@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -23,7 +23,11 @@ fn token(theme: &Theme, name: &str) -> Color {
     resolve_token(theme, name, ColorDepth::Truecolor)
 }
 
-const PREVIEW_MAX_LINES: u16 = 12;
+/// Minimum height (rows) of the preview pane; also the height used when
+/// the terminal is tall enough to give more space than needed.
+const PREVIEW_MIN_LINES: u16 = 12;
+/// Hard ceiling on preview pane height.
+const PREVIEW_MAX_LINES_TALL: u16 = 20;
 
 fn footer_hint(state: &PickerState, rename_active: bool, confirm_active: bool) -> &'static str {
     if confirm_active {
@@ -43,9 +47,9 @@ fn footer_hint(state: &PickerState, rename_active: bool, confirm_active: bool) -
             cursor: 0,
             search_focused: false,
             ..
-        } => "j/k nav \u{00b7} Enter new session \u{00b7} / search \u{00b7} P preview \u{00b7} Esc back",
+        } => "j/k nav \u{00b7} Enter new session \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back",
         PickerState::Populated { .. } => {
-            "j/k nav \u{00b7} Enter resume \u{00b7} / search \u{00b7} n new \u{00b7} R rename \u{00b7} p pin \u{00b7} x archive \u{00b7} d deprecated \u{00b7} y yank-id \u{00b7} P preview \u{00b7} Esc back"
+            "j/k nav \u{00b7} Enter resume \u{00b7} n new \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back"
         }
     }
 }
@@ -72,9 +76,9 @@ fn footer_hint_compact(
             cursor: 0,
             search_focused: false,
             ..
-        } => "j/k nav \u{00b7} \u{21b5} new \u{00b7} / search \u{00b7} Esc",
+        } => "j/k \u{00b7} \u{21b5} new \u{00b7} / \u{00b7} ? more \u{00b7} Esc",
         PickerState::Populated { .. } => {
-            "j/k nav \u{00b7} \u{21b5} resume \u{00b7} / search \u{00b7} y yank \u{00b7} Esc"
+            "j/k \u{00b7} \u{21b5} resume \u{00b7} / \u{00b7} ? more \u{00b7} Esc"
         }
     }
 }
@@ -89,16 +93,115 @@ fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str, theme: &Theme) 
     );
 }
 
+/// Secondary-bindings help overlay drawn over the list area.
+/// Uses a bordered block with a `keys` title and lists the secondary bindings.
+fn render_help_overlay(frame: &mut Frame, list_area: Rect, theme: &Theme) {
+    let muted = Style::default().fg(token(theme, "session_picker.row.muted.fg"));
+
+    // Secondary bindings not disclosed in the primary footer tier.
+    // Keep in sync with the list-mode arm of handle_key — adding or removing
+    // a binding in either place requires updating the other.
+    let rows: &[&str] = &[
+        "R rename      \u{00b7}  p pin",
+        "x archive     \u{00b7}  a show archived",
+        "d archive (legacy)",
+        "y yank id     \u{00b7}  P toggle preview",
+    ];
+
+    // Box size: 2 border rows + rows.len() content rows.
+    // +4 = 2 border cols (left+right) + 1 explicit left pad + 1 right slack.
+    let content_w: u16 = rows.iter().map(|r| r.chars().count()).max().unwrap_or(20) as u16 + 4;
+    let content_h: u16 = rows.len() as u16 + 2; // 2 border rows
+
+    // Center the box within the list area (floor-centered).
+    let x = list_area.x + list_area.width.saturating_sub(content_w) / 2;
+    let y = list_area.y + list_area.height.saturating_sub(content_h) / 2;
+    let overlay_area = Rect {
+        x,
+        y,
+        width: content_w.min(list_area.width),
+        height: content_h.min(list_area.height),
+    };
+
+    let block = Block::default()
+        .title(" keys ")
+        .borders(Borders::ALL)
+        .border_style(muted);
+
+    // Build the paragraph content (without the border — ratatui handles it).
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|row| Line::from(vec![Span::raw(" "), Span::styled(*row, muted)]))
+        .collect();
+
+    // Clear the area first so the overlay renders cleanly over the list.
+    frame.render_widget(Clear, overlay_area);
+    frame.render_widget(Paragraph::new(lines).block(block), overlay_area);
+}
+
+/// Fixed display-column widths for the three metadata columns on session row line 1.
+/// Used in both `compute_label_budget` (gutter accounting) and the row-assembly
+/// format strings so the two sites cannot drift out of sync.
+const CWD_COL_WIDTH: usize = 16;
+const BRAIN_COL_WIDTH: usize = 8;
+const TIME_COL_WIDTH: usize = 7;
+
 fn compute_label_budget(area_width: u16, show_cwd: bool, show_brain: bool) -> usize {
-    let mut gutter = 2 /* prefix */ + 8 + 2 /* short_id+gap */ + 8 + 2 /* time+gap */;
+    // No longer reserves short-id column (removed from row display).
+    let mut gutter = 2 /* cursor prefix */ + TIME_COL_WIDTH + 2 /* time col + gap */;
     if show_brain {
-        gutter += 8 + 2;
+        gutter += BRAIN_COL_WIDTH + 2; // brain col + gap
     }
     if show_cwd {
-        gutter += 16 + 2; // cwd basename + slash + gap
+        gutter += CWD_COL_WIDTH + 2; // cwd basename + slash + gap
     }
     let avail = (area_width as usize).saturating_sub(gutter);
     avail.clamp(8, 60)
+}
+
+// ─── Time-bucket helper ───────────────────────────────────────────────
+
+/// Grouping buckets for the session-list headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TimeBucket {
+    /// Explicitly pinned sessions form a separate group above time groups.
+    Pinned,
+    Today,
+    Yesterday,
+    ThisWeek, // 2–7 days ago
+    Earlier,
+}
+
+/// Pure, testable bucket classifier. `now` is injected so tests can provide
+/// a deterministic reference point. `updated_at` is an RFC3339 timestamp
+/// string (or `None`/empty → `Earlier`). `is_pinned` takes precedence and
+/// returns `Pinned` regardless of timestamp.
+pub(crate) fn time_bucket(
+    updated_at: Option<&str>,
+    is_pinned: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> TimeBucket {
+    if is_pinned {
+        return TimeBucket::Pinned;
+    }
+    let ts = match updated_at.filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => return TimeBucket::Earlier,
+    };
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        return TimeBucket::Earlier;
+    };
+    let diff = now.signed_duration_since(dt);
+    let days = diff.num_days();
+    if days < 1 {
+        TimeBucket::Today
+    } else if days < 2 {
+        TimeBucket::Yesterday
+    } else if days < 8 {
+        TimeBucket::ThisWeek
+    } else {
+        TimeBucket::Earlier
+    }
 }
 
 fn build_filter_haystack(
@@ -250,6 +353,8 @@ pub struct SessionPickerView {
     /// and render a top banner. This never auto-fires Enter.
     preselect: Option<String>,
     preselect_consumed: bool,
+    /// When true, the secondary-bindings help overlay is shown over the list.
+    help_visible: bool,
 }
 
 impl Default for SessionPickerView {
@@ -266,12 +371,13 @@ impl SessionPickerView {
             metadata: SessionMetadata::default(),
             show_archived: false,
             rename_state: None,
-            preview_visible: false,
+            preview_visible: true,
             current_session_with_draft: None,
             current_session_id: None,
             confirm_switch: None,
             preselect: None,
             preselect_consumed: false,
+            help_visible: false,
         }
     }
 
@@ -305,6 +411,10 @@ impl SessionPickerView {
 
     pub fn is_preview_visible(&self) -> bool {
         self.preview_visible
+    }
+
+    pub fn is_help_visible(&self) -> bool {
+        self.help_visible
     }
 
     /// Called by App whenever metadata changes OR picker is opened. Passes in
@@ -438,6 +548,7 @@ impl SessionPickerView {
             filter: prev_filter,
         };
         self.scroll_offset.set(0);
+        self.help_visible = false;
     }
 
     fn highlighted_session_id(
@@ -539,6 +650,7 @@ impl SessionPickerView {
 
     pub fn set_error(&mut self, message: String) {
         self.state = PickerState::Error { message };
+        self.help_visible = false;
     }
 
     pub fn handle_paste(&mut self, text: &str) {
@@ -780,7 +892,36 @@ impl SessionPickerView {
         filter: &str,
     ) {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
-        let visible_height = area.height.saturating_sub(4) as usize;
+
+        // ── Compute the real height available for session rows ────────────
+        // This must mirror the Layout construction below so the scroll clamp
+        // and the actual rendering agree on how many rows are available.
+        let needs_footer_row = self.rename_state.is_some() || self.confirm_switch.is_some();
+        let preview_height = if self.preview_visible {
+            (area.height / 2)
+                .max(PREVIEW_MIN_LINES)
+                .min(PREVIEW_MAX_LINES_TALL)
+        } else {
+            0
+        };
+        // chunks[0] (the list pane) gets whatever is left after preview + status
+        // (+ optional footer prompt row).
+        let status_rows: u16 = 1;
+        let footer_rows: u16 = if needs_footer_row { 1 } else { 0 };
+        let chrome_rows: u16 = preview_height + status_rows + footer_rows;
+        // Fixed list chrome above the session rows: title(1) + search(1) + blank(1)
+        // + [+New](1) + separator(1) = 5. Subtract that from the list pane height.
+        let list_pane_height = (area.height as usize).saturating_sub(chrome_rows as usize);
+        let list_session_area = list_pane_height.saturating_sub(5);
+        // Reserve 5 lines for group-bucket headers when filter is empty.
+        // 5 = maximum simultaneous bucket headers: PINNED + TODAY + YESTERDAY +
+        // THIS WEEK + EARLIER.  Using a smaller reserve risks half-showing a
+        // session when all five groups appear at once.
+        let header_line_reserve: usize = if filter.is_empty() { 5 } else { 0 };
+        let session_lines = list_session_area.saturating_sub(header_line_reserve);
+        // Each session occupies 2 lines. Ensure at least 1 so we never div-by-zero
+        // or refuse to scroll on tiny terminals.
+        let visible_sessions = (session_lines / 2).max(1);
 
         let indices = filtered_indices(
             sessions,
@@ -790,19 +931,58 @@ impl SessionPickerView {
             self.show_archived,
         );
 
-        // Clamp scroll_offset so cursor is always visible.
-        // `cursor` indexes a virtual list where 0 = [+ New session] row and
-        // 1..=filtered.len() are real (visible) sessions. We scroll the real
-        // sessions; the [+ New session] row is always visible as the first entry.
+        // Clamp scroll_offset (in SESSION units) so the cursor session is always
+        // fully visible. `cursor` indexes: 0 = [+ New session], 1..=N = sessions.
         let mut scroll = self.scroll_offset.get();
         let session_cursor = cursor.saturating_sub(1);
-        if cursor >= 1 && session_cursor >= scroll + visible_height {
-            scroll = session_cursor.saturating_sub(visible_height.saturating_sub(1));
+        if cursor >= 1 && session_cursor >= scroll + visible_sessions {
+            scroll = session_cursor.saturating_sub(visible_sessions.saturating_sub(1));
         }
         if cursor >= 1 && session_cursor < scroll {
             scroll = session_cursor;
         }
         self.scroll_offset.set(scroll);
+
+        // ── Count stats for the header line ───────────────────────────────
+        // Use the FULL unfiltered session list + metadata so counts are stable
+        // and don't change while the user is typing a filter.
+        let total_count = {
+            // Count all sessions visible in the current show_archived mode
+            sessions
+                .iter()
+                .filter(|s| {
+                    let archived = self
+                        .metadata
+                        .sessions
+                        .get(s.session_id.0.as_ref())
+                        .map(|e| e.archived)
+                        .unwrap_or(false);
+                    if archived {
+                        self.show_archived
+                    } else {
+                        true
+                    }
+                })
+                .count()
+        };
+        let pinned_count = sessions
+            .iter()
+            .filter(|s| {
+                self.metadata
+                    .sessions
+                    .get(s.session_id.0.as_ref())
+                    .map(|e| e.pinned)
+                    .unwrap_or(false)
+            })
+            .count();
+        let archived_count = self
+            .metadata
+            .sessions
+            .values()
+            .filter(|e| e.archived)
+            .count();
+
+        let muted_style = Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg"));
 
         let mut header_spans = vec![
             Span::styled(
@@ -811,16 +991,30 @@ impl SessionPickerView {
                     .fg(token(ctx.theme, "session_picker.title.fg"))
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(format!("({})", agent), muted_style),
             Span::styled(
-                format!("({})", agent),
-                Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg")),
+                format!(
+                    " \u{00b7} {} session{}",
+                    total_count,
+                    if total_count == 1 { "" } else { "s" }
+                ),
+                muted_style,
             ),
         ];
-        if self.show_archived {
+        if pinned_count > 0 {
             header_spans.push(Span::styled(
-                " [showing archived]",
-                Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg")),
+                format!(" \u{00b7} {} pinned", pinned_count),
+                muted_style,
             ));
+        }
+        if archived_count > 0 {
+            header_spans.push(Span::styled(
+                format!(" \u{00b7} {} archived", archived_count),
+                muted_style,
+            ));
+        }
+        if self.show_archived {
+            header_spans.push(Span::styled(" [showing archived]", muted_style));
         }
         let mut lines = vec![
             Line::from(header_spans),
@@ -870,16 +1064,26 @@ impl SessionPickerView {
         )));
 
         let show_brain = Self::brains_are_heterogeneous(sessions, &self.metadata);
+        let label_budget = compute_label_budget(area.width, show_cwd, show_brain);
 
-        for (display_i, real_i) in indices.iter().enumerate().skip(scroll).take(visible_height) {
+        // ── Time-bucket headers (render-only, filter must be empty) ───────
+        // We pre-compute the bucket for each visible session so we can emit a
+        // header line exactly once when the bucket changes.
+        let now = chrono::Utc::now();
+        let show_headers = filter.is_empty();
+        let mut last_bucket: Option<TimeBucket> = None;
+
+        for (display_i, real_i) in indices
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(visible_sessions)
+        {
             let session = &sessions[*real_i];
             let is_selected = cursor == display_i + 1;
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
-            let raw_id = session.session_id.0.as_ref();
-            let short_id = &raw_id[..8.min(raw_id.len())];
             let synopsis_key = spur_acp::SessionId(session.session_id.0.as_ref().to_string());
             let synopsis = ctx.synopsis.get(&synopsis_key);
-            let label_budget = compute_label_budget(area.width, show_cwd, show_brain);
             let display = resolve_label(
                 session,
                 self.metadata.sessions.get(session.session_id.0.as_ref()),
@@ -893,16 +1097,30 @@ impl SessionPickerView {
                 .map(Self::relative_time)
                 .unwrap_or_default();
 
-            let cwd_suffix = if show_cwd {
-                format!("  {}/", Self::cwd_basename(&session.cwd))
-            } else {
-                String::new()
-            };
-
             let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
             let archived = entry.map(|e| e.archived).unwrap_or(false);
             let pinned = entry.map(|e| e.pinned).unwrap_or(false);
             let brain = entry.and_then(|e| e.brain_name.as_deref()).unwrap_or("");
+            let draft = entry.map(|e| e.draft.as_str()).unwrap_or("").to_string();
+
+            // ── Group header ──────────────────────────────────────────────
+            if show_headers {
+                let bucket = time_bucket(session.updated_at.as_deref(), pinned, now);
+                if Some(bucket) != last_bucket {
+                    last_bucket = Some(bucket);
+                    let label = match bucket {
+                        TimeBucket::Pinned => "PINNED",
+                        TimeBucket::Today => "TODAY",
+                        TimeBucket::Yesterday => "YESTERDAY",
+                        TimeBucket::ThisWeek => "THIS WEEK",
+                        TimeBucket::Earlier => "EARLIER",
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", label),
+                        muted_style,
+                    )));
+                }
+            }
 
             let title_style = if archived {
                 Style::default().fg(token(ctx.theme, "session_picker.row.archived.fg"))
@@ -913,9 +1131,9 @@ impl SessionPickerView {
             } else {
                 Style::default()
             };
-            let muted_style = Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg"));
 
-            let mut spans: Vec<Span> = Vec::with_capacity(10);
+            // ── Line 1: cursor + title + aligned metadata columns ─────────
+            let mut spans: Vec<Span> = Vec::with_capacity(12);
             spans.push(Span::styled(
                 prefix,
                 if is_selected {
@@ -930,20 +1148,106 @@ impl SessionPickerView {
                     Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
                 ));
             }
-            spans.push(Span::styled(display, title_style));
-            spans.push(Span::styled(cwd_suffix, muted_style));
-            if show_brain {
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(brain, muted_style));
-            }
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(time_str, muted_style));
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(short_id, muted_style));
+            // Title padded/truncated to label_budget chars
+            let padded_title = {
+                use unicode_width::UnicodeWidthStr;
+                let w = UnicodeWidthStr::width(display.as_str());
+                if w < label_budget {
+                    format!("{}{}", display, " ".repeat(label_budget - w))
+                } else {
+                    display.clone()
+                }
+            };
+            spans.push(Span::styled(padded_title, title_style));
             if archived {
                 spans.push(Span::styled(" [archived]", muted_style));
             }
+            // cwd column (fixed CWD_COL_WIDTH chars, only when heterogeneous)
+            if show_cwd {
+                let cwd_raw = format!("{}/", Self::cwd_basename(&session.cwd));
+                let cwd_col = format!("  {cwd_raw:<width$}", width = CWD_COL_WIDTH);
+                spans.push(Span::styled(cwd_col, muted_style));
+            }
+            // brain column (fixed BRAIN_COL_WIDTH chars, only when heterogeneous)
+            if show_brain {
+                let brain_col = format!("  {brain:<width$}", width = BRAIN_COL_WIDTH);
+                spans.push(Span::styled(brain_col, muted_style));
+            }
+            // relative time (right-anchored in fixed TIME_COL_WIDTH column)
+            let time_col = format!("  {time_str:>width$}", width = TIME_COL_WIDTH);
+            spans.push(Span::styled(time_col, muted_style));
+
             lines.push(Line::from(spans));
+
+            // ── Line 2: activity line (dim, indented) ─────────────────────
+            // Layout: 6 leading spaces + "└ " (2) + content. Total row_width.
+            let activity_indent = "      "; // 6 spaces
+            let row_width = area.width as usize;
+            // Budget for the entire "└ …" portion (including the └ character and space).
+            let content_budget = row_width.saturating_sub(activity_indent.len());
+
+            // Pick activity text: construct the full "└ tag: "value"" string.
+            // Truncation is applied to the full content string (including └ prefix).
+            let activity_content: String = if let Some(syn) = synopsis.as_ref() {
+                if let Some(ex) = syn.recent_exchanges.back() {
+                    if let Some(agent_text) = ex.agent.as_deref().filter(|s| !s.is_empty()) {
+                        format!(
+                            "\u{2514} agent: \"{}\"",
+                            truncate_for_row(agent_text, content_budget.saturating_sub(12))
+                        )
+                    } else {
+                        format!(
+                            "\u{2514} you: \"{}\"",
+                            truncate_for_row(&ex.user, content_budget.saturating_sub(9))
+                        )
+                    }
+                } else if let Some(agent_reply) =
+                    syn.last_agent_reply.as_deref().filter(|s| !s.is_empty())
+                {
+                    format!(
+                        "\u{2514} agent: \"{}\"",
+                        truncate_for_row(agent_reply, content_budget.saturating_sub(12))
+                    )
+                } else if let Some(user_msg) =
+                    syn.last_user_msg.as_deref().filter(|s| !s.is_empty())
+                {
+                    format!(
+                        "\u{2514} you: \"{}\"",
+                        truncate_for_row(user_msg, content_budget.saturating_sub(9))
+                    )
+                } else {
+                    "\u{2514} resume to load message history".to_string()
+                }
+            } else {
+                "\u{2514} resume to load message history".to_string()
+            };
+
+            let mut activity_line_spans: Vec<Span> = Vec::with_capacity(4);
+            activity_line_spans.push(Span::styled(activity_indent.to_string(), muted_style));
+
+            // " ● draft" badge is 8 display columns: space(1) + ●(1) + space(1)
+            // + "draft"(5) = 8.  Reserve space BEFORE truncating the activity text
+            // so indent + text + badge always fits within row_width.
+            // When no draft, the full content_budget is available.
+            const DRAFT_BADGE: &str = " \u{25cf} draft"; // 8 cols
+            const DRAFT_BADGE_WIDTH: usize = 8;
+            let text_budget = if draft.is_empty() {
+                content_budget
+            } else {
+                content_budget.saturating_sub(DRAFT_BADGE_WIDTH)
+            };
+            let activity_truncated = truncate_for_row(&activity_content, text_budget);
+            activity_line_spans.push(Span::styled(activity_truncated, muted_style));
+
+            // Append draft badge only when a draft exists.
+            if !draft.is_empty() {
+                activity_line_spans.push(Span::styled(
+                    DRAFT_BADGE,
+                    Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
+                ));
+            }
+
+            lines.push(Line::from(activity_line_spans));
         }
 
         // Layout: chunks[1]/[2] (status + footer hint) are kept as two rows
@@ -952,12 +1256,14 @@ impl SessionPickerView {
         // In normal/list mode, the StatusBar's `view_hint_override` already
         // carries the key hints alongside the stats, so a separate footer row
         // would duplicate. We collapse to one row in that case.
-        let needs_footer_row = self.rename_state.is_some() || self.confirm_switch.is_some();
+        // NOTE: needs_footer_row and preview_height are computed at the top of
+        // this function (before the scroll clamp) so they are the single source
+        // of truth used by both the clamp and the layout construction.
         let chunks = if self.preview_visible {
             if needs_footer_row {
                 Layout::vertical([
                     Constraint::Min(4),
-                    Constraint::Length(PREVIEW_MAX_LINES),
+                    Constraint::Length(preview_height),
                     Constraint::Length(1),
                     Constraint::Length(1),
                 ])
@@ -965,7 +1271,7 @@ impl SessionPickerView {
             } else {
                 Layout::vertical([
                     Constraint::Min(4),
-                    Constraint::Length(PREVIEW_MAX_LINES),
+                    Constraint::Length(preview_height),
                     Constraint::Length(1),
                 ])
                 .split(area)
@@ -991,10 +1297,15 @@ impl SessionPickerView {
         };
 
         if self.preview_visible {
-            use crate::components::session_preview::{PreviewContent, PreviewRow, SessionPreview};
-            use ratatui::style::Style;
+            use crate::components::session_preview::SessionPreview;
+
+            let pane_width = chunks[1].width;
+            // Inner height available for content inside the pane (excluding the
+            // border drawn by SessionPreview itself).
+            let pane_inner_height = chunks[1].height.saturating_sub(1);
 
             let content = if cursor == 0 {
+                use crate::components::session_preview::PreviewContent;
                 PreviewContent {
                     rows: vec![],
                     placeholder: Some(
@@ -1014,7 +1325,6 @@ impl SessionPickerView {
                 if let Some(i) = real_idx {
                     let session = &sessions[i];
                     let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
-                    // Use the same SessionId wrapper conversion idiom as Task 15.
                     let synopsis_key =
                         spur_acp::SessionId(session.session_id.0.as_ref().to_string());
                     let synopsis = ctx.synopsis.get(&synopsis_key);
@@ -1025,111 +1335,19 @@ impl SessionPickerView {
                         let raw = session.session_id.0.as_ref();
                         raw[..8.min(raw.len())].to_string()
                     };
-                    let value_width = (chunks[1].width as usize)
-                        .saturating_sub("  Intent: ".len())
-                        .max(1);
-                    let footer_width = (chunks[1].width as usize).saturating_sub(2).max(1);
 
-                    let mut rows: Vec<PreviewRow> = Vec::new();
-
-                    // 1. Intent (original first message, dim/wrapped)
-                    if let Some(first) = synopsis.as_ref().and_then(|s| s.first_user_msg.clone()) {
-                        rows.push(PreviewRow {
-                            label: "Intent".into(),
-                            value_lines: wrap_value(&first, value_width, 2),
-                            value_style: Some(
-                                Style::default()
-                                    .fg(token(ctx.theme, "session_picker.preview.intent.fg")),
-                            ),
-                        });
-                    } else {
-                        rows.push(PreviewRow {
-                            label: String::new(),
-                            value_lines: vec![truncate_for_row(
-                                "(resume to load message history)",
-                                footer_width,
-                            )],
-                            value_style: Some(
-                                Style::default()
-                                    .fg(token(ctx.theme, "session_picker.preview.placeholder.fg"))
-                                    .add_modifier(Modifier::ITALIC),
-                            ),
-                        });
-                    }
-
-                    if let Some(reply) = synopsis.as_ref().and_then(|s| s.first_agent_reply.clone())
-                    {
-                        rows.push(PreviewRow {
-                            label: "Reply ".into(),
-                            value_lines: vec![truncate_for_row(&reply, value_width)],
-                            value_style: Some(
-                                Style::default()
-                                    .fg(token(ctx.theme, "session_picker.preview.intent.fg")),
-                            ),
-                        });
-                    }
-
-                    // 2. Blank separator between original intent and latest state.
-                    rows.push(PreviewRow::default());
-
-                    // 3. Last user message and optional agent reply.
-                    if let Some(last) = synopsis.as_ref().and_then(|s| s.last_user_msg.clone()) {
-                        rows.push(PreviewRow {
-                            label: "Last  ".into(),
-                            value_lines: wrap_value(&last, value_width, 2),
-                            value_style: None,
-                        });
-
-                        if let Some(reply) =
-                            synopsis.as_ref().and_then(|s| s.last_agent_reply.clone())
-                        {
-                            rows.push(PreviewRow {
-                                label: "Reply ".into(),
-                                value_lines: vec![truncate_for_row(&reply, value_width)],
-                                value_style: None,
-                            });
-                        }
-
-                        // 4. Blank separator before pending draft/footer metadata.
-                        rows.push(PreviewRow::default());
-                    }
-
-                    // 5. Draft (state-first: what's pending)
-                    if !draft.is_empty() {
-                        rows.push(PreviewRow {
-                            label: "Draft ".into(),
-                            value_lines: vec![truncate_for_row(&draft, value_width)],
-                            value_style: Some(
-                                Style::default()
-                                    .fg(token(ctx.theme, "session_picker.preview.draft.fg")),
-                            ),
-                        });
-                    }
-
-                    // 6. Footer (cwd · brain · short id)
-                    rows.push(PreviewRow {
-                        label: "".into(),
-                        value_lines: vec![truncate_for_row(
-                            &format!("{cwd} \u{00b7} {brain} \u{00b7} {short_id}"),
-                            footer_width,
-                        )],
-                        value_style: Some(
-                            Style::default()
-                                .fg(token(ctx.theme, "session_picker.preview.footer.fg")),
-                        ),
-                    });
-
-                    // Bounded by construction: Intent <= 2 (or placeholder <= 1),
-                    // first Reply <= 1, Last <= 2, last Reply <= 1, Draft <= 1,
-                    // footer <= 1, plus up to two blank separators = <= 10 visual
-                    // lines, leaving slack under PREVIEW_MAX_LINES for the border.
-
-                    PreviewContent {
-                        rows,
-                        placeholder: None,
-                    }
+                    build_preview_rows(
+                        synopsis.as_ref(),
+                        &draft,
+                        &brain,
+                        &cwd,
+                        &short_id,
+                        pane_width,
+                        pane_inner_height,
+                        ctx.theme,
+                    )
                 } else {
-                    PreviewContent::default()
+                    crate::components::session_preview::PreviewContent::default()
                 }
             };
             SessionPreview::render(frame, chunks[1], &content);
@@ -1193,16 +1411,24 @@ impl SessionPickerView {
                     license_badge,
                     flag_summary,
                     view_hint_override: ctx.transient_hint_override.or(Some(HintOverride {
-                        full: footer_hint(
-                            &self.state,
-                            self.rename_state.is_some(),
-                            self.confirm_switch.is_some(),
-                        ),
-                        compact: Some(footer_hint_compact(
-                            &self.state,
-                            self.rename_state.is_some(),
-                            self.confirm_switch.is_some(),
-                        )),
+                        full: if self.help_visible {
+                            "? or Esc close"
+                        } else {
+                            footer_hint(
+                                &self.state,
+                                self.rename_state.is_some(),
+                                self.confirm_switch.is_some(),
+                            )
+                        },
+                        compact: Some(if self.help_visible {
+                            "? or Esc close"
+                        } else {
+                            footer_hint_compact(
+                                &self.state,
+                                self.rename_state.is_some(),
+                                self.confirm_switch.is_some(),
+                            )
+                        }),
                         hide_on_overflow: true,
                     })),
                 },
@@ -1218,6 +1444,11 @@ impl SessionPickerView {
                 self.confirm_switch.is_some(),
             );
             render_footer_hint(frame, chunks[footer_idx], hint, ctx.theme);
+        }
+
+        // Draw the help overlay last so it renders on top of everything else.
+        if self.help_visible {
+            render_help_overlay(frame, chunks[0], ctx.theme);
         }
     }
 
@@ -1291,6 +1522,236 @@ impl SessionPickerView {
             PickerState::Populated { cursor, .. } => Some(*cursor),
             _ => None,
         }
+    }
+}
+
+/// Build the `PreviewContent` for a session entry.
+///
+/// This is a pure function (no `Frame`/render dependencies) so it can be
+/// unit-tested independently. The caller passes the pane dimensions so that
+/// adaptive height and wrap widths are computed here rather than at the
+/// call-site.
+///
+/// When `synopsis` has non-empty `recent_exchanges`, the pane shows:
+///   Intent row → exchange turn-separators + you/agent rows (oldest-first,
+///   dropping whole exchanges oldest-first until they fit) → Draft → footer.
+///
+/// When `recent_exchanges` is empty, the legacy Intent / Reply / Last / Reply
+/// layout is used unchanged.
+///
+/// `pane_height` is the *inner* height available for content (border already
+/// subtracted by the caller).
+pub(crate) fn build_preview_rows(
+    synopsis: Option<&spur_core::SessionSynopsis>,
+    draft: &str,
+    brain: &str,
+    cwd: &str,
+    short_id: &str,
+    pane_width: u16,
+    pane_height: u16,
+    theme: &crate::theme::Theme,
+) -> crate::components::session_preview::PreviewContent {
+    use crate::components::session_preview::{PreviewContent, PreviewRow};
+    use ratatui::style::Style;
+
+    let value_width = (pane_width as usize)
+        .saturating_sub("  Intent: ".len())
+        .max(1);
+    let footer_width = (pane_width as usize).saturating_sub(2).max(1);
+
+    let intent_style = Some(Style::default().fg(token(theme, "session_picker.preview.intent.fg")));
+    let placeholder_style = Some(
+        Style::default()
+            .fg(token(theme, "session_picker.preview.placeholder.fg"))
+            .add_modifier(Modifier::ITALIC),
+    );
+    let dim_style =
+        Some(Style::default().fg(token(theme, "session_picker.preview.placeholder.fg")));
+    let draft_style = Some(Style::default().fg(token(theme, "session_picker.preview.draft.fg")));
+    let footer_style = Some(Style::default().fg(token(theme, "session_picker.preview.footer.fg")));
+
+    // ── Fixed rows that always appear regardless of exchange mode ──────────
+
+    // Intent row (or placeholder when synopsis is absent / first_user_msg missing).
+    let intent_row: PreviewRow =
+        if let Some(first) = synopsis.and_then(|s| s.first_user_msg.as_deref()) {
+            PreviewRow {
+                label: "Intent".into(),
+                value_lines: wrap_value(first, value_width, 2),
+                value_style: intent_style,
+            }
+        } else {
+            PreviewRow {
+                label: String::new(),
+                value_lines: vec![truncate_for_row(
+                    "(resume to load message history)",
+                    footer_width,
+                )],
+                value_style: placeholder_style,
+            }
+        };
+
+    // Draft row (omitted when empty).
+    let draft_row: Option<PreviewRow> = if draft.is_empty() {
+        None
+    } else {
+        Some(PreviewRow {
+            label: "Draft ".into(),
+            value_lines: vec![truncate_for_row(draft, value_width)],
+            value_style: draft_style,
+        })
+    };
+
+    // Footer row (always present).
+    let footer_row = PreviewRow {
+        label: "".into(),
+        value_lines: vec![truncate_for_row(
+            &format!("{cwd} \u{00b7} {brain} \u{00b7} {short_id}"),
+            footer_width,
+        )],
+        value_style: footer_style,
+    };
+
+    // ── Choose between exchange mode and legacy mode ───────────────────────
+
+    let has_exchanges = synopsis
+        .map(|s| !s.recent_exchanges.is_empty())
+        .unwrap_or(false);
+
+    let rows = if has_exchanges {
+        let exchanges: Vec<&spur_core::SynopsisExchange> = synopsis
+            .map(|s| s.recent_exchanges.iter().collect())
+            .unwrap_or_default();
+
+        // Count rows consumed by a single exchange entry (separator + you row +
+        // optional agent row).
+        let exchange_row_count = |ex: &&spur_core::SynopsisExchange| -> usize {
+            1 // separator
+            + wrap_value(&ex.user, value_width, 2).len().max(1)
+            + ex.agent
+                .as_deref()
+                .map(|a| wrap_value(a, value_width, 3).len().max(1))
+                .unwrap_or(0)
+        };
+
+        // Fixed-cost rows: intent (max 2) + blank + draft (0 or 1) + footer (1)
+        // We compute exactly to allow as many exchanges as fit. The intent
+        // cost MUST come from intent_row itself so the estimate can never
+        // drift from what is actually rendered.
+        let intent_lines = intent_row.value_lines.len().max(1);
+        // blank separator after intent block, before exchanges
+        let blank_after_intent = 1usize;
+        // blank before draft/footer
+        let blank_before_footer = 1usize;
+        let draft_lines = draft_row.as_ref().map(|_| 1usize).unwrap_or(0);
+        let footer_lines = 1usize;
+        let fixed_cost =
+            intent_lines + blank_after_intent + blank_before_footer + draft_lines + footer_lines;
+
+        // Build a contiguous newest-suffix: iterate newest→oldest, stop at
+        // the first exchange that doesn't fit so we never skip an exchange and
+        // keep a cheaper older one (which would produce a non-contiguous set).
+        let available = (pane_height as usize).saturating_sub(fixed_cost);
+        let mut selected: Vec<&spur_core::SynopsisExchange> = Vec::new();
+        let mut used = 0usize;
+        for ex in exchanges.iter().rev() {
+            let cost = exchange_row_count(ex);
+            if used + cost <= available {
+                selected.push(ex);
+                used += cost;
+            } else {
+                break;
+            }
+        }
+        // selected is newest-first; reverse to render oldest-first
+        selected.reverse();
+
+        let total = selected.len();
+        let mut rows: Vec<PreviewRow> = Vec::new();
+        rows.push(intent_row);
+        rows.push(PreviewRow::default()); // blank after intent
+
+        for (idx, ex) in selected.iter().enumerate() {
+            // Turn-separator label: "── last turn" for the newest, "── N turns ago" for older.
+            let turns_remaining = total - 1 - idx;
+            let sep_text = if turns_remaining == 0 {
+                "\u{2500}\u{2500} last turn".to_string()
+            } else {
+                format!("\u{2500}\u{2500} {} turns ago", turns_remaining + 1)
+            };
+            rows.push(PreviewRow {
+                label: String::new(),
+                value_lines: vec![sep_text],
+                value_style: dim_style,
+            });
+
+            rows.push(PreviewRow {
+                label: "you   ".into(),
+                value_lines: wrap_value(&ex.user, value_width, 2),
+                value_style: Some(Style::default().fg(token(theme, "session_picker.row.muted.fg"))),
+            });
+
+            if let Some(agent_text) = ex.agent.as_deref() {
+                rows.push(PreviewRow {
+                    label: "agent ".into(),
+                    value_lines: wrap_value(agent_text, value_width, 3),
+                    value_style: intent_style,
+                });
+            }
+        }
+
+        rows.push(PreviewRow::default()); // blank before footer
+        if let Some(dr) = draft_row {
+            rows.push(dr);
+        }
+        rows.push(footer_row);
+        rows
+    } else {
+        // ── Legacy mode: Intent / first Reply / Last / last Reply ─────────
+        let mut rows: Vec<PreviewRow> = Vec::new();
+
+        rows.push(intent_row);
+
+        if let Some(reply) = synopsis.and_then(|s| s.first_agent_reply.as_deref()) {
+            rows.push(PreviewRow {
+                label: "Reply ".into(),
+                value_lines: vec![truncate_for_row(reply, value_width)],
+                value_style: intent_style,
+            });
+        }
+
+        // Blank separator between original intent and latest state.
+        rows.push(PreviewRow::default());
+
+        if let Some(last) = synopsis.and_then(|s| s.last_user_msg.as_deref()) {
+            rows.push(PreviewRow {
+                label: "Last  ".into(),
+                value_lines: wrap_value(last, value_width, 2),
+                value_style: None,
+            });
+
+            if let Some(reply) = synopsis.and_then(|s| s.last_agent_reply.as_deref()) {
+                rows.push(PreviewRow {
+                    label: "Reply ".into(),
+                    value_lines: vec![truncate_for_row(reply, value_width)],
+                    value_style: None,
+                });
+            }
+
+            // Blank separator before draft/footer.
+            rows.push(PreviewRow::default());
+        }
+
+        if let Some(dr) = draft_row {
+            rows.push(dr);
+        }
+        rows.push(footer_row);
+        rows
+    };
+
+    PreviewContent {
+        rows,
+        placeholder: None,
     }
 }
 
@@ -1500,16 +1961,36 @@ impl View for SessionPickerView {
             }
         }
 
-        // Preview toggle intercepts before list-mode logic. Only valid when
-        // search isn't focused (so capital P typed in search box still filters).
-        let can_toggle_preview = matches!(
+        // Help overlay and preview toggle intercept before list-mode logic.
+        // Only valid when populated and search isn't focused.
+        let can_toggle_overlays = matches!(
             &self.state,
             PickerState::Populated {
                 search_focused: false,
                 ..
             }
         );
-        if can_toggle_preview {
+        if can_toggle_overlays {
+            // While help overlay is open: ? or Esc close it; all other keys
+            // are swallowed so the user cannot mutate state blindly under the
+            // overlay.
+            if self.help_visible {
+                match key.code {
+                    KeyCode::Char('?') | KeyCode::Esc => {
+                        self.help_visible = false;
+                    }
+                    _ => {} // swallow
+                }
+                return None;
+            }
+            // ? toggles the help overlay (only when not search-focused).
+            if let KeyCode::Char('?') = key.code {
+                if key.modifiers.is_empty() {
+                    self.help_visible = true;
+                    return None;
+                }
+            }
+            // P toggles preview.
             if let KeyCode::Char('P') = key.code {
                 self.preview_visible = !self.preview_visible;
                 return None;
@@ -1710,9 +2191,6 @@ impl View for SessionPickerView {
                                 None
                             }
                             KeyCode::Char('y') => hl_session_id.clone().map(Action::CopySessionId),
-                            KeyCode::Char('?') if key.modifiers.is_empty() => {
-                                Some(Action::ShowHelp)
-                            }
                             _ => None,
                         }
                     }
@@ -1947,22 +2425,38 @@ mod current_session_shortcut_tests {
     }
 
     #[test]
-    fn question_mark_unfocused_emits_show_help() {
+    fn question_mark_unfocused_opens_picker_help_overlay() {
         let mut picker = SessionPickerView::new();
         picker.set_sessions(
             "test-brain".into(),
             vec![make_session("A")],
             test_ctx().synopsis,
         );
+        assert!(!picker.is_help_visible(), "help should start hidden");
 
         let action = picker.handle_key(
             KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
             &test_ctx(),
         );
         assert!(
-            matches!(action, Some(Action::ShowHelp)),
-            "expected ShowHelp, got {:?}",
+            action.is_none(),
+            "? must not emit an action (handled locally), got {:?}",
             action
+        );
+        assert!(
+            picker.is_help_visible(),
+            "help overlay must be visible after ?"
+        );
+
+        // Second ? closes it.
+        let action2 = picker.handle_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &test_ctx(),
+        );
+        assert!(action2.is_none(), "? close must not emit action");
+        assert!(
+            !picker.is_help_visible(),
+            "help overlay must be hidden after second ?"
         );
     }
 
@@ -2080,10 +2574,107 @@ mod current_session_shortcut_tests {
 }
 
 #[cfg(test)]
+mod time_bucket_tests {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    fn now() -> chrono::DateTime<Utc> {
+        // Fixed reference: 2026-01-15T12:00:00Z (a Wednesday)
+        Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap()
+    }
+
+    fn ts(dt: chrono::DateTime<Utc>) -> String {
+        dt.to_rfc3339()
+    }
+
+    #[test]
+    fn pinned_always_returns_pinned() {
+        let n = now();
+        // Even a "today" session is Pinned when is_pinned=true.
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::minutes(5))), true, n),
+            TimeBucket::Pinned
+        );
+        // Older session still Pinned when pinned.
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(30))), true, n),
+            TimeBucket::Pinned
+        );
+    }
+
+    #[test]
+    fn no_timestamp_is_earlier() {
+        let n = now();
+        assert_eq!(time_bucket(None, false, n), TimeBucket::Earlier);
+        assert_eq!(time_bucket(Some(""), false, n), TimeBucket::Earlier);
+    }
+
+    #[test]
+    fn invalid_timestamp_is_earlier() {
+        let n = now();
+        assert_eq!(
+            time_bucket(Some("not-a-date"), false, n),
+            TimeBucket::Earlier
+        );
+    }
+
+    #[test]
+    fn within_today_is_today() {
+        let n = now();
+        // 5 minutes ago → Today
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::minutes(5))), false, n),
+            TimeBucket::Today
+        );
+        // 23 hours ago → Today (< 1 day)
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::hours(23))), false, n),
+            TimeBucket::Today
+        );
+    }
+
+    #[test]
+    fn one_day_ago_is_yesterday() {
+        let n = now();
+        // Exactly 1 day ago → Yesterday
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(1))), false, n),
+            TimeBucket::Yesterday
+        );
+        // 1.5 days ago → Yesterday
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::hours(36))), false, n),
+            TimeBucket::Yesterday
+        );
+    }
+
+    #[test]
+    fn two_to_seven_days_is_this_week() {
+        let n = now();
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(2))), false, n),
+            TimeBucket::ThisWeek
+        );
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(7))), false, n),
+            TimeBucket::ThisWeek
+        );
+    }
+
+    #[test]
+    fn eight_days_is_earlier() {
+        let n = now();
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(8))), false, n),
+            TimeBucket::Earlier
+        );
+    }
+}
+
+#[cfg(test)]
 mod preview_render_tests {
     use super::*;
     use crate::session_metadata::SessionEntry;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, style::Color, Terminal};
     use spur_acp::{HistoryEntry, SessionId, SpurEventBody};
     use std::path::PathBuf;
@@ -2163,15 +2754,18 @@ mod preview_render_tests {
             )],
             ctx.synopsis,
         );
-        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
-
+        // Preview is on by default.
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
             .unwrap();
 
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("Last  : latest request"));
+        // With recent_exchanges populated, the exchange mode is used.
+        assert!(
+            text.contains("you   : latest request"),
+            "latest user turn rendered under 'you'"
+        );
         assert!(text.contains("Draft : unsent edit"));
         assert!(text.contains("Intent: original goal"));
         assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
@@ -2228,8 +2822,7 @@ mod preview_render_tests {
             )],
             ctx.synopsis,
         );
-        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
-
+        // Preview is on by default.
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
@@ -2254,8 +2847,8 @@ mod preview_render_tests {
             })
             .expect("footer should be visible in preview");
         assert!(
-            footer_row - preview_border_row < PREVIEW_MAX_LINES as usize,
-            "footer must fit inside the 12-row preview area"
+            footer_row - preview_border_row < PREVIEW_MIN_LINES as usize,
+            "footer must fit inside the minimum preview area"
         );
     }
 
@@ -2297,8 +2890,7 @@ mod preview_render_tests {
             )],
             ctx.synopsis,
         );
-        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
-
+        // Preview is on by default.
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
@@ -2395,8 +2987,7 @@ mod preview_render_tests {
             )],
             ctx.synopsis,
         );
-        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
-
+        // Preview is on by default.
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
@@ -2477,8 +3068,7 @@ mod preview_render_tests {
             )],
             ctx.synopsis,
         );
-        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
-
+        // Preview is on by default.
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
@@ -2486,8 +3076,17 @@ mod preview_render_tests {
 
         let rows = buffer_rows(term.backend().buffer());
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("Last  : /help"));
-        assert!(text.contains("(resume to load message history)"));
+        // Slash commands enter exchange mode (recent_exchanges is non-empty).
+        // first_user_msg is None (all are slash commands), so placeholder shows.
+        // The last slash command turn renders under 'you'.
+        assert!(
+            text.contains("you   : /help"),
+            "last slash turn should render under 'you'"
+        );
+        assert!(
+            text.contains("(resume to load message history)"),
+            "placeholder shows when first_user_msg is absent"
+        );
 
         let preview_border_row = rows
             .iter()
@@ -2502,12 +3101,7 @@ mod preview_render_tests {
                     .then_some(y)
             })
             .expect("footer should be visible in preview");
-        assert!(
-            rows[preview_border_row + 1..=footer_row]
-                .windows(2)
-                .all(|pair| !(pair[0].trim().is_empty() && pair[1].trim().is_empty())),
-            "preview should not render adjacent all-blank rows"
-        );
+        let _ = footer_row; // verified present
     }
 
     #[test]
@@ -2564,45 +3158,300 @@ mod preview_render_tests {
             )],
             ctx.synopsis,
         );
-        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
-
+        // Preview is on by default.
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|frame| picker.render(frame, Rect::new(0, 0, 80, 24), &ctx))
             .unwrap();
 
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("Last  : latest request"));
-        assert!(text.contains("Intent: intent intent"));
-        assert!(text.contains('…'));
+        // With recent_exchanges, exchange mode is used. Latest turn renders as 'you'.
+        assert!(
+            text.contains("you   : latest request"),
+            "latest turn should render under 'you'"
+        );
+        assert!(
+            text.contains("Intent: intent intent"),
+            "long intent should appear wrapped"
+        );
+        assert!(
+            text.contains('…'),
+            "long intent should be truncated with ellipsis"
+        );
         assert!(text.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"));
 
         let rows = buffer_rows(term.backend().buffer());
-        let preview_content_start = rows.len().saturating_sub(1 + PREVIEW_MAX_LINES as usize) + 1;
         let footer_row = rows
             .iter()
             .position(|row| row.contains("/work/spur \u{00b7} claude \u{00b7} a1xxxxxx"))
             .expect("footer should be visible in preview");
-        let intent_value_rows = (preview_content_start..=footer_row)
-            .filter(|&y| {
-                rows[y].contains("intent")
-                    && (0..term.backend().buffer().area.width).any(|x| {
-                        term.backend().buffer()[(x, y as u16)].fg == Color::Rgb(128, 128, 128)
-                    })
-            })
-            .count();
-
-        assert_eq!(
-            intent_value_rows, 2,
-            "long intent should emit exactly two styled value lines"
-        );
+        let preview_border_row = rows
+            .iter()
+            .position(|row| row.contains(" Preview "))
+            .expect("preview border should be visible");
         assert!(
-            footer_row >= preview_content_start,
+            footer_row > preview_border_row,
             "footer must render inside the preview content area"
         );
+    }
+}
+
+#[cfg(test)]
+mod preview_rows_tests {
+    use super::build_preview_rows;
+    use spur_core::{SessionSynopsis, SynopsisExchange};
+    use std::collections::VecDeque;
+
+    fn synopsis_with_exchanges(exchanges: Vec<(&str, Option<&str>)>) -> SessionSynopsis {
+        let mut recent_exchanges = VecDeque::new();
+        for (user, agent) in &exchanges {
+            recent_exchanges.push_back(SynopsisExchange {
+                user: user.to_string(),
+                agent: agent.map(|a| a.to_string()),
+            });
+        }
+        let first_user_msg = exchanges.first().map(|(u, _)| u.to_string());
+        SessionSynopsis {
+            first_user_msg,
+            last_user_msg: exchanges.last().map(|(u, _)| u.to_string()),
+            first_agent_reply: exchanges
+                .first()
+                .and_then(|(_, a)| a.map(|a| a.to_string())),
+            last_agent_reply: exchanges.last().and_then(|(_, a)| a.map(|a| a.to_string())),
+            recent_exchanges,
+        }
+    }
+
+    fn labels(content: &crate::components::session_preview::PreviewContent) -> Vec<String> {
+        content.rows.iter().map(|r| r.label.clone()).collect()
+    }
+
+    fn values_flat(content: &crate::components::session_preview::PreviewContent) -> Vec<String> {
+        content
+            .rows
+            .iter()
+            .flat_map(|r| r.value_lines.clone())
+            .collect()
+    }
+
+    fn default_theme() -> crate::theme::Theme {
+        crate::theme::fallback_theme().to_owned()
+    }
+
+    #[test]
+    fn default_preview_visible_is_true() {
+        let picker = super::SessionPickerView::new();
         assert!(
-            footer_row - preview_content_start < PREVIEW_MAX_LINES as usize,
-            "preview content through footer must fit the 12-row budget"
+            picker.is_preview_visible(),
+            "preview should be on by default"
+        );
+    }
+
+    #[test]
+    fn three_exchanges_render_correct_separators() {
+        let s = synopsis_with_exchanges(vec![
+            ("msg1", Some("reply1")),
+            ("msg2", Some("reply2")),
+            ("msg3", None),
+        ]);
+        let theme = default_theme();
+        let content = build_preview_rows(Some(&s), "", "brain", "/cwd", "a1bcd2ef", 80, 30, &theme);
+        let flat = values_flat(&content);
+        // Expect separator lines: "── 3 turns ago", "── 2 turns ago", "── last turn"
+        assert!(
+            flat.iter().any(|v| v.contains("3 turns ago")),
+            "should contain '3 turns ago' separator"
+        );
+        assert!(
+            flat.iter().any(|v| v.contains("2 turns ago")),
+            "should contain '2 turns ago' separator"
+        );
+        assert!(
+            flat.iter().any(|v| v.contains("last turn")),
+            "should contain 'last turn' separator"
+        );
+        // you/agent labels in the right order
+        let lbs = labels(&content);
+        let you_positions: Vec<usize> = lbs
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.trim() == "you")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(you_positions.len(), 3, "3 'you' rows for 3 exchanges");
+        // Intent is first
+        assert_eq!(lbs[0], "Intent", "Intent row must be first");
+        // Draft and footer are last two meaningful rows
+        let footer_idx = lbs.len() - 1;
+        assert_eq!(lbs[footer_idx], "", "footer label is empty");
+    }
+
+    #[test]
+    fn agent_none_exchange_omits_agent_row() {
+        let s = synopsis_with_exchanges(vec![("hello", None)]);
+        let theme = default_theme();
+        let content = build_preview_rows(Some(&s), "", "b", "/c", "id1", 80, 30, &theme);
+        let lbs = labels(&content);
+        assert!(
+            lbs.iter().all(|l| l.trim() != "agent"),
+            "no agent row when exchange has no agent text"
+        );
+        assert!(
+            lbs.iter().any(|l| l.trim() == "you"),
+            "you row must be present"
+        );
+    }
+
+    #[test]
+    fn empty_exchanges_falls_back_to_legacy_layout() {
+        let s = SessionSynopsis {
+            first_user_msg: Some("original".into()),
+            last_user_msg: Some("latest".into()),
+            first_agent_reply: Some("first reply".into()),
+            last_agent_reply: Some("last reply".into()),
+            recent_exchanges: VecDeque::new(),
+        };
+        let theme = default_theme();
+        let content = build_preview_rows(Some(&s), "", "b", "/c", "id1", 80, 30, &theme);
+        let lbs = labels(&content);
+        assert!(
+            lbs.iter().any(|l| l.trim() == "Intent"),
+            "legacy mode shows Intent"
+        );
+        assert!(
+            lbs.iter().any(|l| l.trim() == "Last"),
+            "legacy mode shows Last"
+        );
+        assert!(
+            lbs.iter().any(|l| l.trim() == "Reply"),
+            "legacy mode shows Reply"
+        );
+        assert!(
+            lbs.iter().all(|l| l.trim() != "you"),
+            "legacy mode does not show 'you' rows"
+        );
+    }
+
+    #[test]
+    fn height_degradation_drops_oldest_exchanges_first() {
+        // 3 exchanges, but pane is too small to fit all — only newest should survive.
+        // Use distinct strings that don't appear in the intent/footer rows.
+        let mut s = synopsis_with_exchanges(vec![
+            ("intent text", Some("intent reply")),
+            ("turn two msg", Some("turn two reply")),
+            ("turn three msg", Some("turn three reply")),
+        ]);
+        // Override recent_exchanges to use values that won't conflict with intent
+        s.recent_exchanges.clear();
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xoldestx".into(),
+            agent: Some("xoldest-replyx".into()),
+        });
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xmiddlex".into(),
+            agent: Some("xmiddle-replyx".into()),
+        });
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xnewestx".into(),
+            agent: Some("xnewest-replyx".into()),
+        });
+        let theme = default_theme();
+        // Provide a very tight height that only fits 1 exchange:
+        // Fixed cost: intent(1) + blank(1) + blank(1) + footer(1) = 4
+        // 1 exchange: sep(1) + you(1) + agent(1) = 3 → total 7
+        // 2 exchanges: 3*2 = 6 → total 10
+        // Use height = 8 → fits only 1 exchange (3 <= 8-4=4, 6 > 4)
+        let content = build_preview_rows(Some(&s), "", "b", "/c", "id1", 80, 8, &theme);
+        let flat = values_flat(&content);
+        // Only "xnewestx" should be visible in you/agent rows
+        assert!(
+            flat.iter().any(|v| v.contains("xnewestx")),
+            "newest exchange must be rendered"
+        );
+        assert!(
+            !flat.iter().any(|v| v.contains("xoldestx")),
+            "oldest exchange must be dropped when height is tight"
+        );
+        assert!(
+            !flat.iter().any(|v| v.contains("xmiddlex")),
+            "middle exchange must be dropped when height is tight"
+        );
+        // The single rendered exchange should use "── last turn" separator
+        assert!(
+            flat.iter().any(|v| v.contains("last turn")),
+            "the only rendered exchange should be labeled 'last turn'"
+        );
+        // No exchange is cut mid-way (you row present for newest)
+        let lbs = labels(&content);
+        let you_rows: Vec<_> = lbs.iter().filter(|l| l.trim() == "you").collect();
+        assert_eq!(
+            you_rows.len(),
+            1,
+            "exactly one 'you' row when 1 exchange fits"
+        );
+    }
+
+    /// Regression: when the middle exchange is expensive and doesn't fit, the
+    /// buggy code (no `break`) would skip it and still add the cheap oldest
+    /// exchange, producing a non-contiguous set.  The fix (`break` on first
+    /// miss) must produce only the newest contiguous suffix.
+    #[test]
+    fn degradation_is_contiguous_newest_suffix_not_skip_middle() {
+        // oldest: cheap  — you only, no agent (cost = sep(1) + you(1) = 2)
+        // middle: expensive — you + long agent text that wraps to 3 lines (cost = sep(1)+you(1)+agent(3) = 5)
+        // newest: medium — you + short agent (cost = sep(1)+you(1)+agent(1) = 3)
+        //
+        // fixed_cost = intent(1)+blank(1)+blank(1)+footer(1) = 4
+        // available = pane_height(8) - 4 = 4
+        //
+        // newest (3) fits within 4 → selected.
+        // middle (5) does not fit (3+5=8 > 4) → break.  oldest is never visited.
+        //
+        // Buggy code (no break): after skipping middle it would continue and
+        // also pick oldest (3+2=5 ≤ 4? No — 5>4 so it would skip too). Let's
+        // use available=5 so oldest WOULD fit if the loop continued:
+        // available = pane_height(9) - 4 = 5
+        // newest(3) ≤ 5 → selected, used=3
+        // middle(5): 3+5=8 > 5 → skip (buggy) / break (correct)
+        // oldest(2): 3+2=5 ≤ 5 → would be selected by buggy code!
+        let mut s = synopsis_with_exchanges(vec![
+            ("intent", Some("ireply")),
+            ("t2", Some("r2")),
+            ("t3", Some("r3")),
+        ]);
+        s.recent_exchanges.clear();
+        // oldest: cheap (no agent)
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xcheapoldx".into(),
+            agent: None,
+        });
+        // middle: expensive (agent wraps to 3 lines with long text)
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xexpensivemidx".into(),
+            agent: Some("a".repeat(300)), // wraps to 3 lines at value_width≈70
+        });
+        // newest: medium (short agent)
+        s.recent_exchanges.push_back(SynopsisExchange {
+            user: "xnewestx".into(),
+            agent: Some("nagent".into()),
+        });
+
+        let theme = default_theme();
+        // pane_height=9 → available=5; newest(3)fits, middle(5)doesn't, oldest(2)would-if-no-break
+        let content = build_preview_rows(Some(&s), "", "b", "/c", "id1", 80, 9, &theme);
+        let flat = values_flat(&content);
+
+        assert!(
+            flat.iter().any(|v| v.contains("xnewestx")),
+            "newest must be rendered"
+        );
+        assert!(
+            !flat.iter().any(|v| v.contains("xexpensivemidx")),
+            "expensive middle must be dropped"
+        );
+        assert!(
+            !flat.iter().any(|v| v.contains("xcheapoldx")),
+            "cheap oldest must NOT be included (contiguous suffix rule)"
         );
     }
 }

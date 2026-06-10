@@ -12,7 +12,7 @@ use spur_acp::SessionId;
 use spur_core::event_replay::{replay_events, ReplayConfig};
 use spur_core::lineage::ExecutorLineage;
 use spur_core::plan_projection::PlanProjectionStore;
-use spur_core::session_synopsis::{SessionSynopsis, SessionSynopsisProjection};
+use spur_core::session_synopsis::{SessionSynopsis, SessionSynopsisProjection, SynopsisExchange};
 
 fn write_ndjson(path: &Path, events: &[SpurEvent]) {
     use std::io::Write;
@@ -125,6 +125,7 @@ fn synopsis_seed_replays_into_fresh_projection() {
             last_user_msg: Some("bye now".into()),
             first_agent_reply: None,
             last_agent_reply: None,
+            ..SessionSynopsis::default()
         })
     );
     assert_eq!(stats.events_applied, 1);
@@ -166,6 +167,11 @@ fn committed_synopsis_survives_subsequent_seed_replay() {
             last_user_msg: Some("real first".into()),
             first_agent_reply: None,
             last_agent_reply: None,
+            recent_exchanges: vec![SynopsisExchange {
+                user: "real first".into(),
+                agent: None,
+            }]
+            .into(),
         })
     );
     assert_eq!(stats.events_applied, 3);
