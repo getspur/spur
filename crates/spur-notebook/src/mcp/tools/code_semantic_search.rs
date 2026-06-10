@@ -632,12 +632,22 @@ pub async fn lance_ann_search_code_inner(
     query_vec: &[f32; EMBED_DIM],
     limit: usize,
 ) -> Result<Vec<(String, f64)>, McpError> {
-    let dataset_path = resolve_lance_code_dataset_path()?;
-    if !dataset_path.is_dir() {
+    let table_path = resolve_lance_code_dataset_path()?;
+    if !table_path.is_dir() {
         return Ok(Vec::new());
     }
 
-    let conn = cached_lance_connection(&dataset_path).await?;
+    // The table is at artifact_dir/code_symbols.lance/, but the LanceDB database
+    // (with __manifest/) is the parent artifact_dir. The writer connects to
+    // artifact_dir and creates the "code_symbols" table inside it, so the
+    // reader must connect to artifact_dir and open "code_symbols" from there.
+    let db_path = table_path.parent().ok_or_else(|| {
+        McpError::internal_error(
+            format!("{METHOD} code symbols path has no parent"),
+            Some(json!({ "path": table_path.display().to_string() })),
+        )
+    })?;
+    let conn = cached_lance_connection(db_path).await?;
     let table = conn
         .open_table(CODE_SYMBOLS_TABLE)
         .execute()
