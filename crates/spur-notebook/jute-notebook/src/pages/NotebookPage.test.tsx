@@ -40,6 +40,11 @@ vi.mock("wouter", () => ({
   useSearch: () => "path=%2Ftmp%2Fapp-mode.ipynb",
 }));
 
+vi.mock("@/ui/notebook/AppGrantPrompt", () => ({
+  AppGrantPromptContainer: () => null,
+  ScriptsDisabledBanner: () => null,
+}));
+
 vi.mock("@/ui/notebook/HtmlScriptsNotice", () => ({
   default: () => <div data-testid="html-scripts-notice" />,
 }));

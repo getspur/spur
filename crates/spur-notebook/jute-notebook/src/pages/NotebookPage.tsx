@@ -5,6 +5,10 @@ import { useStore } from "zustand";
 import { setActiveAgentNotebook } from "@/agent/bridge";
 import { listenForNotebookEvents } from "@/agent/events";
 import { Notebook, NotebookContext } from "@/stores/notebook";
+import {
+  AppGrantPromptContainer,
+  ScriptsDisabledBanner,
+} from "@/ui/notebook/AppGrantPrompt";
 import HtmlScriptsNotice from "@/ui/notebook/HtmlScriptsNotice";
 import NotebookCommandMenu from "@/ui/notebook/NotebookCommandMenu";
 import NotebookFooter from "@/ui/notebook/NotebookFooter";
@@ -55,9 +59,12 @@ export default function NotebookPage() {
       <NotebookContext.Provider value={notebook}>
         <NotebookHeader kernelName="Local Kernel (Python 3.11.7)" />
         {!appMode && <HtmlScriptsNotice />}
+        {appMode && <ScriptsDisabledBanner />}
         <NotebookView />
         {!appMode && <NotebookFooter />}
         {!appMode && <NotebookCommandMenu />}
+        {/* Grant prompt is rendered last so it appears above everything. */}
+        <AppGrantPromptContainer />
       </NotebookContext.Provider>
     </main>
   );

@@ -294,7 +294,17 @@ describe("loadNotebookFromPath", () => {
       }
       if (command === "notebook_open_mode") {
         expect(args).toEqual({ path });
-        return "app";
+        return {
+          open_mode: "app",
+          app_name: "Test App",
+          app_root: "/x",
+          capabilities: {
+            active_output_scripts: false,
+            canvas_capture: false,
+            artifacts_dir: false,
+          },
+          skill: "skill/SKILL.md",
+        };
       }
       if (command === "start_kernel") {
         return "kernel-1";
@@ -315,6 +325,9 @@ describe("loadNotebookFromPath", () => {
     const notebookStore = new Notebook();
     await notebookStore.loadNotebookFromPath(path);
     expect(notebookStore.store.getState().viewState.viewMode).toBe("app");
+    expect(
+      notebookStore.store.getState().viewState.appOpenInfo?.app_root,
+    ).toBe("/x");
   });
 
   test("keeps cells view mode when open mode is null", async () => {
