@@ -1,0 +1,23 @@
+# Spur App SDK
+
+> Open-source SDK for building Spur notebook apps — Python MCP servers, TypeScript frontend cells, and a canonical dev loop (doctor/pack/publish). The SDK makes the host contract executable: one tested implementation of every app-to-host seam, so agents writing apps never reimplement a wire format from memory. Apache-2.0.
+
+## Getting started
+
+- [Manifest reference (spur-app.json)](docs/manifest.md) — Every field, all four capabilities, open_mode values, and the additionalProperties:false rule on capabilities
+- [Dev loop](docs/dev-loop.md) — init/dev/doctor/pack/publish: today's real paths vs planned front doors
+- [JSON Schema for spur-app.json](schema/spur-app.schema.json) — Machine-readable schema (Draft 2020-12); validate with check-jsonschema
+
+## SDK references
+
+- [Python SDK (spur_app)](docs/python-sdk.md) — App, PortStore, ArtifactStore, EnvAccessor, FakePortStore; exact signatures and error types
+- [TypeScript SDK (@spur/app)](docs/typescript-sdk.md) — callTool, capture.canvas, display, ports; wire contract internals
+- [Port-store wire contract](docs/port-store.md) — manifest.json shape, versioned file naming, duration_sec, golden fixtures, lockstep invariant
+
+## Advanced
+
+- [Versioning](docs/versioning.md) — Schema version tracking, sdk_min and contract_version (planned), fixture compatibility
+
+## Agent skill
+
+- [app-dev skill](skill/SKILL.md) — The five-step loop, capability table, HARD-GATE tool verification, testing recipes
