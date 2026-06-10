@@ -804,3 +804,174 @@ fn populated_footer_hint_changes_on_new_row_cursor() {
 
     assert_ne!(before, after);
 }
+
+// ── Help overlay interaction tests ───────────────────────────────────────────
+
+#[test]
+fn help_overlay_opens_on_question_mark() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
+    assert!(!picker.is_help_visible(), "help starts hidden");
+
+    let action = picker.handle_key(key('?'), &test_ctx());
+    assert!(
+        action.is_none(),
+        "? must not emit an action, got {action:?}"
+    );
+    assert!(picker.is_help_visible(), "help must be visible after ?");
+}
+
+#[test]
+fn help_overlay_closes_on_second_question_mark() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
+
+    // Open
+    let _ = picker.handle_key(key('?'), &test_ctx());
+    assert!(picker.is_help_visible());
+
+    // Close
+    let action = picker.handle_key(key('?'), &test_ctx());
+    assert!(action.is_none(), "second ? must not emit action");
+    assert!(
+        !picker.is_help_visible(),
+        "help must be hidden after second ?"
+    );
+}
+
+#[test]
+fn help_overlay_closes_on_esc_without_navigating_away() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
+
+    // Open
+    let _ = picker.handle_key(key('?'), &test_ctx());
+    assert!(picker.is_help_visible());
+
+    // Esc with overlay open must close it and NOT return a view-exit action.
+    let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
+    assert!(
+        action.is_none(),
+        "Esc with overlay open must not emit action (not exit), got {action:?}"
+    );
+    assert!(!picker.is_help_visible(), "help must be hidden after Esc");
+}
+
+#[test]
+fn question_mark_while_search_focused_appends_to_filter_not_open_overlay() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
+
+    // Focus search via /
+    let _ = picker.handle_key(key('/'), &test_ctx());
+    // Confirm search is active: typing 'a' should add to filter
+    let _ = picker.handle_key(key('a'), &test_ctx());
+    assert_eq!(
+        picker.filter(),
+        "a",
+        "filter should have 'a' after typing in search"
+    );
+
+    // Now type ? — should append to filter, NOT open overlay
+    let action = picker.handle_key(key('?'), &test_ctx());
+    assert!(action.is_none(), "?-in-search must not emit action");
+    assert!(
+        !picker.is_help_visible(),
+        "? while search focused must NOT open help overlay"
+    );
+    assert_eq!(picker.filter(), "a?", "? must be appended to filter");
+}
+
+#[test]
+fn navigation_key_while_help_overlay_open_does_not_move_cursor() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
+    );
+    // Cursor starts on first real session (index 1).
+    assert_eq!(picker.cursor(), 1);
+
+    // Open overlay
+    let _ = picker.handle_key(key('?'), &test_ctx());
+    assert!(picker.is_help_visible());
+    let cursor_before = picker.cursor();
+
+    // j (down) while overlay open must NOT move cursor
+    let action = picker.handle_key(key('j'), &test_ctx());
+    assert!(
+        action.is_none(),
+        "j while overlay open must not emit action"
+    );
+    assert_eq!(
+        picker.cursor(),
+        cursor_before,
+        "cursor must not move while help overlay is open"
+    );
+}
+
+#[test]
+fn help_overlay_renders_box_over_list_area() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
+    );
+    let _ = picker.handle_key(key('?'), &test_ctx());
+    assert!(picker.is_help_visible());
+
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| {
+        let area = Rect::new(0, 0, 80, 24);
+        picker.render(f, area, &test_ctx());
+    })
+    .unwrap();
+
+    let lines: Vec<String> = {
+        let buf = term.backend().buffer();
+        let mut out = Vec::with_capacity(buf.area.height as usize);
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push(row.trim_end().to_string());
+        }
+        out
+    };
+
+    // The overlay box should contain a "keys" title and secondary bindings.
+    let full_text = lines.join("\n");
+    assert!(
+        full_text.contains("keys"),
+        "overlay must contain 'keys' title; got:\n{full_text}"
+    );
+    assert!(
+        full_text.contains("rename"),
+        "overlay must contain 'rename' binding; got:\n{full_text}"
+    );
+    assert!(
+        full_text.contains("pin"),
+        "overlay must contain 'pin' binding; got:\n{full_text}"
+    );
+    assert!(
+        full_text.contains("archive"),
+        "overlay must contain 'archive' binding; got:\n{full_text}"
+    );
+    assert!(
+        full_text.contains("yank id"),
+        "overlay must contain 'yank id' binding; got:\n{full_text}"
+    );
+    assert!(
+        full_text.contains("preview"),
+        "overlay must contain 'preview' binding; got:\n{full_text}"
+    );
+    // Footer hint should say "? or Esc close"
+    assert!(
+        full_text.contains("? or Esc close"),
+        "footer hint must say '? or Esc close' while overlay is open; got:\n{full_text}"
+    );
+}

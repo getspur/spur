@@ -111,7 +111,7 @@ fn populated_single_brain_no_filter() {
         "",
         "",
         "",
-        "j/k nav \u{b7} \u{21b5} resume \u{b7} / search \u{b7} y yank \u{b7} Esc             \u{25b6}0 R0 $0.00 0m 00s spur",
+        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc                        \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -148,7 +148,7 @@ fn populated_empty_no_filter() {
         "",
         "",
         "",
-        "j/k nav \u{b7} \u{21b5} new \u{b7} / search \u{b7} Esc                         \u{25b6}0 R0 $0.00 0m 00s spur",
+        "j/k \u{b7} \u{21b5} new \u{b7} / \u{b7} ? more \u{b7} Esc                           \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -269,7 +269,7 @@ fn populated_multi_brain_no_filter() {
         "",
         "",
         "",
-        "j/k nav \u{b7} \u{21b5} resume \u{b7} / search \u{b7} y yank \u{b7} Esc             \u{25b6}0 R0 $0.00 0m 00s spur",
+        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc                        \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -455,7 +455,7 @@ fn populated_with_preview_visible() {
         "",
         "",
         "",
-        "j/k nav \u{b7} \u{21b5} resume \u{b7} / search \u{b7} y yank \u{b7} Esc             \u{25b6}0 R0 $0.00 0m 00s spur",
+        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc                        \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -500,7 +500,7 @@ fn populated_with_archived_shown() {
         "",
         "",
         "",
-        "j/k nav \u{b7} \u{21b5} new \u{b7} / search \u{b7} Esc                         \u{25b6}0 R0 $0.00 0m 00s spur",
+        "j/k \u{b7} \u{21b5} new \u{b7} / \u{b7} ? more \u{b7} Esc                           \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
