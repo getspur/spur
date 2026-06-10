@@ -2,10 +2,7 @@
  * Tests for display helpers in src/display.ts.
  */
 
-import {
-  assertEquals,
-  assertExists,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertExists } from "@std/assert";
 import { display, DISPLAY_SYMBOL } from "../src/display.ts";
 
 // ---------------------------------------------------------------------------
