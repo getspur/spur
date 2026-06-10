@@ -88,7 +88,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     })?;
 
     let port_root = resolve_port_root(deps, params.slot_id.as_deref(), &params.spec_name).await;
-    let mut kernel = start_local_kernel(&params.spec_name, port_root.as_deref())
+    let mut kernel = start_local_kernel(&params.spec_name, port_root.as_deref(), None)
         .await
         .map_err(|error| {
             McpError::internal_error(

@@ -49,6 +49,11 @@ pub struct SpurAppManifest {
     /// Defaults to `"skill/SKILL.md"` when absent.
     #[serde(default)]
     pub skill: Option<String>,
+    /// Vendored SDK declarations. When present, the doctor verifies the
+    /// referenced directories exist inside the app root. Absent in existing
+    /// manifests → `None` (backward compatible).
+    #[serde(default)]
+    pub sdk: Option<SpurAppSdk>,
 }
 
 /// Capability declarations; all fields default to off/None so that existing
@@ -135,6 +140,15 @@ pub struct SpurAppDependencies {
     pub go: Option<String>,
 }
 
+/// Vendored SDK directories, relative to the app root.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpurAppSdk {
+    /// Directory containing the vendored TypeScript SDK modules
+    /// (e.g. `"sdk"` → `<app_root>/sdk/call_tool.ts`).
+    #[serde(default)]
+    pub typescript: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SpurAppExportOptions {
     pub notebook_path: PathBuf,
@@ -188,6 +202,7 @@ impl SpurAppManifest {
             mcp_server: None,
             capabilities: SpurAppCapabilities::default(),
             skill: None,
+            sdk: None,
         }
     }
 }
@@ -510,4 +525,33 @@ fn reset_extract_root(root: &Path) -> Result<(), archive::SpurAppArchiveError> {
 
 fn blake3_hex(contents: &[u8]) -> String {
     blake3::hash(contents).to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_sdk_block_round_trips_and_defaults_to_none() {
+        // Absent field → None (backward compatible with existing manifests).
+        let minimal = SpurAppManifest::minimal("App", "app.ipynb");
+        assert!(minimal.sdk.is_none());
+        let json = serde_json::to_string(&minimal).expect("serialize minimal");
+        let back: SpurAppManifest = serde_json::from_str(&json).expect("deserialize minimal");
+        assert!(back.sdk.is_none());
+
+        // Declared block round-trips.
+        let mut manifest = SpurAppManifest::minimal("App", "app.ipynb");
+        manifest.sdk = Some(SpurAppSdk {
+            typescript: Some("sdk".to_string()),
+        });
+        let json = serde_json::to_string(&manifest).expect("serialize with sdk");
+        let back: SpurAppManifest = serde_json::from_str(&json).expect("deserialize with sdk");
+        assert_eq!(
+            back.sdk,
+            Some(SpurAppSdk {
+                typescript: Some("sdk".to_string())
+            })
+        );
+    }
 }
