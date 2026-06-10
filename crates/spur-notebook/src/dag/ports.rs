@@ -49,11 +49,20 @@ pub enum PortStoreError {
     Arrow(#[from] ArrowError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PortKind {
     Arrow(Schema),
-    Media { mime: String, size: u64 },
+    Media {
+        mime: String,
+        size: u64,
+        /// Duration in seconds for media ports. Optional; `None` if the producer
+        /// did not supply a duration.
+        duration_sec: Option<f64>,
+    },
 }
+
+// Manual Eq impl because f64 doesn't implement Eq.
+impl Eq for PortKind {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortEntry {
@@ -84,6 +93,8 @@ pub enum PortRead {
         version: u64,
         mime: String,
         bytes: Vec<u8>,
+        /// Duration in seconds as recorded in the port manifest, if present.
+        duration_sec: Option<f64>,
     },
 }
 
@@ -91,7 +102,12 @@ pub enum PortRead {
 pub enum PortPayload<'a> {
     RecordBatch(&'a RecordBatch),
     IpcBytes(&'a [u8]),
-    MediaBlob { bytes: &'a [u8], mime: &'a str },
+    MediaBlob {
+        bytes: &'a [u8],
+        mime: &'a str,
+        /// Optional duration in seconds; forwarded to the wire manifest entry.
+        duration_sec: Option<f64>,
+    },
 }
 
 impl Serialize for PortEntry {
@@ -110,6 +126,8 @@ impl Serialize for PortEntry {
             mime: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             size: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            duration_sec: Option<f64>,
         }
 
         let wire = match &self.kind {
@@ -120,14 +138,20 @@ impl Serialize for PortEntry {
                 schema: Some(schema),
                 mime: None,
                 size: None,
+                duration_sec: None,
             },
-            PortKind::Media { mime, size } => WireEntry {
+            PortKind::Media {
+                mime,
+                size,
+                duration_sec,
+            } => WireEntry {
                 path: &self.path,
                 version: self.version,
                 kind: "media",
                 schema: None,
                 mime: Some(mime),
                 size: Some(*size),
+                duration_sec: *duration_sec,
             },
         };
         wire.serialize(serializer)
@@ -151,6 +175,9 @@ impl<'de> Deserialize<'de> for PortEntry {
             mime: Option<String>,
             #[serde(default)]
             size: Option<u64>,
+            /// Optional duration; absent in older manifests — defaults to `None`.
+            #[serde(default)]
+            duration_sec: Option<f64>,
         }
 
         let wire = WireEntry::deserialize(deserializer)?;
@@ -162,6 +189,7 @@ impl<'de> Deserialize<'de> for PortEntry {
             "media" | "Media" => PortKind::Media {
                 mime: wire.mime.ok_or_else(|| de::Error::missing_field("mime"))?,
                 size: wire.size.ok_or_else(|| de::Error::missing_field("size"))?,
+                duration_sec: wire.duration_sec,
             },
             other => {
                 return Err(de::Error::unknown_variant(other, &["arrow", "media"]));
@@ -276,11 +304,16 @@ impl PortStore {
                 let (schema, _) = read_ipc(&ipc_bytes)?;
                 (ipc_bytes, PortKind::Arrow(schema.as_ref().clone()), "arrow")
             }
-            PortPayload::MediaBlob { bytes, mime } => (
+            PortPayload::MediaBlob {
+                bytes,
+                mime,
+                duration_sec,
+            } => (
                 bytes.to_vec(),
                 PortKind::Media {
                     mime: mime.to_owned(),
                     size: bytes.len() as u64,
+                    duration_sec,
                 },
                 "media",
             ),
@@ -322,15 +355,18 @@ impl PortStore {
             .ok_or_else(|| PortStoreError::MissingPort(port.to_owned()))?;
         if entry.path.extension().and_then(|value| value.to_str()) == Some("media") {
             let bytes = fs::read(&entry.path).map_err(|source| io_error(&entry.path, source))?;
-            let mime = match &entry.kind {
-                PortKind::Media { mime, .. } => mime.clone(),
-                PortKind::Arrow(_) => "application/octet-stream".to_owned(),
+            let (mime, duration_sec) = match &entry.kind {
+                PortKind::Media {
+                    mime, duration_sec, ..
+                } => (mime.clone(), *duration_sec),
+                PortKind::Arrow(_) => ("application/octet-stream".to_owned(), None),
             };
             return Ok(PortRead::Media {
                 path: entry.path.clone(),
                 version: entry.version,
                 mime,
                 bytes,
+                duration_sec,
             });
         }
 
@@ -758,6 +794,7 @@ mod tests {
                 PortPayload::MediaBlob {
                     bytes: webm,
                     mime: "video/webm",
+                    duration_sec: None,
                 },
             )
             .expect("put media blob");
@@ -768,6 +805,7 @@ mod tests {
             PortKind::Media {
                 mime: "video/webm".to_string(),
                 size: webm.len() as u64,
+                duration_sec: None,
             },
             entry.kind
         );
@@ -785,5 +823,136 @@ mod tests {
         assert_eq!(1, version);
         assert_eq!("video/webm", mime);
         assert_eq!(webm, bytes.as_slice());
+    }
+
+    // ── T3: port-store fixtures + duration_sec ────────────────────────────────
+
+    #[test]
+    fn put_get_round_trip_preserves_media_blob_and_duration_sec() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = PortStore::open_at(dir.path()).expect("open store");
+        let webm = b"webm bytes";
+
+        let entry = store
+            .put(
+                "capture",
+                PortPayload::MediaBlob {
+                    bytes: webm,
+                    mime: "video/webm",
+                    duration_sec: Some(60.0),
+                },
+            )
+            .expect("put media blob with duration");
+
+        assert_eq!(
+            PortKind::Media {
+                mime: "video/webm".to_string(),
+                size: webm.len() as u64,
+                duration_sec: Some(60.0),
+            },
+            entry.kind
+        );
+
+        // Re-open the store from disk to verify the manifest was persisted.
+        let store2 = PortStore::open_at(dir.path()).expect("re-open store");
+        let reloaded = store2.manifest().get("capture").expect("capture entry");
+        assert_eq!(
+            PortKind::Media {
+                mime: "video/webm".to_string(),
+                size: webm.len() as u64,
+                duration_sec: Some(60.0),
+            },
+            reloaded.kind
+        );
+
+        // get() must also surface duration_sec in PortRead.
+        let read = store2.get("capture").expect("get media blob");
+        let PortRead::Media { duration_sec, .. } = read else {
+            panic!("expected media port read");
+        };
+        assert_eq!(Some(60.0), duration_sec);
+    }
+
+    #[test]
+    fn media_port_without_duration_sec_defaults_to_none_on_deserialization() {
+        // Old manifests written before duration_sec existed must still parse.
+        let manifest_json = r#"{
+  "ports": {
+    "frame": {
+      "path": "/tmp/ports/frame@v1.media",
+      "version": 1,
+      "kind": "media",
+      "mime": "video/webm",
+      "size": 42
+    }
+  }
+}"#;
+        let manifest: PortManifest =
+            serde_json::from_str(manifest_json).expect("old manifest deserializes");
+        let entry = manifest.ports.get("frame").expect("frame entry");
+        assert_eq!(
+            PortKind::Media {
+                mime: "video/webm".to_string(),
+                size: 42,
+                duration_sec: None,
+            },
+            entry.kind,
+            "old manifest without duration_sec must default to None"
+        );
+    }
+
+    #[test]
+    fn port_store_golden_fixture_round_trips() {
+        // Load the canonical fixture files from the on-disk port-store fixture
+        // directory.  The fixture manifest uses paths relative to the fixture
+        // dir so we resolve them before checking.
+        let fixture_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/port-store");
+
+        let manifest_path = fixture_dir.join("manifest.json");
+        let manifest_json = std::fs::read_to_string(&manifest_path)
+            .expect("fixture manifest.json must exist — run `git lfs pull` if missing");
+
+        // Parse with paths as-written in the fixture.
+        let manifest: PortManifest =
+            serde_json::from_str(&manifest_json).expect("fixture manifest.json deserializes");
+
+        // Arrow entry: sales
+        let sales = manifest.ports.get("sales").expect("sales entry in fixture");
+        assert_eq!(1, sales.version);
+        assert!(
+            matches!(&sales.kind, PortKind::Arrow(schema) if schema.field(0).name() == "id"),
+            "sales entry must be an Arrow port with an 'id' field"
+        );
+
+        // Media entry with duration_sec: spur-ad-capture
+        let capture = manifest
+            .ports
+            .get("spur-ad-capture")
+            .expect("spur-ad-capture entry in fixture");
+        assert_eq!(1, capture.version);
+        assert_eq!(
+            PortKind::Media {
+                mime: "video/webm".to_string(),
+                size: 10,
+                duration_sec: Some(60.0),
+            },
+            capture.kind,
+            "fixture media entry must carry duration_sec = 60.0"
+        );
+
+        // The physical media file referenced in the fixture must exist.
+        let media_path = fixture_dir.join("spur-ad-capture@v1.media");
+        assert!(
+            media_path.exists(),
+            "fixture media file {} must exist",
+            media_path.display()
+        );
+
+        // Round-trip: serialize back to JSON and re-parse — must be identical.
+        let re_serialized = serde_json::to_string_pretty(&manifest).expect("manifest serializes");
+        let round_tripped: PortManifest =
+            serde_json::from_str(&re_serialized).expect("re-serialized manifest deserializes");
+        assert_eq!(manifest, round_tripped, "manifest must round-trip cleanly");
     }
 }

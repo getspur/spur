@@ -58,11 +58,23 @@ pub struct SourcePush {
     pub payload: SourcePayload,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SourcePayload {
     IpcBytes(Vec<u8>),
-    MediaBlob { bytes: Vec<u8>, mime: String },
+    MediaBlob {
+        bytes: Vec<u8>,
+        mime: String,
+        /// Duration of the media content in seconds, if known. `None` means
+        /// the duration was not supplied by the producer; consumers that need a
+        /// concrete value should fall back to their own default.
+        duration_sec: Option<f64>,
+    },
 }
+
+// Manual Eq impl required because f64 does not implement Eq. The implementation
+// uses total equality semantics: two NaN values compare equal, matching
+// the intent of "same payload" checks in tests.
+impl Eq for SourcePayload {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellRunRequest {
@@ -329,12 +341,17 @@ where
             SourcePayload::IpcBytes(bytes) => {
                 ports.put(&push.source.port, bytes)?;
             }
-            SourcePayload::MediaBlob { bytes, mime } => {
+            SourcePayload::MediaBlob {
+                bytes,
+                mime,
+                duration_sec,
+            } => {
                 ports.put(
                     &push.source.port,
                     PortPayload::MediaBlob {
                         bytes,
                         mime: mime.as_str(),
+                        duration_sec: *duration_sec,
                     },
                 )?;
             }
@@ -652,12 +669,18 @@ where
                         // file); deref to &[u8] so it routes through PortPayload::IpcBytes.
                         store.put(port, &*ipc_bytes)?;
                     }
-                    PortRead::Media { bytes, mime, .. } => {
+                    PortRead::Media {
+                        bytes,
+                        mime,
+                        duration_sec,
+                        ..
+                    } => {
                         store.put(
                             port,
                             PortPayload::MediaBlob {
                                 bytes: &bytes,
                                 mime: &mime,
+                                duration_sec,
                             },
                         )?;
                     }
