@@ -999,6 +999,23 @@ mod tests {
         assert!(parsed_legacy.metadata.orig_nbformat.is_none());
         assert!(parsed_legacy.metadata.title.is_none());
         assert!(parsed_legacy.metadata.authors.is_none());
+
+        // 3b. Self-heal: re-serializing a notebook parsed from the legacy null
+        //     shape must produce JSON with the five keys ABSENT (not null).
+        let healed = serde_json::to_value(&parsed_legacy).expect("re-serialize legacy notebook");
+        let healed_meta = healed["metadata"].as_object().expect("metadata object");
+        for key in [
+            "kernelspec",
+            "language_info",
+            "orig_nbformat",
+            "title",
+            "authors",
+        ] {
+            assert!(
+                !healed_meta.contains_key(key),
+                "self-heal: {key} must be absent after round-trip, got: {healed_meta:?}"
+            );
+        }
     }
 
     #[test]
