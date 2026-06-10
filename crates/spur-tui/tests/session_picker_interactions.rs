@@ -551,17 +551,18 @@ fn esc_in_rename_cancels_without_action() {
 fn capital_p_toggles_preview_visible() {
     let mut picker = SessionPickerView::new();
     picker.set_sessions("t".into(), vec![session("a1", "x")], synopsis());
-    assert!(!picker.is_preview_visible());
-    let _ = picker.handle_key(
-        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
-        &test_ctx(),
-    );
+    // Preview is on by default.
     assert!(picker.is_preview_visible());
     let _ = picker.handle_key(
         KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
         &test_ctx(),
     );
     assert!(!picker.is_preview_visible());
+    let _ = picker.handle_key(
+        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+        &test_ctx(),
+    );
+    assert!(picker.is_preview_visible());
 }
 
 #[test]

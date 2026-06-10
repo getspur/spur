@@ -85,6 +85,7 @@ fn populated_single_brain_no_filter() {
 
     // Inline golden — capture current layout exactly. Any visual change to
     // session_picker.rs invalidates this and is reviewed as a plain string diff.
+    // Preview is on by default; no synopsis → placeholder row shown.
     let expected: &[&str] = &[
         "Sessions (claude)",
         "  Search",
@@ -97,10 +98,10 @@ fn populated_single_brain_no_filter() {
         "",
         "",
         "",
+        " Preview ───────────────────────────────────────────────────────────────────────",
+        "  (resume to load message history)",
         "",
-        "",
-        "",
-        "",
+        "  /work/spur ·  · a1b2c3d4",
         "",
         "",
         "",
@@ -121,7 +122,8 @@ fn populated_empty_no_filter() {
     picker.set_sessions("claude".into(), vec![], synopsis());
 
     // Inline golden — captures the empty-list layout: only the [+ New]
-    // virtual row + separator visible, status bar at line 22, footer at 23.
+    // virtual row + separator visible. Preview is on by default; cursor=0
+    // shows the "new session" placeholder message.
     let expected: &[&str] = &[
         "Sessions (claude)",
         "  Search",
@@ -134,8 +136,8 @@ fn populated_empty_no_filter() {
         "",
         "",
         "",
-        "",
-        "",
+        " Preview ───────────────────────────────────────────────────────────────────────",
+        "Press Enter to start a new session · any unsent draft will be saved",
         "",
         "",
         "",
@@ -239,6 +241,7 @@ fn populated_multi_brain_no_filter() {
         ],
         synopsis(),
     );
+    // Preview is on by default; cursor on a1xxxxxx (no synopsis) → placeholder.
     let expected: &[&str] = &[
         "Sessions (claude)",
         "  Search",
@@ -251,10 +254,10 @@ fn populated_multi_brain_no_filter() {
         "",
         "",
         "",
+        " Preview ───────────────────────────────────────────────────────────────────────",
+        "  (resume to load message history)",
         "",
-        "",
-        "",
-        "",
+        "  /work/spur · claude · a1xxxxxx",
         "",
         "",
         "",
@@ -285,6 +288,7 @@ fn populated_with_filter() {
     let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &ctx);
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &ctx);
+    // Preview is on by default; cursor=0 (new session) with filter active.
     let expected: &[&str] = &[
         "Sessions (claude)",
         "  Search  b_",
@@ -297,8 +301,8 @@ fn populated_with_filter() {
         "",
         "",
         "",
-        "",
-        "",
+        " Preview ───────────────────────────────────────────────────────────────────────",
+        "Press Enter to start a new session · any unsent draft will be saved",
         "",
         "",
         "",
@@ -328,6 +332,7 @@ fn populated_with_rename_active() {
     // Cursor on a1 by P1; press R to enter rename mode.
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE), &ctx);
     assert!(picker.is_rename_active());
+    // Preview is on by default; rename prompt displaces status bar.
     let expected: &[&str] = &[
         "Sessions (t)",
         "  Search",
@@ -339,10 +344,10 @@ fn populated_with_rename_active() {
         "",
         "",
         "",
+        " Preview ───────────────────────────────────────────────────────────────────────",
+        "  (resume to load message history)",
         "",
-        "",
-        "",
-        "",
+        "  /tmp ·  · a1xxxxxx",
         "",
         "",
         "",
@@ -376,6 +381,7 @@ fn populated_with_confirm_switch() {
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &ctx);
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
     assert!(picker.is_confirm_switch_visible());
+    // Preview is on by default; confirm-switch prompt displaces status bar.
     let expected: &[&str] = &[
         "Sessions (t)",
         "  Search",
@@ -387,10 +393,10 @@ fn populated_with_confirm_switch() {
         "",
         "",
         "",
+        " Preview ───────────────────────────────────────────────────────────────────────",
+        "  (resume to load message history)",
         "",
-        "",
-        "",
-        "",
+        "  /tmp ·  · a2xxxxxx",
         "",
         "",
         "",
@@ -414,9 +420,8 @@ fn populated_with_preview_visible() {
         vec![session("a1xxxxxx", "alpha", "/tmp")],
         synopsis(),
     );
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
-    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE), &ctx);
+    // Preview is on by default — no key press needed.
     assert!(picker.is_preview_visible());
     let expected: &[&str] = &[
         "Sessions (t)",
@@ -431,10 +436,10 @@ fn populated_with_preview_visible() {
         "",
         "",
         " Preview ───────────────────────────────────────────────────────────────────────",
-        "",
         "  (resume to load message history)",
         "",
         "  /tmp ·  · a1xxxxxx",
+        "",
         "",
         "",
         "",
@@ -460,6 +465,7 @@ fn populated_with_archived_shown() {
         synopsis(),
     );
     picker.toggle_show_archived(synopsis());
+    // Preview is on by default; cursor=0 (new session) shows the new-session placeholder.
     let expected: &[&str] = &[
         "Sessions (t) [showing archived]",
         "  Search",
@@ -472,8 +478,8 @@ fn populated_with_archived_shown() {
         "",
         "",
         "",
-        "",
-        "",
+        " Preview ───────────────────────────────────────────────────────────────────────",
+        "Press Enter to start a new session · any unsent draft will be saved",
         "",
         "",
         "",
