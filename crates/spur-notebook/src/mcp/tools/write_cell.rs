@@ -26,7 +26,8 @@ struct WriteCellResult {
 pub fn tool() -> Tool {
     Tool::new(
         METHOD,
-        "Replace one cell's source if expected_version still matches.",
+        "Replace one cell's source if expected_version still matches. \
+         For small changes to large cells prefer notebook.edit_cell.",
         rmcp_object(json!({
             "type": "object",
             "required": ["id", "source", "expected_version"],
