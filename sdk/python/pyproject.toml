@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spur-app"
+version = "0.1.0"
+description = "Python server SDK for Spur app plugins"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = ["mcp"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spur_app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
