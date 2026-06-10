@@ -83,25 +83,26 @@ fn populated_single_brain_no_filter() {
         synopsis(),
     );
 
-    // Inline golden — capture current layout exactly. Any visual change to
-    // session_picker.rs invalidates this and is reviewed as a plain string diff.
+    // Two-line rows: line 1 = title (padded to label_budget) + time column;
+    // line 2 = activity placeholder. Short id removed from list row.
+    // Header counter appears after (agent). Group header EARLIER shown.
     // Preview is on by default; no synopsis → placeholder row shown.
     let expected: &[&str] = &[
-        "Sessions (claude)",
+        "Sessions (claude) \u{b7} 1 session",
         "  Search",
         "",
         "  + Start new session",
         "  ────",
-        "▸ Refactor auth flow    a1b2c3d4",
+        "  EARLIER",
+        "\u{25b8} Refactor auth flow",
+        "      \u{2514} resume to load message history",
         "",
         "",
         "",
-        "",
-        "",
-        " Preview ───────────────────────────────────────────────────────────────────────",
+        " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
         "  (resume to load message history)",
         "",
-        "  /work/spur ·  · a1b2c3d4",
+        "  /work/spur \u{b7}  \u{b7} a1b2c3d4",
         "",
         "",
         "",
@@ -110,7 +111,7 @@ fn populated_single_brain_no_filter() {
         "",
         "",
         "",
-        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav \u{b7} \u{21b5} resume \u{b7} / search \u{b7} y yank \u{b7} Esc             \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -121,14 +122,13 @@ fn populated_empty_no_filter() {
     picker.set_metadata(SessionMetadata::default());
     picker.set_sessions("claude".into(), vec![], synopsis());
 
-    // Inline golden — captures the empty-list layout: only the [+ New]
-    // virtual row + separator visible. Preview is on by default; cursor=0
-    // shows the "new session" placeholder message.
+    // Empty session list: no group headers, count shows 0.
+    // Preview is on by default; cursor=0 shows the "new session" placeholder.
     let expected: &[&str] = &[
-        "Sessions (claude)",
+        "Sessions (claude) \u{b7} 0 sessions",
         "  Search",
         "",
-        "▸ + Start new session",
+        "\u{25b8} + Start new session",
         "  ────",
         "",
         "",
@@ -136,8 +136,8 @@ fn populated_empty_no_filter() {
         "",
         "",
         "",
-        " Preview ───────────────────────────────────────────────────────────────────────",
-        "Press Enter to start a new session · any unsent draft will be saved",
+        " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "Press Enter to start a new session \u{b7} any unsent draft will be saved",
         "",
         "",
         "",
@@ -148,7 +148,7 @@ fn populated_empty_no_filter() {
         "",
         "",
         "",
-        "j/k nav · ↵ new · / search · Esc                         ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav \u{b7} \u{21b5} new \u{b7} / search \u{b7} Esc                         \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -165,7 +165,7 @@ fn loading_state() {
         "",
         "Sessions",
         "",
-        "  Connecting to agent ···",
+        "  Connecting to agent \u{b7}\u{b7}\u{b7}",
         "",
         "",
         "",
@@ -180,7 +180,7 @@ fn loading_state() {
         "",
         "",
         "",
-        "Esc back                                                 ▶0 R0 $0.00 0m 00s spur",
+        "Esc back                                                 \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -213,7 +213,7 @@ fn error_state() {
         "",
         "",
         "",
-        "r retry · Esc back                                       ▶0 R0 $0.00 0m 00s spur",
+        "r retry \u{b7} Esc back                                       \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -241,23 +241,24 @@ fn populated_multi_brain_no_filter() {
         ],
         synopsis(),
     );
+    // Two-line rows with brain column. Short id removed. Group header EARLIER shown.
     // Preview is on by default; cursor on a1xxxxxx (no synopsis) → placeholder.
     let expected: &[&str] = &[
-        "Sessions (claude)",
+        "Sessions (claude) \u{b7} 2 sessions",
         "  Search",
         "",
         "  + Start new session",
         "  ────",
-        "▸ Refactor auth  claude    a1xxxxxx",
-        "  Tier 1 fixes  gpt-5    a2xxxxxx",
+        "  EARLIER",
+        "\u{25b8} Refactor auth                                                claude",
+        "      \u{2514} resume to load message history",
+        "  Tier 1 fixes                                                 gpt-5",
+        "      \u{2514} resume to load message history",
         "",
-        "",
-        "",
-        "",
-        " Preview ───────────────────────────────────────────────────────────────────────",
+        " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
         "  (resume to load message history)",
         "",
-        "  /work/spur · claude · a1xxxxxx",
+        "  /work/spur \u{b7} claude \u{b7} a1xxxxxx",
         "",
         "",
         "",
@@ -266,7 +267,7 @@ fn populated_multi_brain_no_filter() {
         "",
         "",
         "",
-        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav \u{b7} \u{21b5} resume \u{b7} / search \u{b7} y yank \u{b7} Esc             \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -288,32 +289,33 @@ fn populated_with_filter() {
     let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &ctx);
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &ctx);
+    // Filter active: no group headers. Two-line rows shown. Short id removed.
     // Preview is on by default; cursor=0 (new session) with filter active.
     let expected: &[&str] = &[
-        "Sessions (claude)",
+        "Sessions (claude) \u{b7} 1 session",
         "  Search  b_",
         "",
-        "▸ + Start new session",
+        "\u{25b8} + Start new session",
         "  ────",
-        "  beta    a2xxxxxx",
+        "  beta",
+        "      \u{2514} resume to load message history",
+        "",
+        "",
+        "",
+        "",
+        " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "Press Enter to start a new session \u{b7} any unsent draft will be saved",
         "",
         "",
         "",
         "",
         "",
-        " Preview ───────────────────────────────────────────────────────────────────────",
-        "Press Enter to start a new session · any unsent draft will be saved",
         "",
         "",
         "",
         "",
         "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "type to filter · Enter commit · Esc exit search          ▶0 R0 $0.00 0m 00s spur",
+        "type to filter \u{b7} Enter commit \u{b7} Esc exit search          \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -332,22 +334,22 @@ fn populated_with_rename_active() {
     // Cursor on a1 by P1; press R to enter rename mode.
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE), &ctx);
     assert!(picker.is_rename_active());
-    // Preview is on by default; rename prompt displaces status bar.
+    // Two-line rows. Group header EARLIER. Preview is on by default; rename prompt displaces status bar.
     let expected: &[&str] = &[
-        "Sessions (t)",
+        "Sessions (t) \u{b7} 1 session",
         "  Search",
         "",
         "  + Start new session",
         "  ────",
-        "▸ alpha    a1xxxxxx",
+        "  EARLIER",
+        "\u{25b8} alpha",
+        "      \u{2514} resume to load message history",
         "",
         "",
-        "",
-        "",
-        " Preview ───────────────────────────────────────────────────────────────────────",
+        " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
         "  (resume to load message history)",
         "",
-        "  /tmp ·  · a1xxxxxx",
+        "  /tmp \u{b7}  \u{b7} a1xxxxxx",
         "",
         "",
         "",
@@ -356,8 +358,8 @@ fn populated_with_rename_active() {
         "",
         "",
         "",
-        "Rename → alpha_",
-        "type new title · Enter save · Esc cancel",
+        "Rename \u{2192} alpha_",
+        "type new title \u{b7} Enter save \u{b7} Esc cancel",
     ];
     assert_render(&mut picker, expected);
 }
@@ -381,22 +383,22 @@ fn populated_with_confirm_switch() {
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &ctx);
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
     assert!(picker.is_confirm_switch_visible());
-    // Preview is on by default; confirm-switch prompt displaces status bar.
+    // Two-line rows. Group header EARLIER. Preview on; confirm-switch prompt displaces status bar.
     let expected: &[&str] = &[
-        "Sessions (t)",
+        "Sessions (t) \u{b7} 2 sessions",
         "  Search",
         "",
         "  + Start new session",
         "  ────",
-        "  alpha    a1xxxxxx",
-        "▸ beta    a2xxxxxx",
-        "",
-        "",
-        "",
-        " Preview ───────────────────────────────────────────────────────────────────────",
+        "  EARLIER",
+        "  alpha",
+        "      \u{2514} resume to load message history",
+        "\u{25b8} beta",
+        "      \u{2514} resume to load message history",
+        " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
         "  (resume to load message history)",
         "",
-        "  /tmp ·  · a2xxxxxx",
+        "  /tmp \u{b7}  \u{b7} a2xxxxxx",
         "",
         "",
         "",
@@ -405,8 +407,8 @@ fn populated_with_confirm_switch() {
         "",
         "",
         "",
-        "Session \"a1\" has an unsent draft — save and resume a2xxxxxx? [y/N]",
-        "y/Enter confirm · n/Esc cancel",
+        "Session \"a1\" has an unsent draft \u{2014} save and resume a2xxxxxx? [y/N]",
+        "y/Enter confirm \u{b7} n/Esc cancel",
     ];
     assert_render(&mut picker, expected);
 }
@@ -420,25 +422,26 @@ fn populated_with_preview_visible() {
         vec![session("a1xxxxxx", "alpha", "/tmp")],
         synopsis(),
     );
-    let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
+    let _ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
     // Preview is on by default — no key press needed.
     assert!(picker.is_preview_visible());
+    // Same layout as rename_active but without rename prompt.
     let expected: &[&str] = &[
-        "Sessions (t)",
+        "Sessions (t) \u{b7} 1 session",
         "  Search",
         "",
         "  + Start new session",
         "  ────",
-        "▸ alpha    a1xxxxxx",
+        "  EARLIER",
+        "\u{25b8} alpha",
+        "      \u{2514} resume to load message history",
         "",
         "",
         "",
-        "",
-        "",
-        " Preview ───────────────────────────────────────────────────────────────────────",
+        " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
         "  (resume to load message history)",
         "",
-        "  /tmp ·  · a1xxxxxx",
+        "  /tmp \u{b7}  \u{b7} a1xxxxxx",
         "",
         "",
         "",
@@ -447,7 +450,7 @@ fn populated_with_preview_visible() {
         "",
         "",
         "",
-        "j/k nav · ↵ resume · / search · y yank · Esc             ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav \u{b7} \u{21b5} resume \u{b7} / search \u{b7} y yank \u{b7} Esc             \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -465,32 +468,34 @@ fn populated_with_archived_shown() {
         synopsis(),
     );
     picker.toggle_show_archived(synopsis());
-    // Preview is on by default; cursor=0 (new session) shows the new-session placeholder.
+    // Two-line rows. Archived count + [showing archived] in header.
+    // [archived] badge on title line. Short id removed.
+    // Preview is on by default; cursor=0 (new session) shows new-session placeholder.
     let expected: &[&str] = &[
-        "Sessions (t) [showing archived]",
+        "Sessions (t) \u{b7} 1 session \u{b7} 2 archived [showing archived]",
         "  Search",
         "",
-        "▸ + Start new session",
+        "\u{25b8} + Start new session",
         "  ────",
-        "  alpha-archived    a1xxxxxx [archived]",
+        "  EARLIER",
+        "  alpha-archived                                               [archived]",
+        "      \u{2514} resume to load message history",
+        "",
+        "",
+        "",
+        " Preview \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "Press Enter to start a new session \u{b7} any unsent draft will be saved",
         "",
         "",
         "",
         "",
         "",
-        " Preview ───────────────────────────────────────────────────────────────────────",
-        "Press Enter to start a new session · any unsent draft will be saved",
         "",
         "",
         "",
         "",
         "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "j/k nav · ↵ new · / search · Esc                         ▶0 R0 $0.00 0m 00s spur",
+        "j/k nav \u{b7} \u{21b5} new \u{b7} / search \u{b7} Esc                         \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
