@@ -3,7 +3,7 @@
  */
 
 import {
-  assertNotEquals,
+  assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { capture } from "../src/capture.ts";
@@ -46,8 +46,8 @@ Deno.test("capture.canvas emits width and height when provided", () => {
 
 Deno.test("capture.canvas omits width/height when not provided", () => {
   const html = capture.canvas({ port: "x" });
-  assertNotEquals(html.includes("width="), true);
-  assertNotEquals(html.includes("height="), true);
+  assertEquals(html.includes("width="), false);
+  assertEquals(html.includes("height="), false);
 });
 
 Deno.test("capture.canvas escapes special characters in port attribute", () => {
