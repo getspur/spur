@@ -159,8 +159,28 @@ class PortStore:
         manifest_path = self._root / "manifest.json"
         try:
             with manifest_path.open() as fh:
-                return json.load(fh)
+                data = json.load(fh)
         except FileNotFoundError:
             raise PortManifestError(manifest_path, "file not found")
         except json.JSONDecodeError as exc:
             raise PortManifestError(manifest_path, f"invalid JSON: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise PortManifestError(
+                manifest_path,
+                f"expected a JSON object at top level, got {type(data).__name__}",
+            )
+        ports = data.get("ports", {})
+        if not isinstance(ports, dict):
+            raise PortManifestError(
+                manifest_path,
+                f"expected 'ports' to be an object, got {type(ports).__name__}",
+            )
+        for port_name, entry in ports.items():
+            if not isinstance(entry, dict):
+                raise PortManifestError(
+                    manifest_path,
+                    f"expected port entry {port_name!r} to be an object, "
+                    f"got {type(entry).__name__}",
+                )
+        return data

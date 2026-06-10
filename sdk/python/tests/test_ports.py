@@ -233,6 +233,64 @@ def test_corrupt_manifest_raises_port_manifest_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# PortManifestError: malformed ports value
+# ---------------------------------------------------------------------------
+
+
+def test_ports_as_list_raises_port_manifest_error(tmp_path):
+    """PortManifestError raised (not AttributeError) when 'ports' is a list."""
+    import json
+    from spur_app.errors import SpurAppError
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"ports": ["sales", "clip"]}))
+    store = PortStore(root=tmp_path)
+    with pytest.raises(PortManifestError) as exc_info:
+        store.list()
+    err = exc_info.value
+    assert isinstance(err, SpurAppError)
+    assert "ports" in str(err)
+    assert "list" in str(err)
+
+
+def test_ports_as_list_raises_on_read(tmp_path):
+    """read() also surfaces PortManifestError when 'ports' is a list."""
+    import json
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"ports": ["sales"]}))
+    store = PortStore(root=tmp_path)
+    with pytest.raises(PortManifestError):
+        store.read("sales")
+
+
+def test_port_entry_as_string_raises_port_manifest_error(tmp_path):
+    """PortManifestError raised when a port entry is a string instead of object."""
+    import json
+    from spur_app.errors import SpurAppError
+
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"ports": {"sales": "sales@v1.arrow"}})
+    )
+    store = PortStore(root=tmp_path)
+    with pytest.raises(PortManifestError) as exc_info:
+        store.list()
+    err = exc_info.value
+    assert isinstance(err, SpurAppError)
+    assert "sales" in str(err)
+    assert "str" in str(err)
+
+
+def test_top_level_not_dict_raises_port_manifest_error(tmp_path):
+    """PortManifestError raised when the top-level JSON value is not an object."""
+    import json
+
+    (tmp_path / "manifest.json").write_text(json.dumps([{"ports": {}}]))
+    store = PortStore(root=tmp_path)
+    with pytest.raises(PortManifestError) as exc_info:
+        store.list()
+    assert "list" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # basename-join: crafted path "../escape" stays inside root
 # ---------------------------------------------------------------------------
 
