@@ -94,15 +94,61 @@ fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str, theme: &Theme) 
 }
 
 fn compute_label_budget(area_width: u16, show_cwd: bool, show_brain: bool) -> usize {
-    let mut gutter = 2 /* prefix */ + 8 + 2 /* short_id+gap */ + 8 + 2 /* time+gap */;
+    // No longer reserves short-id column (removed from row display).
+    let mut gutter = 2 /* cursor prefix */ + 7 + 2 /* rel-time col + gap */;
     if show_brain {
-        gutter += 8 + 2;
+        gutter += 8 + 2; // brain col + gap
     }
     if show_cwd {
         gutter += 16 + 2; // cwd basename + slash + gap
     }
     let avail = (area_width as usize).saturating_sub(gutter);
     avail.clamp(8, 60)
+}
+
+// ─── Time-bucket helper ───────────────────────────────────────────────
+
+/// Grouping buckets for the session-list headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TimeBucket {
+    /// Explicitly pinned sessions form a separate group above time groups.
+    Pinned,
+    Today,
+    Yesterday,
+    ThisWeek, // 2–7 days ago
+    Earlier,
+}
+
+/// Pure, testable bucket classifier. `now` is injected so tests can provide
+/// a deterministic reference point. `updated_at` is an RFC3339 timestamp
+/// string (or `None`/empty → `Earlier`). `is_pinned` takes precedence and
+/// returns `Pinned` regardless of timestamp.
+pub(crate) fn time_bucket(
+    updated_at: Option<&str>,
+    is_pinned: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> TimeBucket {
+    if is_pinned {
+        return TimeBucket::Pinned;
+    }
+    let ts = match updated_at.filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => return TimeBucket::Earlier,
+    };
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        return TimeBucket::Earlier;
+    };
+    let diff = now.signed_duration_since(dt);
+    let days = diff.num_days();
+    if days < 1 {
+        TimeBucket::Today
+    } else if days < 2 {
+        TimeBucket::Yesterday
+    } else if days < 8 {
+        TimeBucket::ThisWeek
+    } else {
+        TimeBucket::Earlier
+    }
 }
 
 fn build_filter_haystack(
@@ -784,7 +830,16 @@ impl SessionPickerView {
         filter: &str,
     ) {
         let show_cwd = Self::cwds_are_heterogeneous(sessions);
-        let visible_height = area.height.saturating_sub(4) as usize;
+        // With two-line rows + optional headers we budget sessions, not lines.
+        // Reserve up to 4 lines for group headers when there is no active filter,
+        // so the selected session is always fully visible (both lines rendered).
+        // When a filter is active there are no headers, so the full area is used.
+        let header_line_reserve: usize = if filter.is_empty() { 4 } else { 0 };
+        let list_lines = (area.height as usize)
+            .saturating_sub(4) // fixed chrome: title + search + blank + [+new] separator
+            .saturating_sub(header_line_reserve);
+        // Each session occupies 2 lines. Use saturating so tiny terminals don't panic.
+        let visible_sessions = (list_lines / 2).max(1);
 
         let indices = filtered_indices(
             sessions,
@@ -794,19 +849,38 @@ impl SessionPickerView {
             self.show_archived,
         );
 
-        // Clamp scroll_offset so cursor is always visible.
-        // `cursor` indexes a virtual list where 0 = [+ New session] row and
-        // 1..=filtered.len() are real (visible) sessions. We scroll the real
-        // sessions; the [+ New session] row is always visible as the first entry.
+        // Clamp scroll_offset (in SESSION units) so the cursor session is always
+        // fully visible. `cursor` indexes: 0 = [+ New session], 1..=N = sessions.
         let mut scroll = self.scroll_offset.get();
         let session_cursor = cursor.saturating_sub(1);
-        if cursor >= 1 && session_cursor >= scroll + visible_height {
-            scroll = session_cursor.saturating_sub(visible_height.saturating_sub(1));
+        if cursor >= 1 && session_cursor >= scroll + visible_sessions {
+            scroll = session_cursor.saturating_sub(visible_sessions.saturating_sub(1));
         }
         if cursor >= 1 && session_cursor < scroll {
             scroll = session_cursor;
         }
         self.scroll_offset.set(scroll);
+
+        // ── Count stats for the header line ───────────────────────────────
+        let total_count = indices.len();
+        let pinned_count = indices
+            .iter()
+            .filter(|&&i| {
+                self.metadata
+                    .sessions
+                    .get(sessions[i].session_id.0.as_ref())
+                    .map(|e| e.pinned)
+                    .unwrap_or(false)
+            })
+            .count();
+        let archived_count = self
+            .metadata
+            .sessions
+            .values()
+            .filter(|e| e.archived)
+            .count();
+
+        let muted_style = Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg"));
 
         let mut header_spans = vec![
             Span::styled(
@@ -815,16 +889,30 @@ impl SessionPickerView {
                     .fg(token(ctx.theme, "session_picker.title.fg"))
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(format!("({})", agent), muted_style),
             Span::styled(
-                format!("({})", agent),
-                Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg")),
+                format!(
+                    " \u{00b7} {} session{}",
+                    total_count,
+                    if total_count == 1 { "" } else { "s" }
+                ),
+                muted_style,
             ),
         ];
-        if self.show_archived {
+        if pinned_count > 0 {
             header_spans.push(Span::styled(
-                " [showing archived]",
-                Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg")),
+                format!(" \u{00b7} {} pinned", pinned_count),
+                muted_style,
             ));
+        }
+        if archived_count > 0 {
+            header_spans.push(Span::styled(
+                format!(" \u{00b7} {} archived", archived_count),
+                muted_style,
+            ));
+        }
+        if self.show_archived {
+            header_spans.push(Span::styled(" [showing archived]", muted_style));
         }
         let mut lines = vec![
             Line::from(header_spans),
@@ -874,16 +962,26 @@ impl SessionPickerView {
         )));
 
         let show_brain = Self::brains_are_heterogeneous(sessions, &self.metadata);
+        let label_budget = compute_label_budget(area.width, show_cwd, show_brain);
 
-        for (display_i, real_i) in indices.iter().enumerate().skip(scroll).take(visible_height) {
+        // ── Time-bucket headers (render-only, filter must be empty) ───────
+        // We pre-compute the bucket for each visible session so we can emit a
+        // header line exactly once when the bucket changes.
+        let now = chrono::Utc::now();
+        let show_headers = filter.is_empty();
+        let mut last_bucket: Option<TimeBucket> = None;
+
+        for (display_i, real_i) in indices
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(visible_sessions)
+        {
             let session = &sessions[*real_i];
             let is_selected = cursor == display_i + 1;
             let prefix = if is_selected { "\u{25b8} " } else { "  " };
-            let raw_id = session.session_id.0.as_ref();
-            let short_id = &raw_id[..8.min(raw_id.len())];
             let synopsis_key = spur_acp::SessionId(session.session_id.0.as_ref().to_string());
             let synopsis = ctx.synopsis.get(&synopsis_key);
-            let label_budget = compute_label_budget(area.width, show_cwd, show_brain);
             let display = resolve_label(
                 session,
                 self.metadata.sessions.get(session.session_id.0.as_ref()),
@@ -897,16 +995,30 @@ impl SessionPickerView {
                 .map(Self::relative_time)
                 .unwrap_or_default();
 
-            let cwd_suffix = if show_cwd {
-                format!("  {}/", Self::cwd_basename(&session.cwd))
-            } else {
-                String::new()
-            };
-
             let entry = self.metadata.sessions.get(session.session_id.0.as_ref());
             let archived = entry.map(|e| e.archived).unwrap_or(false);
             let pinned = entry.map(|e| e.pinned).unwrap_or(false);
             let brain = entry.and_then(|e| e.brain_name.as_deref()).unwrap_or("");
+            let draft = entry.map(|e| e.draft.as_str()).unwrap_or("").to_string();
+
+            // ── Group header ──────────────────────────────────────────────
+            if show_headers {
+                let bucket = time_bucket(session.updated_at.as_deref(), pinned, now);
+                if Some(bucket) != last_bucket {
+                    last_bucket = Some(bucket);
+                    let label = match bucket {
+                        TimeBucket::Pinned => "PINNED",
+                        TimeBucket::Today => "TODAY",
+                        TimeBucket::Yesterday => "YESTERDAY",
+                        TimeBucket::ThisWeek => "THIS WEEK",
+                        TimeBucket::Earlier => "EARLIER",
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", label),
+                        muted_style,
+                    )));
+                }
+            }
 
             let title_style = if archived {
                 Style::default().fg(token(ctx.theme, "session_picker.row.archived.fg"))
@@ -917,9 +1029,9 @@ impl SessionPickerView {
             } else {
                 Style::default()
             };
-            let muted_style = Style::default().fg(token(ctx.theme, "session_picker.row.muted.fg"));
 
-            let mut spans: Vec<Span> = Vec::with_capacity(10);
+            // ── Line 1: cursor + title + aligned metadata columns ─────────
+            let mut spans: Vec<Span> = Vec::with_capacity(12);
             spans.push(Span::styled(
                 prefix,
                 if is_selected {
@@ -934,20 +1046,94 @@ impl SessionPickerView {
                     Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
                 ));
             }
-            spans.push(Span::styled(display, title_style));
-            spans.push(Span::styled(cwd_suffix, muted_style));
-            if show_brain {
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(brain, muted_style));
-            }
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(time_str, muted_style));
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(short_id, muted_style));
+            // Title padded/truncated to label_budget chars
+            let padded_title = {
+                use unicode_width::UnicodeWidthStr;
+                let w = UnicodeWidthStr::width(display.as_str());
+                if w < label_budget {
+                    format!("{}{}", display, " ".repeat(label_budget - w))
+                } else {
+                    display.clone()
+                }
+            };
+            spans.push(Span::styled(padded_title, title_style));
             if archived {
                 spans.push(Span::styled(" [archived]", muted_style));
             }
+            // cwd column (fixed ~16 chars, only when heterogeneous)
+            if show_cwd {
+                let cwd_raw = format!("{}/", Self::cwd_basename(&session.cwd));
+                let cwd_col = format!("  {:16}", cwd_raw);
+                spans.push(Span::styled(cwd_col, muted_style));
+            }
+            // brain column (fixed ~8 chars, only when heterogeneous)
+            if show_brain {
+                let brain_col = format!("  {:8}", brain);
+                spans.push(Span::styled(brain_col, muted_style));
+            }
+            // relative time (right-anchored in fixed 7-char column)
+            let time_col = format!("  {:>7}", time_str);
+            spans.push(Span::styled(time_col, muted_style));
+
             lines.push(Line::from(spans));
+
+            // ── Line 2: activity line (dim, indented) ─────────────────────
+            // Layout: 6 leading spaces + "└ " (2) + content. Total row_width.
+            let activity_indent = "      "; // 6 spaces
+            let row_width = area.width as usize;
+            // Budget for the entire "└ …" portion (including the └ character and space).
+            let content_budget = row_width.saturating_sub(activity_indent.len());
+
+            // Pick activity text: construct the full "└ tag: "value"" string.
+            // Truncation is applied to the full content string (including └ prefix).
+            let activity_content: String = if let Some(syn) = synopsis.as_ref() {
+                if let Some(ex) = syn.recent_exchanges.back() {
+                    if let Some(agent_text) = ex.agent.as_deref().filter(|s| !s.is_empty()) {
+                        format!(
+                            "\u{2514} agent: \"{}\"",
+                            truncate_for_row(agent_text, content_budget.saturating_sub(12))
+                        )
+                    } else {
+                        format!(
+                            "\u{2514} you: \"{}\"",
+                            truncate_for_row(&ex.user, content_budget.saturating_sub(9))
+                        )
+                    }
+                } else if let Some(agent_reply) =
+                    syn.last_agent_reply.as_deref().filter(|s| !s.is_empty())
+                {
+                    format!(
+                        "\u{2514} agent: \"{}\"",
+                        truncate_for_row(agent_reply, content_budget.saturating_sub(12))
+                    )
+                } else if let Some(user_msg) =
+                    syn.last_user_msg.as_deref().filter(|s| !s.is_empty())
+                {
+                    format!(
+                        "\u{2514} you: \"{}\"",
+                        truncate_for_row(user_msg, content_budget.saturating_sub(9))
+                    )
+                } else {
+                    "\u{2514} resume to load message history".to_string()
+                }
+            } else {
+                "\u{2514} resume to load message history".to_string()
+            };
+
+            let mut activity_line_spans: Vec<Span> = Vec::with_capacity(4);
+            activity_line_spans.push(Span::styled(activity_indent.to_string(), muted_style));
+            let activity_truncated = truncate_for_row(&activity_content, content_budget);
+            activity_line_spans.push(Span::styled(activity_truncated, muted_style));
+
+            // Draft badge at end of activity line
+            if !draft.is_empty() {
+                activity_line_spans.push(Span::styled(
+                    " \u{25cf} draft",
+                    Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
+                ));
+            }
+
+            lines.push(Line::from(activity_line_spans));
         }
 
         // Layout: chunks[1]/[2] (status + footer hint) are kept as two rows
@@ -2231,6 +2417,104 @@ mod current_session_shortcut_tests {
 
         picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &test_ctx());
         assert_eq!(picker.filter(), "");
+    }
+}
+
+#[cfg(test)]
+mod time_bucket_tests {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    fn now() -> chrono::DateTime<Utc> {
+        // Fixed reference: 2026-01-15T12:00:00Z (a Wednesday)
+        Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap()
+    }
+
+    fn ts(dt: chrono::DateTime<Utc>) -> String {
+        dt.to_rfc3339()
+    }
+
+    #[test]
+    fn pinned_always_returns_pinned() {
+        let n = now();
+        // Even a "today" session is Pinned when is_pinned=true.
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::minutes(5))), true, n),
+            TimeBucket::Pinned
+        );
+        // Older session still Pinned when pinned.
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(30))), true, n),
+            TimeBucket::Pinned
+        );
+    }
+
+    #[test]
+    fn no_timestamp_is_earlier() {
+        let n = now();
+        assert_eq!(time_bucket(None, false, n), TimeBucket::Earlier);
+        assert_eq!(time_bucket(Some(""), false, n), TimeBucket::Earlier);
+    }
+
+    #[test]
+    fn invalid_timestamp_is_earlier() {
+        let n = now();
+        assert_eq!(
+            time_bucket(Some("not-a-date"), false, n),
+            TimeBucket::Earlier
+        );
+    }
+
+    #[test]
+    fn within_today_is_today() {
+        let n = now();
+        // 5 minutes ago → Today
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::minutes(5))), false, n),
+            TimeBucket::Today
+        );
+        // 23 hours ago → Today (< 1 day)
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::hours(23))), false, n),
+            TimeBucket::Today
+        );
+    }
+
+    #[test]
+    fn one_day_ago_is_yesterday() {
+        let n = now();
+        // Exactly 1 day ago → Yesterday
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(1))), false, n),
+            TimeBucket::Yesterday
+        );
+        // 1.5 days ago → Yesterday
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::hours(36))), false, n),
+            TimeBucket::Yesterday
+        );
+    }
+
+    #[test]
+    fn two_to_seven_days_is_this_week() {
+        let n = now();
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(2))), false, n),
+            TimeBucket::ThisWeek
+        );
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(7))), false, n),
+            TimeBucket::ThisWeek
+        );
+    }
+
+    #[test]
+    fn eight_days_is_earlier() {
+        let n = now();
+        assert_eq!(
+            time_bucket(Some(&ts(n - Duration::days(8))), false, n),
+            TimeBucket::Earlier
+        );
     }
 }
 
