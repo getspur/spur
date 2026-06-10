@@ -38,6 +38,55 @@ pub struct SpurAppManifest {
     pub dependencies: SpurAppDependencies,
     #[serde(default)]
     pub mcp_server: Option<SpurAppMcpServer>,
+    /// Capability declarations for host provisioning. Additive — existing
+    /// manifests without this field deserialize with all capabilities defaulted
+    /// to off. Unknown capability keys inside the struct are refused at
+    /// deserialization time (enforced by `deny_unknown_fields` on the inner
+    /// struct) so the host can return a structured error on unrecognised keys.
+    #[serde(default)]
+    pub capabilities: SpurAppCapabilities,
+    /// Path (relative to the app root) to the agent skill file for this app.
+    /// Defaults to `"skill/SKILL.md"` when absent.
+    #[serde(default)]
+    pub skill: Option<String>,
+}
+
+/// Capability declarations; all fields default to off/None so that existing
+/// manifests without a `capabilities` block continue to deserialise unchanged.
+///
+/// **Unknown field policy:** `deny_unknown_fields` is applied to this struct so
+/// that a manifest containing an unrecognised capability key (e.g. a future
+/// capability unknown to this host) is rejected at open time with a structured
+/// error rather than silently ignored. This is intentionally strict at the
+/// capability level while the manifest root itself remains permissive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpurAppCapabilities {
+    /// Port-store capability: declares which port names the app reads/writes.
+    /// When present, the host injects `SPUR_PORTS_ROOT` at plugin spawn.
+    #[serde(default)]
+    pub ports: Option<SpurAppCapabilityPorts>,
+    /// When `true`, the host guarantees the canvas-capture recorder loop
+    /// end-to-end (requires `active_output_scripts`).
+    #[serde(default)]
+    pub canvas_capture: bool,
+    /// When `true`, the host shows a one-time per-app grant prompt and, after
+    /// approval, opens output iframes with `allow-scripts allow-same-origin`.
+    #[serde(default)]
+    pub active_output_scripts: bool,
+    /// When `true`, the host injects `SPUR_ARTIFACTS_DIR` at plugin spawn and
+    /// creates the directory.
+    #[serde(default)]
+    pub artifacts_dir: bool,
+}
+
+/// Read/write port name lists for the `ports` capability.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpurAppCapabilityPorts {
+    #[serde(default)]
+    pub read: Vec<String>,
+    #[serde(default)]
+    pub write: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +186,8 @@ impl SpurAppManifest {
             ports: None,
             dependencies: SpurAppDependencies::default(),
             mcp_server: None,
+            capabilities: SpurAppCapabilities::default(),
+            skill: None,
         }
     }
 }
