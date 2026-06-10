@@ -227,6 +227,7 @@ async fn push_capture_port_for_state(
             payload: SourcePayload::MediaBlob {
                 bytes: webm,
                 mime: "video/webm".to_owned(),
+                duration_sec: Some(duration_sec),
             },
         })
         .await
@@ -1123,6 +1124,7 @@ mod tests {
             SourcePayload::MediaBlob {
                 bytes: b"webm bytes".to_vec(),
                 mime: "video/webm".to_owned(),
+                duration_sec: Some(1.5),
             }
         );
     }
