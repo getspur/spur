@@ -17,3 +17,6 @@ jobs:
 
       - name: INV-C2 — only TUI translation constructs InteractiveInput::Message
         run: ./scripts/lint_message_construction_sites.sh
+
+      - name: INV-SDK-F1 — sdk/fixtures/port-store in lockstep with Rust PortStore golden fixtures
+        run: ./scripts/check-sdk-fixture-lockstep.sh
