@@ -914,6 +914,88 @@ mod tests {
         );
     }
 
+    /// Regression test: None fields in NotebookMetadata must NOT serialize as
+    /// `null` — the nbformat v4 JSON schema forbids `"kernelspec": null` etc.
+    /// and `nbformat.read()` in Python crashes on such files.
+    #[test]
+    fn notebook_metadata_none_fields_omitted_not_null() {
+        use serde_json::Map;
+
+        // 1. Serializing a NotebookRoot whose five optional metadata fields are
+        //    all None must produce a `metadata` object that does NOT contain
+        //    the keys kernelspec, language_info, orig_nbformat, title, authors.
+        let root = NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                jute_deck: None,
+                other: Map::new(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: Vec::new(),
+        };
+        let v = serde_json::to_value(&root).unwrap();
+        let meta = v["metadata"].as_object().unwrap();
+        assert!(
+            !meta.contains_key("kernelspec"),
+            "metadata must not contain kernelspec key when None, got: {meta:?}"
+        );
+        assert!(
+            !meta.contains_key("language_info"),
+            "metadata must not contain language_info key when None, got: {meta:?}"
+        );
+        assert!(
+            !meta.contains_key("orig_nbformat"),
+            "metadata must not contain orig_nbformat key when None, got: {meta:?}"
+        );
+        assert!(
+            !meta.contains_key("title"),
+            "metadata must not contain title key when None, got: {meta:?}"
+        );
+        assert!(
+            !meta.contains_key("authors"),
+            "metadata must not contain authors key when None, got: {meta:?}"
+        );
+
+        // 2. Deserializing a notebook with an empty `metadata` object must
+        //    succeed (missing optional keys are OK).
+        let json_empty_meta =
+            r#"{"metadata": {}, "nbformat": 4, "nbformat_minor": 5, "cells": []}"#;
+        let parsed: NotebookRoot = serde_json::from_str(json_empty_meta)
+            .expect("empty metadata must deserialize without error");
+        assert!(parsed.metadata.kernelspec.is_none());
+        assert!(parsed.metadata.language_info.is_none());
+        assert!(parsed.metadata.orig_nbformat.is_none());
+        assert!(parsed.metadata.title.is_none());
+        assert!(parsed.metadata.authors.is_none());
+
+        // 3. Deserializing the legacy shape with explicit nulls must also
+        //    succeed (backward compat with ~597 existing notebooks).
+        let json_explicit_nulls = r#"{
+            "metadata": {
+                "kernelspec": null,
+                "language_info": null,
+                "orig_nbformat": null,
+                "title": null,
+                "authors": null
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "cells": []
+        }"#;
+        let parsed_legacy: NotebookRoot = serde_json::from_str(json_explicit_nulls)
+            .expect("explicit-null metadata must deserialize without error (backward compat)");
+        assert!(parsed_legacy.metadata.kernelspec.is_none());
+        assert!(parsed_legacy.metadata.language_info.is_none());
+        assert!(parsed_legacy.metadata.orig_nbformat.is_none());
+        assert!(parsed_legacy.metadata.title.is_none());
+        assert!(parsed_legacy.metadata.authors.is_none());
+    }
+
     #[test]
     fn string_to_multiline() {
         let empty = MultilineString::Single("".into()).normalize();
