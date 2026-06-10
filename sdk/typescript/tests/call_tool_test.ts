@@ -5,10 +5,7 @@
  * so they exercise the actual framing code without needing a live notebook.
  */
 
-import {
-  assertEquals,
-  assertRejects,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertRejects } from "@std/assert";
 import { callToolWithSocket } from "../src/call_tool.ts";
 import { readFrame, writeFrame } from "../src/wire.ts";
 
@@ -17,10 +14,10 @@ import { readFrame, writeFrame } from "../src/wire.ts";
 // ---------------------------------------------------------------------------
 
 /** Start a fake MCP server at a temp Unix socket path. */
-async function makeFakeServer(
+function makeFakeServer(
   socketPath: string,
   handler: (conn: Deno.Conn) => Promise<void>,
-): Promise<{ done: Promise<void>; close: () => void }> {
+): { done: Promise<void>; close: () => void } {
   const listener = Deno.listen({ transport: "unix", path: socketPath });
   const done = (async () => {
     try {
@@ -93,7 +90,7 @@ Deno.test(
     const socketPath = await tempSocketPath();
     const received: unknown[] = [];
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         {
@@ -140,7 +137,7 @@ Deno.test(
     const socketPath = await tempSocketPath();
     const received: unknown[] = [];
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         { result: { structuredContent: {} } },
@@ -165,7 +162,7 @@ Deno.test(
     const socketPath = await tempSocketPath();
     const received: unknown[] = [];
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         { result: { structuredContent: {} } },
@@ -195,7 +192,7 @@ Deno.test(
   async () => {
     const socketPath = await tempSocketPath();
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         {
@@ -218,7 +215,7 @@ Deno.test(
   async () => {
     const socketPath = await tempSocketPath();
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         {
@@ -241,7 +238,7 @@ Deno.test(
   async () => {
     const socketPath = await tempSocketPath();
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         {
@@ -266,7 +263,7 @@ Deno.test(
   async () => {
     const socketPath = await tempSocketPath();
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         {
@@ -295,7 +292,7 @@ Deno.test(
   async () => {
     const socketPath = await tempSocketPath();
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         {
@@ -319,7 +316,7 @@ Deno.test(
   async () => {
     const socketPath = await tempSocketPath();
 
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         { error: { code: -32603 } },
@@ -345,7 +342,7 @@ Deno.test(
     const socketPath = await tempSocketPath();
 
     // Server that replies to initialize with an error and then hangs up
-    const { done } = await makeFakeServer(socketPath, async (conn) => {
+    const { done } = makeFakeServer(socketPath, async (conn) => {
       const initReq = await readFrame(conn) as Record<string, unknown>;
       await writeFrame(conn, {
         jsonrpc: "2.0",
@@ -398,7 +395,7 @@ Deno.test(
   async () => {
     const socketPath = await tempSocketPath();
     const received: unknown[] = [];
-    const { done } = await makeFakeServer(socketPath, (conn) =>
+    const { done } = makeFakeServer(socketPath, (conn) =>
       canonicalServer(
         conn,
         { result: { structuredContent: { ok: true } } },
