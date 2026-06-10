@@ -6,9 +6,25 @@ programmatically or from the golden fixture directory.  It sets / patches
 ``SPUR_PORTS_ROOT`` so that any code that constructs a :class:`PortStore`
 inside the context picks up the fake root automatically.
 
-**stdlib-only** — no ``mcp`` import, no third-party dependencies.
+**stdlib-only** — ``FakePortStore`` itself has no third-party dependencies.
+``fake_port_store`` is a ``@pytest.fixture``; ``pytest`` is imported only at
+the point of fixture definition and is guarded so that importing
+``spur_app.testing`` succeeds in environments where pytest is not installed.
 
 Typical pytest usage::
+
+    # conftest.py
+    from spur_app.testing import fake_port_store  # noqa: F401
+
+    # test_my_tool.py
+    from pathlib import Path
+    FIXTURES_DIR = Path(__file__).resolve().parents[N] / "fixtures" / "port-store"
+
+    def test_tool(fake_port_store):
+        result = fake_port_store.port_store.read("spur-ad-capture")
+        assert result.mime == "video/webm"
+
+Or use the context manager directly (no pytest required)::
 
     from spur_app.testing import FakePortStore
 
@@ -16,15 +32,6 @@ Typical pytest usage::
         with FakePortStore.from_fixtures(FIXTURES_DIR) as store:
             result = store.port_store.read("spur-ad-capture")
             assert result.mime == "video/webm"
-
-Or use the helper fixtures::
-
-    # conftest.py
-    from spur_app.testing import fake_port_store   # noqa: F401
-
-    def test_tool(fake_port_store):
-        result = fake_port_store.port_store.read("spur-ad-capture")
-        ...
 """
 from __future__ import annotations
 
@@ -33,7 +40,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 
 from .ports import PortStore
 
@@ -59,6 +66,7 @@ class FakePortStore:
         self._entries: list[dict[str, Any]] = []
         self._tmp_dir: Optional[Path] = None
         self._old_env: Optional[str] = None
+        self._fixture_dir: Optional[Path] = None
 
     # ------------------------------------------------------------------
     # Builder methods — call before entering the context
@@ -173,7 +181,7 @@ class FakePortStore:
     def __enter__(self) -> "FakePortStore":
         self._tmp_dir = Path(tempfile.mkdtemp(prefix="spur_fake_port_store_"))
 
-        if hasattr(self, "_fixture_dir"):
+        if self._fixture_dir is not None:
             # Mirror from fixture dir: copy manifest + any files that exist
             fixture_manifest_path = self._fixture_dir / "manifest.json"
             with fixture_manifest_path.open() as fh:
@@ -216,7 +224,7 @@ class FakePortStore:
         self._tmp_dir = None
 
     # ------------------------------------------------------------------
-    # Convenience accessor
+    # Convenience accessors
     # ------------------------------------------------------------------
 
     @property
@@ -249,29 +257,34 @@ class FakePortStore:
 
 
 # ---------------------------------------------------------------------------
-# pytest fixture helpers
+# pytest fixture
 # ---------------------------------------------------------------------------
 
+try:
+    import pytest as _pytest
 
-def fake_port_store() -> Iterator["FakePortStore"]:
-    """Pytest fixture that yields a :class:`FakePortStore` context.
+    @_pytest.fixture
+    def fake_port_store() -> "FakePortStore":  # type: ignore[misc]
+        """Pytest fixture that yields an active :class:`FakePortStore`.
 
-    Import directly in ``conftest.py``::
+        Re-export this fixture in your ``conftest.py``::
 
-        from spur_app.testing import fake_port_store  # noqa: F401
+            from spur_app.testing import fake_port_store  # noqa: F401
 
-    Then use it in tests::
+        Then inject it by name in any test::
 
-        def test_something(fake_port_store):
-            fake_port_store.add_media("clip", b"data", mime="video/mp4")
-            # SPUR_PORTS_ROOT is patched for the test
-            store = fake_port_store.port_store
-            result = store.read("clip")
-            assert result.mime == "video/mp4"
+            def test_something(fake_port_store):
+                fake_port_store.add_media("clip", b"data", mime="video/mp4")
+                result = fake_port_store.port_store.read("clip")
+                assert result.mime == "video/mp4"
 
-    Note: since the fixture is yielded, you can add entries BEFORE the
-    context activates by building the store and then using it.  The fixture
-    enters the context before yielding.
-    """
-    with FakePortStore() as store:
-        yield store
+        ``SPUR_PORTS_ROOT`` is patched for the duration of the test and
+        restored (or removed) when the test finishes.
+        """
+        with FakePortStore() as store:
+            yield store
+
+except ImportError:  # pragma: no cover
+    # pytest is not installed — FakePortStore is still fully usable as a
+    # plain context manager; the fixture just won't be available.
+    pass
