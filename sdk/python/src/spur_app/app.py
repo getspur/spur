@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, TypeVar
 
 from .artifacts import ArtifactStore
 from .env import EnvAccessor
@@ -73,9 +73,9 @@ class App:
         _log.info("spur_app.App(%r) created", name)
 
         # Lazily initialised on first property access
-        self._ports: Optional[PortStore] = None
-        self._artifacts: Optional[ArtifactStore] = None
-        self._env: Optional[EnvAccessor] = None
+        self._ports: PortStore | None = None
+        self._artifacts: ArtifactStore | None = None
+        self._env: EnvAccessor | None = None
         self._mcp: Any = None  # FastMCP instance, created on demand
 
     # ------------------------------------------------------------------

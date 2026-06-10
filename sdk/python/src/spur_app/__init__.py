@@ -23,6 +23,7 @@ from .errors import (
     EnvVarRequiredError,
     MissingCapabilityError,
     PortFileNotFoundError,
+    PortManifestError,
     PortNotFoundError,
     SpurAppError,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "MissingCapabilityError",
     "PortNotFoundError",
     "PortFileNotFoundError",
+    "PortManifestError",
     "EnvVarRequiredError",
     "ArtifactPathError",
 ]
