@@ -93,14 +93,21 @@ fn render_footer_hint(frame: &mut Frame, area: Rect, hint: &str, theme: &Theme) 
     );
 }
 
+/// Fixed display-column widths for the three metadata columns on session row line 1.
+/// Used in both `compute_label_budget` (gutter accounting) and the row-assembly
+/// format strings so the two sites cannot drift out of sync.
+const CWD_COL_WIDTH: usize = 16;
+const BRAIN_COL_WIDTH: usize = 8;
+const TIME_COL_WIDTH: usize = 7;
+
 fn compute_label_budget(area_width: u16, show_cwd: bool, show_brain: bool) -> usize {
     // No longer reserves short-id column (removed from row display).
-    let mut gutter = 2 /* cursor prefix */ + 7 + 2 /* rel-time col + gap */;
+    let mut gutter = 2 /* cursor prefix */ + TIME_COL_WIDTH + 2 /* time col + gap */;
     if show_brain {
-        gutter += 8 + 2; // brain col + gap
+        gutter += BRAIN_COL_WIDTH + 2; // brain col + gap
     }
     if show_cwd {
-        gutter += 16 + 2; // cwd basename + slash + gap
+        gutter += CWD_COL_WIDTH + 2; // cwd basename + slash + gap
     }
     let avail = (area_width as usize).saturating_sub(gutter);
     avail.clamp(8, 60)
@@ -851,8 +858,11 @@ impl SessionPickerView {
         // + [+New](1) + separator(1) = 5. Subtract that from the list pane height.
         let list_pane_height = (area.height as usize).saturating_sub(chrome_rows as usize);
         let list_session_area = list_pane_height.saturating_sub(5);
-        // Reserve up to 4 lines for group-bucket headers when filter is empty.
-        let header_line_reserve: usize = if filter.is_empty() { 4 } else { 0 };
+        // Reserve 5 lines for group-bucket headers when filter is empty.
+        // 5 = maximum simultaneous bucket headers: PINNED + TODAY + YESTERDAY +
+        // THIS WEEK + EARLIER.  Using a smaller reserve risks half-showing a
+        // session when all five groups appear at once.
+        let header_line_reserve: usize = if filter.is_empty() { 5 } else { 0 };
         let session_lines = list_session_area.saturating_sub(header_line_reserve);
         // Each session occupies 2 lines. Ensure at least 1 so we never div-by-zero
         // or refuse to scroll on tiny terminals.
@@ -1097,19 +1107,19 @@ impl SessionPickerView {
             if archived {
                 spans.push(Span::styled(" [archived]", muted_style));
             }
-            // cwd column (fixed ~16 chars, only when heterogeneous)
+            // cwd column (fixed CWD_COL_WIDTH chars, only when heterogeneous)
             if show_cwd {
                 let cwd_raw = format!("{}/", Self::cwd_basename(&session.cwd));
-                let cwd_col = format!("  {:16}", cwd_raw);
+                let cwd_col = format!("  {cwd_raw:<width$}", width = CWD_COL_WIDTH);
                 spans.push(Span::styled(cwd_col, muted_style));
             }
-            // brain column (fixed ~8 chars, only when heterogeneous)
+            // brain column (fixed BRAIN_COL_WIDTH chars, only when heterogeneous)
             if show_brain {
-                let brain_col = format!("  {:8}", brain);
+                let brain_col = format!("  {brain:<width$}", width = BRAIN_COL_WIDTH);
                 spans.push(Span::styled(brain_col, muted_style));
             }
-            // relative time (right-anchored in fixed 7-char column)
-            let time_col = format!("  {:>7}", time_str);
+            // relative time (right-anchored in fixed TIME_COL_WIDTH column)
+            let time_col = format!("  {time_str:>width$}", width = TIME_COL_WIDTH);
             spans.push(Span::styled(time_col, muted_style));
 
             lines.push(Line::from(spans));
@@ -1160,11 +1170,12 @@ impl SessionPickerView {
             let mut activity_line_spans: Vec<Span> = Vec::with_capacity(4);
             activity_line_spans.push(Span::styled(activity_indent.to_string(), muted_style));
 
-            // " ● draft" badge is 7 display columns. Reserve space for it BEFORE
-            // truncating the activity text so the combined line never overflows
-            // row_width. When no draft, the full content_budget is available.
-            const DRAFT_BADGE: &str = " \u{25cf} draft"; // 7 cols
-            const DRAFT_BADGE_WIDTH: usize = 7;
+            // " ● draft" badge is 8 display columns: space(1) + ●(1) + space(1)
+            // + "draft"(5) = 8.  Reserve space BEFORE truncating the activity text
+            // so indent + text + badge always fits within row_width.
+            // When no draft, the full content_budget is available.
+            const DRAFT_BADGE: &str = " \u{25cf} draft"; // 8 cols
+            const DRAFT_BADGE_WIDTH: usize = 8;
             let text_budget = if draft.is_empty() {
                 content_budget
             } else {
