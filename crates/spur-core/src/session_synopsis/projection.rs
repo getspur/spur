@@ -279,8 +279,9 @@ impl SessionSynopsisProjection {
         }
         s.last_user_msg = Some(capped);
 
-        // Push a new exchange onto the ring. Slash-command messages are
-        // included (they update last_user_msg, so they go into the ring too).
+        // Ring entries must mirror last_user_msg semantics exactly: every
+        // flushed non-empty user turn enters the ring, slash commands
+        // included; whitespace-only buffers were filtered above.
         let exchange = SynopsisExchange {
             user: cap_chars(trimmed, RECENT_USER_CAP),
             agent: None,
@@ -301,9 +302,10 @@ impl SessionSynopsisProjection {
             return;
         }
         let capped = cap_chars(trimmed, AGENT_REPLY_CAP);
-        // Only attribute a reply when we already have a real first_user_msg
-        // committed — that way slash-command-prefixed sessions don't get a
-        // misleading "agent reply" attached to the control-input turn.
+        // Attribution requires SOME committed user message. first_agent_reply
+        // additionally requires a real (non-slash) first_user_msg (inner guard
+        // below); last_agent_reply and the ring slot are filled whenever any
+        // user message is committed, including slash-command-only turns.
         let s = match self.by_session.get_mut(session) {
             Some(s) if s.first_user_msg.is_some() || s.last_user_msg.is_some() => s,
             _ => return,
@@ -1142,5 +1144,24 @@ mod tests {
             proj.get(&SessionId("S1".into())).is_none(),
             "whitespace-only flush should not create synopsis or exchange"
         );
+    }
+
+    #[test]
+    fn ring_not_mutated_per_chunk_only_on_flush() {
+        let mut proj = SessionSynopsisProjection::new();
+        // Multiple chunks of a single user turn: the ring must stay untouched
+        // until the turn is flushed, or double-applied chunks would corrupt it.
+        proj.apply(&user_chunk_event("S1", "chunk "));
+        proj.apply(&user_chunk_event("S1", "one"));
+        proj.apply(&user_chunk_event("S1", " more"));
+        assert!(
+            !proj.by_session.contains_key(&SessionId("S1".into())),
+            "no commit (and so no ring write) may happen per-chunk"
+        );
+        // Agent reply triggers the flush; exactly one exchange appears.
+        proj.apply(&agent_chunk_event("S1", "ack"));
+        let s = proj.get(&SessionId("S1".into())).unwrap();
+        assert_eq!(s.recent_exchanges.len(), 1);
+        assert_eq!(s.recent_exchanges[0].user, "chunk one more");
     }
 }
