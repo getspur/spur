@@ -302,6 +302,7 @@ impl ServerHandler for NotebookMcpServer {
             }
             "notebook_export_spur_app" => tools::export_spur_app::call(&self.deps, arguments).await,
             "notebook_import_spur_app" => tools::import_spur_app::call(&self.deps, arguments).await,
+            "notebook_app_doctor" => tools::notebook_app_doctor::call(&self.deps, arguments).await,
             "notebook.oauth_connect" => {
                 tools::api_connection::call_oauth_connect(&self.deps, arguments).await
             }
