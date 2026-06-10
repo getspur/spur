@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -87,8 +88,10 @@ def test_template_files_non_empty() -> None:
 
 
 def test_mcp_server_imports_cleanly() -> None:
+    # Use the interpreter running pytest (sys.executable), not a bare "python3"
+    # off PATH: main.py imports spur_app, which is only installed in this venv.
     subprocess.run(
-        ["python3", "-c", "import main"],
+        [sys.executable, "-c", "import main"],
         cwd=APP_DIR / "server",
         check=True,
     )
