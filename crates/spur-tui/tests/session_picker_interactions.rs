@@ -975,3 +975,25 @@ fn help_overlay_renders_box_over_list_area() {
         "footer hint must say '? or Esc close' while overlay is open; got:\n{full_text}"
     );
 }
+
+#[test]
+fn help_overlay_dismissed_by_set_sessions_refresh() {
+    let mut picker = SessionPickerView::new();
+    picker.set_sessions("t".into(), vec![session("a1", "alpha")], synopsis());
+
+    // Open the overlay.
+    let _ = picker.handle_key(key('?'), &test_ctx());
+    assert!(picker.is_help_visible(), "help should be open");
+
+    // Simulate a sessions refresh (e.g. after pressing 'r').
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1", "alpha"), session("a2", "beta")],
+        synopsis(),
+    );
+
+    assert!(
+        !picker.is_help_visible(),
+        "help overlay must be dismissed after set_sessions"
+    );
+}
