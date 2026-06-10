@@ -109,10 +109,12 @@ app = App("my-app")          # Name must match spur-app.json "name"
 def process(port_names: list[str], output_path: str) -> dict:
     # Read from the port store (requires capabilities.ports declared)
     frame = app.ports.read(port_names[0])
-    # frame.bytes    — raw bytes
-    # frame.mime     — MIME type or None
-    # frame.version  — version counter
+    # frame.bytes       — raw bytes
+    # frame.mime        — MIME type or None (None for arrow ports)
+    # frame.version     — version counter
+    # frame.kind        — "arrow" or "media"
     # frame.duration_sec — seconds for media ports, or None
+    # frame.path        — resolved filesystem Path that was read
 
     # Write to the artifacts dir (requires capabilities.artifacts_dir declared)
     out = app.artifacts.path(output_path)   # Path; parent dirs created
@@ -141,11 +143,12 @@ const result = await callTool("process", {
   output_path: "renders/out.mp4",
 });
 
-// Display HTML output
-display.html(`<video controls src="..." />`);
+// Display HTML output — must be the returned/last expression to render
+return display.html(`<video controls src="..." />`);
 
 // Emit a capture canvas (triggers host recorder loop)
 // Requires capabilities.canvas_capture + active_output_scripts
+// (In a cell that also calls callTool above, use last-expression form:)
 const html = capture.canvas({
   port: "my-cell-id",   // must match the DAG source cell id
   fps: 30,
@@ -153,7 +156,7 @@ const html = capture.canvas({
   width: 1280,
   height: 720,
 });
-display.html(html);
+return display.html(html);  // last expression renders in Deno-Jupyter
 
 // Read a port directly from the frontend (uses SPUR_NOTEBOOK_PORT_ROOT)
 const data = await ports.read("my-port");
@@ -169,10 +172,10 @@ See `sdk/docs/typescript-sdk.md` for the full API.
 `notebook_app_doctor` (exists) verifies the app from its root path:
 
 ```json
-{ "app_root": "/abs/path/to/my-app" }
+{ "path": "/abs/path/to/my-app" }
 ```
 
-Returns structured findings `{ check, level: "pass"|"warn"|"fail", message, location }`.
+Returns `{ "ok": bool, "findings": [{check, level, message, location?}] }`.
 
 Checks include: manifest parses; capabilities are known and grantable; declared
 `ports.read` names exist as DAG sources; plugin spawns and `tools/list` succeeds;
@@ -204,9 +207,10 @@ archive.
 }
 ```
 
-Optional parameters: `widget_assets` (list of widget JS/CSS paths),
-`include_port_snapshots` (bool), `dependency_roots` (list of dirs to search
-for lock files).
+Optional parameters: `name` (override app name), `widget_assets` (list of widget
+JS/CSS paths), `include_port_snapshots` (bool). The packer discovers dependency
+lock files from the notebook's own parent directory — there is no `dependency_roots`
+parameter.
 
 ---
 

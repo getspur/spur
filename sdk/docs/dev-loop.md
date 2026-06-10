@@ -92,22 +92,25 @@ Opens the app against a live daemon with plugin hot-restart on server-file chang
 
 ## 3. Doctor
 
-`notebook_app_doctor` exists today. Pass the app root path:
+`notebook_app_doctor` exists today. Pass the app root path or entry notebook path:
 
 ```json
-{ "app_root": "/abs/path/to/my-app" }
+{ "path": "/abs/path/to/my-app" }
 ```
 
-Returns a list of structured findings:
+Returns `{ "ok": bool, "findings": [...] }`:
 
 ```json
-[
-  { "check": "manifest_parse", "level": "pass", "message": "...", "location": "spur-app.json" },
-  { "check": "skill_hard_gate", "level": "fail", "message": "Tool 'phantom_tool' not in live surface", "location": "skill/SKILL.md:42" }
-]
+{
+  "ok": false,
+  "findings": [
+    { "check": "manifest", "level": "pass", "message": "...", "location": "spur-app.json" },
+    { "check": "skill_hard_gate", "level": "fail", "message": "Tool 'phantom_tool' not in live surface", "location": "skill/SKILL.md:42" }
+  ]
+}
 ```
 
-Levels: `"pass"` | `"warn"` | `"fail"`.
+`ok` is `true` only when no finding has `level: "fail"`. Levels: `"pass"` | `"warn"` | `"fail"`.
 
 **Run doctor before every pack.** A `fail`-level finding must be resolved before
 packing. The doctor gate is the primary mechanism that prevents skills drifting
@@ -131,16 +134,22 @@ to phantom tools.
 {
   "notebook_path": "/abs/path/to/my-app/app.ipynb",
   "output_path": "/abs/path/to/my-app.spurapp",
+  "name": "my-app",
   "widget_assets": [],
-  "include_port_snapshots": false,
-  "dependency_roots": ["/abs/path/to/my-app/server"]
+  "include_port_snapshots": false
 }
 ```
 
-Only `notebook_path` and `output_path` are required. The packer:
+Only `notebook_path` and `output_path` are required. Optional: `name` (app name
+override), `widget_assets` (list of widget JS/CSS paths), `include_port_snapshots`
+(bool; bundles the current port store snapshot). There is no `dependency_roots`
+parameter — the packer discovers lock files from the notebook's parent directory.
+
+The packer:
 - Bundles `app.ipynb` as `app.ipynb` in the archive.
 - Collects widget assets (JS/CSS) into `widgets/<hash>.<ext>`.
-- Collects dependency lock files from `dependency_roots` into `env/`.
+- Discovers and bundles dependency lock files (`uv.lock`, `requirements.txt`,
+  `deno.lock`, etc.) from the notebook's parent directory into `env/`.
 - Generates `spur-app.json` from the notebook's metadata.
 - Writes a zip archive with the `.spurapp` extension.
 
@@ -166,7 +175,7 @@ The extracted app can then be opened in app mode.
 
 ### Today
 
-1. Run doctor: `notebook_app_doctor { "app_root": "..." }` — must be green.
+1. Run doctor: `notebook_app_doctor { "path": "..." }` — must be green (`ok: true`).
 2. Pack: `notebook_export_spur_app` as above.
 3. Distribute the `.spurapp` file manually.
 
