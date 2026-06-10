@@ -1329,11 +1329,10 @@ pub(crate) fn build_preview_rows(
         };
 
         // Fixed-cost rows: intent (max 2) + blank + draft (0 or 1) + footer (1)
-        // We compute exactly to allow as many exchanges as fit.
-        let intent_lines = synopsis
-            .and_then(|s| s.first_user_msg.as_deref())
-            .map(|t| wrap_value(t, value_width, 2).len().max(1))
-            .unwrap_or(1);
+        // We compute exactly to allow as many exchanges as fit. The intent
+        // cost MUST come from intent_row itself so the estimate can never
+        // drift from what is actually rendered.
+        let intent_lines = intent_row.value_lines.len().max(1);
         // blank separator after intent block, before exchanges
         let blank_after_intent = 1usize;
         // blank before draft/footer
