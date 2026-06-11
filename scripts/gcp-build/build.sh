@@ -300,6 +300,9 @@ ensure_vm_up() {
 # Both modes run through `gcloud compute ssh`, so OS Login, key management, and
 # host-key validation are identical — only the transport path differs (omit vs
 # pass --tunnel-through-iap). Set SPUR_DIRECT_SSH=0 to force IAP-only.
+# Direct probing defaults to a short timeout so filtered public SSH fails fast;
+# IAP needs a longer default because tunnel setup can complete TCP connection
+# but still need a few more seconds for SSH banner exchange.
 DIRECT_SSH_PORT_EFFECTIVE=""
 direct_ssh_port() {
     DIRECT_SSH_PORT_EFFECTIVE="${SPUR_DIRECT_SSH_PORT:-22}"
@@ -311,13 +314,15 @@ direct_ssh_port() {
 
 probe_transport() {
     # $1: transport flag ("" for direct, "--tunnel-through-iap" for IAP).
-    local connect_timeout="${SPUR_SSH_CONNECT_TIMEOUT:-3}"
+    local connect_timeout
     if [[ -n "$1" ]]; then
+        connect_timeout="${SPUR_IAP_SSH_CONNECT_TIMEOUT:-${SPUR_SSH_CONNECT_TIMEOUT:-10}}"
         gcloud compute ssh "$VM_NAME" \
             --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
             "$1" --quiet --command='true' \
             -- -o ConnectTimeout="$connect_timeout" >/dev/null 2>&1
     else
+        connect_timeout="${SPUR_DIRECT_SSH_CONNECT_TIMEOUT:-${SPUR_SSH_CONNECT_TIMEOUT:-3}}"
         direct_ssh_port
         if [[ "$DIRECT_SSH_PORT_EFFECTIVE" != "22" ]]; then
             gcloud compute ssh "$VM_NAME" \
