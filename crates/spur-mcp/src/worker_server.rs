@@ -520,6 +520,25 @@ enum CodeSearchMode {
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
+enum KnowledgeIntentParam {
+    Explain,
+    Change,
+    Review,
+    Debug,
+    Plan,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum KnowledgeScopeParam {
+    All,
+    Docs,
+    Code,
+    Graph,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum CodeResponseFormat {
     Full,
     Compact,
@@ -660,6 +679,27 @@ struct CodeSubgraphParams {
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSymbolHistoryParams {
     symbol: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct KnowledgeContextPackParams {
+    /// Natural-language query to orient code or docs exploration.
+    query: String,
+    /// Retrieval intent. Defaults to explain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    intent: Option<KnowledgeIntentParam>,
+    /// Retrieval scope. Defaults to all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<KnowledgeScopeParam>,
+    /// Result limit. Clamped by the handler to 1..=20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
+    /// Include test symbols in code evidence. Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_tests: Option<bool>,
+    /// Maximum number of symbol bodies to include. Clamped by the handler to 0..=5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_symbol_bodies: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -1165,6 +1205,32 @@ impl WorkerToolHandler {
             move |worker_ctx| async move {
                 invoke_code_graph_for_worker(deps, worker_ctx, || {
                     crate::server::handlers::code_graph::code_symbol_history(&args)
+                })
+                .await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "knowledge_context_pack",
+        description = "Builds a bounded evidence pack by combining analyst BM25 candidates, scorecard signals, and exact graph grounding. Lance ANN is not used by this MVP; use code_read_symbol/code_callers/code_callees for exact follow-up.",
+        input_schema = crate::tool_schemas::schema_object::<KnowledgeContextPackParams>()
+    )]
+    async fn knowledge_context_pack_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "knowledge_context_pack",
+            context,
+            Some(None),
+            move |worker_ctx| async move {
+                invoke_code_graph_for_worker(deps, worker_ctx, || {
+                    crate::server::handlers::knowledge_context::knowledge_context_pack(&args)
                 })
                 .await
             },
