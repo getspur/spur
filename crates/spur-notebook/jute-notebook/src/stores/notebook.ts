@@ -270,6 +270,7 @@ export type NotebookTab = {
   title: string;
   dirty: boolean;
   kernelState: NotebookTabKernelState;
+  language?: string;
   mode: NotebookViewMode;
 };
 
