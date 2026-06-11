@@ -33,6 +33,7 @@ import {
   activeTabIdFromSearch,
   notebookRouteForPaths,
   notebookRouteWithPath,
+  pinnedPathsFromSearch,
 } from "./notebookRoute";
 import {
   closeOthersTargets,
@@ -152,9 +153,12 @@ export default function NotebookPage() {
       if (existing === undefined) {
         setTabEntries(nextEntries);
       }
-      setTabs(nextEntries.map(tabFromEntry));
+      const nextTabs = nextEntries.map(tabFromEntry);
+      setTabs(nextTabs);
       setActiveTabId(path);
-      setLocation(notebookRouteWithPath(nextEntries, path));
+      setLocation(
+        notebookRouteWithPath(nextEntries, path, pinnedPathsFromTabs(nextTabs)),
+      );
     },
     [setActiveTabId, setLocation, setTabs, tabEntries],
   );
@@ -243,8 +247,24 @@ export default function NotebookPage() {
         .getState()
         .tabs.find((candidate) => candidate.id === tabId);
       setPinned(tabId, !tab?.pinned);
+      const orderedTabs = useNotebookTabsStore.getState().tabs;
+      const orderedPaths = orderedTabs.flatMap((tab) =>
+        tab.path ? [tab.path] : [],
+      );
+      const activePath = orderedTabs.find(
+        (tab) => tab.id === useNotebookTabsStore.getState().activeTabId,
+      )?.path;
+      if (orderedPaths.length > 0 && activePath) {
+        setLocation(
+          notebookRouteForPaths(
+            orderedPaths,
+            activePath,
+            pinnedPathsFromTabs(orderedTabs),
+          ),
+        );
+      }
     },
-    [setPinned],
+    [setLocation, setPinned],
   );
 
   const getKernelStats = useCallback(
@@ -271,7 +291,13 @@ export default function NotebookPage() {
         (tab) => tab.id === activeTabId,
       )?.path;
       if (orderedPaths.length > 0 && activePath) {
-        setLocation(notebookRouteForPaths(orderedPaths, activePath));
+        setLocation(
+          notebookRouteForPaths(
+            orderedPaths,
+            activePath,
+            pinnedPathsFromTabs(orderedTabs),
+          ),
+        );
       }
     },
     [activeTabId, moveTab, setLocation],
@@ -526,15 +552,19 @@ function NotebookTabPanel({
 function tabsFromSearch(search: string): NotebookTabSpec[] {
   const params = new URLSearchParams(search);
   const paths = params.getAll("path");
+  const pinnedPaths = new Set(pinnedPathsFromSearch(search));
   const inline = params.get("inline") ?? undefined;
   const tabs =
     paths.length > 0
-      ? paths.map((path) => tabFromPath(path))
+      ? paths.map((path) => ({
+          ...tabFromPath(path),
+          pinned: pinnedPaths.has(path),
+        }))
       : inline
         ? [tabFromInline(inline)]
         : [];
 
-  return tabs.length > 0 ? tabs : [tabFromPath(undefined)];
+  return tabs.length > 0 ? pinnedFirst(tabs) : [tabFromPath(undefined)];
 }
 
 function tabFromPath(path: string | undefined): NotebookTabSpec {
@@ -589,9 +619,20 @@ function reconcileTabEntriesFromSpecs(
       id: spec.id,
       path: spec.path,
       inline: spec.inline,
+      pinned: spec.pinned,
       notebook: existing.notebook,
     };
   });
+}
+
+function pinnedFirst(tabs: readonly NotebookTabSpec[]): NotebookTabSpec[] {
+  return [...tabs].sort(
+    (a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)),
+  );
+}
+
+function pinnedPathsFromTabs(tabs: readonly NotebookTab[]): string[] {
+  return tabs.flatMap((tab) => (tab.pinned && tab.path ? [tab.path] : []));
 }
 
 function tabEntryMatchesSpec(

@@ -5,10 +5,14 @@ type NotebookRouteTab = {
 export function notebookRouteForPaths(
   paths: readonly string[],
   activePath?: string,
+  pinnedPaths: readonly string[] = [],
 ): string {
   const params = new URLSearchParams();
   for (const path of uniquePaths(paths)) {
     params.append("path", path);
+  }
+  for (const path of uniquePaths(pinnedPaths)) {
+    params.append("pinned", path);
   }
   if (activePath) {
     params.set("active", activePath);
@@ -20,16 +24,21 @@ export function notebookRouteForPaths(
 export function notebookRouteWithPath(
   tabs: readonly NotebookRouteTab[],
   path: string,
+  pinnedPaths: readonly string[] = [],
 ): string {
   const paths = tabs.flatMap((tab) => (tab.path ? [tab.path] : []));
   if (!paths.includes(path)) {
     paths.push(path);
   }
-  return notebookRouteForPaths(paths, path);
+  return notebookRouteForPaths(paths, path, pinnedPaths);
 }
 
 export function activeTabIdFromSearch(search: string): string | undefined {
   return new URLSearchParams(search).get("active") ?? undefined;
+}
+
+export function pinnedPathsFromSearch(search: string): string[] {
+  return new URLSearchParams(search).getAll("pinned");
 }
 
 function uniquePaths(paths: readonly string[]): string[] {
