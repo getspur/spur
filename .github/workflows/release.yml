@@ -16,6 +16,7 @@
 name: Release
 permissions:
   "contents": "write"
+  "id-token": "write"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -112,6 +113,19 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+      # Match CI and the GCP build VM: release builds use the shared GCS-backed
+      # sccache bucket warmed by remote builds.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GCS_BUCKET: wiilearn-spur-sccache-asia
+      SCCACHE_GCS_RW_MODE: READ_WRITE
+      CARGO_INCREMENTAL: "0"
+      # Route build-script C/C++/asm compiles through sccache too, mirroring
+      # scripts/gcp-build/startup.sh and .github/workflows/ci.yml.
+      CC: "sccache cc"
+      CXX: "sccache c++"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      CMAKE_ASM_COMPILER_LAUNCHER: sccache
       # Option A LicenseSeat bake-in (bd-2j5e.1). Read by `option_env!` in
       # crates/spur-license/src/build_constants.rs so release builds embed
       # the publishable credentials from repo secrets rather than the
@@ -147,11 +161,23 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: "v0.15.0"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -182,6 +208,17 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+      # Keep any global rebuild path on the same shared sccache backend as the
+      # local artifact builders and GCP build VM.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GCS_BUCKET: wiilearn-spur-sccache-asia
+      SCCACHE_GCS_RW_MODE: READ_WRITE
+      CARGO_INCREMENTAL: "0"
+      CC: "sccache cc"
+      CXX: "sccache c++"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      CMAKE_ASM_COMPILER_LAUNCHER: sccache
       # Mirror local-artifacts env so any rebuild path under
       # `dist build --artifacts=global` also picks up the bake-in.
       # See bd-2j5e.1 for context.
@@ -198,6 +235,15 @@ jobs:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: "v0.15.0"
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
         uses: actions/download-artifact@v7
@@ -217,6 +263,9 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
       - name: "Upload artifacts"
         uses: actions/upload-artifact@v6
         with:
