@@ -13,6 +13,7 @@ import NotebookPage from "./NotebookPage";
 
 const mocks = vi.hoisted(() => ({
   listenForNotebookEvents: vi.fn(),
+  listenForRecentNotebookChanges: vi.fn(),
   loadNotebookFromPath: vi.fn(),
   setActiveAgentNotebook: vi.fn(),
   daemonControl: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock("@/agent/bridge", () => ({
 
 vi.mock("@/agent/events", () => ({
   listenForNotebookEvents: mocks.listenForNotebookEvents,
+  listenForRecentNotebookChanges: mocks.listenForRecentNotebookChanges,
 }));
 
 vi.mock("@/daemon/control", () => ({
@@ -151,6 +153,8 @@ describe("NotebookPage", () => {
   beforeEach(() => {
     mocks.listenForNotebookEvents.mockReset();
     mocks.listenForNotebookEvents.mockReturnValue(() => undefined);
+    mocks.listenForRecentNotebookChanges.mockReset();
+    mocks.listenForRecentNotebookChanges.mockReturnValue(() => undefined);
     mocks.loadNotebookFromPath.mockReset();
     mocks.setActiveAgentNotebook.mockReset();
     mocks.daemonControl.mockReset();
@@ -344,5 +348,52 @@ describe("NotebookPage", () => {
       expect(screen.getAllByRole("tab")).toHaveLength(2);
     });
     expect(screen.queryByRole("tab", { name: /Untitled/ })).toBeNull();
+  });
+
+  test("opens and focuses the daemon current notebook announced by recents", async () => {
+    const first = createNotebookStore("cells", {
+      path: "/tmp/one.ipynb",
+      kernelId: "kernel-a",
+    });
+    const scratch = createNotebookStore("cells", {
+      path: "/Users/kevintruong/.spur/scratch/Untitled112.ipynb",
+      kernelId: "kernel-scratch",
+    });
+    let applyRecents:
+      | ((entries: Array<{ path: string; isCurrent: boolean }>) => void)
+      | undefined;
+    mocks.stores = [first, scratch];
+    mocks.search = "path=%2Ftmp%2Fone.ipynb";
+    mocks.listenForRecentNotebookChanges.mockImplementation((callback) => {
+      applyRecents = callback;
+      return () => undefined;
+    });
+
+    render(<NotebookPage />);
+
+    await waitFor(() => {
+      expect(tabButton("one.ipynb")).toHaveAttribute("aria-selected", "true");
+    });
+
+    applyRecents?.([
+      {
+        path: "/Users/kevintruong/.spur/scratch/Untitled112.ipynb",
+        isCurrent: true,
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(tabButton("Untitled112.ipynb")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+    expect(mocks.loadNotebookFromPath).toHaveBeenCalledWith(
+      "/Users/kevintruong/.spur/scratch/Untitled112.ipynb",
+    );
+    expect(activeNotebookView()).toHaveAttribute(
+      "data-kernel-id",
+      "kernel-scratch",
+    );
   });
 });
