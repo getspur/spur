@@ -27,6 +27,7 @@ import {
 export async function dispatchAgentRequest(
   notebook: Notebook | undefined,
   request: AgentBridgeRequest,
+  context: { notebookId?: string } = {},
 ): Promise<unknown> {
   switch (request.method) {
     case "notebook.snapshot":
@@ -44,7 +45,11 @@ export async function dispatchAgentRequest(
     case "notebook.delete_cell":
       return deleteCell(requireNotebook(notebook), request.params);
     case "notebook.set_cell_metadata":
-      return setCellMetadata(requireNotebook(notebook), request.params);
+      return setCellMetadata(
+        requireNotebook(notebook),
+        request.params,
+        context,
+      );
     default:
       throw new AgentHandlerError(
         "unknown_method",
@@ -176,6 +181,7 @@ function deleteCell(notebook: Notebook, params: unknown): AgentDeleteCell {
 async function setCellMetadata(
   notebook: Notebook,
   params: AgentSetCellMetadata,
+  context: { notebookId?: string },
 ): Promise<{ ok: true; version: number }> {
   const { id, patch, expected_version } = params;
   if (!id || typeof patch !== "object" || patch === null) {
@@ -193,6 +199,7 @@ async function setCellMetadata(
 
   const response = await daemonControl({
     command: "set_cell_metadata",
+    notebook_id: context.notebookId,
     id,
     patch,
     expected_version,

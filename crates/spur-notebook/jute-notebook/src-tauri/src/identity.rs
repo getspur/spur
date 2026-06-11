@@ -34,6 +34,11 @@ impl NotebookId {
         &self.store_key
     }
 
+    /// Saved path represented by this identity.
+    pub fn saved_path(&self) -> &str {
+        &self.saved_path
+    }
+
     /// Existing raw path tag used by notebook deltas.
     pub fn delta_path(&self) -> Option<&str> {
         Some(&self.saved_path)

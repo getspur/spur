@@ -517,9 +517,28 @@ impl State {
         )
     }
 
+    /// Return the notebook store for an optional wire target.
+    ///
+    /// `notebook_id` accepts the canonical store key (`nb-...`) and, during the
+    /// saved-notebook MVP, an absolute notebook path for frontend callers that
+    /// already have the loaded path.
+    pub fn notebook_for_optional_target(&self, notebook_id: Option<&str>) -> Arc<NotebookStore> {
+        let id = notebook_id
+            .map(|target| self.resolve_notebook_target(target))
+            .unwrap_or_else(|| self.focused_notebook_id_or_create());
+        self.notebook_for_id(&id)
+    }
+
     /// Return the focused notebook ID, if one has been established.
     pub fn focused_notebook_id(&self) -> Option<NotebookId> {
         self.focused.lock().clone()
+    }
+
+    /// Focus a notebook by canonical store key or saved path.
+    pub fn set_focused_notebook_target(&self, notebook_id: &str) -> NotebookId {
+        let id = self.resolve_notebook_target(notebook_id);
+        self.set_focused_notebook_id(id.clone());
+        id
     }
 
     fn set_focused_notebook_id(&self, id: NotebookId) {
@@ -548,6 +567,24 @@ impl State {
     /// Return a focused datasource catalog snapshot.
     pub fn list_focused_datasources(&self) -> Vec<DatasourceEntry> {
         self.focused_datasource_catalog().lock().list()
+    }
+
+    /// Return a datasource catalog snapshot for an optional wire target.
+    pub fn list_datasources_for_optional_target(
+        &self,
+        notebook_id: Option<&str>,
+    ) -> Vec<DatasourceEntry> {
+        let id = notebook_id
+            .map(|target| self.resolve_notebook_target(target))
+            .unwrap_or_else(|| self.focused_notebook_id_or_create());
+        self.datasource_catalog_for_id(&id).lock().list()
+    }
+
+    fn resolve_notebook_target(&self, target: &str) -> NotebookId {
+        self.notebooks
+            .iter()
+            .find_map(|entry| (entry.key().store_key() == target).then(|| entry.key().clone()))
+            .unwrap_or_else(|| NotebookId::for_saved_path(target))
     }
 
     fn datasource_catalog_for_id(&self, id: &NotebookId) -> Arc<Mutex<DatasourceCatalog>> {
