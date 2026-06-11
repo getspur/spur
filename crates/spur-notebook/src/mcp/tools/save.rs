@@ -75,13 +75,13 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         }
     }
 
-    let notebook = state.get_notebook();
+    let notebook = state.notebook_for_path(&path);
     let notebook_path = notebook.path();
     if is_same_open_target(notebook_path.as_deref(), path.as_path()).await {
         let state_cloned = std::sync::Arc::clone(state);
         let contents = params.contents;
         let _delta = tokio::task::spawn_blocking(move || {
-            jute::commands::replace_notebook_and_hydrate_catalog(
+            jute::commands::replace_notebook_for_path_and_hydrate_catalog(
                 state_cloned.as_ref(),
                 path,
                 contents,
@@ -323,6 +323,38 @@ mod tests {
         let entries = state.datasource_catalog.lock().list();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "inventory");
+    }
+
+    #[tokio::test]
+    async fn save_to_open_path_updates_target_store_not_focused_store() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("spur-notebook-mcp-save-target-")
+            .tempdir()
+            .expect("temp dir");
+        let target_path = temp_dir.path().join("target.ipynb");
+        let focused_path = temp_dir.path().join("focused.ipynb");
+        let state = Arc::new(State::new());
+        state
+            .notebook_for_path(&target_path)
+            .load(&target_path, sample_notebook());
+        state.get_notebook().load(&focused_path, empty_notebook());
+        let replacement = notebook_with_datasource("inventory", "/tmp/inventory.csv");
+        let deps = deps_with_state(Arc::clone(&state));
+
+        call(
+            &deps,
+            json!({
+                "path": target_path.display().to_string(),
+                "contents": replacement.clone()
+            }),
+        )
+        .await
+        .expect("save succeeds");
+
+        let (target_snapshot, _version) = state.notebook_for_path(&target_path).snapshot();
+        assert_eq!(target_snapshot, replacement);
+        let (focused_snapshot, _version) = state.get_notebook().snapshot();
+        assert_eq!(focused_snapshot, empty_notebook());
     }
 
     #[tokio::test]

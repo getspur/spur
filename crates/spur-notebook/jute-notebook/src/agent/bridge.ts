@@ -2,7 +2,6 @@
 // the real Rust AgentBridge; the standalone vendored Jute shell registers
 // no-op bridge commands so this shared frontend path remains valid until that
 // shell grows full agent transport.
-
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -10,18 +9,26 @@ import type { Notebook } from "@/stores/notebook";
 
 import { dispatchAgentRequest } from "./handlers";
 import {
-  AgentHandlerError,
   type AgentBridgeError,
   type AgentBridgeRequest,
   type AgentBridgeResponse,
+  AgentHandlerError,
 } from "./types";
 
 let activeNotebook: Notebook | undefined;
+let activeNotebookId: string | undefined;
 let registration: Promise<void> | undefined;
 
-export function setActiveAgentNotebook(notebook: Notebook | undefined) {
+export function setActiveAgentNotebook(
+  notebook: Notebook | undefined,
+  notebookId?: string,
+) {
   activeNotebook = notebook;
-  void invoke("notebook_active_changed", { open: Boolean(notebook) });
+  activeNotebookId = notebookId ?? notebook?.state.viewState.path;
+  void invoke("notebook_active_changed", {
+    open: Boolean(notebook),
+    notebookId: activeNotebookId,
+  });
 }
 
 export function registerAgentBridge(): Promise<void> {
@@ -40,10 +47,12 @@ async function register() {
 async function handleAgentRequest(
   request: AgentBridgeRequest,
 ): Promise<AgentBridgeResponse> {
+  const notebook = activeNotebook;
+  const notebookId = activeNotebookId;
   try {
     return {
       requestId: request.requestId,
-      result: await dispatchAgentRequest(activeNotebook, request),
+      result: await dispatchAgentRequest(notebook, request, { notebookId }),
     };
   } catch (error) {
     return {

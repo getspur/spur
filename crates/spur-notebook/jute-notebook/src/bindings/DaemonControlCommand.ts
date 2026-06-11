@@ -8,6 +8,7 @@ import type { JsonValue } from "./serde_json/JsonValue";
  * Operation encoded in a daemon control request.
  */
 export type DaemonControlCommand =
+  | { command: "set_focus"; notebook_id: string }
   | { command: "open"; path: string }
   | { command: "rename"; from: string; to: string }
   | { command: "new" }
@@ -44,7 +45,7 @@ export type DaemonControlCommand =
     }
   | { command: "oauth_connect"; name: string }
   | { command: "detach_datasource"; name: string }
-  | { command: "list_datasources" }
+  | { command: "list_datasources"; notebook_id?: string }
   | { command: "list_saved_connections" }
   | {
       command: "attach_saved_connection";
@@ -63,14 +64,16 @@ export type DaemonControlCommand =
   | { command: "set_pinned"; path: string; pinned: boolean }
   | {
       command: "write_cell";
+      notebook_id?: string;
       id: string;
       source: string;
       expected_version: number | null;
       last_edited_by: string | null;
     }
-  | { command: "read_cell"; id: string }
+  | { command: "read_cell"; notebook_id?: string; id: string }
   | {
       command: "insert_cell";
+      notebook_id?: string;
       kind: CellKind;
       after_id: string | null;
       source: string;
@@ -79,13 +82,19 @@ export type DaemonControlCommand =
     }
   | { command: "load"; path: string }
   | { command: "replace_notebook"; path: string; contents: NotebookRoot }
-  | { command: "delete_cell"; id: string; expected_version: number }
+  | {
+      command: "delete_cell";
+      notebook_id?: string;
+      id: string;
+      expected_version: number;
+    }
   | {
       command: "set_cell_metadata";
+      notebook_id?: string;
       id: string;
       patch: JsonValue;
       expected_version: number;
     }
-  | { command: "snapshot" }
-  | { command: "apply_edit"; id: string; source: string }
-  | { command: "flush_notebook" };
+  | { command: "snapshot"; notebook_id?: string }
+  | { command: "apply_edit"; notebook_id?: string; id: string; source: string }
+  | { command: "flush_notebook"; notebook_id?: string };

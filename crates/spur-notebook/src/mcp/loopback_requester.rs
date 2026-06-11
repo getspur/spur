@@ -88,6 +88,8 @@ impl BridgeRequester for LoopbackDaemonRequester {
 
 #[derive(Debug, Deserialize)]
 struct WriteCellParams {
+    #[serde(default, alias = "notebookId")]
+    notebook_id: Option<String>,
     id: String,
     source: String,
     #[serde(alias = "expectedVersion")]
@@ -98,11 +100,15 @@ struct WriteCellParams {
 
 #[derive(Debug, Deserialize)]
 struct ReadCellParams {
+    #[serde(default, alias = "notebookId")]
+    notebook_id: Option<String>,
     id: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct InsertCellParams {
+    #[serde(default, alias = "notebookId")]
+    notebook_id: Option<String>,
     kind: String,
     #[serde(default, alias = "afterId")]
     after_id: Option<String>,
@@ -126,6 +132,8 @@ struct ReplaceNotebookParams {
 
 #[derive(Debug, Deserialize)]
 struct DeleteCellParams {
+    #[serde(default, alias = "notebookId")]
+    notebook_id: Option<String>,
     id: String,
     #[serde(alias = "expectedVersion")]
     expected_version: u64,
@@ -133,6 +141,8 @@ struct DeleteCellParams {
 
 #[derive(Debug, Deserialize)]
 struct SetCellMetadataParams {
+    #[serde(default, alias = "notebookId")]
+    notebook_id: Option<String>,
     id: String,
     patch: Value,
     #[serde(alias = "expectedVersion")]
@@ -172,6 +182,7 @@ fn command_from_bridge_method(
                 ));
             }
             Ok(DaemonControlCommand::WriteCell {
+                notebook_id: params.notebook_id,
                 id: params.id,
                 source: params.source,
                 expected_version: Some(params.expected_version),
@@ -183,7 +194,10 @@ fn command_from_bridge_method(
             if params.id.is_empty() {
                 return Err(invalid_params("notebook.read_cell id must not be empty"));
             }
-            Ok(DaemonControlCommand::ReadCell { id: params.id })
+            Ok(DaemonControlCommand::ReadCell {
+                notebook_id: params.notebook_id,
+                id: params.id,
+            })
         }
         "notebook.insert_cell" => {
             let params: InsertCellParams = decode_params(method, params)?;
@@ -193,6 +207,7 @@ fn command_from_bridge_method(
                 ));
             }
             Ok(DaemonControlCommand::InsertCell {
+                notebook_id: params.notebook_id,
                 kind: bridge_cell_kind(&params.kind)?,
                 after_id: params.after_id,
                 source: params.source,
@@ -228,6 +243,7 @@ fn command_from_bridge_method(
                 ));
             }
             Ok(DaemonControlCommand::DeleteCell {
+                notebook_id: params.notebook_id,
                 id: params.id,
                 expected_version: params.expected_version,
             })
@@ -245,14 +261,15 @@ fn command_from_bridge_method(
                 ));
             }
             Ok(DaemonControlCommand::SetCellMetadata {
+                notebook_id: params.notebook_id,
                 id: params.id,
                 patch: params.patch,
                 expected_version: params.expected_version,
             })
         }
-        "notebook.snapshot" => Ok(DaemonControlCommand::Snapshot {}),
+        "notebook.snapshot" => Ok(DaemonControlCommand::Snapshot { notebook_id: None }),
         "notebook.flush" | "notebook.flush_pending" | "notebook.flush_notebook" => {
-            Ok(DaemonControlCommand::FlushNotebook {})
+            Ok(DaemonControlCommand::FlushNotebook { notebook_id: None })
         }
         method => Err(BridgeError::Handler {
             code: "unknown_method".to_string(),

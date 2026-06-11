@@ -16,6 +16,7 @@ pub mod chat_commands;
 pub mod chat_state;
 pub mod commands;
 pub mod entity;
+pub mod identity;
 /// Lazy provisioning of the bundled Python 3 kernelspec.
 pub mod kernel_provision;
 pub mod menu;
