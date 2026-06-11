@@ -272,19 +272,30 @@ export type NotebookTab = {
   kernelState: NotebookTabKernelState;
   language?: string;
   mode: NotebookViewMode;
+  pinned?: boolean;
+  attention?: boolean;
+  kernelGeneration?: number;
 };
+
+export type ClosedTabRecord = { tab: NotebookTab; index: number };
 
 type NotebookTabsStore = {
   tabs: NotebookTab[];
   activeTabId?: string;
+  closedTabs: ClosedTabRecord[];
   setTabs: (tabs: NotebookTab[]) => void;
   setActiveTabId: (tabId: string | undefined) => void;
   updateTab: (tabId: string, patch: Partial<NotebookTab>) => void;
+  setPinned: (tabId: string, pinned: boolean) => void;
+  moveTab: (tabId: string, toIndex: number) => void;
+  pushClosedTab: (record: ClosedTabRecord) => void;
+  popClosedTab: () => ClosedTabRecord | undefined;
 };
 
 export const useNotebookTabsStore = create<NotebookTabsStore>((set, get) => ({
   tabs: [],
   activeTabId: undefined,
+  closedTabs: [],
   setTabs: (tabs) =>
     set((state) => {
       const activeTabStillOpen =
@@ -302,15 +313,59 @@ export const useNotebookTabsStore = create<NotebookTabsStore>((set, get) => ({
       if (tabId !== undefined && !state.tabs.some((tab) => tab.id === tabId)) {
         return state;
       }
-      return { activeTabId: tabId };
+      return {
+        activeTabId: tabId,
+        tabs: state.tabs.map((tab) =>
+          tab.id === tabId && tab.attention
+            ? { ...tab, attention: false }
+            : tab,
+        ),
+      };
     }),
   updateTab: (tabId, patch) =>
     set((state) => ({
-      tabs: state.tabs.map((tab) =>
-        tab.id === tabId ? { ...tab, ...patch, id: tab.id } : tab,
-      ),
-      activeTabId: get().activeTabId,
+      tabs: state.tabs.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const next = { ...tab, ...patch, id: tab.id };
+        const finishedInBackground =
+          tab.kernelState === "running" &&
+          next.kernelState !== "running" &&
+          state.activeTabId !== tabId;
+        if (finishedInBackground) next.attention = true;
+        return next;
+      }),
     })),
+  setPinned: (tabId, pinned) =>
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab || Boolean(tab.pinned) === pinned) return state;
+      const rest = state.tabs.filter((candidate) => candidate.id !== tabId);
+      const pinnedCount = rest.filter((candidate) => candidate.pinned).length;
+      const next = [...rest];
+      next.splice(pinnedCount, 0, { ...tab, pinned });
+      return { tabs: next };
+    }),
+  moveTab: (tabId, toIndex) =>
+    set((state) => {
+      const from = state.tabs.findIndex((candidate) => candidate.id === tabId);
+      if (from < 0) return state;
+      const tab = state.tabs[from];
+      const next = state.tabs.filter((candidate) => candidate.id !== tabId);
+      const pinnedCount = next.filter((candidate) => candidate.pinned).length;
+      const clamped = tab.pinned
+        ? Math.min(Math.max(toIndex, 0), pinnedCount)
+        : Math.min(Math.max(toIndex, pinnedCount), next.length);
+      next.splice(clamped, 0, tab);
+      return { tabs: next };
+    }),
+  pushClosedTab: (record) =>
+    set((state) => ({ closedTabs: [...state.closedTabs.slice(-9), record] })),
+  popClosedTab: () => {
+    const stack = get().closedTabs;
+    const top = stack[stack.length - 1];
+    if (top) set({ closedTabs: stack.slice(0, -1) });
+    return top;
+  },
 }));
 
 type NotebookLocalDelta = {
