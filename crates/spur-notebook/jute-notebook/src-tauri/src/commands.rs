@@ -277,6 +277,8 @@ impl DaemonControlRequest {
 #[serde(tag = "command", rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum DaemonControlCommand {
+    /// Set the focused notebook used by implicit notebook operations.
+    SetFocus { notebook_id: String },
     /// Open a notebook file.
     Open { path: String },
     /// Rename a notebook file.
@@ -330,7 +332,11 @@ pub enum DaemonControlCommand {
     /// Detach a datasource from the current notebook.
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.
-    ListDatasources,
+    ListDatasources {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+    },
     /// List globally saved API connection templates.
     ListSavedConnections,
     /// Re-attach a saved connection template into the current notebook.
@@ -358,6 +364,9 @@ pub enum DaemonControlCommand {
     SetPinned { path: String, pinned: bool },
     /// Replace one cell's source.
     WriteCell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
         id: String,
         source: String,
         #[ts(type = "number | null")]
@@ -365,9 +374,17 @@ pub enum DaemonControlCommand {
         last_edited_by: Option<String>,
     },
     /// Read one cell.
-    ReadCell { id: String },
+    ReadCell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+        id: String,
+    },
     /// Insert a cell.
     InsertCell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
         kind: CellKind,
         after_id: Option<String>,
         source: String,
@@ -387,23 +404,43 @@ pub enum DaemonControlCommand {
     },
     /// Delete one cell.
     DeleteCell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
         id: String,
         #[ts(type = "number")]
         expected_version: u64,
     },
     /// Merge cell metadata through the notebook bridge.
     SetCellMetadata {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
         id: String,
         patch: serde_json::Value,
         #[ts(type = "number")]
         expected_version: u64,
     },
     /// Return the full notebook root and store version.
-    Snapshot,
+    Snapshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+    },
     /// Apply a UI edit without an optimistic concurrency check.
-    ApplyEdit { id: String, source: String },
+    ApplyEdit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+        id: String,
+        source: String,
+    },
     /// Persist the current store snapshot to disk.
-    FlushNotebook,
+    FlushNotebook {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+    },
 }
 
 /// A daemon control protocol response.
@@ -833,14 +870,24 @@ pub fn replace_notebook_and_hydrate_catalog(
     contents: NotebookRoot,
 ) -> NotebookDelta {
     hydrate_datasource_catalog_from_root(state, path.as_path(), &contents);
-    state.get_notebook().replace(path, contents)
+    state.focus_notebook_path(&path).replace(path, contents)
+}
+
+/// Replace the notebook store for a path without changing the focused notebook.
+pub fn replace_notebook_for_path_and_hydrate_catalog(
+    state: &State,
+    path: PathBuf,
+    contents: NotebookRoot,
+) -> NotebookDelta {
+    hydrate_datasource_catalog_from_root(state, path.as_path(), &contents);
+    state.notebook_for_path(&path).replace(path, contents)
 }
 
 fn hydrate_datasource_catalog_from_root(state: &State, path: &Path, root: &NotebookRoot) {
     let catalog =
         crate::state::DatasourceCatalog::hydrate_from_metadata(&root.metadata, Some(path));
     let entries = catalog.list();
-    *state.datasource_catalog.lock() = catalog;
+    state.replace_datasource_catalog_for_path(path, catalog);
     state.emit_datasources_changed(entries);
 }
 
@@ -848,15 +895,26 @@ async fn handle_daemon_control_inner(
     command: DaemonControlCommand,
     state: &State,
 ) -> Result<DaemonControlResult, DaemonControlResponse> {
-    let notebook = state.get_notebook();
     match command {
+        DaemonControlCommand::SetFocus { notebook_id } => {
+            if notebook_id.is_empty() {
+                return Err(DaemonControlResponse::failure(
+                    "invalid_params",
+                    "set_focus notebook_id must not be empty",
+                ));
+            }
+            state.set_focused_notebook_target(&notebook_id);
+            Ok(DaemonControlResult::Empty)
+        }
         DaemonControlCommand::WriteCell {
+            notebook_id,
             id,
             source,
             expected_version,
             last_edited_by,
         } => {
             validate_cell_id(&id)?;
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .apply(NotebookOp::WriteCell {
                     id,
@@ -867,12 +925,14 @@ async fn handle_daemon_control_inner(
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::ReadCell { id } => {
+        DaemonControlCommand::ReadCell { notebook_id, id } => {
             validate_cell_id(&id)?;
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             let (root, _version) = notebook.snapshot();
             read_daemon_cell(&root, &id).map(DaemonControlResult::Cell)
         }
         DaemonControlCommand::InsertCell {
+            notebook_id,
             kind,
             after_id,
             source,
@@ -885,6 +945,7 @@ async fn handle_daemon_control_inner(
                     "insert_cell after_id must not be empty",
                 ));
             }
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .apply(NotebookOp::InsertCell {
                     kind,
@@ -904,6 +965,7 @@ async fn handle_daemon_control_inner(
                 DaemonControlResponse::failure("load_failed", error.to_string())
             })?;
             hydrate_datasource_catalog_from_root(state, Path::new(&path), &root);
+            let notebook = state.focus_notebook_path(&path);
             let delta = notebook.load(PathBuf::from(path), root);
             Ok(DaemonControlResult::Delta(delta))
         }
@@ -911,15 +973,17 @@ async fn handle_daemon_control_inner(
             let delta = replace_notebook_and_hydrate_catalog(state, PathBuf::from(path), contents);
             Ok(DaemonControlResult::Delta(delta))
         }
-        DaemonControlCommand::ListDatasources => {
-            let entries = state.datasource_catalog.lock().list();
+        DaemonControlCommand::ListDatasources { notebook_id } => {
+            let entries = state.list_datasources_for_optional_target(notebook_id.as_deref());
             Ok(DaemonControlResult::Datasources(entries))
         }
         DaemonControlCommand::DeleteCell {
+            notebook_id,
             id,
             expected_version,
         } => {
             validate_cell_id(&id)?;
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .apply(NotebookOp::DeleteCell {
                     id,
@@ -929,11 +993,13 @@ async fn handle_daemon_control_inner(
                 .map_err(store_error_response)
         }
         DaemonControlCommand::SetCellMetadata {
+            notebook_id,
             id,
             patch,
             expected_version,
         } => {
             validate_cell_id(&id)?;
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             if patch
                 .get("spur")
                 .and_then(|spur| spur.get("datasource_setup"))
@@ -1014,25 +1080,34 @@ async fn handle_daemon_control_inner(
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::Snapshot => {
+        DaemonControlCommand::Snapshot { notebook_id } => {
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             let (root, version) = notebook.snapshot();
             Ok(DaemonControlResult::Snapshot(DaemonNotebookSnapshot {
                 root,
                 version,
             }))
         }
-        DaemonControlCommand::ApplyEdit { id, source } => {
+        DaemonControlCommand::ApplyEdit {
+            notebook_id,
+            id,
+            source,
+        } => {
             validate_cell_id(&id)?;
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .apply(NotebookOp::ApplyEdit { id, source })
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::FlushNotebook => notebook
-            .flush()
-            .await
-            .map(|()| DaemonControlResult::Empty)
-            .map_err(|error| DaemonControlResponse::failure("flush_failed", error.to_string())),
+        DaemonControlCommand::FlushNotebook { notebook_id } => {
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
+            notebook
+                .flush()
+                .await
+                .map(|()| DaemonControlResult::Empty)
+                .map_err(|error| DaemonControlResponse::failure("flush_failed", error.to_string()))
+        }
         command => Err(DaemonControlResponse::failure(
             "unsupported_daemon_command",
             format!("daemon command is not handled by the notebook store: {command:?}"),
@@ -1993,7 +2068,7 @@ fn resolve_run_cell_dispatch(
     cell_id: &str,
     state: &State,
 ) -> Result<RunCellDispatch, Error> {
-    let (root, _version) = state.get_notebook().snapshot();
+    let (root, _version) = state.notebook_for_path(notebook_path).snapshot();
     let code_type = resolve_cell_code_type(&root, cell_id)?;
     let source = resolve_cell_source(&root, cell_id)?;
     let spec_name = kernelspec_for(code_type).to_owned();
@@ -2333,8 +2408,7 @@ mod tests {
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode entry");
-        assert!(result.manifest_error.is_none());
-        let info = result.open_info.expect("entry notebook returns open info");
+        let info = result.expect("entry notebook returns open info");
         assert_eq!(info.open_mode, "app");
         assert_eq!(info.app_name, "My App");
         assert_eq!(info.app_root, dir.path().to_string_lossy().as_ref());
@@ -2346,10 +2420,9 @@ mod tests {
             .await
             .expect("notebook_open_mode other");
         assert!(
-            other_result.open_info.is_none(),
+            other_result.is_none(),
             "non-entry notebook must return no open info"
         );
-        assert!(other_result.manifest_error.is_none());
     }
 
     #[tokio::test]
@@ -2375,7 +2448,6 @@ mod tests {
         let info = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode capabilities")
-            .open_info
             .expect("entry notebook returns open info");
         assert!(info.capabilities.active_output_scripts);
         assert!(info.capabilities.canvas_capture);
@@ -2392,8 +2464,7 @@ mod tests {
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode no manifest");
-        assert!(result.open_info.is_none());
-        assert!(result.manifest_error.is_none());
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -2407,17 +2478,7 @@ mod tests {
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode invalid manifest");
-        assert!(
-            result.open_info.is_none(),
-            "invalid manifest must not enter app mode"
-        );
-        let error = result
-            .manifest_error
-            .expect("invalid manifest reports a diagnostic");
-        assert!(
-            error.contains("spur-app.json"),
-            "diagnostic names the manifest file: {error}"
-        );
+        assert!(result.is_none(), "invalid manifest must not enter app mode");
     }
 
     #[tokio::test]
@@ -2826,6 +2887,154 @@ mod tests {
         };
         assert_eq!(entry.kind, DatasourceKind::Csv);
         assert_eq!(entry.columns[0].sql_type, "DOUBLE");
+    }
+
+    #[test]
+    fn focus_command_round_trips() {
+        let request = DaemonControlRequest::new(DaemonControlCommand::SetFocus {
+            notebook_id: "/tmp/notebooks/focused.ipynb".to_string(),
+        });
+
+        let value = serde_json::to_value(&request).expect("set focus serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "set_focus",
+                "notebook_id": "/tmp/notebooks/focused.ipynb"
+            })
+        );
+
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(value).expect("set focus decodes");
+        match decoded.command {
+            DaemonControlCommand::SetFocus { notebook_id } => {
+                assert_eq!(notebook_id, "/tmp/notebooks/focused.ipynb");
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn cell_mutation_commands_round_trip_optional_notebook_id() {
+        let without_target = serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "write_cell",
+            "id": "cell-1",
+            "source": "print(1)",
+            "expected_version": 1,
+            "last_edited_by": "brain"
+        });
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(without_target.clone()).expect("legacy write decodes");
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("legacy write serializes"),
+            without_target
+        );
+
+        let with_target = serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "write_cell",
+            "notebook_id": "/tmp/notebooks/background.ipynb",
+            "id": "cell-1",
+            "source": "print(2)",
+            "expected_version": 2,
+            "last_edited_by": "brain"
+        });
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(with_target.clone()).expect("targeted write decodes");
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("targeted write serializes"),
+            with_target
+        );
+        match decoded.command {
+            DaemonControlCommand::WriteCell { notebook_id, .. } => {
+                assert_eq!(
+                    notebook_id.as_deref(),
+                    Some("/tmp/notebooks/background.ipynb")
+                );
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn focus_and_optional_notebook_id_target_store_without_changing_focus() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("jute-focus-target-")
+            .tempdir()
+            .expect("temp dir");
+        let path_a = temp_dir.path().join("a.ipynb");
+        let path_b = temp_dir.path().join("b.ipynb");
+        std::fs::write(
+            &path_a,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook A", 1)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &path_b,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook B", 1)).unwrap(),
+        )
+        .unwrap();
+        let state = State::new();
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: path_a.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("A loads");
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: path_b.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("B loads");
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::SetFocus {
+                notebook_id: path_a.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("focus A");
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::WriteCell {
+                notebook_id: Some(path_b.display().to_string()),
+                id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                source: "background B edit".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("targeted write B");
+
+        let focused = handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::Snapshot { notebook_id: None }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("focused snapshot");
+        let DaemonControlResult::Snapshot(snapshot) = focused else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(first_source(&snapshot.root), "notebook A");
+
+        let background = state.notebook_for_path(&path_b).snapshot().0;
+        assert_eq!(first_source(&background), "background B edit");
     }
 
     #[test]
@@ -3357,6 +3566,7 @@ mod tests {
         .unwrap();
 
         let state = Arc::new(State::new());
+        let _startup_store = state.get_notebook();
         let request: DaemonControlRequest = serde_json::from_value(serde_json::json!({
             "daemon": "notebook.v1",
             "command": "load",
@@ -3376,6 +3586,70 @@ mod tests {
 
         let (snapshot, _version) = state.get_notebook().snapshot();
         assert_eq!(first_source(&snapshot), "loaded from disk");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_after_loading_second_notebook_does_not_mutate_second_notebook() {
+        let dir = std::env::temp_dir().join(format!("jute-daemon-multi-load-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let notebook_a_path = dir.join("notebook-a.ipynb");
+        let notebook_b_path = dir.join("notebook-b.ipynb");
+        std::fs::write(
+            &notebook_a_path,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook A initial", 1)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &notebook_b_path,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook B initial", 1)).unwrap(),
+        )
+        .unwrap();
+
+        let state = Arc::new(State::new());
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: notebook_a_path.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("notebook A loads");
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: notebook_b_path.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("notebook B loads");
+
+        state.set_focused_notebook_path(&notebook_a_path);
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::WriteCell {
+                notebook_id: None,
+                id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                source: "notebook A window edit".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("notebook-a-window".to_string()),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("write from notebook A window should be accepted");
+
+        let (snapshot, _version) = state.notebook_for_path(&notebook_b_path).snapshot();
+        assert_eq!(
+            first_source(&snapshot),
+            "notebook B initial",
+            "a write intended for notebook A must not mutate the currently loaded notebook B"
+        );
+        let (snapshot, _version) = state.notebook_for_path(&notebook_a_path).snapshot();
+        assert_eq!(first_source(&snapshot), "notebook A window edit");
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3467,6 +3741,7 @@ mod tests {
         let read = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::ReadCell {
+                notebook_id: None,
                 id: cell_id.clone(),
             }),
         )
@@ -3483,6 +3758,7 @@ mod tests {
         let write = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::WriteCell {
+                notebook_id: None,
                 id: cell_id.clone(),
                 source: "updated".to_string(),
                 expected_version: Some(1),
@@ -3505,6 +3781,7 @@ mod tests {
         let insert = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::InsertCell {
+                notebook_id: None,
                 kind: CellKind::Markdown,
                 after_id: Some(cell_id.clone()),
                 source: "notes".to_string(),
@@ -3535,6 +3812,7 @@ mod tests {
         let apply = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::ApplyEdit {
+                notebook_id: None,
                 id: inserted_id.clone(),
                 source: "edited notes".to_string(),
             }),
@@ -3554,7 +3832,7 @@ mod tests {
 
         let snapshot = send_daemon_control_to(
             &socket_path,
-            &DaemonControlRequest::new(DaemonControlCommand::Snapshot {}),
+            &DaemonControlRequest::new(DaemonControlCommand::Snapshot { notebook_id: None }),
         )
         .await
         .unwrap()
@@ -3569,6 +3847,7 @@ mod tests {
         let delete = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::DeleteCell {
+                notebook_id: None,
                 id: inserted_id.clone(),
                 expected_version: 4,
             }),
@@ -3588,7 +3867,7 @@ mod tests {
 
         let flush = send_daemon_control_to(
             &socket_path,
-            &DaemonControlRequest::new(DaemonControlCommand::FlushNotebook {}),
+            &DaemonControlRequest::new(DaemonControlCommand::FlushNotebook { notebook_id: None }),
         )
         .await
         .unwrap()

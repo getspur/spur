@@ -3,8 +3,7 @@ use std::sync::Arc;
 use jute::{
     backend::{commands::RunCellEvent, notebook::Cell},
     commands::run_cell_events,
-    notebook_store::StoreError,
-    state::State,
+    notebook_store::{NotebookStore, StoreError},
 };
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
@@ -76,9 +75,11 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         McpError::internal_error("notebook.run_cell requires notebook daemon state", None)
     })?;
     if let Some(expected_version) = params.expected_version {
-        ensure_expected_version(state, &params.cell_id, expected_version)?;
+        let store = state.notebook_for_path(&params.notebook_path);
+        ensure_expected_version(&store, &params.cell_id, expected_version)?;
     }
-    ensure_code_cell(state, &params.cell_id)?;
+    let store = state.notebook_for_path(&params.notebook_path);
+    ensure_code_cell(&store, &params.cell_id)?;
     let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
 
     let rx = run_cell_events(
@@ -95,7 +96,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         )
     })?;
 
-    let summary = drain_run_cell_events(deps, state, &params.cell_id, &kernel_id, rx).await;
+    let summary = drain_run_cell_events(deps, &store, &params.cell_id, &kernel_id, rx).await;
 
     Ok(CallToolResult::structured(json!({
         "id": params.cell_id,
@@ -106,7 +107,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
 }
 
 fn ensure_expected_version(
-    state: &State,
+    store: &NotebookStore,
     cell_id: &str,
     expected_version: u64,
 ) -> Result<(), McpError> {
@@ -117,8 +118,7 @@ fn ensure_expected_version(
         ));
     }
 
-    state
-        .get_notebook()
+    store
         .check_cell_version(cell_id, expected_version)
         .map_err(|error| match error {
             StoreError::OptimisticConcurrency { expected, actual } => McpError::invalid_params(
@@ -138,8 +138,8 @@ fn ensure_expected_version(
         })
 }
 
-fn ensure_code_cell(state: &State, cell_id: &str) -> Result<(), McpError> {
-    let (root, _) = state.get_notebook().snapshot();
+fn ensure_code_cell(store: &NotebookStore, cell_id: &str) -> Result<(), McpError> {
+    let (root, _) = store.snapshot();
     for cell in &root.cells {
         match cell {
             Cell::Raw(cell) if cell.id.as_deref() == Some(cell_id) => {
@@ -190,7 +190,7 @@ struct RunCellSummary {
 
 async fn drain_run_cell_events(
     deps: &ServerDeps,
-    state: &State,
+    store: &NotebookStore,
     cell_id: &str,
     kernel_id: &str,
     rx: async_channel::Receiver<RunCellEvent>,
@@ -211,7 +211,7 @@ async fn drain_run_cell_events(
                 }),
             );
         }
-        if let Err(error) = state.get_notebook().apply_run_event(cell_id, event.clone()) {
+        if let Err(error) = store.apply_run_event(cell_id, event.clone()) {
             warn!(
                 cell_id = %cell_id,
                 error = %error,
@@ -402,7 +402,8 @@ mod tests {
         .unwrap();
         drop(tx);
 
-        let summary = drain_run_cell_events(&deps, &state, "code-1", "kernel-1", rx).await;
+        let store = state.get_notebook();
+        let summary = drain_run_cell_events(&deps, &store, "code-1", "kernel-1", rx).await;
 
         assert_eq!(summary.status, "ok");
         let (snapshot, _) = state.get_notebook().snapshot();
@@ -482,6 +483,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validates_cell_against_requested_notebook_path_not_focused_store() {
+        let state = Arc::new(State::new());
+        let requested = state.notebook_for_path("/tmp/requested.ipynb");
+        requested.load("/tmp/requested.ipynb", notebook_with_code_cell());
+        state
+            .get_notebook()
+            .load("/tmp/focused.ipynb", notebook_with_markdown_cell());
+
+        ensure_expected_version(&requested, "code-1", 1).expect("requested cell version matches");
+        ensure_code_cell(&requested, "code-1").expect("requested cell is code");
+    }
+
+    #[tokio::test]
     async fn markdown_cell_rejected_before_dispatch() {
         let state = Arc::new(State::new());
         state
@@ -534,7 +548,8 @@ mod tests {
         .unwrap();
         drop(tx);
 
-        let summary = drain_run_cell_events(&deps, &state, &params.cell_id, "kernel-1", rx).await;
+        let store = state.get_notebook();
+        let summary = drain_run_cell_events(&deps, &store, &params.cell_id, "kernel-1", rx).await;
 
         assert_eq!(summary.status, "ok");
         assert_eq!(summary.exec_count, Some(2));

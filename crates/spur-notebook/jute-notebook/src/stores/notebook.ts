@@ -3,7 +3,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { WritableDraft } from "immer";
 import { createContext, useContext } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { StoreApi, createStore } from "zustand";
+import { StoreApi, create, createStore } from "zustand";
 import { immer } from "zustand/middleware/immer";
 
 import type {
@@ -261,6 +261,57 @@ export type KernelSlotInfo = {
   cpu_pct: number;
   mem_mb: number;
 };
+
+export type NotebookTabKernelState = "idle" | "live" | "running";
+
+export type NotebookTab = {
+  id: string;
+  path?: string;
+  title: string;
+  dirty: boolean;
+  kernelState: NotebookTabKernelState;
+  language?: string;
+  mode: NotebookViewMode;
+};
+
+type NotebookTabsStore = {
+  tabs: NotebookTab[];
+  activeTabId?: string;
+  setTabs: (tabs: NotebookTab[]) => void;
+  setActiveTabId: (tabId: string | undefined) => void;
+  updateTab: (tabId: string, patch: Partial<NotebookTab>) => void;
+};
+
+export const useNotebookTabsStore = create<NotebookTabsStore>((set, get) => ({
+  tabs: [],
+  activeTabId: undefined,
+  setTabs: (tabs) =>
+    set((state) => {
+      const activeTabStillOpen =
+        state.activeTabId !== undefined &&
+        tabs.some((tab) => tab.id === state.activeTabId);
+      return {
+        tabs,
+        activeTabId: activeTabStillOpen
+          ? state.activeTabId
+          : (tabs[0]?.id ?? undefined),
+      };
+    }),
+  setActiveTabId: (tabId) =>
+    set((state) => {
+      if (tabId !== undefined && !state.tabs.some((tab) => tab.id === tabId)) {
+        return state;
+      }
+      return { activeTabId: tabId };
+    }),
+  updateTab: (tabId, patch) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId ? { ...tab, ...patch, id: tab.id } : tab,
+      ),
+      activeTabId: get().activeTabId,
+    })),
+}));
 
 type NotebookLocalDelta = {
   version: number;
