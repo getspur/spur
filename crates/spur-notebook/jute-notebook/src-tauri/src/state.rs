@@ -20,7 +20,7 @@ use crate::{
     chat_state::SidebarChatState,
     commands::{DatasourceEntry, SaveCoordinator},
     identity::NotebookId,
-    notebook_store::{merge_authoritative_spur_metadata_for_save, NotebookStore},
+    notebook_store::{merge_authoritative_spur_metadata_for_save, NotebookDelta, NotebookStore},
 };
 
 /// Current schema version for notebook datasource catalog entries.
@@ -357,6 +357,9 @@ pub struct State {
     /// Authoritative notebook document stores keyed by stable notebook ID.
     pub notebooks: Arc<DashMap<NotebookId, Arc<NotebookStore>>>,
 
+    /// Process-wide notebook delta fan-out across all notebook stores.
+    notebook_delta_tx: tokio::sync::broadcast::Sender<NotebookDelta>,
+
     /// In-memory datasource catalogs keyed by stable notebook ID.
     pub datasource_catalogs: Arc<DashMap<NotebookId, Arc<Mutex<DatasourceCatalog>>>>,
 
@@ -379,6 +382,7 @@ impl Default for State {
         let notebooks_for_save = Arc::clone(&notebooks);
         let catalogs_for_save = Arc::clone(&datasource_catalogs);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        let (notebook_delta_tx, _) = tokio::sync::broadcast::channel(128);
         Self {
             kernels: DashMap::new(),
             comm_owner: DashMap::new(),
@@ -408,6 +412,7 @@ impl Default for State {
             ),
             datasource_catalog,
             notebooks,
+            notebook_delta_tx,
             datasource_catalogs,
             focused: Mutex::new(None),
             event_tx,
@@ -524,9 +529,19 @@ impl State {
         Arc::clone(
             self.notebooks
                 .entry(id.clone())
-                .or_insert_with(|| NotebookStore::new(Arc::new(self.save_coordinator.clone())))
+                .or_insert_with(|| {
+                    NotebookStore::new_with_process_broadcast(
+                        Arc::new(self.save_coordinator.clone()),
+                        self.notebook_delta_tx.clone(),
+                    )
+                })
                 .value(),
         )
+    }
+
+    /// Subscribe to notebook deltas from every store owned by this process.
+    pub fn subscribe_notebook_deltas(&self) -> tokio::sync::broadcast::Receiver<NotebookDelta> {
+        self.notebook_delta_tx.subscribe()
     }
 
     /// Return the notebook store for an optional wire target.
@@ -765,8 +780,51 @@ fn default_notebook_id() -> NotebookId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{identity::NotebookId, ports};
+    use std::time::Duration;
+
+    use crate::{
+        backend::notebook::{
+            Cell, CellMetadata, CodeCell, MultilineString, NotebookRoot, Output, SpurCellMetadata,
+        },
+        identity::NotebookId,
+        notebook_store::{DeltaKind, NotebookOp},
+        ports,
+    };
     use serde_json::json;
+
+    fn notebook_with_source(source: &str, version: u64) -> NotebookRoot {
+        NotebookRoot {
+            metadata: NotebookMetadata {
+                kernelspec: None,
+                language_info: None,
+                orig_nbformat: None,
+                title: None,
+                authors: None,
+                jute_deck: None,
+                other: Map::new(),
+            },
+            nbformat_minor: 5,
+            nbformat: 4,
+            cells: vec![Cell::Code(CodeCell {
+                id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                metadata: CellMetadata {
+                    spur: Some(SpurCellMetadata {
+                        version,
+                        last_edited_by: None,
+                        datasource_setup: None,
+                        dag: None,
+                        frontend: None,
+                        code_type: None,
+                    }),
+                    jute_deck: None,
+                    other: Map::new(),
+                },
+                source: MultilineString::Single(source.to_string()),
+                execution_count: None,
+                outputs: Vec::<Output>::new(),
+            })],
+        }
+    }
 
     #[test]
     fn saved_notebook_identity_derives_existing_public_formats_consistently() {
@@ -888,6 +946,39 @@ mod tests {
         let second = state.get_notebook();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn process_notebook_delta_subscription_receives_path_store_writes() {
+        let state = State::new();
+        let _startup_store = state.get_notebook();
+        let mut deltas = state.subscribe_notebook_deltas();
+        let path = "/tmp/notebooks/process-delta.ipynb";
+        let store = state.focus_notebook_path(path);
+
+        store.load(path, notebook_with_source("initial", 1));
+        let loaded = tokio::time::timeout(Duration::from_millis(100), deltas.recv())
+            .await
+            .expect("process subscription should receive loaded delta")
+            .expect("notebook delta channel should remain open");
+        assert_eq!(loaded.path.as_deref(), Some(path));
+
+        store
+            .apply(NotebookOp::WriteCell {
+                id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                source: "from mcp".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            })
+            .expect("write should succeed");
+
+        let written = tokio::time::timeout(Duration::from_millis(100), deltas.recv())
+            .await
+            .expect("process subscription should receive path-store write")
+            .expect("notebook delta channel should remain open");
+
+        assert_eq!(written.path.as_deref(), Some(path));
+        assert!(matches!(written.kind, DeltaKind::CellWritten { .. }));
     }
 
     #[cfg(unix)]
