@@ -13,6 +13,13 @@ Source sync prefers direct SSH to the VM's external IP on
 `SPUR_DIRECT_SSH_PORT` (default `22`) and falls back to IAP. Fresh VMs keep sshd
 on tcp:22 for GCE/IAP compatibility. Set `SPUR_DIRECT_SSH=0` to force IAP-only.
 
+`build.sh` locally backpressures remote dispatches before syncing to the VM.
+By default, at most three callers from the same workstation are admitted at a
+time; later callers wait in FIFO ticket order. Override the limit with
+`SPUR_BUILD_MAX_CONCURRENT` or set it to `0` to disable the queue. The queue root
+defaults to `/tmp/spur-gcp-build-queue` and can be changed with
+`SPUR_BUILD_QUEUE_DIR`.
+
 The production resource names intentionally stay stable:
 
 - VM: `spur-builder`
