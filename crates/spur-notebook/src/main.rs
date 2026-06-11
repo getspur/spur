@@ -385,6 +385,7 @@ fn main() {
             jute::commands::restart_kernel,
             jute::commands::stop_kernel,
             jute::commands::run_cell,
+            jute::chat_commands::chat_agents_list,
             jute::chat_commands::chat_turn,
             jute::chat_commands::chat_sessions_list,
             jute::chat_commands::chat_switch_session,
@@ -556,6 +557,32 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registered_invoke_handler_source() -> &'static str {
+        let source = include_str!("main.rs");
+        let start = source
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("invoke handler registration should exist");
+        let rest = &source[start..];
+        let end = rest.find("])").expect("invoke handler should close");
+        &rest[..end]
+    }
+
+    #[test]
+    fn invoke_handler_registers_all_sidebar_chat_commands() {
+        let registered = registered_invoke_handler_source();
+        for command in [
+            "jute::chat_commands::chat_agents_list",
+            "jute::chat_commands::chat_turn",
+            "jute::chat_commands::chat_sessions_list",
+            "jute::chat_commands::chat_switch_session",
+            "jute::chat_commands::chat_new_session",
+            "jute::chat_commands::chat_cancel",
+            "jute::chat_commands::chat_permission_respond",
+        ] {
+            assert!(registered.contains(command), "{command} is not registered");
+        }
+    }
 
     #[test]
     fn mcp_proxy_requires_explicit_socket_path() {
