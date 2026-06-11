@@ -833,14 +833,14 @@ pub fn replace_notebook_and_hydrate_catalog(
     contents: NotebookRoot,
 ) -> NotebookDelta {
     hydrate_datasource_catalog_from_root(state, path.as_path(), &contents);
-    state.get_notebook().replace(path, contents)
+    state.focus_notebook_path(&path).replace(path, contents)
 }
 
 fn hydrate_datasource_catalog_from_root(state: &State, path: &Path, root: &NotebookRoot) {
     let catalog =
         crate::state::DatasourceCatalog::hydrate_from_metadata(&root.metadata, Some(path));
     let entries = catalog.list();
-    *state.datasource_catalog.lock() = catalog;
+    state.replace_datasource_catalog_for_path(path, catalog);
     state.emit_datasources_changed(entries);
 }
 
@@ -848,7 +848,6 @@ async fn handle_daemon_control_inner(
     command: DaemonControlCommand,
     state: &State,
 ) -> Result<DaemonControlResult, DaemonControlResponse> {
-    let notebook = state.get_notebook();
     match command {
         DaemonControlCommand::WriteCell {
             id,
@@ -857,6 +856,7 @@ async fn handle_daemon_control_inner(
             last_edited_by,
         } => {
             validate_cell_id(&id)?;
+            let notebook = state.get_notebook();
             notebook
                 .apply(NotebookOp::WriteCell {
                     id,
@@ -869,6 +869,7 @@ async fn handle_daemon_control_inner(
         }
         DaemonControlCommand::ReadCell { id } => {
             validate_cell_id(&id)?;
+            let notebook = state.get_notebook();
             let (root, _version) = notebook.snapshot();
             read_daemon_cell(&root, &id).map(DaemonControlResult::Cell)
         }
@@ -885,6 +886,7 @@ async fn handle_daemon_control_inner(
                     "insert_cell after_id must not be empty",
                 ));
             }
+            let notebook = state.get_notebook();
             notebook
                 .apply(NotebookOp::InsertCell {
                     kind,
@@ -904,6 +906,7 @@ async fn handle_daemon_control_inner(
                 DaemonControlResponse::failure("load_failed", error.to_string())
             })?;
             hydrate_datasource_catalog_from_root(state, Path::new(&path), &root);
+            let notebook = state.focus_notebook_path(&path);
             let delta = notebook.load(PathBuf::from(path), root);
             Ok(DaemonControlResult::Delta(delta))
         }
@@ -912,7 +915,7 @@ async fn handle_daemon_control_inner(
             Ok(DaemonControlResult::Delta(delta))
         }
         DaemonControlCommand::ListDatasources => {
-            let entries = state.datasource_catalog.lock().list();
+            let entries = state.list_focused_datasources();
             Ok(DaemonControlResult::Datasources(entries))
         }
         DaemonControlCommand::DeleteCell {
@@ -920,6 +923,7 @@ async fn handle_daemon_control_inner(
             expected_version,
         } => {
             validate_cell_id(&id)?;
+            let notebook = state.get_notebook();
             notebook
                 .apply(NotebookOp::DeleteCell {
                     id,
@@ -934,6 +938,7 @@ async fn handle_daemon_control_inner(
             expected_version,
         } => {
             validate_cell_id(&id)?;
+            let notebook = state.get_notebook();
             if patch
                 .get("spur")
                 .and_then(|spur| spur.get("datasource_setup"))
@@ -1015,6 +1020,7 @@ async fn handle_daemon_control_inner(
                 .map_err(store_error_response)
         }
         DaemonControlCommand::Snapshot => {
+            let notebook = state.get_notebook();
             let (root, version) = notebook.snapshot();
             Ok(DaemonControlResult::Snapshot(DaemonNotebookSnapshot {
                 root,
@@ -1023,16 +1029,20 @@ async fn handle_daemon_control_inner(
         }
         DaemonControlCommand::ApplyEdit { id, source } => {
             validate_cell_id(&id)?;
+            let notebook = state.get_notebook();
             notebook
                 .apply(NotebookOp::ApplyEdit { id, source })
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::FlushNotebook => notebook
-            .flush()
-            .await
-            .map(|()| DaemonControlResult::Empty)
-            .map_err(|error| DaemonControlResponse::failure("flush_failed", error.to_string())),
+        DaemonControlCommand::FlushNotebook => {
+            let notebook = state.get_notebook();
+            notebook
+                .flush()
+                .await
+                .map(|()| DaemonControlResult::Empty)
+                .map_err(|error| DaemonControlResponse::failure("flush_failed", error.to_string()))
+        }
         command => Err(DaemonControlResponse::failure(
             "unsupported_daemon_command",
             format!("daemon command is not handled by the notebook store: {command:?}"),
@@ -1993,7 +2003,7 @@ fn resolve_run_cell_dispatch(
     cell_id: &str,
     state: &State,
 ) -> Result<RunCellDispatch, Error> {
-    let (root, _version) = state.get_notebook().snapshot();
+    let (root, _version) = state.notebook_for_path(notebook_path).snapshot();
     let code_type = resolve_cell_code_type(&root, cell_id)?;
     let source = resolve_cell_source(&root, cell_id)?;
     let spec_name = kernelspec_for(code_type).to_owned();
@@ -3349,6 +3359,7 @@ mod tests {
         .unwrap();
 
         let state = Arc::new(State::new());
+        let _startup_store = state.get_notebook();
         let request: DaemonControlRequest = serde_json::from_value(serde_json::json!({
             "daemon": "notebook.v1",
             "command": "load",
@@ -3409,6 +3420,7 @@ mod tests {
         .into_result()
         .expect("notebook B loads");
 
+        state.set_focused_notebook_path(&notebook_a_path);
         handle_daemon_control_request(
             DaemonControlRequest::new(DaemonControlCommand::WriteCell {
                 id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
@@ -3422,12 +3434,14 @@ mod tests {
         .into_result()
         .expect("write from notebook A window should be accepted");
 
-        let (snapshot, _version) = state.get_notebook().snapshot();
+        let (snapshot, _version) = state.notebook_for_path(&notebook_b_path).snapshot();
         assert_eq!(
             first_source(&snapshot),
             "notebook B initial",
             "a write intended for notebook A must not mutate the currently loaded notebook B"
         );
+        let (snapshot, _version) = state.notebook_for_path(&notebook_a_path).snapshot();
+        assert_eq!(first_source(&snapshot), "notebook A window edit");
 
         std::fs::remove_dir_all(dir).unwrap();
     }

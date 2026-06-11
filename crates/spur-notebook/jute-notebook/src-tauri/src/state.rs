@@ -340,44 +340,67 @@ pub struct State {
     /// Coordinator for debounced notebook saves.
     pub save_coordinator: SaveCoordinator,
 
-    /// In-memory datasource catalog for the active notebook.
+    /// Compatibility mirror for the focused notebook's datasource catalog.
+    ///
+    /// New daemon-layer code should use the keyed catalog helpers below. This
+    /// mirror keeps older call sites on focused single-window semantics until
+    /// their protocols carry explicit notebook targets.
     pub datasource_catalog: Arc<Mutex<DatasourceCatalog>>,
+
+    /// Authoritative notebook document stores keyed by stable notebook ID.
+    pub notebooks: Arc<DashMap<NotebookId, Arc<NotebookStore>>>,
+
+    /// In-memory datasource catalogs keyed by stable notebook ID.
+    pub datasource_catalogs: Arc<DashMap<NotebookId, Arc<Mutex<DatasourceCatalog>>>>,
+
+    /// Focused notebook ID used by implicit daemon operations.
+    focused: Mutex<Option<NotebookId>>,
 
     /// In-process daemon event fan-out for subscribers.
     pub event_tx: tokio::sync::broadcast::Sender<DaemonEvent>,
-
-    /// Lazily initialized authoritative notebook document store.
-    notebook: Arc<Mutex<Option<Arc<NotebookStore>>>>,
 }
 
 impl Default for State {
     fn default() -> Self {
         let datasource_catalog = Arc::new(Mutex::new(DatasourceCatalog::default()));
-        let catalog_for_save = Arc::clone(&datasource_catalog);
-        let notebook = Arc::new(Mutex::new(None::<Arc<NotebookStore>>));
-        let notebook_for_save = Arc::clone(&notebook);
+        let notebooks = Arc::new(DashMap::<NotebookId, Arc<NotebookStore>>::new());
+        let datasource_catalogs =
+            Arc::new(DashMap::<NotebookId, Arc<Mutex<DatasourceCatalog>>>::new());
+        let notebooks_for_save = Arc::clone(&notebooks);
+        let catalogs_for_save = Arc::clone(&datasource_catalogs);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             kernels: DashMap::new(),
             comm_owner: DashMap::new(),
             save_coordinator: SaveCoordinator::with_before_save(
                 move |path, contents: &mut NotebookRoot| {
-                    catalog_for_save
-                        .lock()
-                        .persist_to_metadata(&mut contents.metadata, Some(path));
-                    let Some(store) = notebook_for_save.lock().as_ref().cloned() else {
+                    let path_id = NotebookId::for_saved_path(path);
+                    let target = notebooks_for_save
+                        .get(&path_id)
+                        .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+                        .or_else(|| {
+                            notebooks_for_save.iter().find_map(|entry| {
+                                (entry.value().path().as_deref() == Some(path))
+                                    .then(|| (entry.key().clone(), Arc::clone(entry.value())))
+                            })
+                        });
+                    let Some((target_id, store)) = target else {
                         return;
                     };
-                    if store.path().as_deref() != Some(path) {
-                        return;
+                    if let Some(catalog) = catalogs_for_save.get(&target_id) {
+                        catalog
+                            .lock()
+                            .persist_to_metadata(&mut contents.metadata, Some(path));
                     }
                     let (authoritative, _version) = store.snapshot();
                     merge_authoritative_spur_metadata_for_save(contents, &authoritative);
                 },
             ),
             datasource_catalog,
+            notebooks,
+            datasource_catalogs,
+            focused: Mutex::new(None),
             event_tx,
-            notebook,
         }
     }
 }
@@ -413,10 +436,12 @@ impl State {
     /// Attach or replace a datasource entry, then notify daemon event subscribers.
     pub fn attach_datasource(&self, entry: DatasourceEntry) {
         let entries = {
-            let mut catalog = self.datasource_catalog.lock();
+            let catalog = self.focused_datasource_catalog();
+            let mut catalog = catalog.lock();
             catalog.attach(entry);
             catalog.list()
         };
+        self.sync_focused_catalog_mirror();
         self.emit_datasources_changed(entries);
     }
 
@@ -426,41 +451,176 @@ impl State {
             return;
         }
         let entries = {
-            let mut catalog = self.datasource_catalog.lock();
+            let catalog = self.focused_datasource_catalog();
+            let mut catalog = catalog.lock();
             for entry in entries {
                 catalog.attach(entry);
             }
             catalog.list()
         };
+        self.sync_focused_catalog_mirror();
         self.emit_datasources_changed(entries);
     }
 
     /// Detach a datasource entry, notifying subscribers only when the catalog changes.
     pub fn detach_datasource(&self, name: &str) -> Option<DatasourceEntry> {
         let (removed, entries) = {
-            let mut catalog = self.datasource_catalog.lock();
+            let catalog = self.focused_datasource_catalog();
+            let mut catalog = catalog.lock();
             let removed = catalog.detach(name);
             let entries = removed.as_ref().map(|_| catalog.list());
             (removed, entries)
         };
         if let Some(entries) = entries {
+            self.sync_focused_catalog_mirror();
             self.emit_datasources_changed(entries);
         }
         removed
     }
 
-    /// Return the process-wide notebook store, initializing it on first use.
+    /// Return the focused notebook store, initializing a default focused store
+    /// on first use for existing single-window callers.
     pub fn get_notebook(&self) -> Arc<NotebookStore> {
-        let mut notebook = self.notebook.lock();
+        let id = self.focused_notebook_id_or_create();
+        self.notebook_for_id(&id)
+    }
+
+    /// Return the notebook store for a saved path without changing focus.
+    pub fn notebook_for_path(&self, path: impl AsRef<Path>) -> Arc<NotebookStore> {
+        let id = NotebookId::for_saved_path(path.as_ref());
+        self.notebook_for_id(&id)
+    }
+
+    /// Return and focus the notebook store for a saved path.
+    pub(crate) fn focus_notebook_path(&self, path: impl AsRef<Path>) -> Arc<NotebookStore> {
+        let id = NotebookId::for_saved_path(path.as_ref());
+        self.alias_focused_default_store_to_id(&id);
+        let store = self.notebook_for_id(&id);
+        self.set_focused_notebook_id(id);
+        store
+    }
+
+    /// Focus an existing or lazily-created saved notebook path for implicit operations.
+    #[cfg(test)]
+    pub(crate) fn set_focused_notebook_path(&self, path: impl AsRef<Path>) {
+        let id = NotebookId::for_saved_path(path.as_ref());
+        self.set_focused_notebook_id(id);
+    }
+
+    /// Return the notebook store for an explicit notebook ID.
+    pub fn notebook_for_id(&self, id: &NotebookId) -> Arc<NotebookStore> {
         Arc::clone(
-            notebook
-                .get_or_insert_with(|| NotebookStore::new(Arc::new(self.save_coordinator.clone()))),
+            self.notebooks
+                .entry(id.clone())
+                .or_insert_with(|| NotebookStore::new(Arc::new(self.save_coordinator.clone())))
+                .value(),
         )
+    }
+
+    /// Return the focused notebook ID, if one has been established.
+    pub fn focused_notebook_id(&self) -> Option<NotebookId> {
+        self.focused.lock().clone()
+    }
+
+    fn set_focused_notebook_id(&self, id: NotebookId) {
+        self.notebook_for_id(&id);
+        self.datasource_catalog_for_id(&id);
+        *self.focused.lock() = Some(id);
+        self.sync_focused_catalog_mirror();
+    }
+
+    /// Replace the datasource catalog for a saved path.
+    pub(crate) fn replace_datasource_catalog_for_path(
+        &self,
+        path: impl AsRef<Path>,
+        catalog: DatasourceCatalog,
+    ) {
+        let id = NotebookId::for_saved_path(path.as_ref());
+        self.replace_datasource_catalog_for_id(&id, catalog);
+    }
+
+    /// Return the focused datasource catalog.
+    pub fn focused_datasource_catalog(&self) -> Arc<Mutex<DatasourceCatalog>> {
+        let id = self.focused_notebook_id_or_create();
+        self.datasource_catalog_for_id(&id)
+    }
+
+    /// Return a focused datasource catalog snapshot.
+    pub fn list_focused_datasources(&self) -> Vec<DatasourceEntry> {
+        self.focused_datasource_catalog().lock().list()
+    }
+
+    fn datasource_catalog_for_id(&self, id: &NotebookId) -> Arc<Mutex<DatasourceCatalog>> {
+        Arc::clone(
+            self.datasource_catalogs
+                .entry(id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(DatasourceCatalog::default())))
+                .value(),
+        )
+    }
+
+    fn replace_datasource_catalog_for_id(&self, id: &NotebookId, catalog: DatasourceCatalog) {
+        self.datasource_catalogs
+            .insert(id.clone(), Arc::new(Mutex::new(catalog)));
+        if self.focused.lock().as_ref() == Some(id) {
+            self.sync_focused_catalog_mirror();
+        }
+    }
+
+    fn focused_notebook_id_or_create(&self) -> NotebookId {
+        if let Some(id) = self.focused.lock().clone() {
+            return id;
+        }
+        let id = default_notebook_id();
+        self.set_focused_notebook_id(id.clone());
+        id
+    }
+
+    fn alias_focused_default_store_to_id(&self, id: &NotebookId) {
+        if self.notebooks.contains_key(id) {
+            return;
+        }
+        let default_id = default_notebook_id();
+        if self.focused.lock().as_ref() != Some(&default_id) {
+            return;
+        }
+        let Some(store) = self
+            .notebooks
+            .get(&default_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return;
+        };
+        if store.path().is_some() {
+            return;
+        }
+        self.notebooks.insert(id.clone(), store);
+        if !self.datasource_catalogs.contains_key(id) {
+            if let Some(catalog) = self
+                .datasource_catalogs
+                .get(&default_id)
+                .map(|entry| Arc::clone(entry.value()))
+            {
+                self.datasource_catalogs.insert(id.clone(), catalog);
+            }
+        }
+    }
+
+    fn sync_focused_catalog_mirror(&self) {
+        let Some(id) = self.focused.lock().clone() else {
+            return;
+        };
+        let catalog = self.datasource_catalog_for_id(&id).lock().clone();
+        *self.datasource_catalog.lock() = catalog;
     }
 
     pub(crate) fn emit_datasources_changed(&self, entries: Vec<DatasourceEntry>) {
         let _ = self.event_tx.send(DaemonEvent::DatasourcesChanged(entries));
     }
+}
+
+fn default_notebook_id() -> NotebookId {
+    NotebookId::for_saved_path("__spur_default_focused_notebook__")
 }
 
 #[cfg(test)]
@@ -571,6 +731,52 @@ mod tests {
         let second = state.get_notebook();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn focused_notebook_registry_keeps_path_stores_and_catalogs_isolated() {
+        let state = State::new();
+        let path_a = "/tmp/notebooks/a.ipynb";
+        let path_b = "/tmp/notebooks/b.ipynb";
+
+        state.set_focused_notebook_path(path_a);
+        let store_a = state.get_notebook();
+        state.attach_datasource(DatasourceEntry {
+            name: "sales".to_string(),
+            path: "/tmp/sales.csv".to_string(),
+            kind: crate::commands::DatasourceKind::Csv,
+            group: None,
+            columns: Vec::new(),
+            row_count: None,
+            tables: Vec::new(),
+        });
+
+        state.set_focused_notebook_path(path_b);
+        let store_b = state.get_notebook();
+        assert!(!Arc::ptr_eq(&store_a, &store_b));
+        assert!(state.list_focused_datasources().is_empty());
+
+        state.attach_datasource(DatasourceEntry {
+            name: "inventory".to_string(),
+            path: "/tmp/inventory.csv".to_string(),
+            kind: crate::commands::DatasourceKind::Csv,
+            group: None,
+            columns: Vec::new(),
+            row_count: None,
+            tables: Vec::new(),
+        });
+
+        state.set_focused_notebook_path(path_a);
+        let entries = state.list_focused_datasources();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "sales");
+        assert!(Arc::ptr_eq(&store_a, &state.notebook_for_path(path_a)));
+
+        state.set_focused_notebook_path(path_b);
+        let entries = state.list_focused_datasources();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "inventory");
+        assert!(Arc::ptr_eq(&store_b, &state.notebook_for_path(path_b)));
     }
 
     #[test]
