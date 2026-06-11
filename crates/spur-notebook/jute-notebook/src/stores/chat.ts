@@ -67,8 +67,10 @@ export type ChatState = ChatConversation & {
 
 export type ChatActions = {
   setScope: (appKey: string, label: string) => void;
+  applyEventForScope: (appKey: string, event: ChatEvent) => void;
   applyEvent: (event: ChatEvent) => void;
   applyEventToApp: (appKey: string, event: ChatEvent) => void;
+  clearPendingPermissionForScope: (appKey: string, requestId: string) => void;
   clearPendingPermission: (requestId: string) => void;
   reset: () => void;
 };
@@ -211,7 +213,11 @@ function applyEventToAppState(
   appKey: string,
   event: ChatEvent,
 ): ChatState {
-  const conversation = state.conversations[appKey] ?? createConversation();
+  const conversation =
+    state.conversations[appKey] ??
+    createConversation(
+      appKey === state.activeAppKey ? state.scopeLabel : undefined,
+    );
   const nextConversation = reduceConversation(conversation, event);
   return projectActiveConversation({
     activeAppKey: state.activeAppKey,
@@ -222,7 +228,7 @@ function applyEventToAppState(
   });
 }
 
-export const useChat = create<ChatStore>()((set) => ({
+export const useChat = create<ChatStore>()((set, get) => ({
   ...createInitialState(),
 
   setScope: (appKey, label) =>
@@ -240,14 +246,38 @@ export const useChat = create<ChatStore>()((set) => ({
       });
     }),
 
-  applyEvent: (event) =>
-    set((state) => {
-      return applyEventToAppState(state, state.activeAppKey, event);
-    }),
-
-  applyEventToApp: (appKey, event) =>
+  applyEventForScope: (appKey, event) =>
     set((state) => {
       return applyEventToAppState(state, appKey, event);
+    }),
+
+  applyEvent: (event) => {
+    const state = get();
+    state.applyEventForScope(state.activeAppKey, event);
+  },
+
+  applyEventToApp: (appKey, event) => {
+    const state = get();
+    state.applyEventForScope(appKey, event);
+  },
+
+  clearPendingPermissionForScope: (appKey, requestId) =>
+    set((state) => {
+      const conversation = state.conversations[appKey];
+      if (!conversation?.pendingPermission) {
+        return projectActiveConversation(state);
+      }
+      const conversations =
+        conversation.pendingPermission.id === requestId
+          ? {
+              ...state.conversations,
+              [appKey]: { ...conversation, pendingPermission: null },
+            }
+          : state.conversations;
+      return projectActiveConversation({
+        activeAppKey: state.activeAppKey,
+        conversations,
+      });
     }),
 
   clearPendingPermission: (requestId) =>

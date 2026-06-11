@@ -14,6 +14,8 @@ import {
 } from "@/stores/chat";
 import { useNotebook } from "@/stores/notebook";
 
+const EMPTY_MESSAGES: ChatMessage[] = [];
+
 function messageClassName(kind: ChatMessage["kind"]) {
   return clsx(
     "rounded border px-3 py-2 text-sm",
@@ -31,6 +33,10 @@ function scopeLabelForPath(path: string | undefined) {
   return filename ?? "Notebook";
 }
 
+function deniedOptionId(optionId: string) {
+  return optionId.toLowerCase() === "deny";
+}
+
 export default function ChatPanel() {
   const notebook = useNotebook();
   const [notebookPath, appOpenInfo] = useStore(
@@ -40,33 +46,27 @@ export default function ChatPanel() {
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const [scopeLabel, messages, streaming, streamingText, pendingPermission] =
-    useChat(
-      useShallow((state) => [
-        state.scopeLabel,
-        state.messages,
-        state.streaming,
-        state.streamingText,
-        state.pendingPermission,
-      ]),
-    );
+  const chatScopeKey =
+    appOpenInfo?.app_root ??
+    (notebookPath ? `notebook:${notebookPath}` : DEFAULT_CHAT_APP_KEY);
+  const chatScopeLabel =
+    appOpenInfo?.app_name ?? scopeLabelForPath(notebookPath);
+  const conversation = useChat((state) => state.conversations[chatScopeKey]);
+  const scopeLabel = conversation?.scopeLabel ?? chatScopeLabel;
+  const messages = conversation?.messages ?? EMPTY_MESSAGES;
+  const streaming = conversation?.streaming ?? false;
+  const streamingText = conversation?.streamingText ?? "";
+  const pendingPermission = conversation?.pendingPermission ?? null;
   const setScope = useChat((state) => state.setScope);
-  const applyEvent = useChat((state) => state.applyEvent);
-  const applyEventToApp = useChat((state) => state.applyEventToApp);
-  const clearPendingPermission = useChat(
-    (state) => state.clearPendingPermission,
+  const applyEventForScope = useChat((state) => state.applyEventForScope);
+  const clearPendingPermissionForScope = useChat(
+    (state) => state.clearPendingPermissionForScope,
   );
 
   useEffect(() => {
-    if (!notebookPath) {
-      setScope(DEFAULT_CHAT_APP_KEY, "Notebook");
-      return;
-    }
+    setScope(chatScopeKey, chatScopeLabel);
 
-    const appKey = appOpenInfo?.app_root ?? DEFAULT_CHAT_APP_KEY;
-    const nextScopeLabel =
-      appOpenInfo?.app_name ?? scopeLabelForPath(notebookPath);
-    setScope(appKey, nextScopeLabel);
+    if (!notebookPath) return;
 
     let disposed = false;
     void invoke<string>("chat_new_session", { notebookPath })
@@ -76,7 +76,7 @@ export default function ChatPanel() {
       })
       .catch((error) => {
         if (!disposed) {
-          applyEventToApp(appKey, {
+          applyEventForScope(chatScopeKey, {
             type: "error",
             message: error instanceof Error ? error.message : String(error),
           });
@@ -87,9 +87,9 @@ export default function ChatPanel() {
       disposed = true;
     };
   }, [
-    appOpenInfo?.app_name,
-    appOpenInfo?.app_root,
-    applyEventToApp,
+    applyEventForScope,
+    chatScopeKey,
+    chatScopeLabel,
     notebookPath,
     setScope,
   ]);
@@ -97,24 +97,25 @@ export default function ChatPanel() {
   const sendPrompt = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt || !notebookPath || submitting) return;
+    const turnNotebookPath = notebookPath;
+    const turnScopeKey = chatScopeKey;
+    if (!trimmedPrompt || !turnNotebookPath || submitting) return;
 
-    const appKey = appOpenInfo?.app_root ?? DEFAULT_CHAT_APP_KEY;
     const onEvent = new Channel<ChatEvent>();
     onEvent.onmessage = (message) => {
-      useChat.getState().applyEventToApp(appKey, message);
+      useChat.getState().applyEventForScope(turnScopeKey, message);
     };
 
     setPrompt("");
     setSubmitting(true);
     try {
       await invoke("chat_turn", {
-        notebookPath,
+        notebookPath: turnNotebookPath,
         prompt: trimmedPrompt,
         onEvent,
       });
     } catch (error) {
-      applyEventToApp(appKey, {
+      applyEventForScope(turnScopeKey, {
         type: "error",
         message: error instanceof Error ? error.message : String(error),
       });
@@ -124,14 +125,16 @@ export default function ChatPanel() {
   };
 
   const respondToPermission = async (requestId: string, optionId: string) => {
+    const responseOptionId = deniedOptionId(optionId) ? null : optionId;
+    const permissionScopeKey = chatScopeKey;
     try {
       await invoke("chat_permission_respond", {
         requestId,
-        optionId,
+        optionId: responseOptionId,
       });
-      clearPendingPermission(requestId);
+      clearPendingPermissionForScope(permissionScopeKey, requestId);
     } catch (error) {
-      applyEvent({
+      applyEventForScope(permissionScopeKey, {
         type: "error",
         message: error instanceof Error ? error.message : String(error),
       });

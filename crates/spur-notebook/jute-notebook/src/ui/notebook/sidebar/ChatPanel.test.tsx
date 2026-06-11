@@ -1,9 +1,11 @@
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
+  within,
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -31,6 +33,7 @@ const tauriMocks = vi.hoisted(() => {
   };
 });
 let notebookPath = "/tmp/revenue.ipynb";
+let appOpenInfo: { app_name?: string; app_root?: string } | undefined;
 
 vi.mock("@tauri-apps/api/core", () => ({
   Channel: tauriMocks.Channel,
@@ -41,10 +44,10 @@ vi.mock("@/stores/notebook", () => ({
   useNotebook: () => ({
     store: {
       getInitialState: () => ({
-        viewState: { appOpenInfo: undefined, path: notebookPath },
+        viewState: { appOpenInfo, path: notebookPath },
       }),
       getState: () => ({
-        viewState: { appOpenInfo: undefined, path: notebookPath },
+        viewState: { appOpenInfo, path: notebookPath },
       }),
       subscribe: () => () => undefined,
     },
@@ -61,16 +64,19 @@ describe("ChatPanel", () => {
       return Promise.resolve(undefined);
     });
     notebookPath = "/tmp/revenue.ipynb";
+    appOpenInfo = undefined;
   });
 
   afterEach(cleanup);
 
   test("renders scope, messages, streaming text, and permission prompt", async () => {
-    useChat.getState().applyEvent({
+    const s = useChat.getState();
+    s.setScope("notebook:/tmp/revenue.ipynb", "revenue.ipynb");
+    s.applyEvent({
       type: "messageChunk",
       text: "Working",
     });
-    useChat.getState().applyEvent({
+    s.applyEvent({
       type: "permissionRequest",
       id: "perm-1",
       title: "Run notebook edit?",
@@ -93,7 +99,7 @@ describe("ChatPanel", () => {
         "chat_permission_respond",
         {
           requestId: "perm-1",
-          optionId: "deny",
+          optionId: null,
         },
       );
     });
@@ -134,39 +140,66 @@ describe("ChatPanel", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
   });
 
-  test("keeps late chat_turn events in the originating conversation", async () => {
-    render(<ChatPanel />);
+  test("routes streamed turn events to the notebook scope that started the turn", async () => {
+    notebookPath = "/tmp/revenue.ipynb";
+    const firstPanel = render(<ChatPanel />);
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
-      target: { value: "Summarize the notebook" },
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_switch_session", {
+        notebookPath: "/tmp/revenue.ipynb",
+        sessionId: "session-1",
+      });
     });
-    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    fireEvent.change(
+      within(firstPanel.container).getByRole("textbox", { name: "Message" }),
+      {
+        target: { value: "Summarize revenue" },
+      },
+    );
+    fireEvent.click(
+      within(firstPanel.container).getByRole("button", {
+        name: "Send message",
+      }),
+    );
 
     await waitFor(() => {
       expect(tauriMocks.invoke).toHaveBeenCalledWith(
         "chat_turn",
         expect.objectContaining({
           notebookPath: "/tmp/revenue.ipynb",
-          prompt: "Summarize the notebook",
+          prompt: "Summarize revenue",
+          onEvent: tauriMocks.channels[0],
         }),
       );
     });
 
-    useChat.getState().setScope("/apps/sales", "Sales App");
+    notebookPath = "/tmp/costs.ipynb";
+    const secondPanel = render(<ChatPanel />);
 
-    tauriMocks.channels[0]?.onmessage?.({
-      type: "messageChunk",
-      text: "Notebook summary",
+    await waitFor(() => {
+      expect(
+        within(secondPanel.container).getByText("costs.ipynb"),
+      ).toBeInTheDocument();
     });
-    tauriMocks.channels[0]?.onmessage?.({ type: "done" });
 
-    expect(useChat.getState().activeAppKey).toBe("/apps/sales");
-    expect(useChat.getState().messages).toEqual([]);
+    await act(async () => {
+      tauriMocks.channels[0]?.onmessage?.({
+        type: "messageChunk",
+        text: "Revenue summary",
+      });
+    });
 
-    useChat.getState().setScope("notebook", "Notebook");
-    expect(useChat.getState().messages.map((message) => message.text)).toEqual([
-      "Notebook summary",
-    ]);
+    const state = useChat.getState();
+    expect(
+      state.conversations["notebook:/tmp/revenue.ipynb"]?.streamingText,
+    ).toBe("Revenue summary");
+    expect(state.conversations["notebook:/tmp/costs.ipynb"]?.streamingText).toBe(
+      "",
+    );
+    expect(
+      within(secondPanel.container).queryByText("Revenue summary"),
+    ).not.toBeInTheDocument();
   });
 
   test("registers the agent sidebar panel", () => {
