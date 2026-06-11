@@ -19,9 +19,12 @@ let activeNotebook: Notebook | undefined;
 let activeNotebookId: string | undefined;
 let registration: Promise<void> | undefined;
 
-export function setActiveAgentNotebook(notebook: Notebook | undefined) {
+export function setActiveAgentNotebook(
+  notebook: Notebook | undefined,
+  notebookId?: string,
+) {
   activeNotebook = notebook;
-  activeNotebookId = notebook?.state.viewState.path;
+  activeNotebookId = notebookId ?? notebook?.state.viewState.path;
   void invoke("notebook_active_changed", {
     open: Boolean(notebook),
     notebookId: activeNotebookId,

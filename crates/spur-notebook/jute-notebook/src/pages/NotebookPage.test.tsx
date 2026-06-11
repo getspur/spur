@@ -216,6 +216,7 @@ describe("NotebookPage", () => {
     });
     expect(mocks.setActiveAgentNotebook).toHaveBeenLastCalledWith(
       expect.objectContaining({ store: second }),
+      "/tmp/analysis.ipynb",
     );
     expect(activeNotebookView()).toHaveAttribute("data-edit-buffer", "");
     expect(activeNotebookView()).toHaveAttribute("data-kernel-id", "kernel-b");

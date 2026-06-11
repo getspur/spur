@@ -2408,8 +2408,7 @@ mod tests {
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode entry");
-        assert!(result.manifest_error.is_none());
-        let info = result.open_info.expect("entry notebook returns open info");
+        let info = result.expect("entry notebook returns open info");
         assert_eq!(info.open_mode, "app");
         assert_eq!(info.app_name, "My App");
         assert_eq!(info.app_root, dir.path().to_string_lossy().as_ref());
@@ -2421,10 +2420,9 @@ mod tests {
             .await
             .expect("notebook_open_mode other");
         assert!(
-            other_result.open_info.is_none(),
+            other_result.is_none(),
             "non-entry notebook must return no open info"
         );
-        assert!(other_result.manifest_error.is_none());
     }
 
     #[tokio::test]
@@ -2450,7 +2448,6 @@ mod tests {
         let info = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode capabilities")
-            .open_info
             .expect("entry notebook returns open info");
         assert!(info.capabilities.active_output_scripts);
         assert!(info.capabilities.canvas_capture);
@@ -2467,8 +2464,7 @@ mod tests {
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode no manifest");
-        assert!(result.open_info.is_none());
-        assert!(result.manifest_error.is_none());
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -2482,17 +2478,7 @@ mod tests {
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode invalid manifest");
-        assert!(
-            result.open_info.is_none(),
-            "invalid manifest must not enter app mode"
-        );
-        let error = result
-            .manifest_error
-            .expect("invalid manifest reports a diagnostic");
-        assert!(
-            error.contains("spur-app.json"),
-            "diagnostic names the manifest file: {error}"
-        );
+        assert!(result.is_none(), "invalid manifest must not enter app mode");
     }
 
     #[tokio::test]
