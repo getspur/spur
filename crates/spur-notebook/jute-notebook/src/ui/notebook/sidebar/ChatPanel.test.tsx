@@ -60,6 +60,11 @@ describe("ChatPanel", () => {
     tauriMocks.channels.length = 0;
     tauriMocks.invoke.mockReset();
     tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "chat_agents_list") {
+        return Promise.resolve([
+          { name: "claude-code", label: "Claude Code", selected: true },
+        ]);
+      }
       if (command === "chat_sessions_list") return Promise.resolve([]);
       if (command === "chat_new_session") return Promise.resolve("session-1");
       return Promise.resolve(undefined);
@@ -92,6 +97,9 @@ describe("ChatPanel", () => {
     expect(screen.getByText("revenue.ipynb")).toBeInTheDocument();
     expect(screen.getByText("Working")).toBeInTheDocument();
     expect(screen.getByText("Run notebook edit?")).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: "Agent" })).toHaveValue(
+      "claude-code",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
 
@@ -100,7 +108,8 @@ describe("ChatPanel", () => {
         "chat_permission_respond",
         {
           requestId: "perm-1",
-          optionId: null,
+          optionId: "deny",
+          agentName: "claude-code",
         },
       );
     });
@@ -112,6 +121,7 @@ describe("ChatPanel", () => {
 
     await waitFor(() => {
       expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_switch_session", {
+        agentName: "claude-code",
         notebookPath: "/tmp/revenue.ipynb",
         sessionId: "session-1",
       });
@@ -128,6 +138,7 @@ describe("ChatPanel", () => {
         expect.objectContaining({
           notebookPath: "/tmp/revenue.ipynb",
           prompt: "Summarize the notebook",
+          agentName: "claude-code",
           onEvent: tauriMocks.channels[0],
         }),
       );
@@ -150,6 +161,11 @@ describe("ChatPanel", () => {
       if (command === "chat_sessions_list") {
         return Promise.resolve(sessionLists.shift() ?? sessionLists[0] ?? []);
       }
+      if (command === "chat_agents_list") {
+        return Promise.resolve([
+          { name: "claude-code", label: "Claude Code", selected: true },
+        ]);
+      }
       if (command === "chat_new_session") return Promise.resolve("session-1");
       return Promise.resolve(undefined);
     });
@@ -158,6 +174,7 @@ describe("ChatPanel", () => {
 
     await waitFor(() => {
       expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_sessions_list", {
+        agentName: "claude-code",
         notebookPath: "/tmp/revenue.ipynb",
       });
     });
@@ -180,6 +197,7 @@ describe("ChatPanel", () => {
 
     await waitFor(() => {
       expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_switch_session", {
+        agentName: "claude-code",
         notebookPath: "/tmp/revenue.ipynb",
         sessionId: "session-old",
       });
@@ -190,6 +208,11 @@ describe("ChatPanel", () => {
     tauriMocks.invoke.mockImplementation((command: string) => {
       if (command === "chat_sessions_list") {
         return Promise.reject(new Error("sessions unavailable"));
+      }
+      if (command === "chat_agents_list") {
+        return Promise.resolve([
+          { name: "claude-code", label: "Claude Code", selected: true },
+        ]);
       }
       if (command === "chat_new_session") return Promise.resolve("session-1");
       return Promise.resolve(undefined);
@@ -214,6 +237,7 @@ describe("ChatPanel", () => {
 
     await waitFor(() => {
       expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_switch_session", {
+        agentName: "claude-code",
         notebookPath: "/tmp/revenue.ipynb",
         sessionId: "session-1",
       });
@@ -237,6 +261,7 @@ describe("ChatPanel", () => {
         expect.objectContaining({
           notebookPath: "/tmp/revenue.ipynb",
           prompt: "Summarize revenue",
+          agentName: "claude-code",
           onEvent: tauriMocks.channels[0],
         }),
       );
@@ -278,6 +303,53 @@ describe("ChatPanel", () => {
       title: "AI Agent",
       ariaLabel: "AI Agent",
       Component: ChatPanel,
+    });
+  });
+
+  test("selects a configured agent and submits turns through that agent", async () => {
+    tauriMocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      const payload = args as { agentName?: string } | undefined;
+      if (command === "chat_agents_list") {
+        return Promise.resolve([
+          { name: "claude-code", label: "Claude Code", selected: true },
+          { name: "codex", label: "Codex", selected: false },
+        ]);
+      }
+      if (command === "chat_sessions_list") return Promise.resolve([]);
+      if (command === "chat_new_session") {
+        return Promise.resolve(`${payload?.agentName ?? "agent"}-session`);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<ChatPanel />);
+
+    const agentPicker = await screen.findByRole("combobox", { name: "Agent" });
+    expect(agentPicker).toHaveValue("claude-code");
+
+    fireEvent.change(agentPicker, { target: { value: "codex" } });
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_new_session", {
+        agentName: "codex",
+        notebookPath: "/tmp/revenue.ipynb",
+      });
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "Use Codex" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith(
+        "chat_turn",
+        expect.objectContaining({
+          agentName: "codex",
+          notebookPath: "/tmp/revenue.ipynb",
+          prompt: "Use Codex",
+        }),
+      );
     });
   });
 });
