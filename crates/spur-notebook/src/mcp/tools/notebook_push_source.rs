@@ -1,4 +1,3 @@
-use jute::backend::notebook::{DagSource, NotebookRoot};
 use rmcp::{
     model::{object as rmcp_object, CallToolResult, Tool},
     ErrorData as McpError,
@@ -7,10 +6,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    dag::{
-        graph::{resolve_source_for_port, SourcePortError},
-        SourcePayload, SourcePush,
-    },
+    commands::{push_validated_source_intent, ExternalSourcePushIntent, SourcePushIntentOrigin},
+    dag::SourcePayload,
     mcp::{tools::parse_byte_payload, ServerDeps},
 };
 
@@ -48,12 +45,6 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             Some(json!({ "error": error.to_string() })),
         )
     })?;
-    if params.port.is_empty() {
-        return Err(McpError::invalid_params(
-            "notebook_push_source port must not be empty",
-            None,
-        ));
-    }
     let payload = parse_byte_payload(METHOD, params.payload)?;
     let state = deps.state.as_ref().ok_or_else(|| {
         McpError::internal_error(
@@ -75,19 +66,17 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     })?;
 
     let (root, _) = state.get_notebook().snapshot();
-    let source = source_for_port(&root, &params.port)?;
-    engine
-        .push_source(SourcePush {
-            source,
+    push_validated_source_intent(
+        &root,
+        &engine,
+        ExternalSourcePushIntent {
+            origin: SourcePushIntentOrigin::Agent { tool: METHOD },
+            port: params.port.clone(),
             payload: SourcePayload::IpcBytes(payload),
-        })
-        .await
-        .map_err(|error| {
-            McpError::internal_error(
-                "notebook_push_source failed to queue source push",
-                Some(json!({ "error": error.to_string() })),
-            )
-        })?;
+        },
+    )
+    .await
+    .map_err(source_push_error_for_mcp)?;
 
     Ok(CallToolResult::structured(json!({
         "port": params.port,
@@ -95,17 +84,29 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     })))
 }
 
-fn source_for_port(root: &NotebookRoot, port: &str) -> Result<DagSource, McpError> {
-    resolve_source_for_port(root, port).map_err(|error| match error {
-        SourcePortError::NotDeclared { port } => McpError::invalid_params(
+fn source_push_error_for_mcp(error: crate::commands::SourcePushIntentError) -> McpError {
+    match error.code {
+        "source_push_failed" => McpError::internal_error(
+            "notebook_push_source failed to queue source push",
+            Some(json!({ "error": error.message, "code": error.code })),
+        ),
+        "source_port_not_declared" => McpError::invalid_params(
             "notebook_push_source source port is not declared",
-            Some(json!({ "port": port, "code": "source_port_not_declared" })),
+            Some(json!({ "port": error.port, "code": error.code })),
         ),
-        SourcePortError::Ambiguous { port } => McpError::invalid_params(
+        "ambiguous_source_port" => McpError::invalid_params(
             "notebook_push_source source port is ambiguous",
-            Some(json!({ "port": port, "code": "ambiguous_source_port" })),
+            Some(json!({ "port": error.port, "code": error.code })),
         ),
-    })
+        "invalid_source_port" => McpError::invalid_params(
+            "notebook_push_source port must not be empty",
+            Some(json!({ "port": error.port, "code": error.code })),
+        ),
+        _ => McpError::invalid_params(
+            error.message,
+            Some(json!({ "port": error.port, "code": error.code })),
+        ),
+    }
 }
 
 #[cfg(test)]

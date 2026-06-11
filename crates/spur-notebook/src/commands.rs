@@ -6,7 +6,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use jute::backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot};
+use jute::backend::notebook::{Cell, CellDagMetadata, NotebookRoot};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 use tracing::warn;
@@ -14,8 +14,12 @@ use tracing::warn;
 use crate::{
     dag::{
         engine::{ReactiveEngineClient, SourcePayload, SourcePush},
-        graph::{resolve_source_for_port, SourcePortError},
-        notebook_port_root, notebook_run_context, NotebookDag, PortStore,
+        graph::{
+            resolve_source_cell_for_port, resolve_source_for_port, resolve_widget_emit_cell,
+            SourcePortError, WidgetEmitError,
+        },
+        notebook_port_root, notebook_run_context, NotebookDag, Origin, PortEventDraft,
+        PortEventKind, PortStore,
     },
     mcp::bridge::{AgentBridge, TauriBridgeRequester},
     spur_app::{self, archive, SpurAppExportOptions, SpurAppManifest, SpurAppPreflight},
@@ -163,6 +167,44 @@ impl AnyWidgetIntentError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum SourcePushIntentOrigin {
+    Agent { tool: &'static str },
+    Widget { model_id: String },
+    Capture,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExternalSourcePushIntent {
+    pub origin: SourcePushIntentOrigin,
+    pub port: String,
+    pub payload: SourcePayload,
+}
+
+#[derive(Debug)]
+pub(crate) struct SourcePushIntentError {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+    pub(crate) port: String,
+    origin: Origin,
+}
+
+impl SourcePushIntentError {
+    fn new(
+        code: &'static str,
+        message: impl Into<String>,
+        port: impl Into<String>,
+        origin: Origin,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            port: port.into(),
+            origin,
+        }
+    }
+}
+
 /// Observe one allowlisted anywidget command intent from the frontend.
 #[tauri::command]
 pub async fn anywidget_command(
@@ -202,11 +244,6 @@ async fn push_capture_port_for_state(
     webm_base64: String,
     duration_sec: f64,
 ) -> Result<Value, jute::Error> {
-    if port.is_empty() {
-        return Err(jute::Error::NotebookDaemon(
-            "push_capture_port port must not be empty".to_owned(),
-        ));
-    }
     if !duration_sec.is_finite() || duration_sec < 0.0 {
         return Err(jute::Error::NotebookDaemon(
             "push_capture_port duration_sec must be a finite non-negative number".to_owned(),
@@ -219,45 +256,24 @@ async fn push_capture_port_for_state(
     let engine = engine.ok_or_else(|| {
         jute::Error::NotebookDaemon("push_capture_port reactive engine is unavailable".to_owned())
     })?;
+    let intent = ExternalSourcePushIntent {
+        origin: SourcePushIntentOrigin::Capture,
+        port: port.clone(),
+        payload: SourcePayload::MediaBlob {
+            bytes: webm,
+            mime: "video/webm".to_owned(),
+            duration_sec: Some(duration_sec),
+        },
+    };
     let (root, _) = state.get_notebook().snapshot();
-    let source = capture_source_for_port(&root, &port)?;
-    engine
-        .push_source(SourcePush {
-            source,
-            payload: SourcePayload::MediaBlob {
-                bytes: webm,
-                mime: "video/webm".to_owned(),
-                duration_sec: Some(duration_sec),
-            },
-        })
+    push_validated_source_intent(&root, &engine, intent)
         .await
-        .map_err(|error| {
-            jute::Error::NotebookDaemon(format!(
-                "push_capture_port failed to queue source push: {error}"
-            ))
-        })?;
+        .map_err(source_push_error_for_capture)?;
 
     Ok(json!({
         "port": port,
         "accepted": true,
     }))
-}
-
-fn capture_source_for_port(root: &NotebookRoot, port: &str) -> Result<DagSource, jute::Error> {
-    let source = resolve_source_for_port(root, port).map_err(|error| match error {
-        SourcePortError::NotDeclared { port } => jute::Error::NotebookDaemon(format!(
-            "push_capture_port source port is not declared: {port}"
-        )),
-        SourcePortError::Ambiguous { port } => jute::Error::NotebookDaemon(format!(
-            "push_capture_port source port is ambiguous: {port}"
-        )),
-    })?;
-    if source.kind != "canvas-capture" {
-        return Err(jute::Error::NotebookDaemon(format!(
-            "push_capture_port source kind must be canvas-capture for port: {port}"
-        )));
-    }
-    Ok(source)
 }
 
 pub fn publish_spur_app_for_paths(
@@ -367,14 +383,6 @@ async fn handle_source_push_intent(
             format!("source.push requires {{ port, payload? }}: {error}"),
         )
     })?;
-    if msg.port.is_empty() {
-        return Err(audit_rejected_intent(
-            intent,
-            "invalid_source_port",
-            "source.push port must not be empty",
-        ));
-    }
-
     let ipc_bytes = source_push_ipc_bytes(msg.payload, &intent.buffers)?;
     let engine = engine.ok_or_else(|| {
         AnyWidgetIntentError::new(
@@ -383,19 +391,30 @@ async fn handle_source_push_intent(
         )
     })?;
     let (root, _) = state.get_notebook().snapshot();
-    let source = source_for_port(&root, &msg.port)?;
-    engine
-        .push_source(SourcePush {
-            source,
-            payload: SourcePayload::IpcBytes(ipc_bytes),
-        })
-        .await
-        .map_err(|error| {
-            AnyWidgetIntentError::new(
-                "source_push_failed",
-                format!("failed to queue source.push: {error}"),
+    let model_id = intent
+        .comm_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|comm_id| !comm_id.is_empty())
+        .ok_or_else(|| {
+            audit_rejected_intent(
+                intent,
+                "missing_model_id",
+                "source.push requires commId for widget authorization",
             )
-        })?;
+        })?
+        .to_owned();
+    push_validated_source_intent(
+        &root,
+        &engine,
+        ExternalSourcePushIntent {
+            origin: SourcePushIntentOrigin::Widget { model_id },
+            port: msg.port.clone(),
+            payload: SourcePayload::IpcBytes(ipc_bytes),
+        },
+    )
+    .await
+    .map_err(source_push_error_for_widget)?;
 
     Ok(json!({
         "accepted": true,
@@ -564,19 +583,6 @@ fn source_push_ipc_bytes(
     }
 }
 
-fn source_for_port(root: &NotebookRoot, port: &str) -> Result<DagSource, AnyWidgetIntentError> {
-    resolve_source_for_port(root, port).map_err(|error| match error {
-        SourcePortError::NotDeclared { port } => AnyWidgetIntentError::new(
-            "source_port_not_declared",
-            format!("source.push port is not declared: {port}"),
-        ),
-        SourcePortError::Ambiguous { port } => AnyWidgetIntentError::new(
-            "ambiguous_source_port",
-            format!("source.push port is ambiguous: {port}"),
-        ),
-    })
-}
-
 fn audit_rejected_intent(
     intent: &AnyWidgetCommandIntent,
     code: &'static str,
@@ -590,6 +596,220 @@ fn audit_rejected_intent(
         "rejected anywidget command intent"
     );
     AnyWidgetIntentError::new(code, message)
+}
+
+pub(crate) async fn push_validated_source_intent(
+    root: &NotebookRoot,
+    engine: &ReactiveEngineClient,
+    intent: ExternalSourcePushIntent,
+) -> Result<(), SourcePushIntentError> {
+    match validate_source_push_intent(root, intent) {
+        Ok(push) => engine.push_source(push).await.map_err(|error| {
+            SourcePushIntentError::new(
+                "source_push_failed",
+                format!("failed to queue source push: {error}"),
+                "",
+                Origin::Agent {
+                    tool: "source_push".to_owned(),
+                },
+            )
+        }),
+        Err(error) => {
+            emit_intent_rejected(engine, &error).await;
+            Err(error)
+        }
+    }
+}
+
+fn validate_source_push_intent(
+    root: &NotebookRoot,
+    intent: ExternalSourcePushIntent,
+) -> Result<SourcePush, SourcePushIntentError> {
+    let port = intent.port;
+    if port.is_empty() {
+        return Err(SourcePushIntentError::new(
+            "invalid_source_port",
+            "source push port must not be empty",
+            port,
+            rejection_origin(&intent.origin),
+        ));
+    }
+    let origin = source_push_origin(root, &intent.origin, &port)?;
+
+    let source = match &intent.origin {
+        SourcePushIntentOrigin::Capture => {
+            let (_cell_id, source) = resolve_source_cell_for_port(root, &port)
+                .map_err(|error| source_port_error("source push", error, origin.clone()))?;
+            if source.kind != "canvas-capture" {
+                return Err(SourcePushIntentError::new(
+                    "invalid_source_kind",
+                    format!(
+                        "push_capture_port source kind must be canvas-capture for port: {port}"
+                    ),
+                    port,
+                    origin,
+                ));
+            }
+            source
+        }
+        SourcePushIntentOrigin::Agent { .. } | SourcePushIntentOrigin::Widget { .. } => {
+            resolve_source_for_port(root, &port)
+                .map_err(|error| source_port_error("source.push", error, origin.clone()))?
+        }
+    };
+
+    match (&intent.origin, &intent.payload) {
+        (
+            SourcePushIntentOrigin::Agent { .. } | SourcePushIntentOrigin::Widget { .. },
+            SourcePayload::IpcBytes(_),
+        )
+        | (SourcePushIntentOrigin::Capture, SourcePayload::MediaBlob { .. }) => {}
+        (SourcePushIntentOrigin::Capture, SourcePayload::IpcBytes(_)) => {
+            return Err(SourcePushIntentError::new(
+                "invalid_source_payload_class",
+                "push_capture_port requires a media blob payload",
+                port,
+                origin,
+            ));
+        }
+        (
+            SourcePushIntentOrigin::Agent { .. } | SourcePushIntentOrigin::Widget { .. },
+            SourcePayload::MediaBlob { .. },
+        ) => {
+            return Err(SourcePushIntentError::new(
+                "invalid_source_payload_class",
+                "source.push accepts dataframe IPC payloads only",
+                port,
+                origin,
+            ));
+        }
+    }
+
+    Ok(SourcePush {
+        source,
+        payload: intent.payload,
+    })
+}
+
+fn rejection_origin(origin: &SourcePushIntentOrigin) -> Origin {
+    match origin {
+        SourcePushIntentOrigin::Agent { tool } => Origin::Agent {
+            tool: (*tool).to_owned(),
+        },
+        SourcePushIntentOrigin::Widget { model_id } => Origin::Widget {
+            model_id: model_id.clone(),
+            cell_id: String::new(),
+        },
+        SourcePushIntentOrigin::Capture => Origin::Capture {
+            cell_id: String::new(),
+        },
+    }
+}
+
+fn source_push_origin(
+    root: &NotebookRoot,
+    origin: &SourcePushIntentOrigin,
+    port: &str,
+) -> Result<Origin, SourcePushIntentError> {
+    match origin {
+        SourcePushIntentOrigin::Agent { tool } => Ok(Origin::Agent {
+            tool: (*tool).to_owned(),
+        }),
+        SourcePushIntentOrigin::Widget { model_id } => {
+            let cell_id = resolve_widget_emit_cell(root, model_id, port)
+                .map_err(|error| widget_emit_error(error, port))?;
+            Ok(Origin::Widget {
+                model_id: model_id.clone(),
+                cell_id,
+            })
+        }
+        SourcePushIntentOrigin::Capture => {
+            let (cell_id, _source) = resolve_source_cell_for_port(root, port).map_err(|error| {
+                source_port_error(
+                    "push_capture_port",
+                    error,
+                    Origin::Capture {
+                        cell_id: String::new(),
+                    },
+                )
+            })?;
+            Ok(Origin::Capture { cell_id })
+        }
+    }
+}
+
+fn source_port_error(
+    prefix: &'static str,
+    error: SourcePortError,
+    origin: Origin,
+) -> SourcePushIntentError {
+    match error {
+        SourcePortError::NotDeclared { port } => SourcePushIntentError::new(
+            "source_port_not_declared",
+            format!("{prefix} port is not declared: {port}"),
+            port,
+            origin,
+        ),
+        SourcePortError::Ambiguous { port } => SourcePushIntentError::new(
+            "ambiguous_source_port",
+            format!("{prefix} port is ambiguous: {port}"),
+            port,
+            origin,
+        ),
+    }
+}
+
+fn widget_emit_error(error: WidgetEmitError, requested_port: &str) -> SourcePushIntentError {
+    match error {
+        WidgetEmitError::ModelNotFound { model_id } => SourcePushIntentError::new(
+            "widget_model_not_found",
+            format!("source.push widget model is not associated with a frontend cell: {model_id}"),
+            requested_port,
+            Origin::Widget {
+                model_id,
+                cell_id: String::new(),
+            },
+        ),
+        WidgetEmitError::CellMissingFrontendMetadata { model_id, cell_id } => {
+            SourcePushIntentError::new(
+                "frontend_metadata_missing",
+                format!("source.push frontend cell has no emits metadata: {cell_id}"),
+                requested_port,
+                Origin::Widget { model_id, cell_id },
+            )
+        }
+        WidgetEmitError::EmitNotDeclared {
+            model_id,
+            cell_id,
+            port,
+        } => SourcePushIntentError::new(
+            "source_emit_not_declared",
+            format!("source.push port is not declared in frontend emits: {port}"),
+            port,
+            Origin::Widget { model_id, cell_id },
+        ),
+    }
+}
+
+async fn emit_intent_rejected(engine: &ReactiveEngineClient, error: &SourcePushIntentError) {
+    if let Err(emit_error) = engine
+        .emit_port_event(PortEventDraft::new(PortEventKind::IntentRejected {
+            origin: error.origin.clone(),
+            code: error.code.to_owned(),
+            port: error.port.clone(),
+        }))
+        .await
+    {
+        warn!(%emit_error, code = error.code, "failed to emit rejected source intent");
+    }
+}
+
+fn source_push_error_for_widget(error: SourcePushIntentError) -> AnyWidgetIntentError {
+    AnyWidgetIntentError::new(error.code, error.message)
+}
+
+fn source_push_error_for_capture(error: SourcePushIntentError) -> jute::Error {
+    jute::Error::NotebookDaemon(error.message)
 }
 
 fn anywidget_response(id: String, response: Value) -> AnyWidgetCommandResponse {
@@ -797,6 +1017,7 @@ fn cell_execution_count(cell: &Cell) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         future::Future,
         pin::Pin,
         sync::{Arc, Mutex},
@@ -807,8 +1028,9 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use base64::Engine as _;
     use jute::backend::notebook::{
-        Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, MultilineString,
-        NotebookMetadata, NotebookRoot, PortSpec, SpurCellMetadata,
+        Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, FrontendCellMetadata,
+        MultilineString, NotebookMetadata, NotebookRoot, Output, OutputDisplayData, PortSpec,
+        SpurCellMetadata,
     };
     use tempfile::TempDir;
 
@@ -818,7 +1040,8 @@ mod tests {
                 CellRunOutcome, CellRunRequest, CellRunStatus, CellRunner, EngineError,
                 KernelEnsureRequest, ReactiveEngineClient, SourcePush,
             },
-            notebook_run_context_with_runner,
+            notebook_run_context_with_runner, Origin, PortEventKind, PortEventSequencer,
+            PortEventSequencerConfig,
         },
         mcp::bridge::{BridgeError, BridgeRequestFuture, BridgeRequester},
     };
@@ -958,9 +1181,59 @@ mod tests {
         })
     }
 
+    fn frontend_source_cell(id: &str, model_id: &str, emits: Vec<&str>, source: DagSource) -> Cell {
+        Cell::Code(CodeCell {
+            id: Some(id.to_owned()),
+            metadata: CellMetadata {
+                spur: Some(SpurCellMetadata {
+                    version: 7,
+                    last_edited_by: Some("brain".to_owned()),
+                    datasource_setup: None,
+                    dag: Some(CellDagMetadata {
+                        produces: Vec::new(),
+                        consumes: Vec::new(),
+                        source: Some(source),
+                    }),
+                    code_type: None,
+                    frontend: Some(FrontendCellMetadata {
+                        kind: Some("html".to_owned()),
+                        binds: Vec::new(),
+                        emits: emits.into_iter().map(str::to_owned).collect(),
+                    }),
+                }),
+                jute_deck: None,
+                other: Default::default(),
+            },
+            source: MultilineString::Single("<div></div>".to_owned()),
+            execution_count: Some(1),
+            outputs: vec![Output::DisplayData(OutputDisplayData {
+                data: BTreeMap::from([(
+                    "application/vnd.jupyter.widget-view+json".to_owned(),
+                    json!({ "model_id": model_id }),
+                )]),
+                metadata: BTreeMap::new(),
+                other: Default::default(),
+            })],
+        })
+    }
+
     fn source_engine_for_test() -> (ReactiveEngineClient, mpsc::Receiver<SourcePush>) {
         let (tx, rx) = mpsc::channel(4);
         (ReactiveEngineClient::new_for_test(tx), rx)
+    }
+
+    fn source_engine_with_events_for_test() -> (
+        ReactiveEngineClient,
+        mpsc::Receiver<SourcePush>,
+        PortEventSequencer,
+    ) {
+        let (tx, rx) = mpsc::channel(4);
+        let sequencer = PortEventSequencer::spawn(PortEventSequencerConfig::default());
+        (
+            ReactiveEngineClient::new_with_port_events(tx, sequencer.client()),
+            rx,
+            sequencer,
+        )
     }
 
     fn ipc_batch() -> RecordBatch {
@@ -1059,7 +1332,12 @@ mod tests {
         };
         state.get_notebook().load(
             &notebook_path,
-            notebook(vec![source_cell("slider", source.clone())]),
+            notebook(vec![frontend_source_cell(
+                "slider",
+                "model-1",
+                vec!["horizon"],
+                source.clone(),
+            )]),
         );
         let (engine, mut source_rx) = source_engine_for_test();
 
@@ -1070,7 +1348,7 @@ mod tests {
                 id: "cmd-1".to_owned(),
                 kind: "anywidget-command".to_owned(),
                 name: "source.push".to_owned(),
-                comm_id: None,
+                comm_id: Some("model-1".to_owned()),
                 msg: json!({ "port": "horizon", "payload": [1, 2, 3] }),
                 buffers: Vec::new(),
             },
@@ -1084,6 +1362,106 @@ mod tests {
         let push = source_rx.recv().await.expect("source push queued");
         assert_eq!(push.source, source);
         assert_eq!(push.payload, SourcePayload::IpcBytes(vec![1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn anywidget_source_push_rejects_undeclared_emit_and_emits_event() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("nb.ipynb");
+        let state = jute::state::State::new();
+        state.get_notebook().load(
+            &notebook_path,
+            notebook(vec![frontend_source_cell(
+                "slider",
+                "model-1",
+                vec!["allowed"],
+                DagSource {
+                    kind: "frontend".to_owned(),
+                    port: "blocked".to_owned(),
+                },
+            )]),
+        );
+        let (engine, mut source_rx, sequencer) = source_engine_with_events_for_test();
+        let mut events_rx = engine
+            .subscribe_port_events()
+            .expect("port event subscription");
+
+        let response = handle_anywidget_command_intent(
+            &state,
+            Some(engine.clone()),
+            AnyWidgetCommandIntent {
+                id: "cmd-denied".to_owned(),
+                kind: "anywidget-command".to_owned(),
+                name: "source.push".to_owned(),
+                comm_id: Some("model-1".to_owned()),
+                msg: json!({ "port": "blocked", "payload": [1, 2, 3] }),
+                buffers: Vec::new(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response.response["error"]["code"],
+            "source_emit_not_declared"
+        );
+        assert!(source_rx.try_recv().is_err());
+        let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("intent rejection event")
+            .expect("event broadcast");
+        assert_eq!(
+            event.kind(),
+            &PortEventKind::IntentRejected {
+                origin: Origin::Widget {
+                    model_id: "model-1".to_owned(),
+                    cell_id: "slider".to_owned(),
+                },
+                code: "source_emit_not_declared".to_owned(),
+                port: "blocked".to_owned(),
+            }
+        );
+        drop(engine);
+        sequencer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn anywidget_source_push_accepts_declared_emit() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("nb.ipynb");
+        let state = jute::state::State::new();
+        let source = DagSource {
+            kind: "frontend".to_owned(),
+            port: "allowed".to_owned(),
+        };
+        state.get_notebook().load(
+            &notebook_path,
+            notebook(vec![frontend_source_cell(
+                "slider",
+                "model-1",
+                vec!["allowed"],
+                source.clone(),
+            )]),
+        );
+        let (engine, mut source_rx) = source_engine_for_test();
+
+        let response = handle_anywidget_command_intent(
+            &state,
+            Some(engine),
+            AnyWidgetCommandIntent {
+                id: "cmd-allowed".to_owned(),
+                kind: "anywidget-command".to_owned(),
+                name: "source.push".to_owned(),
+                comm_id: Some("model-1".to_owned()),
+                msg: json!({ "port": "allowed", "payload": [9] }),
+                buffers: Vec::new(),
+            },
+        )
+        .await;
+
+        assert_eq!(response.response["accepted"], true);
+        let push = source_rx.recv().await.expect("source push queued");
+        assert_eq!(push.source, source);
+        assert_eq!(push.payload, SourcePayload::IpcBytes(vec![9]));
     }
 
     #[tokio::test]
@@ -1127,6 +1505,58 @@ mod tests {
                 duration_sec: Some(1.5),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn push_capture_port_rejects_non_canvas_capture_kind() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("nb.ipynb");
+        let state = jute::state::State::new();
+        state.get_notebook().load(
+            &notebook_path,
+            notebook(vec![source_cell(
+                "capture",
+                DagSource {
+                    kind: "frontend".to_owned(),
+                    port: "capture".to_owned(),
+                },
+            )]),
+        );
+        let (engine, mut source_rx, sequencer) = source_engine_with_events_for_test();
+        let mut events_rx = engine
+            .subscribe_port_events()
+            .expect("port event subscription");
+
+        let error = push_capture_port_for_state(
+            &state,
+            Some(engine.clone()),
+            "capture".to_owned(),
+            base64::engine::general_purpose::STANDARD.encode(b"webm bytes"),
+            1.5,
+        )
+        .await
+        .expect_err("non canvas-capture kind is rejected");
+
+        assert!(error
+            .to_string()
+            .contains("source kind must be canvas-capture"));
+        assert!(source_rx.try_recv().is_err());
+        let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("intent rejection event")
+            .expect("event broadcast");
+        assert_eq!(
+            event.kind(),
+            &PortEventKind::IntentRejected {
+                origin: Origin::Capture {
+                    cell_id: "capture".to_owned(),
+                },
+                code: "invalid_source_kind".to_owned(),
+                port: "capture".to_owned(),
+            }
+        );
+        drop(engine);
+        sequencer.shutdown().await;
     }
 
     #[tokio::test]

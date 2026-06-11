@@ -35,8 +35,8 @@ use crate::mcp::{
 
 use super::{
     notebook_port_root, CascadeStatus, NotebookDag, Origin, PortEvent, PortEventClient,
-    PortEventDraft, PortEventKind, PortEventSequencer, PortEventSequencerConfig, PortPayload,
-    PortRead, PortStore, PortStoreError, RunStatus,
+    PortEventDraft, PortEventError, PortEventKind, PortEventSequencer, PortEventSequencerConfig,
+    PortPayload, PortRead, PortStore, PortStoreError, RunStatus,
 };
 
 const DEFAULT_SOURCE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -1045,6 +1045,13 @@ impl ReactiveEngineClient {
             .send(push)
             .await
             .map_err(|_send_error| EngineError::SourceQueueClosed)
+    }
+
+    pub async fn emit_port_event(&self, draft: PortEventDraft) -> Result<(), PortEventError> {
+        let Some(port_events) = &self.port_events else {
+            return Ok(());
+        };
+        port_events.emit(draft).await
     }
 
     pub fn subscribe_port_events(&self) -> Option<broadcast::Receiver<PortEvent>> {
