@@ -34,10 +34,10 @@ use crate::mcp::{
 };
 
 use super::{
-    notebook_port_root, CascadeStatus, NotebookDag, Origin, PortClass, PortEntry, PortEvent,
-    PortEventClient, PortEventDraft, PortEventError, PortEventKind, PortEventSequencer,
-    PortEventSequencerConfig, PortKind, PortPayload, PortRead, PortRef, PortStore, PortStoreError,
-    RunInput, RunStatus,
+    notebook_port_root, validate_declared_schema, CascadeStatus, DeclaredSchemaError, NotebookDag,
+    Origin, PortClass, PortEntry, PortEvent, PortEventClient, PortEventDraft, PortEventError,
+    PortEventKind, PortEventSequencer, PortEventSequencerConfig, PortKind, PortPayload, PortRead,
+    PortRef, PortStore, PortStoreError, RunInput, RunStatus,
 };
 
 const DEFAULT_SOURCE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -247,6 +247,7 @@ impl CellRunner for RunCellCommandRunner {
 pub enum EngineError {
     Dag(crate::dag::DagError),
     Port(PortStoreError),
+    DeclaredSchema(DeclaredSchemaError),
     CellNotFound {
         cell_id: String,
     },
@@ -271,6 +272,7 @@ impl fmt::Display for EngineError {
         match self {
             Self::Dag(error) => write!(f, "{error}"),
             Self::Port(error) => write!(f, "{error}"),
+            Self::DeclaredSchema(error) => write!(f, "{error}"),
             Self::CellNotFound { cell_id } => write!(f, "cell not found: {cell_id}"),
             Self::MissingCellVersion { cell_id } => {
                 write!(f, "cell has no spur version: {cell_id}")
@@ -299,6 +301,7 @@ impl EngineError {
         match self {
             Self::Dag(_) => "dag",
             Self::Port(_) => "port",
+            Self::DeclaredSchema(_) => "declared_schema",
             Self::CellNotFound { .. } => "cell_not_found",
             Self::MissingCellVersion { .. } => "missing_cell_version",
             Self::StaleCell { .. } => "stale_cell",
@@ -320,6 +323,12 @@ impl From<crate::dag::DagError> for EngineError {
 impl From<PortStoreError> for EngineError {
     fn from(error: PortStoreError) -> Self {
         Self::Port(error)
+    }
+}
+
+impl From<DeclaredSchemaError> for EngineError {
+    fn from(error: DeclaredSchemaError) -> Self {
+        Self::DeclaredSchema(error)
     }
 }
 
@@ -419,6 +428,10 @@ where
         let mut ports = PortStore::open_at(&self.port_root)?;
         match &push.payload {
             SourcePayload::IpcBytes(bytes) => {
+                if let Some(declared) = push.source.schema.as_ref() {
+                    let (schema, _) = super::ports::read_ipc_for_validation(bytes)?;
+                    validate_declared_schema(&push.source.port, declared, schema.as_ref())?;
+                }
                 ports.put(&push.source.port, bytes)?;
             }
             SourcePayload::MediaBlob {
@@ -426,6 +439,13 @@ where
                 mime,
                 duration_sec,
             } => {
+                if push.source.schema.is_some() {
+                    return Err(DeclaredSchemaError::InvalidSchema {
+                        port: push.source.port.clone(),
+                        message: "declared schemas apply only to dataframe ports".to_string(),
+                    }
+                    .into());
+                }
                 ports.put(
                     &push.source.port,
                     PortPayload::MediaBlob {
@@ -867,10 +887,15 @@ where
         Ok(consumed_ports
             .into_iter()
             .map(|port| RunInput {
-                r#ref: store
-                    .manifest()
-                    .get(&port)
-                    .map(|entry| port_ref_from_entry(&port, entry)),
+                r#ref: store.manifest().get(&port).map(|entry| {
+                    port_ref_from_entry(
+                        &port,
+                        entry,
+                        graph
+                            .declared_schema_for_port(&port)
+                            .and_then(|schema| super::ports::schema_hash(schema).ok()),
+                    )
+                }),
                 port,
             })
             .collect())
@@ -888,16 +913,43 @@ where
             return Ok(Vec::new());
         };
         let store = PortStore::open_read_only_at(&self.port_root)?;
-        Ok(metadata
+        metadata
             .produces
             .iter()
             .filter_map(|produced| {
                 let port = produced.port.as_str();
                 let entry = store.manifest().get(port)?;
                 let before = before_versions.get(port).copied().flatten();
-                (Some(entry.version) != before).then(|| port_ref_from_entry(port, entry))
+                (Some(entry.version) != before).then_some((port, entry))
             })
-            .collect())
+            .map(|(port, entry)| {
+                let schema_hash = match graph.declared_schema_for_port(port) {
+                    Some(declared) => {
+                        match &entry.kind {
+                            PortKind::Arrow(actual) => {
+                                validate_declared_schema(port, declared, actual)?;
+                            }
+                            PortKind::Media { .. } => {
+                                return Err(DeclaredSchemaError::InvalidSchema {
+                                    port: port.to_owned(),
+                                    message: "declared schemas apply only to dataframe ports"
+                                        .to_string(),
+                                }
+                                .into());
+                            }
+                        }
+                        Some(super::ports::schema_hash(declared).map_err(|source| {
+                            DeclaredSchemaError::InvalidSchema {
+                                port: port.to_owned(),
+                                message: source.to_string(),
+                            }
+                        })?)
+                    }
+                    None => None,
+                };
+                Ok(port_ref_from_entry(port, entry, schema_hash))
+            })
+            .collect()
     }
 
     fn bump_produced_ports_if_unchanged(
@@ -1346,7 +1398,7 @@ fn build_graph(root: &NotebookRoot) -> Result<NotebookDag, EngineError> {
     .map_err(EngineError::Dag)
 }
 
-fn port_ref_from_entry(port: &str, entry: &PortEntry) -> PortRef {
+fn port_ref_from_entry(port: &str, entry: &PortEntry, schema_hash: Option<String>) -> PortRef {
     PortRef {
         port: port.to_owned(),
         version: entry.version,
@@ -1354,7 +1406,7 @@ fn port_ref_from_entry(port: &str, entry: &PortEntry) -> PortRef {
             PortKind::Arrow(_) => PortClass::Dataframe,
             PortKind::Media { .. } => PortClass::Media,
         },
-        schema_hash: None,
+        schema_hash,
     }
 }
 
@@ -1865,6 +1917,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_push_rejects_declared_schema_mismatch_before_put() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = source_with_schema("csv", "sales", declared_schema_json("Float64"));
+        let store = store_with_notebook(notebook(vec![cell(
+            "a",
+            "a = spur.get('sales')",
+            1,
+            dag(vec![port("a")], vec![], Some(source.clone())),
+        )]));
+        let runner = FakeRunner::default();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner,
+            temp.path().join("reactive.ipynb"),
+            temp.path().to_path_buf(),
+        );
+
+        let err = engine
+            .process_source_push(SourcePush {
+                source,
+                payload: SourcePayload::IpcBytes(ipc_bytes()),
+            })
+            .await
+            .expect_err("declared source schema mismatch fails");
+
+        assert_eq!(
+            err.to_string(),
+            "port 'sales' field 'value': declared Float64, got Int64"
+        );
+        assert!(
+            PortStore::open_at(temp.path())
+                .expect("open ports")
+                .manifest()
+                .get("sales")
+                .is_none(),
+            "mismatched source push must not commit a port entry"
+        );
+    }
+
+    #[tokio::test]
     async fn run_started_records_missing_consumed_port_before_dispatch() {
         let temp = TempDir::new().expect("temp dir");
         let store = store_with_notebook(notebook(vec![cell(
@@ -1918,11 +2010,16 @@ mod tests {
     #[tokio::test]
     async fn run_finished_records_kernel_produced_port_output() {
         let temp = TempDir::new().expect("temp dir");
+        let declared = declared_schema_json("Int64");
         let store = store_with_notebook(notebook(vec![cell(
             "producer",
             "spur.put('result', df)",
             1,
-            dag(vec![port("result")], vec![], None),
+            dag(
+                vec![port_with_schema("result", declared.clone())],
+                vec![],
+                None,
+            ),
         )]));
         let runner = FakeRunner::default();
         runner.write_port_on_run("producer", temp.path(), "result");
@@ -1968,7 +2065,7 @@ mod tests {
                 port: "result".to_string(),
                 version: 1,
                 class: PortClass::Dataframe,
-                schema_hash: None,
+                schema_hash: Some(crate::dag::schema_hash(&declared).expect("schema hash")),
             }]
         ));
 
@@ -2957,6 +3054,18 @@ mod tests {
             port: port.to_string(),
             repr: "arrow".to_string(),
             display: None,
+            class: None,
+            schema: None,
+        }
+    }
+
+    fn port_with_schema(port: &str, schema: Value) -> PortSpec {
+        PortSpec {
+            port: port.to_string(),
+            repr: "arrow".to_string(),
+            display: None,
+            class: Some("dataframe".to_string()),
+            schema: Some(schema),
         }
     }
 
@@ -2964,7 +3073,34 @@ mod tests {
         DagSource {
             kind: kind.to_string(),
             port: port.to_string(),
+            class: None,
+            schema: None,
         }
+    }
+
+    fn source_with_schema(kind: &str, port: &str, schema: Value) -> DagSource {
+        DagSource {
+            kind: kind.to_string(),
+            port: port.to_string(),
+            class: Some("dataframe".to_string()),
+            schema: Some(schema),
+        }
+    }
+
+    fn declared_schema_json(data_type: &str) -> Value {
+        json!({
+            "fields": [
+                {
+                    "name": "value",
+                    "data_type": data_type,
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        })
     }
 
     fn ipc_bytes() -> Vec<u8> {

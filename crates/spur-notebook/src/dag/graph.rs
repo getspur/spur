@@ -6,6 +6,7 @@ use std::{
 
 use jute::backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot, Output};
 use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DagEdge {
@@ -285,6 +286,23 @@ impl NotebookDag {
         self.producers_by_port.get(port).map(String::as_str)
     }
 
+    pub fn declared_schema_for_port(&self, port: &str) -> Option<&Value> {
+        self.nodes.values().find_map(|metadata| {
+            metadata
+                .produces
+                .iter()
+                .find(|produced| produced.port == port)
+                .and_then(|produced| produced.schema.as_ref())
+                .or_else(|| {
+                    metadata
+                        .source
+                        .as_ref()
+                        .filter(|source| source.port == port)
+                        .and_then(|source| source.schema.as_ref())
+                })
+        })
+    }
+
     pub fn edges(&self) -> Vec<DagEdge> {
         self.consumers_by_port
             .iter()
@@ -446,6 +464,8 @@ mod tests {
             port: name.to_string(),
             repr: "dataframe".to_string(),
             display: None,
+            class: None,
+            schema: None,
         }
     }
 
@@ -453,6 +473,8 @@ mod tests {
         DagSource {
             kind: "datasource".to_string(),
             port: port.to_string(),
+            class: None,
+            schema: None,
         }
     }
 
@@ -460,6 +482,8 @@ mod tests {
         DagSource {
             kind: kind.to_string(),
             port: port.to_string(),
+            class: None,
+            schema: None,
         }
     }
 

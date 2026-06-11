@@ -221,6 +221,8 @@ mod tests {
                 port: "raw".to_string(),
                 repr: "arrow".to_string(),
                 display: None,
+                class: None,
+                schema: None,
             }],
             consumes: Vec::new(),
             source,
@@ -267,6 +269,8 @@ mod tests {
             dag(Some(DagSource {
                 kind: "csv".to_string(),
                 port: "sales".to_string(),
+                class: None,
+                schema: None,
             })),
         )]))
         .await;

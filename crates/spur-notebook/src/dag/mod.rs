@@ -22,6 +22,7 @@ pub use inject::{
     javascript_bootstrap, notebook_id_for_path, notebook_port_root, python_bootstrap, PORT_MIME,
 };
 pub use ports::{
-    PortEntry, PortKind, PortManifest, PortPayload, PortRead, PortStore, PortStoreError,
+    schema_hash, validate_declared_schema, DeclaredSchemaError, PortEntry, PortKind, PortManifest,
+    PortPayload, PortRead, PortStore, PortStoreError,
 };
 pub use run_context::{notebook_run_context, notebook_run_context_with_runner, NotebookRunContext};

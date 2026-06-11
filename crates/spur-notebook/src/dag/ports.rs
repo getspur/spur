@@ -22,6 +22,7 @@ use arrow_schema::{ArrowError, Schema, SchemaRef};
 use directories::BaseDirs;
 use memmap2::Mmap;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 use thiserror::Error;
 
 const MANIFEST_FILE: &str = "manifest.json";
@@ -53,6 +54,33 @@ pub enum PortStoreError {
     },
     #[error("Arrow IPC error: {0}")]
     Arrow(#[from] ArrowError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DeclaredSchemaError {
+    #[error("declared schema for port '{port}' is not valid: {message}")]
+    InvalidSchema { port: String, message: String },
+    #[error("port '{port}' field '{field}': declared {declared}, got {actual}")]
+    FieldTypeMismatch {
+        port: String,
+        field: String,
+        declared: String,
+        actual: String,
+    },
+    #[error("port '{port}' field '{field}': declared {declared}, got {actual}")]
+    MissingField {
+        port: String,
+        field: String,
+        declared: String,
+        actual: String,
+    },
+    #[error("port '{port}' field '{field}': declared {declared}, got {actual}")]
+    ExtraField {
+        port: String,
+        field: String,
+        declared: String,
+        actual: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -484,6 +512,12 @@ fn read_ipc(bytes: &[u8]) -> Result<(SchemaRef, Vec<RecordBatch>), PortStoreErro
     Ok((schema, batches))
 }
 
+pub(crate) fn read_ipc_for_validation(
+    bytes: &[u8],
+) -> Result<(SchemaRef, Vec<RecordBatch>), PortStoreError> {
+    read_ipc(bytes)
+}
+
 /// Wrap a memory-mapped region in an Arrow [`Buffer`] without copying. The
 /// `Mmap` is moved into the buffer's allocation owner, keeping the mapping alive
 /// for exactly as long as the buffer (and any arrays sliced from it) are used.
@@ -558,6 +592,75 @@ fn block_slice(buffer: &Buffer, block: &arrow_ipc::Block) -> Buffer {
 
 fn arrow_parse_error(message: impl Into<String>) -> PortStoreError {
     PortStoreError::Arrow(ArrowError::ParseError(message.into()))
+}
+
+pub fn schema_hash(schema: &Value) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(schema)?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+pub fn validate_declared_schema(
+    port: &str,
+    declared: &Value,
+    actual: &Schema,
+) -> Result<String, DeclaredSchemaError> {
+    let declared_schema: Schema = serde_json::from_value(declared.clone()).map_err(|source| {
+        DeclaredSchemaError::InvalidSchema {
+            port: port.to_owned(),
+            message: source.to_string(),
+        }
+    })?;
+
+    for declared_field in declared_schema.fields() {
+        match actual.field_with_name(declared_field.name()) {
+            Ok(actual_field) if actual_field.data_type() == declared_field.data_type() => {}
+            Ok(actual_field) => {
+                return Err(DeclaredSchemaError::FieldTypeMismatch {
+                    port: port.to_owned(),
+                    field: declared_field.name().clone(),
+                    declared: data_type_label(declared_field.data_type()),
+                    actual: data_type_label(actual_field.data_type()),
+                });
+            }
+            Err(_) => {
+                return Err(DeclaredSchemaError::MissingField {
+                    port: port.to_owned(),
+                    field: declared_field.name().clone(),
+                    declared: data_type_label(declared_field.data_type()),
+                    actual: "<missing>".to_owned(),
+                });
+            }
+        }
+    }
+
+    for actual_field in actual.fields() {
+        if declared_schema
+            .field_with_name(actual_field.name())
+            .is_err()
+        {
+            return Err(DeclaredSchemaError::ExtraField {
+                port: port.to_owned(),
+                field: actual_field.name().clone(),
+                declared: "<absent>".to_owned(),
+                actual: data_type_label(actual_field.data_type()),
+            });
+        }
+    }
+
+    schema_hash(declared).map_err(|source| DeclaredSchemaError::InvalidSchema {
+        port: port.to_owned(),
+        message: source.to_string(),
+    })
+}
+
+fn data_type_label(data_type: &arrow_schema::DataType) -> String {
+    serde_json::to_value(data_type)
+        .ok()
+        .and_then(|value| match value {
+            Value::String(value) => Some(value),
+            other => Some(other.to_string()),
+        })
+        .unwrap_or_else(|| format!("{data_type:?}"))
 }
 
 fn validate_path_segment(value: &str) -> Result<(), PortStoreError> {
@@ -641,6 +744,125 @@ mod tests {
         for row in 0..expected_labels.len() {
             assert_eq!(expected_labels.value(row), actual_labels.value(row));
         }
+    }
+
+    #[test]
+    fn declared_schema_comparison_accepts_matching_schema() {
+        let declared = serde_json::json!({
+            "fields": [
+                {
+                    "name": "id",
+                    "data_type": "Int64",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                },
+                {
+                    "name": "label",
+                    "data_type": "Utf8",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        });
+        let actual = batch(vec![1], vec!["alpha"]).schema();
+
+        assert_eq!(
+            validate_declared_schema("sales", &declared, actual.as_ref()).expect("schema matches"),
+            schema_hash(&declared).expect("hashes declared schema")
+        );
+    }
+
+    #[test]
+    fn declared_schema_comparison_reports_field_type_mismatch() {
+        let declared = serde_json::json!({
+            "fields": [
+                {
+                    "name": "id",
+                    "data_type": "Float64",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        });
+        let actual = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+
+        let err = validate_declared_schema("sales", &declared, &actual)
+            .expect_err("mismatched field type is rejected");
+
+        assert_eq!(
+            err,
+            DeclaredSchemaError::FieldTypeMismatch {
+                port: "sales".to_string(),
+                field: "id".to_string(),
+                declared: "Float64".to_string(),
+                actual: "Int64".to_string(),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "port 'sales' field 'id': declared Float64, got Int64"
+        );
+    }
+
+    #[test]
+    fn declared_schema_comparison_reports_missing_and_extra_fields() {
+        let declared = serde_json::json!({
+            "fields": [
+                {
+                    "name": "id",
+                    "data_type": "Int64",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                },
+                {
+                    "name": "label",
+                    "data_type": "Utf8",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        });
+
+        let missing = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+        assert_eq!(
+            validate_declared_schema("sales", &declared, &missing)
+                .expect_err("missing field is rejected"),
+            DeclaredSchemaError::MissingField {
+                port: "sales".to_string(),
+                field: "label".to_string(),
+                declared: "Utf8".to_string(),
+                actual: "<missing>".to_string(),
+            }
+        );
+
+        let extra = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, false),
+            Field::new("debug", DataType::Utf8, false),
+        ]);
+        assert_eq!(
+            validate_declared_schema("sales", &declared, &extra)
+                .expect_err("extra field is rejected"),
+            DeclaredSchemaError::ExtraField {
+                port: "sales".to_string(),
+                field: "debug".to_string(),
+                declared: "<absent>".to_string(),
+                actual: "Utf8".to_string(),
+            }
+        );
     }
 
     #[test]
