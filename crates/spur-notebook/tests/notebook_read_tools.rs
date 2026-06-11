@@ -980,6 +980,8 @@ fn dag(produces: &[&str], consumes: &[&str]) -> CellDagMetadata {
                 port: (*port).to_string(),
                 repr: "arrow".to_string(),
                 display: None,
+                class: None,
+                schema: None,
             })
             .collect(),
         consumes: consumes.iter().map(|port| (*port).to_string()).collect(),

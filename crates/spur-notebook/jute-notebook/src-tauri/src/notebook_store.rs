@@ -1595,11 +1595,15 @@ mod tests {
                 port: "sales".to_string(),
                 repr: "dataframe".to_string(),
                 display: Some("Sales".to_string()),
+                class: None,
+                schema: None,
             }],
             consumes: vec!["config".to_string()],
             source: Some(DagSource {
                 kind: "cell".to_string(),
                 port: "raw".to_string(),
+                class: None,
+                schema: None,
             }),
         };
         let delta = store
@@ -1739,6 +1743,8 @@ mod tests {
                 port: "sales".to_string(),
                 repr: "dataframe".to_string(),
                 display: None,
+                class: None,
+                schema: None,
             }],
             ..Default::default()
         };

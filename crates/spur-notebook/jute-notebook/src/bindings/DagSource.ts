@@ -12,4 +12,12 @@ export type DagSource = {
    * Source port identifier.
    */
   port: string;
+  /**
+   * Source class. Omitted legacy metadata defaults to dataframe at runtime.
+   */
+  class?: string;
+  /**
+   * Optional declared Arrow schema JSON, in the manifest schema dialect.
+   */
+  schema?: unknown;
 };

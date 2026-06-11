@@ -347,6 +347,16 @@ pub struct PortSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub display: Option<String>,
+
+    /// Port class. Omitted legacy metadata defaults to dataframe at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub class: Option<String>,
+
+    /// Optional declared Arrow schema JSON, in the manifest schema dialect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
+    pub schema: Option<Value>,
 }
 
 /// Source descriptor for a consumed DAG port.
@@ -359,6 +369,16 @@ pub struct DagSource {
 
     /// Source port identifier.
     pub port: String,
+
+    /// Source class. Omitted legacy metadata defaults to dataframe at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub class: Option<String>,
+
+    /// Optional declared Arrow schema JSON, in the manifest schema dialect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
+    pub schema: Option<Value>,
 }
 
 /// jute-deck per-cell metadata.
@@ -787,6 +807,101 @@ mod tests {
         assert_eq!(
             serialized["cells"][0]["metadata"]["spur"]["dag"]["source"]["port"],
             "raw"
+        );
+    }
+
+    #[test]
+    fn spur_dag_metadata_preserves_declared_port_schema() {
+        let json = r#"
+            {
+                "metadata": {},
+                "nbformat_minor": 5,
+                "nbformat": 4,
+                "cells": [
+                    {
+                        "cell_type": "code",
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "metadata": {
+                            "spur": {
+                                "version": 7,
+                                "dag": {
+                                    "produces": [
+                                        {
+                                            "port": "sales",
+                                            "repr": "dataframe",
+                                            "class": "dataframe",
+                                            "schema": {
+                                                "fields": [
+                                                    {
+                                                        "name": "id",
+                                                        "data_type": "Int64",
+                                                        "nullable": false,
+                                                        "dict_id": 0,
+                                                        "dict_is_ordered": false,
+                                                        "metadata": {}
+                                                    }
+                                                ],
+                                                "metadata": {}
+                                            }
+                                        }
+                                    ],
+                                    "source": {
+                                        "kind": "datasource",
+                                        "port": "raw",
+                                        "class": "dataframe",
+                                        "schema": {
+                                            "fields": [
+                                                {
+                                                    "name": "id",
+                                                    "data_type": "Int64",
+                                                    "nullable": false,
+                                                    "dict_id": 0,
+                                                    "dict_is_ordered": false,
+                                                    "metadata": {}
+                                                }
+                                            ],
+                                            "metadata": {}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "source": "x = 1",
+                        "execution_count": null,
+                        "outputs": []
+                    }
+                ]
+            }
+        "#;
+
+        let notebook: NotebookRoot = serde_json::from_str(json).unwrap();
+        let Cell::Code(cell) = &notebook.cells[0] else {
+            panic!("expected a code cell");
+        };
+        let dag = cell.metadata.spur.as_ref().unwrap().dag.as_ref().unwrap();
+        assert_eq!(dag.produces[0].class.as_deref(), Some("dataframe"));
+        assert_eq!(
+            dag.produces[0].schema.as_ref().unwrap()["fields"][0]["data_type"],
+            "Int64"
+        );
+        assert_eq!(
+            dag.source.as_ref().unwrap().class.as_deref(),
+            Some("dataframe")
+        );
+        assert_eq!(
+            dag.source.as_ref().unwrap().schema.as_ref().unwrap()["fields"][0]["name"],
+            "id"
+        );
+
+        let serialized = serde_json::to_value(&notebook).unwrap();
+        assert_eq!(
+            serialized["cells"][0]["metadata"]["spur"]["dag"]["produces"][0]["class"],
+            "dataframe"
+        );
+        assert_eq!(
+            serialized["cells"][0]["metadata"]["spur"]["dag"]["source"]["schema"]["fields"][0]
+                ["data_type"],
+            "Int64"
         );
     }
 
