@@ -39,6 +39,25 @@ describe("useChat", () => {
     ]);
   });
 
+  test("applies events to the supplied scope key instead of the active scope", () => {
+    const s = useChat.getState();
+    s.setScope("notebook:/tmp/a.ipynb", "a.ipynb");
+    s.setScope("notebook:/tmp/b.ipynb", "b.ipynb");
+
+    s.applyEventForScope("notebook:/tmp/a.ipynb", {
+      type: "messageChunk",
+      text: "A",
+    });
+    s.applyEventForScope("notebook:/tmp/a.ipynb", { type: "done" });
+
+    expect(
+      useChat
+        .getState()
+        .conversations["notebook:/tmp/a.ipynb"].messages.map((m) => m.text),
+    ).toEqual(["A"]);
+    expect(useChat.getState().messages.map((m) => m.text)).toEqual([]);
+  });
+
   test("permission requests become pending permission views", () => {
     useChat.getState().applyEvent({
       type: "permissionRequest",
