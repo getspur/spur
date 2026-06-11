@@ -274,6 +274,13 @@ impl NotebookDag {
         self.nodes.get(cell_id)
     }
 
+    pub fn consumed_ports(&self, cell_id: &str) -> Vec<String> {
+        self.nodes
+            .get(cell_id)
+            .map(|metadata| metadata.consumes.clone())
+            .unwrap_or_default()
+    }
+
     pub fn producer_for_port(&self, port: &str) -> Option<&str> {
         self.producers_by_port.get(port).map(String::as_str)
     }

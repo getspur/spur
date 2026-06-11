@@ -34,9 +34,10 @@ use crate::mcp::{
 };
 
 use super::{
-    notebook_port_root, CascadeStatus, NotebookDag, Origin, PortEvent, PortEventClient,
-    PortEventDraft, PortEventError, PortEventKind, PortEventSequencer, PortEventSequencerConfig,
-    PortPayload, PortRead, PortStore, PortStoreError, RunStatus,
+    notebook_port_root, CascadeStatus, NotebookDag, Origin, PortClass, PortEntry, PortEvent,
+    PortEventClient, PortEventDraft, PortEventError, PortEventKind, PortEventSequencer,
+    PortEventSequencerConfig, PortKind, PortPayload, PortRead, PortRef, PortStore, PortStoreError,
+    RunInput, RunStatus,
 };
 
 const DEFAULT_SOURCE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -458,13 +459,14 @@ where
 
         if status == CellRunStatus::Succeeded {
             self.bump_produced_ports_if_unchanged(cell_id, &port_versions)?;
-            self.emit_run_report(cell_id, status).await?;
+            let outputs = self.produced_port_output_refs(cell_id, &port_versions)?;
+            self.emit_run_report(cell_id, status, outputs).await?;
             let stale = self.downstream_of(cell_id)?;
             report
                 .runs
                 .extend(self.cascade_from_ordered(stale).await?.runs);
         } else {
-            self.emit_run_report(cell_id, status).await?;
+            self.emit_run_report(cell_id, status, Vec::new()).await?;
         }
 
         Ok(report)
@@ -489,7 +491,7 @@ where
             states.insert(cell_id.to_owned(), CellRunStatus::Succeeded.as_dag_state());
             self.emit_dag_status_changed(states)?;
         } else {
-            self.emit_run_report(cell_id, status).await?;
+            self.emit_run_report(cell_id, status, Vec::new()).await?;
         }
 
         Ok(report)
@@ -504,7 +506,7 @@ where
                 report
                     .runs
                     .push(CellRunReport::new(cell_id.clone(), status));
-                self.emit_run_report(&cell_id, status).await?;
+                self.emit_run_report(&cell_id, status, Vec::new()).await?;
                 for downstream in self.downstream_of(&cell_id)? {
                     blocked.insert(downstream, status);
                 }
@@ -515,19 +517,27 @@ where
                 report
                     .runs
                     .push(CellRunReport::new(cell_id.clone(), CellRunStatus::Stale));
-                self.emit_run_report(&cell_id, CellRunStatus::Stale).await?;
+                self.emit_run_report(&cell_id, CellRunStatus::Stale, Vec::new())
+                    .await?;
                 for downstream in self.downstream_of(&cell_id)? {
                     blocked.insert(downstream, CellRunStatus::Stale);
                 }
                 continue;
             }
 
+            let port_versions = self.produced_port_versions(&cell_id)?;
             let outcome = self.run_cell_with_status_events(&cell_id).await?;
             let status = outcome.status;
             report
                 .runs
                 .push(CellRunReport::new(cell_id.clone(), status));
-            self.emit_run_report(&cell_id, status).await?;
+            let outputs = if status == CellRunStatus::Succeeded {
+                self.bump_produced_ports_if_unchanged(&cell_id, &port_versions)?;
+                self.produced_port_output_refs(&cell_id, &port_versions)?
+            } else {
+                Vec::new()
+            };
+            self.emit_run_report(&cell_id, status, outputs).await?;
             if status == CellRunStatus::Failed {
                 for downstream in self.downstream_of(&cell_id)? {
                     blocked.insert(downstream, CellRunStatus::UpstreamFailed);
@@ -675,9 +685,10 @@ where
         &mut self,
         cell_id: &str,
         status: CellRunStatus,
+        outputs: Vec<PortRef>,
     ) -> Result<(), EngineError> {
         if self.active_cascade.is_some() {
-            self.emit_run_finished(cell_id, status).await?;
+            self.emit_run_finished(cell_id, status, outputs).await?;
             Ok(())
         } else {
             let mut states = BTreeMap::new();
@@ -738,6 +749,7 @@ where
     }
 
     async fn emit_run_started(&mut self, cell_id: &str) -> Result<(), EngineError> {
+        let inputs = self.resolve_run_inputs(cell_id)?;
         let Some(cascade) = self.active_cascade.as_mut() else {
             return Ok(());
         };
@@ -749,7 +761,7 @@ where
             cascade_id,
             run_id,
             cell_id: cell_id.to_string(),
-            inputs: vec![],
+            inputs,
         })
         .await;
         self.emit_dag_status_changed(BTreeMap::new())
@@ -759,6 +771,7 @@ where
         &mut self,
         cell_id: &str,
         status: CellRunStatus,
+        outputs: Vec<PortRef>,
     ) -> Result<(), EngineError> {
         let Some(cascade) = self.active_cascade.as_mut() else {
             return Ok(());
@@ -774,7 +787,7 @@ where
             run_id,
             cell_id: cell_id.to_string(),
             status: status.as_run_status(),
-            outputs: vec![],
+            outputs,
         })
         .await;
         self.emit_dag_status_changed(BTreeMap::new())
@@ -838,6 +851,51 @@ where
                         .get(&produced.port)
                         .map(|entry| entry.version),
                 )
+            })
+            .collect())
+    }
+
+    fn resolve_run_inputs(&self, cell_id: &str) -> Result<Vec<RunInput>, EngineError> {
+        let Some(graph) = &self.graph else {
+            return Ok(Vec::new());
+        };
+        let consumed_ports = graph.consumed_ports(cell_id);
+        if consumed_ports.is_empty() {
+            return Ok(Vec::new());
+        }
+        let store = PortStore::open_read_only_at(&self.port_root)?;
+        Ok(consumed_ports
+            .into_iter()
+            .map(|port| RunInput {
+                r#ref: store
+                    .manifest()
+                    .get(&port)
+                    .map(|entry| port_ref_from_entry(&port, entry)),
+                port,
+            })
+            .collect())
+    }
+
+    fn produced_port_output_refs(
+        &self,
+        cell_id: &str,
+        before_versions: &BTreeMap<String, Option<u64>>,
+    ) -> Result<Vec<PortRef>, EngineError> {
+        let Some(graph) = &self.graph else {
+            return Ok(Vec::new());
+        };
+        let Some(metadata) = graph.cell_metadata(cell_id) else {
+            return Ok(Vec::new());
+        };
+        let store = PortStore::open_read_only_at(&self.port_root)?;
+        Ok(metadata
+            .produces
+            .iter()
+            .filter_map(|produced| {
+                let port = produced.port.as_str();
+                let entry = store.manifest().get(port)?;
+                let before = before_versions.get(port).copied().flatten();
+                (Some(entry.version) != before).then(|| port_ref_from_entry(port, entry))
             })
             .collect())
     }
@@ -1288,6 +1346,18 @@ fn build_graph(root: &NotebookRoot) -> Result<NotebookDag, EngineError> {
     .map_err(EngineError::Dag)
 }
 
+fn port_ref_from_entry(port: &str, entry: &PortEntry) -> PortRef {
+    PortRef {
+        port: port.to_owned(),
+        version: entry.version,
+        class: match &entry.kind {
+            PortKind::Arrow(_) => PortClass::Dataframe,
+            PortKind::Media { .. } => PortClass::Media,
+        },
+        schema_hash: None,
+    }
+}
+
 struct CellView {
     source: String,
     version: Option<u64>,
@@ -1496,6 +1566,7 @@ mod tests {
         max_active_ensures: Arc<Mutex<usize>>,
         events: Arc<Mutex<Vec<String>>>,
         outcomes: Arc<Mutex<BTreeMap<String, VecDeque<Result<CellRunOutcome, EngineError>>>>>,
+        writes: Arc<Mutex<BTreeMap<String, VecDeque<(PathBuf, String)>>>>,
     }
 
     impl FakeRunner {
@@ -1519,6 +1590,15 @@ mod tests {
                 .push_back(Ok(CellRunOutcome {
                     status: CellRunStatus::Failed,
                 }));
+        }
+
+        fn write_port_on_run(&self, cell_id: &str, port_root: &Path, port: &str) {
+            self.writes
+                .lock()
+                .expect("writes lock")
+                .entry(cell_id.to_string())
+                .or_default()
+                .push_back((port_root.to_path_buf(), port.to_string()));
         }
 
         fn requests(&self) -> Vec<CellRunRequest> {
@@ -1577,6 +1657,18 @@ mod tests {
                     .expect("outcomes lock")
                     .get_mut(&request.cell_id)
                     .and_then(VecDeque::pop_front);
+                if let Some((port_root, port)) = self
+                    .writes
+                    .lock()
+                    .expect("writes lock")
+                    .get_mut(&request.cell_id)
+                    .and_then(VecDeque::pop_front)
+                {
+                    PortStore::open_at(port_root)
+                        .expect("open port store for fake kernel write")
+                        .put(&port, &ipc_bytes())
+                        .expect("fake kernel port write");
+                }
                 outcome.unwrap_or(Ok(CellRunOutcome {
                     status: CellRunStatus::Succeeded,
                 }))
@@ -1690,6 +1782,7 @@ mod tests {
             cell("b", "b = a", 1, dag(vec![], vec!["a"], None)),
         ]));
         let runner = FakeRunner::default();
+        runner.write_port_on_run("a", temp.path(), "a");
         let sequencer = PortEventSequencer::spawn(PortEventSequencerConfig::default());
         let event_client = sequencer.client();
         let mut subscription = event_client.subscribe();
@@ -1731,13 +1824,26 @@ mod tests {
                     run_id: 1,
                     cell_id: "a".to_string(),
                     status: RunStatus::Succeeded,
-                    outputs: vec![],
+                    outputs: vec![PortRef {
+                        port: "a".to_string(),
+                        version: 1,
+                        class: PortClass::Dataframe,
+                        schema_hash: None,
+                    }],
                 },
                 PortEventKind::RunStarted {
                     cascade_id: 1,
                     run_id: 2,
                     cell_id: "b".to_string(),
-                    inputs: vec![],
+                    inputs: vec![RunInput {
+                        port: "a".to_string(),
+                        r#ref: Some(PortRef {
+                            port: "a".to_string(),
+                            version: 1,
+                            class: PortClass::Dataframe,
+                            schema_hash: None,
+                        }),
+                    }],
                 },
                 PortEventKind::RunFinished {
                     cascade_id: 1,
@@ -1752,6 +1858,186 @@ mod tests {
                 },
             ]
         );
+        drop(engine);
+        drop(subscription);
+        drop(event_client);
+        sequencer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn run_started_records_missing_consumed_port_before_dispatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = store_with_notebook(notebook(vec![cell(
+            "consumer",
+            "value = spur.get('missing')",
+            1,
+            dag(vec![], vec!["missing"], None),
+        )]));
+        let runner = FakeRunner::default();
+        let sequencer = PortEventSequencer::spawn(PortEventSequencerConfig::default());
+        let event_client = sequencer.client();
+        let mut subscription = event_client.subscribe();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner,
+            temp.path().join("reactive.ipynb"),
+            temp.path().to_path_buf(),
+        )
+        .with_event_draft_sender(event_client.draft_sender());
+
+        engine.rebuild_graph().expect("graph");
+        engine.begin_source_cascade().await;
+        engine
+            .run_cell_with_status_events("consumer")
+            .await
+            .expect("run consumer");
+        engine
+            .emit_run_report("consumer", CellRunStatus::Succeeded, Vec::new())
+            .await
+            .expect("finish run");
+
+        let events = recv_port_event_kinds(&mut subscription, 3).await;
+        assert!(matches!(
+            &events[1],
+            PortEventKind::RunStarted {
+                cell_id,
+                inputs,
+                ..
+            } if cell_id == "consumer" && inputs == &vec![RunInput {
+                port: "missing".to_string(),
+                r#ref: None,
+            }]
+        ));
+
+        drop(engine);
+        drop(subscription);
+        drop(event_client);
+        sequencer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn run_finished_records_kernel_produced_port_output() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = store_with_notebook(notebook(vec![cell(
+            "producer",
+            "spur.put('result', df)",
+            1,
+            dag(vec![port("result")], vec![], None),
+        )]));
+        let runner = FakeRunner::default();
+        runner.write_port_on_run("producer", temp.path(), "result");
+        let sequencer = PortEventSequencer::spawn(PortEventSequencerConfig::default());
+        let event_client = sequencer.client();
+        let mut subscription = event_client.subscribe();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner,
+            temp.path().join("reactive.ipynb"),
+            temp.path().to_path_buf(),
+        )
+        .with_event_draft_sender(event_client.draft_sender());
+
+        engine.rebuild_graph().expect("graph");
+        engine.begin_source_cascade().await;
+        let before = engine
+            .produced_port_versions("producer")
+            .expect("before versions");
+        engine
+            .run_cell_with_status_events("producer")
+            .await
+            .expect("run producer");
+        engine
+            .bump_produced_ports_if_unchanged("producer", &before)
+            .expect("bump unchanged");
+        let outputs = engine
+            .produced_port_output_refs("producer", &before)
+            .expect("output refs");
+        engine
+            .emit_run_report("producer", CellRunStatus::Succeeded, outputs)
+            .await
+            .expect("finish run");
+
+        let events = recv_port_event_kinds(&mut subscription, 3).await;
+        assert!(matches!(
+            &events[2],
+            PortEventKind::RunFinished {
+                cell_id,
+                outputs,
+                ..
+            } if cell_id == "producer" && outputs == &vec![PortRef {
+                port: "result".to_string(),
+                version: 1,
+                class: PortClass::Dataframe,
+                schema_hash: None,
+            }]
+        ));
+
+        drop(engine);
+        drop(subscription);
+        drop(event_client);
+        sequencer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn run_finished_records_bumped_unchanged_produced_port_output() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = store_with_notebook(notebook(vec![cell(
+            "producer",
+            "result = cached",
+            1,
+            dag(vec![port("result")], vec![], None),
+        )]));
+        PortStore::open_at(temp.path())
+            .expect("open ports")
+            .put("result", &ipc_bytes())
+            .expect("seed result");
+        let runner = FakeRunner::default();
+        let sequencer = PortEventSequencer::spawn(PortEventSequencerConfig::default());
+        let event_client = sequencer.client();
+        let mut subscription = event_client.subscribe();
+        let mut engine = ReactiveEngine::new(
+            Arc::clone(&store),
+            runner,
+            temp.path().join("reactive.ipynb"),
+            temp.path().to_path_buf(),
+        )
+        .with_event_draft_sender(event_client.draft_sender());
+
+        engine.rebuild_graph().expect("graph");
+        engine.begin_source_cascade().await;
+        let before = engine
+            .produced_port_versions("producer")
+            .expect("before versions");
+        engine
+            .run_cell_with_status_events("producer")
+            .await
+            .expect("run producer");
+        engine
+            .bump_produced_ports_if_unchanged("producer", &before)
+            .expect("bump unchanged");
+        let outputs = engine
+            .produced_port_output_refs("producer", &before)
+            .expect("output refs");
+        engine
+            .emit_run_report("producer", CellRunStatus::Succeeded, outputs)
+            .await
+            .expect("finish run");
+
+        let events = recv_port_event_kinds(&mut subscription, 3).await;
+        assert!(matches!(
+            &events[2],
+            PortEventKind::RunFinished {
+                cell_id,
+                outputs,
+                ..
+            } if cell_id == "producer" && outputs == &vec![PortRef {
+                port: "result".to_string(),
+                version: 2,
+                class: PortClass::Dataframe,
+                schema_hash: None,
+            }]
+        ));
+
         drop(engine);
         drop(subscription);
         drop(event_client);
@@ -2043,7 +2329,7 @@ mod tests {
         );
         let ports = PortStore::open_at(temp.path()).expect("open ports");
         assert_eq!(ports.get("a").expect("a bumped").version(), 2);
-        assert_eq!(ports.get("b").expect("b unchanged").version(), 1);
+        assert_eq!(ports.get("b").expect("b bumped").version(), 2);
         assert_eq!(ports.get("z").expect("z untouched").version(), 1);
     }
 
