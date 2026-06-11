@@ -208,6 +208,12 @@ fn normalize_path_for_storage(path: &Path, workspace_root: &Path) -> PathBuf {
     std::fs::canonicalize(&absolute).unwrap_or_else(|_| lexical_normalize(&absolute))
 }
 
+fn saved_notebook_id(path: impl AsRef<Path>) -> NotebookId {
+    let workspace_root = workspace_root();
+    let normalized = normalize_path_for_storage(path.as_ref(), &workspace_root);
+    NotebookId::for_saved_path(normalized)
+}
+
 fn workspace_relative_path(path: &Path, workspace_root: &Path) -> Option<String> {
     let root = normalize_path_for_storage(workspace_root, workspace_root);
     path.strip_prefix(&root)
@@ -259,7 +265,7 @@ pub(crate) const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
 
 /// Derive the stable in-memory kernel slot ID for a notebook path.
 pub fn notebook_slot_id(path: &str) -> String {
-    NotebookId::for_saved_path(path).kernel_slot_id()
+    saved_notebook_id(path).kernel_slot_id()
 }
 
 /// Derive the per-notebook kernel slot ID for a per-cell code type.
@@ -269,7 +275,7 @@ pub fn slot_id_for(path: &str, code_type: CodeType) -> String {
 
 /// Derive the per-notebook kernel slot ID for a kernelspec name.
 pub fn slot_id_for_spec(path: &str, spec_name: &str) -> String {
-    NotebookId::for_saved_path(path).kernel_slot_id_for_spec(spec_name)
+    saved_notebook_id(path).kernel_slot_id_for_spec(spec_name)
 }
 
 /// Recover the notebook path from a notebook-derived kernel slot ID.
@@ -378,7 +384,7 @@ impl Default for State {
             comm_owner: DashMap::new(),
             save_coordinator: SaveCoordinator::with_before_save(
                 move |path, contents: &mut NotebookRoot| {
-                    let path_id = NotebookId::for_saved_path(path);
+                    let path_id = saved_notebook_id(path);
                     let target = notebooks_for_save
                         .get(&path_id)
                         .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
@@ -492,14 +498,15 @@ impl State {
 
     /// Return the notebook store for a saved path without changing focus.
     pub fn notebook_for_path(&self, path: impl AsRef<Path>) -> Arc<NotebookStore> {
-        let id = NotebookId::for_saved_path(path.as_ref());
+        let id = saved_notebook_id(path.as_ref());
+        self.alias_focused_default_store_to_id(&id, false);
         self.notebook_for_id(&id)
     }
 
     /// Return and focus the notebook store for a saved path.
     pub fn focus_notebook_path(&self, path: impl AsRef<Path>) -> Arc<NotebookStore> {
-        let id = NotebookId::for_saved_path(path.as_ref());
-        self.alias_focused_default_store_to_id(&id);
+        let id = saved_notebook_id(path.as_ref());
+        self.alias_focused_default_store_to_id(&id, true);
         let store = self.notebook_for_id(&id);
         self.set_focused_notebook_id(id);
         store
@@ -508,7 +515,7 @@ impl State {
     /// Focus an existing or lazily-created saved notebook path for implicit operations.
     #[cfg(test)]
     pub(crate) fn set_focused_notebook_path(&self, path: impl AsRef<Path>) {
-        let id = NotebookId::for_saved_path(path.as_ref());
+        let id = saved_notebook_id(path.as_ref());
         self.set_focused_notebook_id(id);
     }
 
@@ -559,7 +566,7 @@ impl State {
         path: impl AsRef<Path>,
         catalog: DatasourceCatalog,
     ) {
-        let id = NotebookId::for_saved_path(path.as_ref());
+        let id = saved_notebook_id(path.as_ref());
         self.replace_datasource_catalog_for_id(&id, catalog);
     }
 
@@ -589,7 +596,7 @@ impl State {
         self.notebooks
             .iter()
             .find_map(|entry| (entry.key().store_key() == target).then(|| entry.key().clone()))
-            .unwrap_or_else(|| NotebookId::for_saved_path(target))
+            .unwrap_or_else(|| saved_notebook_id(target))
     }
 
     fn datasource_catalog_for_id(&self, id: &NotebookId) -> Arc<Mutex<DatasourceCatalog>> {
@@ -618,7 +625,7 @@ impl State {
         id
     }
 
-    fn alias_focused_default_store_to_id(&self, id: &NotebookId) {
+    fn alias_focused_default_store_to_id(&self, id: &NotebookId, allow_unloaded: bool) {
         if self.notebooks.contains_key(id) {
             return;
         }
@@ -633,8 +640,15 @@ impl State {
         else {
             return;
         };
-        if store.path().is_some() {
-            return;
+        match store.path() {
+            Some(path) => {
+                let loaded_id = saved_notebook_id(&path);
+                if &loaded_id != id {
+                    return;
+                }
+            }
+            None if !allow_unloaded => return,
+            None => {}
         }
         self.notebooks.insert(id.clone(), store);
         if !self.datasource_catalogs.contains_key(id) {
@@ -765,6 +779,24 @@ mod tests {
         assert_eq!(notebook_path_from_slot_id("mcp:kernel", "python3"), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn notebook_slot_ids_reuse_slot_for_symlink_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_path = dir.path().join("real.ipynb");
+        let alias_path = dir.path().join("alias.ipynb");
+        std::fs::write(&real_path, b"{}").unwrap();
+        std::os::unix::fs::symlink(&real_path, &alias_path).unwrap();
+        let real_path = real_path.to_string_lossy();
+        let alias_path = alias_path.to_string_lossy();
+
+        assert_eq!(notebook_slot_id(&real_path), notebook_slot_id(&alias_path));
+        assert_eq!(
+            slot_id_for_spec(&real_path, "python3"),
+            slot_id_for_spec(&alias_path, "python3")
+        );
+    }
+
     #[test]
     fn notebook_store_is_initialized_lazily_and_reused() {
         let state = State::new();
@@ -773,6 +805,22 @@ mod tests {
         let second = state.get_notebook();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn notebook_for_path_reuses_store_for_symlink_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_path = dir.path().join("real.ipynb");
+        let alias_path = dir.path().join("alias.ipynb");
+        std::fs::write(&real_path, b"{}").unwrap();
+        std::os::unix::fs::symlink(&real_path, &alias_path).unwrap();
+        let state = State::new();
+
+        let real_store = state.notebook_for_path(&real_path);
+        let alias_store = state.notebook_for_path(&alias_path);
+
+        assert!(Arc::ptr_eq(&real_store, &alias_store));
     }
 
     #[test]
