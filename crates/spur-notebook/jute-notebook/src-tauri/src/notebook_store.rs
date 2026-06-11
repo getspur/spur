@@ -40,6 +40,7 @@ pub struct NotebookStore {
     version: AtomicU64,
     dirty: AtomicBool,
     broadcast: broadcast::Sender<NotebookDelta>,
+    process_broadcast: Option<broadcast::Sender<NotebookDelta>>,
     save_coord: Arc<SaveCoordinator>,
     path: Mutex<Option<PathBuf>>,
     flush_lock: AsyncMutex<()>,
@@ -291,12 +292,28 @@ pub enum StoreError {
 impl NotebookStore {
     /// Create a new notebook store.
     pub fn new(save_coord: Arc<SaveCoordinator>) -> Arc<Self> {
+        Self::new_inner(save_coord, None)
+    }
+
+    /// Create a notebook store that also forwards deltas to a process-wide channel.
+    pub fn new_with_process_broadcast(
+        save_coord: Arc<SaveCoordinator>,
+        process_broadcast: broadcast::Sender<NotebookDelta>,
+    ) -> Arc<Self> {
+        Self::new_inner(save_coord, Some(process_broadcast))
+    }
+
+    fn new_inner(
+        save_coord: Arc<SaveCoordinator>,
+        process_broadcast: Option<broadcast::Sender<NotebookDelta>>,
+    ) -> Arc<Self> {
         let (broadcast, _receiver) = broadcast::channel(128);
         Arc::new_cyclic(|self_ref| Self {
             inner: Arc::new(RwLock::new(empty_notebook())),
             version: AtomicU64::new(0),
             dirty: AtomicBool::new(false),
             broadcast,
+            process_broadcast,
             save_coord,
             path: Mutex::new(None),
             flush_lock: AsyncMutex::new(()),
@@ -655,6 +672,9 @@ impl NotebookStore {
 
     fn publish(&self, delta: &NotebookDelta) {
         let _ = self.broadcast.send(delta.clone());
+        if let Some(process_broadcast) = &self.process_broadcast {
+            let _ = process_broadcast.send(delta.clone());
+        }
     }
 }
 

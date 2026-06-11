@@ -35,7 +35,7 @@ const DATASOURCES_CHANGED_EVENT: &str = "datasources://changed";
 /// The forwarder owns the single `broadcast::Receiver` for the process and emits
 /// `notebook://changed` for every `NotebookDelta`.
 pub fn spawn_notebook_delta_forwarder(app: tauri::AppHandle, state: Arc<state::State>) {
-    let mut receiver = state.get_notebook().subscribe();
+    let mut receiver = state.subscribe_notebook_deltas();
     tauri::async_runtime::spawn(async move {
         loop {
             match receiver.recv().await {
