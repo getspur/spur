@@ -2,33 +2,55 @@ import clsx from "clsx";
 import { ChevronDownIcon, PlusIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import type { NotebookTab } from "@/stores/notebook";
+import { closeOthersTargets, closeRightTargets } from "@/pages/tabActions";
+import type { KernelSlotInfo, NotebookTab } from "@/stores/notebook";
+import TabContextMenu from "@/ui/notebook/TabContextMenu";
+import TabHoverCard, { useTabHoverDelay } from "@/ui/notebook/TabHoverCard";
+import TabListMenu from "@/ui/notebook/TabListMenu";
 
 type Props = {
   activeTabId?: string;
+  canReopen: boolean;
+  getKernelStats: (tabId: string) => Promise<KernelSlotInfo | null>;
   tabs: NotebookTab[];
   onCloseTab: (tabId: string) => void;
+  onCloseOthers: (tabId: string) => void;
+  onCloseRight: (tabId: string) => void;
   onNewTab: () => void | Promise<void>;
   onOpenNotebook: () => void | Promise<void>;
+  onReopenClosed: () => void | Promise<void>;
   onReorder: (tabId: string, toIndex: number) => void;
   onSwitchTab: (tabId: string) => void;
+  onTogglePin: (tabId: string) => void;
 };
 
 export default function NotebookTabStrip({
   activeTabId,
+  canReopen,
+  getKernelStats,
   onCloseTab,
+  onCloseOthers,
+  onCloseRight,
   onNewTab,
   onOpenNotebook,
+  onReopenClosed,
   onReorder,
   onSwitchTab,
+  onTogglePin,
   tabs,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [contextTarget, setContextTarget] = useState<{
+    tabId: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{
     id: string;
     before: boolean;
   } | null>(null);
+  const [stats, setStats] = useState<KernelSlotInfo | null>(null);
   const [lockedWidths, setLockedWidths] = useState<Record<
     string,
     number
@@ -36,6 +58,8 @@ export default function NotebookTabStrip({
   const [rowWidth, setRowWidth] = useState<number | null>(null);
   const rowRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLDivElement>());
+  const { anchor, cancel, hoveredTabId, onTabEnter, onTabLeave } =
+    useTabHoverDelay(350);
 
   useEffect(() => {
     if (typeof ResizeObserver === "undefined" || !rowRef.current) return;
@@ -45,6 +69,10 @@ export default function NotebookTabStrip({
     observer.observe(rowRef.current);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    if (dragId || menuOpen || contextTarget) cancel();
+  }, [cancel, contextTarget, dragId, menuOpen]);
 
   const pinnedCount = tabs.filter((tab) => tab.pinned).length;
   const unpinnedCount = tabs.length - pinnedCount;
@@ -66,6 +94,20 @@ export default function NotebookTabStrip({
   const handleClose = (tabId: string) => {
     captureWidths();
     onCloseTab(tabId);
+  };
+
+  const hoveredTab = tabs.find((tab) => tab.id === hoveredTabId);
+  const contextTab = tabs.find((tab) => tab.id === contextTarget?.tabId);
+
+  const handleMouseEnter = (tab: NotebookTab, element: HTMLDivElement) => {
+    if (dragId || menuOpen || contextTarget) return;
+    const rect = element.getBoundingClientRect();
+    onTabEnter(tab.id, { left: rect.left, bottom: rect.bottom });
+    setStats(null);
+    if (tab.kernelState === "idle") return;
+    void getKernelStats(tab.id).then((nextStats) => {
+      setStats(nextStats);
+    });
   };
 
   return (
@@ -161,6 +203,20 @@ export default function NotebookTabStrip({
                 setDragId(null);
                 setDropTarget(null);
               }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                cancel();
+                setMenuOpen(false);
+                setContextTarget({
+                  tabId: tab.id,
+                  x: event.clientX,
+                  y: event.clientY,
+                });
+              }}
+              onMouseEnter={(event) => {
+                handleMouseEnter(tab, event.currentTarget);
+              }}
+              onMouseLeave={onTabLeave}
               ref={(el) => {
                 if (el) tabRefs.current.set(tab.id, el);
                 else tabRefs.current.delete(tab.id);
@@ -268,35 +324,41 @@ export default function NotebookTabStrip({
           <ChevronDownIcon size={16} />
         </button>
         {menuOpen && (
-          <div
-            className="absolute right-0 top-full z-20 mt-1 w-44 rounded border border-gray-200 bg-white p-1 text-sm text-gray-700 shadow-lg"
-            role="menu"
-          >
-            <button
-              className="w-full rounded px-3 py-2 text-left hover:bg-gray-100 hover:text-gray-950"
-              onClick={() => {
-                setMenuOpen(false);
-                void onNewTab();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              New notebook
-            </button>
-            <button
-              className="w-full rounded px-3 py-2 text-left hover:bg-gray-100 hover:text-gray-950"
-              onClick={() => {
-                setMenuOpen(false);
-                void onOpenNotebook();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              Open notebook...
-            </button>
-          </div>
+          <TabListMenu
+            activeTabId={activeTabId}
+            onDismiss={() => setMenuOpen(false)}
+            onNewTab={onNewTab}
+            onOpenNotebook={onOpenNotebook}
+            onSelect={onSwitchTab}
+            tabs={tabs}
+          />
         )}
       </div>
+      {hoveredTabId && hoveredTab && !contextTarget && !menuOpen && (
+        <TabHoverCard anchor={anchor} stats={stats} tab={hoveredTab} />
+      )}
+      {contextTarget && contextTab && (
+        <TabContextMenu
+          canReopen={canReopen}
+          closeOthersCount={closeOthersTargets(tabs, contextTab.id).length}
+          closeRightCount={closeRightTargets(tabs, contextTab.id).length}
+          onClose={() => handleClose(contextTab.id)}
+          onCloseOthers={() => onCloseOthers(contextTab.id)}
+          onCloseRight={() => onCloseRight(contextTab.id)}
+          onCopyPath={() => {
+            if (contextTab.path) {
+              void navigator.clipboard
+                .writeText(contextTab.path)
+                .catch(() => {});
+            }
+          }}
+          onDismiss={() => setContextTarget(null)}
+          onReopenClosed={onReopenClosed}
+          onTogglePin={() => onTogglePin(contextTab.id)}
+          position={{ x: contextTarget.x, y: contextTarget.y }}
+          tab={contextTab}
+        />
+      )}
     </div>
   );
 }
