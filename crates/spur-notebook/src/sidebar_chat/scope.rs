@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::{EnvVariable, McpServer, McpServerStdio};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context as _, Result};
 
 use super::types::AppScope;
 use crate::spur_app::{SpurAppManifest, SpurAppMcpServer, SPUR_APP_MANIFEST, SPUR_APP_SCHEMA};
@@ -52,8 +52,8 @@ fn default_notebook_scope(cwd: PathBuf) -> AppScope {
         cwd,
         mcp_servers: foundation_mcp_servers(),
         skill: None,
-        app_key: DEFAULT_NOTEBOOK_APP_KEY.to_string(),
-        label: DEFAULT_NOTEBOOK_LABEL.to_string(),
+        app_key: DEFAULT_NOTEBOOK_APP_KEY.to_owned(),
+        label: DEFAULT_NOTEBOOK_LABEL.to_owned(),
     }
 }
 
