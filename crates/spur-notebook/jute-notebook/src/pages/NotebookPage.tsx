@@ -4,7 +4,10 @@ import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
 import { setActiveAgentNotebook } from "@/agent/bridge";
-import { listenForNotebookEvents } from "@/agent/events";
+import {
+  listenForNotebookEvents,
+  listenForRecentNotebookChanges,
+} from "@/agent/events";
 import { daemonControl } from "@/daemon/control";
 import {
   Notebook,
@@ -70,9 +73,7 @@ export default function NotebookPage() {
   }, [search, tabSpecs]);
 
   useEffect(() => {
-    setTabs(
-      tabEntries.map(({ inline: _inline, notebook: _notebook, ...tab }) => tab),
-    );
+    setTabs(tabEntries.map(tabFromEntry));
   }, [setTabs, tabEntries]);
 
   const requestCloseTab = useCallback((tabId: string) => {
@@ -146,6 +147,32 @@ export default function NotebookPage() {
       unlisten.forEach((cleanup) => cleanup());
     };
   }, [tabEntries]);
+
+  useEffect(() => {
+    return listenForRecentNotebookChanges((entries) => {
+      const current = entries.find((entry) => entry.isCurrent);
+      if (!current?.path) return;
+
+      const existingEntry = tabEntries.find(
+        (entry) => entry.path === current.path || entry.id === current.path,
+      );
+      if (existingEntry) {
+        setTabs(tabEntries.map(tabFromEntry));
+        setActiveTabId(existingEntry.id);
+        return;
+      }
+
+      const entry = tabEntryFromSpec(tabFromPath(current.path));
+      setTabEntries((entries) => {
+        if (entries.some((entry) => entry.path === current.path)) {
+          return entries;
+        }
+        return [...entries, entry];
+      });
+      setTabs([...tabs, tabFromEntry(entry)]);
+      setActiveTabId(entry.id);
+    });
+  }, [setActiveTabId, setTabs, tabEntries, tabs]);
 
   useEffect(() => {
     setActiveAgentNotebook(undefined);
@@ -375,6 +402,11 @@ function tabEntryFromSpec(tab: NotebookTabSpec): NotebookTabEntry {
     ...tab,
     notebook: new Notebook(),
   };
+}
+
+function tabFromEntry(entry: NotebookTabEntry): NotebookTab {
+  const { inline: _inline, notebook: _notebook, ...tab } = entry;
+  return tab;
 }
 
 function tabRequiresCloseConfirmation(
