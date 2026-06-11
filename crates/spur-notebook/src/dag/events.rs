@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use tokio::{
 };
 
 const DEFAULT_DRAFT_CHANNEL_CAPACITY: usize = 128;
-const DEFAULT_BROADCAST_CAPACITY: usize = 128;
+const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 const DEFAULT_RING_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,9 +218,18 @@ impl PortEventSequencer {
         self.client.clone()
     }
 
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         drop(self.client);
-        let _ = self.task.await;
+        if tokio::time::timeout(Duration::from_secs(5), &mut self.task)
+            .await
+            .is_err()
+        {
+            self.task.abort();
+            tracing::warn!(
+                "port event sequencer aborted during shutdown with draft senders still live"
+            );
+            let _ = self.task.await;
+        }
     }
 }
 
@@ -267,8 +276,14 @@ pub enum PortEventError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn default_broadcast_capacity_satisfies_repo_minimum() {
+        assert!(PortEventSequencerConfig::default().broadcast_capacity >= 4096);
+    }
 
     #[tokio::test]
     async fn sequencer_assigns_strictly_monotonic_seq_for_cloned_senders() {
@@ -416,6 +431,22 @@ mod tests {
 
         drop(client);
         sequencer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_completes_with_cloned_draft_sender_still_live() {
+        let sequencer = PortEventSequencer::spawn(PortEventSequencerConfig {
+            draft_channel_capacity: 4,
+            broadcast_capacity: 8,
+            ring_capacity: 8,
+        });
+        let held_sender = sequencer.client().draft_sender();
+
+        tokio::time::timeout(Duration::from_secs(6), sequencer.shutdown())
+            .await
+            .expect("shutdown should timeout and abort the sequencer task internally");
+
+        drop(held_sender);
     }
 
     fn run_started(cascade_id: u64, run_id: u64) -> PortEventDraft {

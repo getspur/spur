@@ -372,9 +372,45 @@ impl PortStore {
         let mut next_manifest = self.manifest.clone();
         next_manifest.ports.insert(port.to_owned(), entry.clone());
         self.persist_manifest(&next_manifest)?;
-        self.manifest = next_manifest;
 
         Ok(entry)
+    }
+
+    pub fn bump_version(&mut self, port: &str) -> Result<u64, PortStoreError> {
+        validate_path_segment(port)?;
+        let current = self
+            .manifest
+            .ports
+            .get(port)
+            .ok_or_else(|| PortStoreError::MissingPort(port.to_owned()))?;
+        let version = current.version + 1;
+        let extension = current
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("arrow");
+        let path = self
+            .ports_dir
+            .join(format!("{port}@v{version}.{extension}"));
+
+        fs::hard_link(&current.path, &path).map_err(|source| {
+            if source.kind() == io::ErrorKind::AlreadyExists {
+                PortStoreError::ExistingPortDestination { path: path.clone() }
+            } else {
+                io_error(&path, source)
+            }
+        })?;
+
+        let entry = PortEntry {
+            path,
+            version,
+            kind: current.kind.clone(),
+        };
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.ports.insert(port.to_owned(), entry);
+        self.persist_manifest(&next_manifest)?;
+
+        Ok(version)
     }
 
     #[expect(
@@ -479,9 +515,20 @@ impl PortStore {
         }
     }
 
-    fn persist_manifest(&self, manifest: &PortManifest) -> Result<(), PortStoreError> {
+    fn persist_manifest(&mut self, manifest: &PortManifest) -> Result<(), PortStoreError> {
+        let mut merged = Self::load_manifest(&self.manifest_path)?;
+        for (port, entry) in &manifest.ports {
+            let keep_memory_entry = merged
+                .ports
+                .get(port)
+                .is_none_or(|disk_entry| disk_entry.version <= entry.version);
+            if keep_memory_entry {
+                merged.ports.insert(port.clone(), entry.clone());
+            }
+        }
+
         let bytes =
-            serde_json::to_vec_pretty(manifest).map_err(|source| PortStoreError::ManifestJson {
+            serde_json::to_vec_pretty(&merged).map_err(|source| PortStoreError::ManifestJson {
                 path: self.manifest_path.clone(),
                 source,
             })?;
@@ -490,7 +537,9 @@ impl PortStore {
             .join(format!("{MANIFEST_FILE}.{}.tmp", std::process::id()));
         fs::write(&tmp_path, bytes).map_err(|source| io_error(&tmp_path, source))?;
         fs::rename(&tmp_path, &self.manifest_path)
-            .map_err(|source| io_error(&self.manifest_path, source))
+            .map_err(|source| io_error(&self.manifest_path, source))?;
+        self.manifest = merged;
+        Ok(())
     }
 }
 
@@ -1056,6 +1105,39 @@ mod tests {
     }
 
     #[test]
+    fn bump_version_links_existing_payload_and_next_put_uses_next_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = PortStore::open_at(dir.path()).expect("open store");
+        let first = batch(vec![1, 2], vec!["alpha", "beta"]);
+
+        store.put("sales", &first).expect("put first batch");
+        let bumped_version = store.bump_version("sales").expect("bump version");
+
+        assert_eq!(2, bumped_version);
+        let v1_path = dir.path().join("ports/sales@v1.arrow");
+        let v2_path = dir.path().join("ports/sales@v2.arrow");
+        assert!(v1_path.exists());
+        assert!(v2_path.exists());
+        assert_eq!(
+            std::fs::read(&v1_path).expect("read v1"),
+            std::fs::read(&v2_path).expect("read v2")
+        );
+        assert_eq!(
+            2,
+            store
+                .manifest()
+                .get("sales")
+                .expect("manifest has sales")
+                .version
+        );
+
+        let second = batch(vec![3], vec!["gamma"]);
+        let second_entry = store.put("sales", &second).expect("put second batch");
+        assert_eq!(3, second_entry.version);
+        assert_eq!(dir.path().join("ports/sales@v3.arrow"), second_entry.path);
+    }
+
+    #[test]
     fn put_get_round_trip_preserves_media_blob_and_mime() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut store = PortStore::open_at(dir.path()).expect("open store");
@@ -1236,6 +1318,52 @@ mod tests {
             std::fs::read(final_path)
                 .expect("winner file remains readable")
                 .as_slice()
+        );
+    }
+
+    #[test]
+    fn stale_store_manifest_persist_merges_ports_written_by_other_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store_a = PortStore::open_at(dir.path()).expect("open store A");
+        let mut store_b = PortStore::open_at(dir.path()).expect("open store B");
+
+        store_a
+            .put(
+                "x",
+                PortPayload::MediaBlob {
+                    bytes: b"x bytes",
+                    mime: "application/octet-stream",
+                    duration_sec: None,
+                },
+            )
+            .expect("store A writes x");
+        store_b
+            .put(
+                "y",
+                PortPayload::MediaBlob {
+                    bytes: b"y bytes",
+                    mime: "application/octet-stream",
+                    duration_sec: None,
+                },
+            )
+            .expect("store B writes y");
+
+        let reloaded = PortStore::open_at(dir.path()).expect("reload merged manifest");
+        assert_eq!(
+            1,
+            reloaded
+                .manifest()
+                .get("x")
+                .expect("manifest keeps x")
+                .version
+        );
+        assert_eq!(
+            1,
+            reloaded
+                .manifest()
+                .get("y")
+                .expect("manifest keeps y")
+                .version
         );
     }
 
