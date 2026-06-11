@@ -1286,7 +1286,7 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let notebook_path = temp.path().join("nb.ipynb");
         let state = Arc::new(jute::state::State::new());
-        state.get_notebook().load(
+        state.notebook_for_path(&notebook_path).load(
             &notebook_path,
             notebook(vec![cell("producer", vec!["raw"], vec![], None)]),
         );

@@ -5212,8 +5212,8 @@ paths:
         let notebook_root: NotebookRoot =
             serde_json::from_value(empty_notebook()).expect("empty notebook parses");
         jute_state
-            .get_notebook()
-            .load(notebook_path.clone(), notebook_root);
+            .focus_notebook_path(&notebook_path)
+            .load(&notebook_path, notebook_root);
         let control = NotebookDaemonControl::new_for_test(
             Arc::new(AgentBridge::new()),
             test_bridge_requester(),

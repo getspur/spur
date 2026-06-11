@@ -273,7 +273,9 @@ mod tests {
     async fn deps(root: NotebookRoot, temp: &TempDir) -> ServerDeps {
         let notebook_path = temp.path().join("nb.ipynb");
         let state = Arc::new(State::new());
-        state.get_notebook().load(&notebook_path, root);
+        state
+            .notebook_for_path(&notebook_path)
+            .load(&notebook_path, root);
         let control = NotebookDaemonControl::new_with_parts_for_test(
             Arc::new(AgentBridge::new()),
             Arc::new(TestBridge),
