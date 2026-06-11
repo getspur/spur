@@ -355,7 +355,7 @@ pub struct PortSpec {
 
     /// Optional declared Arrow schema JSON, in the manifest schema dialect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional, type = "unknown")]
+    #[ts(optional)]
     pub schema: Option<Value>,
 }
 
@@ -377,7 +377,7 @@ pub struct DagSource {
 
     /// Optional declared Arrow schema JSON, in the manifest schema dialect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional, type = "unknown")]
+    #[ts(optional)]
     pub schema: Option<Value>,
 }
 
