@@ -447,6 +447,43 @@ where
     }
 }
 
+fn has_analyst_db(root: &std::path::Path) -> bool {
+    root.join(".spur").join("analyst.duckdb").exists()
+}
+
+fn select_knowledge_context_root(
+    worker_root: Option<PathBuf>,
+    repo_root: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(root) = worker_root.as_ref().filter(|root| has_analyst_db(root)) {
+        return Some(root.clone());
+    }
+    if let Some(root) = repo_root.as_ref().filter(|root| has_analyst_db(root)) {
+        return Some(root.clone());
+    }
+    worker_root.or(repo_root)
+}
+
+async fn invoke_knowledge_context_for_worker(
+    deps: Arc<DispatcherDeps>,
+    worker_ctx: WorkerCallContext,
+    args: Value,
+) -> Result<Value, McpHandlerError> {
+    let worker_root = {
+        deps.delegation_worktree_roots
+            .lock()
+            .get(&worker_ctx.delegation_id)
+            .cloned()
+    };
+    let root = select_knowledge_context_root(worker_root, deps.repo_root.clone());
+    let future = crate::server::handlers::knowledge_context::knowledge_context_pack(&args);
+    if let Some(root) = root {
+        crate::server::handlers::code_graph::with_worktree_root_for_request(root, future).await
+    } else {
+        future.await
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct GetIssueParams {
     id: String,
@@ -1229,10 +1266,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::knowledge_context::knowledge_context_pack(&args)
-                })
-                .await
+                invoke_knowledge_context_for_worker(deps, worker_ctx, args).await
             },
         )
         .await
@@ -2571,5 +2605,48 @@ mod tests {
         let unsorted: Vec<u64> = vec![50, 5, 200, 100, 25];
         // Sorted: [5,25,50,100,200]; ceil(0.99*5) = 5 → idx 4 → 200.
         assert_eq!(compute_p99_latency_ms(&unsorted), 200);
+    }
+
+    #[test]
+    fn knowledge_context_root_falls_back_to_repo_db_when_worker_db_missing() {
+        let worker_dir = tempfile::tempdir().expect("worker tempdir");
+        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo_dir.path().join(".spur")).expect("create repo .spur");
+        std::fs::write(repo_dir.path().join(".spur").join("analyst.duckdb"), b"db")
+            .expect("write repo analyst db marker");
+
+        let selected = select_knowledge_context_root(
+            Some(worker_dir.path().to_path_buf()),
+            Some(repo_dir.path().to_path_buf()),
+        )
+        .expect("selected root");
+
+        assert_eq!(selected, repo_dir.path());
+    }
+
+    #[test]
+    fn knowledge_context_root_prefers_worker_db_when_present() {
+        let worker_dir = tempfile::tempdir().expect("worker tempdir");
+        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(worker_dir.path().join(".spur")).expect("create worker .spur");
+        std::fs::create_dir_all(repo_dir.path().join(".spur")).expect("create repo .spur");
+        std::fs::write(
+            worker_dir.path().join(".spur").join("analyst.duckdb"),
+            b"worker db",
+        )
+        .expect("write worker analyst db marker");
+        std::fs::write(
+            repo_dir.path().join(".spur").join("analyst.duckdb"),
+            b"repo db",
+        )
+        .expect("write repo analyst db marker");
+
+        let selected = select_knowledge_context_root(
+            Some(worker_dir.path().to_path_buf()),
+            Some(repo_dir.path().to_path_buf()),
+        )
+        .expect("selected root");
+
+        assert_eq!(selected, worker_dir.path());
     }
 }
