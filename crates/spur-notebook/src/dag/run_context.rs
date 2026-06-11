@@ -169,7 +169,7 @@ where
     R: CellRunner,
 {
     let notebook_path = notebook_path.as_ref();
-    let store = state.get_notebook();
+    let store = state.notebook_for_path(notebook_path);
     let deps = Arc::new(ServerDeps::new(bridge, Some(state), app, daemon, None));
     let runner = build_runner(Arc::clone(&deps));
     let engine = ReactiveEngine::new(

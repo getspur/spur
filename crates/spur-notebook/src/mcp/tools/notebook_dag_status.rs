@@ -47,7 +47,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             Some(json!({ "code": "notebook_not_open" })),
         )
     })?;
-    let (root, version) = state.get_notebook().snapshot();
+    let (root, version) = state.notebook_for_path(&path).snapshot();
     let dag = build_graph(&root)?;
     let port_manifest = PortStore::open_read_only_at(notebook_port_root(&path))
         .map_err(|error| {
@@ -331,5 +331,47 @@ mod tests {
             .expect("ports dir still exists")
             .count();
         assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn snapshots_current_path_store_not_focused_store() {
+        let temp = TempDir::new().expect("temp dir");
+        let current_path = temp.path().join("current.ipynb");
+        let focused_path = temp.path().join("focused.ipynb");
+        let state = Arc::new(State::new());
+        state.notebook_for_path(&current_path).load(
+            &current_path,
+            notebook(vec![
+                cell("source", vec!["raw"], vec![], None),
+                cell("consumer", vec![], vec!["raw"], None),
+            ]),
+        );
+        state.get_notebook().load(
+            &focused_path,
+            notebook(vec![cell("focused", vec![], vec![], None)]),
+        );
+        let control = NotebookDaemonControl::new_with_parts_for_test(
+            Arc::new(AgentBridge::new()),
+            Arc::new(TestBridge),
+            Arc::clone(&state),
+            Arc::new(TestWindows),
+            None,
+        );
+        control.set_current_path_for_test(current_path).await;
+        let deps = ServerDeps {
+            bridge: Arc::new(TestBridge),
+            state: Some(state),
+            app: None,
+            daemon: Some(control),
+            plugins: None,
+        };
+
+        let result = super::call(&deps, json!({}))
+            .await
+            .expect("status snapshots current path store");
+        let body = result.structured_content.expect("structured content");
+
+        assert_eq!(body["nodes"][0]["id"], "source");
+        assert_eq!(body["nodes"][1]["id"], "consumer");
     }
 }
