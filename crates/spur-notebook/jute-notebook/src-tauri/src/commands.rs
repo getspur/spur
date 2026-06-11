@@ -277,6 +277,8 @@ impl DaemonControlRequest {
 #[serde(tag = "command", rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum DaemonControlCommand {
+    /// Set the focused notebook used by implicit notebook operations.
+    SetFocus { notebook_id: String },
     /// Open a notebook file.
     Open { path: String },
     /// Rename a notebook file.
@@ -330,7 +332,11 @@ pub enum DaemonControlCommand {
     /// Detach a datasource from the current notebook.
     DetachDatasource { name: String },
     /// List datasources attached to the current notebook.
-    ListDatasources,
+    ListDatasources {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+    },
     /// List globally saved API connection templates.
     ListSavedConnections,
     /// Re-attach a saved connection template into the current notebook.
@@ -358,6 +364,9 @@ pub enum DaemonControlCommand {
     SetPinned { path: String, pinned: bool },
     /// Replace one cell's source.
     WriteCell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
         id: String,
         source: String,
         #[ts(type = "number | null")]
@@ -365,9 +374,17 @@ pub enum DaemonControlCommand {
         last_edited_by: Option<String>,
     },
     /// Read one cell.
-    ReadCell { id: String },
+    ReadCell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+        id: String,
+    },
     /// Insert a cell.
     InsertCell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
         kind: CellKind,
         after_id: Option<String>,
         source: String,
@@ -387,23 +404,43 @@ pub enum DaemonControlCommand {
     },
     /// Delete one cell.
     DeleteCell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
         id: String,
         #[ts(type = "number")]
         expected_version: u64,
     },
     /// Merge cell metadata through the notebook bridge.
     SetCellMetadata {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
         id: String,
         patch: serde_json::Value,
         #[ts(type = "number")]
         expected_version: u64,
     },
     /// Return the full notebook root and store version.
-    Snapshot,
+    Snapshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+    },
     /// Apply a UI edit without an optimistic concurrency check.
-    ApplyEdit { id: String, source: String },
+    ApplyEdit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+        id: String,
+        source: String,
+    },
     /// Persist the current store snapshot to disk.
-    FlushNotebook,
+    FlushNotebook {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notebook_id: Option<String>,
+    },
 }
 
 /// A daemon control protocol response.
@@ -859,14 +896,25 @@ async fn handle_daemon_control_inner(
     state: &State,
 ) -> Result<DaemonControlResult, DaemonControlResponse> {
     match command {
+        DaemonControlCommand::SetFocus { notebook_id } => {
+            if notebook_id.is_empty() {
+                return Err(DaemonControlResponse::failure(
+                    "invalid_params",
+                    "set_focus notebook_id must not be empty",
+                ));
+            }
+            state.set_focused_notebook_target(&notebook_id);
+            Ok(DaemonControlResult::Empty)
+        }
         DaemonControlCommand::WriteCell {
+            notebook_id,
             id,
             source,
             expected_version,
             last_edited_by,
         } => {
             validate_cell_id(&id)?;
-            let notebook = state.get_notebook();
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .apply(NotebookOp::WriteCell {
                     id,
@@ -877,13 +925,14 @@ async fn handle_daemon_control_inner(
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::ReadCell { id } => {
+        DaemonControlCommand::ReadCell { notebook_id, id } => {
             validate_cell_id(&id)?;
-            let notebook = state.get_notebook();
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             let (root, _version) = notebook.snapshot();
             read_daemon_cell(&root, &id).map(DaemonControlResult::Cell)
         }
         DaemonControlCommand::InsertCell {
+            notebook_id,
             kind,
             after_id,
             source,
@@ -896,7 +945,7 @@ async fn handle_daemon_control_inner(
                     "insert_cell after_id must not be empty",
                 ));
             }
-            let notebook = state.get_notebook();
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .apply(NotebookOp::InsertCell {
                     kind,
@@ -924,16 +973,17 @@ async fn handle_daemon_control_inner(
             let delta = replace_notebook_and_hydrate_catalog(state, PathBuf::from(path), contents);
             Ok(DaemonControlResult::Delta(delta))
         }
-        DaemonControlCommand::ListDatasources => {
-            let entries = state.list_focused_datasources();
+        DaemonControlCommand::ListDatasources { notebook_id } => {
+            let entries = state.list_datasources_for_optional_target(notebook_id.as_deref());
             Ok(DaemonControlResult::Datasources(entries))
         }
         DaemonControlCommand::DeleteCell {
+            notebook_id,
             id,
             expected_version,
         } => {
             validate_cell_id(&id)?;
-            let notebook = state.get_notebook();
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .apply(NotebookOp::DeleteCell {
                     id,
@@ -943,12 +993,13 @@ async fn handle_daemon_control_inner(
                 .map_err(store_error_response)
         }
         DaemonControlCommand::SetCellMetadata {
+            notebook_id,
             id,
             patch,
             expected_version,
         } => {
             validate_cell_id(&id)?;
-            let notebook = state.get_notebook();
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             if patch
                 .get("spur")
                 .and_then(|spur| spur.get("datasource_setup"))
@@ -1029,24 +1080,28 @@ async fn handle_daemon_control_inner(
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::Snapshot => {
-            let notebook = state.get_notebook();
+        DaemonControlCommand::Snapshot { notebook_id } => {
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             let (root, version) = notebook.snapshot();
             Ok(DaemonControlResult::Snapshot(DaemonNotebookSnapshot {
                 root,
                 version,
             }))
         }
-        DaemonControlCommand::ApplyEdit { id, source } => {
+        DaemonControlCommand::ApplyEdit {
+            notebook_id,
+            id,
+            source,
+        } => {
             validate_cell_id(&id)?;
-            let notebook = state.get_notebook();
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .apply(NotebookOp::ApplyEdit { id, source })
                 .map(DaemonControlResult::Delta)
                 .map_err(store_error_response)
         }
-        DaemonControlCommand::FlushNotebook => {
-            let notebook = state.get_notebook();
+        DaemonControlCommand::FlushNotebook { notebook_id } => {
+            let notebook = state.notebook_for_optional_target(notebook_id.as_deref());
             notebook
                 .flush()
                 .await
@@ -2849,6 +2904,154 @@ mod tests {
     }
 
     #[test]
+    fn focus_command_round_trips() {
+        let request = DaemonControlRequest::new(DaemonControlCommand::SetFocus {
+            notebook_id: "/tmp/notebooks/focused.ipynb".to_string(),
+        });
+
+        let value = serde_json::to_value(&request).expect("set focus serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "set_focus",
+                "notebook_id": "/tmp/notebooks/focused.ipynb"
+            })
+        );
+
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(value).expect("set focus decodes");
+        match decoded.command {
+            DaemonControlCommand::SetFocus { notebook_id } => {
+                assert_eq!(notebook_id, "/tmp/notebooks/focused.ipynb");
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn cell_mutation_commands_round_trip_optional_notebook_id() {
+        let without_target = serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "write_cell",
+            "id": "cell-1",
+            "source": "print(1)",
+            "expected_version": 1,
+            "last_edited_by": "brain"
+        });
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(without_target.clone()).expect("legacy write decodes");
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("legacy write serializes"),
+            without_target
+        );
+
+        let with_target = serde_json::json!({
+            "daemon": "notebook.v1",
+            "command": "write_cell",
+            "notebook_id": "/tmp/notebooks/background.ipynb",
+            "id": "cell-1",
+            "source": "print(2)",
+            "expected_version": 2,
+            "last_edited_by": "brain"
+        });
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(with_target.clone()).expect("targeted write decodes");
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("targeted write serializes"),
+            with_target
+        );
+        match decoded.command {
+            DaemonControlCommand::WriteCell { notebook_id, .. } => {
+                assert_eq!(
+                    notebook_id.as_deref(),
+                    Some("/tmp/notebooks/background.ipynb")
+                );
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn focus_and_optional_notebook_id_target_store_without_changing_focus() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("jute-focus-target-")
+            .tempdir()
+            .expect("temp dir");
+        let path_a = temp_dir.path().join("a.ipynb");
+        let path_b = temp_dir.path().join("b.ipynb");
+        std::fs::write(
+            &path_a,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook A", 1)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &path_b,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook B", 1)).unwrap(),
+        )
+        .unwrap();
+        let state = State::new();
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: path_a.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("A loads");
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: path_b.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("B loads");
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::SetFocus {
+                notebook_id: path_a.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("focus A");
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::WriteCell {
+                notebook_id: Some(path_b.display().to_string()),
+                id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                source: "background B edit".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("brain".to_string()),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("targeted write B");
+
+        let focused = handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::Snapshot { notebook_id: None }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("focused snapshot");
+        let DaemonControlResult::Snapshot(snapshot) = focused else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(first_source(&snapshot.root), "notebook A");
+
+        let background = state.notebook_for_path(&path_b).snapshot().0;
+        assert_eq!(first_source(&background), "background B edit");
+    }
+
+    #[test]
     fn attach_saved_connection_command_defaults_and_round_trips_credentials() {
         let decoded: DaemonControlRequest = serde_json::from_value(serde_json::json!({
             "daemon": "notebook.v1",
@@ -3433,6 +3636,7 @@ mod tests {
         state.set_focused_notebook_path(&notebook_a_path);
         handle_daemon_control_request(
             DaemonControlRequest::new(DaemonControlCommand::WriteCell {
+                notebook_id: None,
                 id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                 source: "notebook A window edit".to_string(),
                 expected_version: Some(1),
@@ -3543,6 +3747,7 @@ mod tests {
         let read = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::ReadCell {
+                notebook_id: None,
                 id: cell_id.clone(),
             }),
         )
@@ -3559,6 +3764,7 @@ mod tests {
         let write = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::WriteCell {
+                notebook_id: None,
                 id: cell_id.clone(),
                 source: "updated".to_string(),
                 expected_version: Some(1),
@@ -3581,6 +3787,7 @@ mod tests {
         let insert = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::InsertCell {
+                notebook_id: None,
                 kind: CellKind::Markdown,
                 after_id: Some(cell_id.clone()),
                 source: "notes".to_string(),
@@ -3611,6 +3818,7 @@ mod tests {
         let apply = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::ApplyEdit {
+                notebook_id: None,
                 id: inserted_id.clone(),
                 source: "edited notes".to_string(),
             }),
@@ -3630,7 +3838,7 @@ mod tests {
 
         let snapshot = send_daemon_control_to(
             &socket_path,
-            &DaemonControlRequest::new(DaemonControlCommand::Snapshot {}),
+            &DaemonControlRequest::new(DaemonControlCommand::Snapshot { notebook_id: None }),
         )
         .await
         .unwrap()
@@ -3645,6 +3853,7 @@ mod tests {
         let delete = send_daemon_control_to(
             &socket_path,
             &DaemonControlRequest::new(DaemonControlCommand::DeleteCell {
+                notebook_id: None,
                 id: inserted_id.clone(),
                 expected_version: 4,
             }),
@@ -3664,7 +3873,7 @@ mod tests {
 
         let flush = send_daemon_control_to(
             &socket_path,
-            &DaemonControlRequest::new(DaemonControlCommand::FlushNotebook {}),
+            &DaemonControlRequest::new(DaemonControlCommand::FlushNotebook { notebook_id: None }),
         )
         .await
         .unwrap()

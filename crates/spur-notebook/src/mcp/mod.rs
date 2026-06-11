@@ -1598,10 +1598,11 @@ impl NotebookDaemonControl {
             | DaemonControlCommand::LoadNotebook { .. }
             | DaemonControlCommand::ReplaceNotebook { .. }
             | DaemonControlCommand::DeleteCell { .. }
-            | DaemonControlCommand::Snapshot {}
+            | DaemonControlCommand::Snapshot { .. }
             | DaemonControlCommand::SetCellMetadata { .. }
             | DaemonControlCommand::ApplyEdit { .. }
-            | DaemonControlCommand::FlushNotebook {} => {
+            | DaemonControlCommand::FlushNotebook { .. }
+            | DaemonControlCommand::SetFocus { .. } => {
                 return self.handle_notebook_store_control(id, request).await;
             }
             DaemonControlCommand::Open { path } => {
@@ -1733,9 +1734,11 @@ impl NotebookDaemonControl {
             }
             DaemonControlCommand::OauthConnect { name } => self.oauth_connect(name).await,
             DaemonControlCommand::DetachDatasource { name } => self.detach_datasource(name).await,
-            DaemonControlCommand::ListDatasources {} => {
+            DaemonControlCommand::ListDatasources { notebook_id } => {
                 async {
-                    let entries = self.jute_state.datasource_catalog.lock().list();
+                    let entries = self
+                        .jute_state
+                        .list_datasources_for_optional_target(notebook_id.as_deref());
                     let result = serde_json::to_value(
                         jute::commands::DaemonControlResult::Datasources(entries),
                     )
@@ -2767,6 +2770,11 @@ impl NotebookDaemonControl {
                 jute::commands::DaemonControlCommand::LoadNotebook { path }
                 | jute::commands::DaemonControlCommand::ReplaceNotebook { path, .. } => {
                     self.state.lock().await.current_path = Some(PathBuf::from(path));
+                }
+                jute::commands::DaemonControlCommand::SetFocus { .. } => {
+                    if let Some(id) = self.jute_state.focused_notebook_id() {
+                        self.state.lock().await.current_path = Some(PathBuf::from(id.saved_path()));
+                    }
                 }
                 _ => {}
             }
@@ -3906,11 +3914,13 @@ score = { json = "$.score", type = "Int64" }
         assert_eq!(request.id.as_deref(), Some("cell-1"));
         match request.request.command {
             jute::commands::DaemonControlCommand::WriteCell {
+                notebook_id,
                 id,
                 source,
                 expected_version,
                 last_edited_by,
             } => {
+                assert!(notebook_id.is_none());
                 assert_eq!(id, "cell-1");
                 assert_eq!(source, "print(1)");
                 assert_eq!(expected_version, Some(7));

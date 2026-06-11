@@ -316,9 +316,16 @@ pub async fn bridge_ready(bridge: tauri::State<'_, Arc<AgentBridge>>) -> Result<
 #[tauri::command]
 pub async fn notebook_active_changed(
     bridge: tauri::State<'_, Arc<AgentBridge>>,
+    state: tauri::State<'_, Arc<jute::state::State>>,
     open: bool,
+    notebook_id: Option<String>,
 ) -> Result<(), String> {
     bridge.set_notebook_open(open);
+    if open {
+        if let Some(notebook_id) = notebook_id.as_deref().filter(|id| !id.is_empty()) {
+            state.set_focused_notebook_target(notebook_id);
+        }
+    }
     Ok(())
 }
 
