@@ -1,6 +1,7 @@
 //! Owned sidebar chat state for the Tauri process.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -17,7 +18,11 @@ use tracing::warn;
 use spur_notebook::sidebar_chat::manager::SidebarChat as SidebarChatManager;
 
 /// Shared sidebar chat manager handle used by Tauri commands.
-pub type SidebarChatHandle = Arc<Mutex<SidebarChatManager>>;
+///
+/// The manager already uses interior async mutexes. Keeping this handle
+/// lock-free lets a streaming turn, permission pump, and permission response
+/// command access the same pending-permission map concurrently.
+pub type SidebarChatHandle = Arc<SidebarChatManager>;
 
 /// Error returned when sidebar chat cannot be made available.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -34,6 +39,7 @@ pub enum ChatStateError {
 pub struct SidebarChatState {
     chat: OnceCell<SidebarChatHandle>,
     cancellation_root: CancellationToken,
+    active_turns: Mutex<HashMap<String, CancellationToken>>,
     permission_tx: mpsc::UnboundedSender<PermissionRequest>,
     permission_rx: Mutex<mpsc::UnboundedReceiver<PermissionRequest>>,
     agent: Option<AgentConfig>,
@@ -55,6 +61,7 @@ impl SidebarChatState {
         Self {
             chat: OnceCell::new(),
             cancellation_root: CancellationToken::new(),
+            active_turns: Mutex::new(HashMap::new()),
             permission_tx,
             permission_rx: Mutex::new(permission_rx),
             agent: select_default_agent(&config),
@@ -77,7 +84,7 @@ impl SidebarChatState {
             .get_or_try_init(|| async move {
                 let connection = build_agent_connection(&agent, &repo_root, Some(permission_tx));
                 let manager = SidebarChatManager::new(connection);
-                Ok(Arc::new(Mutex::new(manager)))
+                Ok(Arc::new(manager))
             })
             .await
             .cloned()
@@ -86,6 +93,21 @@ impl SidebarChatState {
     /// Return the cancellation root for all sidebar chat work.
     pub fn cancellation_root(&self) -> CancellationToken {
         self.cancellation_root.clone()
+    }
+
+    /// Register a turn-specific cancellation token for a live ACP session.
+    pub async fn register_turn_cancel(&self, session_id: String, token: CancellationToken) {
+        self.active_turns.lock().await.insert(session_id, token);
+    }
+
+    /// Remove and return a live turn cancellation token, if one exists.
+    pub async fn take_turn_cancel(&self, session_id: &str) -> Option<CancellationToken> {
+        self.active_turns.lock().await.remove(session_id)
+    }
+
+    /// Forget a completed turn cancellation token.
+    pub async fn unregister_turn_cancel(&self, session_id: &str) {
+        self.active_turns.lock().await.remove(session_id);
     }
 
     /// Return a clone of the permission request sender wired into native ACP.
@@ -258,7 +280,7 @@ mod tests {
         let mut state = crate::state::State::new();
         state.sidebar_chat = SidebarChatState::from_config(config, PathBuf::from("."));
 
-        let chat: Arc<Mutex<spur_notebook::sidebar_chat::manager::SidebarChat>> =
+        let chat: Arc<spur_notebook::sidebar_chat::manager::SidebarChat> =
             get_or_init_sidebar_chat(&state).await.unwrap();
 
         assert!(Arc::ptr_eq(
@@ -273,5 +295,20 @@ mod tests {
 
         let _permission_tx = state.permission_sender();
         assert!(!state.cancellation_root().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn tracks_turn_cancellation_tokens_by_session_id() {
+        let state = SidebarChatState::default();
+        let token = state.cancellation_root().child_token();
+
+        state
+            .register_turn_cancel("session-1".to_owned(), token.clone())
+            .await;
+
+        let stored = state.take_turn_cancel("session-1").await.unwrap();
+        stored.cancel();
+        assert!(token.is_cancelled());
+        assert!(state.take_turn_cancel("session-1").await.is_none());
     }
 }
