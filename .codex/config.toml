@@ -1,0 +1,4 @@
+[mcp_servers.spur-analyst]
+command = "uvx"
+args = ["--with", "duckdb==1.4.3", "--from", "mcp-server-motherduck==0.8.1", "mcp-server-motherduck", "--read-only", "--db-path", ".spur/analyst.duckdb"]
+startup_timeout_sec = 120
