@@ -10,6 +10,7 @@ type Props = {
   onCloseTab: (tabId: string) => void;
   onNewTab: () => void | Promise<void>;
   onOpenNotebook: () => void | Promise<void>;
+  onReorder: (tabId: string, toIndex: number) => void;
   onSwitchTab: (tabId: string) => void;
 };
 
@@ -18,10 +19,16 @@ export default function NotebookTabStrip({
   onCloseTab,
   onNewTab,
   onOpenNotebook,
+  onReorder,
   onSwitchTab,
   tabs,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    id: string;
+    before: boolean;
+  } | null>(null);
   const [lockedWidths, setLockedWidths] = useState<Record<
     string,
     number
@@ -81,6 +88,10 @@ export default function NotebookTabStrip({
       >
         {tabs.map((tab) => {
           const active = tab.id === activeTabId;
+          const dropTargetBefore =
+            dropTarget?.id === tab.id && dropTarget.before;
+          const dropTargetAfter =
+            dropTarget?.id === tab.id && !dropTarget.before;
           return (
             <div
               aria-label={tab.pinned ? `${tab.title} (pinned)` : undefined}
@@ -94,12 +105,61 @@ export default function NotebookTabStrip({
                   ? "z-10 border-gray-200 bg-white"
                   : !tab.attention &&
                       "border-transparent bg-gray-50 text-gray-500 hover:bg-gray-100 hover:text-gray-900",
+                dragId === tab.id && "opacity-50",
+                dropTargetBefore && "shadow-[-2px_0_0_0_#111827]",
+                dropTargetAfter && "shadow-[2px_0_0_0_#111827]",
               )}
+              draggable={!tab.pinned}
               key={tab.id}
               onAuxClick={(event) => {
                 if (event.button === 1 && !tab.pinned) {
                   handleClose(tab.id);
                 }
+              }}
+              onDragEnd={() => {
+                setDragId(null);
+                setDropTarget(null);
+              }}
+              onDragOver={(event) => {
+                if (!dragId || dragId === tab.id || tab.pinned) return;
+                event.preventDefault();
+                const rect = event.currentTarget.getBoundingClientRect();
+                setDropTarget({
+                  id: tab.id,
+                  before: event.clientX < rect.left + rect.width / 2,
+                });
+              }}
+              onDragStart={(event) => {
+                if (tab.pinned) {
+                  event.preventDefault();
+                  return;
+                }
+                setDragId(tab.id);
+                if (event.dataTransfer) {
+                  event.dataTransfer.effectAllowed = "move";
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (!dragId || !dropTarget) return;
+                const fromIndex = tabs.findIndex(
+                  (candidate) => candidate.id === dragId,
+                );
+                const targetIndex = tabs.findIndex(
+                  (candidate) => candidate.id === dropTarget.id,
+                );
+                if (fromIndex < 0 || targetIndex < 0) return;
+
+                const insertionIndex =
+                  targetIndex + (dropTarget.before ? 0 : 1);
+                onReorder(
+                  dragId,
+                  fromIndex < insertionIndex
+                    ? insertionIndex - 1
+                    : insertionIndex,
+                );
+                setDragId(null);
+                setDropTarget(null);
               }}
               ref={(el) => {
                 if (el) tabRefs.current.set(tab.id, el);
@@ -170,11 +230,11 @@ export default function NotebookTabStrip({
                     <>
                       <span
                         aria-hidden="true"
-                        className="group-hover:hidden h-1.5 w-1.5 rounded-full bg-violet-500"
+                        className="h-1.5 w-1.5 rounded-full bg-violet-500 group-hover:hidden"
                       />
                       <XIcon
                         aria-hidden="true"
-                        className="group-hover:block hidden"
+                        className="hidden group-hover:block"
                         size={13}
                       />
                     </>
