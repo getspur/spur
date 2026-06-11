@@ -280,19 +280,39 @@ pub enum DaemonControlCommand {
     /// Set the focused notebook used by implicit notebook operations.
     SetFocus { notebook_id: String },
     /// Open a notebook file.
-    Open { path: String },
+    Open {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        activate: Option<bool>,
+    },
     /// Rename a notebook file.
     Rename { from: String, to: String },
     /// Create a scratch notebook.
-    New,
+    New {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        activate: Option<bool>,
+    },
     /// Create a notebook at an exact path.
     #[serde(rename = "new_at")]
     #[ts(rename = "new_at")]
-    NewAt { path: String },
+    NewAt {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        activate: Option<bool>,
+    },
     /// Reopen the current notebook window.
-    Reopen,
+    Reopen {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        activate: Option<bool>,
+    },
     /// Close the current notebook window.
     Close,
+    /// Close one notebook target without closing the notebook window.
+    CloseNotebook { notebook_id: String },
     /// Attach a local datasource to the current notebook.
     AttachDatasource {
         name: String,
@@ -905,6 +925,19 @@ async fn handle_daemon_control_inner(
             }
             state.set_focused_notebook_target(&notebook_id);
             Ok(DaemonControlResult::Empty)
+        }
+        DaemonControlCommand::CloseNotebook { notebook_id } => {
+            if notebook_id.is_empty() {
+                return Err(DaemonControlResponse::failure(
+                    "invalid_params",
+                    "close_notebook notebook_id must not be empty",
+                ));
+            }
+            state
+                .close_notebook_target(&notebook_id)
+                .await
+                .map(|_| DaemonControlResult::Empty)
+                .map_err(|error| DaemonControlResponse::failure("close_failed", error.to_string()))
         }
         DaemonControlCommand::WriteCell {
             notebook_id,
@@ -2916,6 +2949,32 @@ mod tests {
     }
 
     #[test]
+    fn close_notebook_command_round_trips() {
+        let request = DaemonControlRequest::new(DaemonControlCommand::CloseNotebook {
+            notebook_id: "/tmp/notebooks/background.ipynb".to_string(),
+        });
+
+        let value = serde_json::to_value(&request).expect("close notebook serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "close_notebook",
+                "notebook_id": "/tmp/notebooks/background.ipynb"
+            })
+        );
+
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(value).expect("close notebook decodes");
+        match decoded.command {
+            DaemonControlCommand::CloseNotebook { notebook_id } => {
+                assert_eq!(notebook_id, "/tmp/notebooks/background.ipynb");
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
     fn cell_mutation_commands_round_trip_optional_notebook_id() {
         let without_target = serde_json::json!({
             "daemon": "notebook.v1",
@@ -3035,6 +3094,79 @@ mod tests {
 
         let background = state.notebook_for_path(&path_b).snapshot().0;
         assert_eq!(first_source(&background), "background B edit");
+    }
+
+    #[tokio::test]
+    async fn close_notebook_removes_target_store_without_changing_other_focus() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("jute-close-target-")
+            .tempdir()
+            .expect("temp dir");
+        let path_a = temp_dir.path().join("a.ipynb");
+        let path_b = temp_dir.path().join("b.ipynb");
+        std::fs::write(
+            &path_a,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook A", 1)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &path_b,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook B", 1)).unwrap(),
+        )
+        .unwrap();
+        let state = State::new();
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: path_a.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("A loads");
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: path_b.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("B loads");
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::SetFocus {
+                notebook_id: path_a.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("focus A");
+
+        let response = handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::CloseNotebook {
+                notebook_id: path_b.display().to_string(),
+            }),
+            &state,
+        )
+        .await;
+
+        response.into_result().expect("close notebook succeeds");
+        assert!(!state
+            .notebooks
+            .contains_key(&crate::identity::NotebookId::for_saved_path(&path_b)));
+        let focused = handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::Snapshot { notebook_id: None }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("focused snapshot");
+        let DaemonControlResult::Snapshot(snapshot) = focused else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(first_source(&snapshot.root), "notebook A");
     }
 
     #[test]

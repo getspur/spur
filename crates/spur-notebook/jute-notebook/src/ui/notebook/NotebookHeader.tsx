@@ -1,14 +1,11 @@
 import clsx from "clsx";
 import {
   ChartLineIcon,
-  HomeIcon,
   PlayIcon,
-  PlusIcon,
   RefreshCwIcon,
   SettingsIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link } from "wouter";
 import { useStore } from "zustand";
 
 import {
@@ -214,7 +211,7 @@ export default function NotebookHeader({ kernelName }: Props) {
         </div>
       </div>
 
-      {/* Top-right UI components: home and open notebooks. */}
+      {/* Top-right UI components. Notebook management lives in the tab strip. */}
       <div className="flex items-center">
         <div className="relative">
           <button
@@ -226,16 +223,6 @@ export default function NotebookHeader({ kernelName }: Props) {
           </button>
           {settingsOpen && <SettingsPanel />}
         </div>
-        <Link to="/">
-          <button className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110">
-            <HomeIcon size={20} strokeWidth={1.5} />
-          </button>
-        </Link>
-        <Link to="/">
-          <button className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110">
-            <PlusIcon size={20} strokeWidth={1.5} />
-          </button>
-        </Link>
       </div>
     </Header>
   );

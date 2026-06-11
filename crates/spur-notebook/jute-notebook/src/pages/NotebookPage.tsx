@@ -1,5 +1,6 @@
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearch } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
@@ -8,7 +9,7 @@ import {
   listenForNotebookEvents,
   listenForRecentNotebookChanges,
 } from "@/agent/events";
-import { daemonControl } from "@/daemon/control";
+import { daemonControl, pathFromDaemonControlResponse } from "@/daemon/control";
 import {
   Notebook,
   NotebookContext,
@@ -28,6 +29,8 @@ import NotebookTabStrip from "@/ui/notebook/NotebookTabStrip";
 import NotebookView from "@/ui/notebook/NotebookView";
 import ConfirmModal from "@/ui/shared/ConfirmModal";
 
+import { activeTabIdFromSearch, notebookRouteWithPath } from "./notebookRoute";
+
 type NotebookTabSpec = NotebookTab & {
   inline?: string;
 };
@@ -38,14 +41,22 @@ type NotebookTabEntry = NotebookTabSpec & {
 
 export default function NotebookPage() {
   const search = useSearch();
+  const [, setLocation] = useLocation();
   const tabSpecs = useMemo(() => tabsFromSearch(search), [search]);
+  const routeActiveTabId = useMemo(
+    () => activeTabIdFromSearch(search),
+    [search],
+  );
   const syncedSearchRef = useRef(search);
+  const initialScratchRequestedRef = useRef(false);
+  const loadedSourceByNotebookRef = useRef(new WeakMap<Notebook, string>());
   const [tabEntries, setTabEntries] = useState<NotebookTabEntry[]>(() =>
     tabSpecs.map(tabEntryFromSpec),
   );
   const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(
     null,
   );
+  const [tabError, setTabError] = useState<string | null>(null);
   const tabs = useNotebookTabsStore((state) => state.tabs);
   const activeTabId = useNotebookTabsStore((state) => state.activeTabId);
   const setTabs = useNotebookTabsStore((state) => state.setTabs);
@@ -69,42 +80,74 @@ export default function NotebookPage() {
   useEffect(() => {
     if (syncedSearchRef.current === search) return;
     syncedSearchRef.current = search;
-    setTabEntries(tabSpecs.map(tabEntryFromSpec));
+    setTabEntries((entries) => reconcileTabEntriesFromSpecs(entries, tabSpecs));
   }, [search, tabSpecs]);
 
   useEffect(() => {
     setTabs(tabEntries.map(tabFromEntry));
-  }, [setTabs, tabEntries]);
+    if (
+      routeActiveTabId &&
+      tabEntries.some((entry) => entry.id === routeActiveTabId)
+    ) {
+      setActiveTabId(routeActiveTabId);
+    }
+  }, [routeActiveTabId, setActiveTabId, setTabs, tabEntries]);
 
   const requestCloseTab = useCallback((tabId: string) => {
     setPendingCloseTabId(tabId);
   }, []);
 
-  const addTab = useCallback(() => {
-    const id = `untitled-${Date.now()}`;
-    const entry = tabEntryFromSpec({
-      id,
-      title: "Untitled",
-      dirty: false,
-      kernelState: "idle",
-      language: "python3",
-      mode: "cells",
-    });
-    setTabEntries((entries) => [...entries, entry]);
-    setTabs([
-      ...tabs,
-      {
-        id: entry.id,
-        path: entry.path,
-        title: entry.title,
-        dirty: entry.dirty,
-        kernelState: entry.kernelState,
-        language: entry.language,
-        mode: entry.mode,
-      },
-    ]);
-    setActiveTabId(id);
-  }, [setActiveTabId, setTabs, tabs]);
+  const addOrFocusNotebookPath = useCallback(
+    (path: string) => {
+      setTabError(null);
+
+      const existing = tabEntries.find((entry) => entry.path === path);
+      const nextEntries =
+        existing === undefined
+          ? [
+              ...tabEntries.filter((entry) => !isBlankPlaceholderTab(entry)),
+              tabEntryFromSpec(tabFromPath(path)),
+            ]
+          : tabEntries;
+
+      if (existing === undefined) {
+        setTabEntries(nextEntries);
+      }
+      setTabs(nextEntries.map(tabFromEntry));
+      setActiveTabId(path);
+      setLocation(notebookRouteWithPath(nextEntries, path));
+    },
+    [setActiveTabId, setLocation, setTabs, tabEntries],
+  );
+
+  const addTab = useCallback(async () => {
+    try {
+      const response = await daemonControl({ command: "new", activate: false });
+      addOrFocusNotebookPath(pathFromDaemonControlResponse(response, "new"));
+    } catch (caught) {
+      setTabError(errorMessage(caught));
+    }
+  }, [addOrFocusNotebookPath]);
+
+  const openNotebookFromPicker = useCallback(async () => {
+    try {
+      const file = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Jupyter Notebook", extensions: ["ipynb"] }],
+      });
+      if (typeof file !== "string") return;
+
+      const response = await daemonControl({
+        command: "open",
+        path: file,
+        activate: false,
+      });
+      addOrFocusNotebookPath(pathFromDaemonControlResponse(response, "open"));
+    } catch (caught) {
+      setTabError(errorMessage(caught));
+    }
+  }, [addOrFocusNotebookPath]);
 
   const closeTab = useCallback(
     async (tabId: string) => {
@@ -112,10 +155,9 @@ export default function NotebookPage() {
       if (!tab) return;
 
       await daemonControl({
-        command: "set_focus",
+        command: "close_notebook",
         notebook_id: tab.id,
       });
-      await daemonControl({ command: "close" });
 
       setTabEntries((entries) => entries.filter((entry) => entry.id !== tabId));
       const remainingTabs = tabs.filter((candidate) => candidate.id !== tabId);
@@ -129,11 +171,6 @@ export default function NotebookPage() {
           remainingTabs[Math.min(removedIndex, remainingTabs.length - 1)] ??
           remainingTabs[0];
         setActiveTabId(nextTab?.id);
-      } else if (activeTabId) {
-        await daemonControl({
-          command: "set_focus",
-          notebook_id: activeTabId,
-        });
       }
     },
     [activeTabId, setActiveTabId, setTabs, tabs],
@@ -152,33 +189,24 @@ export default function NotebookPage() {
     return listenForRecentNotebookChanges((entries) => {
       const current = entries.find((entry) => entry.isCurrent);
       if (!current?.path) return;
-
-      const existingEntry = tabEntries.find(
-        (entry) => entry.path === current.path || entry.id === current.path,
-      );
-      if (existingEntry) {
-        setTabs(tabEntries.map(tabFromEntry));
-        setActiveTabId(existingEntry.id);
-        return;
-      }
-
-      const entry = tabEntryFromSpec(tabFromPath(current.path));
-      setTabEntries((entries) => {
-        if (entries.some((entry) => entry.path === current.path)) {
-          return entries;
-        }
-        return [...entries, entry];
-      });
-      setTabs([...tabs, tabFromEntry(entry)]);
-      setActiveTabId(entry.id);
+      addOrFocusNotebookPath(current.path);
     });
-  }, [setActiveTabId, setTabs, tabEntries, tabs]);
+  }, [addOrFocusNotebookPath]);
 
   useEffect(() => {
     setActiveAgentNotebook(undefined);
 
     void Promise.all(
       tabEntries.map(async (entry) => {
+        const sourceKey = tabEntryLoadSourceKey(entry);
+        if (!sourceKey) return;
+        if (
+          loadedSourceByNotebookRef.current.get(entry.notebook) === sourceKey
+        ) {
+          return;
+        }
+        loadedSourceByNotebookRef.current.set(entry.notebook, sourceKey);
+
         if (entry.path) {
           await entry.notebook.loadNotebookFromPath(entry.path);
         } else if (entry.inline) {
@@ -191,6 +219,14 @@ export default function NotebookPage() {
       setActiveAgentNotebook(undefined);
     };
   }, [tabEntries]);
+
+  useEffect(() => {
+    if (tabSpecs.some((spec) => spec.path || spec.inline)) return;
+    if (initialScratchRequestedRef.current) return;
+
+    initialScratchRequestedRef.current = true;
+    void addTab();
+  }, [addTab, tabSpecs]);
 
   useEffect(() => {
     if (!activeEntry) return;
@@ -215,7 +251,7 @@ export default function NotebookPage() {
       const key = event.key.toLowerCase();
       if (key === "t") {
         event.preventDefault();
-        addTab();
+        void addTab();
         return;
       }
 
@@ -261,9 +297,18 @@ export default function NotebookPage() {
         activeTabId={activeTabId}
         onCloseTab={requestCloseTab}
         onNewTab={addTab}
+        onOpenNotebook={openNotebookFromPicker}
         onSwitchTab={setActiveTabId}
         tabs={tabs}
       />
+      {tabError && (
+        <div
+          className="border-b border-red-200 bg-red-50 px-16 py-2 text-sm text-red-700"
+          role="alert"
+        >
+          {tabError}
+        </div>
+      )}
       {tabEntries.map((entry) => (
         <NotebookTabPanel
           active={entry.id === activeEntry?.id}
@@ -402,6 +447,56 @@ function tabEntryFromSpec(tab: NotebookTabSpec): NotebookTabEntry {
     ...tab,
     notebook: new Notebook(),
   };
+}
+
+function reconcileTabEntriesFromSpecs(
+  entries: readonly NotebookTabEntry[],
+  specs: readonly NotebookTabSpec[],
+): NotebookTabEntry[] {
+  const claimed = new Set<NotebookTabEntry>();
+
+  return specs.map((spec) => {
+    const existing = entries.find(
+      (entry) => !claimed.has(entry) && tabEntryMatchesSpec(entry, spec),
+    );
+    if (!existing) return tabEntryFromSpec(spec);
+
+    claimed.add(existing);
+    return {
+      ...spec,
+      ...existing,
+      id: spec.id,
+      path: spec.path,
+      inline: spec.inline,
+      notebook: existing.notebook,
+    };
+  });
+}
+
+function tabEntryMatchesSpec(
+  entry: NotebookTabEntry,
+  spec: NotebookTabSpec,
+): boolean {
+  if (entry.id === spec.id) return true;
+  if (entry.path && spec.path && entry.path === spec.path) return true;
+  if (entry.inline && spec.inline && entry.inline === spec.inline) return true;
+  return false;
+}
+
+function tabEntryLoadSourceKey(entry: NotebookTabEntry): string | undefined {
+  if (entry.path) return `path:${entry.path}`;
+  if (entry.inline) return `inline:${entry.inline}`;
+  return undefined;
+}
+
+function isBlankPlaceholderTab(tab: NotebookTabEntry): boolean {
+  return (
+    tab.id === "untitled" && tab.path === undefined && tab.inline === undefined
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function tabFromEntry(entry: NotebookTabEntry): NotebookTab {

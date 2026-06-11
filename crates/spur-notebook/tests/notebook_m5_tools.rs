@@ -587,6 +587,7 @@ async fn daemon_open_flushes_pending_browser_edit_before_opening_next_notebook()
     let first_open = control
         .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
             path: notebook_a.display().to_string(),
+            activate: Some(true),
         }))
         .await;
     assert!(first_open.ok, "{:?}", first_open.error);
@@ -609,6 +610,7 @@ async fn daemon_open_flushes_pending_browser_edit_before_opening_next_notebook()
     let second_open = control
         .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
             path: notebook_b.display().to_string(),
+            activate: Some(true),
         }))
         .await;
     assert!(second_open.ok, "{:?}", second_open.error);

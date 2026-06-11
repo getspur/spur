@@ -41,7 +41,9 @@ pub async fn call_new(deps: &ServerDeps, arguments: Value) -> Result<CallToolRes
     parse_no_args("notebook.new", arguments)?;
     let daemon = require_daemon(deps)?;
     let response = daemon
-        .handle(daemon_request(jute::commands::DaemonControlCommand::New {}))
+        .handle(daemon_request(jute::commands::DaemonControlCommand::New {
+            activate: Some(true),
+        }))
         .await;
     let response = check_response(response)?;
     let path = response.path.ok_or_else(|| {
@@ -88,6 +90,7 @@ pub async fn call_open(deps: &ServerDeps, arguments: Value) -> Result<CallToolRe
     let response = daemon
         .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
             path: path.display().to_string(),
+            activate: Some(true),
         }))
         .await;
     let response = check_response(response)?;
@@ -140,7 +143,9 @@ pub async fn call_reopen(deps: &ServerDeps, arguments: Value) -> Result<CallTool
     let daemon = require_daemon(deps)?;
     let response = daemon
         .handle(daemon_request(
-            jute::commands::DaemonControlCommand::Reopen {},
+            jute::commands::DaemonControlCommand::Reopen {
+                activate: Some(true),
+            },
         ))
         .await;
     let response = check_response(response)?;

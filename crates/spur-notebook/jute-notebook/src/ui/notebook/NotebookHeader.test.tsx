@@ -81,4 +81,13 @@ describe("NotebookHeader", () => {
     expect(mocks.notebook?.store.getState().viewState.viewMode).toBe("cells");
     expect(notebookButton).toHaveAttribute("aria-pressed", "true");
   });
+
+  test("does not render competing notebook management links", () => {
+    const { container } = render(<NotebookHeader kernelName="python3" />);
+
+    expect(container.querySelectorAll('a[href="/"]')).toHaveLength(0);
+    expect(container.querySelectorAll('button[title="Settings"]')).toHaveLength(
+      1,
+    );
+  });
 });
