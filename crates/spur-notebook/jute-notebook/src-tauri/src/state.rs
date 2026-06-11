@@ -18,6 +18,7 @@ use crate::{
     backend::local::LocalKernel,
     backend::notebook::{kernelspec_for, CodeType, NotebookMetadata, NotebookRoot},
     commands::{DatasourceEntry, SaveCoordinator},
+    identity::NotebookId,
     notebook_store::{merge_authoritative_spur_metadata_for_save, NotebookStore},
 };
 
@@ -257,7 +258,7 @@ pub(crate) const NOTEBOOK_SLOT_PREFIX: &str = "notebook:";
 
 /// Derive the stable in-memory kernel slot ID for a notebook path.
 pub fn notebook_slot_id(path: &str) -> String {
-    format!("{NOTEBOOK_SLOT_PREFIX}{path}")
+    NotebookId::for_saved_path(path).kernel_slot_id()
 }
 
 /// Derive the per-notebook kernel slot ID for a per-cell code type.
@@ -267,7 +268,7 @@ pub fn slot_id_for(path: &str, code_type: CodeType) -> String {
 
 /// Derive the per-notebook kernel slot ID for a kernelspec name.
 pub fn slot_id_for_spec(path: &str, spec_name: &str) -> String {
-    format!("{}#{spec_name}", notebook_slot_id(path))
+    NotebookId::for_saved_path(path).kernel_slot_id_for_spec(spec_name)
 }
 
 /// Recover the notebook path from a notebook-derived kernel slot ID.
@@ -465,7 +466,23 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{identity::NotebookId, ports};
     use serde_json::json;
+
+    #[test]
+    fn saved_notebook_identity_derives_existing_public_formats_consistently() {
+        let path = "/tmp/notebooks/demo.ipynb";
+        let id = NotebookId::for_saved_path(path);
+
+        assert_eq!(id.store_key(), ports::notebook_id_for_path(path));
+        assert_eq!(id.kernel_slot_id(), notebook_slot_id(path));
+        assert_eq!(
+            id.kernel_slot_id_for_spec("python3"),
+            slot_id_for_spec(path, "python3")
+        );
+        assert_eq!(id.delta_path(), Some(path));
+        assert!(ports::notebook_port_root(path).ends_with(id.store_key()));
+    }
 
     #[test]
     fn kernel_slot_generation_starts_at_one_and_increments_with_stable_slot_id() {

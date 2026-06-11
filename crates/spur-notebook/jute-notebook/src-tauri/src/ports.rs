@@ -2,24 +2,19 @@
 
 use std::path::{Path, PathBuf};
 
-use directories::BaseDirs;
+use crate::identity::NotebookId;
 
 /// MIME type used for SPUR port display payloads.
 pub const PORT_MIME: &str = "application/vnd.spur.port+json";
 
 /// Stable notebook id derived from the notebook path.
 pub fn notebook_id_for_path(path: impl AsRef<Path>) -> String {
-    let normalized = path.as_ref().to_string_lossy();
-    let digest = blake3::hash(normalized.as_bytes()).to_hex();
-    format!("nb-{}", &digest[..24])
+    NotebookId::for_saved_path(path).store_key().to_owned()
 }
 
 /// Per-notebook directory used to store SPUR port files and the manifest.
 pub fn notebook_port_root(path: impl AsRef<Path>) -> PathBuf {
-    let notebook_id = notebook_id_for_path(path);
-    BaseDirs::new()
-        .map(|dirs| dirs.home_dir().join(".spur/notebooks").join(&notebook_id))
-        .unwrap_or_else(|| PathBuf::from(".spur/notebooks").join(notebook_id))
+    NotebookId::for_saved_path(path).port_root()
 }
 
 /// Python bootstrap source that installs the `spur` helper for one cell.
