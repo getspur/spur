@@ -12,6 +12,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
 pub mod backend;
+pub mod chat_commands;
 pub mod chat_state;
 pub mod commands;
 pub mod entity;
@@ -21,6 +22,7 @@ pub mod menu;
 pub mod notebook_store;
 pub mod ports;
 pub mod sidebar_chat;
+pub mod spur_app;
 pub mod state;
 pub mod window;
 
