@@ -17,7 +17,7 @@ pub fn resolve_app_scope(notebook_path: &Path) -> Result<AppScope> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let Some((app_root, manifest_path)) = find_manifest_dir(&notebook_dir) else {
-        return Ok(default_notebook_scope(notebook_dir));
+        return Ok(default_notebook_scope(notebook_path, notebook_dir));
     };
 
     let manifest_bytes = std::fs::read(&manifest_path)
@@ -47,12 +47,12 @@ pub fn resolve_app_scope(notebook_path: &Path) -> Result<AppScope> {
     })
 }
 
-fn default_notebook_scope(cwd: PathBuf) -> AppScope {
+fn default_notebook_scope(notebook_path: &Path, cwd: PathBuf) -> AppScope {
     AppScope {
         cwd,
         mcp_servers: foundation_mcp_servers(),
         skill: None,
-        app_key: DEFAULT_NOTEBOOK_APP_KEY.to_owned(),
+        app_key: format!("{}:{}", DEFAULT_NOTEBOOK_APP_KEY, notebook_path.display()),
         label: DEFAULT_NOTEBOOK_LABEL.to_owned(),
     }
 }
@@ -124,9 +124,27 @@ mod tests {
 
         assert_eq!(scope.cwd, dir.path());
         assert_eq!(scope.label, "Notebook");
-        assert_eq!(scope.app_key, "notebook");
+        assert_eq!(scope.app_key, format!("notebook:{}", nb.display()));
         assert!(scope.skill.is_none());
         assert!(scope.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn plain_notebooks_get_distinct_scope_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.ipynb");
+        let second = dir.path().join("second.ipynb");
+        std::fs::write(&first, "{}").unwrap();
+        std::fs::write(&second, "{}").unwrap();
+
+        let first_scope = resolve_app_scope(&first).unwrap();
+        let second_scope = resolve_app_scope(&second).unwrap();
+
+        assert_eq!(first_scope.cwd, dir.path());
+        assert_eq!(second_scope.cwd, dir.path());
+        assert_ne!(first_scope.app_key, second_scope.app_key);
+        assert!(first_scope.app_key.contains("first.ipynb"));
+        assert!(second_scope.app_key.contains("second.ipynb"));
     }
 
     #[test]

@@ -608,6 +608,23 @@ mod turn {
     }
 
     #[tokio::test]
+    async fn ensure_session_creates_separate_plain_notebook_sessions_for_distinct_keys() {
+        let (chat, state) = chat_with_fake();
+        let first = scope("notebook:/workspace/first.ipynb", "/workspace");
+        let second = scope("notebook:/workspace/second.ipynb", "/workspace");
+
+        let first_id = chat.ensure_session(&first).await.unwrap();
+        let second_id = chat.ensure_session(&second).await.unwrap();
+
+        assert_ne!(first_id, second_id);
+        let state = state.lock().unwrap();
+        assert_eq!(state.initialize_protocols.len(), 1);
+        assert_eq!(state.new_sessions.len(), 2);
+        assert_eq!(state.new_sessions[0].0, first.cwd);
+        assert_eq!(state.new_sessions[1].0, second.cwd);
+    }
+
+    #[tokio::test]
     async fn list_sessions_is_cwd_scoped() {
         let (chat, state) = chat_with_fake();
         let scope = scope("app-a", "/workspace/app-a");

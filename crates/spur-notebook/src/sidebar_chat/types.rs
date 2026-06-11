@@ -43,7 +43,7 @@ pub struct AppScope {
     pub cwd: PathBuf,
     pub mcp_servers: Vec<agent_client_protocol::schema::McpServer>,
     pub skill: Option<String>,
-    /// Stable key used to map app -> live session (app dir path, or "notebook").
+    /// Stable key used to map app -> live session (app dir path, or `notebook:<path>`).
     pub app_key: String,
     /// Display label for the chat header.
     pub label: String,
