@@ -365,6 +365,7 @@ fn extension_for(language: Language) -> &'static str {
         Language::Markdown => "md",
         Language::Cpp => "cpp",
         Language::Lua => "lua",
+        Language::Shell => "sh",
     }
 }
 
@@ -379,6 +380,7 @@ fn language_name(language: Language) -> &'static str {
         Language::Markdown => "markdown",
         Language::Cpp => "cpp",
         Language::Lua => "lua",
+        Language::Shell => "shell",
     }
 }
 
