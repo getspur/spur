@@ -2330,10 +2330,11 @@ mod tests {
         let entry = dir.path().join("app.ipynb");
         std::fs::write(&entry, "{}").expect("write notebook");
 
-        let info = notebook_open_mode(entry.to_string_lossy().into_owned())
+        let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
-            .expect("notebook_open_mode entry")
-            .expect("entry notebook returns Some");
+            .expect("notebook_open_mode entry");
+        assert!(result.manifest_error.is_none());
+        let info = result.open_info.expect("entry notebook returns open info");
         assert_eq!(info.open_mode, "app");
         assert_eq!(info.app_name, "My App");
         assert_eq!(info.app_root, dir.path().to_string_lossy().as_ref());
@@ -2341,13 +2342,14 @@ mod tests {
 
         let other = dir.path().join("other.ipynb");
         std::fs::write(&other, "{}").expect("write other notebook");
+        let other_result = notebook_open_mode(other.to_string_lossy().into_owned())
+            .await
+            .expect("notebook_open_mode other");
         assert!(
-            notebook_open_mode(other.to_string_lossy().into_owned())
-                .await
-                .expect("notebook_open_mode other")
-                .is_none(),
-            "non-entry notebook must return None"
+            other_result.open_info.is_none(),
+            "non-entry notebook must return no open info"
         );
+        assert!(other_result.manifest_error.is_none());
     }
 
     #[tokio::test]
@@ -2373,7 +2375,8 @@ mod tests {
         let info = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
             .expect("notebook_open_mode capabilities")
-            .expect("entry notebook returns Some");
+            .open_info
+            .expect("entry notebook returns open info");
         assert!(info.capabilities.active_output_scripts);
         assert!(info.capabilities.canvas_capture);
         assert!(!info.capabilities.artifacts_dir);
@@ -2386,24 +2389,35 @@ mod tests {
         let entry = dir.path().join("app.ipynb");
         std::fs::write(&entry, "{}").expect("write notebook");
 
-        assert!(notebook_open_mode(entry.to_string_lossy().into_owned())
+        let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
-            .expect("notebook_open_mode no manifest")
-            .is_none());
+            .expect("notebook_open_mode no manifest");
+        assert!(result.open_info.is_none());
+        assert!(result.manifest_error.is_none());
     }
 
     #[tokio::test]
-    async fn notebook_open_mode_invalid_manifest_returns_none() {
+    async fn notebook_open_mode_invalid_manifest_reports_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("spur-app.json"), r#"{invalid}"#)
             .expect("write invalid manifest");
         let entry = dir.path().join("app.ipynb");
         std::fs::write(&entry, "{}").expect("write notebook");
 
-        assert!(notebook_open_mode(entry.to_string_lossy().into_owned())
+        let result = notebook_open_mode(entry.to_string_lossy().into_owned())
             .await
-            .expect("notebook_open_mode invalid manifest")
-            .is_none());
+            .expect("notebook_open_mode invalid manifest");
+        assert!(
+            result.open_info.is_none(),
+            "invalid manifest must not enter app mode"
+        );
+        let error = result
+            .manifest_error
+            .expect("invalid manifest reports a diagnostic");
+        assert!(
+            error.contains("spur-app.json"),
+            "diagnostic names the manifest file: {error}"
+        );
     }
 
     #[tokio::test]
