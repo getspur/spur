@@ -414,6 +414,8 @@ mod tests {
                             port: port.to_owned(),
                             repr: "arrow".to_owned(),
                             display: None,
+                            class: None,
+                            schema: None,
                         })
                         .collect(),
                     consumes: consumes.into_iter().map(str::to_owned).collect(),

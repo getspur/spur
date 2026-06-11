@@ -3152,11 +3152,15 @@ mod tests {
                     port: "x".to_string(),
                     repr: "arrow".to_string(),
                     display: None,
+                    class: None,
+                    schema: None,
                 }],
                 consumes: Vec::new(),
                 source: Some(DagSource {
                     kind: "param".to_string(),
                     port: "p".to_string(),
+                    class: None,
+                    schema: None,
                 }),
             })
         );
@@ -3276,11 +3280,15 @@ mod tests {
                         port: "sales".to_string(),
                         repr: "dataframe".to_string(),
                         display: Some("Sales".to_string()),
+                        class: None,
+                        schema: None,
                     }],
                     consumes: vec!["config".to_string()],
                     source: Some(DagSource {
                         kind: "cell".to_string(),
                         port: "raw".to_string(),
+                        class: None,
+                        schema: None,
                     }),
                 },
                 expected_version: 1,

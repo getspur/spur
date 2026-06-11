@@ -79,6 +79,30 @@ mod tests {
     }
 
     #[test]
+    fn python_bootstrap_pins_extended_schema_dialect() {
+        let bootstrap = python_bootstrap();
+
+        assert!(bootstrap.contains(r#"return {"Timestamp": ["#));
+        assert!(
+            bootstrap.contains(r#"return {"Decimal128": [data_type.precision, data_type.scale]}"#)
+        );
+        assert!(bootstrap.contains(r#""Dictionary": ["#));
+        assert!(bootstrap.contains(r#""data_type": self._data_type_json(field.type, port)"#));
+    }
+
+    #[test]
+    fn rust_bootstrap_pins_narrow_schema_dialect() {
+        let bootstrap = rust_bootstrap();
+
+        assert!(bootstrap.contains(r#"DataType::Float64 => "Float64""#));
+        assert!(bootstrap.contains(r#"DataType::Date64 => "Date64""#));
+        assert!(bootstrap.contains("unsupported Arrow type for manifest schema: {other}"));
+        assert!(!bootstrap.contains("DataType::Timestamp"));
+        assert!(!bootstrap.contains("DataType::Decimal128"));
+        assert!(!bootstrap.contains("DataType::Dictionary"));
+    }
+
+    #[test]
     fn javascript_bootstrap_exposes_local_anywidget_helper() {
         let bootstrap = javascript_bootstrap();
 

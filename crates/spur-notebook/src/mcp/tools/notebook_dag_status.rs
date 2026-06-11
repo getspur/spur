@@ -242,6 +242,8 @@ mod tests {
                                 port: port.to_string(),
                                 repr: "arrow".to_string(),
                                 display: None,
+                                class: None,
+                                schema: None,
                             })
                             .collect(),
                         consumes: consumes.into_iter().map(str::to_string).collect(),
@@ -300,6 +302,8 @@ mod tests {
                 Some(DagSource {
                     kind: "csv".to_string(),
                     port: "sales".to_string(),
+                    class: None,
+                    schema: None,
                 }),
             ),
             cell("consumer", vec![], vec!["raw"], None),

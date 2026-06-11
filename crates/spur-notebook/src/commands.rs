@@ -1139,6 +1139,8 @@ mod tests {
                                 port: port.to_string(),
                                 repr: "arrow".to_string(),
                                 display: None,
+                                class: None,
+                                schema: None,
                             })
                             .collect(),
                         consumes: consumes.into_iter().map(str::to_string).collect(),
@@ -1329,6 +1331,8 @@ mod tests {
         let source = DagSource {
             kind: "frontend".to_owned(),
             port: "horizon".to_owned(),
+            class: None,
+            schema: None,
         };
         state.get_notebook().load(
             &notebook_path,
@@ -1378,6 +1382,8 @@ mod tests {
                 DagSource {
                     kind: "frontend".to_owned(),
                     port: "blocked".to_owned(),
+                    class: None,
+                    schema: None,
                 },
             )]),
         );
@@ -1432,6 +1438,8 @@ mod tests {
         let source = DagSource {
             kind: "frontend".to_owned(),
             port: "allowed".to_owned(),
+            class: None,
+            schema: None,
         };
         state.get_notebook().load(
             &notebook_path,
@@ -1476,6 +1484,8 @@ mod tests {
                 DagSource {
                     kind: "canvas-capture".to_owned(),
                     port: "capture".to_owned(),
+                    class: None,
+                    schema: None,
                 },
             )]),
         );
@@ -1519,6 +1529,8 @@ mod tests {
                 DagSource {
                     kind: "frontend".to_owned(),
                     port: "capture".to_owned(),
+                    class: None,
+                    schema: None,
                 },
             )]),
         );
