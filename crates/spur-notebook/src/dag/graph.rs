@@ -4,7 +4,7 @@ use std::{
     fmt,
 };
 
-use jute::backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot};
+use jute::backend::notebook::{Cell, CellDagMetadata, DagSource, NotebookRoot, Output};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -66,6 +66,22 @@ pub(crate) enum SourcePortError {
     Ambiguous { port: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WidgetEmitError {
+    ModelNotFound {
+        model_id: String,
+    },
+    CellMissingFrontendMetadata {
+        model_id: String,
+        cell_id: String,
+    },
+    EmitNotDeclared {
+        model_id: String,
+        cell_id: String,
+        port: String,
+    },
+}
+
 pub(crate) fn resolve_source_for_port(
     root: &NotebookRoot,
     port: &str,
@@ -88,11 +104,100 @@ pub(crate) fn resolve_source_for_port(
     Ok(source)
 }
 
+pub(crate) fn resolve_source_cell_for_port(
+    root: &NotebookRoot,
+    port: &str,
+) -> Result<(String, DagSource), SourcePortError> {
+    let mut matches = root
+        .cells
+        .iter()
+        .filter_map(|cell| Some((cell_id(cell)?.to_owned(), cell_dag_source(cell)?)))
+        .filter(|(_, source)| source.port == port);
+    let Some((cell_id, source)) = matches.next() else {
+        return Err(SourcePortError::NotDeclared {
+            port: port.to_owned(),
+        });
+    };
+    if matches.any(|(_, other)| other.kind != source.kind) {
+        return Err(SourcePortError::Ambiguous {
+            port: port.to_owned(),
+        });
+    }
+    Ok((cell_id, source.clone()))
+}
+
+pub(crate) fn resolve_widget_emit_cell(
+    root: &NotebookRoot,
+    model_id: &str,
+    port: &str,
+) -> Result<String, WidgetEmitError> {
+    let Some(cell) = root
+        .cells
+        .iter()
+        .find(|cell| cell_has_widget_model_id(cell, model_id))
+    else {
+        return Err(WidgetEmitError::ModelNotFound {
+            model_id: model_id.to_owned(),
+        });
+    };
+    let cell_id = cell_id(cell).unwrap_or_default().to_owned();
+    let Some(frontend) = cell_frontend_metadata(cell) else {
+        return Err(WidgetEmitError::CellMissingFrontendMetadata {
+            model_id: model_id.to_owned(),
+            cell_id,
+        });
+    };
+    if frontend.emits.iter().any(|declared| declared == port) {
+        return Ok(cell_id);
+    }
+    Err(WidgetEmitError::EmitNotDeclared {
+        model_id: model_id.to_owned(),
+        cell_id,
+        port: port.to_owned(),
+    })
+}
+
+fn cell_id(cell: &Cell) -> Option<&str> {
+    match cell {
+        Cell::Raw(cell) => cell.id.as_deref(),
+        Cell::Markdown(cell) => cell.id.as_deref(),
+        Cell::Code(cell) => cell.id.as_deref(),
+    }
+}
+
+fn cell_frontend_metadata(cell: &Cell) -> Option<&jute::backend::notebook::FrontendCellMetadata> {
+    match cell {
+        Cell::Raw(cell) => cell.metadata.spur.as_ref()?.frontend.as_ref(),
+        Cell::Markdown(cell) => cell.metadata.spur.as_ref()?.frontend.as_ref(),
+        Cell::Code(cell) => cell.metadata.spur.as_ref()?.frontend.as_ref(),
+    }
+}
+
 fn cell_dag_source(cell: &Cell) -> Option<&DagSource> {
     match cell {
         Cell::Raw(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
         Cell::Markdown(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
         Cell::Code(cell) => cell.metadata.spur.as_ref()?.dag.as_ref()?.source.as_ref(),
+    }
+}
+
+fn cell_has_widget_model_id(cell: &Cell, model_id: &str) -> bool {
+    let Cell::Code(cell) = cell else {
+        return false;
+    };
+    cell.outputs.iter().filter_map(output_data).any(|data| {
+        data.get("application/vnd.jupyter.widget-view+json")
+            .is_some_and(|value| {
+                value.get("model_id").and_then(|value| value.as_str()) == Some(model_id)
+            })
+    })
+}
+
+fn output_data(output: &Output) -> Option<&jute::backend::notebook::MimeBundle> {
+    match output {
+        Output::ExecuteResult(output) => Some(&output.data),
+        Output::DisplayData(output) => Some(&output.data),
+        Output::Stream(_) | Output::Error(_) => None,
     }
 }
 
