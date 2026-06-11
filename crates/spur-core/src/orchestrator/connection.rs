@@ -687,7 +687,7 @@ fn parse_opencode_history_from_sqlite(
     db_path: &Path,
     session_uuid: &str,
 ) -> Vec<spur_acp::HistoryEntry> {
-    let uri = format!("file:{}?mode=ro&immutable=1", db_path.to_string_lossy());
+    let uri = format!("file:{}?mode=ro", db_path.to_string_lossy());
     let conn = match rusqlite::Connection::open_with_flags(
         uri,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
