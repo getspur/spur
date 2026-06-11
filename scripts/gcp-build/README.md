@@ -12,6 +12,10 @@ the cargo target/cache workload.
 Source sync prefers direct SSH to the VM's external IP on
 `SPUR_DIRECT_SSH_PORT` (default `22`) and falls back to IAP. Fresh VMs keep sshd
 on tcp:22 for GCE/IAP compatibility. Set `SPUR_DIRECT_SSH=0` to force IAP-only.
+Direct SSH probing defaults to a short 3s connection timeout
+(`SPUR_DIRECT_SSH_CONNECT_TIMEOUT`) so blocked public SSH fails quickly; IAP
+probing defaults to 10s (`SPUR_IAP_SSH_CONNECT_TIMEOUT`) because tunnel setup can
+need more time for SSH banner exchange.
 
 `build.sh` locally backpressures remote dispatches before syncing to the VM.
 By default, at most three callers from the same workstation are admitted at a
