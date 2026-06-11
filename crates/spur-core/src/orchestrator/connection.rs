@@ -279,6 +279,10 @@ impl Orchestrator {
                 .unwrap_or_default();
         }
 
+        if let Some(db_path) = find_opencode_db_path(&home) {
+            return parse_opencode_history_from_sqlite(&db_path, session_uuid);
+        }
+
         Vec::new()
     }
 }
@@ -661,6 +665,98 @@ fn is_codex_framework_injected_user_message(text: &str) -> bool {
         || text.starts_with("<permissions instructions>")
 }
 
+fn find_opencode_db_path(home: &Path) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("OPENCODE_DATA_DIR") {
+        let p = PathBuf::from(path);
+        if p.is_file() {
+            return Some(p);
+        }
+        let db = p.join("opencode.db");
+        if db.is_file() {
+            return Some(db);
+        }
+    }
+    let db = home.join(".local/share/opencode/opencode.db");
+    if db.is_file() {
+        return Some(db);
+    }
+    None
+}
+
+fn parse_opencode_history_from_sqlite(
+    db_path: &Path,
+    session_uuid: &str,
+) -> Vec<spur_acp::HistoryEntry> {
+    let uri = format!("file:{}?mode=ro&immutable=1", db_path.to_string_lossy());
+    let conn = match rusqlite::Connection::open_with_flags(
+        uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "Failed to open opencode database for history");
+            return Vec::new();
+        }
+    };
+
+    let mut stmt = match conn.prepare(
+        r"
+        SELECT json_extract(m.data, '$.role') AS role,
+               json_extract(p.data, '$.text') AS text
+        FROM message m
+        JOIN part p ON p.message_id = m.id
+        WHERE m.session_id = ?1
+          AND json_extract(p.data, '$.type') = 'text'
+          AND json_extract(p.data, '$.text') IS NOT NULL
+        ORDER BY m.time_created, p.time_created
+        ",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "Failed to prepare opencode history query");
+            return Vec::new();
+        }
+    };
+
+    let rows = match stmt.query_map([session_uuid], |row| {
+        let role: String = row.get(0)?;
+        let text: String = row.get(1)?;
+        Ok((role, text))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "Failed to query opencode history");
+            return Vec::new();
+        }
+    };
+
+    let mut entries = Vec::new();
+    for row in rows {
+        let (role, text) = match row {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "Skipping malformed opencode history row");
+                continue;
+            }
+        };
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        if role != "user" && role != "assistant" {
+            continue;
+        }
+        entries.push(spur_acp::HistoryEntry { role, text });
+    }
+
+    debug!(
+        session = session_uuid,
+        entries = entries.len(),
+        "Extracted history from opencode database"
+    );
+    entries
+}
+
 /// Build a boxed `AgentConnection` from the transport declared in `config`.
 ///
 /// Single source of truth for the `match transport { Acp/Stdio/CliWrap/StreamJson }`
@@ -747,6 +843,63 @@ mod tests {
         let path = session_dir.join(format!("rollout-2026-05-26T00-00-00-{session_uuid}.jsonl"));
         std::fs::write(&path, content).expect("write codex session");
         path
+    }
+
+    fn write_opencode_db(home: &Path, session_id: &str, messages: &[(&str, &str, &str)]) {
+        let db_dir = home.join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).expect("create opencode dir");
+        let db_path = db_dir.join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open opencode db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                title TEXT NOT NULL,
+                version TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            "#,
+        )
+        .expect("create opencode schema");
+        conn.execute(
+            "INSERT INTO session VALUES (?1, 'p1', '/tmp', 'test', 'v1', 1, 1)",
+            [session_id],
+        )
+        .expect("insert session");
+        for (i, (role, text, msg_id)) in messages.iter().enumerate() {
+            let ts = (i + 1) as i64 * 1000;
+            let msg_data = format!(r#"{{"role":"{}"}}"#, role);
+            conn.execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)",
+                rusqlite::params![msg_id, session_id, ts, msg_data],
+            )
+            .expect("insert message");
+            let part_id = format!("part_{}", msg_id);
+            let part_data = format!(r#"{{"type":"text","text":"{}"}}"#, text);
+            conn.execute(
+                "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                rusqlite::params![part_id, msg_id, session_id, ts, part_data],
+            )
+            .expect("insert part");
+        }
     }
 
     fn history_entries(session_uuid: &str) -> Vec<(String, String)> {
@@ -1162,6 +1315,136 @@ not-json
                 ("user".to_string(), "codex prompt".to_string()),
                 ("user".to_string(), "codex prompt canonical".to_string()),
                 ("assistant".to_string(), "codex answer".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_extracts_user_and_assistant_text_parts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_opencode_db(
+            temp.path(),
+            "s1",
+            &[
+                ("user", "hello opencode", "msg_1"),
+                ("assistant", "hi there", "msg_2"),
+                ("user", "second question", "msg_3"),
+                ("assistant", "second answer", "msg_4"),
+            ],
+        );
+
+        let db_path = temp.path().join(".local/share/opencode/opencode.db");
+        let entries = parse_opencode_history_from_sqlite(&db_path, "s1");
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![
+                ("user".to_string(), "hello opencode".to_string()),
+                ("assistant".to_string(), "hi there".to_string()),
+                ("user".to_string(), "second question".to_string()),
+                ("assistant".to_string(), "second answer".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_skips_non_text_parts_and_blank_text() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_dir = temp.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT, version TEXT, time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+            INSERT INTO session VALUES ('s1', 'p1', '/tmp', 'test', 'v1', 1, 1);
+            INSERT INTO message VALUES ('m1', 's1', 1000, 1000, '{"role":"user"}');
+            INSERT INTO part VALUES ('p1', 'm1', 's1', 1000, 1000, '{"type":"text","text":"real question"}');
+            INSERT INTO message VALUES ('m2', 's1', 2000, 2000, '{"role":"assistant"}');
+            INSERT INTO part VALUES ('p2', 'm2', 's1', 2000, 2000, '{"type":"tool","text":"tool output"}');
+            INSERT INTO part VALUES ('p3', 'm2', 's1', 2001, 2001, '{"type":"text","text":"real answer"}');
+            INSERT INTO message VALUES ('m3', 's1', 3000, 3000, '{"role":"user"}');
+            INSERT INTO part VALUES ('p4', 'm3', 's1', 3000, 3000, '{"type":"text","text":"   "}');
+            INSERT INTO message VALUES ('m4', 's1', 4000, 4000, '{"role":"assistant"}');
+            INSERT INTO part VALUES ('p5', 'm4', 's1', 4000, 4000, '{"type":"text","text":"final"}');
+            "#,
+        ).unwrap();
+
+        let entries = parse_opencode_history_from_sqlite(&db_path, "s1");
+
+        assert_eq!(
+            entry_pairs(entries),
+            vec![
+                ("user".to_string(), "real question".to_string()),
+                ("assistant".to_string(), "real answer".to_string()),
+                ("assistant".to_string(), "final".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_returns_empty_for_missing_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_opencode_db(temp.path(), "s1", &[("user", "hello", "msg_1")]);
+
+        let db_path = temp.path().join(".local/share/opencode/opencode.db");
+        let entries = parse_opencode_history_from_sqlite(&db_path, "nonexistent-session");
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn opencode_returns_empty_for_missing_db() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("nonexistent.db");
+        let entries = parse_opencode_history_from_sqlite(&db_path, "s1");
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn find_opencode_db_path_locates_db_under_home() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_dir = temp.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode.db");
+        std::fs::write(&db_path, b"").unwrap();
+
+        let found = find_opencode_db_path(temp.path());
+
+        assert_eq!(found, Some(db_path));
+    }
+
+    #[test]
+    fn find_opencode_db_path_returns_none_when_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let found = find_opencode_db_path(temp.path());
+
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn reads_opencode_history_via_read_session_history_from_disk() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_opencode_db(
+            temp.path(),
+            "opencode-session",
+            &[
+                ("user", "opencode question", "msg_1"),
+                ("assistant", "opencode answer", "msg_2"),
+            ],
+        );
+
+        let entries = with_home(temp.path(), || history_entries("opencode-session"));
+
+        assert_eq!(
+            entries,
+            vec![
+                ("user".to_string(), "opencode question".to_string()),
+                ("assistant".to_string(), "opencode answer".to_string())
             ]
         );
     }
