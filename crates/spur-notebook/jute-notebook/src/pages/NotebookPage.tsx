@@ -29,7 +29,11 @@ import NotebookTabStrip from "@/ui/notebook/NotebookTabStrip";
 import NotebookView from "@/ui/notebook/NotebookView";
 import ConfirmModal from "@/ui/shared/ConfirmModal";
 
-import { activeTabIdFromSearch, notebookRouteWithPath } from "./notebookRoute";
+import {
+  activeTabIdFromSearch,
+  notebookRouteForPaths,
+  notebookRouteWithPath,
+} from "./notebookRoute";
 import { cycleTabId, jumpTabId } from "./tabActions";
 
 type NotebookTabSpec = NotebookTab & {
@@ -214,6 +218,23 @@ export default function NotebookPage() {
     }
   }, [addOrFocusNotebookPath, moveTab, popClosedTab]);
 
+  const reorderTab = useCallback(
+    (tabId: string, toIndex: number) => {
+      moveTab(tabId, toIndex);
+      const orderedTabs = useNotebookTabsStore.getState().tabs;
+      const orderedPaths = orderedTabs.flatMap((tab) =>
+        tab.path ? [tab.path] : [],
+      );
+      const activePath = orderedTabs.find(
+        (tab) => tab.id === activeTabId,
+      )?.path;
+      if (orderedPaths.length > 0 && activePath) {
+        setLocation(notebookRouteForPaths(orderedPaths, activePath));
+      }
+    },
+    [activeTabId, moveTab, setLocation],
+  );
+
   useEffect(() => {
     const unlisten = tabEntries.map((entry) =>
       listenForNotebookEvents(entry.notebook),
@@ -349,6 +370,7 @@ export default function NotebookPage() {
         onCloseTab={requestCloseTab}
         onNewTab={addTab}
         onOpenNotebook={openNotebookFromPicker}
+        onReorder={reorderTab}
         onSwitchTab={setActiveTabId}
         tabs={tabs}
       />

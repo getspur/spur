@@ -20,6 +20,7 @@ function renderStrip(tabs: NotebookTab[], overrides = {}) {
     onCloseTab: vi.fn(),
     onNewTab: vi.fn(),
     onOpenNotebook: vi.fn(),
+    onReorder: vi.fn(),
     onSwitchTab: vi.fn(),
     ...overrides,
   };
@@ -80,5 +81,27 @@ describe("NotebookTabStrip", () => {
     expect(strip.dataset.widthLock).toBe("true");
     fireEvent.mouseLeave(strip);
     expect(strip.dataset.widthLock).toBeUndefined();
+  });
+
+  it("pinned tabs are not draggable", () => {
+    renderStrip([tab("pin", { pinned: true }), tab("a")]);
+    expect(screen.getByLabelText("pin.ipynb (pinned)")).toHaveAttribute(
+      "draggable",
+      "false",
+    );
+    expect(
+      screen.getByRole("tab", { name: /a\.ipynb/ }).closest("[draggable]"),
+    ).toHaveAttribute("draggable", "true");
+  });
+
+  it("emits onReorder with the drop index", () => {
+    const onReorder = vi.fn();
+    renderStrip([tab("a"), tab("b"), tab("c")], { onReorder });
+    const tabA = screen.getByRole("tab", { name: /a\.ipynb/ }).closest("div")!;
+    const tabC = screen.getByRole("tab", { name: /c\.ipynb/ }).closest("div")!;
+    fireEvent.dragStart(tabA);
+    fireEvent.dragOver(tabC, { clientX: 1000 });
+    fireEvent.drop(tabC, { clientX: 1000 });
+    expect(onReorder).toHaveBeenCalledWith("a", 2);
   });
 });
