@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { NotebookTab } from "@/stores/notebook";
@@ -18,10 +24,16 @@ function renderStrip(tabs: NotebookTab[], overrides = {}) {
     activeTabId: tabs[0]?.id,
     tabs,
     onCloseTab: vi.fn(),
+    onCloseOthers: vi.fn(),
+    onCloseRight: vi.fn(),
+    onReopenClosed: vi.fn(),
     onNewTab: vi.fn(),
     onOpenNotebook: vi.fn(),
     onReorder: vi.fn(),
     onSwitchTab: vi.fn(),
+    canReopen: false,
+    onTogglePin: vi.fn(),
+    getKernelStats: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
   const view = render(<NotebookTabStrip {...props} />);
@@ -103,5 +115,41 @@ describe("NotebookTabStrip", () => {
     fireEvent.dragOver(tabC, { clientX: 1000 });
     fireEvent.drop(tabC, { clientX: 1000 });
     expect(onReorder).toHaveBeenCalledWith("a", 2);
+  });
+
+  it("opens the context menu on right-click and pins through it", () => {
+    const onTogglePin = vi.fn();
+    renderStrip([tab("a"), tab("b")], { onTogglePin });
+    fireEvent.contextMenu(screen.getByRole("tab", { name: /b\.ipynb/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Pin tab" }));
+    expect(onTogglePin).toHaveBeenCalledWith("b");
+  });
+
+  it("shows the hover card after 350ms with fetched stats", async () => {
+    vi.useFakeTimers();
+    const getKernelStats = vi.fn().mockResolvedValue({
+      kernel_id: "k",
+      spec_name: "python3",
+      generation: 1,
+      status: "alive",
+      cpu_pct: 12,
+      mem_mb: 96,
+    });
+    renderStrip([tab("a")], { getKernelStats });
+    fireEvent.mouseEnter(screen.getByRole("tab", { name: /a\.ipynb/ }));
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByRole("tooltip")).toBeVisible();
+    expect(getKernelStats).toHaveBeenCalledWith("a");
+    vi.useRealTimers();
+  });
+
+  it("opens the searchable tab list from the overflow button", () => {
+    const onSwitchTab = vi.fn();
+    renderStrip([tab("a"), tab("b")], { onSwitchTab });
+    fireEvent.click(screen.getByLabelText("Tab overflow"));
+    fireEvent.click(screen.getByRole("menuitem", { name: /b\.ipynb/ }));
+    expect(onSwitchTab).toHaveBeenCalledWith("b");
   });
 });

@@ -34,7 +34,12 @@ import {
   notebookRouteForPaths,
   notebookRouteWithPath,
 } from "./notebookRoute";
-import { cycleTabId, jumpTabId } from "./tabActions";
+import {
+  closeOthersTargets,
+  closeRightTargets,
+  cycleTabId,
+  jumpTabId,
+} from "./tabActions";
 
 type NotebookTabSpec = NotebookTab & {
   inline?: string;
@@ -72,8 +77,12 @@ export default function NotebookPage() {
   const setActiveTabId = useNotebookTabsStore((state) => state.setActiveTabId);
   const updateTab = useNotebookTabsStore((state) => state.updateTab);
   const moveTab = useNotebookTabsStore((state) => state.moveTab);
+  const setPinned = useNotebookTabsStore((state) => state.setPinned);
   const pushClosedTab = useNotebookTabsStore((state) => state.pushClosedTab);
   const popClosedTab = useNotebookTabsStore((state) => state.popClosedTab);
+  const canReopen = useNotebookTabsStore(
+    (state) => state.closedTabs.length > 0,
+  );
   const activeEntry =
     tabEntries.find((entry) => entry.id === activeTabId) ?? tabEntries[0];
   const pendingCloseTargets =
@@ -115,6 +124,16 @@ export default function NotebookPage() {
       closeMany([tabId]);
     },
     [closeMany],
+  );
+
+  const closeOthers = useCallback(
+    (tabId: string) => closeMany(closeOthersTargets(tabs, tabId)),
+    [closeMany, tabs],
+  );
+
+  const closeRight = useCallback(
+    (tabId: string) => closeMany(closeRightTargets(tabs, tabId)),
+    [closeMany, tabs],
   );
 
   const addOrFocusNotebookPath = useCallback(
@@ -217,6 +236,29 @@ export default function NotebookPage() {
       setTabError(errorMessage(caught));
     }
   }, [addOrFocusNotebookPath, moveTab, popClosedTab]);
+
+  const togglePin = useCallback(
+    (tabId: string) => {
+      const tab = useNotebookTabsStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === tabId);
+      setPinned(tabId, !tab?.pinned);
+    },
+    [setPinned],
+  );
+
+  const getKernelStats = useCallback(
+    async (tabId: string) => {
+      const entry = tabEntries.find((candidate) => candidate.id === tabId);
+      if (!entry) return null;
+      try {
+        return await entry.notebook.refreshKernelSlotInfo();
+      } catch {
+        return null;
+      }
+    },
+    [tabEntries],
+  );
 
   const reorderTab = useCallback(
     (tabId: string, toIndex: number) => {
@@ -367,11 +409,17 @@ export default function NotebookPage() {
     <main className="h-screen bg-white">
       <NotebookTabStrip
         activeTabId={activeTabId}
+        canReopen={canReopen}
+        getKernelStats={getKernelStats}
         onCloseTab={requestCloseTab}
+        onCloseOthers={closeOthers}
+        onCloseRight={closeRight}
         onNewTab={addTab}
         onOpenNotebook={openNotebookFromPicker}
+        onReopenClosed={reopenClosedTab}
         onReorder={reorderTab}
         onSwitchTab={setActiveTabId}
+        onTogglePin={togglePin}
         tabs={tabs}
       />
       {tabError && (
