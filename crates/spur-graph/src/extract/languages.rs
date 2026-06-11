@@ -28,6 +28,7 @@ pub enum Language {
     C,
     Cpp,
     Lua,
+    Shell,
 }
 
 /// Precision heuristic for common C runtime calls, not an exhaustive builtin list.
@@ -294,6 +295,13 @@ pub(crate) const LUA_BUILTIN_METHODS: &[&str] = &[
     "xpcall",
 ];
 
+/// Precision heuristic for common shell builtins/commands, not an exhaustive builtin list.
+pub(crate) const SHELL_BUILTIN_METHODS: &[&str] = &[
+    ".", "[", "cat", "cd", "chmod", "cp", "echo", "env", "export", "find", "grep", "ln", "local",
+    "mkdir", "mv", "printf", "pwd", "read", "rm", "sed", "set", "shift", "sort", "source", "test",
+    "touch", "trap",
+];
+
 impl Language {
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
         language_registry()
@@ -312,6 +320,7 @@ impl Language {
             Self::C => tree_sitter_c::LANGUAGE.into(),
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Self::Lua => tree_sitter_lua::LANGUAGE.into(),
+            Self::Shell => tree_sitter_bash::LANGUAGE.into(),
         }
     }
 
@@ -326,6 +335,7 @@ impl Language {
             Self::C => c_config(),
             Self::Cpp => cpp_config(),
             Self::Lua => lua_config(),
+            Self::Shell => shell_config(),
         }
     }
 
@@ -338,6 +348,7 @@ impl Language {
             Self::C => C_BUILTIN_METHODS,
             Self::Cpp => CPP_BUILTIN_METHODS,
             Self::Lua => LUA_BUILTIN_METHODS,
+            Self::Shell => SHELL_BUILTIN_METHODS,
             Self::Markdown => &[],
         }
     }
@@ -353,6 +364,7 @@ impl Language {
             Self::C => "c",
             Self::Cpp => "cpp",
             Self::Lua => "lua",
+            Self::Shell => "shell",
         }
     }
 }
@@ -568,6 +580,24 @@ pub(crate) fn lua_config() -> LanguageConfig {
     }
 }
 
+pub(crate) fn shell_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_bash::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/shell/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/shell/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: &[("definition.function", NodeKind::Function)],
+        relation_kind_map: None,
+        preserve_bare_import_path: true,
+        is_method: None,
+    }
+}
+
 pub(crate) fn markdown_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_md::LANGUAGE.into(),
@@ -658,6 +688,18 @@ fn lua_matcher(path: &std::path::Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("lua"))
 }
 
+const SHELL_EXTENSIONS: &[&str] = &["sh", "bash", "zsh", "ksh"];
+
+fn shell_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            SHELL_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
 pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
     &[
         LanguageDescriptor {
@@ -715,6 +757,13 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::Lua,
             label: "lua",
             extensions: &["lua"],
+        },
+        LanguageDescriptor {
+            matcher: shell_matcher,
+            factory: shell_config,
+            language: Language::Shell,
+            label: "shell",
+            extensions: SHELL_EXTENSIONS,
         },
         LanguageDescriptor {
             matcher: markdown_matcher,
@@ -1634,6 +1683,7 @@ mod gate_contract {
             ("lua", LUA_BUILTIN_METHODS),
             ("python", PYTHON_BUILTIN_METHODS),
             ("rust", RUST_BUILTIN_METHODS),
+            ("shell", SHELL_BUILTIN_METHODS),
             ("typescript", TS_BUILTIN_METHODS),
             ("javascript", TS_BUILTIN_METHODS),
         ] {
@@ -1992,6 +2042,10 @@ mod gate_contract {
                 relation_set(&["imports", "calls", "contains", "defines"]),
             ),
             (
+                Language::Shell.label(),
+                relation_set(&["imports", "calls", "contains", "defines"]),
+            ),
+            (
                 Language::Markdown.label(),
                 // README's Markdown `imports` cell is `Y(links)`: the
                 // @import capture channel is remapped to RelationKind::Links.
@@ -2082,6 +2136,7 @@ mod gate_contract {
                 "definition.constant",
             ],
             Language::Lua => &["definition.function", "definition.method"],
+            Language::Shell => &["definition.function"],
             Language::Markdown => &["definition.section"],
         }
     }
