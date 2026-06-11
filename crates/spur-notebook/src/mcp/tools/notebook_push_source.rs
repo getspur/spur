@@ -74,7 +74,13 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         )
     })?;
 
-    let (root, _) = state.get_notebook().snapshot();
+    let path = daemon.current_path().await.ok_or_else(|| {
+        McpError::invalid_params(
+            "notebook_push_source requires an open notebook",
+            Some(json!({ "code": "notebook_not_open" })),
+        )
+    })?;
+    let (root, _) = state.notebook_for_path(&path).snapshot();
     let source = source_for_port(&root, &params.port)?;
     engine
         .push_source(SourcePush {
@@ -281,6 +287,53 @@ mod tests {
         assert_eq!(push.source.kind, "csv");
         assert_eq!(push.source.port, "sales");
         assert_eq!(push.payload, SourcePayload::IpcBytes(vec![1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn reads_source_ports_from_current_path_not_focused_store() {
+        let temp = TempDir::new().expect("temp dir");
+        let current_path = temp.path().join("current.ipynb");
+        let focused_path = temp.path().join("focused.ipynb");
+        let state = Arc::new(State::new());
+        state.notebook_for_path(&current_path).load(
+            &current_path,
+            notebook(vec![cell(
+                "source",
+                dag(Some(DagSource {
+                    kind: "csv".to_string(),
+                    port: "sales".to_string(),
+                })),
+            )]),
+        );
+        state
+            .get_notebook()
+            .load(&focused_path, notebook(vec![cell("plain", dag(None))]));
+        let control = NotebookDaemonControl::new_with_parts_for_test(
+            Arc::new(AgentBridge::new()),
+            Arc::new(TestBridge),
+            Arc::clone(&state),
+            Arc::new(TestWindows),
+            None,
+        );
+        control.set_current_path_for_test(current_path).await;
+        let (tx, mut rx) = mpsc::channel(4);
+        control
+            .set_reactive_engine_client(ReactiveEngineClient::new(tx))
+            .await;
+        let deps = ServerDeps {
+            bridge: Arc::new(TestBridge),
+            state: Some(state),
+            app: None,
+            daemon: Some(control),
+            plugins: None,
+        };
+
+        super::call(&deps, json!({ "port": "sales", "payload": [9] }))
+            .await
+            .expect("source push reads the current path store");
+
+        let push = rx.recv().await.expect("source push queued");
+        assert_eq!(push.source.port, "sales");
     }
 
     #[tokio::test]

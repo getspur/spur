@@ -836,6 +836,16 @@ pub fn replace_notebook_and_hydrate_catalog(
     state.focus_notebook_path(&path).replace(path, contents)
 }
 
+/// Replace the notebook store for a path without changing the focused notebook.
+pub fn replace_notebook_for_path_and_hydrate_catalog(
+    state: &State,
+    path: PathBuf,
+    contents: NotebookRoot,
+) -> NotebookDelta {
+    hydrate_datasource_catalog_from_root(state, path.as_path(), &contents);
+    state.notebook_for_path(&path).replace(path, contents)
+}
+
 fn hydrate_datasource_catalog_from_root(state: &State, path: &Path, root: &NotebookRoot) {
     let catalog =
         crate::state::DatasourceCatalog::hydrate_from_metadata(&root.metadata, Some(path));

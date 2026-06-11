@@ -492,7 +492,7 @@ impl State {
     }
 
     /// Return and focus the notebook store for a saved path.
-    pub(crate) fn focus_notebook_path(&self, path: impl AsRef<Path>) -> Arc<NotebookStore> {
+    pub fn focus_notebook_path(&self, path: impl AsRef<Path>) -> Arc<NotebookStore> {
         let id = NotebookId::for_saved_path(path.as_ref());
         self.alias_focused_default_store_to_id(&id);
         let store = self.notebook_for_id(&id);

@@ -913,7 +913,7 @@ pub fn spawn_reactive_engine(
                             continue;
                         };
                         in_flight += 1;
-                        let store = Arc::clone(&store);
+                        let store = state.notebook_for_path(&path);
                         let runner = runner.clone();
                         let port_root = notebook_port_root(&path);
                         let complete_tx = complete_tx.clone();

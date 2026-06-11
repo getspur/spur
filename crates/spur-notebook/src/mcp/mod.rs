@@ -2750,6 +2750,7 @@ impl NotebookDaemonControl {
 
     #[doc(hidden)]
     pub async fn set_current_path_for_test(&self, path: PathBuf) {
+        self.jute_state.focus_notebook_path(&path);
         self.state.lock().await.current_path = Some(path);
     }
 
@@ -2758,8 +2759,18 @@ impl NotebookDaemonControl {
         id: Option<String>,
         request: jute::commands::DaemonControlRequest,
     ) -> DaemonControlResponse {
+        let command = request.command.clone();
         let response =
             jute::commands::handle_daemon_control_request(request, &self.jute_state).await;
+        if response.ok {
+            match command {
+                jute::commands::DaemonControlCommand::LoadNotebook { path }
+                | jute::commands::DaemonControlCommand::ReplaceNotebook { path, .. } => {
+                    self.state.lock().await.current_path = Some(PathBuf::from(path));
+                }
+                _ => {}
+            }
+        }
         DaemonControlResponse {
             id,
             ok: response.ok,
@@ -2828,7 +2839,7 @@ impl NotebookDaemonControl {
             return Ok(());
         };
 
-        let (snapshot, _) = self.jute_state.get_notebook().snapshot();
+        let (snapshot, _) = self.jute_state.notebook_for_path(&path).snapshot();
         self.jute_state
             .save_coordinator
             .save(path, snapshot)
@@ -3014,6 +3025,7 @@ impl NotebookDaemonControl {
                 state.datasource_setup_cell = None;
             }
         }
+        self.jute_state.focus_notebook_path(&path);
         self.load_open_notebook(&path).await?;
         #[cfg(feature = "datasource-introspect")]
         if let Err(error) = self.reconcile_open_datasource_catalog().await {
