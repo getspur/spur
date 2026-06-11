@@ -25,8 +25,17 @@ pub enum Language {
     Tsx,
     Javascript,
     Markdown,
+    C,
     Cpp,
+    Lua,
 }
+
+/// Precision heuristic for common C runtime calls, not an exhaustive builtin list.
+pub(crate) const C_BUILTIN_METHODS: &[&str] = &[
+    "calloc", "close", "fclose", "fflush", "fopen", "fprintf", "fread", "free", "fwrite", "malloc",
+    "memcpy", "memmove", "memset", "open", "printf", "read", "realloc", "snprintf", "sprintf",
+    "strcmp", "strcpy", "strlen", "strncmp", "strncpy", "write",
+];
 
 /// Precision heuristic for common C++ standard-library methods, not an exhaustive builtin list.
 pub(crate) const CPP_BUILTIN_METHODS: &[&str] = &[
@@ -257,6 +266,34 @@ pub(crate) const TS_BUILTIN_METHODS: &[&str] = &[
     "values",
 ];
 
+/// Precision heuristic for common Lua runtime methods, not an exhaustive builtin list.
+pub(crate) const LUA_BUILTIN_METHODS: &[&str] = &[
+    "assert",
+    "collectgarbage",
+    "error",
+    "format",
+    "gmatch",
+    "gsub",
+    "insert",
+    "ipairs",
+    "len",
+    "match",
+    "next",
+    "pairs",
+    "pcall",
+    "print",
+    "remove",
+    "require",
+    "select",
+    "sort",
+    "sub",
+    "tonumber",
+    "tostring",
+    "type",
+    "unpack",
+    "xpcall",
+];
+
 impl Language {
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
         language_registry()
@@ -272,7 +309,9 @@ impl Language {
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Javascript => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Markdown => tree_sitter_md::LANGUAGE.into(),
+            Self::C => tree_sitter_c::LANGUAGE.into(),
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::Lua => tree_sitter_lua::LANGUAGE.into(),
         }
     }
 
@@ -284,7 +323,9 @@ impl Language {
             Self::Tsx => tsx_config(),
             Self::Javascript => javascript_config(),
             Self::Markdown => markdown_config(),
+            Self::C => c_config(),
             Self::Cpp => cpp_config(),
+            Self::Lua => lua_config(),
         }
     }
 
@@ -294,7 +335,9 @@ impl Language {
             Self::Rust => RUST_BUILTIN_METHODS,
             Self::Python => PYTHON_BUILTIN_METHODS,
             Self::TypeScript | Self::Tsx | Self::Javascript => TS_BUILTIN_METHODS,
+            Self::C => C_BUILTIN_METHODS,
             Self::Cpp => CPP_BUILTIN_METHODS,
+            Self::Lua => LUA_BUILTIN_METHODS,
             Self::Markdown => &[],
         }
     }
@@ -307,7 +350,9 @@ impl Language {
             Self::Tsx => "tsx",
             Self::Javascript => "javascript",
             Self::Markdown => "markdown",
+            Self::C => "c",
             Self::Cpp => "cpp",
+            Self::Lua => "lua",
         }
     }
 }
@@ -448,6 +493,30 @@ pub(crate) fn javascript_config() -> LanguageConfig {
     typescript_config_for(tree_sitter_typescript::LANGUAGE_TSX.into(), TSX_QUERIES)
 }
 
+pub(crate) fn c_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_c::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/c/tags.scm")),
+            ("spur-edges", include_str!("../../queries/c/spur-edges.scm")),
+        ],
+        definition_kind_map: &[
+            ("definition.struct", NodeKind::Struct),
+            ("definition.enum", NodeKind::Enum),
+            ("definition.enum_variant", NodeKind::EnumVariant),
+            ("definition.function", NodeKind::Function),
+            ("definition.type_alias", NodeKind::TypeAlias),
+            ("definition.macro", NodeKind::Macro),
+            ("definition.field", NodeKind::Field),
+            ("definition.constant", NodeKind::Constant),
+        ],
+        relation_kind_map: None,
+        preserve_bare_import_path: false,
+        is_method: None,
+    }
+}
+
 pub(crate) fn cpp_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_cpp::LANGUAGE.into(),
@@ -475,6 +544,27 @@ pub(crate) fn cpp_config() -> LanguageConfig {
         relation_kind_map: None,
         preserve_bare_import_path: false,
         is_method: Some(has_cpp_class_ancestor),
+    }
+}
+
+pub(crate) fn lua_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_lua::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/lua/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/lua/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: &[
+            ("definition.function", NodeKind::Function),
+            ("definition.method", NodeKind::Method),
+        ],
+        relation_kind_map: None,
+        preserve_bare_import_path: true,
+        is_method: None,
     }
 }
 
@@ -556,6 +646,18 @@ fn cpp_matcher(path: &std::path::Path) -> bool {
         })
 }
 
+fn c_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("c"))
+}
+
+fn lua_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lua"))
+}
+
 pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
     &[
         LanguageDescriptor {
@@ -594,11 +696,25 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             extensions: JAVASCRIPT_EXTENSIONS,
         },
         LanguageDescriptor {
+            matcher: c_matcher,
+            factory: c_config,
+            language: Language::C,
+            label: "c",
+            extensions: &["c"],
+        },
+        LanguageDescriptor {
             matcher: cpp_matcher,
             factory: cpp_config,
             language: Language::Cpp,
             label: "cpp",
             extensions: CPP_EXTENSIONS,
+        },
+        LanguageDescriptor {
+            matcher: lua_matcher,
+            factory: lua_config,
+            language: Language::Lua,
+            label: "lua",
+            extensions: &["lua"],
         },
         LanguageDescriptor {
             matcher: markdown_matcher,
@@ -1513,7 +1629,9 @@ mod gate_contract {
     #[test]
     fn builtin_method_lists_are_sorted_and_deduplicated() {
         for (label, methods) in [
+            ("c", C_BUILTIN_METHODS),
             ("cpp", CPP_BUILTIN_METHODS),
+            ("lua", LUA_BUILTIN_METHODS),
             ("python", PYTHON_BUILTIN_METHODS),
             ("rust", RUST_BUILTIN_METHODS),
             ("typescript", TS_BUILTIN_METHODS),
@@ -1854,6 +1972,10 @@ mod gate_contract {
                 ]),
             ),
             (
+                Language::C.label(),
+                relation_set(&["imports", "calls", "constructs", "contains", "defines"]),
+            ),
+            (
                 Language::Cpp.label(),
                 relation_set(&[
                     "imports",
@@ -1864,6 +1986,10 @@ mod gate_contract {
                     "references",
                     "extends",
                 ]),
+            ),
+            (
+                Language::Lua.label(),
+                relation_set(&["imports", "calls", "contains", "defines"]),
             ),
             (
                 Language::Markdown.label(),
@@ -1932,6 +2058,16 @@ mod gate_contract {
                 "definition.constant",
                 "definition.module",
             ],
+            Language::C => &[
+                "definition.struct",
+                "definition.enum",
+                "definition.enum_variant",
+                "definition.function",
+                "definition.type_alias",
+                "definition.macro",
+                "definition.field",
+                "definition.constant",
+            ],
             Language::Cpp => &[
                 "definition.module",
                 "definition.class",
@@ -1945,6 +2081,7 @@ mod gate_contract {
                 "definition.field",
                 "definition.constant",
             ],
+            Language::Lua => &["definition.function", "definition.method"],
             Language::Markdown => &["definition.section"],
         }
     }
