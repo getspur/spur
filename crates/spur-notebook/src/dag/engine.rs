@@ -36,8 +36,8 @@ use crate::mcp::{
 use super::{
     notebook_port_root, validate_declared_schema, CascadeStatus, DeclaredSchemaError, NotebookDag,
     Origin, PortClass, PortEntry, PortEvent, PortEventClient, PortEventDraft, PortEventError,
-    PortEventKind, PortEventSequencer, PortEventSequencerConfig, PortKind, PortPayload, PortRead,
-    PortRef, PortStore, PortStoreError, RunInput, RunStatus,
+    PortEventKind, PortEventSequencer, PortEventSequencerConfig, PortKind, PortPayload, PortRef,
+    PortStore, PortStoreError, RunInput, RunStatus,
 };
 
 const DEFAULT_SOURCE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -968,34 +968,16 @@ where
         let mut changed = false;
         for produced in &metadata.produces {
             let port = produced.port.as_str();
-            let read = match store.get(port) {
-                Ok(read) => read,
-                Err(PortStoreError::MissingPort(_)) => continue,
-                Err(error) => return Err(error.into()),
-            };
             let before = before_versions.get(port).copied().flatten();
-            if Some(read.version()) == before {
-                match read {
-                    PortRead::Arrow { ipc_bytes, .. } => {
-                        // `ipc_bytes` is an arrow Buffer (zero-copy mmap of the port
-                        // file); deref to &[u8] so it routes through PortPayload::IpcBytes.
-                        store.put(port, &*ipc_bytes)?;
-                    }
-                    PortRead::Media {
-                        bytes,
-                        mime,
-                        duration_sec,
-                        ..
-                    } => {
-                        store.put(
-                            port,
-                            PortPayload::MediaBlob {
-                                bytes: &bytes,
-                                mime: &mime,
-                                duration_sec,
-                            },
-                        )?;
-                    }
+            let current_version = match store.manifest().get(port) {
+                Some(entry) => entry.version,
+                None => continue,
+            };
+            if Some(current_version) == before {
+                match store.bump_version(port) {
+                    Ok(_) => {}
+                    Err(PortStoreError::MissingPort(_)) => continue,
+                    Err(error) => return Err(error.into()),
                 }
                 changed = true;
             }
