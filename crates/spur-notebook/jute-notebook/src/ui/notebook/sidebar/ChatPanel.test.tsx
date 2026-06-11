@@ -93,7 +93,7 @@ describe("ChatPanel", () => {
         "chat_permission_respond",
         {
           requestId: "perm-1",
-          optionId: null,
+          optionId: "deny",
         },
       );
     });
@@ -132,6 +132,41 @@ describe("ChatPanel", () => {
     });
     expect(await screen.findByText("Summary")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+  });
+
+  test("keeps late chat_turn events in the originating conversation", async () => {
+    render(<ChatPanel />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "Summarize the notebook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith(
+        "chat_turn",
+        expect.objectContaining({
+          notebookPath: "/tmp/revenue.ipynb",
+          prompt: "Summarize the notebook",
+        }),
+      );
+    });
+
+    useChat.getState().setScope("/apps/sales", "Sales App");
+
+    tauriMocks.channels[0]?.onmessage?.({
+      type: "messageChunk",
+      text: "Notebook summary",
+    });
+    tauriMocks.channels[0]?.onmessage?.({ type: "done" });
+
+    expect(useChat.getState().activeAppKey).toBe("/apps/sales");
+    expect(useChat.getState().messages).toEqual([]);
+
+    useChat.getState().setScope("notebook", "Notebook");
+    expect(useChat.getState().messages.map((message) => message.text)).toEqual([
+      "Notebook summary",
+    ]);
   });
 
   test("registers the agent sidebar panel", () => {

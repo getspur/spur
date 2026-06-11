@@ -31,10 +31,6 @@ function scopeLabelForPath(path: string | undefined) {
   return filename ?? "Notebook";
 }
 
-function deniedOptionId(optionId: string) {
-  return optionId.toLowerCase() === "deny";
-}
-
 export default function ChatPanel() {
   const notebook = useNotebook();
   const [notebookPath, appOpenInfo] = useStore(
@@ -56,6 +52,7 @@ export default function ChatPanel() {
     );
   const setScope = useChat((state) => state.setScope);
   const applyEvent = useChat((state) => state.applyEvent);
+  const applyEventToApp = useChat((state) => state.applyEventToApp);
   const clearPendingPermission = useChat(
     (state) => state.clearPendingPermission,
   );
@@ -79,7 +76,7 @@ export default function ChatPanel() {
       })
       .catch((error) => {
         if (!disposed) {
-          applyEvent({
+          applyEventToApp(appKey, {
             type: "error",
             message: error instanceof Error ? error.message : String(error),
           });
@@ -92,7 +89,7 @@ export default function ChatPanel() {
   }, [
     appOpenInfo?.app_name,
     appOpenInfo?.app_root,
-    applyEvent,
+    applyEventToApp,
     notebookPath,
     setScope,
   ]);
@@ -102,9 +99,10 @@ export default function ChatPanel() {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt || !notebookPath || submitting) return;
 
+    const appKey = appOpenInfo?.app_root ?? DEFAULT_CHAT_APP_KEY;
     const onEvent = new Channel<ChatEvent>();
     onEvent.onmessage = (message) => {
-      useChat.getState().applyEvent(message);
+      useChat.getState().applyEventToApp(appKey, message);
     };
 
     setPrompt("");
@@ -116,7 +114,7 @@ export default function ChatPanel() {
         onEvent,
       });
     } catch (error) {
-      applyEvent({
+      applyEventToApp(appKey, {
         type: "error",
         message: error instanceof Error ? error.message : String(error),
       });
@@ -126,11 +124,10 @@ export default function ChatPanel() {
   };
 
   const respondToPermission = async (requestId: string, optionId: string) => {
-    const responseOptionId = deniedOptionId(optionId) ? null : optionId;
     try {
       await invoke("chat_permission_respond", {
         requestId,
-        optionId: responseOptionId,
+        optionId,
       });
       clearPendingPermission(requestId);
     } catch (error) {

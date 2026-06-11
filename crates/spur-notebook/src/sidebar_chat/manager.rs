@@ -6,8 +6,9 @@ use std::time::Duration;
 use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, ListSessionsRequest, LoadSessionRequest, PromptRequest,
     ProtocolVersion, SessionId, SessionInfo, SessionNotification, SessionUpdate, TextContent,
+    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
 };
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt as _};
 use spur_acp::connection::AgentConnection;
 use spur_acp::types::{PermissionRequest, PermissionResponse};
 use tokio::sync::broadcast::error::RecvError;
@@ -15,6 +16,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::types::{AppScope, ChatEvent, PermissionOptionView};
+
+const TOOL_SUMMARY_MAX_CHARS: usize = 160;
 
 /// Owns sidebar chat ACP sessions keyed by notebook/app scope.
 pub struct SidebarChat {
@@ -101,7 +104,7 @@ impl SidebarChat {
         let session_id = self.ensure_session(scope).await?;
         let prompt_request = PromptRequest::new(
             session_id.clone(),
-            vec![ContentBlock::Text(TextContent::new(prompt.to_string()))],
+            vec![ContentBlock::Text(TextContent::new(prompt.to_owned()))],
         );
 
         let mut notif_rx = {
@@ -119,28 +122,25 @@ impl SidebarChat {
             tokio::select! {
                 biased;
 
-                _ = cancel.cancelled() => {
+                () = cancel.cancelled() => {
                     let mut conn = self.conn.lock().await;
                     let _ = conn.cancel(session_id.0.as_ref()).await;
                     break;
                 }
 
                 maybe_notification = prompt_stream.next(), if !stream_done => {
-                    match maybe_notification {
-                        Some(notification) => {
-                            if notification.session_id == session_id {
-                                self.send_notification(notification, &tx);
-                            }
+                    if let Some(notification) = maybe_notification {
+                        if notification.session_id == session_id {
+                            self.send_notification(notification, &tx);
                         }
-                        None => {
-                            stream_done = true;
-                            if notif_rx.is_some() {
-                                grace_deadline = Some(
-                                    tokio::time::Instant::now() + Duration::from_millis(100),
-                                );
-                            } else {
-                                break;
-                            }
+                    } else {
+                        stream_done = true;
+                        if notif_rx.is_some() {
+                            grace_deadline = Some(
+                                tokio::time::Instant::now() + Duration::from_millis(100),
+                            );
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -162,7 +162,7 @@ impl SidebarChat {
                     }
                 }
 
-                _ = async {
+                () = async {
                     match grace_deadline {
                         Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => futures::future::pending().await,
@@ -192,6 +192,8 @@ impl SidebarChat {
                 input: Some(usage.used),
                 output: Some(usage.size),
             }),
+            SessionUpdate::ToolCall(tool_call) => Some(tool_call_event(tool_call)),
+            SessionUpdate::ToolCallUpdate(update) => tool_update_event(update),
             _ => None,
         }
     }
@@ -218,7 +220,7 @@ impl SidebarChat {
             .fields
             .title
             .clone()
-            .unwrap_or_else(|| "Permission requested".to_string());
+            .unwrap_or_else(|| "Permission requested".to_owned());
         let options = request
             .args
             .options
@@ -235,7 +237,7 @@ impl SidebarChat {
             .insert(id.clone(), request.reply_tx);
 
         tx.send(ChatEvent::PermissionRequest { id, title, options })
-            .map_err(|_| anyhow::anyhow!("permission event receiver dropped"))
+            .map_err(|_error| anyhow::anyhow!("permission event receiver dropped"))
     }
 
     pub async fn respond_permission(
@@ -243,15 +245,16 @@ impl SidebarChat {
         id: &str,
         option_id: Option<String>,
     ) -> anyhow::Result<()> {
+        let Some(option_id) = option_id else {
+            anyhow::bail!("permission option id is required");
+        };
         let Some(reply_tx) = self.pending_permissions.lock().await.remove(id) else {
             anyhow::bail!("permission request not found: {id}");
         };
 
-        if let Some(option_id) = option_id {
-            reply_tx
-                .send(PermissionResponse { option_id })
-                .map_err(|_| anyhow::anyhow!("permission request responder dropped"))?;
-        }
+        reply_tx
+            .send(PermissionResponse { option_id })
+            .map_err(|_error| anyhow::anyhow!("permission request responder dropped"))?;
         Ok(())
     }
 
@@ -266,6 +269,112 @@ impl SidebarChat {
         *initialized = true;
         Ok(())
     }
+}
+
+fn tool_call_event(tool_call: ToolCall) -> ChatEvent {
+    ChatEvent::ToolCall {
+        name: tool_call.title,
+        args_summary: summarize_tool_args(tool_call.raw_input.as_ref()),
+    }
+}
+
+fn tool_update_event(update: ToolCallUpdate) -> Option<ChatEvent> {
+    let raw_output_summary = update
+        .fields
+        .raw_output
+        .as_ref()
+        .and_then(summarize_json_value);
+    let content_summary = update
+        .fields
+        .content
+        .as_ref()
+        .and_then(|content| summarize_tool_content(content));
+    let status_summary = update.fields.status.and_then(summarize_tool_status);
+    let summary = raw_output_summary.or(content_summary).or(status_summary)?;
+
+    Some(ChatEvent::ToolResult { summary })
+}
+
+fn summarize_tool_args(raw_input: Option<&serde_json::Value>) -> String {
+    let Some(raw_input) = raw_input else {
+        return String::new();
+    };
+    if raw_input.is_null() {
+        return String::new();
+    }
+    if let Some(object) = raw_input.as_object() {
+        if object.is_empty() {
+            return String::new();
+        }
+        for key in ["path", "file", "command", "query", "url", "pattern"] {
+            if let Some(value) = object.get(key).and_then(|value| value.as_str()) {
+                return truncate_summary(&format!("{key}: {value}"));
+            }
+        }
+    }
+    summarize_json_value(raw_input).unwrap_or_default()
+}
+
+fn summarize_json_value(value: &serde_json::Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    let summary = value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string());
+    let summary = summary.trim();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(truncate_summary(summary))
+    }
+}
+
+fn summarize_tool_content(content: &[ToolCallContent]) -> Option<String> {
+    for item in content {
+        match item {
+            ToolCallContent::Content(content) => match &content.content {
+                ContentBlock::Text(text) => {
+                    let text = text.text.trim();
+                    if !text.is_empty() {
+                        return Some(truncate_summary(text));
+                    }
+                }
+                ContentBlock::Image(_) => return Some("image output".to_owned()),
+                _ => {}
+            },
+            ToolCallContent::Diff(diff) => {
+                return Some(truncate_summary(&format!("diff: {}", diff.path.display())));
+            }
+            ToolCallContent::Terminal(terminal) => {
+                return Some(truncate_summary(&format!(
+                    "terminal: {}",
+                    terminal.terminal_id
+                )));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn summarize_tool_status(status: ToolCallStatus) -> Option<String> {
+    match status {
+        ToolCallStatus::Completed => Some("completed".to_owned()),
+        ToolCallStatus::Failed => Some("failed".to_owned()),
+        _ => None,
+    }
+}
+
+fn truncate_summary(summary: &str) -> String {
+    if summary.chars().count() <= TOOL_SUMMARY_MAX_CHARS {
+        return summary.to_owned();
+    }
+
+    let mut truncated: String = summary.chars().take(TOOL_SUMMARY_MAX_CHARS).collect();
+    truncated.push_str("...");
+    truncated
 }
 
 enum BcastOutcome {
@@ -293,11 +402,12 @@ mod turn {
     use super::*;
     use agent_client_protocol::schema::{
         ContentChunk, InitializeResponse, ListSessionsResponse, McpServer, NewSessionResponse,
-        PermissionOption, PermissionOptionKind, RequestPermissionRequest, ToolCallUpdate,
+        PermissionOption, PermissionOptionKind, RequestPermissionRequest, ToolCall, ToolCallUpdate,
         ToolCallUpdateFields,
     };
     use async_trait::async_trait;
     use futures::stream;
+    use serde_json::json;
     use spur_acp::types::AgentHealth;
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
@@ -636,6 +746,44 @@ mod turn {
         );
     }
 
+    #[test]
+    fn forward_notification_maps_tool_call_to_chat_event() {
+        let (chat, _state) = chat_with_fake();
+        let notification = SessionNotification::new(
+            SessionId::new("session-1"),
+            SessionUpdate::ToolCall(ToolCall::new("tool-1", "Read file").raw_input(json!({
+                "path": "src/lib.rs"
+            }))),
+        );
+
+        assert_eq!(
+            chat.forward_notification(notification),
+            Some(ChatEvent::ToolCall {
+                name: "Read file".into(),
+                args_summary: "path: src/lib.rs".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn forward_notification_maps_tool_update_output_to_chat_event() {
+        let (chat, _state) = chat_with_fake();
+        let notification = SessionNotification::new(
+            SessionId::new("session-1"),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "tool-1",
+                ToolCallUpdateFields::new().raw_output(json!("read 12 lines")),
+            )),
+        );
+
+        assert_eq!(
+            chat.forward_notification(notification),
+            Some(ChatEvent::ToolResult {
+                summary: "read 12 lines".into(),
+            })
+        );
+    }
+
     #[tokio::test]
     async fn handle_permission_request_emits_event_with_option_ids_and_labels() {
         let (chat, _state) = chat_with_fake();
@@ -707,7 +855,7 @@ mod turn {
     }
 
     #[tokio::test]
-    async fn respond_permission_none_drops_stored_reply() {
+    async fn respond_permission_none_is_rejected_without_clearing_pending() {
         let (chat, _state) = chat_with_fake();
         let (reply_tx, reply_rx) = oneshot::channel();
         let request = PermissionRequest {
@@ -725,9 +873,15 @@ mod turn {
         let (tx, _rx) = mpsc::unbounded_channel();
         chat.handle_permission_request(request, &tx).await.unwrap();
 
-        chat.respond_permission("perm-1", None).await.unwrap();
+        let error = chat.respond_permission("perm-1", None).await.unwrap_err();
 
-        assert!(reply_rx.await.is_err());
+        assert_eq!(error.to_string(), "permission option id is required");
+        assert_eq!(chat.pending_permission_count().await, 1);
+
+        chat.respond_permission("perm-1", Some("deny".into()))
+            .await
+            .unwrap();
+        assert_eq!(reply_rx.await.unwrap().option_id, "deny");
         assert_eq!(chat.pending_permission_count().await, 0);
     }
 }

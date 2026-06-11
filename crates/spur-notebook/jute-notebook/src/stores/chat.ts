@@ -68,6 +68,7 @@ export type ChatState = ChatConversation & {
 export type ChatActions = {
   setScope: (appKey: string, label: string) => void;
   applyEvent: (event: ChatEvent) => void;
+  applyEventToApp: (appKey: string, event: ChatEvent) => void;
   clearPendingPermission: (requestId: string) => void;
   reset: () => void;
 };
@@ -205,6 +206,22 @@ function reduceConversation(
   }
 }
 
+function applyEventToAppState(
+  state: ChatState,
+  appKey: string,
+  event: ChatEvent,
+): ChatState {
+  const conversation = state.conversations[appKey] ?? createConversation();
+  const nextConversation = reduceConversation(conversation, event);
+  return projectActiveConversation({
+    activeAppKey: state.activeAppKey,
+    conversations: {
+      ...state.conversations,
+      [appKey]: nextConversation,
+    },
+  });
+}
+
 export const useChat = create<ChatStore>()((set) => ({
   ...createInitialState(),
 
@@ -225,17 +242,12 @@ export const useChat = create<ChatStore>()((set) => ({
 
   applyEvent: (event) =>
     set((state) => {
-      const activeConversation =
-        state.conversations[state.activeAppKey] ??
-        createConversation(state.scopeLabel);
-      const nextConversation = reduceConversation(activeConversation, event);
-      return projectActiveConversation({
-        activeAppKey: state.activeAppKey,
-        conversations: {
-          ...state.conversations,
-          [state.activeAppKey]: nextConversation,
-        },
-      });
+      return applyEventToAppState(state, state.activeAppKey, event);
+    }),
+
+  applyEventToApp: (appKey, event) =>
+    set((state) => {
+      return applyEventToAppState(state, appKey, event);
     }),
 
   clearPendingPermission: (requestId) =>
