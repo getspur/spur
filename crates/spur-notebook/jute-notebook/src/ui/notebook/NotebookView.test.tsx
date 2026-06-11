@@ -32,8 +32,12 @@ vi.mock("./NotebookLocation", () => ({
   default: () => <div data-testid="notebook-location" />,
 }));
 
-vi.mock("./sidebar/NotebookSidebar", () => ({
-  default: () => <div data-testid="notebook-sidebar" />,
+vi.mock("./sidebar/ChatPanel", () => ({
+  default: () => <div data-testid="chat-panel" />,
+}));
+
+vi.mock("./sidebar/DatasourcePanel", () => ({
+  default: () => <div data-testid="datasource-panel" />,
 }));
 
 describe("NotebookView", () => {
@@ -61,8 +65,12 @@ describe("NotebookView", () => {
 
     expect(screen.getByTestId("app-mode")).toBeInTheDocument();
     expect(screen.queryByTestId("notebook-location")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("notebook-sidebar")).not.toBeInTheDocument();
-    expect(container.firstElementChild).toHaveClass("grid-cols-1");
+    expect(
+      screen.getByRole("button", { name: "AI Agent" }),
+    ).toBeInTheDocument();
+    expect(container.firstElementChild).toHaveClass(
+      "grid-cols-[minmax(0,1fr),auto]",
+    );
     expect(container.querySelector(".py-16")).not.toBeInTheDocument();
   });
 });

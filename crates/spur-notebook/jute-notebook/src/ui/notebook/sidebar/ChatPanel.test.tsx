@@ -5,8 +5,8 @@ import {
   fireEvent,
   render,
   screen,
-  within,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -60,6 +60,7 @@ describe("ChatPanel", () => {
     tauriMocks.channels.length = 0;
     tauriMocks.invoke.mockReset();
     tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "chat_sessions_list") return Promise.resolve([]);
       if (command === "chat_new_session") return Promise.resolve("session-1");
       return Promise.resolve(undefined);
     });
@@ -140,6 +141,73 @@ describe("ChatPanel", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
   });
 
+  test("lists notebook sessions, selects the ensured session, and switches resumed sessions", async () => {
+    const sessionLists = [
+      [{ id: "session-old" }, { id: "session-older" }],
+      [{ id: "session-1" }, { id: "session-old" }, { id: "session-older" }],
+    ];
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "chat_sessions_list") {
+        return Promise.resolve(sessionLists.shift() ?? sessionLists[0] ?? []);
+      }
+      if (command === "chat_new_session") return Promise.resolve("session-1");
+      return Promise.resolve(undefined);
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_sessions_list", {
+        notebookPath: "/tmp/revenue.ipynb",
+      });
+    });
+    await waitFor(() => {
+      expect(
+        tauriMocks.invoke.mock.calls.filter(
+          ([command]) => command === "chat_sessions_list",
+        ),
+      ).toHaveLength(2);
+    });
+
+    const picker = await screen.findByRole("combobox", {
+      name: "Agent session",
+    });
+    await waitFor(() => {
+      expect(picker).toHaveValue("session-1");
+    });
+
+    fireEvent.change(picker, { target: { value: "session-old" } });
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_switch_session", {
+        notebookPath: "/tmp/revenue.ipynb",
+        sessionId: "session-old",
+      });
+    });
+  });
+
+  test("renders session-list failures as scoped chat errors", async () => {
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "chat_sessions_list") {
+        return Promise.reject(new Error("sessions unavailable"));
+      }
+      if (command === "chat_new_session") return Promise.resolve("session-1");
+      return Promise.resolve(undefined);
+    });
+
+    render(<ChatPanel />);
+
+    expect(await screen.findByText("sessions unavailable")).toBeInTheDocument();
+    expect(
+      useChat.getState().conversations["notebook:/tmp/revenue.ipynb"].messages,
+    ).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        text: "sessions unavailable",
+      }),
+    ]);
+  });
+
   test("routes streamed turn events to the notebook scope that started the turn", async () => {
     notebookPath = "/tmp/revenue.ipynb";
     const firstPanel = render(<ChatPanel />);
@@ -194,9 +262,9 @@ describe("ChatPanel", () => {
     expect(
       state.conversations["notebook:/tmp/revenue.ipynb"]?.streamingText,
     ).toBe("Revenue summary");
-    expect(state.conversations["notebook:/tmp/costs.ipynb"]?.streamingText).toBe(
-      "",
-    );
+    expect(
+      state.conversations["notebook:/tmp/costs.ipynb"]?.streamingText,
+    ).toBe("");
     expect(
       within(secondPanel.container).queryByText("Revenue summary"),
     ).not.toBeInTheDocument();
