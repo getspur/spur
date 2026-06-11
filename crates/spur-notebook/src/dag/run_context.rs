@@ -3,14 +3,9 @@ use std::{
     sync::Arc,
 };
 
+use jute::chat_state::{build_agent_connection, load_spur_config, select_default_agent};
 use jute::state::State;
-use spur_acp::config::{AgentConfig, SpurConfig};
-use spur_acp::connection::{
-    AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter,
-};
-use spur_acp::types::TransportKind;
-use tokio::sync::Mutex;
-use tracing::warn;
+use spur_acp::config::AgentConfig;
 
 use crate::dag::ai::{AcpAgentBackend, AiNodeBackend, NullAiBackend};
 use crate::dag::NotebookCellRunner;
@@ -52,54 +47,6 @@ pub fn notebook_run_context(
     })
 }
 
-/// Load the layered SPUR config the same way `spur-cli` does (project
-/// `.spur/config.toml`, then user `~/.spur/config.toml`), degrading to
-/// `SpurConfig::default()` when neither exists or fails to parse. Never
-/// errors: a missing/broken config must not break non-AI notebook cells.
-fn load_spur_config(repo_root: &Path) -> SpurConfig {
-    let project_config = repo_root.join(".spur").join("config.toml");
-    let user_config = directories::BaseDirs::new()
-        .map(|dirs| dirs.home_dir().join(".spur/config.toml"))
-        .unwrap_or_default();
-
-    let path = if project_config.exists() {
-        Some(project_config)
-    } else if user_config.exists() {
-        Some(user_config)
-    } else {
-        None
-    };
-
-    let Some(path) = path else {
-        return SpurConfig::default();
-    };
-
-    match std::fs::read_to_string(&path).map(|content| toml::from_str::<SpurConfig>(&content)) {
-        Ok(Ok(config)) => config,
-        Ok(Err(error)) => {
-            warn!(%error, path = %path.display(), "failed to parse SPUR config; using defaults");
-            SpurConfig::default()
-        }
-        Err(error) => {
-            warn!(%error, path = %path.display(), "failed to read SPUR config; using defaults");
-            SpurConfig::default()
-        }
-    }
-}
-
-/// Pick the notebook's AI agent: the configured brain agent if it appears in
-/// `agents.entries`, otherwise the first registered agent, otherwise `None`
-/// (no agent configured → graceful degradation via `NullAiBackend`).
-fn select_default_agent(config: &SpurConfig) -> Option<AgentConfig> {
-    config
-        .agents
-        .entries
-        .iter()
-        .find(|agent| agent.name == config.brain.default)
-        .or_else(|| config.agents.entries.first())
-        .cloned()
-}
-
 /// Build the AI backend for the notebook run context: a live
 /// `AcpAgentBackend` over a connection mirrored from the `AgentConfig`
 /// transport when one is configured, or the `NullAiBackend` otherwise.
@@ -110,50 +57,10 @@ fn ai_backend_from_config(
 ) -> Arc<dyn AiNodeBackend> {
     match agent {
         Some(config) => {
-            let connection = build_agent_connection(config, repo_root);
+            let connection = build_agent_connection(config, repo_root, None);
             Arc::new(AcpAgentBackend::new(connection, cwd))
         }
         None => Arc::new(NullAiBackend),
-    }
-}
-
-/// Local mirror of `spur_core::orchestrator::connection::build_connection_from_transport`
-/// (which is `pub(super)`). Constructs the public `spur-acp` adapter for the
-/// configured transport, wrapped as the shared `Arc<Mutex<dyn AgentConnection>>`
-/// the `AcpAgentBackend` consumes. The notebook AI node never forwards
-/// permission requests, so no `permission_tx` is wired.
-fn build_agent_connection(
-    config: &AgentConfig,
-    repo_root: &Path,
-) -> Arc<Mutex<dyn AgentConnection>> {
-    let spawn_args = config.effective_args();
-    match config.transport {
-        TransportKind::Acp => {
-            let mut connection = NativeAcpConnection::new_with_kind(
-                config.name.clone(),
-                config.command.clone(),
-                spawn_args,
-                config.kind,
-                None,
-            );
-            connection.set_repo_root(repo_root.to_path_buf());
-            Arc::new(Mutex::new(connection))
-        }
-        TransportKind::Stdio => Arc::new(Mutex::new(StdioAdapter::new(
-            config.name.clone(),
-            config.command.clone(),
-            spawn_args,
-        ))),
-        TransportKind::CliWrap => Arc::new(Mutex::new(CliWrapAdapter::new(
-            config.name.clone(),
-            config.command.clone(),
-            spawn_args,
-        ))),
-        TransportKind::StreamJson => Arc::new(Mutex::new(StreamJsonAdapter::new(
-            config.name.clone(),
-            config.command.clone(),
-            spawn_args,
-        ))),
     }
 }
 

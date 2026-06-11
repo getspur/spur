@@ -3,6 +3,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+extern crate self as spur_notebook;
+
 use std::{io, sync::Arc};
 
 use tauri::Emitter as _;
@@ -10,6 +12,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
 pub mod backend;
+pub mod chat_state;
 pub mod commands;
 pub mod entity;
 /// Lazy provisioning of the bundled Python 3 kernelspec.
@@ -17,6 +20,7 @@ pub mod kernel_provision;
 pub mod menu;
 pub mod notebook_store;
 pub mod ports;
+pub mod sidebar_chat;
 pub mod state;
 pub mod window;
 
