@@ -531,7 +531,7 @@ fn main() {
                                 return;
                             };
 
-                            if let Err(error) = control.reopen().await {
+                            if let Err(error) = control.reopen(true).await {
                                 tracing::warn!(%error, "failed to reopen notebook window");
                             }
                         });
