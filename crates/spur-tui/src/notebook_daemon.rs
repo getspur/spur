@@ -1,4 +1,4 @@
-use std::{io, path::Path, time::Duration};
+use std::{io, path::Path, process::Stdio, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -11,6 +11,8 @@ const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 const CONNECT_ATTEMPTS: usize = 5;
 const CONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
 const CONNECT_MAX_DELAY: Duration = Duration::from_millis(800);
+const LAUNCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const LAUNCH_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,7 +234,7 @@ async fn send_control(
     group: Option<&str>,
     socket_path: &Path,
 ) -> anyhow::Result<ControlResponse> {
-    let mut stream = connect_control_socket(socket_path).await?;
+    let mut stream = connect_or_launch_control_socket(socket_path, launch_notebook_app).await?;
     let request = ControlRequest {
         daemon: "notebook.v1",
         command,
@@ -244,6 +246,20 @@ async fn send_control(
     write_frame(&mut stream, &bytes).await?;
     let response = read_frame(&mut stream).await?;
     Ok(serde_json::from_slice(&response)?)
+}
+
+async fn connect_or_launch_control_socket(
+    socket_path: &Path,
+    launch: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<UnixStream> {
+    match connect_control_socket(socket_path).await {
+        Ok(stream) => return Ok(stream),
+        Err(error) if should_retry_connect_error(&error) => {}
+        Err(error) => return Err(error),
+    }
+
+    launch(socket_path)?;
+    wait_for_launched_control_socket(socket_path).await
 }
 
 async fn connect_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
@@ -269,6 +285,52 @@ fn should_retry_connect_error(error: &io::Error) -> bool {
             | io::ErrorKind::NotFound
             | io::ErrorKind::AddrNotAvailable
     )
+}
+
+fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let log_path = socket_path
+        .parent()
+        .map(|parent| parent.join("daemon.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("spur-notebook-daemon.log"));
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+
+    let mut command = std::process::Command::new(spur_core::notebook::notebook_binary_path());
+    command
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn().map(|_| ())
+}
+
+async fn wait_for_launched_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
+    let deadline = tokio::time::Instant::now() + LAUNCH_CONNECT_TIMEOUT;
+    loop {
+        match UnixStream::connect(socket_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => {
+                if tokio::time::Instant::now() >= deadline || !should_retry_connect_error(&error) {
+                    return Err(error);
+                }
+            }
+        }
+        sleep(LAUNCH_CONNECT_RETRY_DELAY).await;
+    }
 }
 
 async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
@@ -298,4 +360,65 @@ async fn read_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     let mut bytes = vec![0_u8; len];
     stream.read_exact(&mut bytes).await?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    use serde_json::json;
+    use tokio::net::UnixListener;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_or_launch_control_socket_launches_when_socket_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("notebook.sock");
+        let launched = Arc::new(AtomicBool::new(false));
+        let launched_for_fn = Arc::clone(&launched);
+        let socket_for_server = socket_path.clone();
+
+        let mut stream = connect_or_launch_control_socket(&socket_path, move |path| {
+            assert_eq!(path, socket_for_server.as_path());
+            launched_for_fn.store(true, Ordering::SeqCst);
+            let listener = UnixListener::bind(&socket_for_server)?;
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept control socket");
+                let request = read_frame(&mut stream).await.expect("read request frame");
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&request).expect("json"),
+                    json!({"daemon":"notebook.v1","command":"reopen"})
+                );
+                write_frame(&mut stream, br#"{"ok":true,"path":"/tmp/notebook.ipynb"}"#)
+                    .await
+                    .expect("write response");
+            });
+            Ok(())
+        })
+        .await
+        .expect("connect after launch");
+
+        let request = serde_json::to_vec(&ControlRequest {
+            daemon: "notebook.v1",
+            command: "reopen",
+            path: None,
+            name: None,
+            group: None,
+        })
+        .expect("serialize request");
+        write_frame(&mut stream, &request)
+            .await
+            .expect("write request");
+        let response = read_frame(&mut stream).await.expect("read response");
+
+        assert!(launched.load(Ordering::SeqCst));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response).expect("json response"),
+            json!({"ok":true,"path":"/tmp/notebook.ipynb"})
+        );
+    }
 }
