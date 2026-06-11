@@ -6415,14 +6415,17 @@ dependencies = [
 name = "jute"
 version = "0.0.0"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
  "arrow-schema",
  "async-channel",
+ "async-trait",
  "blake3",
  "bytes",
  "cfg-if",
  "dashmap 5.5.3",
  "directories 6.0.0",
+ "futures",
  "futures-util",
  "hmac",
  "parking_lot",
@@ -6434,6 +6437,7 @@ dependencies = [
  "serde_urlencoded",
  "serde_with",
  "sha2",
+ "spur-acp",
  "strum 0.26.3",
  "sysinfo",
  "tauri",
@@ -6448,6 +6452,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
  "trash",
