@@ -60,12 +60,20 @@ DashMap<String, KernelSlot>` keyed by path-derived slot IDs. `state.rs::notebook
 has **22 callers**; `slot_id_for` / `slot_id_for_spec` / `notebook_path_from_slot_id`
 round-trip path↔slot. Per-notebook kernel teardown is already expressible.
 
-**`get_notebook` production blast radius is small — 4 sites** (16 callers total, 12 are
-tests):
+**`get_notebook` production blast radius is broader than the first pass showed.** The
+initial structural review saw the obvious control-path sites, but current `main` also routes
+agent/MCP and DAG execution through `state.get_notebook()`:
 - `commands.rs::handle_daemon_control_inner` (the control dispatch)
 - `commands.rs::replace_notebook_and_hydrate_catalog`
 - `commands.rs::resolve_run_cell_dispatch`
 - **cross-crate** `crates/spur-notebook/src/mcp/mod.rs::NotebookDaemonControl::persist_catalog_to_current_notebook`
+- `crates/spur-notebook/src/mcp/tools/run_cell.rs`, `notebook_push_source.rs`,
+  `notebook_dag_status.rs`, and `save.rs`
+- `crates/spur-notebook/src/dag/run_context.rs` and `dag/engine.rs`
+
+Treat Phase 1 as a registry substrate refactor, not a four-callsite patch. Every production
+path that snapshots, loads, applies run events, saves, or mutates the document store must
+either resolve through the focus pointer or accept an explicit `NotebookId` override.
 
 **There are TWO single-"current"-notebook authorities, not one.** Besides the TS bridge's
 module-global `activeNotebook` (`src/agent/bridge.ts`, which fires
@@ -153,12 +161,21 @@ Mirror the proven kernel `DashMap` pattern.
 - `State.notebook: Arc<Mutex<Option<Arc<NotebookStore>>>>` → `notebooks: DashMap<NotebookId,
   Arc<NotebookStore>>`.
 - `State.datasource_catalog` → per-notebook (keyed by `NotebookId`).
-- `NotebookId`: the path for saved notebooks, a uuid for scratch — reuse
-  `notebook_slot_id(path)` so kernel slots and notebook stores share one identity scheme.
+- `NotebookId`: a stable semantic document identity. Current code has two path-derived
+  identifiers with different semantics: `state.rs::notebook_slot_id(path)` is a raw
+  `notebook:{path}` kernel-slot key, while `ports.rs::notebook_id_for_path(path)` is a
+  hashed `nb-...` storage id. Do **not** casually reuse one as the other. Introduce one
+  canonical `NotebookId` type/helper and derive kernel-slot IDs, port roots, store keys, and
+  delta routing from it.
+- Saved notebooks derive `NotebookId` from the normalized/canonical path; scratch notebooks
+  get a UUID-backed `NotebookId` until save-as. Save-as/path rename is an explicit identity
+  migration: move the store/catalog/focus/delta route and decide whether the kernel slot
+  follows the document identity or restarts under the new path.
 - A daemon-held **focus pointer**: `State.focused: Mutex<Option<NotebookId>>`.
-- `get_notebook()` resolves through the focus pointer by default; the 4 production callers
-  become focus-aware (3 already run inside a control turn that knows the target; the
-  cross-crate `persist_catalog_to_current_notebook` resolves via the focus pointer too).
+- `get_notebook()` resolves through the focus pointer by default, but the refactor must cover
+  all production store access paths named in §2, including MCP tool modules and DAG runtime
+  paths. Helpers should make the target explicit where the request already has a notebook
+  path/id, and fall back to focus only for genuinely implicit operations.
 
 ### 5.2 "Current" is redefined, not deleted
 
@@ -177,6 +194,11 @@ would break every existing prompt/skill and churn all `bindings/`).
 - The Rust `NotebookMcpServer.current_path` and the TS `activeNotebook` both become views of
   the focus pointer rather than independent authorities. `notebook_active_changed` generalizes
   to carry the focused `NotebookId`.
+- Request-level binding is required: when the frontend receives an `agent://request`, it
+  captures the focused `NotebookId`/`Notebook` at dispatch start and uses that target for the
+  whole request. A human tab switch during an in-flight request must not retarget later
+  handler steps to the newly focused tab. Long-running MCP/server requests need the same
+  snapshot semantics, or they must carry the optional `notebook_id` override explicitly.
 
 **Tradeoff (stated honestly):** with implicit focus, the agent acts on what the human sees
 by default. Operating on a background tab requires `SetFocus` first, or the optional
@@ -209,16 +231,17 @@ authoritative document is correct and untouched by B. Confirms or refutes §3. *
 no UI.)*
 
 **Phase 1 — Keyed registry (backend correctness, no UI change).** Promote `State.notebook`
-+ `datasource_catalog` to keyed maps; introduce `NotebookId` (reuse `notebook_slot_id`); add
-the focus pointer; make the 4 `get_notebook` production sites + `mcp/mod.rs` `current_path`
-resolve through it. Phase 0's test must now pass. Multi-*window* becomes correct as a
-side effect.
+and `datasource_catalog` to keyed maps; introduce the canonical `NotebookId`; add the focus
+pointer; make the full production store-access surface in §2 resolve through explicit target
+or focus. Phase 0's test must now pass. Multi-*window* becomes correct as a side effect.
 
 **Phase 2 — Focus protocol.** Add `SetFocus` control command; redefine `current_path` /
 `activeNotebook` as focus views; generalize `notebook_active_changed`; add the **optional**
-`notebook_id` override. Per CLAUDE.md, new control-command variants / envelope fields require
-round-trip serialization tests (model on `crates/spur-acp/tests/executor_events_roundtrip.rs`)
-and regenerated ts-rs `bindings/`. Run `cargo test -p spur-acp` and the notebook test suites.
+`notebook_id` override; bind each request to one target at dispatch start. New
+`DaemonControlCommand` variants / fields require serde round-trip coverage in the Jute/notebook
+layer and regenerated ts-rs `bindings/`; ACP round-trip tests are only needed if ACP event
+types change. Run the notebook Rust tests through `scripts/spur-cargo` and frontend tests /
+typecheck through `scripts/spur-pnpm`.
 
 **Phase 3 — Tab UI (frontend composition).** `NotebookTabs` store + `TabStrip`; kept-mounted
 per-tab `Notebook` instances; tab switch → `SetFocus`; close → kernel teardown; overflow +
@@ -237,11 +260,15 @@ All compiles/tests go through `scripts/spur-cargo` and `scripts/spur-pnpm` (neve
 - **Registry:** unit tests that two `NotebookId`s map to two independent `NotebookStore`s and
   catalogs; load/replace of one never mutates another.
 - **Focus:** `SetFocus` round-trip serialization; implicit-target resolves to focus; optional
-  `notebook_id` override targets a background tab without changing focus.
+  `notebook_id` override targets a background tab without changing focus; an in-flight
+  request remains bound to its starting notebook when focus changes mid-request.
+- **Identity:** one canonical `NotebookId` helper covers store keys, port roots, delta tags,
+  and kernel-slot derivation; save-as/path migration preserves or deliberately restarts the
+  associated kernel according to the chosen lifecycle policy.
 - **Frontend:** `TabStrip` switch keeps each tab's edit buffer / kernel state (kept-mounted);
   close prompts on dirty/running and tears down only that slot; `notebookDeltaIsForPath`
   (id-generalized) still isolates inbound deltas. Use `scripts/spur-pnpm test`.
-- **Bindings:** regenerated ts-rs types compile and typecheck (`spur-pnpm run typecheck`).
+- **Bindings:** regenerated ts-rs types compile and typecheck (`scripts/spur-pnpm run typecheck`).
 
 ## 8. Alternatives considered
 
@@ -274,6 +301,9 @@ All compiles/tests go through `scripts/spur-cargo` and `scripts/spur-pnpm` (neve
 - Present / App mode: do those surfaces get tabs, or stay full-window per tab?
 - Scratch notebook identity stability across save-as (path change ⇒ `NotebookId` change) and
   its effect on the kernel slot and focus pointer.
+- Whether `NotebookId` should be user-visible/debuggable (`notebook:{path}` style) or compact
+  and storage-safe (`nb-...` hash style). The implementation must not keep both as competing
+  identities.
 
 ## Appendix — key file/symbol references
 
@@ -285,9 +315,12 @@ All compiles/tests go through `scripts/spur-cargo` and `scripts/spur-pnpm` (neve
 - Window spawning: `src-tauri/src/window.rs` (`open_notebook_path`, `initialize_builder`,
   `attach_hide_on_close`)
 - Daemon state: `src-tauri/src/state.rs` (`State`, `get_notebook`, `notebook_slot_id`,
-  `KernelSlot`, `DatasourceCatalog`)
+  `KernelSlot`, `DatasourceCatalog`), `src-tauri/src/ports.rs` (`notebook_id_for_path`)
 - Control dispatch: `src-tauri/src/commands.rs` (`handle_daemon_control_inner`,
   `replace_notebook_and_hydrate_catalog`, `resolve_run_cell_dispatch`, `DaemonControlCommand`)
+- MCP/DAG store access: `crates/spur-notebook/src/mcp/tools/run_cell.rs`,
+  `notebook_push_source.rs`, `notebook_dag_status.rs`, `save.rs`,
+  `crates/spur-notebook/src/dag/run_context.rs`, `dag/engine.rs`
 - MCP current-notebook authority: `crates/spur-notebook/src/mcp/mod.rs` (`NotebookMcpServer`,
   `NotebookDaemonControl`, `current_path`, `close_current_window`,
   `persist_catalog_to_current_notebook`, `LastNotebookRecord`)
