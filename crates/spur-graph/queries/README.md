@@ -35,9 +35,10 @@ The shared capture vocabulary is:
 | `@definition.enum_variant` | `NodeKind::EnumVariant` |
 
 `@definition.constant` is captured for Rust, Python, TypeScript top-level
-non-function `const` bindings, and C++ namespace/file-scope `const` and
-`constexpr` variables. `@definition.enum_variant` is captured for Rust,
-TypeScript, and C++ enum members.
+non-function `const` bindings, C file-scope `const` variables, and C++
+namespace/file-scope `const` and `constexpr` variables.
+`@definition.enum_variant` is captured for Rust, TypeScript, C, and C++ enum
+members.
 
 ## Coverage Matrix
 
@@ -54,7 +55,9 @@ Legend:
 | Python | - | Y | - | Y | - | - | - | - | - | - | - | - | - | Y | - |
 | TypeScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
 | Tsx | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
+| C | - | Y | - | - | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
 | Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
+| Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - |
 | Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - |
 
 Notes:
@@ -70,9 +73,10 @@ Notes:
   Python follows the canonical module-level assignment constant pattern.
   TypeScript captures top-level and exported `const` bindings with non-function
   initializer forms; direct arrow/function initializer forms are emitted as
-  `@definition.function` only. C++ captures namespace/file-scope `const` and
-  `constexpr` variables; const class members remain fields, and const locals,
-  parameters, and function return types are intentionally skipped.
+  `@definition.function` only. C captures file-scope `const` variables. C++
+  captures namespace/file-scope `const` and `constexpr` variables; const class
+  members remain fields, and const locals, parameters, and function return
+  types are intentionally skipped.
 - Rust captures enum members as `@definition.enum_variant` (mapped to
   `NodeKind::EnumVariant`); TypeScript enum members and C++ `enumerator`s do
   the same.
@@ -89,17 +93,17 @@ This table is the relation-level analogue of the Definition Coverage Matrix and 
 seed of the Tier-0 ontology realization contract
 (`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
 
-| Predicate | Rust | Python | TypeScript | Tsx | Cpp | Markdown |
-|---|---|---|---|---|---|---|
-| imports | Y | Y | Y | Y | Y | Y(links) |
-| calls | Y | Y | Y | Y | Y | — |
-| constructs | Y | Y | Y | Y | Y | — |
-| contains | Y | Y | Y | Y | Y | Y |
-| defines | Y | Y | Y | Y | Y | — |
-| references (HOF) | Y | Y | TODO | TODO | Y | — |
-| links | — | — | — | — | — | Y |
-| implements | Y | Y | Y | Y | — | — |
-| extends | Y | Y | Y | Y | Y | — |
+| Predicate | Rust | Python | TypeScript | Tsx | C | Cpp | Lua | Markdown |
+|---|---|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y | Y | Y(links) |
+| calls | Y | Y | Y | Y | Y | Y | Y | — |
+| constructs | Y | Y | Y | Y | Y | Y | — | — |
+| contains | Y | Y | Y | Y | Y | Y | Y | Y |
+| defines | Y | Y | Y | Y | Y | Y | Y | — |
+| references (HOF) | Y | Y | TODO | TODO | — | Y | — | — |
+| links | — | — | — | — | — | — | — | Y |
+| implements | Y | Y | Y | Y | — | — | — | — |
+| extends | Y | Y | Y | Y | — | Y | — | — |
 
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
