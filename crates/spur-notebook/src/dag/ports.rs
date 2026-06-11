@@ -1,10 +1,13 @@
 use std::{
     collections::BTreeMap,
-    fs,
-    io::{self, Cursor},
+    fs::{self, OpenOptions},
+    io::{self, Cursor, Write},
     path::{Path, PathBuf},
     ptr::NonNull,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use arrow_array::RecordBatch;
@@ -19,9 +22,11 @@ use arrow_schema::{ArrowError, Schema, SchemaRef};
 use directories::BaseDirs;
 use memmap2::Mmap;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 use thiserror::Error;
 
 const MANIFEST_FILE: &str = "manifest.json";
+static PORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum PortStoreError {
@@ -33,6 +38,8 @@ pub enum PortStoreError {
     InvalidPortName { port: String },
     #[error("port '{0}' has not been written")]
     MissingPort(String),
+    #[error("port destination already exists: {}", path.display())]
+    ExistingPortDestination { path: PathBuf },
     #[error("I/O error at {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -47,6 +54,33 @@ pub enum PortStoreError {
     },
     #[error("Arrow IPC error: {0}")]
     Arrow(#[from] ArrowError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DeclaredSchemaError {
+    #[error("declared schema for port '{port}' is not valid: {message}")]
+    InvalidSchema { port: String, message: String },
+    #[error("port '{port}' field '{field}': declared {declared}, got {actual}")]
+    FieldTypeMismatch {
+        port: String,
+        field: String,
+        declared: String,
+        actual: String,
+    },
+    #[error("port '{port}' field '{field}': declared {declared}, got {actual}")]
+    MissingField {
+        port: String,
+        field: String,
+        declared: String,
+        actual: String,
+    },
+    #[error("port '{port}' field '{field}': declared {declared}, got {actual}")]
+    ExtraField {
+        port: String,
+        field: String,
+        declared: String,
+        actual: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -328,7 +362,7 @@ impl PortStore {
             .ports_dir
             .join(format!("{port}@v{version}.{extension}"));
 
-        fs::write(&path, &bytes).map_err(|source| io_error(&path, source))?;
+        self.write_port_file_once(&path, &bytes)?;
 
         let entry = PortEntry {
             path,
@@ -345,7 +379,7 @@ impl PortStore {
 
     #[expect(
         unsafe_code,
-        reason = "memmap2::Mmap::map maps a write-once, atomically-renamed port file"
+        reason = "memmap2::Mmap::map maps a write-once, atomically-created port file"
     )]
     pub fn get(&self, port: &str) -> Result<PortRead, PortStoreError> {
         let entry = self
@@ -371,9 +405,10 @@ impl PortStore {
         }
 
         let file = fs::File::open(&entry.path).map_err(|source| io_error(&entry.path, source))?;
-        // SAFETY: port files are written once via create + atomic rename and are
-        // never mutated in place (each `put` writes a new versioned file), so the
-        // mapped region stays valid and immutable for the lifetime of the mapping.
+        // SAFETY: port files are written to a temporary file and linked into the
+        // final versioned path only if that path does not already exist. Existing
+        // versions are never mutated in place, so the mapped region stays valid
+        // and immutable for the lifetime of the mapping.
         let mmap = unsafe { Mmap::map(&file).map_err(|source| io_error(&entry.path, source))? };
         let ipc_bytes = mmap_to_buffer(mmap);
         let (schema, batches) = decode_ipc_file(&ipc_bytes)?;
@@ -385,6 +420,50 @@ impl PortStore {
             batches,
             ipc_bytes,
         })
+    }
+
+    fn write_port_file_once(&self, path: &Path, bytes: &[u8]) -> Result<(), PortStoreError> {
+        let tmp_path = self.temp_port_path(path);
+        let result = (|| {
+            let mut tmp_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+                .map_err(|source| io_error(&tmp_path, source))?;
+            tmp_file
+                .write_all(bytes)
+                .map_err(|source| io_error(&tmp_path, source))?;
+            tmp_file
+                .sync_all()
+                .map_err(|source| io_error(&tmp_path, source))?;
+            drop(tmp_file);
+
+            fs::hard_link(&tmp_path, path).map_err(|source| {
+                if source.kind() == io::ErrorKind::AlreadyExists {
+                    PortStoreError::ExistingPortDestination {
+                        path: path.to_path_buf(),
+                    }
+                } else {
+                    io_error(path, source)
+                }
+            })
+        })();
+
+        let _ = fs::remove_file(&tmp_path);
+        result
+    }
+
+    fn temp_port_path(&self, path: &Path) -> PathBuf {
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("port");
+        let counter = PORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.ports_dir.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            counter
+        ))
     }
 
     fn load_manifest(path: &Path) -> Result<PortManifest, PortStoreError> {
@@ -431,6 +510,12 @@ fn read_ipc(bytes: &[u8]) -> Result<(SchemaRef, Vec<RecordBatch>), PortStoreErro
     let schema = reader.schema();
     let batches = reader.by_ref().collect::<Result<Vec<_>, ArrowError>>()?;
     Ok((schema, batches))
+}
+
+pub(crate) fn read_ipc_for_validation(
+    bytes: &[u8],
+) -> Result<(SchemaRef, Vec<RecordBatch>), PortStoreError> {
+    read_ipc(bytes)
 }
 
 /// Wrap a memory-mapped region in an Arrow [`Buffer`] without copying. The
@@ -507,6 +592,75 @@ fn block_slice(buffer: &Buffer, block: &arrow_ipc::Block) -> Buffer {
 
 fn arrow_parse_error(message: impl Into<String>) -> PortStoreError {
     PortStoreError::Arrow(ArrowError::ParseError(message.into()))
+}
+
+pub fn schema_hash(schema: &Value) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(schema)?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+pub fn validate_declared_schema(
+    port: &str,
+    declared: &Value,
+    actual: &Schema,
+) -> Result<String, DeclaredSchemaError> {
+    let declared_schema: Schema = serde_json::from_value(declared.clone()).map_err(|source| {
+        DeclaredSchemaError::InvalidSchema {
+            port: port.to_owned(),
+            message: source.to_string(),
+        }
+    })?;
+
+    for declared_field in declared_schema.fields() {
+        match actual.field_with_name(declared_field.name()) {
+            Ok(actual_field) if actual_field.data_type() == declared_field.data_type() => {}
+            Ok(actual_field) => {
+                return Err(DeclaredSchemaError::FieldTypeMismatch {
+                    port: port.to_owned(),
+                    field: declared_field.name().clone(),
+                    declared: data_type_label(declared_field.data_type()),
+                    actual: data_type_label(actual_field.data_type()),
+                });
+            }
+            Err(_) => {
+                return Err(DeclaredSchemaError::MissingField {
+                    port: port.to_owned(),
+                    field: declared_field.name().clone(),
+                    declared: data_type_label(declared_field.data_type()),
+                    actual: "<missing>".to_owned(),
+                });
+            }
+        }
+    }
+
+    for actual_field in actual.fields() {
+        if declared_schema
+            .field_with_name(actual_field.name())
+            .is_err()
+        {
+            return Err(DeclaredSchemaError::ExtraField {
+                port: port.to_owned(),
+                field: actual_field.name().clone(),
+                declared: "<absent>".to_owned(),
+                actual: data_type_label(actual_field.data_type()),
+            });
+        }
+    }
+
+    schema_hash(declared).map_err(|source| DeclaredSchemaError::InvalidSchema {
+        port: port.to_owned(),
+        message: source.to_string(),
+    })
+}
+
+fn data_type_label(data_type: &arrow_schema::DataType) -> String {
+    serde_json::to_value(data_type)
+        .ok()
+        .and_then(|value| match value {
+            Value::String(value) => Some(value),
+            other => Some(other.to_string()),
+        })
+        .unwrap_or_else(|| format!("{data_type:?}"))
 }
 
 fn validate_path_segment(value: &str) -> Result<(), PortStoreError> {
@@ -590,6 +744,125 @@ mod tests {
         for row in 0..expected_labels.len() {
             assert_eq!(expected_labels.value(row), actual_labels.value(row));
         }
+    }
+
+    #[test]
+    fn declared_schema_comparison_accepts_matching_schema() {
+        let declared = serde_json::json!({
+            "fields": [
+                {
+                    "name": "id",
+                    "data_type": "Int64",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                },
+                {
+                    "name": "label",
+                    "data_type": "Utf8",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        });
+        let actual = batch(vec![1], vec!["alpha"]).schema();
+
+        assert_eq!(
+            validate_declared_schema("sales", &declared, actual.as_ref()).expect("schema matches"),
+            schema_hash(&declared).expect("hashes declared schema")
+        );
+    }
+
+    #[test]
+    fn declared_schema_comparison_reports_field_type_mismatch() {
+        let declared = serde_json::json!({
+            "fields": [
+                {
+                    "name": "id",
+                    "data_type": "Float64",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        });
+        let actual = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+
+        let err = validate_declared_schema("sales", &declared, &actual)
+            .expect_err("mismatched field type is rejected");
+
+        assert_eq!(
+            err,
+            DeclaredSchemaError::FieldTypeMismatch {
+                port: "sales".to_string(),
+                field: "id".to_string(),
+                declared: "Float64".to_string(),
+                actual: "Int64".to_string(),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "port 'sales' field 'id': declared Float64, got Int64"
+        );
+    }
+
+    #[test]
+    fn declared_schema_comparison_reports_missing_and_extra_fields() {
+        let declared = serde_json::json!({
+            "fields": [
+                {
+                    "name": "id",
+                    "data_type": "Int64",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                },
+                {
+                    "name": "label",
+                    "data_type": "Utf8",
+                    "nullable": false,
+                    "dict_id": 0,
+                    "dict_is_ordered": false,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        });
+
+        let missing = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+        assert_eq!(
+            validate_declared_schema("sales", &declared, &missing)
+                .expect_err("missing field is rejected"),
+            DeclaredSchemaError::MissingField {
+                port: "sales".to_string(),
+                field: "label".to_string(),
+                declared: "Utf8".to_string(),
+                actual: "<missing>".to_string(),
+            }
+        );
+
+        let extra = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, false),
+            Field::new("debug", DataType::Utf8, false),
+        ]);
+        assert_eq!(
+            validate_declared_schema("sales", &declared, &extra)
+                .expect_err("extra field is rejected"),
+            DeclaredSchemaError::ExtraField {
+                port: "sales".to_string(),
+                field: "debug".to_string(),
+                declared: "<absent>".to_string(),
+                actual: "Utf8".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -871,6 +1144,99 @@ mod tests {
             panic!("expected media port read");
         };
         assert_eq!(Some(60.0), duration_sec);
+    }
+
+    #[test]
+    fn put_fails_if_next_version_file_already_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = PortStore::open_at(dir.path()).expect("open store");
+        let first = b"first media bytes";
+        let rolled_back = b"rolled back v2 bytes";
+
+        store
+            .put(
+                "capture",
+                PortPayload::MediaBlob {
+                    bytes: first,
+                    mime: "video/webm",
+                    duration_sec: None,
+                },
+            )
+            .expect("put first media blob");
+
+        let next_path = dir.path().join("ports/capture@v2.media");
+        std::fs::write(&next_path, rolled_back).expect("seed stale destination");
+
+        let err = store
+            .put(
+                "capture",
+                PortPayload::MediaBlob {
+                    bytes: b"replacement bytes",
+                    mime: "video/webm",
+                    duration_sec: None,
+                },
+            )
+            .expect_err("existing v2 destination must not be overwritten");
+
+        assert!(matches!(
+            err,
+            PortStoreError::ExistingPortDestination { path } if path == next_path
+        ));
+        assert_eq!(
+            rolled_back.as_slice(),
+            std::fs::read(&next_path)
+                .expect("stale destination remains readable")
+                .as_slice()
+        );
+        assert_eq!(
+            1,
+            store
+                .manifest()
+                .get("capture")
+                .expect("manifest remains at v1")
+                .version
+        );
+    }
+
+    #[test]
+    fn stale_store_cannot_replace_same_version_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut first_store = PortStore::open_at(dir.path()).expect("open first store");
+        let mut stale_store = PortStore::open_at(dir.path()).expect("open stale store");
+
+        first_store
+            .put(
+                "frame",
+                PortPayload::MediaBlob {
+                    bytes: b"winner bytes",
+                    mime: "video/webm",
+                    duration_sec: None,
+                },
+            )
+            .expect("first store writes v1");
+
+        let final_path = dir.path().join("ports/frame@v1.media");
+        let err = stale_store
+            .put(
+                "frame",
+                PortPayload::MediaBlob {
+                    bytes: b"stale writer bytes",
+                    mime: "video/webm",
+                    duration_sec: None,
+                },
+            )
+            .expect_err("stale writer must not overwrite v1");
+
+        assert!(matches!(
+            err,
+            PortStoreError::ExistingPortDestination { path } if path == final_path
+        ));
+        assert_eq!(
+            b"winner bytes".as_slice(),
+            std::fs::read(final_path)
+                .expect("winner file remains readable")
+                .as_slice()
+        );
     }
 
     #[test]
