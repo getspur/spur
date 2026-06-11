@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     | undefined,
   releaseDispatch: undefined as (() => void) | undefined,
   seenNotebookSources: [] as (string | undefined)[],
+  seenNotebookIds: [] as (string | undefined)[],
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -27,15 +28,22 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("./handlers", () => ({
-  dispatchAgentRequest: vi.fn(async (notebook: Notebook | undefined) => {
-    await new Promise<void>((resolve) => {
-      mocks.releaseDispatch = resolve;
-    });
-    mocks.seenNotebookSources.push(
-      notebook?.state.serverState.cells["cell-1"]?.source,
-    );
-    return { ok: true };
-  }),
+  dispatchAgentRequest: vi.fn(
+    async (
+      notebook: Notebook | undefined,
+      _request: AgentBridgeRequest,
+      context: { notebookId?: string },
+    ) => {
+      await new Promise<void>((resolve) => {
+        mocks.releaseDispatch = resolve;
+      });
+      mocks.seenNotebookSources.push(
+        notebook?.state.serverState.cells["cell-1"]?.source,
+      );
+      mocks.seenNotebookIds.push(context.notebookId);
+      return { ok: true };
+    },
+  ),
 }));
 
 describe("agent bridge focus binding", () => {
@@ -59,6 +67,7 @@ describe("agent bridge focus binding", () => {
     mocks.listener = undefined;
     mocks.releaseDispatch = undefined;
     mocks.seenNotebookSources.length = 0;
+    mocks.seenNotebookIds.length = 0;
   });
 
   it("uses the request-start notebook for the whole in-flight request", async () => {
@@ -83,12 +92,39 @@ describe("agent bridge focus binding", () => {
     await requestPromise;
 
     expect(mocks.seenNotebookSources).toEqual(["A"]);
+    expect(mocks.seenNotebookIds).toEqual([undefined]);
     expect(mocks.invoke).toHaveBeenCalledWith("agent_response", {
       payload: {
         requestId: "req-1",
         result: { ok: true },
       },
     });
+  });
+
+  it("binds request context to the active tab id for unsaved tabs", async () => {
+    const { registerAgentBridge, setActiveAgentNotebook } =
+      await import("./bridge");
+    const { Notebook } = await import("@/stores/notebook");
+    await registerAgentBridge();
+
+    const notebook = notebookWithSource(Notebook, "Untitled");
+    setActiveAgentNotebook(notebook, "untitled-1");
+
+    const requestPromise = mocks.listener!({
+      payload: {
+        requestId: "req-2",
+        method: "notebook.set_cell_metadata",
+        params: {
+          id: "cell-1",
+          patch: { spur: { datasource_setup: true } },
+          expected_version: 1,
+        },
+      },
+    });
+    mocks.releaseDispatch!();
+    await requestPromise;
+
+    expect(mocks.seenNotebookIds).toEqual(["untitled-1"]);
   });
 });
 

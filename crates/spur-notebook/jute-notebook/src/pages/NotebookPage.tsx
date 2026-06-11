@@ -167,7 +167,7 @@ export default function NotebookPage() {
 
   useEffect(() => {
     if (!activeEntry) return;
-    setActiveAgentNotebook(activeEntry.notebook);
+    setActiveAgentNotebook(activeEntry.notebook, activeEntry.id);
     void daemonControl({
       command: "set_focus",
       notebook_id: activeEntry.id,
