@@ -21,6 +21,13 @@ type SessionInfo = {
   cwd?: string | null;
 };
 
+type AgentInfo = {
+  name: string;
+  label: string;
+  transport?: string;
+  selected: boolean;
+};
+
 function messageClassName(kind: ChatMessage["kind"]) {
   return clsx(
     "rounded border px-3 py-2 text-sm",
@@ -36,10 +43,6 @@ function scopeLabelForPath(path: string | undefined) {
   if (!path) return "Notebook";
   const filename = path.split("/").filter(Boolean).at(-1);
   return filename ?? "Notebook";
-}
-
-function deniedOptionId(optionId: string) {
-  return optionId.toLowerCase() === "deny";
 }
 
 function errorMessage(error: unknown) {
@@ -68,6 +71,8 @@ export default function ChatPanel() {
   const [prompt, setPrompt] = useState("");
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [selectedAgentName, setSelectedAgentName] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const chatScopeKey =
@@ -89,12 +94,59 @@ export default function ChatPanel() {
 
   useEffect(() => {
     setScope(chatScopeKey, chatScopeLabel);
+  }, [chatScopeKey, chatScopeLabel, setScope]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    void (async () => {
+      try {
+        const nextAgents = await invoke<AgentInfo[]>("chat_agents_list");
+        if (disposed) return;
+
+        setAgents(nextAgents);
+        setSelectedAgentName((currentAgentName) => {
+          if (
+            currentAgentName &&
+            nextAgents.some((agent) => agent.name === currentAgentName)
+          ) {
+            return currentAgentName;
+          }
+          return (
+            nextAgents.find((agent) => agent.selected)?.name ??
+            nextAgents[0]?.name ??
+            ""
+          );
+        });
+
+        if (nextAgents.length === 0) {
+          applyEventForScope(chatScopeKey, {
+            type: "error",
+            message: "No chat agent configured",
+          });
+        }
+      } catch (error) {
+        if (disposed) return;
+        applyEventForScope(chatScopeKey, {
+          type: "error",
+          message: errorMessage(error),
+        });
+      }
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [applyEventForScope, chatScopeKey]);
+
+  useEffect(() => {
     setSessions([]);
     setSelectedSessionId("");
 
-    if (!notebookPath) return;
+    if (!notebookPath || !selectedAgentName) return;
 
     let disposed = false;
+    const agentName = selectedAgentName;
 
     const reportScopedError = (error: unknown) => {
       if (disposed) return;
@@ -107,6 +159,7 @@ export default function ChatPanel() {
     const refreshSessions = async (preferredSessionId?: string) => {
       try {
         const nextSessions = await invoke<SessionInfo[]>("chat_sessions_list", {
+          agentName,
           notebookPath,
         });
         if (disposed) return false;
@@ -136,10 +189,15 @@ export default function ChatPanel() {
     void (async () => {
       const initialListLoaded = await refreshSessions();
       const sessionId = await invoke<string>("chat_new_session", {
+        agentName,
         notebookPath,
       });
       if (disposed) return;
-      await invoke("chat_switch_session", { notebookPath, sessionId });
+      await invoke("chat_switch_session", {
+        agentName,
+        notebookPath,
+        sessionId,
+      });
       if (disposed) return;
       setSelectedSessionId(sessionId);
       if (initialListLoaded) {
@@ -154,23 +212,23 @@ export default function ChatPanel() {
     return () => {
       disposed = true;
     };
-  }, [
-    applyEventForScope,
-    chatScopeKey,
-    chatScopeLabel,
-    notebookPath,
-    setScope,
-  ]);
+  }, [applyEventForScope, chatScopeKey, notebookPath, selectedAgentName]);
+
+  const switchAgent = (event: ChangeEvent<HTMLSelectElement>) => {
+    setSelectedAgentName(event.currentTarget.value);
+  };
 
   const switchSession = async (event: ChangeEvent<HTMLSelectElement>) => {
     const sessionId = event.currentTarget.value;
     const sessionNotebookPath = notebookPath;
     const sessionScopeKey = chatScopeKey;
+    const sessionAgentName = selectedAgentName;
     setSelectedSessionId(sessionId);
-    if (!sessionNotebookPath || !sessionId) return;
+    if (!sessionNotebookPath || !sessionAgentName || !sessionId) return;
 
     try {
       await invoke("chat_switch_session", {
+        agentName: sessionAgentName,
         notebookPath: sessionNotebookPath,
         sessionId,
       });
@@ -187,7 +245,9 @@ export default function ChatPanel() {
     const trimmedPrompt = prompt.trim();
     const turnNotebookPath = notebookPath;
     const turnScopeKey = chatScopeKey;
-    if (!trimmedPrompt || !turnNotebookPath || submitting) return;
+    const turnAgentName = selectedAgentName;
+    if (!trimmedPrompt || !turnNotebookPath || !turnAgentName || submitting)
+      return;
 
     const onEvent = new Channel<ChatEvent>();
     onEvent.onmessage = (message) => {
@@ -198,6 +258,7 @@ export default function ChatPanel() {
     setSubmitting(true);
     try {
       await invoke("chat_turn", {
+        agentName: turnAgentName,
         notebookPath: turnNotebookPath,
         prompt: trimmedPrompt,
         onEvent,
@@ -213,12 +274,13 @@ export default function ChatPanel() {
   };
 
   const respondToPermission = async (requestId: string, optionId: string) => {
-    const responseOptionId = deniedOptionId(optionId) ? null : optionId;
     const permissionScopeKey = chatScopeKey;
+    const permissionAgentName = selectedAgentName;
     try {
       await invoke("chat_permission_respond", {
+        agentName: permissionAgentName,
         requestId,
-        optionId: responseOptionId,
+        optionId,
       });
       clearPendingPermissionForScope(permissionScopeKey, requestId);
     } catch (error) {
@@ -231,38 +293,64 @@ export default function ChatPanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 px-3 pb-16 pt-3 text-gray-700">
-      <header className="flex items-center gap-2 rounded border border-gray-200 bg-white px-3 py-2">
-        <BotIcon
-          className="shrink-0 text-gray-500"
-          size={16}
-          strokeWidth={1.5}
-        />
-        <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-wide text-gray-400">
-            Active scope
-          </div>
-          <div className="truncate text-sm font-medium text-gray-950">
-            {scopeLabel}
+      <header className="space-y-2 rounded border border-gray-200 bg-white px-3 py-2">
+        <div className="flex items-center gap-2">
+          <BotIcon
+            className="shrink-0 text-gray-500"
+            size={16}
+            strokeWidth={1.5}
+          />
+          <div className="min-w-0">
+            <div className="text-[11px] uppercase tracking-wide text-gray-400">
+              Active scope
+            </div>
+            <div className="truncate text-sm font-medium text-gray-950">
+              {scopeLabel}
+            </div>
           </div>
         </div>
-        {sessions.length > 0 && (
-          <label className="ml-auto min-w-0 flex-1">
-            <span className="sr-only">Agent session</span>
-            <select
-              aria-label="Agent session"
-              className="h-8 w-full rounded border border-gray-300 bg-white px-2 text-xs text-gray-700 outline-none transition-colors focus:border-gray-900 disabled:cursor-not-allowed disabled:bg-gray-100"
-              disabled={!notebookPath}
-              onChange={switchSession}
-              value={selectedSessionId}
-            >
-              {sessions.map((session) => (
-                <option key={session.id} value={session.id}>
-                  {session.id}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
+        <div className="grid grid-cols-1 gap-2">
+          {agents.length > 0 && (
+            <label className="min-w-0">
+              <span className="mb-1 block text-[11px] uppercase tracking-wide text-gray-400">
+                Agent
+              </span>
+              <select
+                aria-label="Agent"
+                className="h-8 w-full rounded border border-gray-300 bg-white px-2 text-xs text-gray-700 outline-none transition-colors focus:border-gray-900 disabled:cursor-not-allowed disabled:bg-gray-100"
+                disabled={!notebookPath}
+                onChange={switchAgent}
+                value={selectedAgentName}
+              >
+                {agents.map((agent) => (
+                  <option key={agent.name} value={agent.name}>
+                    {agent.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {sessions.length > 0 && (
+            <label className="min-w-0">
+              <span className="mb-1 block text-[11px] uppercase tracking-wide text-gray-400">
+                Session
+              </span>
+              <select
+                aria-label="Agent session"
+                className="h-8 w-full rounded border border-gray-300 bg-white px-2 text-xs text-gray-700 outline-none transition-colors focus:border-gray-900 disabled:cursor-not-allowed disabled:bg-gray-100"
+                disabled={!notebookPath || !selectedAgentName}
+                onChange={switchSession}
+                value={selectedSessionId}
+              >
+                {sessions.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    {session.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
       </header>
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
@@ -323,10 +411,14 @@ export default function ChatPanel() {
           <textarea
             aria-label="Message"
             className="max-h-32 min-h-20 w-full resize-none rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-gray-900 disabled:cursor-not-allowed disabled:bg-gray-100"
-            disabled={!notebookPath || submitting}
+            disabled={!notebookPath || !selectedAgentName || submitting}
             onChange={(event) => setPrompt(event.currentTarget.value)}
             placeholder={
-              notebookPath ? "Message the agent" : "Save the notebook to chat"
+              !notebookPath
+                ? "Save the notebook to chat"
+                : selectedAgentName
+                  ? "Message the agent"
+                  : "Select an agent"
             }
             value={prompt}
           />
@@ -334,7 +426,13 @@ export default function ChatPanel() {
         <button
           aria-label="Send message"
           className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-gray-300 bg-white text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
-          disabled={!notebookPath || !prompt.trim() || submitting || streaming}
+          disabled={
+            !notebookPath ||
+            !selectedAgentName ||
+            !prompt.trim() ||
+            submitting ||
+            streaming
+          }
           title="Send message"
           type="submit"
         >

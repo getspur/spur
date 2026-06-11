@@ -6,20 +6,33 @@ use agent_client_protocol::schema::{SessionId, SessionInfo};
 use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
-use crate::{chat_state::get_or_init_sidebar_chat, state::State, Error};
+use crate::{
+    chat_state::{get_or_init_sidebar_chat_for_agent, SidebarAgentInfo},
+    state::State,
+    Error,
+};
 use spur_notebook::sidebar_chat::{scope::resolve_app_scope, types::ChatEvent};
+
+/// List agents configured for sidebar chat.
+#[tauri::command]
+pub async fn chat_agents_list(
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<Vec<SidebarAgentInfo>, Error> {
+    Ok(state.sidebar_chat.agent_infos())
+}
 
 /// Run one sidebar chat turn and stream `ChatEvent`s to trusted React.
 #[tauri::command]
 pub async fn chat_turn(
     notebook_path: &str,
     prompt: &str,
+    agent_name: Option<String>,
     on_event: Channel<ChatEvent>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<(), Error> {
     let scope = resolve_app_scope(Path::new(notebook_path)).map_err(command_error)?;
     let prompt = prompt.to_owned();
-    let chat = get_or_init_sidebar_chat(&state)
+    let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
     let cancel = state.sidebar_chat.cancellation_root().child_token();
@@ -97,10 +110,11 @@ pub async fn chat_turn(
 #[tauri::command]
 pub async fn chat_sessions_list(
     notebook_path: &str,
+    agent_name: Option<String>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<Vec<SessionInfo>, Error> {
     let scope = resolve_app_scope(Path::new(notebook_path)).map_err(command_error)?;
-    let chat = get_or_init_sidebar_chat(&state)
+    let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
     chat.list_sessions(&scope).await.map_err(command_error)
@@ -111,10 +125,11 @@ pub async fn chat_sessions_list(
 pub async fn chat_switch_session(
     notebook_path: &str,
     session_id: &str,
+    agent_name: Option<String>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<(), Error> {
     let scope = resolve_app_scope(Path::new(notebook_path)).map_err(command_error)?;
-    let chat = get_or_init_sidebar_chat(&state)
+    let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
     let _stream = chat
@@ -128,10 +143,11 @@ pub async fn chat_switch_session(
 #[tauri::command]
 pub async fn chat_new_session(
     notebook_path: &str,
+    agent_name: Option<String>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<String, Error> {
     let scope = resolve_app_scope(Path::new(notebook_path)).map_err(command_error)?;
-    let chat = get_or_init_sidebar_chat(&state)
+    let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
     let session_id = chat.ensure_session(&scope).await.map_err(command_error)?;
@@ -142,13 +158,14 @@ pub async fn chat_new_session(
 #[tauri::command]
 pub async fn chat_cancel(
     session_id: &str,
+    agent_name: Option<String>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<(), Error> {
     if let Some(cancel) = state.sidebar_chat.take_turn_cancel(session_id).await {
         cancel.cancel();
     }
 
-    let chat = get_or_init_sidebar_chat(&state)
+    let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
     chat.cancel(&SessionId::new(session_id.to_owned()))
@@ -161,9 +178,10 @@ pub async fn chat_cancel(
 pub async fn chat_permission_respond(
     request_id: &str,
     option_id: Option<String>,
+    agent_name: Option<String>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<(), Error> {
-    let chat = get_or_init_sidebar_chat(&state)
+    let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
     chat.respond_permission(request_id, option_id)
@@ -175,10 +193,19 @@ fn command_error(error: impl std::fmt::Display) -> Error {
     Error::NotebookDaemon(error.to_string())
 }
 
+fn selected_agent(agent_name: Option<&str>) -> Option<&str> {
+    agent_name.map(str::trim).filter(|name| !name.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn chat_turn_has_channel_signature() {
         let _command = super::chat_turn;
+    }
+
+    #[test]
+    fn chat_agents_list_has_command_signature() {
+        let _command = super::chat_agents_list;
     }
 }

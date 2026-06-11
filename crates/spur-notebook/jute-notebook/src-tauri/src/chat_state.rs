@@ -6,12 +6,13 @@ use std::{
     sync::Arc,
 };
 
+use serde::Serialize;
 use spur_acp::config::{AgentConfig, SpurConfig};
 use spur_acp::connection::{
     AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter,
 };
 use spur_acp::types::{PermissionRequest, TransportKind};
-use tokio::sync::{mpsc, Mutex, OnceCell};
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -35,14 +36,29 @@ pub enum ChatStateError {
     },
 }
 
+/// Agent option exposed to the trusted React sidebar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarAgentInfo {
+    /// Configured agent name used as the command selector.
+    pub name: String,
+    /// Human-readable label for the sidebar control.
+    pub label: String,
+    /// Transport kind for diagnostics and future filtering.
+    pub transport: String,
+    /// Whether this agent is the configured default.
+    pub selected: bool,
+}
+
 /// Process-wide sidebar chat state owned by Tauri.
 pub struct SidebarChatState {
-    chat: OnceCell<SidebarChatHandle>,
+    chats: Mutex<HashMap<String, SidebarChatHandle>>,
     cancellation_root: CancellationToken,
     active_turns: Mutex<HashMap<String, CancellationToken>>,
     permission_tx: mpsc::UnboundedSender<PermissionRequest>,
     permission_rx: Mutex<mpsc::UnboundedReceiver<PermissionRequest>>,
-    agent: Option<AgentConfig>,
+    agents: Vec<AgentConfig>,
+    default_agent_name: Option<String>,
     repo_root: PathBuf,
 }
 
@@ -58,36 +74,79 @@ impl SidebarChatState {
     /// Construct state from an explicit config.
     pub fn from_config(config: SpurConfig, repo_root: PathBuf) -> Self {
         let (permission_tx, permission_rx) = mpsc::unbounded_channel();
+        let default_agent_name = select_default_agent(&config).map(|agent| agent.name);
         Self {
-            chat: OnceCell::new(),
+            chats: Mutex::new(HashMap::new()),
             cancellation_root: CancellationToken::new(),
             active_turns: Mutex::new(HashMap::new()),
             permission_tx,
             permission_rx: Mutex::new(permission_rx),
-            agent: select_default_agent(&config),
+            agents: config.agents.entries,
+            default_agent_name,
             repo_root,
         }
     }
 
     /// Lazily create and return the sidebar chat manager.
     pub async fn chat(&self) -> Result<SidebarChatHandle, ChatStateError> {
-        let agent = self
-            .agent
-            .clone()
-            .ok_or_else(|| ChatStateError::Unavailable {
-                reason: "no agent configured".to_owned(),
-            })?;
+        self.chat_for_agent(None).await
+    }
+
+    /// Lazily create and return the sidebar chat manager for an agent name.
+    pub async fn chat_for_agent(
+        &self,
+        agent_name: Option<&str>,
+    ) -> Result<SidebarChatHandle, ChatStateError> {
+        let agent = self.agent_config(agent_name)?;
+        let manager_key = agent.name.clone();
+
+        if let Some(chat) = self.chats.lock().await.get(&manager_key).cloned() {
+            return Ok(chat);
+        }
+
         let repo_root = self.repo_root.clone();
         let permission_tx = self.permission_tx.clone();
 
-        self.chat
-            .get_or_try_init(|| async move {
-                let connection = build_agent_connection(&agent, &repo_root, Some(permission_tx));
-                let manager = SidebarChatManager::new(connection);
-                Ok(Arc::new(manager))
+        let connection = build_agent_connection(&agent, &repo_root, Some(permission_tx));
+        let manager = Arc::new(SidebarChatManager::new(connection));
+        self.chats.lock().await.insert(manager_key, manager.clone());
+        Ok(manager)
+    }
+
+    /// List configured agents for the sidebar selector.
+    pub fn agent_infos(&self) -> Vec<SidebarAgentInfo> {
+        let selected_name = self.default_agent_name.as_deref();
+        self.agents
+            .iter()
+            .map(|agent| SidebarAgentInfo {
+                name: agent.name.clone(),
+                label: agent
+                    .display
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| agent.name.clone()),
+                transport: format!("{:?}", agent.transport),
+                selected: selected_name == Some(agent.name.as_str()),
             })
-            .await
+            .collect()
+    }
+
+    fn agent_config(&self, agent_name: Option<&str>) -> Result<AgentConfig, ChatStateError> {
+        let requested_name = agent_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .or(self.default_agent_name.as_deref())
+            .ok_or_else(|| ChatStateError::Unavailable {
+                reason: "no agent configured".to_owned(),
+            })?;
+
+        self.agents
+            .iter()
+            .find(|agent| agent.name == requested_name)
             .cloned()
+            .ok_or_else(|| ChatStateError::Unavailable {
+                reason: format!("agent not configured: {requested_name}"),
+            })
     }
 
     /// Return the cancellation root for all sidebar chat work.
@@ -124,7 +183,12 @@ impl SidebarChatState {
 
     #[cfg(test)]
     fn selected_agent_name(&self) -> Option<&str> {
-        self.agent.as_ref().map(|agent| agent.name.as_str())
+        self.default_agent_name.as_deref()
+    }
+
+    #[cfg(test)]
+    async fn manager_count(&self) -> usize {
+        self.chats.lock().await.len()
     }
 }
 
@@ -133,6 +197,14 @@ pub async fn get_or_init_sidebar_chat(
     state: &crate::state::State,
 ) -> Result<SidebarChatHandle, ChatStateError> {
     state.sidebar_chat.chat().await
+}
+
+/// Return the lazily initialized sidebar chat manager for a selected agent.
+pub async fn get_or_init_sidebar_chat_for_agent(
+    state: &crate::state::State,
+    agent_name: Option<&str>,
+) -> Result<SidebarChatHandle, ChatStateError> {
+    state.sidebar_chat.chat_for_agent(agent_name).await
 }
 
 /// Load layered SPUR config: project `.spur/config.toml`, then user
@@ -263,6 +335,79 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(state.selected_agent_name(), Some("brain"));
+    }
+
+    #[tokio::test]
+    async fn selects_requested_agent_and_caches_managers_by_agent_name() {
+        let config = SpurConfig {
+            brain: BrainConfig {
+                default: "brain".to_owned(),
+                ..BrainConfig::default()
+            },
+            agents: AgentsConfig {
+                entries: vec![
+                    AgentConfig {
+                        transport: TransportKind::Stdio,
+                        command: "brain".to_owned(),
+                        ..AgentConfig::with_defaults("brain")
+                    },
+                    AgentConfig {
+                        transport: TransportKind::Acp,
+                        command: "codex".to_owned(),
+                        ..AgentConfig::with_defaults("codex")
+                    },
+                ],
+            },
+            ..SpurConfig::default()
+        };
+        let state = SidebarChatState::from_config(config, PathBuf::from("."));
+
+        let codex_first = state.chat_for_agent(Some("codex")).await.unwrap();
+        let codex_second = state.chat_for_agent(Some("codex")).await.unwrap();
+        let brain = state.chat_for_agent(Some("brain")).await.unwrap();
+
+        assert!(Arc::ptr_eq(&codex_first, &codex_second));
+        assert!(!Arc::ptr_eq(&codex_first, &brain));
+        assert_eq!(state.manager_count().await, 2);
+    }
+
+    #[test]
+    fn lists_configured_agents_with_default_marked_selected() {
+        let config = SpurConfig {
+            brain: BrainConfig {
+                default: "brain".to_owned(),
+                ..BrainConfig::default()
+            },
+            agents: AgentsConfig {
+                entries: vec![
+                    AgentConfig {
+                        transport: TransportKind::Stdio,
+                        command: "first".to_owned(),
+                        display: spur_acp::config::DisplayConfig {
+                            display_name: Some("First Agent".to_owned()),
+                            ..Default::default()
+                        },
+                        ..AgentConfig::with_defaults("first")
+                    },
+                    AgentConfig {
+                        transport: TransportKind::Acp,
+                        command: "brain".to_owned(),
+                        ..AgentConfig::with_defaults("brain")
+                    },
+                ],
+            },
+            ..SpurConfig::default()
+        };
+        let state = SidebarChatState::from_config(config, PathBuf::from("."));
+
+        let agents = state.agent_infos();
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].name, "first");
+        assert_eq!(agents[0].label, "First Agent");
+        assert!(!agents[0].selected);
+        assert_eq!(agents[1].name, "brain");
+        assert!(agents[1].selected);
     }
 
     #[tokio::test]
