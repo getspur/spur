@@ -30,6 +30,7 @@ import NotebookView from "@/ui/notebook/NotebookView";
 import ConfirmModal from "@/ui/shared/ConfirmModal";
 
 import { activeTabIdFromSearch, notebookRouteWithPath } from "./notebookRoute";
+import { cycleTabId, jumpTabId } from "./tabActions";
 
 type NotebookTabSpec = NotebookTab & {
   inline?: string;
@@ -37,6 +38,12 @@ type NotebookTabSpec = NotebookTab & {
 
 type NotebookTabEntry = NotebookTabSpec & {
   notebook: Notebook;
+};
+
+type PendingCloseTarget = {
+  id: string;
+  tab: NotebookTab | undefined;
+  entry: NotebookTabEntry | undefined;
 };
 
 export default function NotebookPage() {
@@ -53,29 +60,29 @@ export default function NotebookPage() {
   const [tabEntries, setTabEntries] = useState<NotebookTabEntry[]>(() =>
     tabSpecs.map(tabEntryFromSpec),
   );
-  const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(
-    null,
-  );
+  const [pendingCloseIds, setPendingCloseIds] = useState<string[] | null>(null);
   const [tabError, setTabError] = useState<string | null>(null);
   const tabs = useNotebookTabsStore((state) => state.tabs);
   const activeTabId = useNotebookTabsStore((state) => state.activeTabId);
   const setTabs = useNotebookTabsStore((state) => state.setTabs);
   const setActiveTabId = useNotebookTabsStore((state) => state.setActiveTabId);
   const updateTab = useNotebookTabsStore((state) => state.updateTab);
+  const moveTab = useNotebookTabsStore((state) => state.moveTab);
+  const pushClosedTab = useNotebookTabsStore((state) => state.pushClosedTab);
+  const popClosedTab = useNotebookTabsStore((state) => state.popClosedTab);
   const activeEntry =
     tabEntries.find((entry) => entry.id === activeTabId) ?? tabEntries[0];
-  const activeTabIndex = tabs.findIndex((tab) => tab.id === activeTabId);
-  const pendingCloseTab =
-    pendingCloseTabId === null
-      ? undefined
-      : tabs.find((tab) => tab.id === pendingCloseTabId);
-  const pendingCloseEntry =
-    pendingCloseTabId === null
-      ? undefined
-      : tabEntries.find((entry) => entry.id === pendingCloseTabId);
+  const pendingCloseTargets =
+    pendingCloseIds?.map((id) => ({
+      id,
+      tab: tabs.find((tab) => tab.id === id),
+      entry: tabEntries.find((entry) => entry.id === id),
+    })) ?? [];
+  const riskyPendingCloseCount = pendingCloseTargets.filter(({ tab, entry }) =>
+    tabRequiresCloseConfirmation(tab, entry),
+  ).length;
   const confirmCloseNeeded =
-    pendingCloseTabId !== null &&
-    tabRequiresCloseConfirmation(pendingCloseTab, pendingCloseEntry);
+    pendingCloseIds !== null && riskyPendingCloseCount > 0;
 
   useEffect(() => {
     if (syncedSearchRef.current === search) return;
@@ -93,9 +100,18 @@ export default function NotebookPage() {
     }
   }, [routeActiveTabId, setActiveTabId, setTabs, tabEntries]);
 
-  const requestCloseTab = useCallback((tabId: string) => {
-    setPendingCloseTabId(tabId);
+  const closeMany = useCallback((ids: readonly string[]) => {
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length === 0) return;
+    setPendingCloseIds(uniqueIds);
   }, []);
+
+  const requestCloseTab = useCallback(
+    (tabId: string) => {
+      closeMany([tabId]);
+    },
+    [closeMany],
+  );
 
   const addOrFocusNotebookPath = useCallback(
     (path: string) => {
@@ -151,30 +167,52 @@ export default function NotebookPage() {
 
   const closeTab = useCallback(
     async (tabId: string) => {
-      const tab = tabs.find((candidate) => candidate.id === tabId);
+      const currentTabs = useNotebookTabsStore.getState().tabs;
+      const currentActiveTabId = useNotebookTabsStore.getState().activeTabId;
+      const tab = currentTabs.find((candidate) => candidate.id === tabId);
       if (!tab) return;
+      const removedIndex = currentTabs.findIndex(
+        (candidate) => candidate.id === tabId,
+      );
 
       await daemonControl({
         command: "close_notebook",
         notebook_id: tab.id,
       });
 
+      if (tab.path) pushClosedTab({ tab, index: removedIndex });
+
       setTabEntries((entries) => entries.filter((entry) => entry.id !== tabId));
-      const remainingTabs = tabs.filter((candidate) => candidate.id !== tabId);
+      const remainingTabs = currentTabs.filter(
+        (candidate) => candidate.id !== tabId,
+      );
       setTabs(remainingTabs);
 
-      if (activeTabId === tabId) {
-        const removedIndex = tabs.findIndex(
-          (candidate) => candidate.id === tabId,
-        );
+      if (currentActiveTabId === tabId) {
         const nextTab =
           remainingTabs[Math.min(removedIndex, remainingTabs.length - 1)] ??
           remainingTabs[0];
         setActiveTabId(nextTab?.id);
       }
     },
-    [activeTabId, setActiveTabId, setTabs, tabs],
+    [pushClosedTab, setActiveTabId, setTabs],
   );
+
+  const reopenClosedTab = useCallback(async () => {
+    const record = popClosedTab();
+    if (!record?.tab.path) return;
+    try {
+      const response = await daemonControl({
+        command: "open",
+        path: record.tab.path,
+        activate: false,
+      });
+      addOrFocusNotebookPath(pathFromDaemonControlResponse(response, "open"));
+      moveTab(record.tab.path, record.index);
+    } catch (caught) {
+      setTabError(errorMessage(caught));
+    }
+  }, [addOrFocusNotebookPath, moveTab, popClosedTab]);
 
   useEffect(() => {
     const unlisten = tabEntries.map((entry) =>
@@ -238,17 +276,30 @@ export default function NotebookPage() {
   }, [activeEntry]);
 
   useEffect(() => {
-    if (pendingCloseTabId === null) return;
+    if (pendingCloseIds === null) return;
     if (confirmCloseNeeded) return;
-    setPendingCloseTabId(null);
-    void closeTab(pendingCloseTabId);
-  }, [closeTab, confirmCloseNeeded, pendingCloseTabId]);
+    const ids = pendingCloseIds;
+    setPendingCloseIds(null);
+    void closeTabsInOrder(ids, closeTab);
+  }, [closeTab, confirmCloseNeeded, pendingCloseIds]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.metaKey) return;
+      if (event.key === "Tab" && event.ctrlKey) {
+        event.preventDefault();
+        const next = cycleTabId(tabs, activeTabId, event.shiftKey ? -1 : 1);
+        if (next) setActiveTabId(next);
+        return;
+      }
 
+      if (!event.metaKey) return;
       const key = event.key.toLowerCase();
+      if (key === "t" && event.shiftKey) {
+        event.preventDefault();
+        void reopenClosedTab();
+        return;
+      }
+
       if (key === "t") {
         event.preventDefault();
         void addTab();
@@ -257,26 +308,26 @@ export default function NotebookPage() {
 
       if (key === "w") {
         event.preventDefault();
-        if (activeTabId) requestCloseTab(activeTabId);
+        const tab = tabs.find((candidate) => candidate.id === activeTabId);
+        if (tab && !tab.pinned) requestCloseTab(tab.id);
         return;
       }
 
       if (/^[1-9]$/.test(key)) {
-        const tab = tabs[Number(key) - 1];
-        if (tab) {
-          event.preventDefault();
-          setActiveTabId(tab.id);
-        }
+        event.preventDefault();
+        const target = jumpTabId(tabs, Number(key));
+        if (target) setActiveTabId(target);
         return;
       }
 
-      if (!event.altKey || tabs.length === 0) return;
-      if (key === "arrowleft" || key === "arrowright") {
+      if (event.altKey && (key === "arrowleft" || key === "arrowright")) {
         event.preventDefault();
-        const currentIndex = activeTabIndex >= 0 ? activeTabIndex : 0;
-        const offset = key === "arrowleft" ? -1 : 1;
-        const nextIndex = (currentIndex + offset + tabs.length) % tabs.length;
-        setActiveTabId(tabs[nextIndex]?.id);
+        const next = cycleTabId(
+          tabs,
+          activeTabId,
+          key === "arrowleft" ? -1 : 1,
+        );
+        if (next) setActiveTabId(next);
       }
     };
 
@@ -284,9 +335,9 @@ export default function NotebookPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     activeTabId,
-    activeTabIndex,
     addTab,
     requestCloseTab,
+    reopenClosedTab,
     setActiveTabId,
     tabs,
   ]);
@@ -319,19 +370,19 @@ export default function NotebookPage() {
         />
       ))}
       <ConfirmModal
-        body={closePromptBody(pendingCloseTab, pendingCloseEntry)}
-        confirmLabel="Close tab"
+        body={closePromptBody(pendingCloseTargets, riskyPendingCloseCount)}
+        confirmLabel={
+          pendingCloseTargets.length > 1 ? "Close tabs" : "Close tab"
+        }
         danger
-        onCancel={() => setPendingCloseTabId(null)}
+        onCancel={() => setPendingCloseIds(null)}
         onConfirm={() => {
-          const tabId = pendingCloseTabId;
-          setPendingCloseTabId(null);
-          if (tabId) void closeTab(tabId);
+          const ids = pendingCloseIds;
+          setPendingCloseIds(null);
+          if (ids) void closeTabsInOrder(ids, closeTab);
         }}
         open={confirmCloseNeeded}
-        title={`Close ${
-          pendingCloseTab?.title ?? pendingCloseEntry?.title ?? "tab"
-        }?`}
+        title={closePromptTitle(pendingCloseTargets)}
       />
     </main>
   );
@@ -518,7 +569,34 @@ function tabRequiresCloseConfirmation(
   );
 }
 
+async function closeTabsInOrder(
+  ids: readonly string[],
+  closeTab: (tabId: string) => Promise<void>,
+): Promise<void> {
+  for (const id of ids) {
+    await closeTab(id);
+  }
+}
+
+function closePromptTitle(targets: readonly PendingCloseTarget[]): string {
+  if (targets.length > 1) return `Close ${targets.length} tabs?`;
+  const target = targets[0];
+  return `Close ${target?.tab?.title ?? target?.entry?.title ?? "tab"}?`;
+}
+
 function closePromptBody(
+  targets: readonly PendingCloseTarget[],
+  riskyCount: number,
+): string {
+  if (targets.length > 1) {
+    return `${riskyCount} of these tabs have unsaved changes or running kernels. Closing tears down their kernel slots.`;
+  }
+
+  const target = targets[0];
+  return closeSinglePromptBody(target?.tab, target?.entry);
+}
+
+function closeSinglePromptBody(
   tab: NotebookTab | undefined,
   entry: NotebookTabEntry | undefined,
 ): string {
