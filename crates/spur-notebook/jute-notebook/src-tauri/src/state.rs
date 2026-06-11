@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 use crate::{
     backend::local::LocalKernel,
     backend::notebook::{kernelspec_for, CodeType, NotebookMetadata, NotebookRoot},
+    chat_state::SidebarChatState,
     commands::{DatasourceEntry, SaveCoordinator},
     notebook_store::{merge_authoritative_spur_metadata_for_save, NotebookStore},
 };
@@ -345,6 +346,9 @@ pub struct State {
     /// In-process daemon event fan-out for subscribers.
     pub event_tx: tokio::sync::broadcast::Sender<DaemonEvent>,
 
+    /// Process-owned sidebar chat state and ACP permission channel.
+    pub sidebar_chat: SidebarChatState,
+
     /// Lazily initialized authoritative notebook document store.
     notebook: Arc<Mutex<Option<Arc<NotebookStore>>>>,
 }
@@ -376,6 +380,7 @@ impl Default for State {
             ),
             datasource_catalog,
             event_tx,
+            sidebar_chat: SidebarChatState::default(),
             notebook,
         }
     }
