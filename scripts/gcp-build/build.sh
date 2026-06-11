@@ -15,7 +15,8 @@
 #   ./build.sh                              # cargo build --release --workspace
 #   ./build.sh -- check                     # cargo check
 #   ./build.sh --auto-spin -- test ...      # auto-create VM if missing
-#   SPUR_BUILD_JOBS=22 ./build.sh -- build  # override default -j 12
+#   SPUR_BUILD_JOBS=22 ./build.sh -- build  # override default -j 8
+#   SPUR_BUILD_MAX_CONCURRENT=3             # local FIFO admission limit
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -101,6 +102,123 @@ fi
 
 log "Worktree: $WORKTREE_KEY  (local=$GIT_TOPLEVEL)"
 log "Remote:   ~/$REMOTE_DIR   target=$REMOTE_TARGET   -j$JOBS"
+
+# ---- local FIFO admission control -----------------------------------------
+# The builder VM is shared by every local agent/session. Without admission
+# control, many callers can all sync and compile at once, saturating SSH, disk,
+# and cargo job slots on the single VM. Keep the gate local: it preserves the
+# existing VM-unavailable fallback contract, avoids a long-lived remote lock that
+# has to span local rsync calls, and handles the common pressure source.
+BUILD_QUEUE_MAX="${SPUR_BUILD_MAX_CONCURRENT:-3}"
+BUILD_QUEUE_POLL_SECONDS="${SPUR_BUILD_QUEUE_POLL_SECONDS:-2}"
+BUILD_QUEUE_ROOT="${SPUR_BUILD_QUEUE_DIR:-/tmp/spur-gcp-build-queue}"
+BUILD_QUEUE_NAME="${GCP_PROJECT}.${GCP_ZONE}.${VM_NAME}"
+BUILD_QUEUE_NAME="${BUILD_QUEUE_NAME//[^A-Za-z0-9_.-]/_}"
+BUILD_QUEUE_DIR="$BUILD_QUEUE_ROOT/$BUILD_QUEUE_NAME"
+BUILD_QUEUE_LOCK_DIR="$BUILD_QUEUE_DIR/.lock"
+BUILD_QUEUE_TICKETS_DIR="$BUILD_QUEUE_DIR/tickets"
+BUILD_QUEUE_TICKET=""
+BUILD_QUEUE_SLOT_ACQUIRED=0
+BUILD_QUEUE_LOCK_HELD=0
+
+queue_lock() {
+    mkdir -p "$BUILD_QUEUE_DIR" "$BUILD_QUEUE_TICKETS_DIR"
+    while ! mkdir "$BUILD_QUEUE_LOCK_DIR" 2>/dev/null; do
+        local owner=""
+        if [[ -f "$BUILD_QUEUE_LOCK_DIR/pid" ]]; then
+            owner=$(cat "$BUILD_QUEUE_LOCK_DIR/pid" 2>/dev/null || true)
+        fi
+        if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -rf "$BUILD_QUEUE_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        sleep 0.1
+    done
+    printf '%s\n' "$$" >"$BUILD_QUEUE_LOCK_DIR/pid"
+    BUILD_QUEUE_LOCK_HELD=1
+}
+
+queue_unlock() {
+    if [[ "$BUILD_QUEUE_LOCK_HELD" -eq 1 ]]; then
+        rm -rf "$BUILD_QUEUE_LOCK_DIR" 2>/dev/null || true
+        BUILD_QUEUE_LOCK_HELD=0
+    fi
+}
+
+queue_cleanup_stale_tickets() {
+    local ticket pid
+    for ticket in "$BUILD_QUEUE_TICKETS_DIR"/*; do
+        [[ -f "$ticket" ]] || continue
+        pid=$(sed -n '1p' "$ticket" 2>/dev/null || true)
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$ticket" 2>/dev/null || true
+        fi
+    done
+}
+
+queue_ticket_rank() {
+    local rank=0 ticket name
+    while IFS= read -r ticket; do
+        [[ -n "$ticket" ]] || continue
+        name=$(basename "$ticket")
+        rank=$((rank + 1))
+        if [[ "$name" == "$BUILD_QUEUE_TICKET" ]]; then
+            printf '%s\n' "$rank"
+            return 0
+        fi
+    done < <(
+        for ticket in "$BUILD_QUEUE_TICKETS_DIR"/*; do
+            [[ -f "$ticket" ]] && printf '%s\n' "$ticket"
+        done | sort
+    )
+    printf '0\n'
+}
+
+acquire_build_queue_slot() {
+    if ! [[ "$BUILD_QUEUE_MAX" =~ ^[0-9]+$ ]] || [[ "$BUILD_QUEUE_MAX" -eq 0 ]]; then
+        log "Remote build queue disabled (SPUR_BUILD_MAX_CONCURRENT=$BUILD_QUEUE_MAX)"
+        return 0
+    fi
+
+    local counter next rank
+    queue_lock
+    counter=0
+    if [[ -f "$BUILD_QUEUE_DIR/counter" ]]; then
+        counter=$(cat "$BUILD_QUEUE_DIR/counter" 2>/dev/null || echo 0)
+    fi
+    [[ "$counter" =~ ^[0-9]+$ ]] || counter=0
+    next=$((counter + 1))
+    printf '%s\n' "$next" >"$BUILD_QUEUE_DIR/counter"
+    BUILD_QUEUE_TICKET=$(printf '%020d' "$next")
+    printf '%s\n%s\n%s\n' "$$" "$(date +%s)" "$WORKTREE_KEY" >"$BUILD_QUEUE_TICKETS_DIR/$BUILD_QUEUE_TICKET"
+    queue_unlock
+
+    while :; do
+        queue_lock
+        queue_cleanup_stale_tickets
+        rank=$(queue_ticket_rank)
+        if [[ "$rank" -gt 0 && "$rank" -le "$BUILD_QUEUE_MAX" ]]; then
+            BUILD_QUEUE_SLOT_ACQUIRED=1
+            queue_unlock
+            log "Remote build queue: admitted as ticket $next (slot $rank/$BUILD_QUEUE_MAX)."
+            return 0
+        fi
+        queue_unlock
+        log "Remote build queue: ticket $next waiting; $BUILD_QUEUE_MAX build(s) already admitted."
+        sleep "$BUILD_QUEUE_POLL_SECONDS"
+    done
+}
+
+release_build_queue_slot() {
+    if [[ -n "${BUILD_QUEUE_TICKET:-}" ]]; then
+        rm -f "$BUILD_QUEUE_TICKETS_DIR/$BUILD_QUEUE_TICKET" 2>/dev/null || true
+        if [[ "$BUILD_QUEUE_SLOT_ACQUIRED" -eq 1 ]]; then
+            log "Remote build queue: released ticket $BUILD_QUEUE_TICKET."
+        fi
+        BUILD_QUEUE_TICKET=""
+        BUILD_QUEUE_SLOT_ACQUIRED=0
+    fi
+}
 
 # ---- VM lifecycle ----------------------------------------------------------
 # Distinguish three states:
@@ -540,9 +658,21 @@ run_payload() {
 #     back to local cargo.
 #   * still RUNNING -> a genuine build/test failure; propagate the exit code
 #     unchanged ("a red remote test is a real failure").
+FILE_LIST=""
+XFER_LIST=""
+cleanup() {
+    release_build_queue_slot
+    queue_unlock
+    [[ -n "${FILE_LIST:-}" ]] && rm -f "$FILE_LIST"
+    [[ -n "${XFER_LIST:-}" ]] && rm -f "$XFER_LIST"
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
+
+acquire_build_queue_slot
+
 FILE_LIST=$(mktemp)
 XFER_LIST=$(mktemp)
-trap 'rm -f "$FILE_LIST" "$XFER_LIST"' EXIT
 
 ensure_vm_up
 choose_transport
