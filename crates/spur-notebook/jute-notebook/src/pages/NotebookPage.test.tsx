@@ -105,23 +105,6 @@ vi.mock("@/ui/notebook/NotebookView", async () => {
   };
 });
 
-vi.mock("@/ui/notebook/NotebookTabsBasicControls", () => ({
-  default: ({ activeTabId, tabs, onSwitchTab }: any) => (
-    <div data-testid="notebook-tabs-controls">
-      {tabs.map((tab: any) => (
-        <button
-          aria-pressed={tab.id === activeTabId}
-          key={tab.id}
-          onClick={() => onSwitchTab(tab.id)}
-          type="button"
-        >
-          {tab.title}
-        </button>
-      ))}
-    </div>
-  ),
-}));
-
 function createNotebookStore(
   viewMode: "cells" | "dag" | "app",
   options: {
@@ -146,6 +129,14 @@ function createNotebookStore(
     },
     dagStatus: {},
   }));
+}
+
+function tabButton(name: string) {
+  return screen.getByRole("tab", { name: new RegExp(name) });
+}
+
+function closeButton(name: string) {
+  return screen.getByRole("button", { name: `Close ${name}` });
 }
 
 function activeNotebookView() {
@@ -215,7 +206,7 @@ describe("NotebookPage", () => {
     expect(activeNotebookView()).toHaveAttribute("data-edit-buffer", "cellA");
     expect(activeNotebookView()).toHaveAttribute("data-kernel-id", "kernel-a");
 
-    fireEvent.click(screen.getByRole("button", { name: "analysis.ipynb" }));
+    fireEvent.click(tabButton("analysis.ipynb"));
 
     await waitFor(() => {
       expect(mocks.daemonControl).toHaveBeenCalledWith({
@@ -229,9 +220,128 @@ describe("NotebookPage", () => {
     expect(activeNotebookView()).toHaveAttribute("data-edit-buffer", "");
     expect(activeNotebookView()).toHaveAttribute("data-kernel-id", "kernel-b");
 
-    fireEvent.click(screen.getByRole("button", { name: "app-mode.ipynb" }));
+    fireEvent.click(tabButton("app-mode.ipynb"));
 
     expect(activeNotebookView()).toHaveAttribute("data-edit-buffer", "cellA");
     expect(activeNotebookView()).toHaveAttribute("data-kernel-id", "kernel-a");
+  });
+
+  test("prompts before closing a dirty tab and targets teardown to that tab", async () => {
+    const first = createNotebookStore("cells", {
+      path: "/tmp/app-mode.ipynb",
+      cellSources: { cellA: { source: "edited", version: 2 } },
+      kernelId: "kernel-a",
+    });
+    const second = createNotebookStore("cells", {
+      path: "/tmp/analysis.ipynb",
+      kernelId: "kernel-b",
+    });
+    mocks.stores = [first, second];
+    mocks.search = "path=%2Ftmp%2Fapp-mode.ipynb&path=%2Ftmp%2Fanalysis.ipynb";
+
+    render(<NotebookPage />);
+
+    fireEvent.click(tabButton("analysis.ipynb"));
+    await waitFor(() => {
+      expect(tabButton("analysis.ipynb")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+
+    fireEvent.click(closeButton("app-mode.ipynb"));
+
+    expect(
+      screen.getByRole("dialog", { name: "Close app-mode.ipynb?" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/unsaved changes/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("tab", { name: /app-mode.ipynb/ })).toBeNull();
+    });
+    expect(mocks.daemonControl).toHaveBeenCalledWith({
+      command: "set_focus",
+      notebook_id: "/tmp/app-mode.ipynb",
+    });
+    expect(mocks.daemonControl).toHaveBeenCalledWith({ command: "close" });
+    const setFocusIndex = mocks.daemonControl.mock.calls.findIndex(
+      ([cmd]) =>
+        cmd.command === "set_focus" &&
+        cmd.notebook_id === "/tmp/app-mode.ipynb",
+    );
+    const closeIndex = mocks.daemonControl.mock.calls.findIndex(
+      ([cmd]) => cmd.command === "close",
+    );
+    expect(setFocusIndex).toBeGreaterThanOrEqual(0);
+    expect(closeIndex).toBeGreaterThan(setFocusIndex);
+    expect(tabButton("analysis.ipynb")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  test("prompts before closing a running tab", () => {
+    const store = createNotebookStore("cells", {
+      path: "/tmp/running.ipynb",
+    });
+    store.setState({
+      ...store.getState(),
+      dagStatus: {
+        cellA: { state: "running", ranPortVersions: {} },
+      },
+    });
+    mocks.store = store;
+    mocks.search = "path=%2Ftmp%2Frunning.ipynb";
+
+    render(<NotebookPage />);
+
+    fireEvent.click(closeButton("running.ipynb"));
+
+    expect(
+      screen.getByRole("dialog", { name: "Close running.ipynb?" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/running kernel/i)).toBeInTheDocument();
+  });
+
+  test("supports tab keyboard shortcuts", async () => {
+    const first = createNotebookStore("cells", {
+      path: "/tmp/one.ipynb",
+      kernelId: "kernel-a",
+    });
+    const second = createNotebookStore("cells", {
+      path: "/tmp/two.ipynb",
+      kernelId: "kernel-b",
+    });
+    const untitled = createNotebookStore("cells");
+    mocks.stores = [first, second, untitled];
+    mocks.search = "path=%2Ftmp%2Fone.ipynb&path=%2Ftmp%2Ftwo.ipynb";
+
+    render(<NotebookPage />);
+
+    fireEvent.keyDown(window, { key: "2", metaKey: true });
+    await waitFor(() => {
+      expect(tabButton("two.ipynb")).toHaveAttribute("aria-selected", "true");
+    });
+
+    fireEvent.keyDown(window, {
+      key: "ArrowLeft",
+      metaKey: true,
+      altKey: true,
+    });
+    expect(tabButton("one.ipynb")).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getAllByRole("tab")).toHaveLength(3);
+    });
+    expect(tabButton("Untitled")).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getAllByRole("tab")).toHaveLength(2);
+    });
+    expect(screen.queryByRole("tab", { name: /Untitled/ })).toBeNull();
   });
 });
