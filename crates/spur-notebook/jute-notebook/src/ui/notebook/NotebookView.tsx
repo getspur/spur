@@ -38,7 +38,7 @@ export default function NotebookView() {
     <div
       className={clsx(
         "grid h-full grid-rows-1 overflow-hidden",
-        appMode ? "grid-cols-1" : "grid-cols-[minmax(0,1fr),auto]",
+        "grid-cols-[minmax(0,1fr),auto]",
       )}
     >
       <div
@@ -61,7 +61,7 @@ export default function NotebookView() {
           <NotebookCells />
         )}
       </div>
-      {!appMode && <NotebookSidebar />}
+      <NotebookSidebar />
     </div>
   );
 }

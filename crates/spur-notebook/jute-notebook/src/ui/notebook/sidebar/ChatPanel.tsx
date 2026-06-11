@@ -2,7 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { BotIcon, SendIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { FormEvent } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
@@ -15,6 +15,11 @@ import {
 import { useNotebook } from "@/stores/notebook";
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
+
+type SessionInfo = {
+  id: string;
+  cwd?: string | null;
+};
 
 function messageClassName(kind: ChatMessage["kind"]) {
   return clsx(
@@ -37,6 +42,23 @@ function deniedOptionId(optionId: string) {
   return optionId.toLowerCase() === "deny";
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sessionsWithSelectedSession(
+  sessions: SessionInfo[],
+  selectedSessionId: string | undefined,
+) {
+  if (
+    !selectedSessionId ||
+    sessions.some((session) => session.id === selectedSessionId)
+  ) {
+    return sessions;
+  }
+  return [{ id: selectedSessionId }, ...sessions];
+}
+
 export default function ChatPanel() {
   const notebook = useNotebook();
   const [notebookPath, appOpenInfo] = useStore(
@@ -44,6 +66,8 @@ export default function ChatPanel() {
     useShallow((state) => [state.viewState.path, state.viewState.appOpenInfo]),
   );
   const [prompt, setPrompt] = useState("");
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const chatScopeKey =
@@ -65,23 +89,67 @@ export default function ChatPanel() {
 
   useEffect(() => {
     setScope(chatScopeKey, chatScopeLabel);
+    setSessions([]);
+    setSelectedSessionId("");
 
     if (!notebookPath) return;
 
     let disposed = false;
-    void invoke<string>("chat_new_session", { notebookPath })
-      .then((sessionId) => {
-        if (disposed) return;
-        return invoke("chat_switch_session", { notebookPath, sessionId });
-      })
-      .catch((error) => {
-        if (!disposed) {
-          applyEventForScope(chatScopeKey, {
-            type: "error",
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
+
+    const reportScopedError = (error: unknown) => {
+      if (disposed) return;
+      applyEventForScope(chatScopeKey, {
+        type: "error",
+        message: errorMessage(error),
       });
+    };
+
+    const refreshSessions = async (preferredSessionId?: string) => {
+      try {
+        const nextSessions = await invoke<SessionInfo[]>("chat_sessions_list", {
+          notebookPath,
+        });
+        if (disposed) return false;
+
+        const listedSessions = sessionsWithSelectedSession(
+          nextSessions,
+          preferredSessionId,
+        );
+        setSessions(listedSessions);
+        setSelectedSessionId((currentSessionId) => {
+          if (preferredSessionId) return preferredSessionId;
+          if (
+            currentSessionId &&
+            listedSessions.some((session) => session.id === currentSessionId)
+          ) {
+            return currentSessionId;
+          }
+          return listedSessions[0]?.id ?? "";
+        });
+        return true;
+      } catch (error) {
+        reportScopedError(error);
+        return false;
+      }
+    };
+
+    void (async () => {
+      const initialListLoaded = await refreshSessions();
+      const sessionId = await invoke<string>("chat_new_session", {
+        notebookPath,
+      });
+      if (disposed) return;
+      await invoke("chat_switch_session", { notebookPath, sessionId });
+      if (disposed) return;
+      setSelectedSessionId(sessionId);
+      if (initialListLoaded) {
+        await refreshSessions(sessionId);
+      } else {
+        setSessions([{ id: sessionId }]);
+      }
+    })().catch((error) => {
+      reportScopedError(error);
+    });
 
     return () => {
       disposed = true;
@@ -93,6 +161,26 @@ export default function ChatPanel() {
     notebookPath,
     setScope,
   ]);
+
+  const switchSession = async (event: ChangeEvent<HTMLSelectElement>) => {
+    const sessionId = event.currentTarget.value;
+    const sessionNotebookPath = notebookPath;
+    const sessionScopeKey = chatScopeKey;
+    setSelectedSessionId(sessionId);
+    if (!sessionNotebookPath || !sessionId) return;
+
+    try {
+      await invoke("chat_switch_session", {
+        notebookPath: sessionNotebookPath,
+        sessionId,
+      });
+    } catch (error) {
+      applyEventForScope(sessionScopeKey, {
+        type: "error",
+        message: errorMessage(error),
+      });
+    }
+  };
 
   const sendPrompt = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -117,7 +205,7 @@ export default function ChatPanel() {
     } catch (error) {
       applyEventForScope(turnScopeKey, {
         type: "error",
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     } finally {
       setSubmitting(false);
@@ -136,7 +224,7 @@ export default function ChatPanel() {
     } catch (error) {
       applyEventForScope(permissionScopeKey, {
         type: "error",
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
   };
@@ -157,6 +245,24 @@ export default function ChatPanel() {
             {scopeLabel}
           </div>
         </div>
+        {sessions.length > 0 && (
+          <label className="ml-auto min-w-0 flex-1">
+            <span className="sr-only">Agent session</span>
+            <select
+              aria-label="Agent session"
+              className="h-8 w-full rounded border border-gray-300 bg-white px-2 text-xs text-gray-700 outline-none transition-colors focus:border-gray-900 disabled:cursor-not-allowed disabled:bg-gray-100"
+              disabled={!notebookPath}
+              onChange={switchSession}
+              value={selectedSessionId}
+            >
+              {sessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.id}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </header>
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
