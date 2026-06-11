@@ -361,8 +361,10 @@ fn extension_for(language: Language) -> &'static str {
         Language::Python => "py",
         Language::Tsx => "tsx",
         Language::Javascript => "js",
+        Language::C => "c",
         Language::Markdown => "md",
         Language::Cpp => "cpp",
+        Language::Lua => "lua",
     }
 }
 
@@ -373,8 +375,10 @@ fn language_name(language: Language) -> &'static str {
         Language::Python => "python",
         Language::Tsx => "tsx",
         Language::Javascript => "javascript",
+        Language::C => "c",
         Language::Markdown => "markdown",
         Language::Cpp => "cpp",
+        Language::Lua => "lua",
     }
 }
 
