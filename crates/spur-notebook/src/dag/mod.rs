@@ -2,6 +2,7 @@ pub mod ai;
 mod cell_runner;
 pub use cell_runner::NotebookCellRunner;
 pub mod engine;
+pub mod events;
 pub mod graph;
 pub mod inject;
 pub mod ports;
@@ -11,6 +12,10 @@ pub use ai::{AiError, AiNodeBackend, AiRunOutput, AiRunRequest, AiUsage, PortCon
 pub use engine::{
     CellRunReport, CellRunRequest, CellRunStatus, ReactiveEngine, ReactiveEngineClient,
     ReactiveEngineConfig, SourcePayload, SourcePush,
+};
+pub use events::{
+    CascadeStatus, Origin, PortClass, PortEvent, PortEventClient, PortEventDraft, PortEventError,
+    PortEventKind, PortEventSequencer, PortEventSequencerConfig, PortRef, RunInput, RunStatus,
 };
 pub use graph::{DagEdge, DagError, NotebookDag};
 pub use inject::{
