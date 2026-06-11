@@ -3372,6 +3372,66 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn write_after_loading_second_notebook_does_not_mutate_second_notebook() {
+        let dir = std::env::temp_dir().join(format!("jute-daemon-multi-load-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let notebook_a_path = dir.join("notebook-a.ipynb");
+        let notebook_b_path = dir.join("notebook-b.ipynb");
+        std::fs::write(
+            &notebook_a_path,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook A initial", 1)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &notebook_b_path,
+            serde_json::to_vec_pretty(&notebook_with_source("notebook B initial", 1)).unwrap(),
+        )
+        .unwrap();
+
+        let state = Arc::new(State::new());
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: notebook_a_path.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("notebook A loads");
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::LoadNotebook {
+                path: notebook_b_path.display().to_string(),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("notebook B loads");
+
+        handle_daemon_control_request(
+            DaemonControlRequest::new(DaemonControlCommand::WriteCell {
+                id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                source: "notebook A window edit".to_string(),
+                expected_version: Some(1),
+                last_edited_by: Some("notebook-a-window".to_string()),
+            }),
+            &state,
+        )
+        .await
+        .into_result()
+        .expect("write from notebook A window should be accepted");
+
+        let (snapshot, _version) = state.get_notebook().snapshot();
+        assert_eq!(
+            first_source(&snapshot),
+            "notebook B initial",
+            "a write intended for notebook A must not mutate the currently loaded notebook B"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn read_daemon_cell_includes_inserted_last_edited_by() {
         let state = State::new();
