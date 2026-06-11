@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   loadNotebookFromPath: vi.fn(),
   setActiveAgentNotebook: vi.fn(),
   daemonControl: vi.fn(),
+  openDialog: vi.fn(),
+  setLocation: vi.fn(),
   store: undefined as StoreApi<any> | undefined,
   stores: [] as StoreApi<any>[],
   NotebookContext: undefined as any,
@@ -32,8 +34,19 @@ vi.mock("@/agent/events", () => ({
   listenForRecentNotebookChanges: mocks.listenForRecentNotebookChanges,
 }));
 
-vi.mock("@/daemon/control", () => ({
-  daemonControl: mocks.daemonControl,
+vi.mock("@/daemon/control", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/daemon/control")>(
+      "@/daemon/control",
+    );
+  return {
+    ...actual,
+    daemonControl: mocks.daemonControl,
+  };
+});
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: mocks.openDialog,
 }));
 
 vi.mock("@/stores/notebook", async () => {
@@ -62,6 +75,7 @@ vi.mock("@/stores/notebook", async () => {
 });
 
 vi.mock("wouter", () => ({
+  useLocation: () => ["/notebook", mocks.setLocation],
   useSearch: () => mocks.search,
 }));
 
@@ -159,6 +173,9 @@ describe("NotebookPage", () => {
     mocks.setActiveAgentNotebook.mockReset();
     mocks.daemonControl.mockReset();
     mocks.daemonControl.mockResolvedValue({ ok: true });
+    mocks.openDialog.mockReset();
+    mocks.openDialog.mockResolvedValue(null);
+    mocks.setLocation.mockReset();
     mocks.stores = [];
     mocks.search = "path=%2Ftmp%2Fapp-mode.ipynb";
   });
@@ -231,6 +248,39 @@ describe("NotebookPage", () => {
     expect(activeNotebookView()).toHaveAttribute("data-kernel-id", "kernel-a");
   });
 
+  test("preserves an existing tab notebook store when route search adds another tab", async () => {
+    const first = createNotebookStore("cells", {
+      path: "/tmp/one.ipynb",
+      cellSources: { cellA: { source: "edited", version: 2 } },
+      kernelId: "kernel-a",
+    });
+    const replacementFirst = createNotebookStore("cells", {
+      path: "/tmp/one.ipynb",
+    });
+    const second = createNotebookStore("cells", {
+      path: "/tmp/two.ipynb",
+      kernelId: "kernel-b",
+    });
+    mocks.stores = [first, replacementFirst, second];
+    mocks.search = "path=%2Ftmp%2Fone.ipynb";
+
+    const { rerender } = render(<NotebookPage />);
+
+    await waitFor(() => {
+      expect(activeNotebookView()).toHaveAttribute("data-edit-buffer", "cellA");
+    });
+
+    mocks.search = "path=%2Ftmp%2Fone.ipynb&path=%2Ftmp%2Ftwo.ipynb";
+    rerender(<NotebookPage />);
+
+    await waitFor(() => {
+      expect(tabButton("two.ipynb")).toBeInTheDocument();
+    });
+    expect(tabButton("one.ipynb")).toHaveAttribute("aria-selected", "true");
+    expect(activeNotebookView()).toHaveAttribute("data-edit-buffer", "cellA");
+    expect(activeNotebookView()).toHaveAttribute("data-kernel-id", "kernel-a");
+  });
+
   test("prompts before closing a dirty tab and targets teardown to that tab", async () => {
     const first = createNotebookStore("cells", {
       path: "/tmp/app-mode.ipynb",
@@ -253,6 +303,7 @@ describe("NotebookPage", () => {
         "true",
       );
     });
+    mocks.daemonControl.mockClear();
 
     fireEvent.click(closeButton("app-mode.ipynb"));
 
@@ -266,28 +317,19 @@ describe("NotebookPage", () => {
     await waitFor(() => {
       expect(screen.queryByRole("tab", { name: /app-mode.ipynb/ })).toBeNull();
     });
+    expect(mocks.daemonControl).toHaveBeenCalledTimes(1);
     expect(mocks.daemonControl).toHaveBeenCalledWith({
-      command: "set_focus",
+      command: "close_notebook",
       notebook_id: "/tmp/app-mode.ipynb",
     });
-    expect(mocks.daemonControl).toHaveBeenCalledWith({ command: "close" });
-    const setFocusIndex = mocks.daemonControl.mock.calls.findIndex(
-      ([cmd]) =>
-        cmd.command === "set_focus" &&
-        cmd.notebook_id === "/tmp/app-mode.ipynb",
-    );
-    const closeIndex = mocks.daemonControl.mock.calls.findIndex(
-      ([cmd]) => cmd.command === "close",
-    );
-    expect(setFocusIndex).toBeGreaterThanOrEqual(0);
-    expect(closeIndex).toBeGreaterThan(setFocusIndex);
+    expect(mocks.daemonControl).not.toHaveBeenCalledWith({ command: "close" });
     expect(tabButton("analysis.ipynb")).toHaveAttribute(
       "aria-selected",
       "true",
     );
   });
 
-  test("prompts before closing a running tab", () => {
+  test("prompts before closing a running tab", async () => {
     const store = createNotebookStore("cells", {
       path: "/tmp/running.ipynb",
     });
@@ -308,6 +350,174 @@ describe("NotebookPage", () => {
       screen.getByRole("dialog", { name: "Close running.ipynb?" }),
     ).toBeInTheDocument();
     expect(screen.getByText(/running kernel/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("tab", { name: /running.ipynb/ })).toBeNull();
+    });
+    expect(mocks.daemonControl).toHaveBeenCalledWith({
+      command: "close_notebook",
+      notebook_id: "/tmp/running.ipynb",
+    });
+    expect(mocks.daemonControl).not.toHaveBeenCalledWith({ command: "close" });
+  });
+
+  test("closing the active tab tears down that tab and selects a neighbor", async () => {
+    const first = createNotebookStore("cells", {
+      path: "/tmp/one.ipynb",
+      kernelId: "kernel-a",
+    });
+    const second = createNotebookStore("cells", {
+      path: "/tmp/two.ipynb",
+      kernelId: "kernel-b",
+    });
+    mocks.stores = [first, second];
+    mocks.search = "path=%2Ftmp%2Fone.ipynb&path=%2Ftmp%2Ftwo.ipynb";
+
+    render(<NotebookPage />);
+
+    await waitFor(() => {
+      expect(tabButton("one.ipynb")).toHaveAttribute("aria-selected", "true");
+      expect(mocks.daemonControl).toHaveBeenCalledWith({
+        command: "set_focus",
+        notebook_id: "/tmp/one.ipynb",
+      });
+    });
+    mocks.daemonControl.mockClear();
+
+    fireEvent.click(closeButton("one.ipynb"));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("tab", { name: /one.ipynb/ })).toBeNull();
+    });
+    expect(tabButton("two.ipynb")).toHaveAttribute("aria-selected", "true");
+    expect(activeNotebookView()).toHaveAttribute("data-kernel-id", "kernel-b");
+    expect(mocks.daemonControl.mock.calls[0]?.[0]).toEqual({
+      command: "close_notebook",
+      notebook_id: "/tmp/one.ipynb",
+    });
+    expect(mocks.daemonControl).toHaveBeenCalledWith({
+      command: "set_focus",
+      notebook_id: "/tmp/two.ipynb",
+    });
+    expect(mocks.daemonControl).not.toHaveBeenCalledWith({ command: "close" });
+  });
+
+  test("materializes an empty notebook route as daemon-backed scratch", async () => {
+    const placeholder = createNotebookStore("cells");
+    const scratch = createNotebookStore("cells", {
+      path: "/tmp/scratch.ipynb",
+    });
+    mocks.stores = [placeholder, scratch];
+    mocks.search = "";
+    mocks.daemonControl.mockImplementation(async (cmd) =>
+      cmd.command === "new"
+        ? { ok: true, path: "/tmp/scratch.ipynb" }
+        : { ok: true },
+    );
+
+    render(<NotebookPage />);
+
+    await waitFor(() => {
+      expect(mocks.daemonControl).toHaveBeenCalledWith({
+        command: "new",
+        activate: false,
+      });
+    });
+    await waitFor(() => {
+      expect(tabButton("scratch.ipynb")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+    expect(screen.queryByRole("tab", { name: /Untitled/ })).toBeNull();
+    expect(mocks.setLocation).toHaveBeenCalledWith(
+      "/notebook?path=%2Ftmp%2Fscratch.ipynb&active=%2Ftmp%2Fscratch.ipynb",
+    );
+  });
+
+  test("creates a daemon-backed notebook tab from the tab strip", async () => {
+    const first = createNotebookStore("cells", {
+      path: "/tmp/one.ipynb",
+    });
+    const scratch = createNotebookStore("cells", {
+      path: "/tmp/scratch-1.ipynb",
+    });
+    mocks.stores = [first, scratch];
+    mocks.search = "path=%2Ftmp%2Fone.ipynb";
+    mocks.daemonControl.mockImplementation(async (cmd) =>
+      cmd.command === "new"
+        ? { ok: true, path: "/tmp/scratch-1.ipynb" }
+        : { ok: true },
+    );
+
+    render(<NotebookPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+
+    await waitFor(() => {
+      expect(mocks.daemonControl).toHaveBeenCalledWith({
+        command: "new",
+        activate: false,
+      });
+    });
+    await waitFor(() => {
+      expect(tabButton("scratch-1.ipynb")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+    expect(mocks.loadNotebookFromPath).toHaveBeenCalledWith(
+      "/tmp/scratch-1.ipynb",
+    );
+    expect(mocks.setLocation).toHaveBeenCalledWith(
+      "/notebook?path=%2Ftmp%2Fone.ipynb&path=%2Ftmp%2Fscratch-1.ipynb&active=%2Ftmp%2Fscratch-1.ipynb",
+    );
+  });
+
+  test("opens a picked notebook into the tab set", async () => {
+    const first = createNotebookStore("cells", {
+      path: "/tmp/one.ipynb",
+    });
+    const analysis = createNotebookStore("cells", {
+      path: "/tmp/analysis.ipynb",
+    });
+    mocks.stores = [first, analysis];
+    mocks.search = "path=%2Ftmp%2Fone.ipynb";
+    mocks.openDialog.mockResolvedValue("/tmp/analysis.ipynb");
+    mocks.daemonControl.mockImplementation(async (cmd) =>
+      cmd.command === "open"
+        ? { ok: true, path: "/tmp/analysis.ipynb" }
+        : { ok: true },
+    );
+
+    render(<NotebookPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Tab overflow" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open notebook..." }));
+
+    await waitFor(() => {
+      expect(mocks.openDialog).toHaveBeenCalledWith({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Jupyter Notebook", extensions: ["ipynb"] }],
+      });
+    });
+    expect(mocks.daemonControl).toHaveBeenCalledWith({
+      command: "open",
+      path: "/tmp/analysis.ipynb",
+      activate: false,
+    });
+    await waitFor(() => {
+      expect(tabButton("analysis.ipynb")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+    expect(mocks.setLocation).toHaveBeenCalledWith(
+      "/notebook?path=%2Ftmp%2Fone.ipynb&path=%2Ftmp%2Fanalysis.ipynb&active=%2Ftmp%2Fanalysis.ipynb",
+    );
   });
 
   test("supports tab keyboard shortcuts", async () => {
@@ -319,9 +529,16 @@ describe("NotebookPage", () => {
       path: "/tmp/two.ipynb",
       kernelId: "kernel-b",
     });
-    const untitled = createNotebookStore("cells");
+    const untitled = createNotebookStore("cells", {
+      path: "/tmp/untitled.ipynb",
+    });
     mocks.stores = [first, second, untitled];
     mocks.search = "path=%2Ftmp%2Fone.ipynb&path=%2Ftmp%2Ftwo.ipynb";
+    mocks.daemonControl.mockImplementation(async (cmd) =>
+      cmd.command === "new"
+        ? { ok: true, path: "/tmp/untitled.ipynb" }
+        : { ok: true },
+    );
 
     render(<NotebookPage />);
 
@@ -341,13 +558,16 @@ describe("NotebookPage", () => {
     await waitFor(() => {
       expect(screen.getAllByRole("tab")).toHaveLength(3);
     });
-    expect(tabButton("Untitled")).toHaveAttribute("aria-selected", "true");
+    expect(tabButton("untitled.ipynb")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
 
     fireEvent.keyDown(window, { key: "w", metaKey: true });
     await waitFor(() => {
       expect(screen.getAllByRole("tab")).toHaveLength(2);
     });
-    expect(screen.queryByRole("tab", { name: /Untitled/ })).toBeNull();
+    expect(screen.queryByRole("tab", { name: /untitled.ipynb/ })).toBeNull();
   });
 
   test("opens and focuses the daemon current notebook announced by recents", async () => {

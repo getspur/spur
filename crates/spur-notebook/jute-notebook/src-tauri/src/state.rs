@@ -1,7 +1,7 @@
 //! Defines state and stores for the Tauri application.
 
 use std::{
-    env,
+    env, io,
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -541,6 +541,61 @@ impl State {
         self.notebook_for_id(&id)
     }
 
+    /// Flush and remove one notebook target from the in-memory registry.
+    pub async fn close_notebook_target(&self, notebook_id: &str) -> io::Result<bool> {
+        let id = self.resolve_notebook_target(notebook_id);
+        let Some(store) = self
+            .notebooks
+            .get(&id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return Ok(false);
+        };
+
+        if store.path().is_some() {
+            store.flush().await?;
+        }
+        self.close_kernel_slots_for_notebook(&id).await?;
+        self.remove_notebook_id(&id);
+        Ok(true)
+    }
+
+    async fn close_kernel_slots_for_notebook(&self, id: &NotebookId) -> io::Result<()> {
+        let target_path = id.saved_path();
+        let slot_ids = self
+            .kernels
+            .iter()
+            .filter_map(|slot| {
+                let slot_id = slot.key();
+                let spec_name = slot.value().spec_name();
+                (notebook_path_from_slot_id(slot_id, spec_name) == Some(target_path))
+                    .then(|| slot_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        let mut kernels = Vec::new();
+        for slot_id in slot_ids {
+            let Some((_removed_slot_id, mut slot)) = self.kernels.remove(&slot_id) else {
+                continue;
+            };
+            clear_comm_owners_for_slot(self, &slot_id);
+            if let Some(kernel) = slot.kernel.take() {
+                kernels.push(kernel);
+            }
+        }
+
+        let mut first_error = None;
+        for mut kernel in kernels {
+            if let Err(error) = kernel.kill().await {
+                first_error.get_or_insert_with(|| io::Error::other(error.to_string()));
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Return the focused notebook ID, if one has been established.
     pub fn focused_notebook_id(&self) -> Option<NotebookId> {
         self.focused.lock().clone()
@@ -613,6 +668,34 @@ impl State {
             .insert(id.clone(), Arc::new(Mutex::new(catalog)));
         if self.focused.lock().as_ref() == Some(id) {
             self.sync_focused_catalog_mirror();
+        }
+    }
+
+    fn remove_notebook_id(&self, id: &NotebookId) {
+        self.notebooks.remove(id);
+        self.datasource_catalogs.remove(id);
+        let next_focus = self
+            .notebooks
+            .iter()
+            .next()
+            .map(|entry| entry.key().clone());
+        let focus_changed = {
+            let mut focused = self.focused.lock();
+            if focused.as_ref() == Some(id) {
+                *focused = next_focus.clone();
+                true
+            } else {
+                false
+            }
+        };
+
+        if !focus_changed {
+            return;
+        }
+        if next_focus.is_some() {
+            self.sync_focused_catalog_mirror();
+        } else {
+            *self.datasource_catalog.lock() = DatasourceCatalog::default();
         }
     }
 
@@ -867,6 +950,90 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "inventory");
         assert!(Arc::ptr_eq(&store_b, &state.notebook_for_path(path_b)));
+    }
+
+    #[tokio::test]
+    async fn close_notebook_target_removes_target_without_changing_other_focus() {
+        let state = State::new();
+        let path_a = "/tmp/notebooks/a.ipynb";
+        let path_b = "/tmp/notebooks/b.ipynb";
+
+        let store_a = state.focus_notebook_path(path_a);
+        state.focus_notebook_path(path_b);
+        state.set_focused_notebook_path(path_a);
+
+        assert!(state
+            .notebooks
+            .contains_key(&NotebookId::for_saved_path(path_b)));
+
+        assert!(state
+            .close_notebook_target(path_b)
+            .await
+            .expect("close notebook target succeeds"));
+
+        assert!(!state
+            .notebooks
+            .contains_key(&NotebookId::for_saved_path(path_b)));
+        assert!(Arc::ptr_eq(&store_a, &state.get_notebook()));
+        assert_eq!(
+            state
+                .focused_notebook_id()
+                .as_ref()
+                .map(NotebookId::saved_path),
+            Some(path_a)
+        );
+    }
+
+    #[tokio::test]
+    async fn close_notebook_target_removes_only_matching_kernel_slots_and_comm_owners() {
+        let state = State::new();
+        let path_a = "/tmp/notebooks/a.ipynb";
+        let path_b = "/tmp/notebooks/b.ipynb";
+        let target_python_slot = slot_id_for_spec(path_b, "python3");
+        let target_r_slot = slot_id_for_spec(path_b, "ir");
+        let other_notebook_slot = slot_id_for_spec(path_a, "python3");
+        let window_slot = window_slot_id("main");
+
+        state.focus_notebook_path(path_a);
+        state.focus_notebook_path(path_b);
+        state.kernels.insert(
+            target_python_slot.clone(),
+            KernelSlot::new("python3".to_string()),
+        );
+        state
+            .kernels
+            .insert(target_r_slot.clone(), KernelSlot::new("ir".to_string()));
+        state.kernels.insert(
+            other_notebook_slot.clone(),
+            KernelSlot::new("python3".to_string()),
+        );
+        state
+            .kernels
+            .insert(window_slot.clone(), KernelSlot::new("python3".to_string()));
+        record_comm_open(&state, &target_python_slot, "comm-target-python");
+        record_comm_open(&state, &target_r_slot, "comm-target-r");
+        record_comm_open(&state, &other_notebook_slot, "comm-other-notebook");
+        record_comm_open(&state, &window_slot, "comm-window");
+
+        assert!(state
+            .close_notebook_target(path_b)
+            .await
+            .expect("close notebook target succeeds"));
+
+        assert!(!state.kernels.contains_key(&target_python_slot));
+        assert!(!state.kernels.contains_key(&target_r_slot));
+        assert!(state.kernels.contains_key(&other_notebook_slot));
+        assert!(state.kernels.contains_key(&window_slot));
+        assert_eq!(slot_for_comm(&state, "comm-target-python"), None);
+        assert_eq!(slot_for_comm(&state, "comm-target-r"), None);
+        assert_eq!(
+            slot_for_comm(&state, "comm-other-notebook").as_deref(),
+            Some(other_notebook_slot.as_str())
+        );
+        assert_eq!(
+            slot_for_comm(&state, "comm-window").as_deref(),
+            Some(window_slot.as_str())
+        );
     }
 
     #[test]

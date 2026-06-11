@@ -21,6 +21,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useLocation } from "wouter";
 
 import { listenForRecentNotebookChanges } from "@/agent/events";
 import type { RecentNotebookEntry } from "@/bindings";
@@ -29,9 +30,12 @@ import {
   pathFromDaemonControlResponse,
   recentEntriesFromDaemonControlResponse,
 } from "@/daemon/control";
+import { useNotebookTabsStore } from "@/stores/notebook";
 import { validateRename } from "@/ui/home/renameValidation";
 import ConfirmModal from "@/ui/shared/ConfirmModal";
 import Header from "@/ui/shared/Header";
+
+import { notebookRouteWithPath } from "./notebookRoute";
 
 type ContextMenuState = {
   entry: RecentNotebookEntry;
@@ -272,12 +276,15 @@ function ContextMenuItem({
 }
 
 export default function HomePage() {
+  const [, setLocation] = useLocation();
   const [recents, setRecents] = useState<RecentNotebookEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const tabs = useNotebookTabsStore((state) => state.tabs);
+  const setActiveTabId = useNotebookTabsStore((state) => state.setActiveTabId);
 
   const refreshRecents = useCallback(async () => {
     try {
@@ -336,17 +343,31 @@ export default function HomePage() {
   const scratchNotebooks = sortedRecents.filter((entry) => entry.isScratch);
   const regularNotebooks = sortedRecents.filter((entry) => !entry.isScratch);
 
-  const openNotebook = useCallback(async (entry: RecentNotebookEntry) => {
-    try {
-      const response = await daemonControl({
-        command: "open",
-        path: entry.path,
-      });
-      pathFromDaemonControlResponse(response, "open");
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
-  }, []);
+  const openPathInNotebookRoute = useCallback(
+    (path: string) => {
+      setActiveTabId(path);
+      setLocation(notebookRouteWithPath(tabs, path));
+    },
+    [setActiveTabId, setLocation, tabs],
+  );
+
+  const openNotebook = useCallback(
+    async (entry: RecentNotebookEntry) => {
+      try {
+        const response = await daemonControl({
+          command: "open",
+          path: entry.path,
+          activate: false,
+        });
+        openPathInNotebookRoute(
+          pathFromDaemonControlResponse(response, "open"),
+        );
+      } catch (caught) {
+        setError(errorMessage(caught));
+      }
+    },
+    [openPathInNotebookRoute],
+  );
 
   const handleOpenFile = useCallback(async () => {
     try {
@@ -356,22 +377,28 @@ export default function HomePage() {
         filters: [{ name: "Jupyter Notebook", extensions: ["ipynb"] }],
       });
       if (typeof file === "string") {
-        const response = await daemonControl({ command: "open", path: file });
-        pathFromDaemonControlResponse(response, "open");
+        const response = await daemonControl({
+          command: "open",
+          path: file,
+          activate: false,
+        });
+        openPathInNotebookRoute(
+          pathFromDaemonControlResponse(response, "open"),
+        );
       }
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  }, []);
+  }, [openPathInNotebookRoute]);
 
   const handleNewNotebook = useCallback(async () => {
     try {
-      const response = await daemonControl({ command: "new" });
-      pathFromDaemonControlResponse(response, "new");
+      const response = await daemonControl({ command: "new", activate: false });
+      openPathInNotebookRoute(pathFromDaemonControlResponse(response, "new"));
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  }, []);
+  }, [openPathInNotebookRoute]);
 
   const handleNewNotebookAt = useCallback(async () => {
     try {
@@ -386,24 +413,32 @@ export default function HomePage() {
         const response = await daemonControl({
           command: "new_at",
           path: withExt,
+          activate: false,
         });
-        pathFromDaemonControlResponse(response, "new_at");
+        openPathInNotebookRoute(
+          pathFromDaemonControlResponse(response, "new_at"),
+        );
       }
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  }, []);
+  }, [openPathInNotebookRoute]);
 
   const handleReopenCurrent = useCallback(async () => {
     if (!currentNotebook) return;
 
     try {
-      const response = await daemonControl({ command: "reopen" });
-      pathFromDaemonControlResponse(response, "reopen");
+      const response = await daemonControl({
+        command: "reopen",
+        activate: false,
+      });
+      openPathInNotebookRoute(
+        pathFromDaemonControlResponse(response, "reopen"),
+      );
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  }, [currentNotebook]);
+  }, [currentNotebook, openPathInNotebookRoute]);
 
   const handleCloseCurrent = useCallback(async () => {
     try {

@@ -1,5 +1,6 @@
 import clsx from "clsx";
 import { ChevronDownIcon, PlusIcon, XIcon } from "lucide-react";
+import { useState } from "react";
 
 import type { NotebookTab } from "@/stores/notebook";
 
@@ -7,7 +8,8 @@ type Props = {
   activeTabId?: string;
   tabs: NotebookTab[];
   onCloseTab: (tabId: string) => void;
-  onNewTab: () => void;
+  onNewTab: () => void | Promise<void>;
+  onOpenNotebook: () => void | Promise<void>;
   onSwitchTab: (tabId: string) => void;
 };
 
@@ -15,9 +17,12 @@ export default function NotebookTabStrip({
   activeTabId,
   onCloseTab,
   onNewTab,
+  onOpenNotebook,
   onSwitchTab,
   tabs,
 }: Props) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
   return (
     <div className="flex h-9 items-end border-b border-gray-200 bg-gray-50 pl-16 pr-2 text-gray-900">
       <div
@@ -99,20 +104,53 @@ export default function NotebookTabStrip({
       <button
         aria-label="New tab"
         className="mb-1 ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-gray-500 transition-all hover:bg-gray-100 hover:text-gray-900 active:scale-110"
-        onClick={onNewTab}
+        onClick={() => void onNewTab()}
         title="New tab"
         type="button"
       >
         <PlusIcon size={16} />
       </button>
-      <button
-        aria-label="Tab overflow"
-        className="mb-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
-        title="Tab overflow"
-        type="button"
-      >
-        <ChevronDownIcon size={16} />
-      </button>
+      <div className="relative mb-1">
+        <button
+          aria-expanded={menuOpen}
+          aria-label="Tab overflow"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
+          onClick={() => setMenuOpen((open) => !open)}
+          title="Tab overflow"
+          type="button"
+        >
+          <ChevronDownIcon size={16} />
+        </button>
+        {menuOpen && (
+          <div
+            className="absolute right-0 top-full z-20 mt-1 w-44 rounded border border-gray-200 bg-white p-1 text-sm text-gray-700 shadow-lg"
+            role="menu"
+          >
+            <button
+              className="w-full rounded px-3 py-2 text-left hover:bg-gray-100 hover:text-gray-950"
+              onClick={() => {
+                setMenuOpen(false);
+                void onNewTab();
+              }}
+              role="menuitem"
+              type="button"
+            >
+              New notebook
+            </button>
+            <button
+              className="w-full rounded px-3 py-2 text-left hover:bg-gray-100 hover:text-gray-950"
+              onClick={() => {
+                setMenuOpen(false);
+                void onOpenNotebook();
+              }}
+              role="menuitem"
+              type="button"
+            >
+              Open notebook...
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

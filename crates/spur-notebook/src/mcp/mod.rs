@@ -1591,25 +1591,27 @@ impl NotebookDaemonControl {
             };
         }
 
-        let result: Result<DaemonControlSuccess, BridgeError> = match request.command.clone() {
-            DaemonControlCommand::WriteCell { .. }
-            | DaemonControlCommand::ReadCell { .. }
-            | DaemonControlCommand::InsertCell { .. }
-            | DaemonControlCommand::LoadNotebook { .. }
-            | DaemonControlCommand::ReplaceNotebook { .. }
-            | DaemonControlCommand::DeleteCell { .. }
-            | DaemonControlCommand::Snapshot { .. }
-            | DaemonControlCommand::SetCellMetadata { .. }
-            | DaemonControlCommand::ApplyEdit { .. }
-            | DaemonControlCommand::FlushNotebook { .. }
-            | DaemonControlCommand::SetFocus { .. } => {
-                return self.handle_notebook_store_control(id, request).await;
-            }
-            DaemonControlCommand::Open { path } => {
-                async {
+        let result: Result<DaemonControlSuccess, BridgeError> =
+            match request.command.clone() {
+                DaemonControlCommand::WriteCell { .. }
+                | DaemonControlCommand::ReadCell { .. }
+                | DaemonControlCommand::InsertCell { .. }
+                | DaemonControlCommand::LoadNotebook { .. }
+                | DaemonControlCommand::ReplaceNotebook { .. }
+                | DaemonControlCommand::DeleteCell { .. }
+                | DaemonControlCommand::Snapshot { .. }
+                | DaemonControlCommand::SetCellMetadata { .. }
+                | DaemonControlCommand::ApplyEdit { .. }
+                | DaemonControlCommand::FlushNotebook { .. }
+                | DaemonControlCommand::CloseNotebook { .. }
+                | DaemonControlCommand::SetFocus { .. } => {
+                    return self.handle_notebook_store_control(id, request).await;
+                }
+                DaemonControlCommand::Open { path, activate } => async {
+                    let activate = activate.unwrap_or(true);
                     self.save_current().await?;
                     let path = self
-                        .open_path(resolve_notebook_path(PathBuf::from(path)))
+                        .open_path(resolve_notebook_path(PathBuf::from(path)), activate)
                         .await?;
                     if let Err(error) = self.record_recent_open(&path).await {
                         warn!(%error, path = %path.display(), "failed to record recent notebook");
@@ -1618,10 +1620,9 @@ impl NotebookDaemonControl {
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
-                .await
-            }
-            DaemonControlCommand::New {} => {
-                async {
+                .await,
+                DaemonControlCommand::New { activate } => async {
+                    let activate = activate.unwrap_or(true);
                     self.save_current().await?;
                     let path =
                         create_untitled_notebook()
@@ -1630,7 +1631,7 @@ impl NotebookDaemonControl {
                                 code: "scratch_create_failed".to_owned(),
                                 message: error.to_string(),
                             })?;
-                    let path = self.open_path(path).await?;
+                    let path = self.open_path(path, activate).await?;
                     if let Err(error) = self.record_recent_open(&path).await {
                         warn!(%error, path = %path.display(), "failed to record recent notebook");
                     } else {
@@ -1638,10 +1639,9 @@ impl NotebookDaemonControl {
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
-                .await
-            }
-            DaemonControlCommand::NewAt { path } => {
-                async {
+                .await,
+                DaemonControlCommand::NewAt { path, activate } => async {
+                    let activate = activate.unwrap_or(true);
                     self.save_current().await?;
                     let path = resolve_notebook_path(PathBuf::from(path));
                     create_empty_notebook_at(&path).await.map_err(|error| {
@@ -1650,7 +1650,7 @@ impl NotebookDaemonControl {
                             message: error.to_string(),
                         }
                     })?;
-                    let path = self.open_path(path).await?;
+                    let path = self.open_path(path, activate).await?;
                     if let Err(error) = self.record_recent_open(&path).await {
                         warn!(%error, path = %path.display(), "failed to record recent notebook");
                     } else {
@@ -1658,148 +1658,154 @@ impl NotebookDaemonControl {
                     }
                     Ok(DaemonControlSuccess::path(path))
                 }
-                .await
-            }
-            DaemonControlCommand::Reopen {} => self.reopen().await.map(DaemonControlSuccess::path),
-            DaemonControlCommand::Rename { from, to } => {
-                async {
-                    self.save_current().await?;
-                    let path = self
-                        .rename_path(
-                            resolve_notebook_path(PathBuf::from(from)),
-                            resolve_notebook_path(PathBuf::from(to)),
-                        )
-                        .await?;
-                    Ok(DaemonControlSuccess::path(path))
+                .await,
+                DaemonControlCommand::Reopen { activate } => self
+                    .reopen(activate.unwrap_or(true))
+                    .await
+                    .map(DaemonControlSuccess::path),
+                DaemonControlCommand::Rename { from, to } => {
+                    async {
+                        self.save_current().await?;
+                        let path = self
+                            .rename_path(
+                                resolve_notebook_path(PathBuf::from(from)),
+                                resolve_notebook_path(PathBuf::from(to)),
+                            )
+                            .await?;
+                        Ok(DaemonControlSuccess::path(path))
+                    }
+                    .await
                 }
-                .await
-            }
-            DaemonControlCommand::Close {} => {
-                async {
-                    self.save_current().await?;
-                    self.shutdown_app_plugins().await;
-                    self.close_current_window().await;
-                    self.bridge.set_notebook_open(false);
-                    {
-                        let mut state = self.state.lock().await;
-                        state.current_path = None;
-                        state.window_label = None;
-                        #[cfg(feature = "datasource-introspect")]
+                DaemonControlCommand::Close {} => {
+                    async {
+                        self.save_current().await?;
+                        self.shutdown_app_plugins().await;
+                        self.close_current_window().await;
+                        self.bridge.set_notebook_open(false);
                         {
-                            state.datasource_setup_cell = None;
+                            let mut state = self.state.lock().await;
+                            state.current_path = None;
+                            state.window_label = None;
+                            #[cfg(feature = "datasource-introspect")]
+                            {
+                                state.datasource_setup_cell = None;
+                            }
                         }
+                        if let Err(error) = self.clear_last_notebook().await {
+                            warn!(%error, "failed to clear last notebook record");
+                        }
+                        self.emit_recents_changed().await?;
+                        Ok(DaemonControlSuccess::empty())
                     }
-                    if let Err(error) = self.clear_last_notebook().await {
-                        warn!(%error, "failed to clear last notebook record");
-                    }
-                    self.emit_recents_changed().await?;
-                    Ok(DaemonControlSuccess::empty())
+                    .await
                 }
-                .await
-            }
-            DaemonControlCommand::AttachDatasource { name, path, group } => {
-                self.attach_datasource(name, path, group).await
-            }
-            DaemonControlCommand::AddApiDatasource { name, source } => {
-                self.add_api_datasource(name, source).await
-            }
-            DaemonControlCommand::ListNangoProviders {} => self.list_nango_providers().await,
-            DaemonControlCommand::PreviewOpenApiTables { spec_text } => {
-                self.preview_open_api_tables(spec_text).await
-            }
-            DaemonControlCommand::AddApiDatasourceFromImport {
-                name,
-                provider,
-                spec_text,
-                credentials,
-            } => {
-                self.add_api_datasource_from_import(name, provider, spec_text, credentials)
+                DaemonControlCommand::AttachDatasource { name, path, group } => {
+                    self.attach_datasource(name, path, group).await
+                }
+                DaemonControlCommand::AddApiDatasource { name, source } => {
+                    self.add_api_datasource(name, source).await
+                }
+                DaemonControlCommand::ListNangoProviders {} => self.list_nango_providers().await,
+                DaemonControlCommand::PreviewOpenApiTables { spec_text } => {
+                    self.preview_open_api_tables(spec_text).await
+                }
+                DaemonControlCommand::AddApiDatasourceFromImport {
+                    name,
+                    provider,
+                    spec_text,
+                    credentials,
+                } => {
+                    self.add_api_datasource_from_import(name, provider, spec_text, credentials)
+                        .await
+                }
+                DaemonControlCommand::AddApiDatasourceFromManifest {
+                    name,
+                    manifest_toml,
+                    credentials,
+                } => {
+                    self.add_api_datasource_from_manifest(name, manifest_toml, credentials)
+                        .await
+                }
+                DaemonControlCommand::SaveApiConnectionTemplate {
+                    name,
+                    provider,
+                    manifest_toml,
+                } => {
+                    self.save_api_connection_template(name, provider, manifest_toml)
+                        .await
+                }
+                DaemonControlCommand::OauthConnect { name } => self.oauth_connect(name).await,
+                DaemonControlCommand::DetachDatasource { name } => {
+                    self.detach_datasource(name).await
+                }
+                DaemonControlCommand::ListDatasources { notebook_id } => {
+                    async {
+                        let entries = self
+                            .jute_state
+                            .list_datasources_for_optional_target(notebook_id.as_deref());
+                        let result = serde_json::to_value(
+                            jute::commands::DaemonControlResult::Datasources(entries),
+                        )
+                        .map_err(|error| BridgeError::Handler {
+                            code: "datasources_encode_failed".to_owned(),
+                            message: error.to_string(),
+                        })?;
+                        Ok(DaemonControlSuccess::result(result))
+                    }
                     .await
-            }
-            DaemonControlCommand::AddApiDatasourceFromManifest {
-                name,
-                manifest_toml,
-                credentials,
-            } => {
-                self.add_api_datasource_from_manifest(name, manifest_toml, credentials)
+                }
+                DaemonControlCommand::ListSavedConnections {} => {
+                    self.list_saved_connections().await
+                }
+                DaemonControlCommand::AttachSavedConnection { name, credentials } => {
+                    self.attach_saved_connection(name, credentials).await
+                }
+                DaemonControlCommand::DeleteSavedConnection { name } => {
+                    self.delete_saved_connection(name).await
+                }
+                DaemonControlCommand::UpdateSavedConnection {
+                    name,
+                    spec_text,
+                    credentials,
+                } => {
+                    self.update_saved_connection(name, spec_text, credentials)
+                        .await
+                }
+                DaemonControlCommand::ListRecents {} => self
+                    .list_recent_entries()
                     .await
-            }
-            DaemonControlCommand::SaveApiConnectionTemplate {
-                name,
-                provider,
-                manifest_toml,
-            } => {
-                self.save_api_connection_template(name, provider, manifest_toml)
-                    .await
-            }
-            DaemonControlCommand::OauthConnect { name } => self.oauth_connect(name).await,
-            DaemonControlCommand::DetachDatasource { name } => self.detach_datasource(name).await,
-            DaemonControlCommand::ListDatasources { notebook_id } => {
-                async {
-                    let entries = self
-                        .jute_state
-                        .list_datasources_for_optional_target(notebook_id.as_deref());
-                    let result = serde_json::to_value(
-                        jute::commands::DaemonControlResult::Datasources(entries),
-                    )
+                    .map(DaemonControlSuccess::entries)
                     .map_err(|error| BridgeError::Handler {
-                        code: "datasources_encode_failed".to_owned(),
+                        code: "recents_failed".to_owned(),
                         message: error.to_string(),
-                    })?;
-                    Ok(DaemonControlSuccess::result(result))
-                }
-                .await
-            }
-            DaemonControlCommand::ListSavedConnections {} => self.list_saved_connections().await,
-            DaemonControlCommand::AttachSavedConnection { name, credentials } => {
-                self.attach_saved_connection(name, credentials).await
-            }
-            DaemonControlCommand::DeleteSavedConnection { name } => {
-                self.delete_saved_connection(name).await
-            }
-            DaemonControlCommand::UpdateSavedConnection {
-                name,
-                spec_text,
-                credentials,
-            } => {
-                self.update_saved_connection(name, spec_text, credentials)
+                    }),
+                DaemonControlCommand::RemoveFromRecents { path } => {
+                    async {
+                        self.remove_recent_path(&resolve_notebook_path(PathBuf::from(path)))
+                            .await
+                            .map_err(|error| BridgeError::Handler {
+                                code: "recents_failed".to_owned(),
+                                message: error.to_string(),
+                            })?;
+                        self.emit_recents_changed().await?;
+                        Ok(DaemonControlSuccess::empty())
+                    }
                     .await
-            }
-            DaemonControlCommand::ListRecents {} => self
-                .list_recent_entries()
-                .await
-                .map(DaemonControlSuccess::entries)
-                .map_err(|error| BridgeError::Handler {
-                    code: "recents_failed".to_owned(),
-                    message: error.to_string(),
-                }),
-            DaemonControlCommand::RemoveFromRecents { path } => {
-                async {
-                    self.remove_recent_path(&resolve_notebook_path(PathBuf::from(path)))
-                        .await
-                        .map_err(|error| BridgeError::Handler {
-                            code: "recents_failed".to_owned(),
-                            message: error.to_string(),
-                        })?;
-                    self.emit_recents_changed().await?;
-                    Ok(DaemonControlSuccess::empty())
                 }
-                .await
-            }
-            DaemonControlCommand::SetPinned { path, pinned } => {
-                async {
-                    self.set_recent_pinned(&resolve_notebook_path(PathBuf::from(path)), pinned)
-                        .await
-                        .map_err(|error| BridgeError::Handler {
-                            code: "recents_failed".to_owned(),
-                            message: error.to_string(),
-                        })?;
-                    self.emit_recents_changed().await?;
-                    Ok(DaemonControlSuccess::empty())
+                DaemonControlCommand::SetPinned { path, pinned } => {
+                    async {
+                        self.set_recent_pinned(&resolve_notebook_path(PathBuf::from(path)), pinned)
+                            .await
+                            .map_err(|error| BridgeError::Handler {
+                                code: "recents_failed".to_owned(),
+                                message: error.to_string(),
+                            })?;
+                        self.emit_recents_changed().await?;
+                        Ok(DaemonControlSuccess::empty())
+                    }
+                    .await
                 }
-                .await
-            }
-        };
+            };
 
         match result {
             Ok(success) => DaemonControlResponse {
@@ -2986,18 +2992,22 @@ impl NotebookDaemonControl {
         Ok(to)
     }
 
-    async fn open_path(&self, path: PathBuf) -> Result<PathBuf, BridgeError> {
+    async fn open_path(&self, path: PathBuf, activate: bool) -> Result<PathBuf, BridgeError> {
         let app_plugin = self.app_plugin_config_for_notebook(&path).await?;
         let (previous_path, previous_window_label) = {
             let state = self.state.lock().await;
             let previous_path = state.current_path.clone();
             let previous_window_label = state.window_label.clone();
             if state.current_path.as_deref() == Some(path.as_path()) {
-                if let Some(label) = previous_window_label.clone() {
-                    drop(state);
-                    if self.windows.show_and_focus(&label) {
-                        return Ok(path);
+                if activate {
+                    if let Some(label) = previous_window_label.clone() {
+                        drop(state);
+                        if self.windows.show_and_focus(&label) {
+                            return Ok(path);
+                        }
                     }
+                } else {
+                    return Ok(path);
                 }
             }
 
@@ -3006,35 +3016,43 @@ impl NotebookDaemonControl {
 
         self.shutdown_app_plugins().await;
 
-        // Try to open the new window first; only mutate state on success so a
-        // failure leaves the previously open notebook recoverable (H2).
-        let label = match self.windows.open_notebook_path(&path) {
-            Ok(label) => label,
-            Err(error) => {
-                if previous_path.is_some() {
-                    if let Some(label) = previous_window_label.as_deref() {
-                        let _ = self.windows.show_and_focus(label);
+        let window_label = if activate {
+            // Try to open the new window first; only mutate state on success so
+            // a failure leaves the previously open notebook recoverable (H2).
+            let label = match self.windows.open_notebook_path(&path) {
+                Ok(label) => label,
+                Err(error) => {
+                    if previous_path.is_some() {
+                        if let Some(label) = previous_window_label.as_deref() {
+                            let _ = self.windows.show_and_focus(label);
+                        }
                     }
+                    return Err(error);
                 }
-                return Err(error);
+            };
+
+            if let Some(label) = previous_window_label.as_deref() {
+                self.windows.hide(label);
             }
+            self.bridge.set_notebook_open(false);
+            Some(label)
+        } else {
+            previous_window_label
         };
 
-        if let Some(label) = previous_window_label.as_deref() {
-            self.windows.hide(label);
-        }
-        self.bridge.set_notebook_open(false);
         {
             let mut state = self.state.lock().await;
             state.current_path = Some(path.clone());
-            state.window_label = Some(label);
+            state.window_label = window_label;
             #[cfg(feature = "datasource-introspect")]
             {
                 state.datasource_setup_cell = None;
             }
         }
         self.jute_state.focus_notebook_path(&path);
-        self.load_open_notebook(&path).await?;
+        if activate {
+            self.load_open_notebook(&path).await?;
+        }
         #[cfg(feature = "datasource-introspect")]
         if let Err(error) = self.reconcile_open_datasource_catalog().await {
             warn!(
@@ -3241,7 +3259,7 @@ impl NotebookDaemonControl {
         }
     }
 
-    pub async fn reopen(&self) -> Result<PathBuf, BridgeError> {
+    pub async fn reopen(&self, activate: bool) -> Result<PathBuf, BridgeError> {
         let (path, label) = {
             let state = self.state.lock().await;
             let path = state
@@ -3251,13 +3269,17 @@ impl NotebookDaemonControl {
             (path, state.window_label.clone())
         };
 
+        if !activate {
+            return Ok(path);
+        }
+
         if let Some(label) = label {
             if self.windows.show_and_focus(&label) {
                 return Ok(path);
             }
         }
 
-        self.open_path(path).await
+        self.open_path(path, true).await
     }
 
     async fn close_current_window(&self) {
@@ -3285,7 +3307,7 @@ impl NotebookDaemonControl {
         let Some(path) = notebook_path_for_daemon_start().await else {
             return;
         };
-        if let Err(error) = self.open_path(path.clone()).await {
+        if let Err(error) = self.open_path(path.clone(), true).await {
             warn!(
                 %error,
                 path = %path.display(),
@@ -3895,8 +3917,9 @@ score = { json = "$.score", type = "Int64" }
 
         assert_eq!(request.id.as_deref(), Some("request-1"));
         match request.request.command {
-            jute::commands::DaemonControlCommand::Open { path } => {
+            jute::commands::DaemonControlCommand::Open { path, activate } => {
                 assert_eq!(path, "/tmp/notebook.ipynb");
+                assert_eq!(activate, None);
             }
             command => panic!("unexpected command: {command:?}"),
         }
@@ -5349,6 +5372,7 @@ paths:
         let response = control
             .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
                 path: notebook_path.display().to_string(),
+                activate: Some(true),
             }))
             .await;
 
@@ -5896,6 +5920,7 @@ if __name__ == "__main__":
         let response = control
             .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
                 path: other_path.display().to_string(),
+                activate: Some(true),
             }))
             .await;
 
@@ -5923,6 +5948,89 @@ if __name__ == "__main__":
             saved["cells"][0]["metadata"]["spur"]["last_edited_by"],
             "brain"
         );
+    }
+
+    #[tokio::test]
+    async fn close_notebook_removes_target_without_window_lifecycle() {
+        let active_path = PathBuf::from("/tmp/notebooks/active.ipynb");
+        let background_path = PathBuf::from("/tmp/notebooks/background.ipynb");
+        let bridge = Arc::new(AgentBridge::new());
+        bridge.set_notebook_open(true);
+        let jute_state = Arc::new(State::new());
+        jute_state.focus_notebook_path(&active_path);
+        jute_state.focus_notebook_path(&background_path);
+        jute_state.set_focused_notebook_target(&active_path.display().to_string());
+        let windows = Arc::new(RecordingWindowOps::default());
+        let window_ops: Arc<dyn DaemonWindowOps> = windows.clone();
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::clone(&bridge),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            window_ops,
+            None,
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(active_path.clone());
+            state.window_label = Some("current-window".to_string());
+        }
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::CloseNotebook {
+                    notebook_id: background_path.display().to_string(),
+                },
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        assert!(bridge.notebook_open());
+        assert!(windows.hidden().is_empty());
+        assert!(!jute_state
+            .notebooks
+            .contains_key(&jute::identity::NotebookId::for_saved_path(
+                &background_path
+            )));
+        assert!(jute_state
+            .notebooks
+            .contains_key(&jute::identity::NotebookId::for_saved_path(&active_path)));
+        let state = control.state.lock().await;
+        assert_eq!(state.current_path.as_deref(), Some(active_path.as_path()));
+        assert_eq!(state.window_label.as_deref(), Some("current-window"));
+    }
+
+    #[tokio::test]
+    async fn legacy_close_hides_window_and_marks_bridge_closed() {
+        let current_path = PathBuf::from("/tmp/notebooks/current.ipynb");
+        let bridge = Arc::new(AgentBridge::new());
+        bridge.set_notebook_open(true);
+        let windows = Arc::new(RecordingWindowOps::default());
+        let window_ops: Arc<dyn DaemonWindowOps> = windows.clone();
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::clone(&bridge),
+            test_bridge_requester(),
+            Arc::new(State::new()),
+            window_ops,
+            None,
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(current_path);
+            state.window_label = Some("current-window".to_string());
+        }
+
+        let response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::Close {},
+            ))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        assert!(!bridge.notebook_open());
+        assert_eq!(windows.hidden(), vec!["current-window"]);
+        let state = control.state.lock().await;
+        assert!(state.current_path.is_none());
+        assert!(state.window_label.is_none());
     }
 
     #[tokio::test]
@@ -5977,6 +6085,7 @@ if __name__ == "__main__":
         let first_response = control
             .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
                 path: first_notebook.display().to_string(),
+                activate: Some(true),
             }))
             .await;
         assert!(first_response.ok, "{:?}", first_response.error);
@@ -5989,6 +6098,7 @@ if __name__ == "__main__":
         let second_response = control
             .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
                 path: second_notebook.display().to_string(),
+                activate: Some(true),
             }))
             .await;
         assert!(second_response.ok, "{:?}", second_response.error);
@@ -6235,7 +6345,7 @@ if __name__ == "__main__":
         }
 
         let error = control
-            .open_path(PathBuf::from("/tmp/new.ipynb"))
+            .open_path(PathBuf::from("/tmp/new.ipynb"), true)
             .await
             .expect_err("window open failure should bubble");
 
@@ -6248,6 +6358,51 @@ if __name__ == "__main__":
         assert_eq!(state.current_path.as_deref(), Some(previous_path.as_path()));
         assert_eq!(state.window_label.as_deref(), Some(previous_label.as_str()));
         assert!(bridge.notebook_open());
+    }
+
+    #[tokio::test]
+    async fn open_with_activate_false_updates_state_without_opening_window() {
+        let workspace_dir = std::env::current_dir().expect("current dir");
+        let tempdir = tempfile::Builder::new()
+            .prefix("spur-notebook-inactive-open-")
+            .tempdir_in(&workspace_dir)
+            .expect("workspace-local fixture dir");
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        tokio::fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&empty_notebook()).expect("empty notebook serializes"),
+        )
+        .await
+        .expect("write notebook fixture");
+
+        let windows = Arc::new(RecordingWindowOps::default());
+        let window_ops: Arc<dyn DaemonWindowOps> = windows.clone();
+        let control = NotebookDaemonControl::new_for_test_with_recents_record(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::new(State::new()),
+            window_ops,
+            Some(tempdir.path().join("last-notebook.json")),
+            Some(tempdir.path().join("recents.json")),
+        );
+
+        let response = control
+            .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+                path: notebook_path.display().to_string(),
+                activate: Some(false),
+            }))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(windows.opened(), Vec::<PathBuf>::new());
+        assert_eq!(windows.hidden(), Vec::<String>::new());
+        assert_eq!(
+            response.path.as_deref(),
+            Some(notebook_path.to_string_lossy().as_ref())
+        );
+        let state = control.state.lock().await;
+        assert_eq!(state.current_path.as_deref(), Some(notebook_path.as_path()));
+        assert_eq!(state.window_label, None);
     }
 
     #[tokio::test]

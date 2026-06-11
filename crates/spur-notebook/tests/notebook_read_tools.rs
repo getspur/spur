@@ -1402,6 +1402,7 @@ async fn run_cell_omitted_kernel_id_uses_current_notebook_slot() {
     let open = control
         .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
             path: path.display().to_string(),
+            activate: Some(true),
         }))
         .await;
     assert!(open.ok, "{:?}", open.error);

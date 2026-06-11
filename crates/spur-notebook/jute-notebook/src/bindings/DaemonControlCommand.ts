@@ -9,12 +9,13 @@ import type { JsonValue } from "./serde_json/JsonValue";
  */
 export type DaemonControlCommand =
   | { command: "set_focus"; notebook_id: string }
-  | { command: "open"; path: string }
+  | { command: "open"; path: string; activate?: boolean }
   | { command: "rename"; from: string; to: string }
-  | { command: "new" }
-  | { command: "new_at"; path: string }
-  | { command: "reopen" }
+  | { command: "new"; activate?: boolean }
+  | { command: "new_at"; path: string; activate?: boolean }
+  | { command: "reopen"; activate?: boolean }
   | { command: "close" }
+  | { command: "close_notebook"; notebook_id: string }
   | {
       command: "attach_datasource";
       name: string;
