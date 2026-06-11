@@ -26,6 +26,8 @@ Discovery was run against a local Nango checkout at `resources/nango`:
 
 - Nango source: `https://github.com/NangoHQ/nango.git`
 - Nango checkout HEAD: `988efd014`
+- Nango repository license at this checkout: Elastic License 2.0 (`resources/nango/LICENSE`)
+- APIs.guru index source: `https://api.apis.guru/v2/list.json`; Phase 1 must pin the fetched snapshot date and content hash before committing derived counts.
 - SPUR graph hash: `4bf57ce26d580b4e709199114d1af15b6b09ea6058468d8909e2dbc62a774f2f`
 - Indexed by SPUR graph: 2,117 files, 11,763 analyst nodes, 37,532 resolved edges
 
@@ -35,6 +37,8 @@ Generated discovery artifacts:
 - `resources/nango/.spur/table_seed_classes.csv`
 - `resources/nango/.spur/docs_endpoint_candidates.csv`
 - `resources/nango/.spur/apis_guru_crosswalk.csv`
+
+These artifacts are analysis outputs, not yet committed source-of-truth inputs. The implementation must either commit the generator and deterministic inputs, or replace the ad hoc discovery step with an `xtask` command that can regenerate the same files from pinned upstream inputs.
 
 Observed source coverage:
 
@@ -114,6 +118,8 @@ Machine index:
 `https://api.apis.guru/v2/list.json`
 
 APIs.guru is the best broad public catalog. Its README describes a directory of OpenAPI 2.0 and 3.x definitions, REST API access, weekly updates, and public/community-driven curation. Licensing is mixed: contributed definitions are CC0, while some acquired public-source definitions are described under fair-use principles. SPUR must track provenance and license status per spec.
+
+Because the public index is updated regularly, SPUR should not treat the live entry count as a stable invariant. The catalog build must cache or record the exact `list.json` digest and retrieval timestamp used for each crosswalk run.
 
 ### Official Provider Spec Repositories
 
@@ -382,6 +388,14 @@ Bundling policy:
 
 APIs.guru requires special handling because its README says contributed definitions are CC0, while some public-source definitions are acquired under fair-use principles. The first implementation should store APIs.guru spec URLs and provenance, but only check in generated manifests for sources reviewed as redistributable.
 
+Nango's provider catalog requires separate handling from OpenAPI specs. The local checkout used for this design is under Elastic License 2.0, so SPUR should not blindly redistribute the upstream `providers.yaml` or generated snapshots derived wholesale from it. Phase 1 should default to one of these safer modes until legal review approves broader bundling:
+
+1. URL/hash/index-only catalog metadata that points to the pinned Nango commit.
+2. A small manually reviewed provider subset, with attribution and license notice.
+3. User-local generation from a user-provided Nango checkout or downloaded archive.
+
+Generated manifests that only encode user-facing connection templates still need provenance back to the Nango source fields used to derive auth/base URL behavior.
+
 ## Error Handling
 
 - If a spec URL fails to fetch, keep the provider metadata and mark the spec source unavailable.
@@ -420,6 +434,8 @@ Integration tests:
 Deliver:
 
 - `nango-catalog` import path or an `xtask` command.
+- Deterministic harvest generator for `provider_harvest_candidates.csv`, `table_seed_classes.csv`, `docs_endpoint_candidates.csv`, and `apis_guru_crosswalk.csv`.
+- Pinned upstream input metadata: Nango commit, Nango license identifier, APIs.guru `list.json` retrieval timestamp, and APIs.guru `list.json` content hash.
 - Parse full Nango provider metadata.
 - Parse APIs.guru list.
 - Produce `provider_spec_crosswalk.json`.
@@ -484,8 +500,9 @@ Initial candidates:
 
 | Risk | Mitigation |
 |---|---|
-| License ambiguity | Store URL-only sources by default; require review before bundling spec content. |
+| License ambiguity | Store URL-only sources by default; require review before bundling Nango-derived catalog data or third-party spec content. |
 | False-positive crosswalk | Confidence levels, manual overrides, and diagnostics. |
+| Drifting upstream indexes | Pin Nango commits and APIs.guru snapshot hashes; make coverage summaries reproducible from checked-in tooling. |
 | OpenAPI path params block scans | Skip unresolved path-param endpoints in v1; later map them to table-function args. |
 | Base URL mismatch between Nango and spec | Nango base URL wins for auth/runtime; spec server URL is advisory. |
 | Huge generated manifests | Cap tables per provider initially; let UI reveal more. |
@@ -495,9 +512,10 @@ Initial candidates:
 
 1. Should generated manifests be checked into the repo, or generated into `.spur/` cache and only curated ones committed?
 2. What is the minimum license review process for APIs.guru fair-use entries?
-3. Should docs/verification endpoint seeds be visible in the UI by default, or hidden behind an "experimental seeds" toggle?
-4. Should required path params become table-function args in Phase 2, or wait for a later phase?
-5. Should the first crosswalk source be stored as CSV for inspection, JSON for runtime, or both?
+3. What Nango-derived provider metadata, if any, can SPUR redistribute under Elastic License 2.0 without legal review?
+4. Should docs/verification endpoint seeds be visible in the UI by default, or hidden behind an "experimental seeds" toggle?
+5. Should required path params become table-function args in Phase 2, or wait for a later phase?
+6. Should the first crosswalk source be stored as CSV for inspection, JSON for runtime, or both?
 
 ## Recommended Implementation Boundary
 
