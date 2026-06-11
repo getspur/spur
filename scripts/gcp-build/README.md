@@ -33,6 +33,35 @@ The production resource names intentionally stay stable:
 Use environment overrides only for one-off benchmarks, for example
 `VM_NAME=spur-builder-c4d-bench CACHE_DISK=spur-cargo-cache-c4d-bench`.
 
+## Local macOS GCS sccache
+
+Local macOS builds can opt into the same GCS-backed sccache bucket without using
+the remote builder:
+
+```sh
+SPUR_REMOTE=0 SPUR_SCCACHE_GCS=1 scripts/spur-cargo check -p spur-core
+SPUR_SCCACHE_GCS=1 scripts/spur-cargo clippy -p spur-core
+```
+
+`scripts/spur-cargo` injects `scripts/sccache-worktree.sh`, disables Cargo
+incremental compilation when `CARGO_INCREMENTAL` is unset, and restarts an idle
+local sccache server into the GCS config when needed. The wrapper exports
+`SCCACHE_GCS_BUCKET=${GCP_PROJECT:-wiilearn}-spur-sccache-asia` by default and
+`SCCACHE_MULTILEVEL_CHAIN=disk,gcs` for sccache builds that support multi-level
+caching. Older sccache builds ignore the multi-level variable and use GCS as the
+single configured backend.
+
+For the current Homebrew `sccache 0.14.0`, a user ADC file from
+`gcloud auth application-default login` is not enough: the binary rejects that
+`authorized_user` credential shape and falls through to GCE metadata. Provide a
+service-account or external-account credential via `SCCACHE_GCS_KEY_PATH` or
+`GOOGLE_APPLICATION_CREDENTIALS`, or use a newer/local sccache build that accepts
+your ADC format. If GCS startup fails, `spur-cargo` exits before invoking Cargo
+and points at `${SCCACHE_ERROR_LOG:-/tmp/spur-sccache-gcs.log}`.
+
+Override `SCCACHE_GCS_RW_MODE=READ_ONLY` to consume the shared bucket without
+writing local macOS artifacts back to it.
+
 ## Remote xtask Install
 
 Run this from any SPUR worktree to build the Linux release binaries on the GCP
