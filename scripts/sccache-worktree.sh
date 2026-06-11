@@ -3,7 +3,8 @@
 #
 # rustc-wrapper that dynamically sets SCCACHE_BASEDIRS to the current git
 # worktree root so sccache normalizes workspace paths identically across all
-# worktrees and the main repo.
+# worktrees and the main repo. Local macOS builds can opt into the shared GCS
+# backend with SPUR_SCCACHE_GCS=1.
 #
 # Why: sccache 0.14.0 strips SCCACHE_BASEDIRS prefixes before hashing.
 # Without this wrapper, each worktree's unique subdirectory name remains in the
@@ -30,6 +31,32 @@ fi
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
 SPUR_ROOT="${SPUR_ROOT:-$REPO_ROOT}"
 
+enable_spur_gcs_cache() {
+    [[ "${SPUR_SCCACHE_GCS:-0}" == "1" ]] || return 0
+
+    local platform
+    platform=$(uname -s 2>/dev/null || echo "")
+    if [[ "$platform" != "Darwin" && "${SPUR_SCCACHE_GCS_FORCE:-0}" != "1" ]]; then
+        return 0
+    fi
+
+    local project bucket
+    project="${GCP_PROJECT:-wiilearn}"
+    bucket="${SCCACHE_BUCKET:-${project}-spur-sccache-asia}"
+
+    if [[ -z "${SCCACHE_GCS_BUCKET:-}" ]]; then
+        export SCCACHE_GCS_BUCKET="$bucket"
+    fi
+
+    if [[ -n "${SCCACHE_GCS_BUCKET:-}" ]]; then
+        export SCCACHE_GCS_RW_MODE="${SCCACHE_GCS_RW_MODE:-READ_WRITE}"
+        # sccache 0.15+ can use disk,gcs as a real multi-level chain. Older
+        # sccache builds ignore this var and use GCS as the single configured
+        # backend when SCCACHE_GCS_BUCKET is set.
+        export SCCACHE_MULTILEVEL_CHAIN="${SCCACHE_MULTILEVEL_CHAIN:-disk,gcs}"
+    fi
+}
+
 if [[ -n "$GIT_ROOT" && "$GIT_ROOT" != "$SPUR_ROOT" ]]; then
     # Worktree: strip to the worktree root first (longest-prefix wins).
     export SCCACHE_BASEDIRS="${GIT_ROOT}:${SPUR_ROOT}"
@@ -38,7 +65,16 @@ else
     export SCCACHE_BASEDIRS="${SPUR_ROOT}"
 fi
 
-if [[ -n "${CODEX_SANDBOX:-}" ]]; then
+enable_spur_gcs_cache
+
+IS_SCCACHE_CONTROL=0
+case "${1:-}" in
+    --show-stats|--show-adv-stats|--start-server|--stop-server|--zero-stats|\
+    --dist-status|--dist-auth|--debug-preprocessor-cache|--package-toolchain)
+        IS_SCCACHE_CONTROL=1 ;;
+esac
+
+if [[ -n "${CODEX_SANDBOX:-}" && "$IS_SCCACHE_CONTROL" -eq 0 ]]; then
     exec "$@"
 fi
 

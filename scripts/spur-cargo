@@ -87,7 +87,37 @@ if [[ $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
 fi
 
 # ---- local fallback (original behavior) ------------------------------------
+ensure_spur_gcs_sccache_server() {
+    [[ "${SPUR_SCCACHE_GCS:-0}" == "1" ]] || return 0
+    [[ -z "${CODEX_SANDBOX:-}" ]] || return 0
+    command -v sccache >/dev/null 2>&1 || return 0
+
+    local stats
+    stats=$("$WRAPPER" --show-stats --stats-format json 2>/dev/null || true)
+    if [[ "$stats" == *'"cache_location":"GCS'* || "$stats" == *'"cache_location":"Multi'* || "$stats" == *"GCS"* ]]; then
+        return 0
+    fi
+
+    if pgrep -f '/rustc[^ ]*$|/rustc ' >/dev/null 2>&1; then
+        echo "[spur-cargo] SPUR_SCCACHE_GCS=1 but rustc is running; leaving existing sccache server unchanged" >&2
+        return 0
+    fi
+
+    local error_log="${SCCACHE_ERROR_LOG:-/tmp/spur-sccache-gcs.log}"
+    "$WRAPPER" --stop-server >/dev/null 2>&1 || true
+    if ! SCCACHE_ERROR_LOG="$error_log" "$WRAPPER" --start-server >/dev/null 2>&1; then
+        sccache --start-server >/dev/null 2>&1 || true
+        echo "[spur-cargo] failed to start GCS sccache server for SPUR_SCCACHE_GCS=1" >&2
+        echo "[spur-cargo] see $error_log; configure SCCACHE_GCS_KEY_PATH or GOOGLE_APPLICATION_CREDENTIALS with a service/external account credential" >&2
+        exit 1
+    fi
+}
+
 if [[ -z "${RUSTC_WRAPPER+x}" ]]; then
     export RUSTC_WRAPPER="$WRAPPER"
 fi
+if [[ "${SPUR_SCCACHE_GCS:-0}" == "1" && -z "${CARGO_INCREMENTAL+x}" ]]; then
+    export CARGO_INCREMENTAL=0
+fi
+ensure_spur_gcs_sccache_server
 exec cargo "$@"
