@@ -93,7 +93,7 @@ fi
 WORKTREE_FILE_KEY="${WORKTREE_KEY//\//_}"
 REMOTE_DIR="spur/$WORKTREE_KEY"                       # e.g. spur/worktrees/UUID
 REMOTE_TARGET="/mnt/cargo/targets/$WORKTREE_KEY"
-REMOTE_PNPM_NODE_MODULES="/mnt/cargo/pnpm-nm/$WORKTREE_KEY"
+REMOTE_PNPM_VIRTUAL_STORE="/mnt/cargo/pnpm-vstore/$WORKTREE_KEY/.pnpm"
 JOBS="${SPUR_BUILD_JOBS:-8}"
 NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=0
 if [[ -f "$GIT_TOPLEVEL/$NOTEBOOK_FRONTEND_DIR/pnpm-lock.yaml" ]]; then
@@ -470,10 +470,11 @@ sync_workspace() {
 # orchestrator can distinguish a genuine build/test failure from a preemption.
 run_payload() {
     # ---- run pnpm in the notebook frontend on the VM ----------------------
-    # pnpm hard-links node_modules entries from its content-addressable store.
-    # Hard-links only work within one filesystem, so both the shared store and this
-    # worktree's node_modules live under /mnt/cargo. The in-source node_modules
-    # path is only a symlink, mirroring the target/ symlink used for cargo.
+    # pnpm hard-links package contents from its content-addressable store into
+    # the virtual store. Hard-links only work within one filesystem, so both the
+    # shared store and this worktree's virtual store live under /mnt/cargo. The
+    # source node_modules stays a real lightweight directory so pnpm can create
+    # .bin shims and command resolution works normally.
     if [[ $PNPM -eq 1 ]]; then
         log "Running pnpm on VM: $NOTEBOOK_FRONTEND_DIR (pnpm$PNPM_ARGS_ESCAPED)"
         remote_ssh \
@@ -483,27 +484,21 @@ run_payload() {
                 source /etc/profile.d/spur-build.sh 2>/dev/null || true
                 frontend_dir=\"\$HOME/$REMOTE_DIR/$NOTEBOOK_FRONTEND_DIR\"
                 pnpm_store=\"$NOTEBOOK_FRONTEND_PNPM_STORE\"
-                pnpm_node_modules=\"$REMOTE_PNPM_NODE_MODULES\"
-                mkdir -p \"\$pnpm_store\" \"\$pnpm_node_modules\"
-                link=\"\$frontend_dir/node_modules\"
+                pnpm_virtual_store=\"$REMOTE_PNPM_VIRTUAL_STORE\"
+                pnpm_state_dir=\"\$(dirname \"\$pnpm_virtual_store\")\"
+                mkdir -p \"\$pnpm_store\" \"\$pnpm_state_dir\"
                 cd \"\$frontend_dir\"
                 store_dev=\$(stat -Lc %d \"\$pnpm_store\")
-                nm_dev=\$(stat -Lc %d \"\$pnpm_node_modules\")
-                if [ \"\$store_dev\" != \"\$nm_dev\" ]; then
-                    echo \"[build] pnpm store and node_modules are on different filesystems\" >&2
+                virtual_store_dev=\$(stat -Lc %d \"\$pnpm_state_dir\")
+                if [ \"\$store_dev\" != \"\$virtual_store_dev\" ]; then
+                    echo \"[build] pnpm store and virtual store are on different filesystems\" >&2
                     exit 1
                 fi
                 pnpm_version=$PNPM_VERSION_ESCAPED
-                ensure_node_modules_link() {
-                    if [ \"\$(readlink \"\$link\" 2>/dev/null)\" != \"\$pnpm_node_modules\" ]; then
-                        rm -rf \"\$link\"
-                        ln -s \"\$pnpm_node_modules\" \"\$link\"
-                    fi
-                }
                 corepack prepare pnpm@\"\$pnpm_version\" --activate
                 lockfile=\"\"
                 install_flags=(--prefer-offline)
-                version_marker=\"\$pnpm_node_modules/.spur-pnpm-version\"
+                version_marker=\"\$pnpm_state_dir/.spur-pnpm-version\"
                 if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 0 ]]; then
                     rm -f pnpm-lock.yaml
                 fi
@@ -518,22 +513,21 @@ run_payload() {
                     lock_hash=\$(sha256sum \"\$lockfile\" | awk \"{ print \\\$1 }\")
                 fi
                 expected_marker=\"\$pnpm_version \$lockfile \$lock_hash\"
-                if [ ! -d \"\$pnpm_node_modules/.pnpm\" ] || [ ! -f \"\$version_marker\" ] || [ \"\$(cat \"\$version_marker\")\" != \"\$expected_marker\" ]; then
+                if [ ! -d \"\$frontend_dir/node_modules/.bin\" ] || [ ! -d \"\$pnpm_virtual_store\" ] || [ ! -f \"\$version_marker\" ] || [ \"\$(cat \"\$version_marker\")\" != \"\$expected_marker\" ]; then
                     echo \"[build] Installing frontend deps: pnpm install \${install_flags[*]}\"
-                    rm -rf \"\$link\"
-                    rm -rf \"\$pnpm_node_modules\"
-                    mkdir -p \"\$pnpm_node_modules\"
-                    ensure_node_modules_link
-                    pnpm --dir \"\$frontend_dir\" --store-dir \"\$pnpm_store\" install \"\${install_flags[@]}\"
+                    rm -rf \"\$frontend_dir/node_modules\"
+                    rm -rf \"\$pnpm_state_dir\"
+                    mkdir -p \"\$pnpm_state_dir\"
+                    pnpm --dir \"\$frontend_dir\" --store-dir \"\$pnpm_store\" --virtual-store-dir \"\$pnpm_virtual_store\" install \"\${install_flags[@]}\"
                     if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 0 ]]; then
                         rm -f pnpm-lock.yaml
                     fi
                     printf \"%s\n\" \"\$expected_marker\" >\"\$version_marker\"
-                    touch \"\$pnpm_node_modules\"
+                    touch \"\$pnpm_state_dir\"
                 else
                     echo \"[build] node_modules current; skipping install\"
                 fi
-                ensure_node_modules_link
+                export SPUR_REMOTE_PNPM_VIRTUAL_STORE=1
                 echo \"[build] pnpm --dir $NOTEBOOK_FRONTEND_DIR$PNPM_ARGS_ESCAPED\"
                 pnpm --dir \"\$frontend_dir\"$PNPM_ARGS_ESCAPED
             '" || return $?
