@@ -116,16 +116,20 @@ describe("ChatPanel", () => {
     expect(useChat.getState().pendingPermission).toBeNull();
   });
 
-  test("switches sessions for path and streams chat_turn events", async () => {
+  test("ensures a session for path without loading it and streams chat_turn events", async () => {
     render(<ChatPanel />);
 
     await waitFor(() => {
-      expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_switch_session", {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_new_session", {
         agentName: "claude-code",
         notebookPath: "/tmp/revenue.ipynb",
-        sessionId: "session-1",
       });
     });
+    expect(
+      tauriMocks.invoke.mock.calls.some(
+        ([command]) => command === "chat_switch_session",
+      ),
+    ).toBe(false);
 
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
       target: { value: "Summarize the notebook" },
@@ -236,10 +240,9 @@ describe("ChatPanel", () => {
     const firstPanel = render(<ChatPanel />);
 
     await waitFor(() => {
-      expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_switch_session", {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_new_session", {
         agentName: "claude-code",
         notebookPath: "/tmp/revenue.ipynb",
-        sessionId: "session-1",
       });
     });
 

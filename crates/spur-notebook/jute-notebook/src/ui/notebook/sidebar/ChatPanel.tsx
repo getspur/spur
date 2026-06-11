@@ -193,12 +193,6 @@ export default function ChatPanel() {
         notebookPath,
       });
       if (disposed) return;
-      await invoke("chat_switch_session", {
-        agentName,
-        notebookPath,
-        sessionId,
-      });
-      if (disposed) return;
       setSelectedSessionId(sessionId);
       if (initialListLoaded) {
         await refreshSessions(sessionId);
