@@ -433,7 +433,7 @@ mod tests {
     async fn empty_kernel_id_requires_open_notebook() {
         let state = Arc::new(State::new());
         state
-            .get_notebook()
+            .notebook_for_path("/tmp/test.ipynb")
             .load("/tmp/test.ipynb", notebook_with_code_cell());
         let deps = deps_with_state(state);
         let error = call(
@@ -459,7 +459,7 @@ mod tests {
     async fn expected_version_rejects_stale_cell_before_dispatch() {
         let state = Arc::new(State::new());
         state
-            .get_notebook()
+            .notebook_for_path("/tmp/test.ipynb")
             .load("/tmp/test.ipynb", notebook_with_code_cell());
         let deps = deps_with_state(state);
 
@@ -499,7 +499,7 @@ mod tests {
     async fn markdown_cell_rejected_before_dispatch() {
         let state = Arc::new(State::new());
         state
-            .get_notebook()
+            .notebook_for_path("/tmp/test.ipynb")
             .load("/tmp/test.ipynb", notebook_with_markdown_cell());
         let deps = deps_with_state(state);
 

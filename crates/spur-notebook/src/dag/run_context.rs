@@ -296,7 +296,9 @@ mod tests {
             serde_json::to_vec(&root).expect("notebook json"),
         )
         .expect("write notebook");
-        state.get_notebook().load(notebook_path, root);
+        state
+            .notebook_for_path(notebook_path)
+            .load(notebook_path, root);
     }
 
     fn read_text_port(notebook_path: &std::path::Path, port: &str) -> String {

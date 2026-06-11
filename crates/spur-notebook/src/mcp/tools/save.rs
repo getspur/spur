@@ -302,7 +302,7 @@ mod tests {
         let path = temp_dir.path().join("open.ipynb");
         let state = Arc::new(State::new());
         state
-            .get_notebook()
+            .focus_notebook_path(&path)
             .load(&path, notebook_with_datasource("sales", "/tmp/sales.csv"));
         state.attach_datasource(datasource_entry("sales", "/tmp/sales.csv"));
         let replacement = notebook_with_datasource("inventory", "/tmp/inventory.csv");
@@ -318,7 +318,7 @@ mod tests {
         .await
         .expect("save succeeds");
 
-        let (snapshot, _version) = state.get_notebook().snapshot();
+        let (snapshot, _version) = state.notebook_for_path(&path).snapshot();
         assert_eq!(snapshot, replacement);
         let entries = state.datasource_catalog.lock().list();
         assert_eq!(entries.len(), 1);
@@ -370,7 +370,9 @@ mod tests {
         let alias_path = temp_dir.path().join("alias.ipynb");
         std::os::unix::fs::symlink(&real_path, &alias_path).expect("symlink notebook");
         let state = Arc::new(State::new());
-        state.get_notebook().load(&real_path, sample_notebook());
+        state
+            .notebook_for_path(&real_path)
+            .load(&real_path, sample_notebook());
         let replacement: NotebookRoot = serde_json::from_value(json!({
             "metadata": {},
             "nbformat_minor": 5,
@@ -397,7 +399,7 @@ mod tests {
         .await
         .expect("save succeeds");
 
-        let (snapshot, _version) = state.get_notebook().snapshot();
+        let (snapshot, _version) = state.notebook_for_path(&real_path).snapshot();
         assert_eq!(snapshot, replacement);
     }
 
