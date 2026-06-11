@@ -1,10 +1,13 @@
 use std::{
     collections::BTreeMap,
-    fs,
-    io::{self, Cursor},
+    fs::{self, OpenOptions},
+    io::{self, Cursor, Write},
     path::{Path, PathBuf},
     ptr::NonNull,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use arrow_array::RecordBatch;
@@ -22,6 +25,7 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 const MANIFEST_FILE: &str = "manifest.json";
+static PORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum PortStoreError {
@@ -33,6 +37,8 @@ pub enum PortStoreError {
     InvalidPortName { port: String },
     #[error("port '{0}' has not been written")]
     MissingPort(String),
+    #[error("port destination already exists: {}", path.display())]
+    ExistingPortDestination { path: PathBuf },
     #[error("I/O error at {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -328,7 +334,7 @@ impl PortStore {
             .ports_dir
             .join(format!("{port}@v{version}.{extension}"));
 
-        fs::write(&path, &bytes).map_err(|source| io_error(&path, source))?;
+        self.write_port_file_once(&path, &bytes)?;
 
         let entry = PortEntry {
             path,
@@ -345,7 +351,7 @@ impl PortStore {
 
     #[expect(
         unsafe_code,
-        reason = "memmap2::Mmap::map maps a write-once, atomically-renamed port file"
+        reason = "memmap2::Mmap::map maps a write-once, atomically-created port file"
     )]
     pub fn get(&self, port: &str) -> Result<PortRead, PortStoreError> {
         let entry = self
@@ -371,9 +377,10 @@ impl PortStore {
         }
 
         let file = fs::File::open(&entry.path).map_err(|source| io_error(&entry.path, source))?;
-        // SAFETY: port files are written once via create + atomic rename and are
-        // never mutated in place (each `put` writes a new versioned file), so the
-        // mapped region stays valid and immutable for the lifetime of the mapping.
+        // SAFETY: port files are written to a temporary file and linked into the
+        // final versioned path only if that path does not already exist. Existing
+        // versions are never mutated in place, so the mapped region stays valid
+        // and immutable for the lifetime of the mapping.
         let mmap = unsafe { Mmap::map(&file).map_err(|source| io_error(&entry.path, source))? };
         let ipc_bytes = mmap_to_buffer(mmap);
         let (schema, batches) = decode_ipc_file(&ipc_bytes)?;
@@ -385,6 +392,50 @@ impl PortStore {
             batches,
             ipc_bytes,
         })
+    }
+
+    fn write_port_file_once(&self, path: &Path, bytes: &[u8]) -> Result<(), PortStoreError> {
+        let tmp_path = self.temp_port_path(path);
+        let result = (|| {
+            let mut tmp_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+                .map_err(|source| io_error(&tmp_path, source))?;
+            tmp_file
+                .write_all(bytes)
+                .map_err(|source| io_error(&tmp_path, source))?;
+            tmp_file
+                .sync_all()
+                .map_err(|source| io_error(&tmp_path, source))?;
+            drop(tmp_file);
+
+            fs::hard_link(&tmp_path, path).map_err(|source| {
+                if source.kind() == io::ErrorKind::AlreadyExists {
+                    PortStoreError::ExistingPortDestination {
+                        path: path.to_path_buf(),
+                    }
+                } else {
+                    io_error(path, source)
+                }
+            })
+        })();
+
+        let _ = fs::remove_file(&tmp_path);
+        result
+    }
+
+    fn temp_port_path(&self, path: &Path) -> PathBuf {
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("port");
+        let counter = PORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.ports_dir.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            counter
+        ))
     }
 
     fn load_manifest(path: &Path) -> Result<PortManifest, PortStoreError> {
@@ -871,6 +922,99 @@ mod tests {
             panic!("expected media port read");
         };
         assert_eq!(Some(60.0), duration_sec);
+    }
+
+    #[test]
+    fn put_fails_if_next_version_file_already_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = PortStore::open_at(dir.path()).expect("open store");
+        let first = b"first media bytes";
+        let rolled_back = b"rolled back v2 bytes";
+
+        store
+            .put(
+                "capture",
+                PortPayload::MediaBlob {
+                    bytes: first,
+                    mime: "video/webm",
+                    duration_sec: None,
+                },
+            )
+            .expect("put first media blob");
+
+        let next_path = dir.path().join("ports/capture@v2.media");
+        std::fs::write(&next_path, rolled_back).expect("seed stale destination");
+
+        let err = store
+            .put(
+                "capture",
+                PortPayload::MediaBlob {
+                    bytes: b"replacement bytes",
+                    mime: "video/webm",
+                    duration_sec: None,
+                },
+            )
+            .expect_err("existing v2 destination must not be overwritten");
+
+        assert!(matches!(
+            err,
+            PortStoreError::ExistingPortDestination { path } if path == next_path
+        ));
+        assert_eq!(
+            rolled_back.as_slice(),
+            std::fs::read(&next_path)
+                .expect("stale destination remains readable")
+                .as_slice()
+        );
+        assert_eq!(
+            1,
+            store
+                .manifest()
+                .get("capture")
+                .expect("manifest remains at v1")
+                .version
+        );
+    }
+
+    #[test]
+    fn stale_store_cannot_replace_same_version_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut first_store = PortStore::open_at(dir.path()).expect("open first store");
+        let mut stale_store = PortStore::open_at(dir.path()).expect("open stale store");
+
+        first_store
+            .put(
+                "frame",
+                PortPayload::MediaBlob {
+                    bytes: b"winner bytes",
+                    mime: "video/webm",
+                    duration_sec: None,
+                },
+            )
+            .expect("first store writes v1");
+
+        let final_path = dir.path().join("ports/frame@v1.media");
+        let err = stale_store
+            .put(
+                "frame",
+                PortPayload::MediaBlob {
+                    bytes: b"stale writer bytes",
+                    mime: "video/webm",
+                    duration_sec: None,
+                },
+            )
+            .expect_err("stale writer must not overwrite v1");
+
+        assert!(matches!(
+            err,
+            PortStoreError::ExistingPortDestination { path } if path == final_path
+        ));
+        assert_eq!(
+            b"winner bytes".as_slice(),
+            std::fs::read(final_path)
+                .expect("winner file remains readable")
+                .as_slice()
+        );
     }
 
     #[test]
