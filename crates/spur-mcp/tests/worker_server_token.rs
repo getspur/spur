@@ -173,6 +173,20 @@ async fn valid_token_round_trip_header() {
 }
 
 #[tokio::test]
+async fn worker_tools_list_includes_knowledge_context_pack() {
+    let (_dir, server) = test_server().await;
+    let token = server.issue_token("d-1", Duration::from_secs(60));
+    let tools = list_tool_names_header(&server.url(), &token)
+        .await
+        .expect("valid bearer token should open rmcp session");
+    assert!(
+        tools.iter().any(|name| name == "knowledge_context_pack"),
+        "worker tools/list must expose knowledge_context_pack, got: {tools:?}"
+    );
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
 async fn valid_token_round_trip_query() {
     let (_dir, server) = test_server().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
