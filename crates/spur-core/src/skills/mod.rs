@@ -727,8 +727,7 @@ mod tests {
     #[test]
     fn spur_analyst_skill_is_bundled_and_loadable() {
         let fake = PathBuf::from("/nonexistent");
-        let body =
-            load_skill("spur-analyst", &fake).expect("spur-analyst skill must be bundled");
+        let body = load_skill("spur-analyst", &fake).expect("spur-analyst skill must be bundled");
         assert!(
             body.contains("DuckPGQ"),
             "skill must document the property-graph extension"
