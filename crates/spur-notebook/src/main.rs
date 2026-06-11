@@ -42,6 +42,7 @@ use tokio::net::UnixStream;
 
 const DAEMON_SPAWN_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_SPAWN_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+const STANDALONE_SOCKET_NONCE: &str = "standalone";
 
 fn handle_file_associations(
     app: &AppHandle,
@@ -147,6 +148,10 @@ fn parse_mode_from(args: impl IntoIterator<Item = String>) -> Mode {
 
 fn parse_mode() -> Mode {
     parse_mode_from(env::args().skip(1))
+}
+
+fn app_socket_path(socket: Option<PathBuf>) -> PathBuf {
+    socket.unwrap_or_else(|| spur_core::notebook::control_socket_path(STANDALONE_SOCKET_NONCE))
 }
 
 async fn run_mcp_proxy(socket_path: PathBuf) -> anyhow::Result<()> {
@@ -329,14 +334,7 @@ fn main() {
     tracing_subscriber::fmt().init();
 
     let (files, socket_path) = match parse_mode() {
-        Mode::App {
-            files,
-            socket: Some(socket_path),
-        } => (files, socket_path),
-        Mode::App { socket: None, .. } => {
-            eprintln!("spur-notebook app mode requires --socket <path>");
-            std::process::exit(2);
-        }
+        Mode::App { files, socket } => (files, app_socket_path(socket)),
         Mode::McpProxy { socket_path } => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -587,6 +585,21 @@ mod tests {
 
         assert_eq!(socket, None);
         assert_eq!(files, vec![PathBuf::from("something.ipynb")]);
+    }
+
+    #[test]
+    fn app_mode_without_socket_uses_standalone_socket() {
+        assert_eq!(
+            app_socket_path(None),
+            spur_core::notebook::control_socket_path("standalone")
+        );
+    }
+
+    #[test]
+    fn app_mode_with_socket_keeps_explicit_socket() {
+        let socket = PathBuf::from("/tmp/notebook-session.sock");
+
+        assert_eq!(app_socket_path(Some(socket.clone())), socket);
     }
 
     #[test]
