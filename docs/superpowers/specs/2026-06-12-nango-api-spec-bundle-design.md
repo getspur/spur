@@ -183,8 +183,8 @@ Tracked Tier B/OAuth-family precedents:
 
 | Provider | Source grounding | E2E status |
 |---|---|---|
-| `google_ads` | Google public API interface definitions live in `googleapis/googleapis`; the repo documents public Google APIs that support REST and gRPC and use proto3 interface definitions for both REST and RPC. Google Ads also has first-party client repositories, but not a simple OpenAPI bundle in this phase. | Provider-specific mock E2E for OAuth refresh and typed POST action rows. |
-| `facebook_ads` | Meta Marketing API remains docs/Graph API sourced in this phase; no official reviewed OpenAPI repo was confirmed in this pass. | Parse/shape coverage only; not supported until request/auth E2E lands. |
+| `google_ads` | Google public API interface definitions live in `googleapis/googleapis`; the repo documents public Google APIs that support REST and gRPC and use proto3 interface definitions for both REST and RPC. Google Ads also has first-party client repositories, but not a simple OpenAPI bundle in this phase. | Supported action manifest plus provider-specific mock E2E for OAuth refresh and typed POST action rows. |
+| `facebook_ads` | Meta Marketing API remains docs/Graph API sourced in this phase; no official reviewed OpenAPI repo was confirmed in this pass. | Supported action manifest plus provider-specific mock E2E for OAuth refresh, bearer request construction, and typed insight rows. |
 | `linear` | Linear is a GraphQL provider in SPUR today, backed by a curated GraphQL manifest. The public `linear/linear` repository is SDK/tooling, not a REST OpenAPI source. | GraphQL mock scan precedent; outside REST/OpenAPI Tier A promotion. |
 
 Untracked generated Tier A candidates currently present in the workspace are
@@ -215,6 +215,8 @@ Recommended near-term promotion order:
    pinned beyond APIs.guru/docs-derived evidence.
 5. Keep `google_ads`, `facebook_ads`, and `linear` on the Tier B/GraphQL/action
    track rather than mixing them into the REST OpenAPI table promotion batch.
+   `google_ads` and `facebook_ads` are now exposed as supported action-function
+   providers in the Wizard, separate from REST GET table-function providers.
 
 ### Nango Docs Endpoint Seeds
 
