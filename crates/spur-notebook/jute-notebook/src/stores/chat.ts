@@ -31,6 +31,11 @@ export type ChatEvent =
 export type ChatMessage =
   | {
       id: string;
+      kind: "user";
+      text: string;
+    }
+  | {
+      id: string;
       kind: "assistant";
       text: string;
     }
@@ -67,6 +72,8 @@ export type ChatState = ChatConversation & {
 
 export type ChatActions = {
   setScope: (appKey: string, label: string) => void;
+  appendUserMessageForScope: (appKey: string, text: string) => void;
+  appendUserMessage: (text: string) => void;
   applyEventForScope: (appKey: string, event: ChatEvent) => void;
   applyEvent: (event: ChatEvent) => void;
   applyEventToApp: (appKey: string, event: ChatEvent) => void;
@@ -122,6 +129,14 @@ function assistantMessage(text: string): ChatMessage {
   return {
     id: nextMessageId(),
     kind: "assistant",
+    text,
+  };
+}
+
+function userMessage(text: string): ChatMessage {
+  return {
+    id: nextMessageId(),
+    kind: "user",
     text,
   };
 }
@@ -250,6 +265,30 @@ export const useChat = create<ChatStore>()((set, get) => ({
     set((state) => {
       return applyEventToAppState(state, appKey, event);
     }),
+
+  appendUserMessageForScope: (appKey, text) =>
+    set((state) => {
+      const conversation =
+        state.conversations[appKey] ??
+        createConversation(
+          appKey === state.activeAppKey ? state.scopeLabel : undefined,
+        );
+      return projectActiveConversation({
+        activeAppKey: state.activeAppKey,
+        conversations: {
+          ...state.conversations,
+          [appKey]: {
+            ...conversation,
+            messages: [...conversation.messages, userMessage(text)],
+          },
+        },
+      });
+    }),
+
+  appendUserMessage: (text) => {
+    const state = get();
+    state.appendUserMessageForScope(state.activeAppKey, text);
+  },
 
   applyEvent: (event) => {
     const state = get();
