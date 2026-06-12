@@ -11,10 +11,14 @@ use spur_rest_table_gateway::adapter::catalog::{
     ProviderSeedClass, ProviderSpecCrosswalk, APIS_GURU_CROSSWALK_CSV, COVERAGE_SUMMARY_JSON,
     PROVIDER_HARVEST_CANDIDATES_CSV, PROVIDER_SPEC_CROSSWALK_JSON, TABLE_SEED_CLASSES_CSV,
 };
-use spur_rest_table_gateway::adapter::nango::parse_providers;
+use spur_rest_table_gateway::adapter::manifest::Manifest;
+use spur_rest_table_gateway::adapter::nango::{
+    manifest_to_toml, parse_providers, provider_to_manifest_stub,
+};
 
 const NANGO_LICENSE: &str = "Elastic License 2.0";
-const USAGE: &str = "usage: nango-catalog <providers.yaml> <apis-guru-list.json> <out_dir> --nango-commit <sha> --apis-guru-fetched-at <timestamp> [--reviewed-source <provider>=<spec-path>]";
+const EXPERIMENTAL_MANIFEST_INDEX_JSON: &str = "experimental_manifest_index.json";
+const USAGE: &str = "usage: nango-catalog <providers.yaml> <apis-guru-list.json> <out_dir> --nango-commit <sha> --apis-guru-fetched-at <timestamp> [--reviewed-source <provider>=<spec-path>] [--experimental-crosswalk-manifests]";
 
 fn main() {
     if let Err(err) = run() {
@@ -75,6 +79,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         },
     )?;
     write_reviewed_manifests(&args.out_dir, &providers_yaml, &args.reviewed_sources)?;
+    if args.experimental_crosswalk_manifests {
+        write_experimental_crosswalk_manifests(&args.out_dir, &providers_yaml, &report.rows)?;
+    }
 
     println!(
         "wrote catalog for {} providers, {} APIs.guru entries, {} crosswalk rows",
@@ -94,6 +101,7 @@ struct Args {
     nango_commit: String,
     apis_guru_fetched_at: String,
     reviewed_sources: Vec<ReviewedSourceArg>,
+    experimental_crosswalk_manifests: bool,
 }
 
 #[derive(Debug)]
@@ -120,6 +128,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Box<dyn Er
     let mut nango_commit = None;
     let mut apis_guru_fetched_at = None;
     let mut reviewed_sources = Vec::new();
+    let mut experimental_crosswalk_manifests = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -147,6 +156,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Box<dyn Er
                     .ok_or_else(|| usage_error("--reviewed-source requires provider=spec-path"))?;
                 reviewed_sources.push(parse_reviewed_source(&value)?);
             }
+            "--experimental-crosswalk-manifests" => {
+                experimental_crosswalk_manifests = true;
+            }
             other if other.starts_with("--") => return Err(usage_error("unknown option")),
             _ => return Err(usage_error("unexpected argument")),
         }
@@ -160,6 +172,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Box<dyn Er
         apis_guru_fetched_at: apis_guru_fetched_at
             .ok_or_else(|| usage_error("--apis-guru-fetched-at is required"))?,
         reviewed_sources,
+        experimental_crosswalk_manifests,
     })
 }
 
@@ -223,6 +236,112 @@ fn write_reviewed_manifests(
     }
 
     Ok(())
+}
+
+fn write_experimental_crosswalk_manifests(
+    out_dir: &Path,
+    providers_yaml: &str,
+    rows: &[ProviderSpecCrosswalk],
+) -> Result<(), Box<dyn Error>> {
+    let providers = parse_providers(providers_yaml)?;
+    let connections_dir = out_dir.join("connections").join("experimental");
+    fs::create_dir_all(&connections_dir)
+        .map_err(|err| format!("failed to create {}: {err}", connections_dir.display()))?;
+
+    let mut manifests = Vec::new();
+    let mut seen_paths = BTreeMap::<String, usize>::new();
+
+    for row in rows {
+        let provider_entry = providers.get(&row.provider).ok_or_else(|| {
+            format!(
+                "crosswalk row provider {} is not present in providers.yaml",
+                row.provider
+            )
+        })?;
+        let mut file_stem = format!(
+            "{}--{}",
+            sanitize_filename_component(&row.provider),
+            sanitize_filename_component(&row.spec_source_key)
+        );
+        let base_file_stem = file_stem.clone();
+        let next = seen_paths.entry(base_file_stem.clone()).or_insert(0);
+        if *next > 0 {
+            file_stem = format!("{base_file_stem}-{}", *next + 1);
+        }
+        *next += 1;
+
+        let relative_path = format!("connections/experimental/{file_stem}.connection.toml");
+        let toml = experimental_crosswalk_manifest_toml(&row.provider, provider_entry, row)?;
+        let full_path = out_dir.join(&relative_path);
+        fs::write(&full_path, toml)
+            .map_err(|err| format!("failed to write {}: {err}", full_path.display()))?;
+        manifests.push(ExperimentalManifestIndexEntry {
+            provider: &row.provider,
+            spec_source_key: &row.spec_source_key,
+            path: relative_path,
+            confidence: format!("{:?}", row.confidence),
+            license_status: format!("{:?}", row.license_status),
+            generation_eligible: row.generation_eligible,
+        });
+    }
+
+    write_json(
+        &out_dir.join(EXPERIMENTAL_MANIFEST_INDEX_JSON),
+        &ExperimentalManifestIndex {
+            experimental: true,
+            support_level: "experimental_crosswalk",
+            crosswalk_row_count: rows.len(),
+            manifest_count: manifests.len(),
+            manifests,
+        },
+    )?;
+
+    Ok(())
+}
+
+fn experimental_crosswalk_manifest_toml(
+    provider: &str,
+    provider_entry: &spur_rest_table_gateway::adapter::nango::ProviderEntry,
+    row: &ProviderSpecCrosswalk,
+) -> Result<String, Box<dyn Error>> {
+    let manifest = provider_to_manifest_stub(provider, provider_entry);
+    let mut toml = manifest_to_toml(&manifest).replace(
+        "# TODO: add [[table]] blocks (path/columns/filters)\n",
+        "# Experimental crosswalk candidate. This file is not supported until a reviewed OpenAPI source adds [[table]] blocks and provider E2E coverage.\n",
+    );
+    toml.push('\n');
+    toml.push_str("support_level = \"experimental_crosswalk\"\n");
+    toml.push_str(&format!(
+        "spec_source_key = {}\n",
+        toml_string(&row.spec_source_key)
+    ));
+    toml.push_str(&format!("spec_url = {}\n", toml_string(&row.url)));
+    toml.push_str(&format!(
+        "match_confidence = {}\n",
+        toml_string(&format!("{:?}", row.confidence))
+    ));
+    toml.push_str(&format!(
+        "license_status = {}\n",
+        toml_string(&format!("{:?}", row.license_status))
+    ));
+    toml.push_str(&format!(
+        "generation_eligible = {}\n",
+        row.generation_eligible
+    ));
+    toml.push_str(&format!(
+        "nango_commit = {}\n",
+        toml_string(&row.nango_commit)
+    ));
+    if let Some(apis_guru_hash) = &row.apis_guru_hash {
+        toml.push_str(&format!(
+            "apis_guru_sha256 = {}\n",
+            toml_string(apis_guru_hash)
+        ));
+    }
+
+    Manifest::from_toml(&toml)
+        .map_err(|err| format!("experimental manifest for {provider} failed to reparse: {err}"))?;
+    Ok(toml)
 }
 
 fn write_provider_harvest(
@@ -325,6 +444,36 @@ fn push_csv_field(csv: &mut String, field: &str) {
     }
 }
 
+fn sanitize_filename_component(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_dash = false;
+    for character in value.chars() {
+        let next = if character.is_ascii_alphanumeric() || character == '.' {
+            previous_dash = false;
+            Some(character.to_ascii_lowercase())
+        } else if !previous_dash {
+            previous_dash = true;
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(next) = next {
+            out.push(next);
+        }
+    }
+
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    format!("{:?}", value)
+}
+
 fn seed_class_name(seed_class: ProviderSeedClass) -> &'static str {
     match seed_class {
         ProviderSeedClass::BaseUrlOnly => "BaseUrlOnly",
@@ -366,4 +515,23 @@ struct CoverageSummary<'a> {
     matched_provider_count: usize,
     rejected_ambiguous_candidates: usize,
     providers_by_seed_class: &'a BTreeMap<ProviderSeedClass, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExperimentalManifestIndex<'a> {
+    experimental: bool,
+    support_level: &'a str,
+    crosswalk_row_count: usize,
+    manifest_count: usize,
+    manifests: Vec<ExperimentalManifestIndexEntry<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExperimentalManifestIndexEntry<'a> {
+    provider: &'a str,
+    spec_source_key: &'a str,
+    path: String,
+    confidence: String,
+    license_status: String,
+    generation_eligible: bool,
 }

@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use std::collections::BTreeMap;
 
 use crate::adapter::manifest::{AuthCfg, Manifest, PaginationCfg, SourceCfg, Transport};
 
@@ -8,6 +9,7 @@ pub struct ProviderEntry {
     pub display_name: Option<String>,
     pub categories: Option<Vec<String>>,
     pub auth_mode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_token_url")]
     pub token_url: Option<String>,
     pub credentials: Option<IndexMap<String, serde_yaml::Value>>,
     pub connection_config: Option<IndexMap<String, serde_yaml::Value>>,
@@ -60,6 +62,37 @@ pub fn parse_providers(
     yaml: &str,
 ) -> std::result::Result<IndexMap<String, ProviderEntry>, serde_yaml::Error> {
     serde_yaml::from_str(yaml)
+}
+
+fn deserialize_token_url<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    Ok(value.as_ref().and_then(token_url_from_value))
+}
+
+fn token_url_from_value(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(value) => Some(value.clone()),
+        serde_yaml::Value::Mapping(map) => {
+            let mut by_key = BTreeMap::new();
+            for (key, value) in map {
+                let (serde_yaml::Value::String(key), serde_yaml::Value::String(value)) =
+                    (key, value)
+                else {
+                    continue;
+                };
+                by_key.insert(key.to_ascii_uppercase(), value.clone());
+            }
+
+            by_key
+                .get("OAUTH2")
+                .cloned()
+                .or_else(|| by_key.into_values().next())
+        }
+        _ => None,
+    }
 }
 
 pub fn provider_to_manifest_stub(name: &str, p: &ProviderEntry) -> Manifest {
@@ -453,6 +486,31 @@ notion:
                 assert_eq!(client_id_env, "NOTION_CLIENT_ID");
                 assert_eq!(client_secret_env, "NOTION_CLIENT_SECRET");
                 assert_eq!(refresh_token_env, "NOTION_REFRESH_TOKEN");
+            }
+            other => panic!("expected oauth2_refresh, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oauth2_token_url_map_prefers_oauth2_entry() {
+        let providers = parse_providers(
+            r#"
+github-app-oauth:
+  display_name: GitHub App OAuth
+  auth_mode: OAUTH2
+  token_url:
+    OAUTH2: https://github.com/login/oauth/access_token
+    APP: https://api.github.com/app/installations/${connectionConfig.installation_id}/access_tokens
+  proxy:
+    base_url: "https://api.github.com"
+"#,
+        )
+        .expect("providers yaml should parse");
+        let manifest =
+            provider_to_manifest_stub("github-app-oauth", &providers["github-app-oauth"]);
+        match manifest.source.auth {
+            crate::adapter::manifest::AuthCfg::Oauth2Refresh { token_url, .. } => {
+                assert_eq!(token_url, "https://github.com/login/oauth/access_token");
             }
             other => panic!("expected oauth2_refresh, got {other:?}"),
         }
