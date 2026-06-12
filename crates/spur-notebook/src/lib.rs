@@ -82,6 +82,7 @@
 pub mod commands;
 pub mod connection_secrets;
 pub mod connection_store;
+pub mod context;
 pub mod dag;
 #[cfg(feature = "datasource-introspect")]
 pub mod datasource;
