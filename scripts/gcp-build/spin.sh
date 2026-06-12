@@ -8,6 +8,12 @@ source "$SCRIPT_DIR/config.env"
 
 log() { echo "[spin] $*" >&2; }
 
+vm_status() {
+    gcloud compute instances describe "$VM_NAME" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+        --format='value(status)' 2>/dev/null || echo "MISSING"
+}
+
 VM_STATUS=$(gcloud compute instances describe "$VM_NAME" \
     --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
     --format='value(status)' 2>/dev/null || echo "MISSING")
@@ -19,8 +25,16 @@ case "$VM_STATUS" in
         ;;
     TERMINATED|STOPPED|SUSPENDED|STOPPING|SUSPENDING)
         log "VM $VM_NAME is $VM_STATUS — starting (cache disk stays attached)..."
-        gcloud compute instances start "$VM_NAME" \
-            --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet
+        if ! gcloud compute instances start "$VM_NAME" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet; then
+            VM_STATUS=$(vm_status)
+            if [[ "$VM_STATUS" == "RUNNING" ]]; then
+                log "start failed but VM is RUNNING; another process likely started it."
+            else
+                log "start failed and VM is $VM_STATUS"
+                exit 1
+            fi
+        fi
         log "Waiting for SSH..."
         for _ in $(seq 1 30); do
             if gcloud compute ssh "$VM_NAME" \
@@ -42,7 +56,7 @@ case "$VM_STATUS" in
 esac
 
 log "Creating spot VM $VM_NAME ($VM_MACHINE_TYPE) in $GCP_ZONE..."
-gcloud compute instances create "$VM_NAME" \
+if ! gcloud compute instances create "$VM_NAME" \
     --project="$GCP_PROJECT" \
     --zone="$GCP_ZONE" \
     --machine-type="$VM_MACHINE_TYPE" \
@@ -56,7 +70,15 @@ gcloud compute instances create "$VM_NAME" \
     --service-account="$BUILD_SA_EMAIL" \
     --scopes=cloud-platform \
     --metadata="sccache-bucket=$SCCACHE_BUCKET,enable-oslogin=TRUE,direct-ssh-port=$SPUR_DIRECT_SSH_PORT" \
-    --metadata-from-file="startup-script=$SCRIPT_DIR/startup.sh"
+    --metadata-from-file="startup-script=$SCRIPT_DIR/startup.sh"; then
+    VM_STATUS=$(vm_status)
+    if [[ "$VM_STATUS" == "RUNNING" ]]; then
+        log "create failed but VM is RUNNING; another process likely created it."
+    else
+        log "create failed and VM is $VM_STATUS"
+        exit 1
+    fi
+fi
 
 log "Waiting for SSH..."
 for _ in $(seq 1 30); do
