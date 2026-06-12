@@ -1,4 +1,5 @@
 use serde_json::Value;
+use spur_rest_table_gateway::adapter::manifest::Manifest;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +48,48 @@ const APIS_GURU_FIXTURE: &str = r#"{
         "info": {"title": "GitHub v3 REST API"},
         "swaggerUrl": "https://api.apis.guru/v2/specs/github.com/1.1.4/openapi.json",
         "openapiVer": "3.0.0"
+      }
+    }
+  }
+}"#;
+
+const GITHUB_PROVIDER_FIXTURE: &str = r#"
+github:
+  display_name: GitHub
+  categories: [dev-tools]
+  auth_mode: API_KEY
+  proxy:
+    base_url: https://api.github.com
+    headers:
+      Authorization: Bearer ${apiKey}
+"#;
+
+const OPENAPI_COLLECTION_FIXTURE: &str = r#"{
+  "openapi": "3.0.0",
+  "info": {"title": "GitHub REST API", "version": "1.0.0"},
+  "paths": {
+    "/user/repos": {
+      "get": {
+        "operationId": "list_repos",
+        "responses": {
+          "200": {
+            "description": "repositories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {"type": "integer"},
+                      "name": {"type": "string"}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -101,6 +144,10 @@ fn nango_catalog_cli_writes_deterministic_crosswalk_outputs() {
     ] {
         assert!(out.join(file).exists(), "{file} should be written");
     }
+    assert!(
+        !out.join("connections").exists(),
+        "unreviewed crosswalk rows should not generate manifests"
+    );
 
     let crosswalk: Value = serde_json::from_str(
         &std::fs::read_to_string(out.join("provider_spec_crosswalk.json"))
@@ -183,6 +230,52 @@ fn nango_catalog_cli_requires_pinned_upstream_metadata() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--apis-guru-fetched-at is required"));
+
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn nango_catalog_cli_generates_parseable_reviewed_manifest() {
+    let bin = env!("CARGO_BIN_EXE_nango-catalog");
+    let temp = unique_temp_dir("nango-catalog-reviewed-source");
+    let providers = temp.join("providers.yaml");
+    let apis = temp.join("list.json");
+    let spec = temp.join("github.openapi.json");
+    let out = temp.join("out");
+
+    std::fs::create_dir_all(&temp).expect("temp dir should be created");
+    std::fs::write(&providers, GITHUB_PROVIDER_FIXTURE).expect("providers should be written");
+    std::fs::write(&apis, APIS_GURU_FIXTURE).expect("apis guru list should be written");
+    std::fs::write(&spec, OPENAPI_COLLECTION_FIXTURE).expect("openapi spec should be written");
+
+    let output = Command::new(bin)
+        .arg(&providers)
+        .arg(&apis)
+        .arg(&out)
+        .arg("--nango-commit")
+        .arg("988efd014")
+        .arg("--apis-guru-fetched-at")
+        .arg("2026-06-12T00:00:00Z")
+        .arg("--reviewed-source")
+        .arg(format!("github={}", spec.display()))
+        .output()
+        .expect("nango-catalog should run");
+
+    assert!(
+        output.status.success(),
+        "nango-catalog failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest_path = out.join("connections").join("github.connection.toml");
+    let manifest_toml =
+        std::fs::read_to_string(&manifest_path).expect("generated manifest should be readable");
+    let parsed = Manifest::from_toml(&manifest_toml).expect("generated manifest should parse");
+
+    assert_eq!(parsed.source.name, "github");
+    assert_eq!(parsed.tables.len(), 1);
+    assert_eq!(parsed.tables[0].name, "list_repos");
+    assert_eq!(manifest_toml.matches("[[table]]").count(), 1);
 
     std::fs::remove_dir_all(temp).ok();
 }

@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use spur_rest_table_gateway::adapter::catalog::{
-    build_crosswalk_report, provider_catalog_from_yaml, ApisGuruSnapshot, CrosswalkDiagnostics,
-    CrosswalkOptions, ProviderCatalogEntry, ProviderSeedClass, ProviderSpecCrosswalk,
-    APIS_GURU_CROSSWALK_CSV, COVERAGE_SUMMARY_JSON, PROVIDER_HARVEST_CANDIDATES_CSV,
-    PROVIDER_SPEC_CROSSWALK_JSON, TABLE_SEED_CLASSES_CSV,
+    build_crosswalk_report, generate_reviewed_manifest, provider_catalog_from_yaml,
+    ApisGuruSnapshot, CrosswalkDiagnostics, CrosswalkOptions, ProviderCatalogEntry,
+    ProviderSeedClass, ProviderSpecCrosswalk, APIS_GURU_CROSSWALK_CSV, COVERAGE_SUMMARY_JSON,
+    PROVIDER_HARVEST_CANDIDATES_CSV, PROVIDER_SPEC_CROSSWALK_JSON, TABLE_SEED_CLASSES_CSV,
 };
+use spur_rest_table_gateway::adapter::nango::parse_providers;
 
 const NANGO_LICENSE: &str = "Elastic License 2.0";
-const USAGE: &str = "usage: nango-catalog <providers.yaml> <apis-guru-list.json> <out_dir> --nango-commit <sha> --apis-guru-fetched-at <timestamp>";
+const USAGE: &str = "usage: nango-catalog <providers.yaml> <apis-guru-list.json> <out_dir> --nango-commit <sha> --apis-guru-fetched-at <timestamp> [--reviewed-source <provider>=<spec-path>]";
 
 fn main() {
     if let Err(err) = run() {
@@ -73,6 +74,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             providers_by_seed_class: &report.diagnostics.providers_by_seed_class,
         },
     )?;
+    write_reviewed_manifests(&args.out_dir, &providers_yaml, &args.reviewed_sources)?;
 
     println!(
         "wrote catalog for {} providers, {} APIs.guru entries, {} crosswalk rows",
@@ -91,6 +93,13 @@ struct Args {
     out_dir: PathBuf,
     nango_commit: String,
     apis_guru_fetched_at: String,
+    reviewed_sources: Vec<ReviewedSourceArg>,
+}
+
+#[derive(Debug)]
+struct ReviewedSourceArg {
+    provider: String,
+    spec_path: PathBuf,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Box<dyn Error>> {
@@ -110,6 +119,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Box<dyn Er
 
     let mut nango_commit = None;
     let mut apis_guru_fetched_at = None;
+    let mut reviewed_sources = Vec::new();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -131,6 +141,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Box<dyn Er
                 }
                 apis_guru_fetched_at = Some(value);
             }
+            "--reviewed-source" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| usage_error("--reviewed-source requires provider=spec-path"))?;
+                reviewed_sources.push(parse_reviewed_source(&value)?);
+            }
             other if other.starts_with("--") => return Err(usage_error("unknown option")),
             _ => return Err(usage_error("unexpected argument")),
         }
@@ -143,7 +159,70 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, Box<dyn Er
         nango_commit: nango_commit.ok_or_else(|| usage_error("--nango-commit is required"))?,
         apis_guru_fetched_at: apis_guru_fetched_at
             .ok_or_else(|| usage_error("--apis-guru-fetched-at is required"))?,
+        reviewed_sources,
     })
+}
+
+fn parse_reviewed_source(value: &str) -> Result<ReviewedSourceArg, Box<dyn Error>> {
+    let (provider, spec_path) = value
+        .split_once('=')
+        .ok_or_else(|| usage_error("--reviewed-source requires provider=spec-path"))?;
+    if provider.trim().is_empty() || spec_path.trim().is_empty() {
+        return Err(usage_error("--reviewed-source requires provider=spec-path"));
+    }
+    if spec_path.starts_with("http://") || spec_path.starts_with("https://") {
+        return Err(usage_error("--reviewed-source requires a local spec path"));
+    }
+
+    Ok(ReviewedSourceArg {
+        provider: provider.to_string(),
+        spec_path: PathBuf::from(spec_path),
+    })
+}
+
+fn write_reviewed_manifests(
+    out_dir: &Path,
+    providers_yaml: &str,
+    reviewed_sources: &[ReviewedSourceArg],
+) -> Result<(), Box<dyn Error>> {
+    if reviewed_sources.is_empty() {
+        return Ok(());
+    }
+
+    let providers = parse_providers(providers_yaml)?;
+    let connections_dir = out_dir.join("connections");
+    fs::create_dir_all(&connections_dir)
+        .map_err(|err| format!("failed to create {}: {err}", connections_dir.display()))?;
+
+    for reviewed_source in reviewed_sources {
+        let provider_entry = providers.get(&reviewed_source.provider).ok_or_else(|| {
+            format!(
+                "--reviewed-source provider {} is not present in providers.yaml",
+                reviewed_source.provider
+            )
+        })?;
+        let spec_text = fs::read_to_string(&reviewed_source.spec_path).map_err(|err| {
+            format!(
+                "failed to read reviewed source {}: {err}",
+                reviewed_source.spec_path.display()
+            )
+        })?;
+        let generated =
+            generate_reviewed_manifest(&reviewed_source.provider, provider_entry, &spec_text)
+                .map_err(|err| {
+                    format!(
+                        "failed to generate reviewed manifest for {} from {}: {err}",
+                        reviewed_source.provider,
+                        reviewed_source.spec_path.display()
+                    )
+                })?;
+        fs::write(
+            connections_dir.join(format!("{}.connection.toml", reviewed_source.provider)),
+            generated.toml,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn write_provider_harvest(
