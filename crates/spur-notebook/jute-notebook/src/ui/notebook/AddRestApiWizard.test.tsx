@@ -37,11 +37,39 @@ function providersResponse() {
       type: "nangoProviders" as const,
       data: [
         {
+          name: "github",
+          displayName: "GitHub",
+          category: "Dev tools",
+          tier: "A",
+          authMode: "API_KEY",
+          supportLevel: "supported",
+          baseUrl: "https://api.github.com",
+          credentialEnvVars: ["GITHUB_TOKEN"],
+          tables: [
+            {
+              name: "security_advisories",
+              path: "/advisories",
+              responsePath: null,
+              columns: [{ name: "ghsaId", ty: "Utf8", json: "$.ghsa_id" }],
+            },
+            {
+              name: "authenticated_repos",
+              path: "/user/repos",
+              responsePath: null,
+              columns: [{ name: "name", ty: "Utf8", json: "$.name" }],
+            },
+          ],
+        },
+        {
           name: "stripe",
           displayName: "Stripe",
           category: "Payments",
           tier: "A",
           authMode: "API_KEY",
+          supportLevel: "catalog",
+          baseUrl: null,
+          credentialEnvVars: [],
+          tables: [],
         },
         {
           name: "hubspot",
@@ -49,6 +77,10 @@ function providersResponse() {
           category: "CRM",
           tier: "B",
           authMode: "OAUTH2",
+          supportLevel: "catalog",
+          baseUrl: null,
+          credentialEnvVars: [],
+          tables: [],
         },
       ],
     },
@@ -164,6 +196,13 @@ async function chooseStripeProvider() {
   fireEvent.click(stripe);
 }
 
+async function chooseGithubProvider() {
+  fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
+
+  const github = await screen.findByRole("button", { name: /GitHub/i });
+  fireEvent.click(github);
+}
+
 describe("AddRestApiWizard", () => {
   afterEach(() => {
     cleanup();
@@ -244,6 +283,45 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("https://api.stripe.com")).toBeInTheDocument();
     expect(screen.getByLabelText("STRIPE_API_KEY")).toBeInTheDocument();
     expect(screen.getByText(/Drop-in/i)).toBeInTheDocument();
+  });
+
+  test("supported_catalog_provider_shows_ready_tables_without_openapi_preview", async () => {
+    const onClose = renderWizard();
+
+    await chooseGithubProvider();
+    expect(screen.getByText("2 table-functions")).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to GitHub" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("https://api.github.com")).toBeInTheDocument();
+    expect(screen.getByLabelText("GITHUB_TOKEN")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("GITHUB_TOKEN"), {
+      target: { value: "ghp_test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByText("security_advisories")).toBeInTheDocument();
+    expect(screen.getByText("authenticated_repos")).toBeInTheDocument();
+    expect(screen.getByText("GET /advisories")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "add_api_datasource_from_import",
+        name: "github",
+        provider: "github",
+        spec_text: null,
+        credentials: [["GITHUB_TOKEN", "ghp_test"]],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   test("prefill_opens_connect_step_with_blank_missing_credentials_and_saves_import", async () => {

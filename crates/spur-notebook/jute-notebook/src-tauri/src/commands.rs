@@ -208,6 +208,17 @@ pub struct ProviderSummary {
     pub tier: String,
     /// Nango auth mode string.
     pub auth_mode: String,
+    /// Support level for the bundled catalog entry.
+    pub support_level: String,
+    /// Runtime base URL from a supported manifest when known.
+    #[ts(type = "string | null")]
+    pub base_url: Option<String>,
+    /// Environment variables required by the supported manifest.
+    #[serde(default)]
+    pub credential_env_vars: Vec<String>,
+    /// Table previews available from a supported bundled manifest.
+    #[serde(default)]
+    pub tables: Vec<TablePreview>,
 }
 
 /// Column metadata returned when previewing OpenAPI-generated API tables.

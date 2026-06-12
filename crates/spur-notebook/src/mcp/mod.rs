@@ -1038,7 +1038,33 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
         .into_iter()
         .map(|(name, provider)| {
             let auth_mode = provider.auth_mode.clone().unwrap_or_default();
-            jute::commands::ProviderSummary {
+            let source = normalize_api_datasource_source(&name)?;
+            let supported_manifest = curated_preset_toml(&source)
+                .map(spur_rest_table_gateway::adapter::manifest::Manifest::from_toml)
+                .transpose()
+                .map_err(|error| BridgeError::Handler {
+                    code: "curated_provider_manifest_failed".to_string(),
+                    message: format!(
+                        "failed to parse bundled provider manifest for {name}: {error}"
+                    ),
+                })?;
+            let support_level = if supported_manifest.is_some() {
+                "supported"
+            } else {
+                "catalog"
+            };
+            let base_url = supported_manifest
+                .as_ref()
+                .map(|manifest| manifest.source.base_url.clone());
+            let credential_env_vars = supported_manifest
+                .as_ref()
+                .map(required_env_vars_from_manifest)
+                .unwrap_or_default();
+            let tables = supported_manifest
+                .map(|manifest| manifest.tables.into_iter().map(table_preview).collect())
+                .unwrap_or_default();
+
+            Ok(jute::commands::ProviderSummary {
                 display_name: provider
                     .display_name
                     .clone()
@@ -1052,10 +1078,14 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                 tier: spur_rest_table_gateway::adapter::nango::tier(provider.auth_mode.as_deref())
                     .to_string(),
                 auth_mode,
+                support_level: support_level.to_string(),
+                base_url,
+                credential_env_vars,
+                tables,
                 name,
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, BridgeError>>()?;
     summaries.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(summaries)
 }
@@ -1297,6 +1327,48 @@ fn table_preview(
                 json: column.json,
             })
             .collect(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn required_env_vars_from_manifest(
+    manifest: &spur_rest_table_gateway::adapter::manifest::Manifest,
+) -> Vec<String> {
+    use spur_rest_table_gateway::adapter::manifest::AuthCfg;
+
+    let mut values = Vec::new();
+    match &manifest.source.auth {
+        AuthCfg::None => {}
+        AuthCfg::Bearer { env }
+        | AuthCfg::Header { env, .. }
+        | AuthCfg::ApiKeyQuery { env, .. } => {
+            push_unique_env(&mut values, env.clone());
+        }
+        AuthCfg::Basic { user_env, pass_env } => {
+            push_unique_env(&mut values, user_env.clone());
+            push_unique_env(&mut values, pass_env.clone());
+        }
+        AuthCfg::Oauth2Refresh {
+            client_id_env,
+            client_secret_env,
+            refresh_token_env,
+            ..
+        } => {
+            push_unique_env(&mut values, client_id_env.clone());
+            push_unique_env(&mut values, client_secret_env.clone());
+            push_unique_env(&mut values, refresh_token_env.clone());
+        }
+    }
+    for name in &manifest.source.connection_config {
+        push_unique_env(&mut values, format!("SPUR_CONN_{name}"));
+    }
+    values
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn push_unique_env(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
     }
 }
 
@@ -4580,6 +4652,21 @@ paths:
                 .tier,
             "B"
         );
+        let github = providers
+            .iter()
+            .find(|provider| provider.name == "github")
+            .expect("github provider is listed");
+        assert_eq!(github.support_level, "supported");
+        assert_eq!(github.base_url.as_deref(), Some("https://api.github.com"));
+        assert_eq!(github.credential_env_vars, ["GITHUB_TOKEN"]);
+        assert!(github
+            .tables
+            .iter()
+            .any(|table| table.name == "authenticated_repos"));
+        assert!(github
+            .tables
+            .iter()
+            .any(|table| table.name == "security_advisories"));
         assert!(providers
             .windows(2)
             .all(|pair| pair[0].name <= pair[1].name));
