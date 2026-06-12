@@ -14,6 +14,10 @@ members = ["cargo:."]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
+# Only the CLI is published through cargo-dist. Native notebook app builds go
+# through the Tauri/xtask path because they require GTK/WebKit system packages
+# on Linux.
+packages = ["spur-cli"]
 # Target platforms to build apps for (Rust target-triple syntax).
 # Temporarily omit x86_64-unknown-linux-musl and x86_64-pc-windows-msvc;
 # the v1.0.1 release showed target-specific build failures that need debug.
