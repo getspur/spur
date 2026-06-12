@@ -1,0 +1,46 @@
+# Curated GitHub REST manifest for the REST table gateway.
+# Source grounding: Nango github-pat auth metadata + GitHub REST OpenAPI table shapes.
+
+[source]
+name = "github"
+base_url = "https://api.github.com"
+auth = { scheme = "bearer", env = "GITHUB_TOKEN" }
+
+[source.headers]
+x-github-api-version = "2022-11-28"
+
+[[table]]
+name = "security_advisories"
+path = "/advisories"
+
+[table.columns]
+ghsa_id = { json = "$.ghsa_id", type = "Utf8" }
+cve_id = { json = "$.cve_id", type = "Utf8" }
+summary = { json = "$.summary", type = "Utf8" }
+severity = { json = "$.severity", type = "Utf8" }
+published_at = { json = "$.published_at", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+ecosystem = { param = "ecosystem" }
+severity = { param = "severity" }
+type = { param = "type" }
+
+[[table]]
+name = "authenticated_repos"
+path = "/user/repos"
+
+[table.columns]
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+full_name = { json = "$.full_name", type = "Utf8" }
+private = { json = "$.private", type = "Boolean" }
+html_url = { json = "$.html_url", type = "Utf8" }
+default_branch = { json = "$.default_branch", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+visibility = { param = "visibility" }
+affiliation = { param = "affiliation" }
+sort = { param = "sort" }
+direction = { param = "direction" }

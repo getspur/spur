@@ -1082,6 +1082,9 @@ fn preview_open_api_tables(
 fn curated_preset_toml(source: &str) -> Option<&'static str> {
     let key = source.replace('-', "_");
     match key.as_str() {
+        "github" | "github_pat" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/github.connection.toml"
+        )),
         "google_ads" => Some(include_str!(
             "../../rest-table-gateway/connections/tier-a/google_ads.connection.toml"
         )),
@@ -3902,6 +3905,28 @@ score = { json = "$.score", type = "Int64" }
                 .iter()
                 .any(|action| action.name == "google_ads_search"),
             "curated preset carries the search action, not the empty stub"
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn build_api_import_manifest_prefers_curated_github_preset() {
+        let (source, manifest) =
+            build_api_import_manifest("github", Some("github".to_string()), None)
+                .expect("manifest builds from preset");
+
+        assert_eq!(source, "github");
+        assert!(matches!(
+            manifest.source.auth,
+            spur_rest_table_gateway::adapter::manifest::AuthCfg::Bearer { ref env }
+                if env == "GITHUB_TOKEN"
+        ));
+        assert!(
+            manifest
+                .tables
+                .iter()
+                .any(|table| table.name == "authenticated_repos"),
+            "curated preset carries working GitHub tables, not the empty stub"
         );
     }
 
