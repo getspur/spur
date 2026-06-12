@@ -5,7 +5,9 @@
 - **Surface:** `crates/spur-notebook/src/mcp/` (tools + server instructions),
   `crates/spur-notebook/src/sidebar_chat/`
 - **Related:** `2026-06-12-ai-sidebar-context-lenses-design.md` (companion — UI/lens
-  framing), `2026-06-09-notebook-sidebar-ai-agent-design.md`
+  framing), `2026-06-10-spur-graph-jupyter-notebook-support-design.md` (approved —
+  notebook container extraction in spur-graph; §6 builds on it),
+  `2026-06-09-notebook-sidebar-ai-agent-design.md`
 - **Design Epic:** `bd-f1ab`
 
 ## 1. Goal
@@ -139,7 +141,7 @@ linked to tables through its cells (`cell.metadata.spur.dag.source` wiring plus
 table-function name matches against cell sources). `scope: "used"` computes the
 composition at query time. In slice 1 the table-function match is a literal
 string search of each catalog `invoke` name over cell sources; slice 3 upgrades
-it to CellFacts `tables[]`. No session-side ledger or cache exists to drift.
+it to the spur-graph extractor's table facts. No session-side ledger or cache exists to drift.
 Tables mentioned only in earlier chat turns are not tracked — the transcript is
 that memory.
 
@@ -207,35 +209,41 @@ Each list section is capped (catalog nodes ~12, failed nodes ~5, frontend cells
 ~8). Anything cut is named in `truncated` with the ref to query deeper. Target
 for the whole pack: comfortably under ~1.5k tokens for typical notebooks.
 
-## 6. Q3 — Cells: Symbol-Level Indexing Across Languages
+## 6. Q3 — Cells: Symbol-Level Indexing (owned by spur-graph)
 
-Cell languages: `cell.metadata.spur.code_type` ∈ `python` (default) |
-`javascript` (Deno slot) | `rust` (evcxr) | `go` (gonb), plus markdown cells.
-Notebook cells are not in the repo analyst graph today, and this spec keeps it
-that way (see Non-Goals) — the index lives in the daemon, per notebook.
+Symbol extraction for notebooks is the responsibility of `crates/spur-graph`,
+**not** the notebook daemon. The approved spec
+`2026-06-10-spur-graph-jupyter-notebook-support-design.md` already defines the
+foundation: `.ipynb` is a custom container format with a dedicated parser
+(`crates/spur-graph/src/extract/notebook.rs`) that decodes the JSON cells,
+resolves each cell's language through the fallback chain
+(`cell.metadata.spur.code_type` → cell kernelspec → notebook kernelspec →
+`language_info`), and delegates to the tree-sitter grammars spur-graph already
+ships (python, tsx, rust, go, julia, r; markdown cells via the md grammar).
+Notebooks join code and docs as a **third indexed corpus**: cell symbols land
+in the same graph artifact and analyst index and surface through
+`code_*`/`knowledge_context_pack` like any other symbol.
 
-### Extraction contract
+### The delta this spec adds: the spur-semantic fact layer
 
-A per-language adapter (tree-sitter based) behind one trait, emitting one
-standard shape regardless of language — deliberately a flat fact extractor,
-**not** a compiler (no type resolution, no intra-cell call graphs):
+The spur-graph spec extracts *generic* symbols. The spur notebook format also
+carries semantics no generic grammar sees — this spec assigns their extraction
+to the same notebook extractor:
 
-```rust
-struct CellFacts {
-    cell_ref: Ref,                    // cell://<id>@v<N>
-    lang: CodeType,
-    symbols: Vec<CellSymbol>,         // defs: { name, kind: fn|class|var|import, span }
-    uses: Vec<NameUse>,               // identifier reads with spans
-    puts: Vec<String>,                // spur.put("<port>") string literals
-    gets: Vec<String>,                // spur.get("<port>") string literals
-    tables: Vec<String>,              // table-function / catalog references
-    markdown_headings: Vec<String>,   // markdown cells only
-}
-```
+| Fact | Source | Graph output |
+|---|---|---|
+| Cell container nodes | nbformat cells | cell node between file node and its symbols (promotes that spec's future-work item) — backs `cell://` refs |
+| Actual port I/O | `spur.put("x")` / `spur.get("x")` string literals | port nodes + actual produces/consumes edges |
+| Declared DAG | `cell.metadata.spur.dag` | declared produces/consumes/source edges |
+| Frontend binding | `cell.metadata.spur.frontend` | binds/emits edges |
+| Table references | table-function calls in cell source | cell → `ds://` table edges |
+| Drift | declared vs actual port I/O mismatch | drift annotation on the cell node |
 
-**Adapters ship python + javascript first** (they cover the real notebook
-population: Python kernel default, Deno app track). Rust/go are one trait impl
-each, deferred.
+Deliberately a flat fact extractor, **not** a compiler: no type resolution, no
+intra-cell call graphs. The spur-fact tree-sitter query patterns ship for
+**python + javascript first** (the real notebook population: Python kernel
+default, Deno app track); other languages get generic symbols from their
+grammars immediately and spur-fact patterns only when needed.
 
 ### Edge rules (kernel-slot aware)
 
@@ -250,14 +258,28 @@ each, deferred.
   cell's facts (and vice versa) is reported — this catches the most common
   wiring bug in the data-app skill's gotcha table.
 
-### Lifecycle
+### One extractor, two execution modes
 
-Re-extract the full facts of a modified cell on **save/run boundaries**
-(debounced — not per keystroke); cells are small, so whole-cell re-extraction
-beats incremental diffing on simplicity and drift-freedom.
-`notebook_context_pack` recomputes lazily on read if the index is dirty.
+Notebooks are working files and need not live in a git workspace, so the same
+spur-graph extractor runs in two modes:
+
+- **Batch** — `graph build` discovers repo-resident `.ipynb` files and indexes
+  them into the graph artifact + analyst DB (Spur Apps living in a repo get
+  full `code_*`/analyst coverage).
+- **Live** — the notebook daemon links the spur-graph notebook extractor as a
+  library and re-extracts the open notebook on **save/run boundaries**
+  (debounced, per-cell content hash — this implements the spur-graph spec's
+  "incremental re-extraction" future-work item). Loose notebooks outside any
+  repo are covered by this mode alone.
+
+One implementation, two write targets — no duplicated parsing logic in the
+daemon. `notebook_context_pack` recomputes lazily on read if the live index is
+dirty.
 
 ### Tools (slice 3)
+
+Daemon-side query tools serve from the live index; `sym://` refs map 1:1 to
+`graph://symbol/<stable_id>` wherever the batch index also covers the file:
 
 ```jsonc
 notebook_symbol_search({ notebook_path, query, kind? })
@@ -358,9 +380,9 @@ contract.
 - **No silent caps.** Every bounded list reports what was cut and the ref to
   query deeper.
 - **Derived, not stored.** Usage links (`scope:"used"`), datasource ids, and
-  lineage are computed at query time from primary state; the only persisted
-  artifact is the per-notebook CellFacts index, which is recomputable from the
-  `.ipynb` alone.
+  lineage are computed at query time from primary state; the only
+  daemon-persisted artifact is the live per-notebook fact index, recomputable
+  from the `.ipynb` alone (the batch graph artifact is owned by spur-graph).
 - **Stale-ref handling.** A ref to a deleted cell/port resolves to a structured
   error with the nearest valid parent ref, not a bare failure.
 
@@ -374,12 +396,16 @@ contract.
 2. **Lineage**
    - `notebook_lineage` walker over existing engine state
    - `dag_ops` lens preamble references it
-3. **CellFacts indexer + symbol tools**
-   - language-adapter trait; python + javascript tree-sitter adapters
-   - save/run-debounced extraction; drift check
-   - `notebook_symbol_search`, `notebook_symbol_refs`
-   - (tree-sitter crates are a new dependency — justified as the standard
-     multi-language parsing substrate; gated to this slice)
+3. **Spur-semantic fact layer in spur-graph + daemon integration**
+   - depends on the `2026-06-10` spur-graph notebook-support plan landing
+     (container parser, language fallback chain, grammar delegation)
+   - extend `crates/spur-graph/src/extract/notebook.rs`: cell container nodes,
+     port/dag/frontend/table facts, drift annotation (python + javascript
+     spur-fact patterns first)
+   - daemon links the extractor for the live per-notebook index
+     (save/run-debounced, per-cell content hash)
+   - `notebook_symbol_search`, `notebook_symbol_refs` over the live index;
+     `sym://` ↔ `graph://symbol/<id>` mapping where the batch index exists
 
 ## 12. Test Plan
 
@@ -399,12 +425,16 @@ Slice 2:
 - failed job nodes carry `error_excerpt` from cell outputs
 - node roles follow dataset/job vocabulary
 
-Slice 3:
-- python adapter: defs/uses/puts/gets/tables extraction fixtures
-- javascript adapter: same fixtures incl. `spur.get` in Deno app cells
+Slice 3 (extraction tests live in `spur-graph`; integration tests in the daemon):
+- python cells: defs/uses/puts/gets/tables extraction fixtures
+- javascript cells: same fixtures incl. `spur.get` in Deno app cells
+- cell container nodes appear between file node and symbols; back `cell://` refs
 - same-slot doc-order def→use edges; shadowing fixture documents false positive
 - cross-slot edges only via port string-literal match
 - drift: declared `produces` without `spur.put` reported (and inverse)
+- live mode: save-triggered re-extraction respects per-cell content hashes;
+  batch and live extraction of the same notebook agree on symbols/facts
+- `sym://` refs round-trip to `graph://symbol/<id>` for repo-resident notebooks
 
 ## 13. Non-Goals
 
@@ -414,9 +444,12 @@ Slice 3:
   aggregation question over notebook metadata that layered navigation can't
   answer in ≤2 calls.
 - **Full OpenLineage protocol/export** — vocabulary only in v1.
-- **Rust/go cell adapters** — trait impls deferred until such notebooks exist.
-- **Indexing notebook cells into `.spur/analyst.duckdb`** — the per-notebook
-  daemon index is the v1 home; export is a possible follow-up.
+- **Spur-fact query patterns for rust/go/julia/r cells** — those languages get
+  generic symbol extraction free from their existing grammars (per the
+  spur-graph spec); `spur.put/get`/table patterns are deferred until such
+  notebooks exist.
+- **A daemon-owned parser** — the daemon never reimplements notebook parsing;
+  it links the spur-graph extractor (one implementation, two modes).
 - **Cross-notebook lineage** for multi-notebook apps — v1 lineage is scoped to
   one notebook.
 - **Semantic/embedding retrieval over cells.**
@@ -440,8 +473,13 @@ containment.
 **Token cost of the pack on large notebooks.** Caps + truncation markers bound
 it; `next_queries` keeps depth one call away.
 
-**tree-sitter dependency weight** (slice 3 only). Two grammars initially;
-isolated behind the adapter trait so it never leaks into slices 1–2.
+**Slice 3 sequencing.** It depends on the spur-graph notebook-support plan
+landing first. Slices 1–2 are independent of it and ship regardless.
+
+**Batch/live index divergence.** Two execution modes of one extractor can
+still drift if the daemon's snapshot differs from the committed file. Contained
+by the shared implementation, per-cell content hashes, and the
+batch-live-agreement test in the slice 3 plan.
 
 ## 15. Acceptance Criteria
 
@@ -457,5 +495,8 @@ isolated behind the adapter trait so it never leaks into slices 1–2.
 - No response ever contains credentials; every response is version-stamped.
 - DAG lineage answers upstream/downstream from any ref with bounded depth and
   failed-node error excerpts.
-- Multi-language cells share one CellFacts shape; cross-language edges resolve
-  through ports/tables only.
+- Notebook cell symbols are extracted by the spur-graph notebook extractor
+  (one parser, batch + live modes); repo-resident notebook symbols appear in
+  the analyst index and `code_*` tools, and the daemon's `notebook_symbol_*`
+  tools serve loose notebooks from the live index.
+- Cross-language cell edges resolve through ports/tables only.
