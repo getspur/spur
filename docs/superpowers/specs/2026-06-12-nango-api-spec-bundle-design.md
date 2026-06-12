@@ -74,6 +74,7 @@ support levels:
 | Level | Meaning | Current evidence |
 |---|---|---|
 | Cataloged | Nango provider metadata is parsed and can be crosswalked to candidate spec sources. | `nango-catalog` writes deterministic harvest, seed-class, crosswalk, and coverage files from pinned local Nango/APIs.guru inputs. |
+| Experimental crosswalk | Every crosswalk row can be materialized as a parseable, provenance-tagged candidate manifest under an experimental directory. These manifests carry Nango auth/base URL metadata and APIs.guru source metadata, but intentionally contain no `[[table]]` blocks until a reviewed spec body is applied. | `nango-catalog --experimental-crosswalk-manifests` writes `connections/experimental/*.connection.toml` and `experimental_manifest_index.json`; the E2E suite verifies parseability and index counts. |
 | Generated | A reviewed spec source can be converted into a parseable SPUR `*.connection.toml` with auth metadata and one or more `[[table]]` blocks. | `--reviewed-source github=<local-spec>` generates a parseable GitHub manifest in tests. |
 | Scannable generic path | The runtime can scan a generated table shape against a local API fixture. | `nango-import` + hand-added table scans an API-key, cursor-paginated REST envelope; `openapi-import` scans typed rows from a generated OpenAPI table. |
 | Provider-specific E2E | A named provider manifest/adapter proves auth plus request plus typed table/action rows. | Google Ads proves OAuth refresh -> bearer -> provider headers -> typed POST action rows. Polymarket proves no-auth REST table and table-function scans. Linear proves GraphQL table scan shape but not REST/OpenAPI. |
@@ -347,6 +348,24 @@ crates/spur-notebook/rest-table-gateway/connections/generated/
   twilio.connection.toml
   ...
 ```
+
+Experimental crosswalk manifests:
+
+```text
+catalog/
+  experimental_manifest_index.json
+  connections/
+    experimental/
+      github-pat--github.com.connection.toml
+      stripe-api-key--stripe.com.connection.toml
+      ...
+```
+
+The experimental directory is the landing zone for the 295 Nango/APIs.guru
+crosswalk rows. It is intentionally lower than the `generated` support level:
+files in this directory are candidate source/auth bundles, not runnable table
+manifests, because the catalog build has not yet fetched or reviewed the
+OpenAPI bodies needed to emit `[[table]]` blocks.
 
 The generated directory should be reproducible. If checked in, diffs must be stable and sorted by provider key.
 
