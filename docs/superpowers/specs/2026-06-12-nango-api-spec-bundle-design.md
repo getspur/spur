@@ -74,7 +74,7 @@ support levels:
 | Level | Meaning | Current evidence |
 |---|---|---|
 | Cataloged | Nango provider metadata is parsed and can be crosswalked to candidate spec sources. | `nango-catalog` writes deterministic harvest, seed-class, crosswalk, and coverage files from pinned local Nango/APIs.guru inputs. |
-| Experimental crosswalk | Every crosswalk row can be materialized as a parseable, provenance-tagged candidate manifest under an experimental directory. These manifests carry Nango auth/base URL metadata and APIs.guru source metadata, but intentionally contain no `[[table]]` blocks until a reviewed spec body is applied. | `nango-catalog --experimental-crosswalk-manifests` writes `connections/experimental/*.connection.toml` and `experimental_manifest_index.json`; the E2E suite verifies parseability and index counts. |
+| Experimental crosswalk | Every crosswalk row can be materialized as a production-shaped candidate manifest under an experimental directory. These TOML files use the same `[source]` schema as supported manifests and keep provenance in comments plus the sidecar index, but intentionally contain no `[[table]]` blocks until a reviewed spec body is applied. | `nango-catalog --experimental-crosswalk-manifests` writes `connections/experimental/*.connection.toml` and `experimental_manifest_index.json`; the E2E suite verifies parseability, production-shaped metadata placement, and index counts. |
 | Generated | A reviewed spec source can be converted into a parseable SPUR `*.connection.toml` with auth metadata and one or more `[[table]]` blocks. | `--reviewed-source github=<local-spec>` generates a parseable GitHub manifest in tests. |
 | Scannable generic path | The runtime can scan a generated table shape against a local API fixture. | `nango-import` + hand-added table scans an API-key, cursor-paginated REST envelope; `openapi-import` scans typed rows from a generated OpenAPI table. |
 | Provider-specific E2E | A named provider manifest/adapter proves auth plus request plus typed table/action rows. | Google Ads proves OAuth refresh -> bearer -> provider headers -> typed POST action rows. Polymarket proves no-auth REST table and table-function scans. Linear proves GraphQL table scan shape but not REST/OpenAPI. |
@@ -365,7 +365,10 @@ The experimental directory is the landing zone for the 295 Nango/APIs.guru
 crosswalk rows. It is intentionally lower than the `generated` support level:
 files in this directory are candidate source/auth bundles, not runnable table
 manifests, because the catalog build has not yet fetched or reviewed the
-OpenAPI bodies needed to emit `[[table]]` blocks.
+OpenAPI bodies needed to emit `[[table]]` blocks. The TOML body should remain
+promotion-ready: metadata that is not part of the runtime manifest schema stays
+in comments and `experimental_manifest_index.json`, so promotion is a path move
+plus reviewed table blocks rather than a format migration.
 
 The generated directory should be reproducible. If checked in, diffs must be stable and sorted by provider key.
 
