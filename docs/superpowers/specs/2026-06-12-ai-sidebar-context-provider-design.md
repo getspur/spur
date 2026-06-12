@@ -291,11 +291,32 @@ notebook_symbol_refs({ notebook_path, ref })
 
 ## 7. Q4 — DAG Lineage
 
-Everything required already exists in the engine; lineage is one join exposed
-as a walk:
+### The topology is static; only the state is live
+
+The lineage graph is **declared in the notebook file itself**:
+`cell.metadata.spur.dag` (produces/consumes/source) and
+`cell.metadata.spur.frontend` (binds/emits) are what the reactive engine
+derives its schedule from at load time. The full topology is therefore
+derivable by static analysis — it is exactly the spur-semantic facts §6
+extracts, emitted as a **typed DAG**:
 
 ```text
-catalog ⋈ dag.source ⋈ DAG edges ⋈ port_manifest ⋈ spur.frontend(binds/emits) ⋈ cell states
+node types:  dataset (ds://, port://) | job (cell://)
+edge types:  source | produces | consumes | binds | emits
+provenance:  declared (metadata) | actual (spur.put/get, table calls)
+```
+
+Static means: queryable offline with no running kernel, batch-indexed for
+repo-resident notebooks (analyst SQL over whole pipelines), and guaranteed
+consistent with the engine because both read the same declarations.
+
+What is **not** in the `.ipynb` is only the state overlay: port versions (the
+PortStore `manifest.json` sidecar), engine staleness, and unsaved execution
+state (`execution_count` and error outputs are in the file once saved).
+Lineage is therefore composed as:
+
+```text
+static typed DAG (shared extractor)  ⊕  live overlay (port versions, staleness, errors)
 ```
 
 ### Tool: `notebook_lineage`
@@ -318,8 +339,10 @@ vocabulary** (vocabulary only — not the protocol): tables and ports are
     { "ref": "port://nb/markets@v12", "role": "dataset", "state": "fresh" }
   ],
   "edges": [
-    { "from": "ds://polymarket/markets", "to": "cell://a3f1@v7", "via": "source" },
-    { "from": "cell://a3f1@v7", "to": "port://nb/markets@v12", "via": "produces" }
+    { "from": "ds://polymarket/markets", "to": "cell://a3f1@v7", "via": "source",
+      "provenance": "declared" },
+    { "from": "cell://a3f1@v7", "to": "port://nb/markets@v12", "via": "produces",
+      "provenance": "declared" }      // "actual" provenance arrives with slice 3
   ],
   "truncated": false,
   "next_queries": [ ... ]
@@ -394,8 +417,13 @@ contract.
    - extend server instructions; remove dead `AppScope.skill`
    - sidebar turn: lens preamble + orient hint; `selected_cell_ref` pass-through
 2. **Lineage**
-   - `notebook_lineage` walker over existing engine state
+   - `notebook_lineage`: declared topology read through the daemon's existing
+     DAG model (the `notebook_dag_status` machinery parses the same metadata
+     today) ⊕ live overlay (port manifest, staleness, error excerpts)
    - `dag_ops` lens preamble references it
+   - slice 3 later swaps the topology source to the shared spur-graph
+     extractor, adding `actual` edge provenance and drift — tool contract
+     unchanged
 3. **Spur-semantic fact layer in spur-graph + daemon integration**
    - depends on the `2026-06-10` spur-graph notebook-support plan landing
      (container parser, language fallback chain, grammar delegation)
@@ -422,8 +450,11 @@ Slice 1:
 Slice 2:
 - upstream/downstream/both walks; depth bound honored; visited cap survives a
   hand-corrupted cyclic metadata fixture
-- failed job nodes carry `error_excerpt` from cell outputs
-- node roles follow dataset/job vocabulary
+- lineage topology agrees with `notebook_dag_status` nodes/edges for the same
+  notebook (single source of declarations)
+- live overlay: port versions from the PortStore manifest; failed job nodes
+  carry `error_excerpt` from cell outputs
+- node roles follow dataset/job vocabulary; edges carry `provenance: declared`
 
 Slice 3 (extraction tests live in `spur-graph`; integration tests in the daemon):
 - python cells: defs/uses/puts/gets/tables extraction fixtures
