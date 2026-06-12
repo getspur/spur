@@ -756,7 +756,7 @@ impressions = {{ json = "$.metrics.impressions", type = "Int64" }}
 
     #[test]
     fn google_ads_preset_has_refresh_auth_and_required_headers() {
-        let toml = include_str!("../../connections/tier-a/google_ads.connection.toml");
+        let toml = include_str!("../../connections/supported/google_ads.connection.toml");
         let manifest = Manifest::from_toml(toml).expect("preset parses");
         // Both Google Ads headers are present.
         assert_eq!(
@@ -792,7 +792,7 @@ impressions = {{ json = "$.metrics.impressions", type = "Int64" }}
 
     #[test]
     fn facebook_ads_preset_parses_with_typed_insights_action() {
-        let toml = include_str!("../../connections/tier-a/facebook_ads.connection.toml");
+        let toml = include_str!("../../connections/supported/facebook_ads.connection.toml");
         let manifest = Manifest::from_toml(toml).expect("facebook ads preset parses");
         assert!(manifest.source.allow_writes);
         assert!(matches!(
@@ -810,6 +810,101 @@ impressions = {{ json = "$.metrics.impressions", type = "Int64" }}
             .get("impressions")
             .expect("impressions column present");
         assert_eq!(impressions.ty, "Int64");
+    }
+
+    #[tokio::test]
+    async fn facebook_ads_action_uses_refresh_bearer_and_returns_typed_rows() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/access_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "meta-test-token",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/act_123/insights"))
+            .and(header("authorization", "Bearer meta-test-token"))
+            .and(query_param(
+                "fields",
+                "campaign_name,impressions,clicks,spend",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "campaign_name": "Launch",
+                        "impressions": "1000",
+                        "clicks": "17",
+                        "spend": "42.50"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        const ENV_KEYS: &[&str] = &[
+            "FACEBOOK_TYPED_TEST_CLIENT_ID",
+            "FACEBOOK_TYPED_TEST_CLIENT_SECRET",
+            "FACEBOOK_TYPED_TEST_REFRESH_TOKEN",
+        ];
+        struct EnvGuard(&'static [&'static str]);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for key in self.0 {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+        let _env_guard = EnvGuard(ENV_KEYS);
+        std::env::set_var("FACEBOOK_TYPED_TEST_CLIENT_ID", "cid");
+        std::env::set_var("FACEBOOK_TYPED_TEST_CLIENT_SECRET", "secret");
+        std::env::set_var("FACEBOOK_TYPED_TEST_REFRESH_TOKEN", "rt");
+
+        let token_url = format!("{}/oauth/access_token", server.uri());
+        let toml = include_str!("../../connections/supported/facebook_ads.connection.toml")
+            .replace("https://graph.facebook.com/v21.0", &server.uri())
+            .replace("FACEBOOK_ADS_CLIENT_ID", "FACEBOOK_TYPED_TEST_CLIENT_ID")
+            .replace(
+                "FACEBOOK_ADS_CLIENT_SECRET",
+                "FACEBOOK_TYPED_TEST_CLIENT_SECRET",
+            )
+            .replace(
+                "FACEBOOK_ADS_REFRESH_TOKEN",
+                "FACEBOOK_TYPED_TEST_REFRESH_TOKEN",
+            )
+            .replace(&format!("{}/oauth/access_token", server.uri()), &token_url);
+        let manifest = Manifest::from_toml(&toml).expect("preset parses");
+        let adapter = ManifestAdapter::new(manifest);
+        let req = ActionRequest {
+            name: "facebook_ads_insights".to_string(),
+            method: "POST".to_string(),
+            path: "/act_123/insights".to_string(),
+            query: vec![(
+                "fields".to_string(),
+                "campaign_name,impressions,clicks,spend".to_string(),
+            )],
+            body: None,
+            idempotency_key: None,
+            dry_run: false,
+        };
+
+        let batches = adapter
+            .act(req)
+            .await
+            .expect("facebook insights returns typed rows");
+        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(rows, 1);
+        let schema = batches[0].schema();
+        assert!(
+            schema.column_with_name("http_status").is_none(),
+            "typed action columns should replace raw http fallback columns"
+        );
+        assert!(schema.column_with_name("campaign_name").is_some());
+        assert!(schema.column_with_name("impressions").is_some());
     }
 
     #[tokio::test]
@@ -960,7 +1055,7 @@ query = {{ in = "body", type = "Utf8", required = true }}
         std::env::set_var("GADS_TYPED_TEST_REFRESH_TOKEN", "rt-typed");
 
         let token_url = format!("{}/token", server.uri());
-        let toml = include_str!("../../connections/tier-a/google_ads.connection.toml")
+        let toml = include_str!("../../connections/supported/google_ads.connection.toml")
             .replace("https://googleads.googleapis.com/v20", &server.uri())
             .replace("https://oauth2.googleapis.com/token", &token_url)
             .replace("DEVELOPER_TOKEN", "GADS_TYPED_TEST_DEVELOPER_TOKEN")

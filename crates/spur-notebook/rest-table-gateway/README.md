@@ -25,6 +25,12 @@ Auth support is grouped into import tiers:
 - Tier B: OAuth-family providers imported as BYO-token manifests; SPUR does not run the hosted OAuth flow.
 - Tier C: unsupported or unknown auth modes that require manual review before use.
 
+Reviewed Tier B presets that are committed under `connections/supported/` are
+shown as supported action-function providers in the notebook Wizard. Google Ads
+and Facebook Ads use OAuth refresh credentials supplied from the user's
+environment and return typed action rows; they are not REST `GET` table-function
+presets.
+
 Nango provider metadata is licensed under Elastic License 2.0. Preserve the generated notice comments and this crate's `THIRD_PARTY_NOTICES` when distributing imported `*.connection.toml` files. Bundling imported manifests is intended for local distribution only, not for offering a hosted or managed Nango-derived service.
 
 ## Nango catalog workflow

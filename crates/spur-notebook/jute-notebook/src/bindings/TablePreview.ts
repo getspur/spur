@@ -10,6 +10,10 @@ export type TablePreview = {
    */
   name: string;
   /**
+   * HTTP method used by the table or action.
+   */
+  method: string;
+  /**
    * Request path for the table.
    */
   path: string;

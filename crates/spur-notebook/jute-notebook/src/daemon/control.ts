@@ -490,7 +490,10 @@ function isProviderSummary(value: unknown): value is ProviderSummary {
     Array.isArray(candidate.credentialEnvVars) &&
     candidate.credentialEnvVars.every((envVar) => typeof envVar === "string") &&
     Array.isArray(candidate.tables) &&
-    candidate.tables.every(isTablePreview)
+    candidate.tables.every(isTablePreview) &&
+    (candidate.actions === undefined ||
+      (Array.isArray(candidate.actions) &&
+        candidate.actions.every(isTablePreview)))
   );
 }
 
@@ -510,6 +513,7 @@ function isTablePreview(value: unknown): value is TablePreview {
   const table = value as Partial<TablePreview>;
   return (
     typeof table.name === "string" &&
+    (table.method === undefined || typeof table.method === "string") &&
     typeof table.path === "string" &&
     (table.responsePath === null || typeof table.responsePath === "string") &&
     Array.isArray(table.columns) &&

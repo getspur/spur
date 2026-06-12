@@ -52,17 +52,20 @@ function providersResponse() {
           tables: [
             {
               name: "security_advisories",
+              method: "GET",
               path: "/advisories",
               responsePath: null,
               columns: [{ name: "ghsaId", ty: "Utf8", json: "$.ghsa_id" }],
             },
             {
               name: "authenticated_repos",
+              method: "GET",
               path: "/user/repos",
               responsePath: null,
               columns: [{ name: "name", ty: "Utf8", json: "$.name" }],
             },
           ],
+          actions: [],
         },
         {
           name: "stripe",
@@ -80,9 +83,42 @@ function providersResponse() {
           tables: [
             {
               name: "getaccounts",
+              method: "GET",
               path: "/v1/accounts",
               responsePath: "$.data",
               columns: [{ name: "id", ty: "Utf8", json: "$.id" }],
+            },
+          ],
+          actions: [],
+        },
+        {
+          name: "facebook-ads",
+          displayName: "Facebook Ads",
+          category: "Marketing",
+          tier: "B",
+          authMode: "OAUTH2",
+          supportLevel: "supported",
+          providerKey: "facebook-ads",
+          baseUrl: "https://graph.facebook.com/v21.0",
+          specSourceKey: null,
+          specUrl: null,
+          experimentalSpecCount: 0,
+          credentialEnvVars: [
+            "FACEBOOK_ADS_CLIENT_ID",
+            "FACEBOOK_ADS_CLIENT_SECRET",
+            "FACEBOOK_ADS_REFRESH_TOKEN",
+          ],
+          tables: [],
+          actions: [
+            {
+              name: "facebook_ads_insights",
+              method: "POST",
+              path: "/{ad_account_id}/insights",
+              responsePath: "$.data",
+              columns: [
+                { name: "campaign_name", ty: "Utf8", json: "$.campaign_name" },
+                { name: "impressions", ty: "Int64", json: "$.impressions" },
+              ],
             },
           ],
         },
@@ -100,6 +136,7 @@ function providersResponse() {
           experimentalSpecCount: 1,
           credentialEnvVars: [],
           tables: [],
+          actions: [],
         },
         {
           name: "hubspot",
@@ -115,6 +152,7 @@ function providersResponse() {
           experimentalSpecCount: 0,
           credentialEnvVars: [],
           tables: [],
+          actions: [],
         },
       ],
     },
@@ -130,6 +168,7 @@ function tablePreviewResponse() {
         tables: [
           {
             name: "stripe_charges",
+            method: "GET",
             path: "/v1/charges",
             responsePath: "$.data",
             columns: [
@@ -239,6 +278,15 @@ async function chooseGithubProvider() {
 
   const github = await screen.findByRole("button", { name: /GitHub/i });
   fireEvent.click(github);
+}
+
+async function chooseFacebookAdsProvider() {
+  fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
+
+  const facebookAds = await screen.findByRole("button", {
+    name: /Facebook Ads/i,
+  });
+  fireEvent.click(facebookAds);
 }
 
 async function chooseExperimentalProvider() {
@@ -366,6 +414,66 @@ describe("AddRestApiWizard", () => {
         provider: "github",
         spec_text: null,
         credentials: [["GITHUB_TOKEN", "ghp_test"]],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  test("supported_tier_b_provider_shows_ready_actions_without_openapi_preview", async () => {
+    const onClose = renderWizard();
+
+    await chooseFacebookAdsProvider();
+    expect(screen.getByText("1 action-function")).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to Facebook Ads" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("https://graph.facebook.com/v21.0"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("FACEBOOK_ADS_CLIENT_ID")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("FACEBOOK_ADS_CLIENT_SECRET"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("FACEBOOK_ADS_REFRESH_TOKEN"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("FACEBOOK_ADS_CLIENT_ID"), {
+      target: { value: "meta-client" },
+    });
+    fireEvent.change(screen.getByLabelText("FACEBOOK_ADS_CLIENT_SECRET"), {
+      target: { value: "meta-secret" },
+    });
+    fireEvent.change(screen.getByLabelText("FACEBOOK_ADS_REFRESH_TOKEN"), {
+      target: { value: "meta-refresh" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByText("Bundled actions")).toBeInTheDocument();
+    expect(screen.getByText("facebook_ads_insights")).toBeInTheDocument();
+    expect(
+      screen.getByText("POST /{ad_account_id}/insights"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.getByText("1 action-function")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "add_api_datasource_from_import",
+        name: "facebook-ads",
+        provider: "facebook-ads",
+        spec_text: null,
+        credentials: [
+          ["FACEBOOK_ADS_CLIENT_ID", "meta-client"],
+          ["FACEBOOK_ADS_CLIENT_SECRET", "meta-secret"],
+          ["FACEBOOK_ADS_REFRESH_TOKEN", "meta-refresh"],
+        ],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
