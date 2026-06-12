@@ -8,7 +8,7 @@ shows the real path to use today vs the planned front door.
 
 | Step | Today (agents) | Planned | Task |
 |------|----------------|---------|------|
-| Init / scaffold | Manual (see below) | `notebook_app_init`, `spur app init` | U4/U5 |
+| Init / scaffold | `notebook_app_init` (EXISTS) | `spur app init` | U5 |
 | Dev (hot-reload) | N/A | `spur app dev` | U5 |
 | Doctor | `notebook_app_doctor` (EXISTS) | same | — |
 | Pack to .spurapp | `notebook_export_spur_app` (EXISTS) | `notebook_app_pack`, `spur app pack` | U4/U5 |
@@ -17,9 +17,27 @@ shows the real path to use today vs the planned front door.
 
 ## 1. Init / scaffold
 
-### Today: manual
+### Today: notebook_app_init
 
-The reference app `app_gallery/html_video/` is the template. Copy and adapt:
+```json
+{ "app_root": "/abs/path/to/new-app", "name": "my-app", "template": "minimal" }
+```
+
+Scaffolds a doctor-green app structure from a template. Only `app_root` is
+required; `name` defaults to the `app_root` directory name and `template` to
+`"minimal"`. Returns `{ ok, app_root, name, template, files[], next_steps[] }`
+and refuses to overwrite existing app files.
+
+Templates (one per app model type — the registry lives in
+`crates/spur-notebook/src/spur_app/scaffold.rs`; adding a new model type is one
+new registry entry):
+
+| Template | What you get |
+|----------|--------------|
+| `minimal` | Python MCP server on the `spur_app` SDK (`server/main.py`, `server/requirements.txt`), a TypeScript frontend cell on the vendored TS SDK (`sdk/call_tool.ts`, `sdk/wire.ts` — byte-identical to `sdk/typescript/src/`), `skill/SKILL.md`, and pytest tests via `spur_app.testing`. |
+| `frontend-only` | No MCP server: entry notebook with an HTML-output frontend cell plus `skill/SKILL.md`. Add a server later by editing `spur-app.json`. |
+
+The generated structure for `minimal`:
 
 ```text
 my-app/
@@ -27,47 +45,24 @@ my-app/
   app.ipynb             # entry notebook
   server/
     main.py             # Python MCP server using spur_app
-    requirements.txt    # at minimum: spur_app, mcp
+    requirements.txt    # mcp + spur_app (monorepo-relative path or TODO(U7))
   skill/
     SKILL.md            # app-specific agent skill
+  sdk/
+    call_tool.ts        # vendored TS SDK (declared in manifest "sdk")
+    wire.ts
+  conftest.py           # re-exports spur_app.testing.fake_port_store
+  tests/
+    test_app.py         # pytest tests, zero hand-written protocol code
 ```
 
-Minimal `server/main.py`:
+When the app root is inside a spur checkout, `server/requirements.txt` gets the
+monorepo-relative `sdk/python` path (the `app_gallery/html_video` pattern);
+elsewhere it falls back to `mcp>=1.0.0` plus a `TODO(U7)` comment until
+`spur-app` is on PyPI.
 
-```python
-from spur_app import App
-
-app = App("my-app")   # name must match spur-app.json
-
-@app.tool()
-def my_tool(x: str) -> str:
-    return x.upper()
-
-if __name__ == "__main__":
-    app.run()
-```
-
-Minimal `spur-app.json` (no capabilities):
-
-```json
-{
-  "schema": "spur.app/v1",
-  "name": "my-app",
-  "entry_notebook": "app.ipynb",
-  "open_mode": "app",
-  "runtime": { "jute_min": "0.1.0" },
-  "mcp_server": { "type": "python", "entry": "server/main.py",
-                  "requirements": "server/requirements.txt", "env": {} }
-}
-```
-
-### Planned: notebook_app_init (U4)
-
-```json
-{ "app_root": "/abs/path/to/new-app", "name": "my-app", "template": "minimal" }
-```
-
-Will scaffold a doctor-green app structure from a template. Not yet registered.
+The reference app `app_gallery/html_video/` remains the worked example of the
+same structure at full scale.
 
 ### Planned: spur app init (U5 CLI)
 
