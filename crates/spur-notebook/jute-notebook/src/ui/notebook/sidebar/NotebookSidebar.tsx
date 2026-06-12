@@ -1,16 +1,23 @@
 import clsx from "clsx";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { useRef } from "react";
+import type { KeyboardEvent, PointerEvent } from "react";
 
-import { useSidebar } from "@/stores/sidebar";
+import {
+  MAX_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  useSidebar,
+} from "@/stores/sidebar";
 
 import { SIDEBAR_PANELS } from "./panels";
 
 export default function NotebookSidebar() {
   const activePanelId = useSidebar((state) => state.activePanelId);
   const collapsed = useSidebar((state) => state.collapsed);
+  const sidebarWidth = useSidebar((state) => state.width);
   const activatePanel = useSidebar((state) => state.activatePanel);
   const toggleCollapsed = useSidebar((state) => state.toggleCollapsed);
+  const setWidth = useSidebar((state) => state.setWidth);
 
   const activePanel =
     SIDEBAR_PANELS.find((panel) => panel.id === activePanelId) ??
@@ -25,14 +32,56 @@ export default function NotebookSidebar() {
   const mountedIds = mountedIdsRef.current;
 
   const ActiveIcon = activePanel.icon;
+  const resizeBy = (delta: number) => setWidth(sidebarWidth + delta);
+
+  const startResize = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const onPointerMove = (moveEvent: globalThis.PointerEvent) => {
+      setWidth(window.innerWidth - moveEvent.clientX - 48);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  };
+
+  const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      resizeBy(24);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      resizeBy(-24);
+    }
+  };
 
   return (
-    <aside className="flex h-full shrink-0 border-l border-gray-200 bg-gray-50 text-gray-700">
+    <aside className="relative flex h-full shrink-0 border-l border-gray-200 bg-gray-50 text-gray-700">
+      {!collapsed && (
+        <div
+          aria-label="Resize sidebar"
+          aria-orientation="vertical"
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuenow={sidebarWidth}
+          className="absolute left-0 top-0 z-10 h-full w-2 -translate-x-1 cursor-col-resize outline-none transition-colors hover:bg-gray-900/10 focus:bg-gray-900/10"
+          onKeyDown={resizeWithKeyboard}
+          onPointerDown={startResize}
+          role="separator"
+          tabIndex={0}
+        />
+      )}
       <div
         className={clsx(
           "flex h-full min-h-0 flex-col overflow-hidden transition-[width] duration-200",
-          collapsed ? "w-0" : "w-80",
+          collapsed && "w-0",
         )}
+        style={collapsed ? undefined : { width: sidebarWidth }}
       >
         {!collapsed && (
           <div className="flex items-center gap-2 px-3 pb-2 pt-14">

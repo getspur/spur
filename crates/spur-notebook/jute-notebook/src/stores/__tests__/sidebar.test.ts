@@ -7,6 +7,7 @@ describe("useSidebar", () => {
     useSidebar.setState({
       activePanelId: DEFAULT_SIDEBAR_PANEL_ID,
       collapsed: false,
+      width: 420,
     });
   });
 
@@ -36,5 +37,13 @@ describe("useSidebar", () => {
     expect(useSidebar.getState().collapsed).toBe(true);
     useSidebar.getState().setCollapsed(false);
     expect(useSidebar.getState().collapsed).toBe(false);
+  });
+
+  test("setWidth clamps sidebar width to readable bounds", () => {
+    useSidebar.getState().setWidth(760);
+    expect(useSidebar.getState().width).toBe(720);
+
+    useSidebar.getState().setWidth(260);
+    expect(useSidebar.getState().width).toBe(320);
   });
 });

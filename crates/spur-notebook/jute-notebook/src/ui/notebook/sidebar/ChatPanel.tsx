@@ -30,9 +30,11 @@ type AgentInfo = {
 
 function messageClassName(kind: ChatMessage["kind"]) {
   return clsx(
-    "rounded-md border px-3 py-2 text-[13px]",
+    "max-w-[92%] rounded-md border px-3 py-2 text-[13px]",
+    kind === "user" &&
+      "ml-auto border-[#1e1f23] bg-[#1e1f23] text-[#fdfdf8]",
     kind === "assistant" &&
-      "border-[#bfc1b7] bg-[#fdfdf8] text-[#23251d]",
+      "mr-auto border-[#bfc1b7] bg-[#fdfdf8] text-[#23251d]",
     kind === "error" && "border-red-200 bg-red-50 text-red-700",
   );
 }
@@ -125,6 +127,9 @@ export default function ChatPanel() {
   const applyEventForScope = useChat((state) => state.applyEventForScope);
   const clearPendingPermissionForScope = useChat(
     (state) => state.clearPendingPermissionForScope,
+  );
+  const appendUserMessageForScope = useChat(
+    (state) => state.appendUserMessageForScope,
   );
 
   useEffect(() => {
@@ -298,6 +303,7 @@ export default function ChatPanel() {
 
     setPrompt("");
     setSubmitting(true);
+    appendUserMessageForScope(turnScopeKey, trimmedPrompt);
     try {
       await invoke("chat_turn", {
         agentName: turnAgentName,
@@ -346,30 +352,38 @@ export default function ChatPanel() {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 bg-[#fdfdf8] px-3 pb-16 pt-3 text-[#23251d]">
-      <header className="space-y-3 rounded-md border border-[#bfc1b7] bg-[#eeefe9] px-3 py-3">
-        <div className="flex items-start gap-2">
+    <div className="flex h-full min-h-0 flex-col gap-2 bg-[#fdfdf8] px-3 pb-16 pt-2 text-[#23251d]">
+      <header className="space-y-2 border-b border-[#d8d9d1] bg-[#fdfdf8] pb-2">
+        <div className="flex items-center gap-2">
           <BotIcon
-            className="mt-0.5 shrink-0 text-[#65675e]"
-            size={16}
+            className="shrink-0 text-[#65675e]"
+            size={14}
             strokeWidth={1.5}
           />
           <div className="min-w-0 flex-1">
-            <div className="text-[10px] font-medium uppercase text-[#65675e]">
-              Active scope
-            </div>
-            <div className="truncate text-base font-semibold leading-5 text-[#23251d]">
+            <div className="truncate text-sm font-semibold leading-5 text-[#23251d]">
               {scopeLabel}
             </div>
             <div className="mt-0.5 truncate text-[11px] text-[#65675e]">
               {scopeHint}
             </div>
           </div>
+          <div className="flex max-w-[44%] items-center gap-1.5 rounded-full bg-[#eeefe9] px-2 py-1 text-[11px] font-medium text-[#65675e]">
+            <CircleIcon
+              className={clsx(
+                "h-2 w-2 shrink-0 fill-current",
+                pendingPermission ? "text-[#d6b36e]" : "text-[#65675e]",
+              )}
+              size={8}
+              strokeWidth={0}
+            />
+            <span className="truncate">{currentStatusText}</span>
+          </div>
         </div>
-        <div className="grid grid-cols-1 gap-2">
+        <div className="grid grid-cols-2 gap-2">
           {agents.length > 0 && (
             <label className="min-w-0">
-              <span className="mb-1 block text-[10px] font-medium uppercase text-[#65675e]">
+              <span className="sr-only">
                 Agent
               </span>
               <select
@@ -389,7 +403,7 @@ export default function ChatPanel() {
           )}
           {sessions.length > 0 && (
             <label className="min-w-0">
-              <span className="mb-1 block text-[10px] font-medium uppercase text-[#65675e]">
+              <span className="sr-only">
                 Session
               </span>
               <select
@@ -407,17 +421,6 @@ export default function ChatPanel() {
               </select>
             </label>
           )}
-        </div>
-        <div className="flex items-center gap-2 rounded-md border border-[#bfc1b7] bg-[#fdfdf8] px-2 py-1.5 text-[11px] font-medium text-[#65675e]">
-          <CircleIcon
-            className={clsx(
-              "h-2 w-2 fill-current",
-              pendingPermission ? "text-[#d6b36e]" : "text-[#65675e]",
-            )}
-            size={8}
-            strokeWidth={0}
-          />
-          <span className="truncate">{currentStatusText}</span>
         </div>
       </header>
 

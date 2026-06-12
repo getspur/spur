@@ -20,6 +20,19 @@ describe("useChat", () => {
     expect(state.streamingText).toBe("");
   });
 
+  test("appends user messages to the active conversation", () => {
+    const s = useChat.getState();
+
+    s.appendUserMessage("Summarize this notebook");
+
+    expect(useChat.getState().messages).toEqual([
+      expect.objectContaining({
+        kind: "user",
+        text: "Summarize this notebook",
+      }),
+    ]);
+  });
+
   test("keeps conversations isolated by active app key", () => {
     const s = useChat.getState();
 

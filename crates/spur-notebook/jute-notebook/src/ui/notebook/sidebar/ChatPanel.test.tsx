@@ -200,6 +200,15 @@ describe("ChatPanel", () => {
         }),
       );
     });
+    expect(screen.getByText("Summarize the notebook")).toBeInTheDocument();
+    expect(
+      useChat.getState().conversations["notebook:/tmp/revenue.ipynb"].messages,
+    ).toEqual([
+      expect.objectContaining({
+        kind: "user",
+        text: "Summarize the notebook",
+      }),
+    ]);
 
     tauriMocks.channels[0]?.onmessage?.({
       type: "messageChunk",

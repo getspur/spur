@@ -33,6 +33,7 @@ beforeEach(() => {
   useSidebar.setState({
     activePanelId: DEFAULT_SIDEBAR_PANEL_ID,
     collapsed: false,
+    width: 420,
   });
 });
 afterEach(cleanup);
@@ -79,5 +80,18 @@ describe("NotebookSidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: "AI chat" }));
     expect(screen.getByText("BETA BODY")).toBeVisible();
     expect(useSidebar.getState().collapsed).toBe(false);
+  });
+
+  test("keyboard resize handle adjusts sidebar width", () => {
+    render(<NotebookSidebar />);
+
+    fireEvent.keyDown(
+      screen.getByRole("separator", { name: "Resize sidebar" }),
+      {
+        key: "ArrowLeft",
+      },
+    );
+
+    expect(useSidebar.getState().width).toBe(444);
   });
 });
