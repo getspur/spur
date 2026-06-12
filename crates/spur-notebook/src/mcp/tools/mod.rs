@@ -24,6 +24,7 @@ pub mod interrupt;
 pub mod kernel_info;
 pub mod list_datasources;
 pub mod notebook_app_doctor;
+pub mod notebook_app_init;
 pub mod notebook_dag_status;
 pub mod notebook_push_source;
 pub mod notebook_run_cascade;
@@ -98,6 +99,7 @@ pub fn tools() -> Vec<Tool> {
         daemon_files::reveal_in_finder_tool(),
         daemon_files::discard_scratch_tool(),
         notebook_app_doctor::tool(),
+        notebook_app_init::tool(),
     ]
 }
 
@@ -290,6 +292,7 @@ mod tests {
             .any(|name| name == "notebook_set_cell_code_type"));
         assert!(names.iter().any(|name| name == "notebook_push_source"));
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
+        assert!(names.iter().any(|name| name == "notebook_app_init"));
         assert!(names.iter().any(|name| name == "notebook_run_cell"));
         assert!(names.iter().any(|name| name == "notebook_run_cascade"));
         assert!(names.iter().any(|name| name == "notebook.edit_cell"));
