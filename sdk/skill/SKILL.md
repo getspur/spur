@@ -23,7 +23,7 @@ tool surface (verified at task write time against
 | `notebook_export_spur_app`  | EXISTS   | `crates/spur-notebook/src/mcp/tools/export_spur_app.rs` |
 | `notebook_import_spur_app`  | EXISTS   | `crates/spur-notebook/src/mcp/tools/import_spur_app.rs` |
 | `notebook_app_doctor`       | EXISTS   | `crates/spur-notebook/src/mcp/tools/notebook_app_doctor.rs` |
-| `notebook_app_init`         | PLANNED  | (task U4 — not yet registered) |
+| `notebook_app_init`         | EXISTS   | `crates/spur-notebook/src/mcp/tools/notebook_app_init.rs` |
 | `notebook_app_pack`         | PLANNED  | (task U4 — not yet registered) |
 | `spur app init`             | PLANNED  | (CLI task U5 — not yet shipped) |
 | `spur app pack`             | PLANNED  | (CLI task U5 — not yet shipped) |
@@ -82,17 +82,23 @@ See `sdk/docs/manifest.md` for the full field reference and
 
 ### 2. Scaffold the app
 
-**Today's real path (agents):** create files manually — see
-`app_gallery/html_video/` as the reference app:
-- `spur-app.json` — manifest (from §1 above)
-- `app.ipynb` — the entry notebook
-- `server/main.py` — the Python MCP server entry point
-- `server/requirements.txt` — dependencies
-- `skill/SKILL.md` — the app-specific agent skill
+**Today's real path (agents):** `notebook_app_init` (exists) scaffolds a
+doctor-green app from a template:
 
-**Planned front doors (not yet available):**
-- `notebook_app_init` (MCP, planned U4) — scaffolds the full structure from a
-  template, doctor-green out of the box.
+```json
+{ "app_root": "/abs/path/to/my-app", "name": "my-app", "template": "minimal" }
+```
+
+Templates: `minimal` (Python MCP server on `spur_app` + TypeScript frontend
+cell on the vendored TS SDK + skill + pytest tests) and `frontend-only` (no
+server). Only `app_root` is required — `name` defaults to the directory name,
+`template` to `minimal`. The result lists every file written plus `next_steps`
+for the rest of the loop. It refuses to overwrite existing app files.
+
+The reference app `app_gallery/html_video/` remains the worked example of the
+same structure at full scale.
+
+**Planned front door (not yet available):**
 - `spur app init` (CLI, planned U5) — standalone equivalent.
 
 ### 3. Write server tools and frontend cells
@@ -203,7 +209,7 @@ should block the commit.
 |------|----------------|-----------------|
 | Pack to `.spurapp` | `notebook_export_spur_app { notebook_path, output_path }` | `notebook_app_pack` / `spur app pack` |
 | Install / test pack | `notebook_import_spur_app { path }` | same tool |
-| Scaffold | Manual (see §2) | `notebook_app_init` / `spur app init` |
+| Scaffold | `notebook_app_init { app_root }` (see §2) | `spur app init` |
 
 `notebook_export_spur_app` creates the canonical `.spurapp` zip archive (Rust
 packer in `spur_app::archive`). Never simulate the packer yourself — the fixture-
