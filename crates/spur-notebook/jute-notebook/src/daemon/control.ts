@@ -9,6 +9,7 @@ import type {
   OpenApiTablePreview,
   ProviderSummary,
   RecentNotebookEntry,
+  TablePreview,
 } from "@/bindings";
 
 type PathCommandName = "open" | "rename" | "new" | "new_at" | "reopen";
@@ -478,7 +479,13 @@ function isProviderSummary(value: unknown): value is ProviderSummary {
     typeof candidate.displayName === "string" &&
     typeof candidate.category === "string" &&
     typeof candidate.tier === "string" &&
-    typeof candidate.authMode === "string"
+    typeof candidate.authMode === "string" &&
+    typeof candidate.supportLevel === "string" &&
+    (candidate.baseUrl === null || typeof candidate.baseUrl === "string") &&
+    Array.isArray(candidate.credentialEnvVars) &&
+    candidate.credentialEnvVars.every((envVar) => typeof envVar === "string") &&
+    Array.isArray(candidate.tables) &&
+    candidate.tables.every(isTablePreview)
   );
 }
 
@@ -488,23 +495,26 @@ function isOpenApiTablePreview(value: unknown): value is OpenApiTablePreview {
   const candidate = value as Partial<OpenApiTablePreview>;
   return (
     Array.isArray(candidate.tables) &&
-    candidate.tables.every(
-      (table) =>
-        typeof table === "object" &&
-        table !== null &&
-        typeof table.name === "string" &&
-        typeof table.path === "string" &&
-        (table.responsePath === null ||
-          typeof table.responsePath === "string") &&
-        Array.isArray(table.columns) &&
-        table.columns.every(
-          (column) =>
-            typeof column === "object" &&
-            column !== null &&
-            typeof column.name === "string" &&
-            typeof column.ty === "string" &&
-            typeof column.json === "string",
-        ),
+    candidate.tables.every(isTablePreview)
+  );
+}
+
+function isTablePreview(value: unknown): value is TablePreview {
+  if (typeof value !== "object" || value === null) return false;
+
+  const table = value as Partial<TablePreview>;
+  return (
+    typeof table.name === "string" &&
+    typeof table.path === "string" &&
+    (table.responsePath === null || typeof table.responsePath === "string") &&
+    Array.isArray(table.columns) &&
+    table.columns.every(
+      (column) =>
+        typeof column === "object" &&
+        column !== null &&
+        typeof column.name === "string" &&
+        typeof column.ty === "string" &&
+        typeof column.json === "string",
     )
   );
 }

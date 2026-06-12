@@ -291,6 +291,8 @@ export default function AddRestApiWizard({
       !currentName || currentName === "rest_api" ? provider.name : currentName,
     );
     setCredentials({});
+    setTablePreview(tablePreviewFromProvider(provider));
+    setConnectionOnly(false);
     setPrefillCredentialKeys([]);
     setPrefillManifestToml(null);
     setError(null);
@@ -1005,6 +1007,8 @@ function ProviderTile({
   selected: boolean;
 }) {
   const tier = normalizedTier(provider.tier);
+  const tableCount = provider.tables.length;
+  const ready = isSupportedProvider(provider);
 
   return (
     <button
@@ -1029,8 +1033,13 @@ function ProviderTile({
         <span className="truncate text-[11px] text-gray-400">
           {provider.category}
         </span>
-        <TierBadge tier={tier} />
+        {ready ? <ReadyBadge /> : <TierBadge tier={tier} />}
       </span>
+      {tableCount > 0 && (
+        <span className="mt-2 block truncate text-[11px] font-medium text-green-700">
+          {tableCount} table-function{tableCount === 1 ? "" : "s"}
+        </span>
+      )}
     </button>
   );
 }
@@ -1182,6 +1191,9 @@ function ConnectStep({
     ? baseUrlForProvider(selectedProvider)
     : "https://api.example.com";
   const tier = normalizedTier(selectedProvider?.tier);
+  const supportedProvider = selectedProvider
+    ? isSupportedProvider(selectedProvider)
+    : false;
   const heading = selectedProvider
     ? `Connect to ${selectedProvider.displayName}`
     : "Connect a custom REST API";
@@ -1222,11 +1234,17 @@ function ConnectStep({
           )}
           <p>
             <span className="font-medium">
-              {tier === "A" ? "Drop-in." : "Bring your own token."}
+              {supportedProvider
+                ? "Tables ready."
+                : tier === "A"
+                  ? "Drop-in."
+                  : "Bring your own token."}
             </span>{" "}
-            {tier === "A"
-              ? "Paste the credential once; it stays in session state until the daemon receives it."
-              : "Generate a token with the provider and paste it here for this session."}
+            {supportedProvider
+              ? "This provider has a bundled manifest with table-functions; add credentials and continue."
+              : tier === "A"
+                ? "Paste the credential once; it stays in session state until the daemon receives it."
+                : "Generate a token with the provider and paste it here for this session."}
           </p>
         </div>
       </div>
@@ -1298,55 +1316,65 @@ function TablesStep({
   tablePreview: OpenApiTablePreview | null;
 }) {
   const providerName = selectedProvider?.displayName ?? "API";
+  const catalogTablesReady =
+    selectedProvider !== null &&
+    isSupportedProvider(selectedProvider) &&
+    tablePreview !== null &&
+    specText.trim().length === 0;
 
   return (
     <div>
       <h3 className="text-base font-semibold text-gray-950">Tables</h3>
       <p className="mt-1 text-sm text-gray-500">
-        Preview generated table-functions from an OpenAPI spec, or add the
-        connection now and define tables later.
+        {catalogTablesReady
+          ? "Bundled provider tables are ready. Review the table-functions before adding the datasource."
+          : "Preview generated table-functions from an OpenAPI spec, or add the connection now and define tables later."}
       </p>
 
-      <label className="mt-4 block">
-        <span className="text-xs font-medium text-gray-600">
-          OpenAPI spec text or URL
-        </span>
-        <textarea
-          aria-label="OpenAPI spec text or URL"
-          className="mt-1 min-h-28 w-full resize-y rounded border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
-          disabled={connectionOnly}
-          onChange={(event) => onSpecTextChange(event.currentTarget.value)}
-          placeholder={`${providerName.toLowerCase()}.openapi.json or https://...`}
-          value={specText}
-        />
-      </label>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          className="inline-flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:border-gray-950 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
-          disabled={connectionOnly || pendingPreview}
-          onClick={onPreviewTables}
-          type="button"
-        >
-          {pendingPreview ? (
-            <Loader2Icon className="animate-spin" size={14} />
-          ) : (
-            <TableIcon size={14} strokeWidth={1.5} />
-          )}
-          Preview tables
-        </button>
-        <label className="inline-flex items-center gap-2 text-sm text-gray-600">
-          <input
-            checked={connectionOnly}
-            className="h-4 w-4 rounded border-gray-300 text-indigo-600"
-            onChange={(event) =>
-              onConnectionOnlyChange(event.currentTarget.checked)
-            }
-            type="checkbox"
+      {!catalogTablesReady && (
+        <label className="mt-4 block">
+          <span className="text-xs font-medium text-gray-600">
+            OpenAPI spec text or URL
+          </span>
+          <textarea
+            aria-label="OpenAPI spec text or URL"
+            className="mt-1 min-h-28 w-full resize-y rounded border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+            disabled={connectionOnly}
+            onChange={(event) => onSpecTextChange(event.currentTarget.value)}
+            placeholder={`${providerName.toLowerCase()}.openapi.json or https://...`}
+            value={specText}
           />
-          Connection only
         </label>
-      </div>
+      )}
+
+      {!catalogTablesReady && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            className="inline-flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:border-gray-950 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+            disabled={connectionOnly || pendingPreview}
+            onClick={onPreviewTables}
+            type="button"
+          >
+            {pendingPreview ? (
+              <Loader2Icon className="animate-spin" size={14} />
+            ) : (
+              <TableIcon size={14} strokeWidth={1.5} />
+            )}
+            Preview tables
+          </button>
+          <label className="inline-flex items-center gap-2 text-sm text-gray-600">
+            <input
+              checked={connectionOnly}
+              className="h-4 w-4 rounded border-gray-300 text-indigo-600"
+              onChange={(event) =>
+                onConnectionOnlyChange(event.currentTarget.checked)
+              }
+              type="checkbox"
+            />
+            Connection only
+          </label>
+        </div>
+      )}
 
       {error && <ErrorBanner message={error} />}
 
@@ -1498,9 +1526,11 @@ function ReviewStep({
                 .join(", ")}
         </SummaryRow>
         <SummaryRow label="Spec">
-          {connectionOnly || specText.trim().length === 0
-            ? "connection only"
-            : "OpenAPI spec attached"}
+          {selectedProvider && isSupportedProvider(selectedProvider)
+            ? "bundled provider manifest"
+            : connectionOnly || specText.trim().length === 0
+              ? "connection only"
+              : "OpenAPI spec attached"}
         </SummaryRow>
         <SummaryRow label="Tables">
           {tableCount === 0
@@ -1560,6 +1590,14 @@ function TierBadge({ tier }: { tier: string }) {
       )}
     >
       Tier {tier}
+    </span>
+  );
+}
+
+function ReadyBadge() {
+  return (
+    <span className="rounded bg-green-50 px-1.5 py-0.5 text-[10px] font-semibold text-green-700">
+      Ready
     </span>
   );
 }
@@ -1638,6 +1676,14 @@ function credentialFieldsForProvider(
 ): CredentialField[] {
   if (!provider) return [];
 
+  if (provider.credentialEnvVars.length > 0) {
+    return provider.credentialEnvVars.map((key) => ({
+      key,
+      label: key,
+      type: key.endsWith("_USER") ? "text" : "password",
+    }));
+  }
+
   const prefix = envPrefix(provider.name);
   const authMode = provider.authMode.toLowerCase();
 
@@ -1672,6 +1718,10 @@ function providerSummaryFromPrefill(providerName: string): ProviderSummary {
     category: "Imported",
     tier: "B",
     authMode: "API_KEY",
+    supportLevel: "catalog",
+    baseUrl: null,
+    credentialEnvVars: [],
+    tables: [],
   };
 }
 
@@ -1700,6 +1750,8 @@ function authSchemeLabel(authMode: string) {
 }
 
 function baseUrlForProvider(provider: ProviderSummary) {
+  if (provider.baseUrl) return provider.baseUrl;
+
   const known = KNOWN_BASE_URLS[provider.name.toLowerCase()];
   if (known) return known;
 
@@ -1736,6 +1788,17 @@ function tablePreviewFromTemplate(
       })),
     })),
   };
+}
+
+function tablePreviewFromProvider(
+  provider: ProviderSummary,
+): OpenApiTablePreview | null {
+  if (provider.tables.length === 0) return null;
+  return { tables: provider.tables };
+}
+
+function isSupportedProvider(provider: ProviderSummary) {
+  return provider.supportLevel === "supported" && provider.tables.length > 0;
 }
 
 function errorMessage(caught: unknown) {
