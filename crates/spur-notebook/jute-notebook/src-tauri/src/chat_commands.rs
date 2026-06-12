@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     chat_state::{get_or_init_sidebar_chat_for_agent, SidebarAgentInfo},
+    commands::daemon_socket_path_from_args,
     state::State,
     Error,
 };
@@ -30,7 +31,7 @@ pub async fn chat_turn(
     on_event: Channel<ChatEvent>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<(), Error> {
-    let scope = resolve_app_scope(Path::new(notebook_path)).map_err(command_error)?;
+    let scope = resolve_chat_scope(notebook_path)?;
     let prompt = prompt.to_owned();
     let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
@@ -113,7 +114,7 @@ pub async fn chat_sessions_list(
     agent_name: Option<String>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<Vec<SessionInfo>, Error> {
-    let scope = resolve_app_scope(Path::new(notebook_path)).map_err(command_error)?;
+    let scope = resolve_chat_scope(notebook_path)?;
     let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
@@ -128,7 +129,7 @@ pub async fn chat_switch_session(
     agent_name: Option<String>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<(), Error> {
-    let scope = resolve_app_scope(Path::new(notebook_path)).map_err(command_error)?;
+    let scope = resolve_chat_scope(notebook_path)?;
     let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
@@ -146,7 +147,7 @@ pub async fn chat_new_session(
     agent_name: Option<String>,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<String, Error> {
-    let scope = resolve_app_scope(Path::new(notebook_path)).map_err(command_error)?;
+    let scope = resolve_chat_scope(notebook_path)?;
     let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
         .await
         .map_err(command_error)?;
@@ -191,6 +192,13 @@ pub async fn chat_permission_respond(
 
 fn command_error(error: impl std::fmt::Display) -> Error {
     Error::NotebookDaemon(error.to_string())
+}
+
+fn resolve_chat_scope(
+    notebook_path: &str,
+) -> Result<spur_notebook::sidebar_chat::types::AppScope, Error> {
+    let socket_path = daemon_socket_path_from_args()?;
+    resolve_app_scope(Path::new(notebook_path), &socket_path).map_err(command_error)
 }
 
 fn selected_agent(agent_name: Option<&str>) -> Option<&str> {
