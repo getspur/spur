@@ -1082,6 +1082,9 @@ fn preview_open_api_tables(
 fn curated_preset_toml(source: &str) -> Option<&'static str> {
     let key = source.replace('-', "_");
     match key.as_str() {
+        "algolia" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/algolia.connection.toml"
+        )),
         "github" | "github_pat" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/github.connection.toml"
         )),
@@ -3927,6 +3930,32 @@ score = { json = "$.score", type = "Int64" }
                 .iter()
                 .any(|table| table.name == "authenticated_repos"),
             "curated preset carries working GitHub tables, not the empty stub"
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn build_api_import_manifest_prefers_curated_algolia_preset() {
+        let (source, manifest) =
+            build_api_import_manifest("algolia", Some("algolia".to_string()), None)
+                .expect("manifest builds from preset");
+
+        assert_eq!(source, "algolia");
+        assert_eq!(
+            manifest.source.connection_config,
+            vec!["algolia_app_id".to_string()]
+        );
+        assert!(matches!(
+            manifest.source.auth,
+            spur_rest_table_gateway::adapter::manifest::AuthCfg::Header { ref name, ref env }
+                if name == "x-algolia-api-key" && env == "ALGOLIA_API_KEY"
+        ));
+        assert!(
+            manifest
+                .tables
+                .iter()
+                .any(|table| table.name == "list_indices"),
+            "curated preset carries working Algolia tables, not the empty stub"
         );
     }
 
