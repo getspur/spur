@@ -120,6 +120,8 @@ BUILD_QUEUE_TICKETS_DIR="$BUILD_QUEUE_DIR/tickets"
 BUILD_QUEUE_TICKET=""
 BUILD_QUEUE_SLOT_ACQUIRED=0
 BUILD_QUEUE_LOCK_HELD=0
+VM_LIFECYCLE_LOCK_DIR="$BUILD_QUEUE_DIR/vm-lifecycle.lock"
+VM_LIFECYCLE_LOCK_HELD=0
 
 queue_lock() {
     mkdir -p "$BUILD_QUEUE_DIR" "$BUILD_QUEUE_TICKETS_DIR"
@@ -220,6 +222,31 @@ release_build_queue_slot() {
     fi
 }
 
+vm_lifecycle_lock() {
+    mkdir -p "$BUILD_QUEUE_DIR"
+    while ! mkdir "$VM_LIFECYCLE_LOCK_DIR" 2>/dev/null; do
+        local owner=""
+        if [[ -f "$VM_LIFECYCLE_LOCK_DIR/pid" ]]; then
+            owner=$(cat "$VM_LIFECYCLE_LOCK_DIR/pid" 2>/dev/null || true)
+        fi
+        if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -rf "$VM_LIFECYCLE_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        log "VM lifecycle: another local build is recovering $VM_NAME; waiting..."
+        sleep "$BUILD_QUEUE_POLL_SECONDS"
+    done
+    printf '%s\n' "$$" >"$VM_LIFECYCLE_LOCK_DIR/pid"
+    VM_LIFECYCLE_LOCK_HELD=1
+}
+
+vm_lifecycle_unlock() {
+    if [[ "$VM_LIFECYCLE_LOCK_HELD" -eq 1 ]]; then
+        rm -rf "$VM_LIFECYCLE_LOCK_DIR" 2>/dev/null || true
+        VM_LIFECYCLE_LOCK_HELD=0
+    fi
+}
+
 # ---- VM lifecycle ----------------------------------------------------------
 # Distinguish three states:
 #   RUNNING                       — proceed
@@ -256,6 +283,7 @@ vm_status() {
 # boot disk (and thus the synced source tree under ~/spur) is lost and re-synced.
 ensure_vm_up() {
     local status
+    vm_lifecycle_lock
     status=$(vm_status)
     case "$status" in
         RUNNING)
@@ -263,9 +291,17 @@ ensure_vm_up() {
         TERMINATED|STOPPED|STOPPING|SUSPENDED|SUSPENDING)
             if [[ $AUTO_SPIN -eq 1 ]]; then
                 log "VM $VM_NAME is $status — starting..."
-                gcloud compute instances start "$VM_NAME" \
+                if ! gcloud compute instances start "$VM_NAME" \
                     --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
-                    --quiet || { log "start failed"; exit $INFRA_UNAVAILABLE; }
+                    --quiet; then
+                    status=$(vm_status)
+                    if [[ "$status" == "RUNNING" ]]; then
+                        log "start failed but VM is now RUNNING; another local build likely recovered it."
+                    else
+                        log "start failed and VM is $status"
+                        exit $INFRA_UNAVAILABLE
+                    fi
+                fi
                 wait_for_ssh || { log "SSH never came up"; exit $INFRA_UNAVAILABLE; }
             else
                 log "VM $VM_NAME is $status. Pass --auto-spin to start it."
@@ -275,7 +311,16 @@ ensure_vm_up() {
         MISSING)
             if [[ $AUTO_SPIN -eq 1 ]]; then
                 log "VM $VM_NAME missing — spinning a fresh one..."
-                "$SCRIPT_DIR/spin.sh" || { log "spin.sh failed"; exit $INFRA_UNAVAILABLE; }
+                if ! "$SCRIPT_DIR/spin.sh"; then
+                    status=$(vm_status)
+                    if [[ "$status" == "RUNNING" ]]; then
+                        log "spin.sh failed but VM is now RUNNING; another local build likely recovered it."
+                    else
+                        log "spin.sh failed and VM is $status"
+                        exit $INFRA_UNAVAILABLE
+                    fi
+                fi
+                wait_for_ssh || { log "SSH never came up"; exit $INFRA_UNAVAILABLE; }
             else
                 log "VM $VM_NAME missing. Pass --auto-spin to create it."
                 exit $INFRA_UNAVAILABLE
@@ -286,6 +331,7 @@ ensure_vm_up() {
             exit $INFRA_UNAVAILABLE
             ;;
     esac
+    vm_lifecycle_unlock
 }
 
 # ---- choose SSH transport: direct (default) -> IAP -> local ----------------
@@ -661,6 +707,7 @@ FILE_LIST=""
 XFER_LIST=""
 cleanup() {
     release_build_queue_slot
+    vm_lifecycle_unlock
     queue_unlock
     [[ -n "${FILE_LIST:-}" ]] && rm -f "$FILE_LIST"
     [[ -n "${XFER_LIST:-}" ]] && rm -f "$XFER_LIST"
