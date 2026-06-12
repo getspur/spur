@@ -9,6 +9,9 @@ pub struct ProviderEntry {
     pub categories: Option<Vec<String>>,
     pub auth_mode: Option<String>,
     pub token_url: Option<String>,
+    pub credentials: Option<IndexMap<String, serde_yaml::Value>>,
+    pub connection_config: Option<IndexMap<String, serde_yaml::Value>>,
+    pub docs: Option<serde_yaml::Value>,
     // Authorization-code (Approach C) provider fields. Parsed now; consumed by the
     // deferred "Connect with browser" wizard task. Optional so non-OAuth providers
     // (and the SAMPLE / OAUTH2_CC / TWO_STEP entries) keep parsing unchanged.
@@ -23,7 +26,10 @@ pub struct ProviderEntry {
 pub struct Proxy {
     pub base_url: Option<String>,
     pub headers: Option<IndexMap<String, String>>,
+    pub query: Option<IndexMap<String, String>>,
+    pub body: Option<IndexMap<String, String>>,
     pub paginate: Option<Paginate>,
+    pub verification: Option<Verification>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +40,20 @@ pub struct Paginate {
     pub cursor_name_in_request: Option<String>,
     pub response_path: Option<String>,
     pub limit_name_in_request: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Verification {
+    One(VerificationEndpoint),
+    Many(Vec<VerificationEndpoint>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerificationEndpoint {
+    pub method: Option<String>,
+    pub endpoint: Option<String>,
+    pub endpoints: Option<Vec<String>>,
 }
 
 pub fn parse_providers(
@@ -488,6 +508,40 @@ acme:
             Some("code")
         );
         assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
+    }
+
+    #[test]
+    fn parses_verification_plural_endpoints() {
+        const Y: &str = r#"
+events:
+  display_name: Events
+  proxy:
+    verification:
+      method: GET
+      endpoints:
+        - /api/v2/auth/introspect
+        - /api/v2/users/me
+"#;
+        let providers = parse_providers(Y).expect("providers yaml should parse");
+        let verification = providers["events"]
+            .proxy
+            .as_ref()
+            .and_then(|proxy| proxy.verification.as_ref())
+            .expect("verification should be present");
+
+        match verification {
+            Verification::One(endpoint) => {
+                assert_eq!(endpoint.method.as_deref(), Some("GET"));
+                assert_eq!(
+                    endpoint.endpoints.as_ref().expect("endpoints should parse"),
+                    &[
+                        "/api/v2/auth/introspect".to_string(),
+                        "/api/v2/users/me".to_string()
+                    ]
+                );
+            }
+            Verification::Many(_) => panic!("expected single verification object"),
+        }
     }
 
     #[test]
