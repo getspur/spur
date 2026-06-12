@@ -22,6 +22,7 @@ JSON Schema: `sdk/schema/spur-app.schema.json`
 | `mcp_server` | object \| null | no | `null` | MCP server configuration. `null` means the app has no server plugin. |
 | `capabilities` | object | no | all off | Capability declarations. See [Capabilities](#capabilities). |
 | `skill` | string \| null | no | `null` | Relative path to the app's agent skill file. When `null`, the host looks for `"skill/SKILL.md"` by convention. |
+| `sdk` | object \| null | no | `null` | Vendored SDK declarations. `sdk.typescript` names the app-root-relative directory holding the vendored TS modules (`call_tool.ts`, `wire.ts`); the doctor verifies they exist. |
 
 ## Runtime
 
