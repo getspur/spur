@@ -19,5 +19,8 @@ pub use crosswalk::{
     CrosswalkReport, ProviderSpecCrosswalk,
 };
 pub use fulfillment::ProviderFulfillmentStatus;
-pub use generate::{generate_reviewed_manifest, GeneratedReviewedManifest};
+pub use generate::{
+    candidate_provider_blocked_reason, generate_candidate_manifest, generate_reviewed_manifest,
+    CandidateBlockedReason, GeneratedCandidateManifest, GeneratedReviewedManifest,
+};
 pub use provider::{provider_catalog_from_yaml, ProviderCatalogEntry, ProviderSeedClass};
