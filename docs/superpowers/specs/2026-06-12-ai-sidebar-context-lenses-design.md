@@ -3,7 +3,7 @@
 - **Status:** Draft for user review
 - **Date:** 2026-06-12
 - **Surface:** `crates/spur-notebook/jute-notebook/src/ui/notebook/sidebar/ChatPanel.tsx`
-- **Related:** `2026-06-09-notebook-sidebar-ai-agent-design.md`, `2026-06-12-ai-sidebar-single-tab-chat-panel-design.md`
+- **Related:** `2026-06-09-notebook-sidebar-ai-agent-design.md`, `2026-06-12-ai-sidebar-single-tab-chat-panel-design.md`, `2026-06-12-ai-sidebar-context-provider-design.md` (companion — context substrate)
 - **Design Epic:** `bd-f1ab`
 - **Review Source:** `bd-1t1s`, `claude-code` delegation `96639037-4323-4d54-be1a-e01373572fe4`
 
@@ -208,6 +208,11 @@ pub struct ChatTurnContext {
 The backend still resolves authoritative scope from the notebook path/app
 manifest for session identity. The context payload is used for turn framing,
 not for deciding session storage.
+
+The companion spec `2026-06-12-ai-sidebar-context-provider-design.md` extends
+this contract with an optional `selectedCellRef` field and defines the
+queryable context substrate (catalog, orientation pack, lineage, cell facts)
+that the lens preamble points the agent at.
 
 ### Prompt Framing
 
