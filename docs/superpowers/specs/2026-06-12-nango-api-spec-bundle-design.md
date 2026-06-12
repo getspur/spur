@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft design |
+| Status | Implemented plan submitted |
 | Date | 2026-06-12 |
 | Crates | `crates/spur-notebook/rest-table-gateway`, `crates/spur-notebook` |
 | Inputs | Nango `providers.yaml`, public OpenAPI/Swagger catalogs, provider docs, GraphQL metadata |
