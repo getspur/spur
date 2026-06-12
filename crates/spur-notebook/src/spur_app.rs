@@ -5,6 +5,7 @@ use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
 pub mod archive;
+pub mod scaffold;
 
 pub const SPUR_APP_EXTENSION: &str = "spurapp";
 pub const SPUR_APP_MANIFEST: &str = "spur-app.json";
