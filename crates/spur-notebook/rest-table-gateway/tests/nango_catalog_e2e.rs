@@ -252,10 +252,18 @@ fn nango_catalog_cli_can_write_experimental_crosswalk_manifests() {
     let github_manifest =
         std::fs::read_to_string(&github_manifest_path).expect("manifest should be readable");
     assert!(github_manifest.contains("Experimental crosswalk candidate"));
-    assert!(github_manifest.contains("support_level = \"experimental_crosswalk\""));
-    assert!(github_manifest.contains("spec_source_key = \"github.com\""));
+    assert!(github_manifest.contains("# support_level: experimental_crosswalk"));
+    assert!(github_manifest.contains("# spec_source_key: github.com"));
     assert!(github_manifest
-        .contains("spec_url = \"https://api.apis.guru/v2/specs/github.com/1.1.4/openapi.json\""));
+        .contains("# spec_url: https://api.apis.guru/v2/specs/github.com/1.1.4/openapi.json"));
+    assert!(
+        !github_manifest.contains("\nsupport_level ="),
+        "experimental manifests should stay production-shaped and keep metadata out of TOML keys"
+    );
+    assert!(
+        !github_manifest.contains("\nspec_url ="),
+        "experimental manifests should keep spec provenance in comments and the sidecar index"
+    );
 
     let parsed = Manifest::from_toml(&github_manifest).expect("experimental manifest should parse");
     assert_eq!(parsed.source.name, "github-pat");
