@@ -70,11 +70,33 @@ function providersResponse() {
           category: "Payments",
           tier: "A",
           authMode: "API_KEY",
-          supportLevel: "experimental",
+          supportLevel: "supported",
           providerKey: "stripe",
           baseUrl: "https://api.stripe.com",
-          specSourceKey: "stripe.com",
-          specUrl: "https://api.apis.guru/v2/specs/stripe.com/2023-10-16/openapi.json",
+          specSourceKey: null,
+          specUrl: null,
+          experimentalSpecCount: 1,
+          credentialEnvVars: ["STRIPE_API_KEY"],
+          tables: [
+            {
+              name: "getaccounts",
+              path: "/v1/accounts",
+              responsePath: "$.data",
+              columns: [{ name: "id", ty: "Utf8", json: "$.id" }],
+            },
+          ],
+        },
+        {
+          name: "1password-events",
+          displayName: "1Password (Events API)",
+          category: "Productivity",
+          tier: "A",
+          authMode: "API_KEY",
+          supportLevel: "experimental",
+          providerKey: "1password-events",
+          baseUrl: "https://events.1password.com",
+          specSourceKey: "1password.com:events",
+          specUrl: "https://api.apis.guru/v2/specs/1password.com/events/1.0.0/openapi.json",
           experimentalSpecCount: 1,
           credentialEnvVars: [],
           tables: [],
@@ -219,6 +241,15 @@ async function chooseGithubProvider() {
   fireEvent.click(github);
 }
 
+async function chooseExperimentalProvider() {
+  fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
+
+  const provider = await screen.findByRole("button", {
+    name: /1Password \(Events API\)/i,
+  });
+  fireEvent.click(provider);
+}
+
 describe("AddRestApiWizard", () => {
   afterEach(() => {
     cleanup();
@@ -343,7 +374,7 @@ describe("AddRestApiWizard", () => {
   test("experimental_catalog_provider_uses_spec_url_and_provider_key", async () => {
     const onClose = renderWizard();
 
-    await chooseStripeProvider();
+    await chooseExperimentalProvider();
 
     expect(screen.getAllByText("Experimental").length).toBeGreaterThan(0);
     expect(screen.getByText("1 spec candidate")).toBeInTheDocument();
@@ -351,18 +382,18 @@ describe("AddRestApiWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(
       await screen.findByRole("heading", {
-        name: "Connect to Stripe",
+        name: "Connect to 1Password (Events API)",
       }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("STRIPE_API_KEY")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("STRIPE_API_KEY"), {
-      target: { value: "sk_test" },
+    expect(screen.getByLabelText("1PASSWORD_EVENTS_API_KEY")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("1PASSWORD_EVENTS_API_KEY"), {
+      target: { value: "events_test" },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     const specInput = screen.getByLabelText("OpenAPI spec text or URL");
     expect(specInput).toHaveValue(
-      "https://api.apis.guru/v2/specs/stripe.com/2023-10-16/openapi.json",
+      "https://api.apis.guru/v2/specs/1password.com/events/1.0.0/openapi.json",
     );
 
     fireEvent.click(screen.getByLabelText("Connection only"));
@@ -372,10 +403,10 @@ describe("AddRestApiWizard", () => {
     await waitFor(() =>
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "add_api_datasource_from_import",
-        name: "stripe",
-        provider: "stripe",
+        name: "1password_events",
+        provider: "1password-events",
         spec_text: null,
-        credentials: [["STRIPE_API_KEY", "sk_test"]],
+        credentials: [["1PASSWORD_EVENTS_API_KEY", "events_test"]],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));

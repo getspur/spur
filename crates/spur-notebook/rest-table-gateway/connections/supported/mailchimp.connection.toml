@@ -1,0 +1,871 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier A OpenAPI sources.
+
+[source]
+name = "mailchimp"
+base_url = "https://${connectionConfig.mailchimp_datacenter}.api.mailchimp.com/3.0"
+connection_config = ["mailchimp_datacenter"]
+auth = { scheme = "header", name = "authorization", env = "MAILCHIMP_API_KEY" }
+
+
+[[table]]
+name = "getroot"
+path = "/"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getaccountexportid"
+path = "/account-exports/{export_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getaudiencecontacts"
+path = "/audiences"
+response_path = "$.audiences"
+
+[table.columns]
+enabled_channels = { json = "$.enabled_channels", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+stats_total_contacts = { json = "$.stats.total_contacts", type = "Int64" }
+
+[table.filters]
+count = { param = "count" }
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getaudienceid"
+path = "/audiences/{audience_id}"
+response_path = "$.enabled_channels"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getaudiencecontact"
+path = "/audiences/{audience_id}/contacts/{contact_id}"
+response_path = "$.tags"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getautomationsid"
+path = "/automations/{workflow_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getautomationsidemailsid"
+path = "/automations/{workflow_id}/emails/{workflow_email_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[[table]]
+name = "getautomationsidemailsidqueueid"
+path = "/automations/{workflow_id}/emails/{workflow_email_id}/queue/{subscriber_hash}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[[table]]
+name = "getautomationsidremovedsubscribersid"
+path = "/automations/{workflow_id}/removed-subscribers/{subscriber_hash}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[[table]]
+name = "getbatchwebhook"
+path = "/batch-webhooks/{batch_webhook_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getbatchesid"
+path = "/batches/{batch_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getcampaignfoldersid"
+path = "/campaign-folders/{folder_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getcampaignsid"
+path = "/campaigns/{campaign_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+include_resend_shortcut_eligibility = { param = "include_resend_shortcut_eligibility" }
+include_resend_shortcut_usage = { param = "include_resend_shortcut_usage" }
+
+[[table]]
+name = "getcampaignsidfeedbackid"
+path = "/campaigns/{campaign_id}/feedback/{feedback_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getcampaignsidsendchecklist"
+path = "/campaigns/{campaign_id}/send-checklist"
+response_path = "$.items"
+
+[table.columns]
+details = { json = "$.details", type = "Utf8" }
+heading = { json = "$.heading", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+type = { json = "$.type", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getconnectedsitesid"
+path = "/connected-sites/{connected_site_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getconversationsid"
+path = "/conversations/{conversation_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getconversationsidmessagesid"
+path = "/conversations/{conversation_id}/messages/{message_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getecommercestoresid"
+path = "/ecommerce/stores/{store_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getecommercestoresidcartsidlinesid"
+path = "/ecommerce/stores/{store_id}/carts/{cart_id}/lines/{line_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getecommercestoresidcustomersid"
+path = "/ecommerce/stores/{store_id}/customers/{customer_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getecommercestoresidordersidlinesid"
+path = "/ecommerce/stores/{store_id}/orders/{order_id}/lines/{line_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getecommercestoresidproductsidvariantsid"
+path = "/ecommerce/stores/{store_id}/products/{product_id}/variants/{variant_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getecommercestoresidpromorulesid"
+path = "/ecommerce/stores/{store_id}/promo-rules/{promo_rule_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getecommercestoresidpromocodesid"
+path = "/ecommerce/stores/{store_id}/promo-rules/{promo_rule_id}/promo-codes/{promo_code_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getfilemanagerfilesid"
+path = "/file-manager/files/{file_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getfilemanagerfoldersid"
+path = "/file-manager/folders/{folder_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlandingpageid"
+path = "/landing-pages/{page_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlandingpageidcontent"
+path = "/landing-pages/{page_id}/content"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlistsidabusereportsid"
+path = "/lists/{list_id}/abuse-reports/{report_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+count = { param = "count" }
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlistsidgrowthhistoryid"
+path = "/lists/{list_id}/growth-history/{month}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlistsidinterestcategoriesid"
+path = "/lists/{list_id}/interest-categories/{interest_category_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlistsidinterestcategoriesidinterestsid"
+path = "/lists/{list_id}/interest-categories/{interest_category_id}/interests/{interest_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlistsidmembersidnotesid"
+path = "/lists/{list_id}/members/{subscriber_hash}/notes/{note_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlistsidmergefieldsid"
+path = "/lists/{list_id}/merge-fields/{merge_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getlistsidsegmentsid"
+path = "/lists/{list_id}/segments/{segment_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+include_cleaned = { param = "include_cleaned" }
+include_transactional = { param = "include_transactional" }
+include_unsubscribed = { param = "include_unsubscribed" }
+
+[[table]]
+name = "searchtagsbyname"
+path = "/lists/{list_id}/tag-search"
+response_path = "$.tags"
+
+[table.columns]
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+
+[table.filters]
+name = { param = "name" }
+
+[[table]]
+name = "getlistsidwebhooksid"
+path = "/lists/{list_id}/webhooks/{webhook_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[[table]]
+name = "getreportingsurveysidquestionsid"
+path = "/reporting/surveys/{survey_id}/questions/{question_id}"
+response_path = "$.options"
+
+[table.columns]
+count = { json = "$.count", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+label = { json = "$.label", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getreportingsurveysidresponsesid"
+path = "/reporting/surveys/{survey_id}/responses/{response_id}"
+response_path = "$.results"
+
+[table.columns]
+answer = { json = "$.answer", type = "Utf8" }
+query = { json = "$.query", type = "Utf8" }
+question_id = { json = "$.question_id", type = "Utf8" }
+question_type = { json = "$.question_type", type = "Utf8" }
+
+[[table]]
+name = "getreportsidabusereportsidid"
+path = "/reports/{campaign_id}/abuse-reports/{report_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getreportsidclickdetailsid"
+path = "/reports/{campaign_id}/click-details/{link_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getreportsidclickdetailsidmembersid"
+path = "/reports/{campaign_id}/click-details/{link_id}/members/{subscriber_hash}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getreportsidsenttoid"
+path = "/reports/{campaign_id}/sent-to/{subscriber_hash}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getreportsidunsubscribedid"
+path = "/reports/{campaign_id}/unsubscribed/{subscriber_hash}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getsearchcampaigns"
+path = "/search-campaigns"
+response_path = "$.results"
+
+[table.columns]
+campaign_links = { json = "$.campaign._links", type = "Utf8" }
+campaign_ab_split_opts_from_name_a = { json = "$.campaign.ab_split_opts.from_name_a", type = "Utf8" }
+campaign_ab_split_opts_from_name_b = { json = "$.campaign.ab_split_opts.from_name_b", type = "Utf8" }
+campaign_ab_split_opts_pick_winner = { json = "$.campaign.ab_split_opts.pick_winner", type = "Utf8" }
+campaign_ab_split_opts_reply_email_a = { json = "$.campaign.ab_split_opts.reply_email_a", type = "Utf8" }
+campaign_ab_split_opts_reply_email_b = { json = "$.campaign.ab_split_opts.reply_email_b", type = "Utf8" }
+campaign_ab_split_opts_send_time_a = { json = "$.campaign.ab_split_opts.send_time_a", type = "Utf8" }
+campaign_ab_split_opts_send_time_b = { json = "$.campaign.ab_split_opts.send_time_b", type = "Utf8" }
+campaign_ab_split_opts_send_time_winner = { json = "$.campaign.ab_split_opts.send_time_winner", type = "Utf8" }
+campaign_ab_split_opts_split_size = { json = "$.campaign.ab_split_opts.split_size", type = "Int64" }
+campaign_ab_split_opts_split_test = { json = "$.campaign.ab_split_opts.split_test", type = "Utf8" }
+campaign_ab_split_opts_subject_a = { json = "$.campaign.ab_split_opts.subject_a", type = "Utf8" }
+campaign_ab_split_opts_subject_b = { json = "$.campaign.ab_split_opts.subject_b", type = "Utf8" }
+campaign_ab_split_opts_wait_time = { json = "$.campaign.ab_split_opts.wait_time", type = "Int64" }
+campaign_ab_split_opts_wait_units = { json = "$.campaign.ab_split_opts.wait_units", type = "Utf8" }
+campaign_archive_url = { json = "$.campaign.archive_url", type = "Utf8" }
+campaign_content_type = { json = "$.campaign.content_type", type = "Utf8" }
+campaign_create_time = { json = "$.campaign.create_time", type = "Utf8" }
+campaign_delivery_status_can_cancel = { json = "$.campaign.delivery_status.can_cancel", type = "Boolean" }
+campaign_delivery_status_emails_canceled = { json = "$.campaign.delivery_status.emails_canceled", type = "Int64" }
+campaign_delivery_status_emails_sent = { json = "$.campaign.delivery_status.emails_sent", type = "Int64" }
+campaign_delivery_status_enabled = { json = "$.campaign.delivery_status.enabled", type = "Boolean" }
+campaign_delivery_status_status = { json = "$.campaign.delivery_status.status", type = "Utf8" }
+campaign_emails_sent = { json = "$.campaign.emails_sent", type = "Int64" }
+campaign_id = { json = "$.campaign.id", type = "Utf8" }
+campaign_long_archive_url = { json = "$.campaign.long_archive_url", type = "Utf8" }
+campaign_needs_block_refresh = { json = "$.campaign.needs_block_refresh", type = "Boolean" }
+campaign_parent_campaign_id = { json = "$.campaign.parent_campaign_id", type = "Utf8" }
+campaign_recipients_list_id = { json = "$.campaign.recipients.list_id", type = "Utf8" }
+campaign_recipients_list_is_active = { json = "$.campaign.recipients.list_is_active", type = "Boolean" }
+campaign_recipients_list_name = { json = "$.campaign.recipients.list_name", type = "Utf8" }
+campaign_recipients_recipient_count = { json = "$.campaign.recipients.recipient_count", type = "Int64" }
+campaign_recipients_segment_opts_conditions = { json = "$.campaign.recipients.segment_opts.conditions", type = "Utf8" }
+campaign_recipients_segment_opts_match = { json = "$.campaign.recipients.segment_opts.match", type = "Utf8" }
+campaign_recipients_segment_opts_prebuilt_segment_id = { json = "$.campaign.recipients.segment_opts.prebuilt_segment_id", type = "Utf8" }
+campaign_recipients_segment_opts_saved_segment_id = { json = "$.campaign.recipients.segment_opts.saved_segment_id", type = "Utf8" }
+campaign_recipients_segment_text = { json = "$.campaign.recipients.segment_text", type = "Utf8" }
+campaign_report_summary_click_rate = { json = "$.campaign.report_summary.click_rate", type = "Float64" }
+campaign_report_summary_clicks = { json = "$.campaign.report_summary.clicks", type = "Int64" }
+campaign_report_summary_ecommerce_total_orders = { json = "$.campaign.report_summary.ecommerce.total_orders", type = "Utf8" }
+campaign_report_summary_ecommerce_total_revenue = { json = "$.campaign.report_summary.ecommerce.total_revenue", type = "Utf8" }
+campaign_report_summary_ecommerce_total_spent = { json = "$.campaign.report_summary.ecommerce.total_spent", type = "Utf8" }
+campaign_report_summary_open_rate = { json = "$.campaign.report_summary.open_rate", type = "Float64" }
+campaign_report_summary_opens = { json = "$.campaign.report_summary.opens", type = "Int64" }
+campaign_report_summary_subscriber_clicks = { json = "$.campaign.report_summary.subscriber_clicks", type = "Int64" }
+campaign_report_summary_unique_opens = { json = "$.campaign.report_summary.unique_opens", type = "Int64" }
+campaign_resend_shortcut_eligibility_to_new_subscribers_is_eligible = { json = "$.campaign.resend_shortcut_eligibility.to_new_subscribers.is_eligible", type = "Utf8" }
+campaign_resend_shortcut_eligibility_to_new_subscribers_reason = { json = "$.campaign.resend_shortcut_eligibility.to_new_subscribers.reason", type = "Utf8" }
+campaign_resend_shortcut_eligibility_to_non_clickers_is_eligible = { json = "$.campaign.resend_shortcut_eligibility.to_non_clickers.is_eligible", type = "Utf8" }
+campaign_resend_shortcut_eligibility_to_non_clickers_reason = { json = "$.campaign.resend_shortcut_eligibility.to_non_clickers.reason", type = "Utf8" }
+campaign_resend_shortcut_eligibility_to_non_openers_is_eligible = { json = "$.campaign.resend_shortcut_eligibility.to_non_openers.is_eligible", type = "Utf8" }
+campaign_resend_shortcut_eligibility_to_non_openers_reason = { json = "$.campaign.resend_shortcut_eligibility.to_non_openers.reason", type = "Utf8" }
+campaign_resend_shortcut_eligibility_to_non_purchasers_is_eligible = { json = "$.campaign.resend_shortcut_eligibility.to_non_purchasers.is_eligible", type = "Utf8" }
+campaign_resend_shortcut_eligibility_to_non_purchasers_reason = { json = "$.campaign.resend_shortcut_eligibility.to_non_purchasers.reason", type = "Utf8" }
+campaign_resend_shortcut_usage_original_campaign_id = { json = "$.campaign.resend_shortcut_usage.original_campaign.id", type = "Utf8" }
+campaign_resend_shortcut_usage_original_campaign_shortcut_type = { json = "$.campaign.resend_shortcut_usage.original_campaign.shortcut_type", type = "Utf8" }
+campaign_resend_shortcut_usage_original_campaign_title = { json = "$.campaign.resend_shortcut_usage.original_campaign.title", type = "Utf8" }
+campaign_resend_shortcut_usage_original_campaign_web_id = { json = "$.campaign.resend_shortcut_usage.original_campaign.web_id", type = "Utf8" }
+campaign_resend_shortcut_usage_shortcut_campaigns = { json = "$.campaign.resend_shortcut_usage.shortcut_campaigns", type = "Utf8" }
+campaign_resendable = { json = "$.campaign.resendable", type = "Boolean" }
+campaign_rss_opts_constrain_rss_img = { json = "$.campaign.rss_opts.constrain_rss_img", type = "Boolean" }
+campaign_rss_opts_feed_url = { json = "$.campaign.rss_opts.feed_url", type = "Utf8" }
+campaign_rss_opts_frequency = { json = "$.campaign.rss_opts.frequency", type = "Utf8" }
+campaign_rss_opts_last_sent = { json = "$.campaign.rss_opts.last_sent", type = "Utf8" }
+campaign_rss_opts_schedule_daily_send = { json = "$.campaign.rss_opts.schedule.daily_send", type = "Utf8" }
+campaign_rss_opts_schedule_hour = { json = "$.campaign.rss_opts.schedule.hour", type = "Utf8" }
+campaign_rss_opts_schedule_monthly_send_date = { json = "$.campaign.rss_opts.schedule.monthly_send_date", type = "Utf8" }
+campaign_rss_opts_schedule_weekly_send_day = { json = "$.campaign.rss_opts.schedule.weekly_send_day", type = "Utf8" }
+campaign_send_time = { json = "$.campaign.send_time", type = "Utf8" }
+campaign_settings_authenticate = { json = "$.campaign.settings.authenticate", type = "Boolean" }
+campaign_settings_auto_fb_post = { json = "$.campaign.settings.auto_fb_post", type = "Utf8" }
+campaign_settings_auto_footer = { json = "$.campaign.settings.auto_footer", type = "Boolean" }
+campaign_settings_auto_tweet = { json = "$.campaign.settings.auto_tweet", type = "Boolean" }
+campaign_settings_drag_and_drop = { json = "$.campaign.settings.drag_and_drop", type = "Boolean" }
+campaign_settings_fb_comments = { json = "$.campaign.settings.fb_comments", type = "Boolean" }
+campaign_settings_folder_id = { json = "$.campaign.settings.folder_id", type = "Utf8" }
+campaign_settings_from_name = { json = "$.campaign.settings.from_name", type = "Utf8" }
+campaign_settings_inline_css = { json = "$.campaign.settings.inline_css", type = "Boolean" }
+campaign_settings_preview_text = { json = "$.campaign.settings.preview_text", type = "Utf8" }
+campaign_settings_reply_to = { json = "$.campaign.settings.reply_to", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+query = { param = "query" }
+
+[[table]]
+name = "getsearchmembers"
+path = "/search-members"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+list_id = { param = "list_id" }
+query = { param = "query" }
+
+[[table]]
+name = "gettemplatefoldersid"
+path = "/template-folders/{folder_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "gettemplatesid"
+path = "/templates/{template_id}"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "gettemplatesiddefaultcontent"
+path = "/templates/{template_id}/default-content"
+response_path = "$._links"
+
+[table.columns]
+href = { json = "$.href", type = "Utf8" }
+method = { json = "$.method", type = "Utf8" }
+rel = { json = "$.rel", type = "Utf8" }
+schema = { json = "$.schema", type = "Utf8" }
+targetschema = { json = "$.targetSchema", type = "Utf8" }
+
+[table.filters]
+exclude_fields = { param = "exclude_fields" }
+fields = { param = "fields" }
+
+[[table]]
+name = "getverifieddomains"
+path = "/verified-domains"
+response_path = "$.domains"
+
+[table.columns]
+authenticated = { json = "$.authenticated", type = "Boolean" }
+domain = { json = "$.domain", type = "Utf8" }
+is_free_email_provider = { json = "$.is_free_email_provider", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+verification_email = { json = "$.verification_email", type = "Utf8" }
+verification_sent = { json = "$.verification_sent", type = "Utf8" }
+verified = { json = "$.verified", type = "Boolean" }

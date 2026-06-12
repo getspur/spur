@@ -1,0 +1,4201 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier A OpenAPI sources.
+
+[source]
+name = "zendesk"
+base_url = "https://${connectionConfig.zendesk_subdomain}.zendesk.com/api/v2"
+connection_config = ["zendesk_subdomain"]
+auth = { scheme = "basic", user_env = "ZENDESK_USER", pass_env = "ZENDESK_PASS" }
+
+
+[[table]]
+name = "listapprovalrequests"
+path = "/api/v2/approval_requests"
+response_path = "$.approval_requests"
+
+[table.columns]
+assignee_group_id = { json = "$.assignee_group.id", type = "Int64" }
+assignee_group_name = { json = "$.assignee_group.name", type = "Utf8" }
+assignee_user_id = { json = "$.assignee_user.id", type = "Int64" }
+assignee_user_name = { json = "$.assignee_user.name", type = "Utf8" }
+clarification_flow_messages = { json = "$.clarification_flow_messages", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by_user_id = { json = "$.created_by_user.id", type = "Int64" }
+created_by_user_name = { json = "$.created_by_user.name", type = "Utf8" }
+created_by_user_photo_content_url = { json = "$.created_by_user.photo.content_url", type = "Utf8" }
+decided_at = { json = "$.decided_at", type = "Utf8" }
+decisions = { json = "$.decisions", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+message = { json = "$.message", type = "Utf8" }
+origination_type = { json = "$.origination_type", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+withdrawn_reason = { json = "$.withdrawn_reason", type = "Utf8" }
+
+[table.filters]
+after_cursor = { param = "after_cursor" }
+before_cursor = { param = "before_cursor" }
+filter_assignee_group_id = { param = "filter[assignee_group_id]" }
+filter_assignee_user_id = { param = "filter[assignee_user_id]" }
+filter_status = { param = "filter[status]" }
+
+[[table]]
+name = "listauditlogs"
+path = "/api/v2/audit_logs"
+response_path = "$.audit_logs"
+
+[table.columns]
+action = { json = "$.action", type = "Utf8" }
+action_label = { json = "$.action_label", type = "Utf8" }
+actor_id = { json = "$.actor_id", type = "Int64" }
+actor_name = { json = "$.actor_name", type = "Utf8" }
+change_description = { json = "$.change_description", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+ip_address = { json = "$.ip_address", type = "Utf8" }
+source_id = { json = "$.source_id", type = "Int64" }
+source_label = { json = "$.source_label", type = "Utf8" }
+source_type = { json = "$.source_type", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+filter_action = { param = "filter[action]" }
+filter_actor_id = { param = "filter[actor_id]" }
+filter_created_at = { param = "filter[created_at]" }
+filter_ip_address = { param = "filter[ip_address]" }
+filter_source_id = { param = "filter[source_id]" }
+filter_source_type = { param = "filter[source_type]" }
+sort = { param = "sort" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "autocompletetags"
+path = "/api/v2/autocomplete/tags"
+response_path = "$.tags"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listautomations"
+path = "/api/v2/automations"
+response_path = "$.automations"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+active = { param = "active" }
+include = { param = "include" }
+sort = { param = "sort" }
+
+[[table]]
+name = "listactiveautomations"
+path = "/api/v2/automations/active"
+response_path = "$.automations"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "searchautomations"
+path = "/api/v2/automations/search"
+response_path = "$.automations"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "listbrandagents"
+path = "/api/v2/brand_agents"
+response_path = "$.brand_agents"
+
+[table.columns]
+brand_id = { json = "$.brand_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "checkhostmappingvalidity"
+path = "/api/v2/brands/check_host_mapping"
+response_path = "$.expected_cnames"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+host_mapping = { param = "host_mapping" }
+subdomain = { param = "subdomain" }
+
+[[table]]
+name = "listbrandagentsbybrand"
+path = "/api/v2/brands/{brand_id}/agents"
+response_path = "$.brand_agents"
+
+[table.columns]
+brand_id = { json = "$.brand_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "checkhostmappingvalidityforexistingbrand"
+path = "/api/v2/brands/{brand_id}/check_host_mapping"
+response_path = "$.expected_cnames"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listmonitoredtwitterhandles"
+path = "/api/v2/channels/twitter/monitored_twitter_handles"
+response_path = "$.monitored_twitter_handles"
+
+[table.columns]
+allow_reply = { json = "$.allow_reply", type = "Boolean" }
+avatar_url = { json = "$.avatar_url", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+can_reply = { json = "$.can_reply", type = "Boolean" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+screen_name = { json = "$.screen_name", type = "Utf8" }
+twitter_user_id = { json = "$.twitter_user_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "gettingtwicketstatus"
+path = "/api/v2/channels/twitter/tickets/{comment_id}/statuses"
+response_path = "$.statuses"
+
+[table.columns]
+favorited = { json = "$.favorited", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+retweeted = { json = "$.retweeted", type = "Boolean" }
+user_followed = { json = "$.user_followed", type = "Boolean" }
+
+[table.filters]
+ids = { param = "ids" }
+
+[[table]]
+name = "listcustomobjects"
+path = "/api/v2/custom_objects"
+response_path = "$.custom_objects"
+
+[table.columns]
+allows_attachments = { json = "$.allows_attachments", type = "Boolean" }
+allows_photos = { json = "$.allows_photos", type = "Boolean" }
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by_user_id = { json = "$.created_by_user_id", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+include_in_list_view = { json = "$.include_in_list_view", type = "Boolean" }
+key = { json = "$.key", type = "Utf8" }
+raw_description = { json = "$.raw_description", type = "Utf8" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+raw_title_pluralized = { json = "$.raw_title_pluralized", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+title_pluralized = { json = "$.title_pluralized", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+updated_by_user_id = { json = "$.updated_by_user_id", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+include_ui_path = { param = "include_ui_path" }
+
+[[table]]
+name = "listaccessrules"
+path = "/api/v2/custom_objects/{custom_object_key}/access_rules"
+response_path = "$.access_rules"
+
+[table.columns]
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "listcustomobjectfields"
+path = "/api/v2/custom_objects/{custom_object_key}/fields"
+response_path = "$.custom_object_fields"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+include_standard_fields = { param = "include_standard_fields" }
+
+[[table]]
+name = "listpermissionpolicies"
+path = "/api/v2/custom_objects/{custom_object_key}/permission_policies"
+response_path = "$.policies"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+records_create_allowed = { json = "$.records.create.allowed", type = "Boolean" }
+records_create_rule_id = { json = "$.records.create.rule_id", type = "Int64" }
+records_delete_allowed = { json = "$.records.delete.allowed", type = "Boolean" }
+records_delete_rule_id = { json = "$.records.delete.rule_id", type = "Int64" }
+records_read_allowed = { json = "$.records.read.allowed", type = "Boolean" }
+records_read_rule_id = { json = "$.records.read.rule_id", type = "Int64" }
+records_update_allowed = { json = "$.records.update.allowed", type = "Boolean" }
+records_update_rule_id = { json = "$.records.update.rule_id", type = "Int64" }
+role_name = { json = "$.role_name", type = "Utf8" }
+
+[[table]]
+name = "listcustomobjectrecords"
+path = "/api/v2/custom_objects/{custom_object_key}/records"
+response_path = "$.custom_object_records"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by_user_id = { json = "$.created_by_user_id", type = "Utf8" }
+custom_object_fields = { json = "$.custom_object_fields", type = "Utf8" }
+custom_object_key = { json = "$.custom_object_key", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+photo = { json = "$.photo", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+updated_by_user_id = { json = "$.updated_by_user_id", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+filter_external_ids = { param = "filter[external_ids]" }
+filter_ids = { param = "filter[ids]" }
+page_after = { param = "page[after]" }
+page_before = { param = "page[before]" }
+page_size = { param = "page[size]" }
+sort = { param = "sort" }
+
+[[table]]
+name = "autocompletecustomobjectrecordsearch"
+path = "/api/v2/custom_objects/{custom_object_key}/records/autocomplete"
+response_path = "$.custom_object_records"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by_user_id = { json = "$.created_by_user_id", type = "Utf8" }
+custom_object_fields = { json = "$.custom_object_fields", type = "Utf8" }
+custom_object_key = { json = "$.custom_object_key", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+photo = { json = "$.photo", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+updated_by_user_id = { json = "$.updated_by_user_id", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+assignee_id = { param = "assignee_id" }
+field_id = { param = "field_id" }
+filter_dynamic_values = { param = "filter[dynamic_values]" }
+name = { param = "name" }
+organization_id = { param = "organization_id" }
+page_after = { param = "page[after]" }
+page_before = { param = "page[before]" }
+page_size = { param = "page[size]" }
+requester_id = { param = "requester_id" }
+source = { param = "source" }
+
+[[table]]
+name = "searchcustomobjectrecords"
+path = "/api/v2/custom_objects/{custom_object_key}/records/search"
+response_path = "$.custom_object_records"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by_user_id = { json = "$.created_by_user_id", type = "Utf8" }
+custom_object_fields = { json = "$.custom_object_fields", type = "Utf8" }
+custom_object_key = { json = "$.custom_object_key", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+photo = { json = "$.photo", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+updated_by_user_id = { json = "$.updated_by_user_id", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+page_after = { param = "page[after]" }
+page_before = { param = "page[before]" }
+page_size = { param = "page[size]" }
+query = { param = "query" }
+sort = { param = "sort" }
+
+[[table]]
+name = "listcustomobjectrecordattachments"
+path = "/api/v2/custom_objects/{custom_object_key}/records/{record_id}/attachments"
+response_path = "$.custom_object_record_attachments"
+
+[table.columns]
+content_type = { json = "$.content_type", type = "Utf8" }
+content_url = { json = "$.content_url", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by = { json = "$.created_by", type = "Utf8" }
+custom_object_record_id = { json = "$.custom_object_record_id", type = "Utf8" }
+filename = { json = "$.filename", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+malware_access_override = { json = "$.malware_access_override", type = "Boolean" }
+malware_scan_completed_at = { json = "$.malware_scan_completed_at", type = "Utf8" }
+malware_scan_status = { json = "$.malware_scan_status", type = "Utf8" }
+size = { json = "$.size", type = "Int64" }
+
+[[table]]
+name = "listobjecttriggers"
+path = "/api/v2/custom_objects/{custom_object_key}/triggers"
+response_path = "$.triggers"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+active = { param = "active" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listactiveobjecttriggers"
+path = "/api/v2/custom_objects/{custom_object_key}/triggers/active"
+response_path = "$.triggers"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "searchobjecttriggers"
+path = "/api/v2/custom_objects/{custom_object_key}/triggers/search"
+response_path = "$.triggers"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listcustomroles"
+path = "/api/v2/custom_roles"
+response_path = "$.custom_roles"
+
+[table.columns]
+configuration_actions_access = { json = "$.configuration.actions_access", type = "Utf8" }
+configuration_assign_tickets_to_any_group = { json = "$.configuration.assign_tickets_to_any_group", type = "Boolean" }
+configuration_capacity_rules_access = { json = "$.configuration.capacity_rules_access", type = "Utf8" }
+configuration_chat_access = { json = "$.configuration.chat_access", type = "Boolean" }
+configuration_end_user_list_access = { json = "$.configuration.end_user_list_access", type = "Utf8" }
+configuration_end_user_profile_access = { json = "$.configuration.end_user_profile_access", type = "Utf8" }
+configuration_execute_it_asset_management_actions = { json = "$.configuration.execute_it_asset_management_actions", type = "Boolean" }
+configuration_explore_access = { json = "$.configuration.explore_access", type = "Utf8" }
+configuration_export_views = { json = "$.configuration.export_views", type = "Boolean" }
+configuration_forum_access = { json = "$.configuration.forum_access", type = "Utf8" }
+configuration_forum_access_restricted_content = { json = "$.configuration.forum_access_restricted_content", type = "Boolean" }
+configuration_group_access = { json = "$.configuration.group_access", type = "Boolean" }
+configuration_light_agent = { json = "$.configuration.light_agent", type = "Boolean" }
+configuration_macro_access = { json = "$.configuration.macro_access", type = "Utf8" }
+configuration_manage_business_rules = { json = "$.configuration.manage_business_rules", type = "Boolean" }
+configuration_manage_contextual_workspaces = { json = "$.configuration.manage_contextual_workspaces", type = "Boolean" }
+configuration_manage_dynamic_content = { json = "$.configuration.manage_dynamic_content", type = "Boolean" }
+configuration_manage_extensions_and_channels = { json = "$.configuration.manage_extensions_and_channels", type = "Boolean" }
+configuration_manage_facebook = { json = "$.configuration.manage_facebook", type = "Boolean" }
+configuration_manage_organization_fields = { json = "$.configuration.manage_organization_fields", type = "Boolean" }
+configuration_manage_ticket_fields = { json = "$.configuration.manage_ticket_fields", type = "Boolean" }
+configuration_manage_ticket_forms = { json = "$.configuration.manage_ticket_forms", type = "Boolean" }
+configuration_manage_ticket_settings = { json = "$.configuration.manage_ticket_settings", type = "Boolean" }
+configuration_manage_user_fields = { json = "$.configuration.manage_user_fields", type = "Boolean" }
+configuration_manage_user_own_contacts = { json = "$.configuration.manage_user_own_contacts", type = "Boolean" }
+configuration_manage_user_own_forwarding_numbers = { json = "$.configuration.manage_user_own_forwarding_numbers", type = "Boolean" }
+configuration_manage_user_own_photo = { json = "$.configuration.manage_user_own_photo", type = "Boolean" }
+configuration_moderate_forums = { json = "$.configuration.moderate_forums", type = "Boolean" }
+configuration_modify_closed_tickets = { json = "$.configuration.modify_closed_tickets", type = "Boolean" }
+configuration_organization_editing = { json = "$.configuration.organization_editing", type = "Boolean" }
+configuration_organization_notes_editing = { json = "$.configuration.organization_notes_editing", type = "Boolean" }
+configuration_report_access = { json = "$.configuration.report_access", type = "Utf8" }
+configuration_side_conversation_create = { json = "$.configuration.side_conversation_create", type = "Boolean" }
+configuration_ticket_access = { json = "$.configuration.ticket_access", type = "Utf8" }
+configuration_ticket_comment_access = { json = "$.configuration.ticket_comment_access", type = "Utf8" }
+configuration_ticket_deletion = { json = "$.configuration.ticket_deletion", type = "Boolean" }
+configuration_ticket_editing = { json = "$.configuration.ticket_editing", type = "Boolean" }
+configuration_ticket_merge = { json = "$.configuration.ticket_merge", type = "Boolean" }
+configuration_ticket_tag_editing = { json = "$.configuration.ticket_tag_editing", type = "Boolean" }
+configuration_twitter_search_access = { json = "$.configuration.twitter_search_access", type = "Boolean" }
+configuration_update_user_own_alias = { json = "$.configuration.update_user_own_alias", type = "Boolean" }
+configuration_update_user_own_name = { json = "$.configuration.update_user_own_name", type = "Boolean" }
+configuration_update_user_own_signature = { json = "$.configuration.update_user_own_signature", type = "Boolean" }
+configuration_user_view_access = { json = "$.configuration.user_view_access", type = "Utf8" }
+configuration_view_access = { json = "$.configuration.view_access", type = "Utf8" }
+configuration_view_access_logs = { json = "$.configuration.view_access_logs", type = "Boolean" }
+configuration_view_audit_logs = { json = "$.configuration.view_audit_logs", type = "Boolean" }
+configuration_view_deleted_tickets = { json = "$.configuration.view_deleted_tickets", type = "Boolean" }
+configuration_view_filter_tickets = { json = "$.configuration.view_filter_tickets", type = "Boolean" }
+configuration_voice_access = { json = "$.configuration.voice_access", type = "Boolean" }
+configuration_voice_dashboard_access = { json = "$.configuration.voice_dashboard_access", type = "Boolean" }
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+role_type = { json = "$.role_type", type = "Int64" }
+team_member_count = { json = "$.team_member_count", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "listcustomstatuses"
+path = "/api/v2/custom_statuses"
+response_path = "$.custom_statuses"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+agent_label = { json = "$.agent_label", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+end_user_description = { json = "$.end_user_description", type = "Utf8" }
+end_user_label = { json = "$.end_user_label", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+raw_agent_label = { json = "$.raw_agent_label", type = "Utf8" }
+raw_description = { json = "$.raw_description", type = "Utf8" }
+raw_end_user_description = { json = "$.raw_end_user_description", type = "Utf8" }
+raw_end_user_label = { json = "$.raw_end_user_label", type = "Utf8" }
+status_category = { json = "$.status_category", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+active = { param = "active" }
+default = { param = "default" }
+status_categories = { param = "status_categories" }
+
+[[table]]
+name = "listdeletedusers"
+path = "/api/v2/deleted_users"
+response_path = "$.deleted_users"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+created_at = { json = "$.created_at", type = "Utf8" }
+email = { json = "$.email", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+locale = { json = "$.locale", type = "Utf8" }
+locale_id = { json = "$.locale_id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+phone = { json = "$.phone", type = "Utf8" }
+photo = { json = "$.photo", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+separation_brand_id = { json = "$.separation.brand_id", type = "Int64" }
+separation_scope = { json = "$.separation.scope", type = "Utf8" }
+shared_phone_number = { json = "$.shared_phone_number", type = "Utf8" }
+time_zone = { json = "$.time_zone", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "listdeletionschedules"
+path = "/api/v2/deletion_schedules"
+response_path = "$.deletion_schedules"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listdynamiccontents"
+path = "/api/v2/dynamic_content/items"
+response_path = "$.items"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default_locale_id = { json = "$.default_locale_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+outdated = { json = "$.outdated", type = "Boolean" }
+placeholder = { json = "$.placeholder", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+variants = { json = "$.variants", type = "Utf8" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "showmanydynamiccontents"
+path = "/api/v2/dynamic_content/items/show_many"
+response_path = "$.items"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default_locale_id = { json = "$.default_locale_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+outdated = { json = "$.outdated", type = "Boolean" }
+placeholder = { json = "$.placeholder", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+variants = { json = "$.variants", type = "Utf8" }
+
+[table.filters]
+identifiers = { param = "identifiers" }
+
+[[table]]
+name = "dynamiccontentlistvariants"
+path = "/api/v2/dynamic_content/items/{dynamic_content_item_id}/variants"
+response_path = "$.variants"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+content = { json = "$.content", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+locale_id = { json = "$.locale_id", type = "Int64" }
+outdated = { json = "$.outdated", type = "Boolean" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "listemailnotifications"
+path = "/api/v2/email_notifications"
+response_path = "$.email_notifications"
+
+[table.columns]
+comment_id = { json = "$.comment_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+email_id = { json = "$.email_id", type = "Utf8" }
+message_id = { json = "$.message_id", type = "Utf8" }
+notification_id = { json = "$.notification_id", type = "Int64" }
+recipients = { json = "$.recipients", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listenduseridentities"
+path = "/api/v2/end_users/{user_id}/identities"
+response_path = "$.identities"
+
+[table.columns]
+brand_id = { json = "$.brand_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+deliverable_state = { json = "$.deliverable_state", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+primary = { json = "$.primary", type = "Boolean" }
+type = { json = "$.type", type = "Utf8" }
+undeliverable_count = { json = "$.undeliverable_count", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+value = { json = "$.value", type = "Utf8" }
+verification_method = { json = "$.verification_method", type = "Utf8" }
+verified = { json = "$.verified", type = "Boolean" }
+verified_at = { json = "$.verified_at", type = "Utf8" }
+
+[[table]]
+name = "listgroupmemberships"
+path = "/api/v2/group_memberships"
+response_path = "$.group_memberships"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[table.filters]
+include = { param = "include" }
+sort = { param = "sort" }
+
+[[table]]
+name = "listassignablegroupmemberships"
+path = "/api/v2/group_memberships/assignable"
+response_path = "$.group_memberships"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "listgroupslapolicies"
+path = "/api/v2/group_slas/policies"
+response_path = "$.group_sla_policies"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+filter_all = { json = "$.filter.all", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+policy_metrics = { json = "$.policy_metrics", type = "Utf8" }
+position = { json = "$.position", type = "Int64" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listgroups"
+path = "/api/v2/groups"
+response_path = "$.groups"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+deleted = { json = "$.deleted", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+exclude_deleted = { param = "exclude_deleted" }
+include = { param = "include" }
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+sort = { param = "sort" }
+
+[[table]]
+name = "listassignablegroups"
+path = "/api/v2/groups/assignable"
+response_path = "$.groups"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+deleted = { json = "$.deleted", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listgroupmembershipsbygroup"
+path = "/api/v2/groups/{group_id}/memberships"
+response_path = "$.group_memberships"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "listassignablegroupmembershipsbygroup"
+path = "/api/v2/groups/{group_id}/memberships/assignable"
+response_path = "$.group_memberships"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "listgroupusers"
+path = "/api/v2/groups/{group_id}/users"
+response_path = "$.users"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+external_id = { param = "external_id" }
+permission_set = { param = "permission_set" }
+role = { param = "role[]" }
+
+[[table]]
+name = "incrementalcustomobjectrecordexportcursor"
+path = "/api/v2/incremental/custom_objects/{custom_object_key}/cursor"
+response_path = "$.custom_object_records"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by_user_id = { json = "$.created_by_user_id", type = "Utf8" }
+custom_object_fields = { json = "$.custom_object_fields", type = "Utf8" }
+custom_object_key = { json = "$.custom_object_key", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+updated_by_user_id = { json = "$.updated_by_user_id", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "incrementalorganizationexport"
+path = "/api/v2/incremental/organizations"
+response_path = "$.organizations"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+details = { json = "$.details", type = "Utf8" }
+domain_names = { json = "$.domain_names", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+notes = { json = "$.notes", type = "Utf8" }
+organization_fields = { json = "$.organization_fields", type = "Utf8" }
+shared_comments = { json = "$.shared_comments", type = "Boolean" }
+shared_tickets = { json = "$.shared_tickets", type = "Boolean" }
+tags = { json = "$.tags", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "incrementalticketevents"
+path = "/api/v2/incremental/ticket_events"
+response_path = "$.ticket_events"
+
+[table.columns]
+deleted = { json = "$.deleted", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+instance_id = { json = "$.instance_id", type = "Int64" }
+metric = { json = "$.metric", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+time = { json = "$.time", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+
+[table.filters]
+include = { param = "include" }
+
+[[table]]
+name = "incrementalticketexporttime"
+path = "/api/v2/incremental/tickets"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[[table]]
+name = "incrementalticketexportcursor"
+path = "/api/v2/incremental/tickets/cursor"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[[table]]
+name = "incrementaluserexporttime"
+path = "/api/v2/incremental/users"
+response_path = "$.users"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "incrementaluserexportcursor"
+path = "/api/v2/incremental/users/cursor"
+response_path = "$.users"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "incrementalsampleexport"
+path = "/api/v2/incremental/{incremental_resource}/sample"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[[table]]
+name = "listitamassettypes"
+path = "/api/v2/it_asset_management/asset_types"
+response_path = "$.asset_types"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by_user_id = { json = "$.created_by_user_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+field_keys = { json = "$.field_keys", type = "Utf8" }
+hierarchy_depth = { json = "$.hierarchy_depth", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+is_standard = { json = "$.is_standard", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+parent_id = { json = "$.parent_id", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+updated_by_user_id = { json = "$.updated_by_user_id", type = "Int64" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listitamassettypefields"
+path = "/api/v2/it_asset_management/asset_types/{asset_type_id}/fields"
+response_path = "$.fields"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listitamassets"
+path = "/api/v2/it_asset_management/assets"
+response_path = "$.assets"
+
+[table.columns]
+asset_tag = { json = "$.asset_tag", type = "Utf8" }
+asset_type_id = { json = "$.asset_type_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_field_values = { json = "$.custom_field_values", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+location_id = { json = "$.location_id", type = "Utf8" }
+manufacturer = { json = "$.manufacturer", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+notes = { json = "$.notes", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+purchase_cost = { json = "$.purchase_cost", type = "Float64" }
+purchase_date = { json = "$.purchase_date", type = "Utf8" }
+serial_number = { json = "$.serial_number", type = "Utf8" }
+status_id = { json = "$.status_id", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+vendor = { json = "$.vendor", type = "Utf8" }
+warranty_expiration = { json = "$.warranty_expiration", type = "Utf8" }
+
+[[table]]
+name = "searchitamassets"
+path = "/api/v2/it_asset_management/assets/search"
+response_path = "$.assets"
+
+[table.columns]
+asset_tag = { json = "$.asset_tag", type = "Utf8" }
+asset_type_id = { json = "$.asset_type_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_field_values = { json = "$.custom_field_values", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+location_id = { json = "$.location_id", type = "Utf8" }
+manufacturer = { json = "$.manufacturer", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+notes = { json = "$.notes", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+purchase_cost = { json = "$.purchase_cost", type = "Float64" }
+purchase_date = { json = "$.purchase_date", type = "Utf8" }
+serial_number = { json = "$.serial_number", type = "Utf8" }
+status_id = { json = "$.status_id", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+vendor = { json = "$.vendor", type = "Utf8" }
+warranty_expiration = { json = "$.warranty_expiration", type = "Utf8" }
+
+[table.filters]
+page_after = { param = "page[after]" }
+page_before = { param = "page[before]" }
+page_size = { param = "page[size]" }
+query = { param = "query" }
+sort = { param = "sort" }
+
+[[table]]
+name = "listitamstatuses"
+path = "/api/v2/it_asset_management/statuses"
+response_path = "$.statuses"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listjobstatuses"
+path = "/api/v2/job_statuses"
+response_path = "$.job_statuses"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+job_type = { json = "$.job_type", type = "Utf8" }
+message = { json = "$.message", type = "Utf8" }
+progress = { json = "$.progress", type = "Int64" }
+results_success = { json = "$.results.success", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+total = { json = "$.total", type = "Int64" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "showmanyjobstatuses"
+path = "/api/v2/job_statuses/show_many"
+response_path = "$.job_statuses"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+job_type = { json = "$.job_type", type = "Utf8" }
+message = { json = "$.message", type = "Utf8" }
+progress = { json = "$.progress", type = "Int64" }
+results_success = { json = "$.results.success", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+total = { json = "$.total", type = "Int64" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+ids = { param = "ids" }
+
+[[table]]
+name = "listlocales"
+path = "/api/v2/locales"
+response_path = "$.locales"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+locale = { json = "$.locale", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listlocalesforagent"
+path = "/api/v2/locales/agent"
+response_path = "$.locales"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+locale = { json = "$.locale", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listavailablepubliclocales"
+path = "/api/v2/locales/public"
+response_path = "$.locales"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+locale = { json = "$.locale", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listmacrosactions"
+path = "/api/v2/macros/actions"
+response_path = "$.actions"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listmacrocategories"
+path = "/api/v2/macros/categories"
+response_path = "$.categories"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listmacroattachments"
+path = "/api/v2/macros/{macro_id}/attachments"
+response_path = "$.macro_attachments"
+
+[table.columns]
+content_type = { json = "$.content_type", type = "Utf8" }
+content_url = { json = "$.content_url", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+filename = { json = "$.filename", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+size = { json = "$.size", type = "Int64" }
+
+[[table]]
+name = "listoauthclients"
+path = "/api/v2/oauth/clients"
+response_path = "$.clients"
+
+[table.columns]
+company = { json = "$.company", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+global = { json = "$.global", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+identifier = { json = "$.identifier", type = "Utf8" }
+kind = { json = "$.kind", type = "Utf8" }
+logo_url = { json = "$.logo_url", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+redirect_uri = { json = "$.redirect_uri", type = "Utf8" }
+secret = { json = "$.secret", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "listglobaloauthclients"
+path = "/api/v2/oauth/global_clients"
+response_path = "$.global_clients"
+
+[table.columns]
+company = { json = "$.company", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+identifier = { json = "$.identifier", type = "Utf8" }
+kind = { json = "$.kind", type = "Utf8" }
+logo_url = { json = "$.logo_url", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "globaloauthclientstokensummary"
+path = "/api/v2/oauth/global_clients/token_summary"
+response_path = "$.global_clients"
+
+[table.columns]
+id = { json = "$.id", type = "Int64" }
+last_used_at = { json = "$.last_used_at", type = "Utf8" }
+tokens_count = { json = "$.tokens_count", type = "Int64" }
+
+[[table]]
+name = "listoauthtokens"
+path = "/api/v2/oauth/tokens"
+response_path = "$.tokens"
+
+[table.columns]
+client_id = { json = "$.client_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+expires_at = { json = "$.expires_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+refresh_token = { json = "$.refresh_token", type = "Utf8" }
+refresh_token_expires_at = { json = "$.refresh_token_expires_at", type = "Utf8" }
+scopes = { json = "$.scopes", type = "Utf8" }
+token = { json = "$.token", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+used_at = { json = "$.used_at", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "listorganizationfields"
+path = "/api/v2/organization_fields"
+response_path = "$.organization_fields"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+resolve_dc = { param = "resolve_dc" }
+
+[[table]]
+name = "listorganizationmemberships"
+path = "/api/v2/organization_memberships"
+response_path = "$.organization_memberships"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+organization_name = { json = "$.organization_name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+view_tickets = { json = "$.view_tickets", type = "Boolean" }
+
+[table.filters]
+include = { param = "include" }
+sort = { param = "sort" }
+
+[[table]]
+name = "listorganizations"
+path = "/api/v2/organizations"
+response_path = "$.organizations"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+details = { json = "$.details", type = "Utf8" }
+domain_names = { json = "$.domain_names", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+notes = { json = "$.notes", type = "Utf8" }
+organization_fields = { json = "$.organization_fields", type = "Utf8" }
+shared_comments = { json = "$.shared_comments", type = "Boolean" }
+shared_tickets = { json = "$.shared_tickets", type = "Boolean" }
+tags = { json = "$.tags", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+sort = { param = "sort" }
+
+[[table]]
+name = "autocompleteorganizations"
+path = "/api/v2/organizations/autocomplete"
+response_path = "$.organizations"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+details = { json = "$.details", type = "Utf8" }
+domain_names = { json = "$.domain_names", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+notes = { json = "$.notes", type = "Utf8" }
+organization_fields = { json = "$.organization_fields", type = "Utf8" }
+shared_comments = { json = "$.shared_comments", type = "Boolean" }
+shared_tickets = { json = "$.shared_tickets", type = "Boolean" }
+tags = { json = "$.tags", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+field_id = { param = "field_id" }
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+name = { param = "name" }
+source = { param = "source" }
+
+[[table]]
+name = "searchorganizations"
+path = "/api/v2/organizations/search"
+response_path = "$.organizations"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+details = { json = "$.details", type = "Utf8" }
+domain_names = { json = "$.domain_names", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+notes = { json = "$.notes", type = "Utf8" }
+organization_fields = { json = "$.organization_fields", type = "Utf8" }
+shared_comments = { json = "$.shared_comments", type = "Boolean" }
+shared_tickets = { json = "$.shared_tickets", type = "Boolean" }
+tags = { json = "$.tags", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "showmanyorganizations"
+path = "/api/v2/organizations/show_many"
+response_path = "$.organizations"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+details = { json = "$.details", type = "Utf8" }
+domain_names = { json = "$.domain_names", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+notes = { json = "$.notes", type = "Utf8" }
+organization_fields = { json = "$.organization_fields", type = "Utf8" }
+shared_comments = { json = "$.shared_comments", type = "Boolean" }
+shared_tickets = { json = "$.shared_tickets", type = "Boolean" }
+tags = { json = "$.tags", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listorganizationmembershipsbyorganization"
+path = "/api/v2/organizations/{organization_id}/organization_memberships"
+response_path = "$.organization_memberships"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+organization_name = { json = "$.organization_name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+view_tickets = { json = "$.view_tickets", type = "Boolean" }
+
+[[table]]
+name = "listorganizationrequests"
+path = "/api/v2/organizations/{organization_id}/requests"
+response_path = "$.requests"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+can_be_solved_by_me = { json = "$.can_be_solved_by_me", type = "Boolean" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+followup_source_id = { json = "$.followup_source_id", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+priority = { json = "$.priority", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+solved = { json = "$.solved", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listorganizationtags"
+path = "/api/v2/organizations/{organization_id}/tags"
+response_path = "$.tags"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listorganizationtickets"
+path = "/api/v2/organizations/{organization_id}/tickets"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[[table]]
+name = "listorganizationusers"
+path = "/api/v2/organizations/{organization_id}/users"
+response_path = "$.users"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+external_id = { param = "external_id" }
+permission_set = { param = "permission_set" }
+role = { param = "role[]" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listqueues"
+path = "/api/v2/queues"
+response_path = "$.queues"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+definition_all = { json = "$.definition.all", type = "Utf8" }
+definition_any = { json = "$.definition.any", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+order = { json = "$.order", type = "Int64" }
+primary_groups_count = { json = "$.primary_groups.count", type = "Int64" }
+primary_groups_groups = { json = "$.primary_groups.groups", type = "Utf8" }
+priority = { json = "$.priority", type = "Int64" }
+secondary_groups_count = { json = "$.secondary_groups.count", type = "Int64" }
+secondary_groups_groups = { json = "$.secondary_groups.groups", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listsupportaddresses"
+path = "/api/v2/recipient_addresses"
+response_path = "$.recipient_addresses"
+
+[table.columns]
+brand_id = { json = "$.brand_id", type = "Int64" }
+cname_status = { json = "$.cname_status", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+dns_results = { json = "$.dns_results", type = "Utf8" }
+domain_verification_code = { json = "$.domain_verification_code", type = "Utf8" }
+domain_verification_status = { json = "$.domain_verification_status", type = "Utf8" }
+email = { json = "$.email", type = "Utf8" }
+forwarding_status = { json = "$.forwarding_status", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+spf_status = { json = "$.spf_status", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+include = { param = "include" }
+sort = { param = "sort" }
+
+[[table]]
+name = "listremoteauthentications"
+path = "/api/v2/remote_authentications"
+response_path = "$.remote_authentications"
+
+[table.columns]
+agent = { json = "$.agent", type = "Boolean" }
+agent_primary = { json = "$.agent_primary", type = "Boolean" }
+auth_flow = { json = "$.auth_flow", type = "Utf8" }
+auth_mode = { json = "$.auth_mode", type = "Int64" }
+auth_mode_name = { json = "$.auth_mode_name", type = "Utf8" }
+auth_url = { json = "$.auth_url", type = "Utf8" }
+auto_discovery = { json = "$.auto_discovery", type = "Boolean" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+can_display_button_to_end_users = { json = "$.can_display_button_to_end_users", type = "Boolean" }
+can_display_button_to_team_members = { json = "$.can_display_button_to_team_members", type = "Boolean" }
+client_id = { json = "$.client_id", type = "Utf8" }
+end_user = { json = "$.end_user", type = "Boolean" }
+end_user_primary = { json = "$.end_user_primary", type = "Boolean" }
+fingerprint = { json = "$.fingerprint", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+ip_ranges = { json = "$.ip_ranges", type = "Utf8" }
+is_active = { json = "$.is_active", type = "Boolean" }
+issuer_url = { json = "$.issuer_url", type = "Utf8" }
+jwks_url = { json = "$.jwks_url", type = "Utf8" }
+label = { json = "$.label", type = "Utf8" }
+masked_client_secret = { json = "$.masked_client_secret", type = "Utf8" }
+masked_secret = { json = "$.masked_secret", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+priority = { json = "$.priority", type = "Int64" }
+remote_login_url = { json = "$.remote_login_url", type = "Utf8" }
+remote_logout_url = { json = "$.remote_logout_url", type = "Utf8" }
+scope = { json = "$.scope", type = "Utf8" }
+token_url = { json = "$.token_url", type = "Utf8" }
+update_external_ids = { json = "$.update_external_ids", type = "Boolean" }
+user_info_url = { json = "$.user_info_url", type = "Utf8" }
+
+[table.filters]
+brand_id = { param = "brand_id" }
+
+[[table]]
+name = "listrequests"
+path = "/api/v2/requests"
+response_path = "$.requests"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+can_be_solved_by_me = { json = "$.can_be_solved_by_me", type = "Boolean" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+followup_source_id = { json = "$.followup_source_id", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+priority = { json = "$.priority", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+solved = { json = "$.solved", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listccdrequests"
+path = "/api/v2/requests/ccd"
+response_path = "$.requests"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+can_be_solved_by_me = { json = "$.can_be_solved_by_me", type = "Boolean" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+followup_source_id = { json = "$.followup_source_id", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+priority = { json = "$.priority", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+solved = { json = "$.solved", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listopenrequests"
+path = "/api/v2/requests/open"
+response_path = "$.requests"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+can_be_solved_by_me = { json = "$.can_be_solved_by_me", type = "Boolean" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+followup_source_id = { json = "$.followup_source_id", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+priority = { json = "$.priority", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+solved = { json = "$.solved", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "searchrequests"
+path = "/api/v2/requests/search"
+response_path = "$.requests"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+can_be_solved_by_me = { json = "$.can_be_solved_by_me", type = "Boolean" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+followup_source_id = { json = "$.followup_source_id", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+priority = { json = "$.priority", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+solved = { json = "$.solved", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+query = { param = "query" }
+
+[[table]]
+name = "listsolvedrequests"
+path = "/api/v2/requests/solved"
+response_path = "$.requests"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+can_be_solved_by_me = { json = "$.can_be_solved_by_me", type = "Boolean" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+followup_source_id = { json = "$.followup_source_id", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+priority = { json = "$.priority", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+solved = { json = "$.solved", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listcomments"
+path = "/api/v2/requests/{request_id}/comments"
+response_path = "$.comments"
+
+[table.columns]
+add_short_url = { json = "$.add_short_url", type = "Boolean" }
+attachments = { json = "$.attachments", type = "Utf8" }
+audit_id = { json = "$.audit_id", type = "Int64" }
+author_id = { json = "$.author_id", type = "Int64" }
+body = { json = "$.body", type = "Utf8" }
+channel_back = { json = "$.channel_back", type = "Utf8" }
+channel_source_id = { json = "$.channel_source_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+html_body = { json = "$.html_body", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+metadata = { json = "$.metadata", type = "Utf8" }
+plain_body = { json = "$.plain_body", type = "Utf8" }
+public = { json = "$.public", type = "Boolean" }
+translate_to = { json = "$.translate_to", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+uploads = { json = "$.uploads", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+role = { param = "role" }
+since = { param = "since" }
+
+[[table]]
+name = "listresourcecollections"
+path = "/api/v2/resource_collections"
+response_path = "$.resource_collections"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+resources = { json = "$.resources", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "listmanyagentsattributevalues"
+path = "/api/v2/routing/agents/instance_values"
+response_path = "$.instance_values"
+
+[table.columns]
+agent_id = { json = "$.agent_id", type = "Int64" }
+agent_skill_priority = { json = "$.agent_skill_priority", type = "Utf8" }
+attribute_id = { json = "$.attribute_id", type = "Utf8" }
+attribute_value_id = { json = "$.attribute_value_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+filter_agent_ids = { param = "filter[agent_ids]" }
+page_after = { param = "page[after]" }
+page_before = { param = "page[before]" }
+page_size = { param = "page[size]" }
+
+[[table]]
+name = "listagentattributevalues"
+path = "/api/v2/routing/agents/{user_id}/instance_values"
+response_path = "$.attribute_values"
+
+[table.columns]
+agent_skill_priority = { json = "$.agent_skill_priority", type = "Utf8" }
+attribute_id = { json = "$.attribute_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listaccountattributes"
+path = "/api/v2/routing/attributes"
+response_path = "$.attributes"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+include = { param = "include" }
+
+[[table]]
+name = "listattributevalues"
+path = "/api/v2/routing/attributes/{attribute_id}/values"
+response_path = "$.attribute_values"
+
+[table.columns]
+attribute_id = { json = "$.attribute_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listticketsfullfilledbyuser"
+path = "/api/v2/routing/requirements/fulfilled"
+response_path = "$.fulfilled_ticket_ids"
+
+[table.columns]
+field = { json = "$", type = "Int64" }
+
+[table.filters]
+ticket_ids = { param = "ticket_ids" }
+
+[[table]]
+name = "listticketattributevalues"
+path = "/api/v2/routing/tickets/{ticket_id}/instance_values"
+response_path = "$.attribute_values"
+
+[table.columns]
+agent_skill_priority = { json = "$.agent_skill_priority", type = "Utf8" }
+attribute_id = { json = "$.attribute_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listsatisfactionratings"
+path = "/api/v2/satisfaction_ratings"
+response_path = "$.satisfaction_ratings"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+comment = { json = "$.comment", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+reason = { json = "$.reason", type = "Utf8" }
+reason_code = { json = "$.reason_code", type = "Int64" }
+reason_id = { json = "$.reason_id", type = "Int64" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+score = { json = "$.score", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "showsatisfactionrating"
+path = "/api/v2/satisfaction_ratings/{satisfaction_rating_id}"
+response_path = "$.satisfaction_rating"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+comment = { json = "$.comment", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+reason = { json = "$.reason", type = "Utf8" }
+reason_code = { json = "$.reason_code", type = "Int64" }
+reason_id = { json = "$.reason_id", type = "Int64" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+score = { json = "$.score", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listsatisfactionratingreasons"
+path = "/api/v2/satisfaction_reasons"
+response_path = "$.reasons"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+deleted_at = { json = "$.deleted_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+raw_value = { json = "$.raw_value", type = "Utf8" }
+reason_code = { json = "$.reason_code", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+value = { json = "$.value", type = "Utf8" }
+
+[[table]]
+name = "showsatisfactionratings"
+path = "/api/v2/satisfaction_reasons/{satisfaction_reason_id}"
+response_path = "$.reason"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+deleted_at = { json = "$.deleted_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+raw_value = { json = "$.raw_value", type = "Utf8" }
+reason_code = { json = "$.reason_code", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+value = { json = "$.value", type = "Utf8" }
+
+[[table]]
+name = "listsearchresults"
+path = "/api/v2/search"
+response_path = "$.results"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+deleted = { json = "$.deleted", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+result_type = { json = "$.result_type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+include = { param = "include" }
+query = { param = "query" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "exportsearchresults"
+path = "/api/v2/search/export"
+response_path = "$.results"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+deleted = { json = "$.deleted", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+result_type = { json = "$.result_type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+filter_type = { param = "filter[type]" }
+include = { param = "include" }
+page_after = { param = "page[after]" }
+page_size = { param = "page[size]" }
+query = { param = "query" }
+
+[[table]]
+name = "listsessions"
+path = "/api/v2/sessions"
+response_path = "$.sessions"
+
+[table.columns]
+authenticated_at = { json = "$.authenticated_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+last_seen_at = { json = "$.last_seen_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "listsharingagreements"
+path = "/api/v2/sharing_agreements"
+response_path = "$.sharing_agreements"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+partner_name = { json = "$.partner_name", type = "Utf8" }
+remote_subdomain = { json = "$.remote_subdomain", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listskips"
+path = "/api/v2/skips"
+response_path = "$.skips"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+reason = { json = "$.reason", type = "Utf8" }
+ticket = { json = "$.ticket", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "listslapolicies"
+path = "/api/v2/slas/policies"
+response_path = "$.sla_policies"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+filter_all = { json = "$.filter.all", type = "Utf8" }
+filter_any = { json = "$.filter.any", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+policy_metrics = { json = "$.policy_metrics", type = "Utf8" }
+position = { json = "$.position", type = "Int64" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listsuspendedtickets"
+path = "/api/v2/suspended_tickets"
+response_path = "$.suspended_tickets"
+
+[table.columns]
+attachments = { json = "$.attachments", type = "Utf8" }
+author = { json = "$.author", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+cause = { json = "$.cause", type = "Utf8" }
+cause_id = { json = "$.cause_id", type = "Int64" }
+content = { json = "$.content", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+error_messages = { json = "$.error_messages", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+message_id = { json = "$.message_id", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source_from_address = { json = "$.via.source.from.address", type = "Utf8" }
+via_source_from_id = { json = "$.via.source.from.id", type = "Utf8" }
+via_source_from_name = { json = "$.via.source.from.name", type = "Utf8" }
+via_source_from_title = { json = "$.via.source.from.title", type = "Utf8" }
+via_source_rel = { json = "$.via.source.rel", type = "Utf8" }
+via_source_to_address = { json = "$.via.source.to.address", type = "Utf8" }
+via_source_to_name = { json = "$.via.source.to.name", type = "Utf8" }
+
+[[table]]
+name = "showsuspendedtickets"
+path = "/api/v2/suspended_tickets/{id}"
+response_path = "$.suspended_tickets"
+
+[table.columns]
+attachments = { json = "$.attachments", type = "Utf8" }
+author = { json = "$.author", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+cause = { json = "$.cause", type = "Utf8" }
+cause_id = { json = "$.cause_id", type = "Int64" }
+content = { json = "$.content", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+error_messages = { json = "$.error_messages", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+message_id = { json = "$.message_id", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source_from_address = { json = "$.via.source.from.address", type = "Utf8" }
+via_source_from_id = { json = "$.via.source.from.id", type = "Utf8" }
+via_source_from_name = { json = "$.via.source.from.name", type = "Utf8" }
+via_source_from_title = { json = "$.via.source.from.title", type = "Utf8" }
+via_source_rel = { json = "$.via.source.rel", type = "Utf8" }
+via_source_to_address = { json = "$.via.source.to.address", type = "Utf8" }
+via_source_to_name = { json = "$.via.source.to.name", type = "Utf8" }
+
+[[table]]
+name = "listtags"
+path = "/api/v2/tags"
+response_path = "$.tags"
+
+[table.columns]
+count = { json = "$.count", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "listtargetfailures"
+path = "/api/v2/target_failures"
+response_path = "$.target_failures"
+
+[table.columns]
+consecutive_failure_count = { json = "$.consecutive_failure_count", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+raw_request = { json = "$.raw_request", type = "Utf8" }
+raw_response = { json = "$.raw_response", type = "Utf8" }
+status_code = { json = "$.status_code", type = "Int64" }
+target_name = { json = "$.target_name", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listtargets"
+path = "/api/v2/targets"
+response_path = "$.targets"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listtasklisttemplates"
+path = "/api/v2/task_list_templates"
+response_path = "$.task_list_templates"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+is_active = { json = "$.is_active", type = "Boolean" }
+is_required = { json = "$.is_required", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+task_count = { json = "$.task_count", type = "Int64" }
+tasks = { json = "$.tasks", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "gettasksbytasklisttemplateid"
+path = "/api/v2/task_list_templates/{task_list_template_id}/tasks"
+response_path = "$.tasks"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+position = { json = "$.position", type = "Int64" }
+required = { json = "$.required", type = "Boolean" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "listticketaudits"
+path = "/api/v2/ticket_audits"
+response_path = "$.audits"
+
+[table.columns]
+author_id = { json = "$.author_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+events = { json = "$.events", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+metadata = { json = "$.metadata", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+page_after = { param = "page[after]" }
+page_before = { param = "page[before]" }
+page_size = { param = "page[size]" }
+
+[[table]]
+name = "listticketcontentpins"
+path = "/api/v2/ticket_content_pins"
+response_path = "$.ticket_content_pins"
+
+[table.columns]
+account_id = { json = "$.account_id", type = "Utf8" }
+content_id = { json = "$.content_id", type = "Utf8" }
+content_type = { json = "$.content_type", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+locale = { json = "$.locale", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+ticket_id = { param = "ticket_id" }
+
+[[table]]
+name = "listticketfields"
+path = "/api/v2/ticket_fields"
+response_path = "$.ticket_fields"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+agent_can_edit = { json = "$.agent_can_edit", type = "Boolean" }
+agent_description = { json = "$.agent_description", type = "Utf8" }
+collapsed_for_agents = { json = "$.collapsed_for_agents", type = "Boolean" }
+created_at = { json = "$.created_at", type = "Utf8" }
+creator_app_name = { json = "$.creator_app_name", type = "Utf8" }
+creator_user_id = { json = "$.creator_user_id", type = "Int64" }
+custom_field_options = { json = "$.custom_field_options", type = "Utf8" }
+custom_statuses = { json = "$.custom_statuses", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+editable_in_portal = { json = "$.editable_in_portal", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_description = { json = "$.raw_description", type = "Utf8" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+raw_title_in_portal = { json = "$.raw_title_in_portal", type = "Utf8" }
+regexp_for_validation = { json = "$.regexp_for_validation", type = "Utf8" }
+relationship_filter = { json = "$.relationship_filter", type = "Utf8" }
+relationship_target_type = { json = "$.relationship_target_type", type = "Utf8" }
+removable = { json = "$.removable", type = "Boolean" }
+required = { json = "$.required", type = "Boolean" }
+required_in_portal = { json = "$.required_in_portal", type = "Boolean" }
+sub_type_id = { json = "$.sub_type_id", type = "Int64" }
+system_field_options = { json = "$.system_field_options", type = "Utf8" }
+tag = { json = "$.tag", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+title_in_portal = { json = "$.title_in_portal", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+visible_in_portal = { json = "$.visible_in_portal", type = "Boolean" }
+
+[table.filters]
+creator = { param = "creator" }
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+locale = { param = "locale" }
+sort = { param = "sort" }
+
+[[table]]
+name = "showmanyticketfields"
+path = "/api/v2/ticket_fields/show_many"
+response_path = "$.ticket_fields"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+agent_can_edit = { json = "$.agent_can_edit", type = "Boolean" }
+agent_description = { json = "$.agent_description", type = "Utf8" }
+collapsed_for_agents = { json = "$.collapsed_for_agents", type = "Boolean" }
+created_at = { json = "$.created_at", type = "Utf8" }
+creator_app_name = { json = "$.creator_app_name", type = "Utf8" }
+creator_user_id = { json = "$.creator_user_id", type = "Int64" }
+custom_field_options = { json = "$.custom_field_options", type = "Utf8" }
+custom_statuses = { json = "$.custom_statuses", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+editable_in_portal = { json = "$.editable_in_portal", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_description = { json = "$.raw_description", type = "Utf8" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+raw_title_in_portal = { json = "$.raw_title_in_portal", type = "Utf8" }
+regexp_for_validation = { json = "$.regexp_for_validation", type = "Utf8" }
+relationship_filter = { json = "$.relationship_filter", type = "Utf8" }
+relationship_target_type = { json = "$.relationship_target_type", type = "Utf8" }
+removable = { json = "$.removable", type = "Boolean" }
+required = { json = "$.required", type = "Boolean" }
+required_in_portal = { json = "$.required_in_portal", type = "Boolean" }
+sub_type_id = { json = "$.sub_type_id", type = "Int64" }
+system_field_options = { json = "$.system_field_options", type = "Utf8" }
+tag = { json = "$.tag", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+title_in_portal = { json = "$.title_in_portal", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+visible_in_portal = { json = "$.visible_in_portal", type = "Boolean" }
+
+[table.filters]
+creator = { param = "creator" }
+exclude_sub_selection_options = { param = "exclude_sub_selection_options" }
+ids = { param = "ids" }
+keys = { param = "keys" }
+
+[[table]]
+name = "listticketfieldoptions"
+path = "/api/v2/ticket_fields/{ticket_field_id}/options"
+response_path = "$.custom_field_options"
+
+[table.columns]
+allow_solving = { json = "$.allow_solving", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+position = { json = "$.position", type = "Int64" }
+raw_name = { json = "$.raw_name", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+value = { json = "$.value", type = "Utf8" }
+
+[[table]]
+name = "listticketformstatuses"
+path = "/api/v2/ticket_form_statuses"
+response_path = "$.ticket_form_statuses"
+
+[table.columns]
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+
+[table.filters]
+filter = { param = "filter" }
+ticket_form_id = { param = "ticket_form_id" }
+
+[[table]]
+name = "showmanyticketformstatuses"
+path = "/api/v2/ticket_form_statuses/show_many"
+response_path = "$.ticket_form_statuses"
+
+[table.columns]
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+
+[table.filters]
+ids = { param = "ids" }
+
+[[table]]
+name = "listticketforms"
+path = "/api/v2/ticket_forms"
+response_path = "$.ticket_forms"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+agent_conditions = { json = "$.agent_conditions", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+deleted_at = { json = "$.deleted_at", type = "Utf8" }
+display_name = { json = "$.display_name", type = "Utf8" }
+end_user_conditions = { json = "$.end_user_conditions", type = "Utf8" }
+end_user_visible = { json = "$.end_user_visible", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+in_all_brands = { json = "$.in_all_brands", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+position = { json = "$.position", type = "Int64" }
+raw_display_name = { json = "$.raw_display_name", type = "Utf8" }
+raw_name = { json = "$.raw_name", type = "Utf8" }
+restricted_brand_ids = { json = "$.restricted_brand_ids", type = "Utf8" }
+ticket_field_ids = { json = "$.ticket_field_ids", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+active = { param = "active" }
+associated_to_brand = { param = "associated_to_brand" }
+end_user_visible = { param = "end_user_visible" }
+fallback_to_default = { param = "fallback_to_default" }
+form_type = { param = "form_type" }
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+locale = { param = "locale" }
+sort = { param = "sort" }
+
+[[table]]
+name = "showmanyticketforms"
+path = "/api/v2/ticket_forms/show_many"
+response_path = "$.ticket_forms"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+agent_conditions = { json = "$.agent_conditions", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+deleted_at = { json = "$.deleted_at", type = "Utf8" }
+display_name = { json = "$.display_name", type = "Utf8" }
+end_user_conditions = { json = "$.end_user_conditions", type = "Utf8" }
+end_user_visible = { json = "$.end_user_visible", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+in_all_brands = { json = "$.in_all_brands", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+position = { json = "$.position", type = "Int64" }
+raw_display_name = { json = "$.raw_display_name", type = "Utf8" }
+raw_name = { json = "$.raw_name", type = "Utf8" }
+restricted_brand_ids = { json = "$.restricted_brand_ids", type = "Utf8" }
+ticket_field_ids = { json = "$.ticket_field_ids", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+active = { param = "active" }
+associated_to_brand = { param = "associated_to_brand" }
+end_user_visible = { param = "end_user_visible" }
+fallback_to_default = { param = "fallback_to_default" }
+ids = { param = "ids" }
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+
+[[table]]
+name = "ticketformticketformstatuses"
+path = "/api/v2/ticket_forms/{ticket_form_id}/ticket_form_statuses"
+response_path = "$.ticket_form_statuses"
+
+[table.columns]
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+
+[[table]]
+name = "listticketmetrics"
+path = "/api/v2/ticket_metrics"
+response_path = "$.ticket_metrics"
+
+[table.columns]
+agent_wait_time_in_minutes = { json = "$.agent_wait_time_in_minutes", type = "Utf8" }
+assigned_at = { json = "$.assigned_at", type = "Utf8" }
+assignee_stations = { json = "$.assignee_stations", type = "Int64" }
+assignee_updated_at = { json = "$.assignee_updated_at", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_status_updated_at = { json = "$.custom_status_updated_at", type = "Utf8" }
+first_resolution_time_in_minutes = { json = "$.first_resolution_time_in_minutes", type = "Utf8" }
+full_resolution_time_in_minutes = { json = "$.full_resolution_time_in_minutes", type = "Utf8" }
+group_stations = { json = "$.group_stations", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+initially_assigned_at = { json = "$.initially_assigned_at", type = "Utf8" }
+latest_comment_added_at = { json = "$.latest_comment_added_at", type = "Utf8" }
+on_hold_time_in_minutes = { json = "$.on_hold_time_in_minutes", type = "Utf8" }
+reopens = { json = "$.reopens", type = "Int64" }
+replies = { json = "$.replies", type = "Int64" }
+reply_time_in_minutes = { json = "$.reply_time_in_minutes", type = "Utf8" }
+reply_time_in_seconds = { json = "$.reply_time_in_seconds", type = "Utf8" }
+requester_updated_at = { json = "$.requester_updated_at", type = "Utf8" }
+requester_wait_time_in_minutes = { json = "$.requester_wait_time_in_minutes", type = "Utf8" }
+solved_at = { json = "$.solved_at", type = "Utf8" }
+status_updated_at = { json = "$.status_updated_at", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "showticketmetrics"
+path = "/api/v2/ticket_metrics/{ticket_metric_id}"
+response_path = "$.ticket_metric"
+
+[table.columns]
+agent_wait_time_in_minutes = { json = "$.agent_wait_time_in_minutes", type = "Utf8" }
+assigned_at = { json = "$.assigned_at", type = "Utf8" }
+assignee_stations = { json = "$.assignee_stations", type = "Int64" }
+assignee_updated_at = { json = "$.assignee_updated_at", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_status_updated_at = { json = "$.custom_status_updated_at", type = "Utf8" }
+first_resolution_time_in_minutes = { json = "$.first_resolution_time_in_minutes", type = "Utf8" }
+full_resolution_time_in_minutes = { json = "$.full_resolution_time_in_minutes", type = "Utf8" }
+group_stations = { json = "$.group_stations", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+initially_assigned_at = { json = "$.initially_assigned_at", type = "Utf8" }
+latest_comment_added_at = { json = "$.latest_comment_added_at", type = "Utf8" }
+on_hold_time_in_minutes = { json = "$.on_hold_time_in_minutes", type = "Utf8" }
+reopens = { json = "$.reopens", type = "Int64" }
+replies = { json = "$.replies", type = "Int64" }
+reply_time_in_minutes = { json = "$.reply_time_in_minutes", type = "Utf8" }
+reply_time_in_seconds = { json = "$.reply_time_in_seconds", type = "Utf8" }
+requester_updated_at = { json = "$.requester_updated_at", type = "Utf8" }
+requester_wait_time_in_minutes = { json = "$.requester_wait_time_in_minutes", type = "Utf8" }
+solved_at = { json = "$.solved_at", type = "Utf8" }
+status_updated_at = { json = "$.status_updated_at", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listtickets"
+path = "/api/v2/tickets"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[table.filters]
+external_id = { param = "external_id" }
+include = { param = "include" }
+sort = { param = "sort" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+start_time = { param = "start_time" }
+support_type_scope = { param = "support_type_scope" }
+
+[[table]]
+name = "listrecenttickets"
+path = "/api/v2/tickets/recent"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[[table]]
+name = "ticketsshowmany"
+path = "/api/v2/tickets/show_many"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[table.filters]
+ids = { param = "ids" }
+include = { param = "include" }
+
+[[table]]
+name = "listauditsforticket"
+path = "/api/v2/tickets/{ticket_id}/audits"
+response_path = "$.audits"
+
+[table.columns]
+author_id = { json = "$.author_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+events = { json = "$.events", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+metadata = { json = "$.metadata", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+filter_events = { param = "filter_events" }
+include = { param = "include" }
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+sort = { param = "sort" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listticketcomments"
+path = "/api/v2/tickets/{ticket_id}/comments"
+response_path = "$.comments"
+
+[table.columns]
+add_short_url = { json = "$.add_short_url", type = "Boolean" }
+attachments = { json = "$.attachments", type = "Utf8" }
+audit_id = { json = "$.audit_id", type = "Int64" }
+author_id = { json = "$.author_id", type = "Int64" }
+body = { json = "$.body", type = "Utf8" }
+channel_back = { json = "$.channel_back", type = "Utf8" }
+channel_source_id = { json = "$.channel_source_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+html_body = { json = "$.html_body", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+metadata = { json = "$.metadata", type = "Utf8" }
+plain_body = { json = "$.plain_body", type = "Utf8" }
+public = { json = "$.public", type = "Boolean" }
+translate_to = { json = "$.translate_to", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+uploads = { json = "$.uploads", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+include = { param = "include" }
+include_inline_images = { param = "include_inline_images" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listconversationlogforticket"
+path = "/api/v2/tickets/{ticket_id}/conversation_log"
+response_path = "$.events"
+
+[table.columns]
+attachments = { json = "$.attachments", type = "Utf8" }
+author_type = { json = "$.author.type", type = "Utf8" }
+author_zen_sunco_user_id = { json = "$.author.zen:sunco:user_id", type = "Utf8" }
+author_zen_support_user_id = { json = "$.author.zen:support:user_id", type = "Int64" }
+content = { json = "$.content", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+reference = { json = "$.reference", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+
+[table.filters]
+sort = { param = "sort" }
+
+[[table]]
+name = "showticketmetricsbyticket"
+path = "/api/v2/tickets/{ticket_id}/metrics"
+response_path = "$.ticket_metric"
+
+[table.columns]
+agent_wait_time_in_minutes = { json = "$.agent_wait_time_in_minutes", type = "Utf8" }
+assigned_at = { json = "$.assigned_at", type = "Utf8" }
+assignee_stations = { json = "$.assignee_stations", type = "Int64" }
+assignee_updated_at = { json = "$.assignee_updated_at", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_status_updated_at = { json = "$.custom_status_updated_at", type = "Utf8" }
+first_resolution_time_in_minutes = { json = "$.first_resolution_time_in_minutes", type = "Utf8" }
+full_resolution_time_in_minutes = { json = "$.full_resolution_time_in_minutes", type = "Utf8" }
+group_stations = { json = "$.group_stations", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+initially_assigned_at = { json = "$.initially_assigned_at", type = "Utf8" }
+latest_comment_added_at = { json = "$.latest_comment_added_at", type = "Utf8" }
+on_hold_time_in_minutes = { json = "$.on_hold_time_in_minutes", type = "Utf8" }
+reopens = { json = "$.reopens", type = "Int64" }
+replies = { json = "$.replies", type = "Int64" }
+reply_time_in_minutes = { json = "$.reply_time_in_minutes", type = "Utf8" }
+reply_time_in_seconds = { json = "$.reply_time_in_seconds", type = "Utf8" }
+requester_updated_at = { json = "$.requester_updated_at", type = "Utf8" }
+requester_wait_time_in_minutes = { json = "$.requester_wait_time_in_minutes", type = "Utf8" }
+solved_at = { json = "$.solved_at", type = "Utf8" }
+status_updated_at = { json = "$.status_updated_at", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listticketskipsbyticket"
+path = "/api/v2/tickets/{ticket_id}/skips"
+response_path = "$.skips"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+reason = { json = "$.reason", type = "Utf8" }
+ticket = { json = "$.ticket", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "listresourcetags"
+path = "/api/v2/tickets/{ticket_id}/tags"
+response_path = "$.tags"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "showtasklist"
+path = "/api/v2/tickets/{ticket_id}/task_lists"
+response_path = "$.task_lists"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+is_required = { json = "$.is_required", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+task_count = { json = "$.task_count", type = "Int64" }
+task_list_template_id = { json = "$.task_list_template_id", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "listtriggers"
+path = "/api/v2/triggers"
+response_path = "$.triggers"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+all = { json = "$.all", type = "Utf8" }
+any = { json = "$.any", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+category_name = { json = "$.category.name", type = "Utf8" }
+category_position = { json = "$.category.position", type = "Int64" }
+category_id = { json = "$.category_id", type = "Utf8" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+restriction = { json = "$.restriction", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+active = { param = "active" }
+category_id = { param = "category_id" }
+include = { param = "include" }
+sort = { param = "sort" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listactivetriggers"
+path = "/api/v2/triggers/active"
+response_path = "$.triggers"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+all = { json = "$.all", type = "Utf8" }
+any = { json = "$.any", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+category_name = { json = "$.category.name", type = "Utf8" }
+category_position = { json = "$.category.position", type = "Int64" }
+category_id = { json = "$.category_id", type = "Utf8" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+restriction = { json = "$.restriction", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "searchtriggers"
+path = "/api/v2/triggers/search"
+response_path = "$.triggers"
+
+[table.columns]
+actions = { json = "$.actions", type = "Utf8" }
+active = { json = "$.active", type = "Boolean" }
+all = { json = "$.all", type = "Utf8" }
+any = { json = "$.any", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+category_name = { json = "$.category.name", type = "Utf8" }
+category_position = { json = "$.category.position", type = "Int64" }
+category_id = { json = "$.category_id", type = "Utf8" }
+conditions_all = { json = "$.conditions.all", type = "Utf8" }
+conditions_any = { json = "$.conditions.any", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+raw_title = { json = "$.raw_title", type = "Utf8" }
+restriction = { json = "$.restriction", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listtriggerrevisions"
+path = "/api/v2/triggers/{trigger_id}/revisions"
+response_path = "$.trigger_revisions"
+
+[table.columns]
+author_id = { json = "$.author_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+diff_actions = { json = "$.diff.actions", type = "Utf8" }
+diff_active = { json = "$.diff.active", type = "Utf8" }
+diff_conditions_field = { json = "$.diff.conditions.field", type = "Utf8" }
+diff_conditions_operator = { json = "$.diff.conditions.operator", type = "Utf8" }
+diff_conditions_value = { json = "$.diff.conditions.value", type = "Utf8" }
+diff_description = { json = "$.diff.description", type = "Utf8" }
+diff_source_id = { json = "$.diff.source_id", type = "Int64" }
+diff_target_id = { json = "$.diff.target_id", type = "Int64" }
+diff_title = { json = "$.diff.title", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+snapshot_actions = { json = "$.snapshot.actions", type = "Utf8" }
+snapshot_active = { json = "$.snapshot.active", type = "Boolean" }
+snapshot_conditions_all = { json = "$.snapshot.conditions.all", type = "Utf8" }
+snapshot_conditions_any = { json = "$.snapshot.conditions.any", type = "Utf8" }
+snapshot_description = { json = "$.snapshot.description", type = "Utf8" }
+snapshot_title = { json = "$.snapshot.title", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "listuserfields"
+path = "/api/v2/user_fields"
+response_path = "$.user_fields"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+resolve_dc = { param = "resolve_dc" }
+
+[[table]]
+name = "showmanyuserfields"
+path = "/api/v2/user_fields/show_many"
+response_path = "$.user_fields"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+keys = { param = "keys" }
+
+[[table]]
+name = "listuserfieldoptions"
+path = "/api/v2/user_fields/{user_field_id}/options"
+response_path = "$.custom_field_options"
+
+[table.columns]
+allow_solving = { json = "$.allow_solving", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+position = { json = "$.position", type = "Int64" }
+raw_name = { json = "$.raw_name", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+value = { json = "$.value", type = "Utf8" }
+
+[[table]]
+name = "listusers"
+path = "/api/v2/users"
+response_path = "$.users"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+brand_id = { param = "brand_id" }
+external_id = { param = "external_id" }
+include = { param = "include" }
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+permission_set = { param = "permission_set" }
+role = { param = "role[]" }
+sort = { param = "sort" }
+
+[[table]]
+name = "autocompleteusers"
+path = "/api/v2/users/autocomplete"
+response_path = "$.users"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+brand_id = { param = "brand_id" }
+field_id = { param = "field_id" }
+filter = { param = "filter" }
+include = { param = "include" }
+name = { param = "name" }
+phone = { param = "phone" }
+source = { param = "source" }
+
+[[table]]
+name = "listcurrentuseroauthclients"
+path = "/api/v2/users/me/oauth/clients"
+response_path = "$.clients"
+
+[table.columns]
+company = { json = "$.company", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+global = { json = "$.global", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+identifier = { json = "$.identifier", type = "Utf8" }
+kind = { json = "$.kind", type = "Utf8" }
+logo_url = { json = "$.logo_url", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+redirect_uri = { json = "$.redirect_uri", type = "Utf8" }
+secret = { json = "$.secret", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "showcurrentlyauthenticatedsession"
+path = "/api/v2/users/me/session"
+response_path = "$.session"
+
+[table.columns]
+authenticated_at = { json = "$.authenticated_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+last_seen_at = { json = "$.last_seen_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "searchusers"
+path = "/api/v2/users/search"
+response_path = "$.users"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+brand_id = { param = "brand_id" }
+external_id = { param = "external_id" }
+include = { param = "include" }
+query = { param = "query" }
+
+[[table]]
+name = "showmanyusers"
+path = "/api/v2/users/show_many"
+response_path = "$.users"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[table.filters]
+brand_id = { param = "brand_id" }
+external_ids = { param = "external_ids" }
+ids = { param = "ids" }
+include = { param = "include" }
+include_deleted = { param = "include_deleted" }
+
+[[table]]
+name = "listuserbrandagents"
+path = "/api/v2/users/{user_id}/brand_agents"
+response_path = "$.brand_agents"
+
+[table.columns]
+brand_id = { json = "$.brand_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "showusercompliancedeletionstatuses"
+path = "/api/v2/users/{user_id}/compliance_deletion_statuses"
+response_path = "$.compliance_deletion_statuses"
+
+[table.columns]
+account_subdomain = { json = "$.account_subdomain", type = "Utf8" }
+action = { json = "$.action", type = "Utf8" }
+application = { json = "$.application", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+executer_id = { json = "$.executer_id", type = "Int64" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[table.filters]
+application = { param = "application" }
+
+[[table]]
+name = "listusergroupmemberships"
+path = "/api/v2/users/{user_id}/group_memberships"
+response_path = "$.group_memberships"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[table.filters]
+include = { param = "include" }
+
+[[table]]
+name = "listusergroups"
+path = "/api/v2/users/{user_id}/groups"
+response_path = "$.groups"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+deleted = { json = "$.deleted", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+sort = { param = "sort" }
+
+[[table]]
+name = "listuseridentities"
+path = "/api/v2/users/{user_id}/identities"
+response_path = "$.identities"
+
+[table.columns]
+brand_id = { json = "$.brand_id", type = "Int64" }
+created_at = { json = "$.created_at", type = "Utf8" }
+deliverable_state = { json = "$.deliverable_state", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+primary = { json = "$.primary", type = "Boolean" }
+type = { json = "$.type", type = "Utf8" }
+undeliverable_count = { json = "$.undeliverable_count", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+value = { json = "$.value", type = "Utf8" }
+verification_method = { json = "$.verification_method", type = "Utf8" }
+verified = { json = "$.verified", type = "Boolean" }
+verified_at = { json = "$.verified_at", type = "Utf8" }
+
+[table.filters]
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+sort = { param = "sort" }
+type = { param = "type" }
+
+[[table]]
+name = "listuserorganizationmemberships"
+path = "/api/v2/users/{user_id}/organization_memberships"
+response_path = "$.organization_memberships"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+organization_name = { json = "$.organization_name", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+view_tickets = { json = "$.view_tickets", type = "Boolean" }
+
+[table.filters]
+include = { param = "include" }
+
+[[table]]
+name = "listuserorganizations"
+path = "/api/v2/users/{user_id}/organizations"
+response_path = "$.organizations"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+details = { json = "$.details", type = "Utf8" }
+domain_names = { json = "$.domain_names", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+notes = { json = "$.notes", type = "Utf8" }
+organization_fields = { json = "$.organization_fields", type = "Utf8" }
+shared_comments = { json = "$.shared_comments", type = "Boolean" }
+shared_tickets = { json = "$.shared_tickets", type = "Boolean" }
+tags = { json = "$.tags", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+include_boundary_indicators = { param = "include_boundary_indicators" }
+include_item_cursors = { param = "include_item_cursors" }
+sort = { param = "sort" }
+
+[[table]]
+name = "getuserpasswordrequirements"
+path = "/api/v2/users/{user_id}/password/requirements"
+response_path = "$.requirements"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listuserrequests"
+path = "/api/v2/users/{user_id}/requests"
+response_path = "$.requests"
+
+[table.columns]
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+can_be_solved_by_me = { json = "$.can_be_solved_by_me", type = "Boolean" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+followup_source_id = { json = "$.followup_source_id", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+priority = { json = "$.priority", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+solved = { json = "$.solved", type = "Boolean" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+ticket_form_id = { json = "$.ticket_form_id", type = "Int64" }
+type = { json = "$.type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+via_channel = { json = "$.via.channel", type = "Utf8" }
+via_source = { json = "$.via.source", type = "Utf8" }
+
+[table.filters]
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listusersessions"
+path = "/api/v2/users/{user_id}/sessions"
+response_path = "$.sessions"
+
+[table.columns]
+authenticated_at = { json = "$.authenticated_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+last_seen_at = { json = "$.last_seen_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "showsession"
+path = "/api/v2/users/{user_id}/sessions/{session_id}"
+response_path = "$.session"
+
+[table.columns]
+authenticated_at = { json = "$.authenticated_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+last_seen_at = { json = "$.last_seen_at", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "listticketskips"
+path = "/api/v2/users/{user_id}/skips"
+response_path = "$.skips"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+reason = { json = "$.reason", type = "Utf8" }
+ticket = { json = "$.ticket", type = "Utf8" }
+ticket_id = { json = "$.ticket_id", type = "Int64" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+user_id = { json = "$.user_id", type = "Int64" }
+
+[[table]]
+name = "listusertags"
+path = "/api/v2/users/{user_id}/tags"
+response_path = "$.tags"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listuserassignedtickets"
+path = "/api/v2/users/{user_id}/tickets/assigned"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[[table]]
+name = "listuserccdtickets"
+path = "/api/v2/users/{user_id}/tickets/ccd"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[[table]]
+name = "listuserfollowedtickets"
+path = "/api/v2/users/{user_id}/tickets/followed"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[table.filters]
+exclude_archived = { param = "exclude_archived" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listuserrequestedtickets"
+path = "/api/v2/users/{user_id}/tickets/requested"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[table.filters]
+exclude_archived = { param = "exclude_archived" }
+exclude_count = { param = "exclude_count" }
+include = { param = "include" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listviews"
+path = "/api/v2/views"
+response_path = "$.views"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+conditions = { json = "$.conditions", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+execution = { json = "$.execution", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+restriction = { json = "$.restriction", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+access = { param = "access" }
+active = { param = "active" }
+group_id = { param = "group_id" }
+sort = { param = "sort" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listactiveviews"
+path = "/api/v2/views/active"
+response_path = "$.views"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+conditions = { json = "$.conditions", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+execution = { json = "$.execution", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+restriction = { json = "$.restriction", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+access = { param = "access" }
+group_id = { param = "group_id" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listcompactviews"
+path = "/api/v2/views/compact"
+response_path = "$.views"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+conditions = { json = "$.conditions", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+execution = { json = "$.execution", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+restriction = { json = "$.restriction", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[[table]]
+name = "getviewcounts"
+path = "/api/v2/views/count_many"
+response_path = "$.view_counts"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+fresh = { json = "$.fresh", type = "Boolean" }
+pretty = { json = "$.pretty", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+value = { json = "$.value", type = "Int64" }
+view_id = { json = "$.view_id", type = "Int64" }
+
+[table.filters]
+ids = { param = "ids" }
+
+[[table]]
+name = "searchviews"
+path = "/api/v2/views/search"
+response_path = "$.views"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+conditions = { json = "$.conditions", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+execution = { json = "$.execution", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+restriction = { json = "$.restriction", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+access = { param = "access" }
+active = { param = "active" }
+group_id = { param = "group_id" }
+include = { param = "include" }
+query = { param = "query" }
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }
+
+[[table]]
+name = "listviewsbyid"
+path = "/api/v2/views/show_many"
+response_path = "$.views"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+conditions = { json = "$.conditions", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+default = { json = "$.default", type = "Boolean" }
+description = { json = "$.description", type = "Utf8" }
+execution = { json = "$.execution", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+position = { json = "$.position", type = "Int64" }
+restriction = { json = "$.restriction", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+active = { param = "active" }
+ids = { param = "ids" }
+
+[[table]]
+name = "listticketsfromview"
+path = "/api/v2/views/{view_id}/tickets"
+response_path = "$.tickets"
+
+[table.columns]
+additional_collaborators = { json = "$.additional_collaborators", type = "Utf8" }
+allow_attachments = { json = "$.allow_attachments", type = "Boolean" }
+allow_channelback = { json = "$.allow_channelback", type = "Boolean" }
+assignee_email = { json = "$.assignee_email", type = "Utf8" }
+assignee_id = { json = "$.assignee_id", type = "Int64" }
+attribute_value_ids = { json = "$.attribute_value_ids", type = "Utf8" }
+brand_id = { json = "$.brand_id", type = "Int64" }
+collaborator_ids = { json = "$.collaborator_ids", type = "Utf8" }
+collaborators = { json = "$.collaborators", type = "Utf8" }
+comment_add_short_url = { json = "$.comment.add_short_url", type = "Boolean" }
+comment_attachments = { json = "$.comment.attachments", type = "Utf8" }
+comment_audit_id = { json = "$.comment.audit_id", type = "Int64" }
+comment_author_id = { json = "$.comment.author_id", type = "Int64" }
+comment_body = { json = "$.comment.body", type = "Utf8" }
+comment_channel_back = { json = "$.comment.channel_back", type = "Utf8" }
+comment_channel_source_id = { json = "$.comment.channel_source_id", type = "Utf8" }
+comment_created_at = { json = "$.comment.created_at", type = "Utf8" }
+comment_html_body = { json = "$.comment.html_body", type = "Utf8" }
+comment_id = { json = "$.comment.id", type = "Int64" }
+comment_metadata = { json = "$.comment.metadata", type = "Utf8" }
+comment_plain_body = { json = "$.comment.plain_body", type = "Utf8" }
+comment_public = { json = "$.comment.public", type = "Boolean" }
+comment_translate_to = { json = "$.comment.translate_to", type = "Utf8" }
+comment_type = { json = "$.comment.type", type = "Utf8" }
+comment_uploads = { json = "$.comment.uploads", type = "Utf8" }
+comment_via_channel = { json = "$.comment.via.channel", type = "Utf8" }
+comment_via_source = { json = "$.comment.via.source", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_fields = { json = "$.custom_fields", type = "Utf8" }
+custom_status_id = { json = "$.custom_status_id", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+due_at = { json = "$.due_at", type = "Utf8" }
+email_cc_ids = { json = "$.email_cc_ids", type = "Utf8" }
+email_ccs = { json = "$.email_ccs", type = "Utf8" }
+encoded_id = { json = "$.encoded_id", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+fields = { json = "$.fields", type = "Utf8" }
+follower_ids = { json = "$.follower_ids", type = "Utf8" }
+followers = { json = "$.followers", type = "Utf8" }
+followup_ids = { json = "$.followup_ids", type = "Utf8" }
+forum_topic_id = { json = "$.forum_topic_id", type = "Int64" }
+from_messaging_channel = { json = "$.from_messaging_channel", type = "Boolean" }
+generated_timestamp = { json = "$.generated_timestamp", type = "Int64" }
+group_id = { json = "$.group_id", type = "Int64" }
+has_incidents = { json = "$.has_incidents", type = "Boolean" }
+id = { json = "$.id", type = "Int64" }
+is_public = { json = "$.is_public", type = "Boolean" }
+macro_id = { json = "$.macro_id", type = "Int64" }
+macro_ids = { json = "$.macro_ids", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Int64" }
+origin_zrn = { json = "$.origin_zrn", type = "Utf8" }
+priority = { json = "$.priority", type = "Utf8" }
+problem_id = { json = "$.problem_id", type = "Int64" }
+raw_subject = { json = "$.raw_subject", type = "Utf8" }
+recipient = { json = "$.recipient", type = "Utf8" }
+requester_email = { json = "$.requester.email", type = "Utf8" }
+requester_locale = { json = "$.requester.locale", type = "Utf8" }
+requester_locale_id = { json = "$.requester.locale_id", type = "Int64" }
+requester_name = { json = "$.requester.name", type = "Utf8" }
+requester_organization_id = { json = "$.requester.organization_id", type = "Int64" }
+requester_role = { json = "$.requester.role", type = "Utf8" }
+requester_verified = { json = "$.requester.verified", type = "Boolean" }
+requester_id = { json = "$.requester_id", type = "Int64" }
+safe_update = { json = "$.safe_update", type = "Boolean" }
+satisfaction_probability = { json = "$.satisfaction_probability", type = "Float64" }
+satisfaction_rating = { json = "$.satisfaction_rating", type = "Utf8" }
+sharing_agreement_ids = { json = "$.sharing_agreement_ids", type = "Utf8" }
+sharing_agreements_custom_fields = { json = "$.sharing_agreements.custom_fields", type = "Utf8" }
+sharing_agreements_id = { json = "$.sharing_agreements.id", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+subject = { json = "$.subject", type = "Utf8" }
+submitter_id = { json = "$.submitter_id", type = "Int64" }
+support_type = { json = "$.support_type", type = "Utf8" }
+suspended_ticket_id = { json = "$.suspended_ticket_id", type = "Int64" }
+suspension_type_id = { json = "$.suspension_type_id", type = "Int64" }
+system_metadata_client = { json = "$.system_metadata.client", type = "Utf8" }
+system_metadata_ip_address = { json = "$.system_metadata.ip_address", type = "Utf8" }
+tags = { json = "$.tags", type = "Utf8" }
+tde_workspace_previous_workspace_id = { json = "$.tde_workspace.previous_workspace.id", type = "Int64" }
+
+[table.filters]
+sort_by = { param = "sort_by" }
+sort_order = { param = "sort_order" }

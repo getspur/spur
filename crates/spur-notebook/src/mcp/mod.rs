@@ -306,6 +306,7 @@ impl ServerHandler for NotebookMcpServer {
             "notebook_export_spur_app" => tools::export_spur_app::call(&self.deps, arguments).await,
             "notebook_import_spur_app" => tools::import_spur_app::call(&self.deps, arguments).await,
             "notebook_app_doctor" => tools::notebook_app_doctor::call(&self.deps, arguments).await,
+            "notebook_app_init" => tools::notebook_app_init::call(&self.deps, arguments).await,
             "notebook.oauth_connect" => {
                 tools::api_connection::call_oauth_connect(&self.deps, arguments).await
             }
@@ -1212,6 +1213,30 @@ fn curated_preset_toml(source: &str) -> Option<&'static str> {
         )),
         "github" | "github_pat" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/github.connection.toml"
+        )),
+        "datadog" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/datadog.connection.toml"
+        )),
+        "mailchimp" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/mailchimp.connection.toml"
+        )),
+        "openai" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/openai.connection.toml"
+        )),
+        "sendgrid" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/sendgrid.connection.toml"
+        )),
+        "square" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/square.connection.toml"
+        )),
+        "stripe" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/stripe.connection.toml"
+        )),
+        "twilio" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/twilio.connection.toml"
+        )),
+        "zendesk" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/zendesk.connection.toml"
         )),
         "google_ads" => Some(include_str!(
             "../../rest-table-gateway/connections/tier-a/google_ads.connection.toml"
@@ -4134,6 +4159,36 @@ score = { json = "$.score", type = "Int64" }
         );
     }
 
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn build_api_import_manifest_prefers_supported_tier_a_table_presets() {
+        let providers = [
+            ("datadog", "listapikeys"),
+            ("mailchimp", "getroot"),
+            ("openai", "listassistants"),
+            ("sendgrid", "listaccessactivity"),
+            ("square", "retrievebusinessbookingprofile"),
+            ("stripe", "getaccounts"),
+            ("twilio", "listaccount"),
+            ("zendesk", "listapprovalrequests"),
+        ];
+
+        for (provider, expected_table) in providers {
+            let (source, manifest) =
+                build_api_import_manifest(provider, Some(provider.to_string()), None)
+                    .unwrap_or_else(|error| panic!("{provider} manifest builds: {error}"));
+
+            assert_eq!(source, provider);
+            assert!(
+                manifest
+                    .tables
+                    .iter()
+                    .any(|table| table.name == expected_table),
+                "{provider} preset should carry {expected_table}, not the empty stub"
+            );
+        }
+    }
+
     #[test]
     fn daemon_control_request_decodes_flat_wire_as_typed_commands() {
         let request: DaemonControlRequest = serde_json::from_value(json!({
@@ -4770,11 +4825,32 @@ paths:
             .tables
             .iter()
             .any(|table| table.name == "security_advisories"));
+        let supported_tier_a = [
+            ("datadog", "listapikeys"),
+            ("mailchimp", "getroot"),
+            ("openai", "listassistants"),
+            ("sendgrid", "listaccessactivity"),
+            ("square", "retrievebusinessbookingprofile"),
+            ("stripe", "getaccounts"),
+            ("twilio", "listaccount"),
+            ("zendesk", "listapprovalrequests"),
+        ];
+        for (provider_name, table_name) in supported_tier_a {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.name == provider_name)
+                .unwrap_or_else(|| panic!("{provider_name} provider is listed"));
+            assert_eq!(provider.support_level, "supported");
+            assert!(
+                provider.tables.iter().any(|table| table.name == table_name),
+                "{provider_name} should expose {table_name} as a ready table"
+            );
+        }
         let experimental = providers
             .iter()
             .filter(|provider| provider.support_level == "experimental")
             .collect::<Vec<_>>();
-        assert_eq!(experimental.len(), 85);
+        assert_eq!(experimental.len(), 81);
         assert_eq!(
             providers
                 .iter()
@@ -4789,18 +4865,15 @@ paths:
                 .count(),
             87
         );
-        let stripe = experimental
+        let stripe = providers
             .iter()
             .find(|provider| provider.name == "stripe")
-            .expect("stripe experimental provider is listed");
+            .expect("stripe provider is listed");
         assert_eq!(stripe.provider_key, "stripe");
+        assert_eq!(stripe.support_level, "supported");
         assert_eq!(stripe.experimental_spec_count, 1);
-        assert_eq!(stripe.spec_source_key.as_deref(), Some("stripe.com"));
-        assert!(stripe
-            .spec_url
-            .as_deref()
-            .unwrap_or_default()
-            .starts_with("https://api.apis.guru/"));
+        assert_eq!(stripe.spec_source_key, None);
+        assert_eq!(stripe.spec_url, None);
         assert!(providers
             .windows(2)
             .all(|pair| pair[0].name <= pair[1].name));

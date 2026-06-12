@@ -1,0 +1,1470 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier A OpenAPI sources.
+
+[source]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+auth = { scheme = "header", name = "authorization", env = "OPENAI_API_KEY" }
+
+
+[[table]]
+name = "listassistants"
+path = "/assistants"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+instructions = { json = "$.instructions", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+response_format = { json = "$.response_format", type = "Utf8" }
+temperature = { json = "$.temperature", type = "Utf8" }
+tool_resources_code_interpreter_file_ids = { json = "$.tool_resources.code_interpreter.file_ids", type = "Utf8" }
+tool_resources_file_search_vector_store_ids = { json = "$.tool_resources.file_search.vector_store_ids", type = "Utf8" }
+tools = { json = "$.tools", type = "Utf8" }
+top_p = { json = "$.top_p", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+order = { param = "order" }
+
+[[table]]
+name = "getassistant"
+path = "/assistants/{assistant_id}"
+response_path = "$.tools"
+
+[table.columns]
+type = { json = "$.type", type = "Utf8" }
+
+[[table]]
+name = "listvoiceconsents"
+path = "/audio/voice_consents"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+language = { json = "$.language", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+
+[[table]]
+name = "listbatches"
+path = "/batches"
+response_path = "$.data"
+
+[table.columns]
+cancelled_at = { json = "$.cancelled_at", type = "Int64" }
+cancelling_at = { json = "$.cancelling_at", type = "Int64" }
+completed_at = { json = "$.completed_at", type = "Int64" }
+completion_window = { json = "$.completion_window", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+endpoint = { json = "$.endpoint", type = "Utf8" }
+error_file_id = { json = "$.error_file_id", type = "Utf8" }
+errors_data = { json = "$.errors.data", type = "Utf8" }
+errors_object = { json = "$.errors.object", type = "Utf8" }
+expired_at = { json = "$.expired_at", type = "Int64" }
+expires_at = { json = "$.expires_at", type = "Int64" }
+failed_at = { json = "$.failed_at", type = "Int64" }
+finalizing_at = { json = "$.finalizing_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+in_progress_at = { json = "$.in_progress_at", type = "Int64" }
+input_file_id = { json = "$.input_file_id", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+output_file_id = { json = "$.output_file_id", type = "Utf8" }
+request_counts_completed = { json = "$.request_counts.completed", type = "Int64" }
+request_counts_failed = { json = "$.request_counts.failed", type = "Int64" }
+request_counts_total = { json = "$.request_counts.total", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+usage_input_tokens = { json = "$.usage.input_tokens", type = "Int64" }
+usage_input_tokens_details_cached_tokens = { json = "$.usage.input_tokens_details.cached_tokens", type = "Int64" }
+usage_output_tokens = { json = "$.usage.output_tokens", type = "Int64" }
+usage_output_tokens_details_reasoning_tokens = { json = "$.usage.output_tokens_details.reasoning_tokens", type = "Int64" }
+usage_total_tokens = { json = "$.usage.total_tokens", type = "Int64" }
+
+[table.filters]
+after = { param = "after" }
+
+[[table]]
+name = "listchatcompletions"
+path = "/chat/completions"
+response_path = "$.data"
+
+[table.columns]
+choices = { json = "$.choices", type = "Utf8" }
+created = { json = "$.created", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+service_tier = { json = "$.service_tier", type = "Utf8" }
+system_fingerprint = { json = "$.system_fingerprint", type = "Utf8" }
+usage_completion_tokens = { json = "$.usage.completion_tokens", type = "Int64" }
+usage_completion_tokens_details_accepted_prediction_tokens = { json = "$.usage.completion_tokens_details.accepted_prediction_tokens", type = "Int64" }
+usage_completion_tokens_details_audio_tokens = { json = "$.usage.completion_tokens_details.audio_tokens", type = "Int64" }
+usage_completion_tokens_details_reasoning_tokens = { json = "$.usage.completion_tokens_details.reasoning_tokens", type = "Int64" }
+usage_completion_tokens_details_rejected_prediction_tokens = { json = "$.usage.completion_tokens_details.rejected_prediction_tokens", type = "Int64" }
+usage_prompt_tokens = { json = "$.usage.prompt_tokens", type = "Int64" }
+usage_prompt_tokens_details_audio_tokens = { json = "$.usage.prompt_tokens_details.audio_tokens", type = "Int64" }
+usage_prompt_tokens_details_cached_tokens = { json = "$.usage.prompt_tokens_details.cached_tokens", type = "Int64" }
+usage_total_tokens = { json = "$.usage.total_tokens", type = "Int64" }
+
+[table.filters]
+after = { param = "after" }
+metadata = { param = "metadata" }
+model = { param = "model" }
+order = { param = "order" }
+
+[[table]]
+name = "getchatcompletion"
+path = "/chat/completions/{completion_id}"
+response_path = "$.choices"
+
+[table.columns]
+finish_reason = { json = "$.finish_reason", type = "Utf8" }
+index = { json = "$.index", type = "Int64" }
+logprobs_content = { json = "$.logprobs.content", type = "Utf8" }
+logprobs_refusal = { json = "$.logprobs.refusal", type = "Utf8" }
+message_annotations = { json = "$.message.annotations", type = "Utf8" }
+message_audio_data = { json = "$.message.audio.data", type = "Utf8" }
+message_audio_expires_at = { json = "$.message.audio.expires_at", type = "Int64" }
+message_audio_id = { json = "$.message.audio.id", type = "Utf8" }
+message_audio_transcript = { json = "$.message.audio.transcript", type = "Utf8" }
+message_content = { json = "$.message.content", type = "Utf8" }
+message_function_call_arguments = { json = "$.message.function_call.arguments", type = "Utf8" }
+message_function_call_name = { json = "$.message.function_call.name", type = "Utf8" }
+message_refusal = { json = "$.message.refusal", type = "Utf8" }
+message_role = { json = "$.message.role", type = "Utf8" }
+message_tool_calls = { json = "$.message.tool_calls", type = "Utf8" }
+
+[[table]]
+name = "getchatcompletionmessages"
+path = "/chat/completions/{completion_id}/messages"
+response_path = "$.data"
+
+[table.columns]
+annotations = { json = "$.annotations", type = "Utf8" }
+audio_data = { json = "$.audio.data", type = "Utf8" }
+audio_expires_at = { json = "$.audio.expires_at", type = "Int64" }
+audio_id = { json = "$.audio.id", type = "Utf8" }
+audio_transcript = { json = "$.audio.transcript", type = "Utf8" }
+content = { json = "$.content", type = "Utf8" }
+function_call_arguments = { json = "$.function_call.arguments", type = "Utf8" }
+function_call_name = { json = "$.function_call.name", type = "Utf8" }
+refusal = { json = "$.refusal", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+tool_calls = { json = "$.tool_calls", type = "Utf8" }
+content_parts = { json = "$.content_parts", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "listthreadsmethod"
+path = "/chatkit/threads"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+status_type = { json = "$.status.type", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+user = { json = "$.user", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+order = { param = "order" }
+user = { param = "user" }
+
+[[table]]
+name = "listthreaditemsmethod"
+path = "/chatkit/threads/{thread_id}/items"
+response_path = "$.data"
+
+[table.columns]
+attachments = { json = "$.attachments", type = "Utf8" }
+content = { json = "$.content", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+inference_options_model = { json = "$.inference_options.model", type = "Utf8" }
+inference_options_tool_choice_id = { json = "$.inference_options.tool_choice.id", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+thread_id = { json = "$.thread_id", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+order = { param = "order" }
+
+[[table]]
+name = "listcontainers"
+path = "/containers"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+expires_after_anchor = { json = "$.expires_after.anchor", type = "Utf8" }
+expires_after_minutes = { json = "$.expires_after.minutes", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+last_active_at = { json = "$.last_active_at", type = "Int64" }
+memory_limit = { json = "$.memory_limit", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+network_policy_allowed_domains = { json = "$.network_policy.allowed_domains", type = "Utf8" }
+network_policy_type = { json = "$.network_policy.type", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+name = { param = "name" }
+order = { param = "order" }
+
+[[table]]
+name = "listcontainerfiles"
+path = "/containers/{container_id}/files"
+response_path = "$.data"
+
+[table.columns]
+bytes = { json = "$.bytes", type = "Int64" }
+container_id = { json = "$.container_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+path = { json = "$.path", type = "Utf8" }
+source = { json = "$.source", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "listconversationitems"
+path = "/conversations/{conversation_id}/items"
+response_path = "$.data"
+
+[table.columns]
+content = { json = "$.content", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+phase = { json = "$.phase", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+include = { param = "include" }
+order = { param = "order" }
+
+[[table]]
+name = "listevals"
+path = "/evals"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+data_source_config = { json = "$.data_source_config", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+testing_criteria = { json = "$.testing_criteria", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+order_by = { param = "order_by" }
+
+[[table]]
+name = "geteval"
+path = "/evals/{eval_id}"
+response_path = "$.testing_criteria"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "getevalruns"
+path = "/evals/{eval_id}/runs"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+data_source = { json = "$.data_source", type = "Utf8" }
+error_code = { json = "$.error.code", type = "Utf8" }
+error_message = { json = "$.error.message", type = "Utf8" }
+eval_id = { json = "$.eval_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+per_model_usage = { json = "$.per_model_usage", type = "Utf8" }
+per_testing_criteria_results = { json = "$.per_testing_criteria_results", type = "Utf8" }
+report_url = { json = "$.report_url", type = "Utf8" }
+result_counts_errored = { json = "$.result_counts.errored", type = "Int64" }
+result_counts_failed = { json = "$.result_counts.failed", type = "Int64" }
+result_counts_passed = { json = "$.result_counts.passed", type = "Int64" }
+result_counts_total = { json = "$.result_counts.total", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+status = { param = "status" }
+
+[[table]]
+name = "getevalrunoutputitems"
+path = "/evals/{eval_id}/runs/{run_id}/output_items"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+datasource_item = { json = "$.datasource_item", type = "Utf8" }
+datasource_item_id = { json = "$.datasource_item_id", type = "Int64" }
+eval_id = { json = "$.eval_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+run_id = { json = "$.run_id", type = "Utf8" }
+sample_error_code = { json = "$.sample.error.code", type = "Utf8" }
+sample_error_message = { json = "$.sample.error.message", type = "Utf8" }
+sample_finish_reason = { json = "$.sample.finish_reason", type = "Utf8" }
+sample_input = { json = "$.sample.input", type = "Utf8" }
+sample_max_completion_tokens = { json = "$.sample.max_completion_tokens", type = "Int64" }
+sample_model = { json = "$.sample.model", type = "Utf8" }
+sample_output = { json = "$.sample.output", type = "Utf8" }
+sample_seed = { json = "$.sample.seed", type = "Int64" }
+sample_temperature = { json = "$.sample.temperature", type = "Float64" }
+sample_top_p = { json = "$.sample.top_p", type = "Float64" }
+sample_usage_cached_tokens = { json = "$.sample.usage.cached_tokens", type = "Int64" }
+sample_usage_completion_tokens = { json = "$.sample.usage.completion_tokens", type = "Int64" }
+sample_usage_prompt_tokens = { json = "$.sample.usage.prompt_tokens", type = "Int64" }
+sample_usage_total_tokens = { json = "$.sample.usage.total_tokens", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+status = { param = "status" }
+
+[[table]]
+name = "getevalrunoutputitem"
+path = "/evals/{eval_id}/runs/{run_id}/output_items/{output_item_id}"
+response_path = "$.results"
+
+[table.columns]
+name = { json = "$.name", type = "Utf8" }
+passed = { json = "$.passed", type = "Boolean" }
+sample = { json = "$.sample", type = "Utf8" }
+score = { json = "$.score", type = "Float64" }
+type = { json = "$.type", type = "Utf8" }
+
+[[table]]
+name = "listfiles"
+path = "/files"
+response_path = "$.data"
+
+[table.columns]
+bytes = { json = "$.bytes", type = "Int64" }
+created_at = { json = "$.created_at", type = "Int64" }
+expires_at = { json = "$.expires_at", type = "Int64" }
+filename = { json = "$.filename", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+purpose = { json = "$.purpose", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+status_details = { json = "$.status_details", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+purpose = { param = "purpose" }
+
+[[table]]
+name = "listfinetuningcheckpointpermissions"
+path = "/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+project_id = { json = "$.project_id", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+project_id = { param = "project_id" }
+
+[[table]]
+name = "listpaginatedfinetuningjobs"
+path = "/fine_tuning/jobs"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+error_code = { json = "$.error.code", type = "Utf8" }
+error_message = { json = "$.error.message", type = "Utf8" }
+error_param = { json = "$.error.param", type = "Utf8" }
+estimated_finish = { json = "$.estimated_finish", type = "Utf8" }
+fine_tuned_model = { json = "$.fine_tuned_model", type = "Utf8" }
+finished_at = { json = "$.finished_at", type = "Utf8" }
+hyperparameters_batch_size = { json = "$.hyperparameters.batch_size", type = "Utf8" }
+hyperparameters_learning_rate_multiplier = { json = "$.hyperparameters.learning_rate_multiplier", type = "Utf8" }
+hyperparameters_n_epochs = { json = "$.hyperparameters.n_epochs", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+integrations = { json = "$.integrations", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+method_dpo_hyperparameters_batch_size = { json = "$.method.dpo.hyperparameters.batch_size", type = "Utf8" }
+method_dpo_hyperparameters_beta = { json = "$.method.dpo.hyperparameters.beta", type = "Utf8" }
+method_dpo_hyperparameters_learning_rate_multiplier = { json = "$.method.dpo.hyperparameters.learning_rate_multiplier", type = "Utf8" }
+method_dpo_hyperparameters_n_epochs = { json = "$.method.dpo.hyperparameters.n_epochs", type = "Utf8" }
+method_reinforcement_grader = { json = "$.method.reinforcement.grader", type = "Utf8" }
+method_reinforcement_hyperparameters_batch_size = { json = "$.method.reinforcement.hyperparameters.batch_size", type = "Utf8" }
+method_reinforcement_hyperparameters_compute_multiplier = { json = "$.method.reinforcement.hyperparameters.compute_multiplier", type = "Utf8" }
+method_reinforcement_hyperparameters_eval_interval = { json = "$.method.reinforcement.hyperparameters.eval_interval", type = "Utf8" }
+method_reinforcement_hyperparameters_eval_samples = { json = "$.method.reinforcement.hyperparameters.eval_samples", type = "Utf8" }
+method_reinforcement_hyperparameters_learning_rate_multiplier = { json = "$.method.reinforcement.hyperparameters.learning_rate_multiplier", type = "Utf8" }
+method_reinforcement_hyperparameters_n_epochs = { json = "$.method.reinforcement.hyperparameters.n_epochs", type = "Utf8" }
+method_reinforcement_hyperparameters_reasoning_effort = { json = "$.method.reinforcement.hyperparameters.reasoning_effort", type = "Utf8" }
+method_supervised_hyperparameters_batch_size = { json = "$.method.supervised.hyperparameters.batch_size", type = "Utf8" }
+method_supervised_hyperparameters_learning_rate_multiplier = { json = "$.method.supervised.hyperparameters.learning_rate_multiplier", type = "Utf8" }
+method_supervised_hyperparameters_n_epochs = { json = "$.method.supervised.hyperparameters.n_epochs", type = "Utf8" }
+method_type = { json = "$.method.type", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+organization_id = { json = "$.organization_id", type = "Utf8" }
+result_files = { json = "$.result_files", type = "Utf8" }
+seed = { json = "$.seed", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+trained_tokens = { json = "$.trained_tokens", type = "Utf8" }
+training_file = { json = "$.training_file", type = "Utf8" }
+validation_file = { json = "$.validation_file", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+metadata = { param = "metadata" }
+
+[[table]]
+name = "retrievefinetuningjob"
+path = "/fine_tuning/jobs/{fine_tuning_job_id}"
+response_path = "$.result_files"
+
+[table.columns]
+field = { json = "$", type = "Utf8" }
+
+[[table]]
+name = "listfinetuningjobcheckpoints"
+path = "/fine_tuning/jobs/{fine_tuning_job_id}/checkpoints"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+fine_tuned_model_checkpoint = { json = "$.fine_tuned_model_checkpoint", type = "Utf8" }
+fine_tuning_job_id = { json = "$.fine_tuning_job_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+metrics_full_valid_loss = { json = "$.metrics.full_valid_loss", type = "Float64" }
+metrics_full_valid_mean_token_accuracy = { json = "$.metrics.full_valid_mean_token_accuracy", type = "Float64" }
+metrics_step = { json = "$.metrics.step", type = "Float64" }
+metrics_train_loss = { json = "$.metrics.train_loss", type = "Float64" }
+metrics_train_mean_token_accuracy = { json = "$.metrics.train_mean_token_accuracy", type = "Float64" }
+metrics_valid_loss = { json = "$.metrics.valid_loss", type = "Float64" }
+metrics_valid_mean_token_accuracy = { json = "$.metrics.valid_mean_token_accuracy", type = "Float64" }
+object = { json = "$.object", type = "Utf8" }
+step_number = { json = "$.step_number", type = "Int64" }
+
+[table.filters]
+after = { param = "after" }
+
+[[table]]
+name = "listfinetuningevents"
+path = "/fine_tuning/jobs/{fine_tuning_job_id}/events"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+data = { json = "$.data", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+level = { json = "$.level", type = "Utf8" }
+message = { json = "$.message", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+
+[[table]]
+name = "listmodels"
+path = "/models"
+response_path = "$.data"
+
+[table.columns]
+created = { json = "$.created", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+owned_by = { json = "$.owned_by", type = "Utf8" }
+
+[[table]]
+name = "admin_api_keys_list"
+path = "/organization/admin_api_keys"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+last_used_at = { json = "$.last_used_at", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+owner_created_at = { json = "$.owner.created_at", type = "Int64" }
+owner_id = { json = "$.owner.id", type = "Utf8" }
+owner_name = { json = "$.owner.name", type = "Utf8" }
+owner_object = { json = "$.owner.object", type = "Utf8" }
+owner_role = { json = "$.owner.role", type = "Utf8" }
+owner_type = { json = "$.owner.type", type = "Utf8" }
+redacted_value = { json = "$.redacted_value", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_audit_logs"
+path = "/organization/audit_logs"
+response_path = "$.data"
+
+[table.columns]
+actor_api_key_id = { json = "$.actor.api_key.id", type = "Utf8" }
+actor_api_key_service_account_id = { json = "$.actor.api_key.service_account.id", type = "Utf8" }
+actor_api_key_type = { json = "$.actor.api_key.type", type = "Utf8" }
+actor_api_key_user_email = { json = "$.actor.api_key.user.email", type = "Utf8" }
+actor_api_key_user_id = { json = "$.actor.api_key.user.id", type = "Utf8" }
+actor_session_ip_address = { json = "$.actor.session.ip_address", type = "Utf8" }
+actor_session_user_email = { json = "$.actor.session.user.email", type = "Utf8" }
+actor_session_user_id = { json = "$.actor.session.user.id", type = "Utf8" }
+actor_type = { json = "$.actor.type", type = "Utf8" }
+api_key_created_data_scopes = { json = "$.api_key.created.data.scopes", type = "Utf8" }
+api_key_created_id = { json = "$.api_key.created.id", type = "Utf8" }
+api_key_deleted_id = { json = "$.api_key.deleted.id", type = "Utf8" }
+api_key_updated_changes_requested_scopes = { json = "$.api_key.updated.changes_requested.scopes", type = "Utf8" }
+api_key_updated_id = { json = "$.api_key.updated.id", type = "Utf8" }
+certificate_created_id = { json = "$.certificate.created.id", type = "Utf8" }
+certificate_created_name = { json = "$.certificate.created.name", type = "Utf8" }
+certificate_deleted_certificate = { json = "$.certificate.deleted.certificate", type = "Utf8" }
+certificate_deleted_id = { json = "$.certificate.deleted.id", type = "Utf8" }
+certificate_deleted_name = { json = "$.certificate.deleted.name", type = "Utf8" }
+certificate_updated_id = { json = "$.certificate.updated.id", type = "Utf8" }
+certificate_updated_name = { json = "$.certificate.updated.name", type = "Utf8" }
+certificates_activated_certificates = { json = "$.certificates.activated.certificates", type = "Utf8" }
+certificates_deactivated_certificates = { json = "$.certificates.deactivated.certificates", type = "Utf8" }
+checkpoint_permission_created_data_fine_tuned_model_checkpoint = { json = "$.checkpoint.permission.created.data.fine_tuned_model_checkpoint", type = "Utf8" }
+checkpoint_permission_created_data_project_id = { json = "$.checkpoint.permission.created.data.project_id", type = "Utf8" }
+checkpoint_permission_created_id = { json = "$.checkpoint.permission.created.id", type = "Utf8" }
+checkpoint_permission_deleted_id = { json = "$.checkpoint.permission.deleted.id", type = "Utf8" }
+effective_at = { json = "$.effective_at", type = "Int64" }
+external_key_registered_data = { json = "$.external_key.registered.data", type = "Utf8" }
+external_key_registered_id = { json = "$.external_key.registered.id", type = "Utf8" }
+external_key_removed_id = { json = "$.external_key.removed.id", type = "Utf8" }
+group_created_data_group_name = { json = "$.group.created.data.group_name", type = "Utf8" }
+group_created_id = { json = "$.group.created.id", type = "Utf8" }
+group_deleted_id = { json = "$.group.deleted.id", type = "Utf8" }
+group_updated_changes_requested_group_name = { json = "$.group.updated.changes_requested.group_name", type = "Utf8" }
+group_updated_id = { json = "$.group.updated.id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+invite_accepted_id = { json = "$.invite.accepted.id", type = "Utf8" }
+invite_deleted_id = { json = "$.invite.deleted.id", type = "Utf8" }
+invite_sent_data_email = { json = "$.invite.sent.data.email", type = "Utf8" }
+invite_sent_data_role = { json = "$.invite.sent.data.role", type = "Utf8" }
+invite_sent_id = { json = "$.invite.sent.id", type = "Utf8" }
+ip_allowlist_config_activated_configs = { json = "$.ip_allowlist.config.activated.configs", type = "Utf8" }
+ip_allowlist_config_deactivated_configs = { json = "$.ip_allowlist.config.deactivated.configs", type = "Utf8" }
+ip_allowlist_created_allowed_ips = { json = "$.ip_allowlist.created.allowed_ips", type = "Utf8" }
+ip_allowlist_created_id = { json = "$.ip_allowlist.created.id", type = "Utf8" }
+ip_allowlist_created_name = { json = "$.ip_allowlist.created.name", type = "Utf8" }
+ip_allowlist_deleted_allowed_ips = { json = "$.ip_allowlist.deleted.allowed_ips", type = "Utf8" }
+ip_allowlist_deleted_id = { json = "$.ip_allowlist.deleted.id", type = "Utf8" }
+ip_allowlist_deleted_name = { json = "$.ip_allowlist.deleted.name", type = "Utf8" }
+ip_allowlist_updated_allowed_ips = { json = "$.ip_allowlist.updated.allowed_ips", type = "Utf8" }
+ip_allowlist_updated_id = { json = "$.ip_allowlist.updated.id", type = "Utf8" }
+login_failed_error_code = { json = "$.login.failed.error_code", type = "Utf8" }
+login_failed_error_message = { json = "$.login.failed.error_message", type = "Utf8" }
+login_succeeded = { json = "$.login.succeeded", type = "Utf8" }
+logout_failed_error_code = { json = "$.logout.failed.error_code", type = "Utf8" }
+logout_failed_error_message = { json = "$.logout.failed.error_message", type = "Utf8" }
+logout_succeeded = { json = "$.logout.succeeded", type = "Utf8" }
+organization_updated_changes_requested_api_call_logging = { json = "$.organization.updated.changes_requested.api_call_logging", type = "Utf8" }
+organization_updated_changes_requested_api_call_logging_project_ids = { json = "$.organization.updated.changes_requested.api_call_logging_project_ids", type = "Utf8" }
+organization_updated_changes_requested_description = { json = "$.organization.updated.changes_requested.description", type = "Utf8" }
+organization_updated_changes_requested_name = { json = "$.organization.updated.changes_requested.name", type = "Utf8" }
+organization_updated_changes_requested_threads_ui_visibility = { json = "$.organization.updated.changes_requested.threads_ui_visibility", type = "Utf8" }
+organization_updated_changes_requested_title = { json = "$.organization.updated.changes_requested.title", type = "Utf8" }
+organization_updated_changes_requested_usage_dashboard_visibility = { json = "$.organization.updated.changes_requested.usage_dashboard_visibility", type = "Utf8" }
+organization_updated_id = { json = "$.organization.updated.id", type = "Utf8" }
+project_id = { json = "$.project.id", type = "Utf8" }
+project_name = { json = "$.project.name", type = "Utf8" }
+project_archived_id = { json = "$.project.archived.id", type = "Utf8" }
+project_created_data_name = { json = "$.project.created.data.name", type = "Utf8" }
+project_created_data_title = { json = "$.project.created.data.title", type = "Utf8" }
+project_created_id = { json = "$.project.created.id", type = "Utf8" }
+project_deleted_id = { json = "$.project.deleted.id", type = "Utf8" }
+project_updated_changes_requested_title = { json = "$.project.updated.changes_requested.title", type = "Utf8" }
+project_updated_id = { json = "$.project.updated.id", type = "Utf8" }
+rate_limit_deleted_id = { json = "$.rate_limit.deleted.id", type = "Utf8" }
+rate_limit_updated_changes_requested_batch_1_day_max_input_tokens = { json = "$.rate_limit.updated.changes_requested.batch_1_day_max_input_tokens", type = "Int64" }
+rate_limit_updated_changes_requested_max_audio_megabytes_per_1_minute = { json = "$.rate_limit.updated.changes_requested.max_audio_megabytes_per_1_minute", type = "Int64" }
+rate_limit_updated_changes_requested_max_images_per_1_minute = { json = "$.rate_limit.updated.changes_requested.max_images_per_1_minute", type = "Int64" }
+rate_limit_updated_changes_requested_max_requests_per_1_day = { json = "$.rate_limit.updated.changes_requested.max_requests_per_1_day", type = "Int64" }
+
+[table.filters]
+actor_emails = { param = "actor_emails[]" }
+actor_ids = { param = "actor_ids[]" }
+after = { param = "after" }
+before = { param = "before" }
+effective_at = { param = "effective_at" }
+event_types = { param = "event_types[]" }
+project_ids = { param = "project_ids[]" }
+resource_ids = { param = "resource_ids[]" }
+
+[[table]]
+name = "listorganizationcertificates"
+path = "/organization/certificates"
+response_path = "$.data"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+certificate_details_expires_at = { json = "$.certificate_details.expires_at", type = "Int64" }
+certificate_details_valid_at = { json = "$.certificate_details.valid_at", type = "Int64" }
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "usage_costs"
+path = "/organization/costs"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+api_key_ids = { param = "api_key_ids" }
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+project_ids = { param = "project_ids" }
+start_time = { param = "start_time" }
+
+[[table]]
+name = "list_groups"
+path = "/organization/groups"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+group_type = { json = "$.group_type", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+is_scim_managed = { json = "$.is_scim_managed", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_group_role_assignments"
+path = "/organization/groups/{group_id}/roles"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by = { json = "$.created_by", type = "Utf8" }
+created_by_user_obj = { json = "$.created_by_user_obj", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+permissions = { json = "$.permissions", type = "Utf8" }
+predefined_role = { json = "$.predefined_role", type = "Boolean" }
+resource_type = { json = "$.resource_type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_group_users"
+path = "/organization/groups/{group_id}/users"
+response_path = "$.data"
+
+[table.columns]
+email = { json = "$.email", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_invites"
+path = "/organization/invites"
+response_path = "$.data"
+
+[table.columns]
+accepted_at = { json = "$.accepted_at", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+email = { json = "$.email", type = "Utf8" }
+expires_at = { json = "$.expires_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+projects = { json = "$.projects", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+
+[[table]]
+name = "retrieve_invite"
+path = "/organization/invites/{invite_id}"
+response_path = "$.projects"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+
+[[table]]
+name = "list_projects"
+path = "/organization/projects"
+response_path = "$.data"
+
+[table.columns]
+archived_at = { json = "$.archived_at", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+external_key_id = { json = "$.external_key_id", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+include_archived = { param = "include_archived" }
+
+[[table]]
+name = "list_project_api_keys"
+path = "/organization/projects/{project_id}/api_keys"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+last_used_at = { json = "$.last_used_at", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+owner_service_account_created_at = { json = "$.owner.service_account.created_at", type = "Int64" }
+owner_service_account_id = { json = "$.owner.service_account.id", type = "Utf8" }
+owner_service_account_name = { json = "$.owner.service_account.name", type = "Utf8" }
+owner_service_account_role = { json = "$.owner.service_account.role", type = "Utf8" }
+owner_type = { json = "$.owner.type", type = "Utf8" }
+owner_user_created_at = { json = "$.owner.user.created_at", type = "Int64" }
+owner_user_email = { json = "$.owner.user.email", type = "Utf8" }
+owner_user_id = { json = "$.owner.user.id", type = "Utf8" }
+owner_user_name = { json = "$.owner.user.name", type = "Utf8" }
+owner_user_role = { json = "$.owner.user.role", type = "Utf8" }
+redacted_value = { json = "$.redacted_value", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+
+[[table]]
+name = "listprojectcertificates"
+path = "/organization/projects/{project_id}/certificates"
+response_path = "$.data"
+
+[table.columns]
+active = { json = "$.active", type = "Boolean" }
+certificate_details_expires_at = { json = "$.certificate_details.expires_at", type = "Int64" }
+certificate_details_valid_at = { json = "$.certificate_details.valid_at", type = "Int64" }
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_project_groups"
+path = "/organization/projects/{project_id}/groups"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+group_id = { json = "$.group_id", type = "Utf8" }
+group_name = { json = "$.group_name", type = "Utf8" }
+group_type = { json = "$.group_type", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+project_id = { json = "$.project_id", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_project_rate_limits"
+path = "/organization/projects/{project_id}/rate_limits"
+response_path = "$.data"
+
+[table.columns]
+batch_1_day_max_input_tokens = { json = "$.batch_1_day_max_input_tokens", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+max_audio_megabytes_per_1_minute = { json = "$.max_audio_megabytes_per_1_minute", type = "Int64" }
+max_images_per_1_minute = { json = "$.max_images_per_1_minute", type = "Int64" }
+max_requests_per_1_day = { json = "$.max_requests_per_1_day", type = "Int64" }
+max_requests_per_1_minute = { json = "$.max_requests_per_1_minute", type = "Int64" }
+max_tokens_per_1_minute = { json = "$.max_tokens_per_1_minute", type = "Int64" }
+model = { json = "$.model", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+
+[[table]]
+name = "list_project_service_accounts"
+path = "/organization/projects/{project_id}/service_accounts"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+
+[[table]]
+name = "list_project_users"
+path = "/organization/projects/{project_id}/users"
+response_path = "$.data"
+
+[table.columns]
+added_at = { json = "$.added_at", type = "Int64" }
+email = { json = "$.email", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+
+[[table]]
+name = "list_roles"
+path = "/organization/roles"
+response_path = "$.data"
+
+[table.columns]
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+permissions = { json = "$.permissions", type = "Utf8" }
+predefined_role = { json = "$.predefined_role", type = "Boolean" }
+resource_type = { json = "$.resource_type", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "usage_audio_speeches"
+path = "/organization/usage/audio_speeches"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+api_key_ids = { param = "api_key_ids" }
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+models = { param = "models" }
+project_ids = { param = "project_ids" }
+start_time = { param = "start_time" }
+user_ids = { param = "user_ids" }
+
+[[table]]
+name = "usage_audio_transcriptions"
+path = "/organization/usage/audio_transcriptions"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+api_key_ids = { param = "api_key_ids" }
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+models = { param = "models" }
+project_ids = { param = "project_ids" }
+start_time = { param = "start_time" }
+user_ids = { param = "user_ids" }
+
+[[table]]
+name = "usage_code_interpreter_sessions"
+path = "/organization/usage/code_interpreter_sessions"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+project_ids = { param = "project_ids" }
+start_time = { param = "start_time" }
+
+[[table]]
+name = "usage_completions"
+path = "/organization/usage/completions"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+api_key_ids = { param = "api_key_ids" }
+batch = { param = "batch" }
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+models = { param = "models" }
+project_ids = { param = "project_ids" }
+start_time = { param = "start_time" }
+user_ids = { param = "user_ids" }
+
+[[table]]
+name = "usage_embeddings"
+path = "/organization/usage/embeddings"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+api_key_ids = { param = "api_key_ids" }
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+models = { param = "models" }
+project_ids = { param = "project_ids" }
+start_time = { param = "start_time" }
+user_ids = { param = "user_ids" }
+
+[[table]]
+name = "usage_images"
+path = "/organization/usage/images"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+api_key_ids = { param = "api_key_ids" }
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+models = { param = "models" }
+project_ids = { param = "project_ids" }
+sizes = { param = "sizes" }
+sources = { param = "sources" }
+start_time = { param = "start_time" }
+user_ids = { param = "user_ids" }
+
+[[table]]
+name = "usage_moderations"
+path = "/organization/usage/moderations"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+api_key_ids = { param = "api_key_ids" }
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+models = { param = "models" }
+project_ids = { param = "project_ids" }
+start_time = { param = "start_time" }
+user_ids = { param = "user_ids" }
+
+[[table]]
+name = "usage_vector_stores"
+path = "/organization/usage/vector_stores"
+response_path = "$.data"
+
+[table.columns]
+end_time = { json = "$.end_time", type = "Int64" }
+object = { json = "$.object", type = "Utf8" }
+results = { json = "$.results", type = "Utf8" }
+start_time = { json = "$.start_time", type = "Int64" }
+
+[table.filters]
+bucket_width = { param = "bucket_width" }
+end_time = { param = "end_time" }
+group_by = { param = "group_by" }
+project_ids = { param = "project_ids" }
+start_time = { param = "start_time" }
+
+[[table]]
+name = "list_users"
+path = "/organization/users"
+response_path = "$.data"
+
+[table.columns]
+added_at = { json = "$.added_at", type = "Int64" }
+api_key_last_used_at = { json = "$.api_key_last_used_at", type = "Utf8" }
+created = { json = "$.created", type = "Int64" }
+developer_persona = { json = "$.developer_persona", type = "Utf8" }
+email = { json = "$.email", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+is_default = { json = "$.is_default", type = "Boolean" }
+is_scale_tier_authorized_purchaser = { json = "$.is_scale_tier_authorized_purchaser", type = "Utf8" }
+is_scim_managed = { json = "$.is_scim_managed", type = "Boolean" }
+is_service_account = { json = "$.is_service_account", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+projects_data = { json = "$.projects.data", type = "Utf8" }
+projects_object = { json = "$.projects.object", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+technical_level = { json = "$.technical_level", type = "Utf8" }
+user_banned = { json = "$.user.banned", type = "Utf8" }
+user_banned_at = { json = "$.user.banned_at", type = "Utf8" }
+user_email = { json = "$.user.email", type = "Utf8" }
+user_enabled = { json = "$.user.enabled", type = "Utf8" }
+user_id = { json = "$.user.id", type = "Utf8" }
+user_name = { json = "$.user.name", type = "Utf8" }
+user_object = { json = "$.user.object", type = "Utf8" }
+user_picture = { json = "$.user.picture", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+emails = { param = "emails" }
+
+[[table]]
+name = "list_user_role_assignments"
+path = "/organization/users/{user_id}/roles"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by = { json = "$.created_by", type = "Utf8" }
+created_by_user_obj = { json = "$.created_by_user_obj", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+permissions = { json = "$.permissions", type = "Utf8" }
+predefined_role = { json = "$.predefined_role", type = "Boolean" }
+resource_type = { json = "$.resource_type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_project_group_role_assignments"
+path = "/projects/{project_id}/groups/{group_id}/roles"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by = { json = "$.created_by", type = "Utf8" }
+created_by_user_obj = { json = "$.created_by_user_obj", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+permissions = { json = "$.permissions", type = "Utf8" }
+predefined_role = { json = "$.predefined_role", type = "Boolean" }
+resource_type = { json = "$.resource_type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_project_roles"
+path = "/projects/{project_id}/roles"
+response_path = "$.data"
+
+[table.columns]
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+permissions = { json = "$.permissions", type = "Utf8" }
+predefined_role = { json = "$.predefined_role", type = "Boolean" }
+resource_type = { json = "$.resource_type", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "list_project_user_role_assignments"
+path = "/projects/{project_id}/users/{user_id}/roles"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+created_by = { json = "$.created_by", type = "Utf8" }
+created_by_user_obj = { json = "$.created_by_user_obj", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+permissions = { json = "$.permissions", type = "Utf8" }
+predefined_role = { json = "$.predefined_role", type = "Boolean" }
+resource_type = { json = "$.resource_type", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "listinputitems"
+path = "/responses/{response_id}/input_items"
+response_path = "$.data"
+
+[table.columns]
+content = { json = "$.content", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+include = { param = "include" }
+order = { param = "order" }
+
+[[table]]
+name = "listskills"
+path = "/skills"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+default_version = { json = "$.default_version", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+latest_version = { json = "$.latest_version", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "listskillversions"
+path = "/skills/{skill_id}/versions"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+skill_id = { json = "$.skill_id", type = "Utf8" }
+version = { json = "$.version", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
+
+[[table]]
+name = "listmessages"
+path = "/threads/{thread_id}/messages"
+response_path = "$.data"
+
+[table.columns]
+assistant_id = { json = "$.assistant_id", type = "Utf8" }
+attachments = { json = "$.attachments", type = "Utf8" }
+completed_at = { json = "$.completed_at", type = "Utf8" }
+content = { json = "$.content", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+incomplete_at = { json = "$.incomplete_at", type = "Utf8" }
+incomplete_details_reason = { json = "$.incomplete_details.reason", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+role = { json = "$.role", type = "Utf8" }
+run_id = { json = "$.run_id", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+thread_id = { json = "$.thread_id", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+order = { param = "order" }
+run_id = { param = "run_id" }
+
+[[table]]
+name = "getmessage"
+path = "/threads/{thread_id}/messages/{message_id}"
+response_path = "$.content"
+
+[table.columns]
+image_file_detail = { json = "$.image_file.detail", type = "Utf8" }
+image_file_file_id = { json = "$.image_file.file_id", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+
+[[table]]
+name = "listruns"
+path = "/threads/{thread_id}/runs"
+response_path = "$.data"
+
+[table.columns]
+assistant_id = { json = "$.assistant_id", type = "Utf8" }
+cancelled_at = { json = "$.cancelled_at", type = "Int64" }
+completed_at = { json = "$.completed_at", type = "Int64" }
+created_at = { json = "$.created_at", type = "Int64" }
+expires_at = { json = "$.expires_at", type = "Int64" }
+failed_at = { json = "$.failed_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+incomplete_details_reason = { json = "$.incomplete_details.reason", type = "Utf8" }
+instructions = { json = "$.instructions", type = "Utf8" }
+last_error_code = { json = "$.last_error.code", type = "Utf8" }
+last_error_message = { json = "$.last_error.message", type = "Utf8" }
+max_completion_tokens = { json = "$.max_completion_tokens", type = "Int64" }
+max_prompt_tokens = { json = "$.max_prompt_tokens", type = "Int64" }
+metadata = { json = "$.metadata", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+parallel_tool_calls = { json = "$.parallel_tool_calls", type = "Boolean" }
+required_action_submit_tool_outputs_tool_calls = { json = "$.required_action.submit_tool_outputs.tool_calls", type = "Utf8" }
+required_action_type = { json = "$.required_action.type", type = "Utf8" }
+response_format_type = { json = "$.response_format.type", type = "Utf8" }
+started_at = { json = "$.started_at", type = "Int64" }
+status = { json = "$.status", type = "Utf8" }
+temperature = { json = "$.temperature", type = "Float64" }
+thread_id = { json = "$.thread_id", type = "Utf8" }
+tool_choice = { json = "$.tool_choice", type = "Utf8" }
+tools = { json = "$.tools", type = "Utf8" }
+top_p = { json = "$.top_p", type = "Float64" }
+truncation_strategy_last_messages = { json = "$.truncation_strategy.last_messages", type = "Utf8" }
+truncation_strategy_type = { json = "$.truncation_strategy.type", type = "Utf8" }
+usage_completion_tokens = { json = "$.usage.completion_tokens", type = "Int64" }
+usage_prompt_tokens = { json = "$.usage.prompt_tokens", type = "Int64" }
+usage_total_tokens = { json = "$.usage.total_tokens", type = "Int64" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+order = { param = "order" }
+
+[[table]]
+name = "getrun"
+path = "/threads/{thread_id}/runs/{run_id}"
+response_path = "$.tools"
+
+[table.columns]
+type = { json = "$.type", type = "Utf8" }
+
+[[table]]
+name = "listrunsteps"
+path = "/threads/{thread_id}/runs/{run_id}/steps"
+response_path = "$.data"
+
+[table.columns]
+assistant_id = { json = "$.assistant_id", type = "Utf8" }
+cancelled_at = { json = "$.cancelled_at", type = "Utf8" }
+completed_at = { json = "$.completed_at", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+expired_at = { json = "$.expired_at", type = "Utf8" }
+failed_at = { json = "$.failed_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+last_error_code = { json = "$.last_error.code", type = "Utf8" }
+last_error_message = { json = "$.last_error.message", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+run_id = { json = "$.run_id", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+step_details = { json = "$.step_details", type = "Utf8" }
+thread_id = { json = "$.thread_id", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+usage_completion_tokens = { json = "$.usage.completion_tokens", type = "Int64" }
+usage_prompt_tokens = { json = "$.usage.prompt_tokens", type = "Int64" }
+usage_total_tokens = { json = "$.usage.total_tokens", type = "Int64" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+include = { param = "include[]" }
+order = { param = "order" }
+
+[[table]]
+name = "listvectorstores"
+path = "/vector_stores"
+response_path = "$.data"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Int64" }
+expires_after_anchor = { json = "$.expires_after.anchor", type = "Utf8" }
+expires_after_days = { json = "$.expires_after.days", type = "Int64" }
+expires_at = { json = "$.expires_at", type = "Utf8" }
+file_counts_cancelled = { json = "$.file_counts.cancelled", type = "Int64" }
+file_counts_completed = { json = "$.file_counts.completed", type = "Int64" }
+file_counts_failed = { json = "$.file_counts.failed", type = "Int64" }
+file_counts_in_progress = { json = "$.file_counts.in_progress", type = "Int64" }
+file_counts_total = { json = "$.file_counts.total", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+last_active_at = { json = "$.last_active_at", type = "Utf8" }
+metadata = { json = "$.metadata", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+usage_bytes = { json = "$.usage_bytes", type = "Int64" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+order = { param = "order" }
+
+[[table]]
+name = "listfilesinvectorstorebatch"
+path = "/vector_stores/{vector_store_id}/file_batches/{batch_id}/files"
+response_path = "$.data"
+
+[table.columns]
+attributes = { json = "$.attributes", type = "Utf8" }
+chunking_strategy = { json = "$.chunking_strategy", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+last_error_code = { json = "$.last_error.code", type = "Utf8" }
+last_error_message = { json = "$.last_error.message", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+usage_bytes = { json = "$.usage_bytes", type = "Int64" }
+vector_store_id = { json = "$.vector_store_id", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+filter = { param = "filter" }
+order = { param = "order" }
+
+[[table]]
+name = "listvectorstorefiles"
+path = "/vector_stores/{vector_store_id}/files"
+response_path = "$.data"
+
+[table.columns]
+attributes = { json = "$.attributes", type = "Utf8" }
+chunking_strategy = { json = "$.chunking_strategy", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+last_error_code = { json = "$.last_error.code", type = "Utf8" }
+last_error_message = { json = "$.last_error.message", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+usage_bytes = { json = "$.usage_bytes", type = "Int64" }
+vector_store_id = { json = "$.vector_store_id", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+before = { param = "before" }
+filter = { param = "filter" }
+order = { param = "order" }
+
+[[table]]
+name = "retrievevectorstorefilecontent"
+path = "/vector_stores/{vector_store_id}/files/{file_id}/content"
+response_path = "$.data"
+
+[table.columns]
+text = { json = "$.text", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+
+[[table]]
+name = "listvideos"
+path = "/videos"
+response_path = "$.data"
+
+[table.columns]
+completed_at = { json = "$.completed_at", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Int64" }
+error_code = { json = "$.error.code", type = "Utf8" }
+error_message = { json = "$.error.message", type = "Utf8" }
+expires_at = { json = "$.expires_at", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+model = { json = "$.model", type = "Utf8" }
+object = { json = "$.object", type = "Utf8" }
+progress = { json = "$.progress", type = "Int64" }
+prompt = { json = "$.prompt", type = "Utf8" }
+remixed_from_video_id = { json = "$.remixed_from_video_id", type = "Utf8" }
+seconds = { json = "$.seconds", type = "Utf8" }
+size = { json = "$.size", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+after = { param = "after" }
+order = { param = "order" }
