@@ -10,6 +10,10 @@ export type ProviderSummary = {
    */
   name: string;
   /**
+   * Underlying Nango provider key used when importing a selected catalog row.
+   */
+  providerKey: string;
+  /**
    * Human-readable provider name.
    */
   displayName: string;
@@ -29,6 +33,18 @@ export type ProviderSummary = {
    * Support level for the bundled catalog entry.
    */
   supportLevel: string;
+  /**
+   * API spec source key when this row came from an experimental spec crosswalk.
+   */
+  specSourceKey: string | null;
+  /**
+   * API spec URL when this row came from an experimental spec crosswalk.
+   */
+  specUrl: string | null;
+  /**
+   * Number of experimental API spec candidates attached to this provider.
+   */
+  experimentalSpecCount: number;
   /**
    * Runtime base URL from a supported manifest when known.
    */

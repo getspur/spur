@@ -43,7 +43,11 @@ function providersResponse() {
           tier: "A",
           authMode: "API_KEY",
           supportLevel: "supported",
+          providerKey: "github",
           baseUrl: "https://api.github.com",
+          specSourceKey: null,
+          specUrl: null,
+          experimentalSpecCount: 0,
           credentialEnvVars: ["GITHUB_TOKEN"],
           tables: [
             {
@@ -66,8 +70,12 @@ function providersResponse() {
           category: "Payments",
           tier: "A",
           authMode: "API_KEY",
-          supportLevel: "catalog",
-          baseUrl: null,
+          supportLevel: "experimental",
+          providerKey: "stripe",
+          baseUrl: "https://api.stripe.com",
+          specSourceKey: "stripe.com",
+          specUrl: "https://api.apis.guru/v2/specs/stripe.com/2023-10-16/openapi.json",
+          experimentalSpecCount: 1,
           credentialEnvVars: [],
           tables: [],
         },
@@ -78,7 +86,11 @@ function providersResponse() {
           tier: "B",
           authMode: "OAUTH2",
           supportLevel: "catalog",
+          providerKey: "hubspot",
           baseUrl: null,
+          specSourceKey: null,
+          specUrl: null,
+          experimentalSpecCount: 0,
           credentialEnvVars: [],
           tables: [],
         },
@@ -192,7 +204,11 @@ function renderWizard(onClose = vi.fn()) {
 async function chooseStripeProvider() {
   fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
 
-  const stripe = await screen.findByRole("button", { name: /Stripe/i });
+  const stripeButtons = await screen.findAllByRole("button", { name: /Stripe/i });
+  const stripe = stripeButtons.find(
+    (button) => !button.textContent?.includes("Stripe API"),
+  );
+  if (!stripe) throw new Error("Stripe provider tile missing");
   fireEvent.click(stripe);
 }
 
@@ -319,6 +335,47 @@ describe("AddRestApiWizard", () => {
         provider: "github",
         spec_text: null,
         credentials: [["GITHUB_TOKEN", "ghp_test"]],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  test("experimental_catalog_provider_uses_spec_url_and_provider_key", async () => {
+    const onClose = renderWizard();
+
+    await chooseStripeProvider();
+
+    expect(screen.getAllByText("Experimental").length).toBeGreaterThan(0);
+    expect(screen.getByText("1 spec candidate")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "Connect to Stripe",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("STRIPE_API_KEY")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("STRIPE_API_KEY"), {
+      target: { value: "sk_test" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    const specInput = screen.getByLabelText("OpenAPI spec text or URL");
+    expect(specInput).toHaveValue(
+      "https://api.apis.guru/v2/specs/stripe.com/2023-10-16/openapi.json",
+    );
+
+    fireEvent.click(screen.getByLabelText("Connection only"));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "add_api_datasource_from_import",
+        name: "stripe",
+        provider: "stripe",
+        spec_text: null,
+        credentials: [["STRIPE_API_KEY", "sk_test"]],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));

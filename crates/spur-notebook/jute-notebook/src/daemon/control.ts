@@ -476,11 +476,16 @@ function isProviderSummary(value: unknown): value is ProviderSummary {
   const candidate = value as Partial<ProviderSummary>;
   return (
     typeof candidate.name === "string" &&
+    typeof candidate.providerKey === "string" &&
     typeof candidate.displayName === "string" &&
     typeof candidate.category === "string" &&
     typeof candidate.tier === "string" &&
     typeof candidate.authMode === "string" &&
     typeof candidate.supportLevel === "string" &&
+    (candidate.specSourceKey === null ||
+      typeof candidate.specSourceKey === "string") &&
+    (candidate.specUrl === null || typeof candidate.specUrl === "string") &&
+    typeof candidate.experimentalSpecCount === "number" &&
     (candidate.baseUrl === null || typeof candidate.baseUrl === "string") &&
     Array.isArray(candidate.credentialEnvVars) &&
     candidate.credentialEnvVars.every((envVar) => typeof envVar === "string") &&

@@ -292,6 +292,7 @@ export default function AddRestApiWizard({
     );
     setCredentials({});
     setTablePreview(tablePreviewFromProvider(provider));
+    setSpecText(provider.specUrl ?? "");
     setConnectionOnly(false);
     setPrefillCredentialKeys([]);
     setPrefillManifestToml(null);
@@ -441,7 +442,7 @@ export default function AddRestApiWizard({
       const response = await daemonControl(
         addApiDatasourceFromImportCommand({
           name: datasourceName.trim(),
-          provider: selectedProvider?.name ?? null,
+          provider: selectedProvider?.providerKey ?? null,
           spec_text:
             connectionOnly || trimmedSpec.length === 0 ? null : trimmedSpec,
           credentials: credentialPairs,
@@ -1009,6 +1010,7 @@ function ProviderTile({
   const tier = normalizedTier(provider.tier);
   const tableCount = provider.tables.length;
   const ready = isSupportedProvider(provider);
+  const experimental = isExperimentalProvider(provider);
 
   return (
     <button
@@ -1033,8 +1035,20 @@ function ProviderTile({
         <span className="truncate text-[11px] text-gray-400">
           {provider.category}
         </span>
-        {ready ? <ReadyBadge /> : <TierBadge tier={tier} />}
+        {ready ? (
+          <ReadyBadge />
+        ) : experimental ? (
+          <ExperimentalBadge />
+        ) : (
+          <TierBadge tier={tier} />
+        )}
       </span>
+      {experimental && provider.experimentalSpecCount > 0 && (
+        <span className="mt-2 block truncate text-[11px] font-medium text-amber-700">
+          {provider.experimentalSpecCount} spec candidate
+          {provider.experimentalSpecCount === 1 ? "" : "s"}
+        </span>
+      )}
       {tableCount > 0 && (
         <span className="mt-2 block truncate text-[11px] font-medium text-green-700">
           {tableCount} table-function{tableCount === 1 ? "" : "s"}
@@ -1602,6 +1616,14 @@ function ReadyBadge() {
   );
 }
 
+function ExperimentalBadge() {
+  return (
+    <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+      Experimental
+    </span>
+  );
+}
+
 function ErrorBanner({ message }: { message: string }) {
   return (
     <div className="mt-4 flex items-start gap-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -1684,7 +1706,7 @@ function credentialFieldsForProvider(
     }));
   }
 
-  const prefix = envPrefix(provider.name);
+  const prefix = envPrefix(provider.providerKey);
   const authMode = provider.authMode.toLowerCase();
 
   if (authMode === "none" || authMode.includes("no_auth")) {
@@ -1714,11 +1736,15 @@ function providerSummaryFromPrefill(providerName: string): ProviderSummary {
 
   return {
     name,
+    providerKey: name,
     displayName: displayNameFromProvider(name),
     category: "Imported",
     tier: "B",
     authMode: "API_KEY",
     supportLevel: "catalog",
+    specSourceKey: null,
+    specUrl: null,
+    experimentalSpecCount: 0,
     baseUrl: null,
     credentialEnvVars: [],
     tables: [],
@@ -1799,6 +1825,10 @@ function tablePreviewFromProvider(
 
 function isSupportedProvider(provider: ProviderSummary) {
   return provider.supportLevel === "supported" && provider.tables.length > 0;
+}
+
+function isExperimentalProvider(provider: ProviderSummary) {
+  return provider.supportLevel === "experimental";
 }
 
 function errorMessage(caught: unknown) {
