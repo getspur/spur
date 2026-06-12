@@ -27,6 +27,32 @@ Auth support is grouped into import tiers:
 
 Nango provider metadata is licensed under Elastic License 2.0. Preserve the generated notice comments and this crate's `THIRD_PARTY_NOTICES` when distributing imported `*.connection.toml` files. Bundling imported manifests is intended for local distribution only, not for offering a hosted or managed Nango-derived service.
 
+## Nango catalog workflow
+
+The `nango-catalog` helper builds a deterministic inspection bundle from pinned local inputs: a Nango `providers.yaml`, an APIs.guru `list.json` snapshot, the exact Nango commit, and the APIs.guru snapshot retrieval timestamp.
+
+```sh
+scripts/spur-cargo run -p spur-rest-table-gateway --bin nango-catalog -- \
+  resources/nango/packages/providers/providers.yaml \
+  .spur/vendor/apis-guru/list.json \
+  .spur/nango-catalog \
+  --nango-commit 988efd014 \
+  --apis-guru-fetched-at 2026-06-12T00:00:00Z \
+  --reviewed-source github=crates/spur-notebook/rest-table-gateway/specs/tier-a/github.json
+```
+
+The command reads only local files. It does not fetch Nango, APIs.guru, or provider specs from the network, and generated provider catalogs should not be checked in without review. The Nango commit and APIs.guru timestamp are required so every generated crosswalk can be traced back to stable source inputs.
+
+The output directory contains:
+
+- `provider_harvest_candidates.csv`: normalized Nango provider metadata, auth/base URL fields, seed class, Nango license, and source commit.
+- `table_seed_classes.csv`: provider counts by seed class.
+- `apis_guru_crosswalk.csv`: provider-to-spec candidate rows for review.
+- `provider_spec_crosswalk.json`: deterministic crosswalk rows with Nango ELv2 metadata and APIs.guru SHA-256 provenance.
+- `coverage_summary.json`: provider/spec counts, match diagnostics, and snapshot metadata.
+
+Reviewed OpenAPI sources are opt-in through `--reviewed-source <provider>=<local-spec-path>`. Only those local reviewed specs are converted into `connections/<provider>.connection.toml`; APIs.guru URL matches with `NeedsReview`, `UrlOnly`, `Blocked`, or candidate confidence stay as catalog metadata and do not generate bundled manifests by themselves.
+
 ## OpenAPI table import
 
 The `openapi-import` helper converts OpenAPI collection `GET` endpoints into `[[table]]` manifest blocks:
