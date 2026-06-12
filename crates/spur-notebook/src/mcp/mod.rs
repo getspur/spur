@@ -45,6 +45,9 @@ use self::{
 const FLUSH_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
 const NOTEBOOK_LOAD_READY_POLL: Duration = Duration::from_millis(25);
 const CONNECTIONS_CHANGED_EVENT: &str = "connections://changed";
+#[cfg(feature = "datasource-introspect")]
+const EXPERIMENTAL_NANGO_CROSSWALK_INDEX: &str =
+    include_str!("../../rest-table-gateway/connections/experimental_manifest_index.json");
 
 pub type SharedPluginRegistry = Arc<tokio::sync::RwLock<PluginRegistry>>;
 
@@ -1034,11 +1037,13 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                 code: "nango_provider_snapshot_failed".to_string(),
                 message: format!("failed to parse bundled Nango providers snapshot: {error}"),
             })?;
+    let experimental_by_provider = experimental_nango_crosswalk_by_provider()?;
     let mut summaries = providers
         .into_iter()
         .map(|(name, provider)| {
             let auth_mode = provider.auth_mode.clone().unwrap_or_default();
             let source = normalize_api_datasource_source(&name)?;
+            let experimental = experimental_by_provider.get(name.as_str());
             let supported_manifest = curated_preset_toml(&source)
                 .map(spur_rest_table_gateway::adapter::manifest::Manifest::from_toml)
                 .transpose()
@@ -1050,12 +1055,20 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                 })?;
             let support_level = if supported_manifest.is_some() {
                 "supported"
+            } else if experimental.is_some() {
+                "experimental"
             } else {
                 "catalog"
             };
+            let experimental_spec = if supported_manifest.is_some() {
+                None
+            } else {
+                experimental
+            };
             let base_url = supported_manifest
                 .as_ref()
-                .map(|manifest| manifest.source.base_url.clone());
+                .map(|manifest| manifest.source.base_url.clone())
+                .or_else(|| experimental.and_then(|entry| entry.base_url.clone()));
             let credential_env_vars = supported_manifest
                 .as_ref()
                 .map(required_env_vars_from_manifest)
@@ -1065,6 +1078,8 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                 .unwrap_or_default();
 
             Ok(jute::commands::ProviderSummary {
+                name: name.clone(),
+                provider_key: name.clone(),
                 display_name: provider
                     .display_name
                     .clone()
@@ -1079,15 +1094,67 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                     .to_string(),
                 auth_mode,
                 support_level: support_level.to_string(),
+                spec_source_key: experimental_spec.map(|entry| entry.spec_source_key.clone()),
+                spec_url: experimental_spec.map(|entry| entry.spec_url.clone()),
+                experimental_spec_count: experimental.map(|entry| entry.count).unwrap_or(0),
                 base_url,
                 credential_env_vars,
                 tables,
-                name,
             })
         })
         .collect::<Result<Vec<_>, BridgeError>>()?;
     summaries.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(summaries)
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Deserialize)]
+struct ExperimentalNangoCrosswalkIndex {
+    rows: Vec<ExperimentalNangoCrosswalkRow>,
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Deserialize)]
+struct ExperimentalNangoCrosswalkRow {
+    provider_key: String,
+    base_url: Option<String>,
+    spec_source_key: String,
+    spec_url: String,
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[derive(Debug, Clone)]
+struct ExperimentalProviderSpecSummary {
+    base_url: Option<String>,
+    spec_source_key: String,
+    spec_url: String,
+    count: usize,
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn experimental_nango_crosswalk_by_provider(
+) -> Result<std::collections::BTreeMap<String, ExperimentalProviderSpecSummary>, BridgeError> {
+    let index: ExperimentalNangoCrosswalkIndex =
+        serde_json::from_str(EXPERIMENTAL_NANGO_CROSSWALK_INDEX).map_err(|error| {
+            BridgeError::Handler {
+                code: "experimental_nango_crosswalk_failed".to_string(),
+                message: format!("failed to parse bundled experimental Nango crosswalk: {error}"),
+            }
+        })?;
+    let mut grouped = std::collections::BTreeMap::new();
+    for row in index.rows {
+        let entry =
+            grouped
+                .entry(row.provider_key)
+                .or_insert_with(|| ExperimentalProviderSpecSummary {
+                    base_url: row.base_url,
+                    spec_source_key: row.spec_source_key,
+                    spec_url: row.spec_url,
+                    count: 0,
+                });
+        entry.count += 1;
+    }
+    Ok(grouped)
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -1106,6 +1173,34 @@ fn preview_open_api_tables(
         .map(table_preview)
         .collect();
     Ok(jute::commands::OpenApiTablePreview { tables })
+}
+
+#[cfg(feature = "datasource-introspect")]
+async fn resolve_open_api_spec_text(spec_text: String) -> Result<String, BridgeError> {
+    let trimmed = spec_text.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Ok(spec_text);
+    }
+
+    let response = reqwest::get(trimmed)
+        .await
+        .map_err(|error| BridgeError::Handler {
+            code: "openapi_fetch_failed".to_string(),
+            message: format!("failed to fetch OpenAPI spec from {trimmed}: {error}"),
+        })?;
+    if !response.status().is_success() {
+        return Err(BridgeError::Handler {
+            code: "openapi_fetch_failed".to_string(),
+            message: format!(
+                "failed to fetch OpenAPI spec from {trimmed}: HTTP {}",
+                response.status()
+            ),
+        });
+    }
+    response.text().await.map_err(|error| BridgeError::Handler {
+        code: "openapi_fetch_failed".to_string(),
+        message: format!("failed to read OpenAPI spec from {trimmed}: {error}"),
+    })
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -2133,6 +2228,7 @@ impl NotebookDaemonControl {
 
         let manifest_toml = match spec_text {
             Some(spec_text) if !spec_text.trim().is_empty() => {
+                let spec_text = resolve_open_api_spec_text(spec_text).await?;
                 let (_source, manifest) =
                     build_api_import_manifest(&name, existing.provider.clone(), Some(spec_text))?;
                 let mut toml = spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest);
@@ -2252,6 +2348,7 @@ impl NotebookDaemonControl {
         &self,
         spec_text: String,
     ) -> Result<DaemonControlSuccess, BridgeError> {
+        let spec_text = resolve_open_api_spec_text(spec_text).await?;
         let preview = preview_open_api_tables(&spec_text)?;
         let result = serde_json::to_value(
             jute::commands::DaemonControlResult::OpenApiTablePreview(preview),
@@ -2272,6 +2369,12 @@ impl NotebookDaemonControl {
         credentials: Vec<(String, String)>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         let provider_for_template = provider.clone();
+        let spec_text = match spec_text {
+            Some(spec_text) if !spec_text.trim().is_empty() => {
+                Some(resolve_open_api_spec_text(spec_text).await?)
+            }
+            other => other,
+        };
         let (_source, manifest) = build_api_import_manifest(&name, provider, spec_text)?;
         let mut manifest_toml =
             spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest);
@@ -4667,6 +4770,37 @@ paths:
             .tables
             .iter()
             .any(|table| table.name == "security_advisories"));
+        let experimental = providers
+            .iter()
+            .filter(|provider| provider.support_level == "experimental")
+            .collect::<Vec<_>>();
+        assert_eq!(experimental.len(), 85);
+        assert_eq!(
+            providers
+                .iter()
+                .map(|provider| provider.experimental_spec_count)
+                .sum::<usize>(),
+            295
+        );
+        assert_eq!(
+            providers
+                .iter()
+                .filter(|provider| provider.experimental_spec_count > 0)
+                .count(),
+            87
+        );
+        let stripe = experimental
+            .iter()
+            .find(|provider| provider.name == "stripe")
+            .expect("stripe experimental provider is listed");
+        assert_eq!(stripe.provider_key, "stripe");
+        assert_eq!(stripe.experimental_spec_count, 1);
+        assert_eq!(stripe.spec_source_key.as_deref(), Some("stripe.com"));
+        assert!(stripe
+            .spec_url
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("https://api.apis.guru/"));
         assert!(providers
             .windows(2)
             .all(|pair| pair[0].name <= pair[1].name));
@@ -4720,6 +4854,41 @@ paths:
                 },
             ]
         );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn preview_openapi_tables_fetches_url() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/openapi.json"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string(OPENAPI_CHARGES_SPEC),
+            )
+            .mount(&server)
+            .await;
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::new(State::new()),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "preview_open_api_tables",
+            "spec_text": format!("{}/openapi.json", server.uri())
+        }))
+        .expect("preview_open_api_tables command deserializes");
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let preview = open_api_preview_from_response(&response);
+        assert_eq!(preview.tables.len(), 1);
+        assert_eq!(preview.tables[0].name, "charges");
     }
 
     #[cfg(feature = "datasource-introspect")]

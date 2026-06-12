@@ -200,6 +200,8 @@ pub struct DatasourceEntry {
 pub struct ProviderSummary {
     /// Provider key from the vendored Nango providers snapshot.
     pub name: String,
+    /// Underlying Nango provider key used when importing a selected catalog row.
+    pub provider_key: String,
     /// Human-readable provider name.
     pub display_name: String,
     /// Primary provider category.
@@ -210,6 +212,14 @@ pub struct ProviderSummary {
     pub auth_mode: String,
     /// Support level for the bundled catalog entry.
     pub support_level: String,
+    /// API spec source key when this row came from an experimental spec crosswalk.
+    #[ts(type = "string | null")]
+    pub spec_source_key: Option<String>,
+    /// API spec URL when this row came from an experimental spec crosswalk.
+    #[ts(type = "string | null")]
+    pub spec_url: Option<String>,
+    /// Number of experimental API spec candidates attached to this provider.
+    pub experimental_spec_count: usize,
     /// Runtime base URL from a supported manifest when known.
     #[ts(type = "string | null")]
     pub base_url: Option<String>,
