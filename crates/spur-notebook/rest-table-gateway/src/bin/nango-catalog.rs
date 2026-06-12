@@ -309,39 +309,28 @@ fn experimental_crosswalk_manifest_toml(
         "# TODO: add [[table]] blocks (path/columns/filters)\n",
         "# Experimental crosswalk candidate. This file is not supported until a reviewed OpenAPI source adds [[table]] blocks and provider E2E coverage.\n",
     );
-    toml.push('\n');
-    toml.push_str("support_level = \"experimental_crosswalk\"\n");
-    toml.push_str(&format!(
-        "spec_source_key = {}\n",
-        toml_string(&row.spec_source_key)
-    ));
-    toml.push_str(&format!("spec_url = {}\n", toml_string(&row.url)));
-    toml.push_str(&format!(
-        "match_confidence = {}\n",
-        toml_string(&format!("{:?}", row.confidence))
-    ));
-    toml.push_str(&format!(
-        "license_status = {}\n",
-        toml_string(&format!("{:?}", row.license_status))
-    ));
-    toml.push_str(&format!(
-        "generation_eligible = {}\n",
-        row.generation_eligible
-    ));
-    toml.push_str(&format!(
-        "nango_commit = {}\n",
-        toml_string(&row.nango_commit)
-    ));
-    if let Some(apis_guru_hash) = &row.apis_guru_hash {
-        toml.push_str(&format!(
-            "apis_guru_sha256 = {}\n",
-            toml_string(apis_guru_hash)
-        ));
-    }
+    let provenance = experimental_provenance_comments(row);
+    toml = toml.replacen("\n[source]\n", &format!("\n{provenance}\n[source]\n"), 1);
 
     Manifest::from_toml(&toml)
         .map_err(|err| format!("experimental manifest for {provider} failed to reparse: {err}"))?;
     Ok(toml)
+}
+
+fn experimental_provenance_comments(row: &ProviderSpecCrosswalk) -> String {
+    let mut lines = vec![
+        "# support_level: experimental_crosswalk".to_string(),
+        format!("# spec_source_key: {}", row.spec_source_key),
+        format!("# spec_url: {}", row.url),
+        format!("# match_confidence: {:?}", row.confidence),
+        format!("# license_status: {:?}", row.license_status),
+        format!("# generation_eligible: {}", row.generation_eligible),
+        format!("# nango_commit: {}", row.nango_commit),
+    ];
+    if let Some(apis_guru_hash) = &row.apis_guru_hash {
+        lines.push(format!("# apis_guru_sha256: {apis_guru_hash}"));
+    }
+    lines.join("\n")
 }
 
 fn write_provider_harvest(
@@ -468,10 +457,6 @@ fn sanitize_filename_component(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-fn toml_string(value: &str) -> String {
-    format!("{:?}", value)
 }
 
 fn seed_class_name(seed_class: ProviderSeedClass) -> &'static str {
