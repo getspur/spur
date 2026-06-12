@@ -208,6 +208,77 @@ fn nango_catalog_cli_writes_deterministic_crosswalk_outputs() {
 }
 
 #[test]
+fn nango_catalog_cli_can_write_experimental_crosswalk_manifests() {
+    let bin = env!("CARGO_BIN_EXE_nango-catalog");
+    let temp = unique_temp_dir("nango-catalog-experimental");
+    let providers = temp.join("providers.yaml");
+    let apis = temp.join("list.json");
+    let out = temp.join("out");
+
+    std::fs::create_dir_all(&temp).expect("temp dir should be created");
+    std::fs::write(&providers, PROVIDERS_FIXTURE).expect("providers should be written");
+    std::fs::write(&apis, APIS_GURU_FIXTURE).expect("apis guru list should be written");
+
+    let output = Command::new(bin)
+        .arg(&providers)
+        .arg(&apis)
+        .arg(&out)
+        .arg("--nango-commit")
+        .arg("988efd014")
+        .arg("--apis-guru-fetched-at")
+        .arg("2026-06-12T00:00:00Z")
+        .arg("--experimental-crosswalk-manifests")
+        .output()
+        .expect("nango-catalog should run");
+
+    assert!(
+        output.status.success(),
+        "nango-catalog failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let experimental_dir = out.join("connections").join("experimental");
+    let github_manifest_path = experimental_dir.join("github-pat--github.com.connection.toml");
+    let stripe_manifest_path = experimental_dir.join("stripe-api-key--stripe.com.connection.toml");
+    assert!(
+        github_manifest_path.exists(),
+        "github experimental manifest should be written"
+    );
+    assert!(
+        stripe_manifest_path.exists(),
+        "stripe experimental manifest should be written"
+    );
+
+    let github_manifest =
+        std::fs::read_to_string(&github_manifest_path).expect("manifest should be readable");
+    assert!(github_manifest.contains("Experimental crosswalk candidate"));
+    assert!(github_manifest.contains("support_level = \"experimental_crosswalk\""));
+    assert!(github_manifest.contains("spec_source_key = \"github.com\""));
+    assert!(github_manifest
+        .contains("spec_url = \"https://api.apis.guru/v2/specs/github.com/1.1.4/openapi.json\""));
+
+    let parsed = Manifest::from_toml(&github_manifest).expect("experimental manifest should parse");
+    assert_eq!(parsed.source.name, "github-pat");
+    assert_eq!(parsed.tables.len(), 0);
+
+    let index_path = out.join("experimental_manifest_index.json");
+    let index: Value = serde_json::from_str(
+        &std::fs::read_to_string(index_path).expect("experimental index should be readable"),
+    )
+    .expect("experimental index should parse");
+    assert_eq!(index["experimental"], true);
+    assert_eq!(index["crosswalk_row_count"], 2);
+    assert_eq!(index["manifest_count"], 2);
+    assert_eq!(index["manifests"][0]["provider"], "github-pat");
+    assert_eq!(
+        index["manifests"][0]["path"],
+        "connections/experimental/github-pat--github.com.connection.toml"
+    );
+
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
 fn nango_catalog_cli_requires_pinned_upstream_metadata() {
     let bin = env!("CARGO_BIN_EXE_nango-catalog");
     let temp = unique_temp_dir("nango-catalog-missing-metadata");
