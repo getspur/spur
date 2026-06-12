@@ -65,6 +65,36 @@ Table seed classes from local discovery:
 | GraphQL candidate | 11 |
 | Metadata only | 7 |
 
+### Current Implementation Snapshot
+
+After the June 12 plan merge, the implementation is stronger than the original
+catalog-only baseline but still not provider-complete. Treat these as distinct
+support levels:
+
+| Level | Meaning | Current evidence |
+|---|---|---|
+| Cataloged | Nango provider metadata is parsed and can be crosswalked to candidate spec sources. | `nango-catalog` writes deterministic harvest, seed-class, crosswalk, and coverage files from pinned local Nango/APIs.guru inputs. |
+| Generated | A reviewed spec source can be converted into a parseable SPUR `*.connection.toml` with auth metadata and one or more `[[table]]` blocks. | `--reviewed-source github=<local-spec>` generates a parseable GitHub manifest in tests. |
+| Scannable generic path | The runtime can scan a generated table shape against a local API fixture. | `nango-import` + hand-added table scans an API-key, cursor-paginated REST envelope; `openapi-import` scans typed rows from a generated OpenAPI table. |
+| Provider-specific E2E | A named provider manifest/adapter proves auth plus request plus typed table/action rows. | Google Ads proves OAuth refresh -> bearer -> provider headers -> typed POST action rows. Polymarket proves no-auth REST table and table-function scans. Linear proves GraphQL table scan shape but not REST/OpenAPI. |
+| Live provider E2E | The committed provider path is exercised against the real upstream API. | Polymarket live tests exist but are ignored by default; other provider paths are mock-only today. |
+
+Current committed provider-specific coverage is therefore:
+
+| Provider | Transport | Runtime shape | Auth evidence | Table/action evidence | Status |
+|---|---|---|---|---|---|
+| Polymarket | REST | `markets` table, `orderbook` table function | No auth | Mock tests plus ignored live tests | Supported no-auth REST adapter, not Nango-derived. |
+| Google Ads | REST | `google_ads_search` POST action | OAuth refresh exchange plus bearer and provider headers in mock E2E | Typed action rows from preset manifest | Supported action flow; not a normal GET table. |
+| Linear | GraphQL | `issues` table | Manifest declares `LINEAR_API_KEY`; mock scan does not require env auth | Typed GraphQL table rows | Useful precedent for GraphQL follow-on, outside REST/OpenAPI phase. |
+| Facebook Ads | REST | `facebook_ads_insights` POST action | Manifest declares OAuth refresh | Parse/shape coverage only | Not yet provider-specific request/auth E2E. |
+| GitHub | REST/OpenAPI | Generated `[[table]]` from reviewed local spec | Nango API-key/header metadata in generated manifest | Manifest reparses; no scan test yet | Generated candidate, not yet provider-specific E2E. |
+
+Untracked generated manifests currently exist in the workspace for providers
+such as GitHub, Stripe, Zendesk, SendGrid, Twilio, OpenAI, Mailchimp, Datadog,
+Algolia, Square, and others. They must not be counted as supported until they
+are reviewed, committed, covered by provider-specific tests, and cleared by the
+license/provenance gate.
+
 ## Goals
 
 1. Build a reproducible bundled catalog that maps Nango providers to API spec sources.
@@ -425,6 +455,12 @@ Integration tests:
 
 - Generated manifest reparses via `Manifest::from_toml`.
 - Generated table can scan against a local wiremock fixture.
+- Each promoted provider must have one provider-specific mock E2E that proves
+  the declared auth mode is applied to the outgoing request and that at least
+  one generated table/action returns typed rows.
+- A provider may be labeled `cataloged` or `generated` without live credentials,
+  but it must not be labeled `supported` until the provider-specific mock E2E
+  passes.
 - Existing `nango-import` and `openapi-import` behavior remains unchanged.
 
 ## Phasing
@@ -451,6 +487,9 @@ Deliver:
 - Generate `[[table]]` blocks from safe `GET` collection endpoints.
 - Combine with Nango auth/base metadata.
 - Write generated manifests under a generated output path.
+- Promote only reviewed providers whose generated manifest has provider-specific
+  mock E2E coverage for auth, request construction, pagination where relevant,
+  and typed rows.
 
 ### Phase 3: Provenance and License Gate
 
@@ -491,6 +530,10 @@ Initial candidates:
 
 - At least 80 Nango providers have spec-source candidates from APIs.guru or official sources.
 - At least 25 high-value providers produce parseable generated manifests with one or more `[[table]]` blocks.
+- At least 5 high-value REST providers are promoted to `supported`, meaning
+  committed manifest plus provider-specific mock E2E for auth, request, and
+  typed rows. Initial promotion candidates should come from API-key/no-auth
+  providers before OAuth-heavy providers.
 - Generated manifests for GitHub, Stripe, Twilio, Asana, Box, GitLab, SendGrid, and Slack are either produced or explicitly diagnosed.
 - Every generated table has provenance.
 - No unreviewed third-party spec content is bundled.
@@ -516,6 +559,8 @@ Initial candidates:
 4. Should docs/verification endpoint seeds be visible in the UI by default, or hidden behind an "experimental seeds" toggle?
 5. Should required path params become table-function args in Phase 2, or wait for a later phase?
 6. Should the first crosswalk source be stored as CSV for inspection, JSON for runtime, or both?
+7. Which status labels should the UI expose: `cataloged`, `generated`,
+   `supported`, and `live-verified`, or a smaller user-facing vocabulary?
 
 ## Recommended Implementation Boundary
 
