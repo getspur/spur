@@ -232,6 +232,7 @@ impl ServerHandler for NotebookMcpServer {
             "notebook_push_source" => {
                 tools::notebook_push_source::call(&self.deps, arguments).await
             }
+            "notebook_catalog" => tools::notebook_catalog::call(&self.deps, arguments).await,
             "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
             "notebook_run_cell" => tools::notebook_run_cell::call(&self.deps, arguments).await,
             "notebook_run_cascade" => {
@@ -7197,6 +7198,7 @@ if __name__ == "__main__":
             .collect::<Vec<_>>();
 
         for expected in [
+            "notebook_catalog",
             "notebook.venv_list",
             "notebook.venv_create",
             "notebook.venv_delete",

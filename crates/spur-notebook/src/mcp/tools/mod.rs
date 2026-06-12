@@ -25,6 +25,7 @@ pub mod kernel_info;
 pub mod list_datasources;
 pub mod notebook_app_doctor;
 pub mod notebook_app_init;
+pub mod notebook_catalog;
 pub mod notebook_dag_status;
 pub mod notebook_push_source;
 pub mod notebook_run_cascade;
@@ -66,6 +67,7 @@ pub fn tools() -> Vec<Tool> {
         export_spur_app::tool(),
         import_spur_app::tool(),
         notebook_push_source::tool(),
+        notebook_catalog::tool(),
         notebook_dag_status::tool(),
         notebook_run_cell::tool(),
         notebook_run_cascade::tool(),
@@ -291,6 +293,7 @@ mod tests {
             .iter()
             .any(|name| name == "notebook_set_cell_code_type"));
         assert!(names.iter().any(|name| name == "notebook_push_source"));
+        assert!(names.iter().any(|name| name == "notebook_catalog"));
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
         assert!(names.iter().any(|name| name == "notebook_app_init"));
         assert!(names.iter().any(|name| name == "notebook_run_cell"));
