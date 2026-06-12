@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use spur_rest_table_gateway::adapter::manifest::Manifest;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +28,12 @@ metadata-only:
   display_name: Metadata Only
   categories: [tests]
   auth_mode: NONE
+zz-candidate:
+  display_name: ZZ Candidate
+  categories: [tests]
+  auth_mode: API_KEY
+  proxy:
+    base_url: https://candidate.example.com
 "#;
 
 const APIS_GURU_FIXTURE: &str = r#"{
@@ -47,6 +53,26 @@ const APIS_GURU_FIXTURE: &str = r#"{
       "1.1.4": {
         "info": {"title": "GitHub v3 REST API"},
         "swaggerUrl": "https://api.apis.guru/v2/specs/github.com/1.1.4/openapi.json",
+        "openapiVer": "3.0.0"
+      }
+    }
+  },
+  "metadata-only": {
+    "preferred": "1.0.0",
+    "versions": {
+      "1.0.0": {
+        "info": {"title": "Metadata Only API"},
+        "swaggerUrl": "https://api.apis.guru/v2/specs/metadata-only/1.0.0/openapi.json",
+        "openapiVer": "3.0.0"
+      }
+    }
+  },
+  "zz-candidate": {
+    "preferred": "1.0.0",
+    "versions": {
+      "1.0.0": {
+        "info": {"title": "ZZ Candidate API"},
+        "swaggerUrl": "https://api.apis.guru/v2/specs/zz-candidate/1.0.0/openapi.json",
         "openapiVer": "3.0.0"
       }
     }
@@ -106,6 +132,57 @@ fn unique_temp_dir(name: &str) -> std::path::PathBuf {
     ))
 }
 
+fn api_guru_coverage_fixture(provider_count: usize, spec_row_count: usize) -> (String, String) {
+    assert!(provider_count > 0);
+    assert!(spec_row_count >= provider_count);
+
+    let mut providers_yaml = String::new();
+    let mut apis = Map::new();
+    let extra_versions = spec_row_count - provider_count;
+
+    for provider_index in 0..provider_count {
+        let provider_key = format!("fixture-provider-{provider_index:03}");
+        providers_yaml.push_str(&format!(
+            r#"{provider_key}:
+  display_name: Fixture Provider {provider_index:03}
+  categories: [tests]
+  auth_mode: API_KEY
+  proxy:
+    base_url: https://{provider_key}.example.com
+"#
+        ));
+
+        let version_count = if provider_index == 0 {
+            extra_versions + 1
+        } else {
+            1
+        };
+        let mut versions = Map::new();
+        for version_index in 0..version_count {
+            let version = format!("v{version_index:03}");
+            versions.insert(
+                version.clone(),
+                json!({
+                    "info": {"title": format!("Fixture Provider {provider_index:03}")},
+                    "swaggerUrl": format!(
+                        "https://api.apis.guru/v2/specs/{provider_key}/{version}/openapi.json"
+                    ),
+                    "openapiVer": "3.0.0"
+                }),
+            );
+        }
+        apis.insert(
+            provider_key,
+            json!({
+                "preferred": "v000",
+                "versions": versions
+            }),
+        );
+    }
+
+    (providers_yaml, Value::Object(apis).to_string())
+}
+
 #[test]
 fn nango_catalog_cli_writes_deterministic_crosswalk_outputs() {
     let bin = env!("CARGO_BIN_EXE_nango-catalog");
@@ -139,6 +216,7 @@ fn nango_catalog_cli_writes_deterministic_crosswalk_outputs() {
         "provider_harvest_candidates.csv",
         "table_seed_classes.csv",
         "apis_guru_crosswalk.csv",
+        "api_guru_fulfillment_matrix.json",
         "provider_spec_crosswalk.json",
         "coverage_summary.json",
     ] {
@@ -174,23 +252,66 @@ fn nango_catalog_cli_writes_deterministic_crosswalk_outputs() {
     let rows = crosswalk["rows"]
         .as_array()
         .expect("rows should be an array");
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 4);
     assert_eq!(rows[0]["provider"], "github-pat");
-    assert_eq!(rows[1]["provider"], "stripe-api-key");
+    assert_eq!(rows[1]["provider"], "metadata-only");
+    assert_eq!(rows[2]["provider"], "stripe-api-key");
+    assert_eq!(rows[3]["provider"], "zz-candidate");
 
     let summary: Value = serde_json::from_str(
         &std::fs::read_to_string(out.join("coverage_summary.json"))
             .expect("coverage summary should be readable"),
     )
     .expect("coverage summary should parse");
-    assert_eq!(summary["provider_count"], 3);
-    assert_eq!(summary["apis_guru_total_entries"], 2);
-    assert_eq!(summary["crosswalk_row_count"], 2);
-    assert_eq!(summary["matched_provider_count"], 2);
+    assert_eq!(summary["provider_count"], 4);
+    assert_eq!(summary["apis_guru_total_entries"], 4);
+    assert_eq!(summary["crosswalk_row_count"], 4);
+    assert_eq!(summary["matched_provider_count"], 4);
+
+    let matrix: Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("api_guru_fulfillment_matrix.json"))
+            .expect("fulfillment matrix should be readable"),
+    )
+    .expect("fulfillment matrix should parse");
+    let matrix_rows = matrix["rows"]
+        .as_array()
+        .expect("matrix rows should be an array");
+    assert_eq!(matrix["provider_count"], 4);
+    assert_eq!(matrix["spec_row_count"], 4);
+    assert_eq!(matrix_rows.len(), 4);
+    assert_eq!(matrix_rows[0]["provider_key"], "github-pat");
+    assert_eq!(matrix_rows[0]["spec_source_key"], "github.com");
+    assert_eq!(
+        matrix_rows[0]["spec_url"],
+        "https://api.apis.guru/v2/specs/github.com/1.1.4/openapi.json"
+    );
+    assert_eq!(matrix_rows[0]["status"], "Ready");
+    assert_eq!(matrix_rows[0]["blocked_reason"], Value::Null);
+    assert_eq!(
+        matrix_rows[0]["supported_manifest"],
+        "connections/supported/github.connection.toml"
+    );
+    assert_eq!(matrix_rows[0]["candidate_manifest"], Value::Null);
+    assert_eq!(matrix_rows[0]["table_count"], 2);
+    assert_eq!(matrix_rows[0]["action_count"], 0);
+    assert_eq!(matrix_rows[1]["provider_key"], "metadata-only");
+    assert_eq!(matrix_rows[1]["status"], "Blocked");
+    assert_eq!(matrix_rows[1]["blocked_reason"], "missing_base_url");
+    assert_eq!(matrix_rows[1]["candidate_manifest"], Value::Null);
+    assert_eq!(matrix_rows[3]["provider_key"], "zz-candidate");
+    assert_eq!(matrix_rows[3]["status"], "Candidate");
+    assert_eq!(matrix_rows[3]["blocked_reason"], Value::Null);
+    assert_eq!(matrix_rows[3]["supported_manifest"], Value::Null);
+    assert_eq!(
+        matrix_rows[3]["candidate_manifest"],
+        "connections/experimental/zz-candidate--zz-candidate.connection.toml"
+    );
+    assert_eq!(matrix_rows[3]["table_count"], 0);
+    assert_eq!(matrix_rows[3]["action_count"], 0);
 
     let harvest = std::fs::read_to_string(out.join("provider_harvest_candidates.csv"))
         .expect("harvest csv should be readable");
-    assert_eq!(harvest.lines().count(), 4);
+    assert_eq!(harvest.lines().count(), 5);
     assert!(harvest.contains("github-pat,GitHub,API_KEY,https://api.github.com"));
 
     let seeds = std::fs::read_to_string(out.join("table_seed_classes.csv"))
@@ -275,12 +396,122 @@ fn nango_catalog_cli_can_write_experimental_crosswalk_manifests() {
     )
     .expect("experimental index should parse");
     assert_eq!(index["experimental"], true);
-    assert_eq!(index["crosswalk_row_count"], 2);
-    assert_eq!(index["manifest_count"], 2);
+    assert_eq!(index["crosswalk_row_count"], 4);
+    assert_eq!(index["manifest_count"], 3);
     assert_eq!(index["manifests"][0]["provider"], "github-pat");
     assert_eq!(
         index["manifests"][0]["path"],
         "connections/experimental/github-pat--github.com.connection.toml"
+    );
+
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn nango_catalog_cli_marks_committed_supported_manifests_ready() {
+    let bin = env!("CARGO_BIN_EXE_nango-catalog");
+    let temp = unique_temp_dir("nango-catalog-ready");
+    let providers = temp.join("providers.yaml");
+    let apis = temp.join("list.json");
+    let out = temp.join("out");
+
+    std::fs::create_dir_all(&temp).expect("temp dir should be created");
+    std::fs::write(&providers, GITHUB_PROVIDER_FIXTURE).expect("providers should be written");
+    std::fs::write(&apis, APIS_GURU_FIXTURE).expect("apis guru list should be written");
+
+    let output = Command::new(bin)
+        .arg(&providers)
+        .arg(&apis)
+        .arg(&out)
+        .arg("--nango-commit")
+        .arg("988efd014")
+        .arg("--apis-guru-fetched-at")
+        .arg("2026-06-12T00:00:00Z")
+        .output()
+        .expect("nango-catalog should run");
+
+    assert!(
+        output.status.success(),
+        "nango-catalog failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let matrix: Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("api_guru_fulfillment_matrix.json"))
+            .expect("fulfillment matrix should be readable"),
+    )
+    .expect("fulfillment matrix should parse");
+    let rows = matrix["rows"]
+        .as_array()
+        .expect("matrix rows should be an array");
+
+    assert_eq!(matrix["provider_count"], 1);
+    assert_eq!(matrix["spec_row_count"], 1);
+    assert_eq!(rows[0]["provider_key"], "github");
+    assert_eq!(rows[0]["status"], "Ready");
+    assert_eq!(rows[0]["blocked_reason"], Value::Null);
+    assert_eq!(
+        rows[0]["supported_manifest"],
+        "connections/supported/github.connection.toml"
+    );
+    assert_eq!(rows[0]["candidate_manifest"], Value::Null);
+    assert_eq!(rows[0]["table_count"], 2);
+    assert_eq!(rows[0]["action_count"], 0);
+
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn nango_catalog_cli_covers_full_fulfillment_matrix_dimensions() {
+    let bin = env!("CARGO_BIN_EXE_nango-catalog");
+    let temp = unique_temp_dir("nango-catalog-coverage");
+    let providers = temp.join("providers.yaml");
+    let apis = temp.join("list.json");
+    let out = temp.join("out");
+    let (providers_yaml, apis_guru_json) = api_guru_coverage_fixture(87, 295);
+
+    std::fs::create_dir_all(&temp).expect("temp dir should be created");
+    std::fs::write(&providers, providers_yaml).expect("providers should be written");
+    std::fs::write(&apis, apis_guru_json).expect("apis guru list should be written");
+
+    let output = Command::new(bin)
+        .arg(&providers)
+        .arg(&apis)
+        .arg(&out)
+        .arg("--nango-commit")
+        .arg("988efd014")
+        .arg("--apis-guru-fetched-at")
+        .arg("2026-06-12T00:00:00Z")
+        .output()
+        .expect("nango-catalog should run");
+
+    assert!(
+        output.status.success(),
+        "nango-catalog failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let matrix: Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("api_guru_fulfillment_matrix.json"))
+            .expect("fulfillment matrix should be readable"),
+    )
+    .expect("fulfillment matrix should parse");
+    let rows = matrix["rows"]
+        .as_array()
+        .expect("matrix rows should be an array");
+
+    assert_eq!(matrix["provider_count"], 87);
+    assert_eq!(matrix["spec_row_count"], 295);
+    assert_eq!(rows.len(), 295);
+    assert_eq!(rows[0]["provider_key"], "fixture-provider-000");
+    assert_eq!(rows[0]["status"], "Candidate");
+    assert_eq!(
+        rows[0]["candidate_manifest"],
+        "connections/experimental/fixture-provider-000--fixture-provider-000.connection.toml"
+    );
+    assert_eq!(
+        rows[1]["candidate_manifest"],
+        "connections/experimental/fixture-provider-000--fixture-provider-000-2.connection.toml"
     );
 
     std::fs::remove_dir_all(temp).ok();

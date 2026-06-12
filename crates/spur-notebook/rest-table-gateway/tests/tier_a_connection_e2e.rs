@@ -99,7 +99,7 @@ async fn generated_tier_a_supported_manifests_scan_one_table_each() {
 
         let table = first_scannable_table(&manifest)
             .unwrap_or_else(|| panic!("{provider_name} should have a path-param-free table"));
-        let response = response_body_for(table);
+        let response = response_body_for(&table);
 
         let server = MockServer::start().await;
         let _env = install_auth_env(&manifest.source.auth, provider_name);
