@@ -1,5 +1,6 @@
 pub mod apis_guru;
 pub mod crosswalk;
+pub mod generate;
 pub mod provider;
 
 pub const APIS_GURU_CROSSWALK_CSV: &str = "apis_guru_crosswalk.csv";
@@ -15,4 +16,5 @@ pub use crosswalk::{
     build_crosswalk, build_crosswalk_report, CrosswalkDiagnostics, CrosswalkOptions,
     CrosswalkReport, ProviderSpecCrosswalk,
 };
+pub use generate::{generate_reviewed_manifest, GeneratedReviewedManifest};
 pub use provider::{provider_catalog_from_yaml, ProviderCatalogEntry, ProviderSeedClass};
