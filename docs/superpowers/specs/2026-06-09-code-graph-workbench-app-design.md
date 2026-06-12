@@ -1,10 +1,13 @@
 # Code Graph Workbench — App Gallery Design
 
-- **Status:** Approved (brainstorming complete)
+- **Status:** Refined after AI sidebar implementation
 - **Date:** 2026-06-09
+- **Refined:** 2026-06-12
 - **Surface:** `app_gallery/code-graph-workbench/` (a Spur App, `schema spur.app/v1`)
-- **Approved visual:** notebook `Untitled105.ipynb` (dark systems-console workbench; analyst left, graph center, conversation right, inspector bottom)
-- **Companion:** `2026-06-09-code-graph-workbench-app-integration.ipynb` (mermaid integration diagrams)
+- **Approved visual:** notebook `Untitled105.ipynb` (dark systems-console workbench; analyst left,
+  graph center, inspector bottom/right, AI conversation in the notebook sidebar)
+- **Companions:** `2026-06-09-code-graph-workbench-app-integration.ipynb` (mermaid integration diagrams);
+  `2026-06-09-notebook-sidebar-ai-agent-design.md` (the now-shipped AI sidebar contract)
 
 ## 1. Problem & Goal
 
@@ -14,12 +17,15 @@ in real graph and analyst evidence**, where every claim is traceable to a concre
 symbol node and a concrete database row.
 
 The Code Graph Workbench is a self-contained Spur App, delivered as a Jute notebook in
-`app_gallery/`. It is **agent-driven**: the user asks the app-owned ACP agent; during its
-turn the agent calls **app-level evidence tools** that run deterministic queries over the
-SPUR code graph and `spur-analyst` (`.spur/analyst.duckdb`), serialize Arrow, and push
-the results into the notebook's reactive ports. Those pushes cascade into a graph canvas,
-an analyst/evidence panel, and a symbol inspector. The same agent turn streams a
-citation-bearing answer.
+`app_gallery/`. It is **sidebar-agent-driven**: the user asks the notebook AI sidebar,
+which is already implemented as trusted React plus Tauri `chat_*` commands. When the
+workbench app is open, the sidebar resolves the active Spur App scope, creates or resumes
+an ACP session with the app's MCP server and app skill, and streams the turn through the
+existing `ChatPanel`. During that turn the agent calls **app-level evidence tools** that
+run deterministic queries over the SPUR code graph and `spur-analyst`
+(`.spur/analyst.duckdb`), serialize Arrow, and push the results into the notebook's
+reactive ports. Those pushes cascade into a graph canvas, an analyst/evidence panel, and
+a symbol inspector. The same sidebar turn streams a citation-bearing answer.
 
 **The agent chooses what to retrieve; the tools compute and push it.** The LLM only
 selects arguments (which symbol / file / depth); the tools run the real SQL/graph
@@ -27,10 +33,11 @@ queries, so every painted node and row is real, never hallucinated.
 
 ### Non-goals (YAGNI, out of MVP scope)
 
-- Tier-2 "attach to the live orchestration brain session" (see §10). The MVP agent is
-  app-owned.
+- A workbench-owned embedded chat or `wb-answer` AI node. The sidebar is the single agent
+  surface; the app contributes tools, source ports, panels, and skill.
+- Tier-2 "attach to the live orchestration brain session" (see §10).
 - The external-host chat model (B2): a long-lived session driving the notebook from
-  outside. The MVP uses the in-DAG AI node (B1).
+  outside.
 - Multi-session history / persistence; graph layout engine beyond force + the cited path;
   any write actions; multi-repo. Single repo, single ACP session.
 
@@ -38,12 +45,22 @@ queries, so every painted node and row is real, never hallucinated.
 
 This design composes existing primitives; nothing here is net-new transport.
 
-**The agent turn is a shipped primitive.** `crates/spur-notebook/src/dag/ai/acp_backend.rs::AcpAgentBackend`
-is "Tier-1: one ACP session per notebook, one prompt turn per run": `initialize →
-new_session(cwd) → prompt(PromptRequest) → stream AgentMessageChunk`, honoring a
-`CancellationToken`. The AI node contract (`dag/ai/mod.rs`): `AiRunRequest { cell_id,
-prompt, context: Vec<PortContext>, cancel } → AiRunOutput { text, usage }`. The header
-notes "Tier-2 (session/Orchestrator) becomes a second impl with no engine change."
+**The sidebar agent is now the shipped primitive.** The current implementation is
+`crates/spur-notebook/jute-notebook/src/ui/notebook/sidebar/ChatPanel.tsx` plus
+`crates/spur-notebook/jute-notebook/src-tauri/src/chat_commands.rs`. `chat_turn` resolves
+the active app scope, ensures a sidebar ACP session, streams `ChatEvent` values to trusted
+React over a Tauri `Channel`, forwards permission requests, and cancels through the stored
+session token. The session manager in `crates/spur-notebook/src/sidebar_chat/manager.rs`
+calls `new_session(scope.cwd, scope.mcp_servers)` and `load_session(...).mcp_servers(...)`;
+the scope resolver in `crates/spur-notebook/src/sidebar_chat/scope.rs` always includes the
+foundation notebook MCP proxy and appends the app MCP server from `spur-app.json`.
+
+**The app contract is shipped.** `AppScope` carries `{ cwd, mcp_servers, skill, app_key,
+label }`; `resolve_app_scope` discovers `spur-app.json`, reads optional `skill/SKILL.md`
+or the manifest's explicit `skill`, and turns a Python app MCP server with requirements
+into `uv run --with-requirements ... python server/main.py`. Therefore the workbench
+should not create its own AI DAG cell. It should provide the app artifacts the sidebar
+already consumes.
 
 **The port-push cascade is a shipped primitive.** `crates/spur-notebook/src/dag/engine.rs`:
 `ReactiveEngine::push_source(SourcePush { source: DagSource, payload:
@@ -75,7 +92,7 @@ the pgid under `.spur/pgids/`, and `Drop` kills it. Broadcast channel capacity 4
 the sizing invariant (anchor `3ff4e86`), inherited untouched. Only `NativeAcpConnection`
 is in scope (stdio / cli-wrap / stream-json adapters are out).
 
-**Analyst panels are existing views** (verified live; ≈ 52,844 symbols / 110,291 resolved
+**Analyst panels are existing views** (verified live; 59,122 symbols / 121,732 resolved
 edges):
 
 | Panel / need | Source object | Key columns |
@@ -88,39 +105,47 @@ edges):
 | Co-change graph | `onager_edges` | temporal / co-change edges |
 | Live index counts | `_meta` | `node_count, resolved_edge_count, graph_content_hash` |
 
-**Structural caution (verified via spur-analyst).** `AcpAgentBackend`, `AiNodeBackend`,
-`push_source`, and `SourcePush` are young **leaf** symbols (pagerank ≈ 0, callers ≤ 1,
-churn ~1) under active development (the AFM reactive control-plane plan,
-`docs/superpowers/plans/2026-06-05-jute-app-afm-reactive-control-plane.md`, is in flight;
-the graph index advanced during design). **The implementation plan MUST re-verify these
-APIs against HEAD before building** (Task 0, §10).
+**Structural caution (verified via code graph + spur-analyst).** The original draft
+depended on young AI-node plumbing. The refined integration depends instead on the
+current sidebar path: `ChatPanel`, `chat_turn`, `SidebarChat`, and `resolve_app_scope`.
+These are still active surface area, so **the implementation plan MUST re-verify them
+against HEAD before building** (Task 0, §10).
 
-## 3. Architecture (B1: agent-driven, app-level evidence tools)
+## 3. Architecture (sidebar agent + app-level evidence tools)
 
 ```
-user ──ask──▶ wb-question (source port)
+user ──ask──▶ AI sidebar ChatPanel
                  │
                  ▼
-            wb-answer  [AI node = AcpAgentBackend turn over NativeAcpConnection]
-                 │  during the turn the agent calls APP-LEVEL evidence tools:
+        chat_turn(notebook_path, prompt, agent)
+                 │  resolve_app_scope(app.ipynb, notebook MCP socket)
+                 │  new/load ACP session with:
+                 │    • foundation notebook MCP proxy
+                 │    • workbench app MCP server
+                 │    • workbench skill context
+                 ▼
+        agent subprocess during sidebar turn
+                 │  calls APP-LEVEL evidence tools:
                  │    wb_blast_radius(symbol) / wb_subgraph(symbol,depth,kinds)
                  │    wb_scorecard(symbol)    / wb_cochange(file)
                  ▼
-   app plugin server (server/, FastMCP, spawned by foundation)
-                 │  • read .spur/analyst.duckdb READ-ONLY + code_* via SPUR_NOTEBOOK_MCP_SOCKET
+   app plugin server (server/, FastMCP, spawned from spur-app.json)
+                 │  • read .spur/analyst.duckdb READ-ONLY
+                 │  • optionally call foundation code_* via notebook MCP proxy
                  │  • build pyarrow Tables, serialize Arrow IPC
                  │  • notebook_push_source(port, ipc_bytes)  ─────────┐
                  ▼                                                    │
             ReactiveEngine.push_source ──cascade──▶ AFM widgets ◀─────┘
             wb-graph (center) · wb-analyst (left) · wb-inspector (bottom)
                  │
-                 └─ same agent turn streams answer text ─▶ answer port ─▶ conversation (right)
+                 └─ same sidebar turn streams answer/tool chips in ChatPanel
 ```
 
-The deterministic Python retrieval cell from the prior draft is **removed**. Retrieval is
-now the agent invoking app evidence tools; the tools are the only writers of the evidence
-source ports. This is the composition of two existing primitives (AI node + push_source)
-with no new transport.
+The deterministic Python retrieval cell from the prior draft remains **removed**.
+`wb-answer` is now also **removed**. Retrieval is the sidebar agent invoking app evidence
+tools; the tools are the only writers of the evidence source ports. This is the
+composition of two existing primitives (sidebar chat + `notebook_push_source`) with no new
+transport.
 
 ## 4. App package & ports
 
@@ -129,7 +154,10 @@ app_gallery/code-graph-workbench/
 ├── spur-app.json        # schema spur.app/v1, open_mode "app",
 │                        # runtime.features [frontend-cells, anywidget-afm, mcp-tools, ports-arrow],
 │                        # mcp_server { type python, entry server/main.py, requirements server/requirements.txt }
+│                        # skill "skill/SKILL.md"
 ├── app.ipynb            # the DAG below (declares the source ports)
+├── skill/
+│   └── SKILL.md         # tells the sidebar agent when/how to call wb_* tools
 ├── server/              # app-level MCP plugin (mirrors html_video/server)
 │   ├── main.py          # FastMCP("code-graph-workbench"); register wb_* tools; stdio
 │   ├── requirements.txt # mcp, duckdb, pyarrow
@@ -149,15 +177,14 @@ app_gallery/code-graph-workbench/
 
 | port | declared on | pushed by | bound by |
 |---|---|---|---|
-| `question` | `wb-question` | composer (frontend) | `wb-answer` |
 | `subgraph` | source port | `wb_subgraph` tool | `wb-graph` |
 | `analyst_rows` | source port | `wb_blast_radius` tool | `wb-analyst` |
 | `scorecard` | source port | `wb_scorecard` tool | `wb-graph`, `wb-inspector` |
 | `cochange` | source port | `wb_cochange` tool | `wb-inspector` |
-| `answer` | `wb-answer` (AI node) | AI node output | conversation (right) |
 
-Frontend cells: `wb-question`, `wb-graph`, `wb-analyst`, `wb-inspector` (all
-`anywidget-afm`). DAG cell: `wb-answer` (AI node). No Python retrieval cell.
+Frontend cells: `wb-graph`, `wb-analyst`, `wb-inspector`, and optional compact
+workbench controls/status (all `anywidget-afm`). The conversation lives in the notebook
+AI sidebar, not in the app DAG. No Python retrieval cell and no AI node.
 
 ## 5. App-level evidence tools (the plugin server)
 
@@ -176,37 +203,38 @@ Each `wb_*` tool is a typed FastMCP function (html_video pattern):
 Index size is read live from `_meta` (never hardcoded). Concurrency with an indexer
 rebuild is tolerated (read-only open, retry transient locks).
 
-## 6. AI node + agent wiring (`wb-answer`)
+## 6. Sidebar agent wiring
 
-`AcpAgentBackend` over a fresh `NativeAcpConnection`:
+The workbench uses the existing sidebar path:
 
-- **Agent:** the user's configured default SPUR agent (`agent_name`/`command` from SPUR
-  config), `set_repo_root(repo_root)`, `cwd` = repo root.
-- **Agent tool access (the one real build item):** the spawned agent's MCP config MUST
-  include the **notebook MCP server** (`SPUR_NOTEBOOK_MCP_SOCKET`), which aggregates the
-  foundation tools (`code_*`, `notebook_push_source`) **and** the app plugin's `wb_*`
-  tools (proxied additively). Without this the agent can talk but cannot paint. This is
-  Task 1 of the plan.
-- **Grounding contract:** the prompt instructs the agent to call the relevant `wb_*`
-  evidence tool(s) **before** answering, and to answer only from the pushed evidence,
-  emitting a citation block mapping each marker to a `stable_symbol_id` returned by the
-  tools.
-- **Permissions:** read-only policy via `permission_tx` (auto-approve graph/analyst
-  reads + `notebook_push_source`, deny writes).
-- **Lifecycle:** one ACP session per notebook (`ensure_session` reuse); `CancellationToken`
-  wired to a Stop control; `Drop` + `.spur/pgids/` handle teardown; broadcast 4096
-  inherited.
+- **Agent:** selected in the AI sidebar (`chat_agents_list` / `ChatPanel` agent selector).
+- **Scope:** `resolve_app_scope(app.ipynb, socket)` sets `cwd` to the workbench app root,
+  includes the foundation notebook MCP proxy, appends the workbench Python MCP server,
+  and reads `skill/SKILL.md`.
+- **Session:** `SidebarChat::ensure_session` creates one ACP session per `app_key`; app
+  sessions are keyed by app root, while ordinary notebooks use `notebook:<path>`.
+- **Tool access:** the agent sees foundation notebook tools (`code_*`,
+  `notebook_push_source`) plus app `wb_*` tools through the session's `mcp_servers`.
+- **Grounding contract:** the app skill instructs the agent to call the relevant `wb_*`
+  evidence tool(s) **before** answering, answer only from pushed evidence, and include a
+  compact citation block mapping markers to `stable_symbol_id`s returned by the tools.
+- **Permissions:** handled by the sidebar's existing ACP permission forwarding; read-only
+  evidence tools should not request file writes.
+- **Lifecycle:** cancellation, session reuse, load-session, tool-call chips, and streaming
+  answer text are owned by the sidebar.
 - **Population guarantee:** if the agent skips a tool, panels keep last state and a "no
-  evidence pushed this turn" status shows; the answer still renders.
+  evidence pushed this turn" status shows; the sidebar answer still renders.
 
 ## 7. Frontend panels
 
-Four `anywidget-afm` widgets (sandboxed iframe) binding the source ports; layout matches
-the approved mock (analyst left, graph center, conversation right, inspector bottom,
-status rail top). `wb-question` and node-select in `wb-graph` use
-`experimental.invoke("source.push", {port, payload})`. **Scripts-off baseline
-(mandatory):** each widget server-renders its last port state so the app reads as designed
-with active content off; live interactivity is progressive enhancement.
+Three primary `anywidget-afm` widgets (sandboxed iframe) bind the source ports; layout
+keeps the approved mock's workbench feel while leaving conversation to the real notebook
+sidebar. The main viewport becomes analyst left, graph center, inspector bottom/right,
+and status rail top. Node-select in `wb-graph` may push a selected-symbol source or call a
+small app tool if the app needs deterministic follow-up; it should not implement chat.
+**Scripts-off baseline (mandatory):** each widget server-renders its last port state so
+the app reads as designed with active content off; live interactivity is progressive
+enhancement.
 
 ## 8. Error handling, concurrency, staleness
 
@@ -215,8 +243,8 @@ with active content off; live interactivity is progressive enhancement.
 - **Stale index:** banner from `_meta.graph_content_hash` vs `git HEAD`; the workbench
   answers from the indexed snapshot and says so.
 - **Tool / agent failure:** a failed evidence push leaves the other panels live; an agent
-  failure surfaces only in the answer column; retrieval is unaffected.
-- **Cancellation:** Stop cancels the ACP turn (`conn.cancel(session_id)`); already-pushed
+  failure surfaces in the AI sidebar; retrieval state is preserved.
+- **Cancellation:** sidebar Stop / `chat_cancel` cancels the ACP turn; already-pushed
   ports stay rendered.
 - **Concurrency:** read-only DuckDB open; retry transient locks; engine debounces pushes
   per source.
@@ -226,22 +254,30 @@ with active content off; live interactivity is progressive enhancement.
 - **Evidence tools:** pytest in `tests/` (html_video pattern) against a small fixture
   `analyst.duckdb`: assert each tool's view query columns, Arrow schema, and the
   `notebook_push_source` payload (port + IPC bytes) via a stub socket.
-- **AI node:** reuse the existing `FakeConn` harness in `acp_backend.rs` to assert prompt
-  assembly, streaming accumulation, cancellation.
+- **Sidebar integration:** exercise `resolve_app_scope` for the workbench manifest:
+  foundation MCP first, workbench MCP second, `skill/SKILL.md` loaded, and app key scoped
+  to the app root.
+- **Sidebar turn:** existing sidebar tests cover `chat_turn`, streaming, permissions, and
+  session creation; add only workbench-specific coverage if the manifest or skill changes
+  expose a regression.
 - **Cascade:** integration test that a `notebook_push_source` on each evidence port reruns
   the bound widget cell (mirrors `push_source_reruns_only_downstream_cells_in_dependency_order`).
 - **App mode:** smoke test that the frontend cells render in document order.
 - **Packaging:** `notebook_export_spur_app` produces a clean `.spurapp`; import preflight
-  passes (deps + `mcp_server` present).
+  passes (deps + `mcp_server` + `skill/SKILL.md` present).
 
 ## 10. Plan preconditions & deferred work
 
-- **Task 0 — API-drift check:** re-verify `AcpAgentBackend`, `AiNodeBackend`,
-  `push_source`/`SourcePush`, and `notebook_push_source` against HEAD before building
-  (these are young, actively-churning leaves; the AFM control-plane plan is in flight).
-- **Task 1 — agent MCP wiring:** ensure the `NativeAcpConnection`-spawned agent is
-  configured with the notebook MCP socket (foundation + app plugin tools). This is the
-  critical-path integration glue.
-- **Deferred (Tier-2):** attach the AI node to the live orchestration brain session (a
-  backend swap behind `AiNodeBackend`, "no engine change"); the external-host chat model
-  (B2); write actions; multi-repo.
+- **Task 0 — API-drift check:** re-verify `ChatPanel`, `chat_turn`, `SidebarChat`,
+  `resolve_app_scope`, `push_source`/`SourcePush`, and `notebook_push_source` against HEAD
+  before building.
+- **Task 1 — app package:** create `app_gallery/code-graph-workbench/` with
+  `spur-app.json`, `app.ipynb`, `skill/SKILL.md`, and the Python FastMCP evidence server.
+- **Task 2 — evidence tools:** implement and test `wb_blast_radius`, `wb_subgraph`,
+  `wb_scorecard`, and `wb_cochange` as deterministic read-only tools that push Arrow IPC
+  to declared ports and return citation metadata.
+- **Task 3 — workbench widgets:** build graph, analyst, inspector, and status widgets
+  that bind only to source ports and tolerate missing/stale evidence honestly.
+- **Deferred (Tier-2):** attach the sidebar session manager to the live orchestration
+  brain session ("no panel change"); the external-host chat model (B2); write actions;
+  multi-repo.
