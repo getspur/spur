@@ -511,7 +511,10 @@ export default function DatasourcePanel() {
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        <div
+          className="min-h-0 flex-1 space-y-3 overflow-y-auto pb-20 pr-1"
+          data-testid="datasource-panel-scroll"
+        >
           <section>
             <h3 className="mb-2 truncate text-xs uppercase tracking-wide text-gray-400">
               In this notebook
@@ -541,24 +544,24 @@ export default function DatasourcePanel() {
               </div>
             )}
           </section>
-        </div>
 
-        <SavedConnectionsSection
-          connections={savedConnections}
-          expandedName={expandedSavedConnection}
-          notice={savedConnectionNotice}
-          onAttach={(name) => void handleAttachSavedConnection(name)}
-          onDelete={(name) => void handleDeleteSavedConnection(name)}
-          onEdit={(connection) => {
-            setRestWizardPrefill(null);
-            setEditingConnection(connection);
-          }}
-          onToggle={(name) =>
-            setExpandedSavedConnection((current) =>
-              current === name ? null : name,
-            )
-          }
-        />
+          <SavedConnectionsSection
+            connections={savedConnections}
+            expandedName={expandedSavedConnection}
+            notice={savedConnectionNotice}
+            onAttach={(name) => void handleAttachSavedConnection(name)}
+            onDelete={(name) => void handleDeleteSavedConnection(name)}
+            onEdit={(connection) => {
+              setRestWizardPrefill(null);
+              setEditingConnection(connection);
+            }}
+            onToggle={(name) =>
+              setExpandedSavedConnection((current) =>
+                current === name ? null : name,
+              )
+            }
+          />
+        </div>
       </div>
       <AddRestApiWizard
         editConnection={editingConnection}
@@ -592,7 +595,7 @@ function SavedConnectionsSection({
   onToggle: (name: string) => void;
 }) {
   return (
-    <section className="shrink-0 border-t border-gray-200 pt-3">
+    <section className="border-t border-gray-200 pt-3">
       <h3 className="mb-2 truncate text-xs uppercase tracking-wide text-gray-400">
         Saved connections
       </h3>
@@ -604,7 +607,7 @@ function SavedConnectionsSection({
       {connections.length === 0 ? (
         <p className="px-1 py-1 text-xs text-gray-400">No saved connections.</p>
       ) : (
-        <div className="max-h-60 space-y-1 overflow-y-auto pr-1">
+        <div className="space-y-1">
           {connections.map((connection) => (
             <SavedConnectionRow
               connection={connection}
