@@ -17,11 +17,16 @@ cargo-dist-version = "0.31.0"
 # Only the CLI is published through cargo-dist. Native notebook app builds go
 # through the Tauri/xtask path because they require GTK/WebKit system packages
 # on Linux.
+dist = false
 packages = ["spur-cli"]
 # Target platforms to build apps for (Rust target-triple syntax).
 # Temporarily omit x86_64-unknown-linux-musl and x86_64-pc-windows-msvc;
 # the v1.0.1 release showed target-specific build failures that need debug.
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Build only the selected package instead of the whole workspace. The default
+# workspace build pulls in Tauri/WebKit crates from non-release binaries on
+# Linux, which require GTK system packages.
+precise-builds = true
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
@@ -55,6 +60,12 @@ runner = "ubuntu-24.04"
 runner = "ubuntu-24.04-arm"
 # Whether to install an updater program
 install-updater = false
+
+[dist.dependencies.apt]
+protobuf-compiler = "*"
+
+[dist.dependencies.homebrew]
+protobuf = "*"
 
 # ---- Per-crate: only spur-cli produces a distributable binary ----
 # cargo-dist auto-detects binary crates, but we set explicit metadata in
