@@ -115,22 +115,42 @@ fn read_skill(app_root: &Path, skill_path: Option<&str>) -> Result<Option<String
 }
 
 fn app_mcp_server(name: &str, manifest: &SpurAppMcpServer) -> Result<McpServer> {
-    if manifest.requirements.is_some() {
-        return Err(anyhow!(
-            "app MCP server requirements are not representable in ACP McpServer without plugin provisioning"
+    let mut env = manifest
+        .env
+        .iter()
+        .map(|(name, value)| EnvVariable::new(name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    if manifest.server_type == "python" {
+        env.push(EnvVariable::new(
+            "PYTHONUNBUFFERED".to_owned(),
+            "1".to_owned(),
+        ));
+    }
+
+    if let Some(requirements) = &manifest.requirements {
+        if manifest.server_type != "python" {
+            return Err(anyhow!(
+                "app MCP server requirements are only supported for python app MCP servers"
+            ));
+        }
+
+        return Ok(McpServer::Stdio(
+            McpServerStdio::new(name, "uv")
+                .args(vec![
+                    "run".to_owned(),
+                    "--with-requirements".to_owned(),
+                    requirements.clone(),
+                    "python".to_owned(),
+                    manifest.entry.clone(),
+                ])
+                .env(env),
         ));
     }
 
     Ok(McpServer::Stdio(
         McpServerStdio::new(name, manifest.server_type.clone())
             .args(vec![manifest.entry.clone()])
-            .env(
-                manifest
-                    .env
-                    .iter()
-                    .map(|(name, value)| EnvVariable::new(name.clone(), value.clone()))
-                    .collect(),
-            ),
+            .env(env),
     ))
 }
 
@@ -241,6 +261,58 @@ mod tests {
                     .env
                     .iter()
                     .any(|env| env.name == "SPUR_APP_MODE" && env.value == "test"));
+            }
+            other => panic!("expected stdio MCP server, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spur_app_mcp_with_requirements_resolves_to_uv_command() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("spur-app.json"),
+            r#"{
+              "schema": "spur.app/v1",
+              "name": "HTML Video",
+              "entry_notebook": "app.ipynb",
+              "open_mode": "app",
+              "runtime": {
+                "jute_min": "0.1.0"
+              },
+              "mcp_server": {
+                "type": "python",
+                "entry": "server/main.py",
+                "requirements": "server/requirements.txt",
+                "env": {}
+              }
+            }"#,
+        )
+        .unwrap();
+        let nb = dir.path().join("app.ipynb");
+        std::fs::write(&nb, "{}").unwrap();
+
+        let socket = notebook_socket();
+        let scope = resolve_app_scope(&nb, &socket).unwrap();
+
+        assert_eq!(scope.mcp_servers.len(), 2);
+        match &scope.mcp_servers[1] {
+            McpServer::Stdio(server) => {
+                assert_eq!(server.name, "HTML Video");
+                assert_eq!(server.command, std::path::PathBuf::from("uv"));
+                assert_eq!(
+                    server.args,
+                    vec![
+                        "run",
+                        "--with-requirements",
+                        "server/requirements.txt",
+                        "python",
+                        "server/main.py"
+                    ]
+                );
+                assert!(server
+                    .env
+                    .iter()
+                    .any(|env| env.name == "PYTHONUNBUFFERED" && env.value == "1"));
             }
             other => panic!("expected stdio MCP server, got {other:?}"),
         }
