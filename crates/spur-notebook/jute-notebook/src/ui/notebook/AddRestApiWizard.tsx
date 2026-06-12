@@ -1852,6 +1852,7 @@ function tablePreviewFromTemplate(
   return {
     tables: connection.tables.map((table) => ({
       name: table.name,
+      method: "GET",
       path: "",
       responsePath: null,
       columns: table.columns.map((column) => ({

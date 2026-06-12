@@ -634,6 +634,27 @@ describe("AddRestApiWizard", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
+  test("edit_connection_tables_default_to_get_preview_method", async () => {
+    const onClose = vi.fn();
+    const editConnection = savedConnectionsResponse().result.data[0];
+
+    render(
+      <AddRestApiWizard
+        editConnection={editConnection}
+        open
+        onClose={onClose}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to Stripe" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByText("stripe_charges")).toBeInTheDocument();
+    expect(screen.getAllByText(/^GET\s*$/).length).toBeGreaterThan(0);
+  });
+
   test("preview_openapi_tables_result_renders_tables_and_flattened_columns", async () => {
     renderWizard();
 
