@@ -21,6 +21,17 @@ pub const EVCXR_ARROW_CRATE_VERSION: &str = "55";
 /// Arrow Go module path used by managed Go kernel bootstrap code.
 pub const GONB_ARROW_GO_MODULE: &str = "github.com/apache/arrow-go/v18";
 
+/// Environment injected into the bundled Deno kernelspec.
+///
+/// `DENO_NO_PACKAGE_JSON=1` keeps the kernel out of Deno's
+/// bring-your-own-node_modules resolution: the kernel starts with cwd at the
+/// notebook directory, so an unrelated `package.json` in any ancestor would
+/// otherwise disable `npm:` auto-install and break the SPUR ports bootstrap
+/// (`import("npm:apache-arrow@…")`) for every cell execution. The kernel
+/// context is deliberately config-free (no deno.json import map either); npm
+/// specifiers always resolve from Deno's global cache.
+const DENO_KERNEL_ENV: &[(&str, &str)] = &[("DENO_NO_PACKAGE_JSON", "1")];
+
 /// Ensure the bundled `python3` kernelspec is installed for this app.
 pub async fn ensure_python3_kernelspec(app: &AppHandle) -> Result<(), Error> {
     let _guard = PYTHON3_KERNELSPEC_LOCK.lock().await;
@@ -173,7 +184,7 @@ async fn ensure_deno_kernelspec_in_dir(spur_jupyter: &std::path::Path) -> Result
         .join("kernels")
         .join("deno")
         .join("kernel.json");
-    if kernelspec_is_valid(&kernelspec).await {
+    if deno_kernelspec_is_valid(&kernelspec).await {
         return Ok(());
     }
 
@@ -191,6 +202,10 @@ async fn ensure_deno_kernelspec_in_dir(spur_jupyter: &std::path::Path) -> Result
             cause: error.to_string(),
         })?;
 
+    let env: serde_json::Map<String, serde_json::Value> = DENO_KERNEL_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), serde_json::json!(value)))
+        .collect();
     let payload = serde_json::json!({
         "argv": [
             path_to_string(&deno, "deno_kernelspec_write")?,
@@ -200,7 +215,8 @@ async fn ensure_deno_kernelspec_in_dir(spur_jupyter: &std::path::Path) -> Result
             "{connection_file}"
         ],
         "display_name": "Deno",
-        "language": "typescript"
+        "language": "typescript",
+        "env": env
     });
 
     tokio::fs::write(&kernelspec, payload.to_string())
@@ -210,7 +226,7 @@ async fn ensure_deno_kernelspec_in_dir(spur_jupyter: &std::path::Path) -> Result
             cause: error.to_string(),
         })?;
 
-    if kernelspec_is_valid(&kernelspec).await {
+    if deno_kernelspec_is_valid(&kernelspec).await {
         Ok(())
     } else {
         Err(Error::KernelProvisionFailed {
@@ -535,17 +551,33 @@ where
 }
 
 async fn kernelspec_is_valid(path: &std::path::Path) -> bool {
-    let Ok(contents) = tokio::fs::read(path).await else {
-        return false;
-    };
-    let Ok(spec) = serde_json::from_slice::<KernelSpec>(&contents) else {
-        return false;
-    };
-    let Some(command) = spec.argv.first() else {
-        return false;
-    };
-    let command = std::path::Path::new(command);
-    command.is_absolute() && command.exists()
+    read_valid_kernelspec(path).await.is_some()
+}
+
+/// Validity check specific to the bundled Deno kernelspec: in addition to the
+/// generic argv check it requires every [`DENO_KERNEL_ENV`] entry, so that
+/// kernelspecs written before the env was introduced are treated as stale and
+/// regenerated instead of short-circuiting provisioning forever.
+async fn deno_kernelspec_is_valid(path: &std::path::Path) -> bool {
+    read_valid_kernelspec(path).await.is_some_and(|spec| {
+        DENO_KERNEL_ENV
+            .iter()
+            .all(|(key, value)| spec.env.get(*key).map(String::as_str) == Some(*value))
+    })
+}
+
+/// Parse a kernelspec and verify its argv points at an existing absolute
+/// binary. Returns the parsed spec for further checks.
+async fn read_valid_kernelspec(path: &std::path::Path) -> Option<KernelSpec> {
+    let contents = tokio::fs::read(path).await.ok()?;
+    let spec = serde_json::from_slice::<KernelSpec>(&contents).ok()?;
+    {
+        let command = std::path::Path::new(spec.argv.first()?);
+        if !command.is_absolute() || !command.exists() {
+            return None;
+        }
+    }
+    Some(spec)
 }
 
 fn venv_python_path(venv: &std::path::Path) -> PathBuf {
@@ -1081,10 +1113,67 @@ mod tests {
                     "{connection_file}"
                 ],
                 "display_name": "Deno",
-                "language": "typescript"
+                "language": "typescript",
+                "env": { "DENO_NO_PACKAGE_JSON": "1" }
             })
         );
         assert!(kernelspec_is_valid(&kernelspec).await);
+        assert!(deno_kernelspec_is_valid(&kernelspec).await);
+
+        match previous_deno_path {
+            Some(value) => std::env::set_var("DENO_PATH", value),
+            None => std::env::remove_var("DENO_PATH"),
+        }
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_deno_kernelspec_without_no_package_json_env_is_regenerated() {
+        let root = std::env::temp_dir().join(format!("spur-jupyter-{}", Uuid::new_v4()));
+        let deno = root
+            .join("bin")
+            .join(if cfg!(windows) { "deno.exe" } else { "deno" });
+        tokio::fs::create_dir_all(deno.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&deno, b"").await.unwrap();
+
+        // Pre-fix kernelspec: valid argv but no env block. Without the
+        // DENO_NO_PACKAGE_JSON requirement this spec short-circuits
+        // provisioning forever and existing installs never pick up the fix.
+        let kernelspec = root.join("kernels").join("deno").join("kernel.json");
+        tokio::fs::create_dir_all(kernelspec.parent().unwrap())
+            .await
+            .unwrap();
+        let stale = serde_json::json!({
+            "argv": [
+                deno.to_string_lossy(),
+                "jupyter",
+                "--kernel",
+                "--conn",
+                "{connection_file}"
+            ],
+            "display_name": "Deno",
+            "language": "typescript"
+        });
+        tokio::fs::write(&kernelspec, stale.to_string())
+            .await
+            .unwrap();
+        assert!(kernelspec_is_valid(&kernelspec).await);
+        assert!(!deno_kernelspec_is_valid(&kernelspec).await);
+
+        let previous_deno_path = std::env::var_os("DENO_PATH");
+        std::env::set_var("DENO_PATH", &deno);
+
+        ensure_deno_kernelspec_in_dir(&root).await.unwrap();
+
+        let contents = tokio::fs::read(&kernelspec).await.unwrap();
+        let spec = serde_json::from_slice::<serde_json::Value>(&contents).unwrap();
+        assert_eq!(
+            spec["env"],
+            serde_json::json!({ "DENO_NO_PACKAGE_JSON": "1" }),
+            "stale deno kernelspec must be rewritten with the byonm opt-out env"
+        );
 
         match previous_deno_path {
             Some(value) => std::env::set_var("DENO_PATH", value),
