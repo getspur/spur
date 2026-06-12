@@ -177,7 +177,7 @@ name = "codex"
 command = "npx"
 args = [
     "--yes",
-    "@zed-industries/codex-acp@0.15.0",
+    "@zed-industries/codex-acp@0.16.0",
 ]
 transport = "acp"
 kind = "codex-acp"
