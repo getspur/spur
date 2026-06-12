@@ -1542,6 +1542,12 @@ export class Notebook {
     }
     try {
       const notebook = await invoke<NotebookRoot>("get_notebook", { path });
+      const loadResponse = await daemonControl({ command: "load", path });
+      if (!loadResponse.ok) {
+        throw new Error(
+          loadResponse.error?.message ?? "daemon load response was not ok",
+        );
+      }
       this.loadNotebook(notebook);
       this.state.viewStateActions.setPath(path);
       try {
