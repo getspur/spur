@@ -164,6 +164,58 @@ High-value official sources should override or supplement broad catalog matches:
 | Google APIs | Google Discovery Service JSON via `googleapis` artifacts |
 | Shopify | Official/admin GraphQL and REST metadata where available |
 
+### Tier A/B GitHub Source Research Addendum
+
+Updated on 2026-06-12. This addendum separates "has a public API spec
+candidate" from "end-to-end supported". A provider is not end-to-end until the
+manifest is committed under `connections/supported/` and has provider-specific
+mock E2E coverage for auth, request construction, pagination where relevant, and
+typed rows.
+
+Current tracked supported REST providers:
+
+| Provider | Source grounding | E2E status |
+|---|---|---|
+| `github` | Official GitHub REST OpenAPI repo, `github/rest-api-description`, whose README says it contains OpenAPI descriptions for GitHub's REST API and keeps stable 3.0 descriptions plus breaking-change 3.1 descriptions. | Supported manifest plus provider-specific mock E2E. |
+| `algolia` | Official Algolia `api-clients-automation` repo, described as a monorepo of Algolia API specs and generated clients/docs. | Supported manifest plus provider-specific mock E2E. |
+
+Tracked Tier B/OAuth-family precedents:
+
+| Provider | Source grounding | E2E status |
+|---|---|---|
+| `google_ads` | Google public API interface definitions live in `googleapis/googleapis`; the repo documents public Google APIs that support REST and gRPC and use proto3 interface definitions for both REST and RPC. Google Ads also has first-party client repositories, but not a simple OpenAPI bundle in this phase. | Provider-specific mock E2E for OAuth refresh and typed POST action rows. |
+| `facebook_ads` | Meta Marketing API remains docs/Graph API sourced in this phase; no official reviewed OpenAPI repo was confirmed in this pass. | Parse/shape coverage only; not supported until request/auth E2E lands. |
+| `linear` | Linear is a GraphQL provider in SPUR today, backed by a curated GraphQL manifest. The public `linear/linear` repository is SDK/tooling, not a REST OpenAPI source. | GraphQL mock scan precedent; outside REST/OpenAPI Tier A promotion. |
+
+Untracked generated Tier A candidates currently present in the workspace are
+useful for review, but must not be counted as supported until committed and
+covered by provider-specific E2E:
+
+| Provider | Current generated shape | Best GitHub/spec source found | Promotion note |
+|---|---:|---|---|
+| `airtable` | 0 tables | No obvious official `airtable/openapi` repository via GitHub API check; APIs.guru/docs source review required. | Keep experimental until a reviewed spec source is pinned. |
+| `datadog` | 43 tables | Official `DataDog/datadog-api-client-typescript` repo is an Apache-2.0 generated client; README documents `DD_API_KEY`/`DD_APP_KEY` auth and paginated listing helpers. Need locate/pin the upstream spec artifact used by generation. | Good Tier A candidate after adding dual API/app key auth and mock E2E. |
+| `mailchimp` | 51 tables | No obvious official `mailchimp/openapi` repository via GitHub API check; current source appears to be APIs.guru or docs-derived. | Keep experimental/source-review until provenance is pinned. |
+| `openai` | 67 tables | Official `openai/openai-openapi` repo contains `openapi.yaml` for the OpenAI API and is MIT licensed. | Good Tier A candidate after table subset review and bearer auth E2E. |
+| `sendgrid` | 121 tables | Official `twilio/sendgrid-oai` repo contains SendGrid OpenAPI documents in JSON/YAML directories, is MIT licensed, and is marked beta/active. | Good Tier A candidate after reducing to read-safe tables and bearer auth E2E. |
+| `square` | 67 tables | Official `square/connect-api-specification` repo contains the canonical `api.json` OpenAPI/Swagger spec for Square SDK generation and is Apache-2.0 licensed. | Good Tier A candidate after bearer auth E2E and pagination review. |
+| `stripe` | 149 tables | Official `stripe/openapi` repo contains Stripe OpenAPI specs; README recommends `/latest/` for GA coverage across v1/v2 endpoints and keeps legacy `/openapi/` updated. | High-priority Tier A candidate after capping tables and bearer auth E2E. |
+| `twilio` | 63 tables | Official `twilio/twilio-oai` repo contains Twilio OpenAPI JSON/YAML documents, is GA, active, and used to validate Twilio API requests. | Good Tier A candidate after basic auth E2E. |
+| `zendesk` | 168 tables | No obvious official `zendesk/openapi` repository via GitHub API check; current source appears to be APIs.guru or docs-derived. | Keep experimental/source-review until provenance is pinned. |
+
+Recommended near-term promotion order:
+
+1. Keep `github` and `algolia` as supported examples.
+2. Promote `stripe`, `twilio`, `sendgrid`, `openai`, and `square` next because
+   official GitHub/OpenAPI sources are clear and auth is simple enough for mock
+   E2E.
+3. Promote `datadog` only after the app-key requirement is represented in the
+   manifest auth/header model.
+4. Keep `airtable`, `mailchimp`, and `zendesk` experimental until the source is
+   pinned beyond APIs.guru/docs-derived evidence.
+5. Keep `google_ads`, `facebook_ads`, and `linear` on the Tier B/GraphQL/action
+   track rather than mixing them into the REST OpenAPI table promotion batch.
+
 ### Nango Docs Endpoint Seeds
 
 Nango docs contain sample proxy endpoints for many providers. These are useful as fallback table seeds but not complete schemas.
