@@ -10,14 +10,18 @@ const DEFAULT_NOTEBOOK_APP_KEY: &str = "notebook";
 const DEFAULT_NOTEBOOK_LABEL: &str = "Notebook";
 const DEFAULT_SKILL_PATH: &str = "skill/SKILL.md";
 
-pub fn resolve_app_scope(notebook_path: &Path) -> Result<AppScope> {
+pub fn resolve_app_scope(notebook_path: &Path, notebook_mcp_socket: &Path) -> Result<AppScope> {
     let notebook_dir = notebook_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
 
     let Some((app_root, manifest_path)) = find_manifest_dir(&notebook_dir) else {
-        return Ok(default_notebook_scope(notebook_path, notebook_dir));
+        return Ok(default_notebook_scope(
+            notebook_path,
+            notebook_dir,
+            notebook_mcp_socket,
+        ));
     };
 
     let manifest_bytes = std::fs::read(&manifest_path)
@@ -33,7 +37,7 @@ pub fn resolve_app_scope(notebook_path: &Path) -> Result<AppScope> {
         ));
     }
 
-    let mut mcp_servers = foundation_mcp_servers();
+    let mut mcp_servers = foundation_mcp_servers(notebook_mcp_socket);
     if let Some(mcp_server) = &manifest.mcp_server {
         mcp_servers.push(app_mcp_server(&manifest.name, mcp_server)?);
     }
@@ -47,18 +51,39 @@ pub fn resolve_app_scope(notebook_path: &Path) -> Result<AppScope> {
     })
 }
 
-fn default_notebook_scope(notebook_path: &Path, cwd: PathBuf) -> AppScope {
+fn default_notebook_scope(
+    notebook_path: &Path,
+    cwd: PathBuf,
+    notebook_mcp_socket: &Path,
+) -> AppScope {
     AppScope {
         cwd,
-        mcp_servers: foundation_mcp_servers(),
+        mcp_servers: foundation_mcp_servers(notebook_mcp_socket),
         skill: None,
         app_key: format!("{}:{}", DEFAULT_NOTEBOOK_APP_KEY, notebook_path.display()),
         label: DEFAULT_NOTEBOOK_LABEL.to_owned(),
     }
 }
 
-fn foundation_mcp_servers() -> Vec<McpServer> {
-    Vec::new()
+fn foundation_mcp_servers(notebook_mcp_socket: &Path) -> Vec<McpServer> {
+    vec![McpServer::Stdio(
+        McpServerStdio::new("notebook", notebook_binary_path()).args(vec![
+            "--mcp-proxy".to_owned(),
+            notebook_mcp_socket.display().to_string(),
+        ]),
+    )]
+}
+
+fn notebook_binary_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("SPUR_NOTEBOOK_BIN") {
+        return PathBuf::from(path);
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        return current_exe;
+    }
+
+    PathBuf::from("spur-notebook")
 }
 
 fn find_manifest_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
@@ -114,19 +139,41 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::McpServer;
 
+    fn notebook_socket() -> PathBuf {
+        PathBuf::from("/tmp/spur-notebook-test.sock")
+    }
+
+    fn assert_notebook_mcp(server: &McpServer) {
+        match server {
+            McpServer::Stdio(server) => {
+                assert_eq!(server.name, "notebook");
+                assert_eq!(
+                    server.args,
+                    vec![
+                        "--mcp-proxy".to_owned(),
+                        "/tmp/spur-notebook-test.sock".to_owned()
+                    ]
+                );
+            }
+            other => panic!("expected notebook stdio MCP server, got {other:?}"),
+        }
+    }
+
     #[test]
     fn plain_notebook_yields_default_scope() {
         let dir = tempfile::tempdir().unwrap();
         let nb = dir.path().join("notebook.ipynb");
         std::fs::write(&nb, "{}").unwrap();
 
-        let scope = resolve_app_scope(&nb).unwrap();
+        let socket = notebook_socket();
+        let scope = resolve_app_scope(&nb, &socket).unwrap();
 
         assert_eq!(scope.cwd, dir.path());
         assert_eq!(scope.label, "Notebook");
         assert_eq!(scope.app_key, format!("notebook:{}", nb.display()));
         assert!(scope.skill.is_none());
-        assert!(scope.mcp_servers.is_empty());
+        assert_eq!(scope.mcp_servers.len(), 1);
+        assert_notebook_mcp(&scope.mcp_servers[0]);
     }
 
     #[test]
@@ -137,8 +184,9 @@ mod tests {
         std::fs::write(&first, "{}").unwrap();
         std::fs::write(&second, "{}").unwrap();
 
-        let first_scope = resolve_app_scope(&first).unwrap();
-        let second_scope = resolve_app_scope(&second).unwrap();
+        let socket = notebook_socket();
+        let first_scope = resolve_app_scope(&first, &socket).unwrap();
+        let second_scope = resolve_app_scope(&second, &socket).unwrap();
 
         assert_eq!(first_scope.cwd, dir.path());
         assert_eq!(second_scope.cwd, dir.path());
@@ -175,14 +223,16 @@ mod tests {
         let nb = dir.path().join("app.ipynb");
         std::fs::write(&nb, "{}").unwrap();
 
-        let scope = resolve_app_scope(&nb).unwrap();
+        let socket = notebook_socket();
+        let scope = resolve_app_scope(&nb, &socket).unwrap();
 
         assert_eq!(scope.label, "Code Graph Workbench");
         assert_eq!(scope.cwd, dir.path());
         assert_eq!(scope.app_key, dir.path().display().to_string());
         assert_eq!(scope.skill.as_deref(), Some("workbench skill"));
-        assert_eq!(scope.mcp_servers.len(), 1);
-        match &scope.mcp_servers[0] {
+        assert_eq!(scope.mcp_servers.len(), 2);
+        assert_notebook_mcp(&scope.mcp_servers[0]);
+        match &scope.mcp_servers[1] {
             McpServer::Stdio(server) => {
                 assert_eq!(server.name, "Code Graph Workbench");
                 assert_eq!(server.command, std::path::PathBuf::from("python"));

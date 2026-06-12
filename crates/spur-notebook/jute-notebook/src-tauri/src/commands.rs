@@ -735,7 +735,7 @@ fn notebook_path_from_window(window: &WebviewWindow) -> Option<String> {
         .filter(|path| !path.is_empty())
 }
 
-fn daemon_socket_path_from_args() -> Result<PathBuf, Error> {
+pub(crate) fn daemon_socket_path_from_args() -> Result<PathBuf, Error> {
     let mut args = env::args();
     while let Some(arg) = args.next() {
         if arg == "--socket" {
