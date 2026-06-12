@@ -373,6 +373,25 @@ Three channels, none of which spend per-turn prompt tokens:
 3. **App SKILL.md** — app-specific guidance, returned inline by
    `notebook_context_pack` (§5).
 
+### Hosting architecture: who serves these tools
+
+Every tool in this spec is hosted by the notebook daemon's existing `rmcp`
+server and registered into the ACP session through `AppScope.mcp_servers` —
+the established self-host/self-register pattern (the notebook proxy and
+per-app manifest servers already work this way). `spur-graph` remains a pure
+library, linked by both spur-mcp and the daemon; it does **not** gain its own
+MCP server in this spec.
+
+Recorded follow-up (out of scope): extract the reusable MCP hosting layer
+(tool registry/dispatch, error envelopes, stdio/socket proxy plumbing, server
+instructions, and this spec's response conventions — refs, `next_queries`,
+version stamps, truncation markers) **out of spur-mcp into a shared host
+crate**, with spur-mcp as its first consumer. Dependency direction matters:
+spur-mcp depends on spur-graph, so per-crate servers cannot depend on spur-mcp
+without a cycle — the scaffold must move down, not be borrowed sideways. Once
+it exists, a standalone spur-graph server can self-register into repo-resident
+app sessions for full `code_*` coverage alongside the notebook server.
+
 ## 9. Turn Context Extension
 
 The lenses spec's `ChatTurnContext` gains one optional field — the cheapest,
@@ -481,6 +500,9 @@ Slice 3 (extraction tests live in `spur-graph`; integration tests in the daemon)
   notebooks exist.
 - **A daemon-owned parser** — the daemon never reimplements notebook parsing;
   it links the spur-graph extractor (one implementation, two modes).
+- **A standalone spur-graph MCP server** — requires first extracting the
+  shared hosting scaffold out of spur-mcp (see §8 hosting note); recorded as a
+  follow-up, not part of any slice here.
 - **Cross-notebook lineage** for multi-notebook apps — v1 lineage is scoped to
   one notebook.
 - **Semantic/embedding retrieval over cells.**
