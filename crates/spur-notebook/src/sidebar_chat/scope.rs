@@ -86,7 +86,7 @@ fn notebook_binary_path() -> PathBuf {
     PathBuf::from("spur-notebook")
 }
 
-fn find_manifest_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
+pub(crate) fn find_manifest_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
     for candidate in start.ancestors() {
         let manifest_path = candidate.join(SPUR_APP_MANIFEST);
         if manifest_path.is_file() {
@@ -96,7 +96,7 @@ fn find_manifest_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-fn read_skill(app_root: &Path, skill_path: Option<&str>) -> Result<Option<String>> {
+pub(crate) fn read_skill(app_root: &Path, skill_path: Option<&str>) -> Result<Option<String>> {
     let explicit_skill = skill_path.map(|path| app_root.join(path));
     if let Some(path) = explicit_skill {
         return std::fs::read_to_string(&path)
