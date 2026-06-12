@@ -156,6 +156,61 @@ describe("ChatPanel", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
   });
 
+  test("submits a prompt when Enter is pressed in the message box", async () => {
+    render(<ChatPanel />);
+
+    await screen.findByRole("combobox", { name: "Agent" });
+    const messageBox = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(messageBox, {
+      target: { value: "hello" },
+    });
+
+    fireEvent.keyDown(messageBox, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith(
+        "chat_turn",
+        expect.objectContaining({
+          notebookPath: "/tmp/revenue.ipynb",
+          prompt: "hello",
+          agentName: "claude-code",
+        }),
+      );
+    });
+  });
+
+  test("keeps the send button clickable when stale streaming state exists", async () => {
+    const s = useChat.getState();
+    s.setScope("notebook:/tmp/revenue.ipynb", "revenue.ipynb");
+    s.applyEvent({
+      type: "messageChunk",
+      text: "Unfinished previous response",
+    });
+
+    render(<ChatPanel />);
+
+    await screen.findByRole("combobox", { name: "Agent" });
+    const messageBox = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(messageBox, {
+      target: { value: "hello" },
+    });
+
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    expect((sendButton as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(sendButton);
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith(
+        "chat_turn",
+        expect.objectContaining({
+          notebookPath: "/tmp/revenue.ipynb",
+          prompt: "hello",
+          agentName: "claude-code",
+        }),
+      );
+    });
+  });
+
   test("lists notebook sessions, selects the ensured session, and switches resumed sessions", async () => {
     const sessionLists = [
       [{ id: "session-old" }, { id: "session-older" }],
