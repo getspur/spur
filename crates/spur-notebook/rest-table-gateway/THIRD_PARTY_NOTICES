@@ -14,3 +14,19 @@ distributing those imported manifests.
 Bundling imported manifests is for local distribution and use only. It is not
 permission to offer a hosted or managed service based on Nango-derived provider
 metadata.
+
+APIs.guru OpenAPI directory metadata
+====================================
+
+The nango-catalog helper can read a user-provided APIs.guru list.json snapshot
+to build provider/spec crosswalk metadata:
+
+Upstream: https://api.apis.guru/v2/list.json
+Project: https://github.com/APIs-guru/openapi-directory
+
+APIs.guru entries have mixed provenance. Some definitions are contributed under
+CC0, while other public-source definitions may require separate review before
+redistribution. nango-catalog records the snapshot retrieval timestamp and
+SHA-256 digest, but treats APIs.guru matches as review candidates by default.
+Do not bundle third-party OpenAPI spec content or generated manifests from
+those specs unless the specific source has been reviewed as redistributable.
