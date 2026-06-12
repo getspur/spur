@@ -57,4 +57,8 @@ export type ProviderSummary = {
    * Table previews available from a supported bundled manifest.
    */
   tables: Array<TablePreview>;
+  /**
+   * Action previews available from a supported bundled manifest.
+   */
+  actions: Array<TablePreview>;
 };

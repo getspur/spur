@@ -1075,7 +1075,18 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                 .map(required_env_vars_from_manifest)
                 .unwrap_or_default();
             let tables = supported_manifest
-                .map(|manifest| manifest.tables.into_iter().map(table_preview).collect())
+                .as_ref()
+                .map(|manifest| {
+                    manifest
+                        .tables
+                        .clone()
+                        .into_iter()
+                        .map(table_preview)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let actions = supported_manifest
+                .map(|manifest| manifest.actions.into_iter().map(action_preview).collect())
                 .unwrap_or_default();
 
             Ok(jute::commands::ProviderSummary {
@@ -1101,6 +1112,7 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                 base_url,
                 credential_env_vars,
                 tables,
+                actions,
             })
         })
         .collect::<Result<Vec<_>, BridgeError>>()?;
@@ -1238,8 +1250,11 @@ fn curated_preset_toml(source: &str) -> Option<&'static str> {
         "zendesk" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/zendesk.connection.toml"
         )),
+        "facebook_ads" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/facebook_ads.connection.toml"
+        )),
         "google_ads" => Some(include_str!(
-            "../../rest-table-gateway/connections/tier-a/google_ads.connection.toml"
+            "../../rest-table-gateway/connections/supported/google_ads.connection.toml"
         )),
         _ => None,
     }
@@ -1436,10 +1451,33 @@ fn table_preview(
 ) -> jute::commands::TablePreview {
     jute::commands::TablePreview {
         name: table.name,
+        method: "GET".to_string(),
         path: table.path,
         response_path: table.response_path,
         columns: table
             .columns
+            .into_iter()
+            .map(|(name, column)| jute::commands::TablePreviewColumn {
+                name,
+                ty: column.ty,
+                json: column.json,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn action_preview(
+    action: spur_rest_table_gateway::adapter::manifest::ActionCfg,
+) -> jute::commands::TablePreview {
+    jute::commands::TablePreview {
+        name: action.name,
+        method: action.method,
+        path: action.path,
+        response_path: action.response_path,
+        columns: action
+            .columns
+            .unwrap_or_default()
             .into_iter()
             .map(|(name, column)| jute::commands::TablePreviewColumn {
                 name,
@@ -4113,6 +4151,24 @@ score = { json = "$.score", type = "Int64" }
 
     #[cfg(feature = "datasource-introspect")]
     #[test]
+    fn build_api_import_manifest_prefers_curated_facebook_ads_preset() {
+        let (source, manifest) =
+            build_api_import_manifest("meta", Some("facebook-ads".to_string()), None)
+                .expect("manifest builds from preset");
+
+        assert_eq!(source, "facebook_ads");
+        assert!(manifest.source.allow_writes, "preset enables action calls");
+        assert!(
+            manifest
+                .actions
+                .iter()
+                .any(|action| action.name == "facebook_ads_insights"),
+            "curated preset carries the insights action, not the empty stub"
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
     fn build_api_import_manifest_prefers_curated_github_preset() {
         let (source, manifest) =
             build_api_import_manifest("github", Some("github".to_string()), None)
@@ -4825,6 +4881,50 @@ paths:
             .tables
             .iter()
             .any(|table| table.name == "security_advisories"));
+        let google_ads = providers
+            .iter()
+            .find(|provider| provider.name == "google-ads")
+            .expect("google ads provider is listed");
+        assert_eq!(google_ads.tier, "B");
+        assert_eq!(google_ads.support_level, "supported");
+        assert_eq!(
+            google_ads.base_url.as_deref(),
+            Some("https://googleads.googleapis.com/v20")
+        );
+        assert_eq!(
+            google_ads.credential_env_vars,
+            [
+                "GOOGLE_ADS_CLIENT_ID",
+                "GOOGLE_ADS_CLIENT_SECRET",
+                "GOOGLE_ADS_REFRESH_TOKEN"
+            ]
+        );
+        assert!(google_ads
+            .actions
+            .iter()
+            .any(|action| action.name == "google_ads_search"));
+        let facebook_ads = providers
+            .iter()
+            .find(|provider| provider.name == "facebook-ads")
+            .expect("facebook ads provider is listed");
+        assert_eq!(facebook_ads.tier, "B");
+        assert_eq!(facebook_ads.support_level, "supported");
+        assert_eq!(
+            facebook_ads.base_url.as_deref(),
+            Some("https://graph.facebook.com/v21.0")
+        );
+        assert_eq!(
+            facebook_ads.credential_env_vars,
+            [
+                "FACEBOOK_ADS_CLIENT_ID",
+                "FACEBOOK_ADS_CLIENT_SECRET",
+                "FACEBOOK_ADS_REFRESH_TOKEN"
+            ]
+        );
+        assert!(facebook_ads
+            .actions
+            .iter()
+            .any(|action| action.name == "facebook_ads_insights"));
         let supported_tier_a = [
             ("datadog", "listapikeys"),
             ("mailchimp", "getroot"),

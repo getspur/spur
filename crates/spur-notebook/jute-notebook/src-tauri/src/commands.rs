@@ -229,6 +229,9 @@ pub struct ProviderSummary {
     /// Table previews available from a supported bundled manifest.
     #[serde(default)]
     pub tables: Vec<TablePreview>,
+    /// Action previews available from a supported bundled manifest.
+    #[serde(default)]
+    pub actions: Vec<TablePreview>,
 }
 
 /// Column metadata returned when previewing OpenAPI-generated API tables.
@@ -251,6 +254,8 @@ pub struct TablePreviewColumn {
 pub struct TablePreview {
     /// Generated table name.
     pub name: String,
+    /// HTTP method used by the table or action.
+    pub method: String,
     /// Request path for the table.
     pub path: String,
     /// `JSONPath` to the response array when detected.

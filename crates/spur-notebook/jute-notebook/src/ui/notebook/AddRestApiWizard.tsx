@@ -1009,6 +1009,7 @@ function ProviderTile({
 }) {
   const tier = normalizedTier(provider.tier);
   const tableCount = provider.tables.length;
+  const actionCount = provider.actions?.length ?? 0;
   const ready = isSupportedProvider(provider);
   const experimental = isExperimentalProvider(provider);
 
@@ -1052,6 +1053,11 @@ function ProviderTile({
       {tableCount > 0 && (
         <span className="mt-2 block truncate text-[11px] font-medium text-green-700">
           {tableCount} table-function{tableCount === 1 ? "" : "s"}
+        </span>
+      )}
+      {actionCount > 0 && (
+        <span className="mt-2 block truncate text-[11px] font-medium text-blue-700">
+          {actionCount} action-function{actionCount === 1 ? "" : "s"}
         </span>
       )}
     </button>
@@ -1335,6 +1341,12 @@ function TablesStep({
     isSupportedProvider(selectedProvider) &&
     tablePreview !== null &&
     specText.trim().length === 0;
+  const catalogActionsReady =
+    selectedProvider !== null &&
+    isSupportedProvider(selectedProvider) &&
+    (selectedProvider.actions?.length ?? 0) > 0 &&
+    tablePreview === null &&
+    specText.trim().length === 0;
 
   return (
     <div>
@@ -1342,10 +1354,12 @@ function TablesStep({
       <p className="mt-1 text-sm text-gray-500">
         {catalogTablesReady
           ? "Bundled provider tables are ready. Review the table-functions before adding the datasource."
+          : catalogActionsReady
+            ? "Bundled provider actions are ready. Review the action-functions before adding the datasource."
           : "Preview generated table-functions from an OpenAPI spec, or add the connection now and define tables later."}
       </p>
 
-      {!catalogTablesReady && (
+      {!catalogTablesReady && !catalogActionsReady && (
         <label className="mt-4 block">
           <span className="text-xs font-medium text-gray-600">
             OpenAPI spec text or URL
@@ -1361,7 +1375,7 @@ function TablesStep({
         </label>
       )}
 
-      {!catalogTablesReady && (
+      {!catalogTablesReady && !catalogActionsReady && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button
             className="inline-flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:border-gray-950 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
@@ -1417,6 +1431,29 @@ function TablesStep({
           <FlattenPreview table={tablePreview.tables[0] ?? null} />
         </div>
       )}
+      {catalogActionsReady && (
+        <div className="mt-4 space-y-4">
+          <section>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h4 className="text-xs font-medium text-gray-950">
+                Bundled actions
+              </h4>
+              <span className="text-xs text-gray-400">
+                {selectedProvider.actions.length} action
+                {selectedProvider.actions.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="space-y-2">
+              {selectedProvider.actions.map((action) => (
+                <TablePreviewRow
+                  key={`action:${action.name}:${action.path}`}
+                  table={action}
+                />
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -1430,7 +1467,7 @@ function TablePreviewRow({ table }: { table: TablePreview }) {
             {table.name}
           </h5>
           <p className="mt-0.5 font-mono text-[11px] text-gray-400">
-            GET {table.path}
+            {table.method} {table.path}
           </p>
         </div>
         <span className="shrink-0 text-xs text-gray-400">
@@ -1515,6 +1552,10 @@ function ReviewStep({
     (field) => (credentials[field.key]?.trim() ?? "").length > 0,
   ).length;
   const tableCount = connectionOnly ? 0 : (tablePreview?.tables.length ?? 0);
+  const actionCount =
+    selectedProvider && isSupportedProvider(selectedProvider)
+      ? (selectedProvider.actions?.length ?? 0)
+      : 0;
 
   return (
     <div>
@@ -1551,6 +1592,11 @@ function ReviewStep({
             ? "none yet"
             : `${tableCount} table-function${tableCount === 1 ? "" : "s"}`}
         </SummaryRow>
+        {actionCount > 0 && (
+          <SummaryRow label="Actions">
+            {actionCount} action-function{actionCount === 1 ? "" : "s"}
+          </SummaryRow>
+        )}
       </div>
 
       {tablePreview && !connectionOnly && (
@@ -1748,6 +1794,7 @@ function providerSummaryFromPrefill(providerName: string): ProviderSummary {
     baseUrl: null,
     credentialEnvVars: [],
     tables: [],
+    actions: [],
   };
 }
 
@@ -1824,7 +1871,10 @@ function tablePreviewFromProvider(
 }
 
 function isSupportedProvider(provider: ProviderSummary) {
-  return provider.supportLevel === "supported" && provider.tables.length > 0;
+  return (
+    provider.supportLevel === "supported" &&
+    (provider.tables.length > 0 || (provider.actions?.length ?? 0) > 0)
+  );
 }
 
 function isExperimentalProvider(provider: ProviderSummary) {
