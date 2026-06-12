@@ -8,8 +8,9 @@ use serde::Serialize;
 use spur_rest_table_gateway::adapter::catalog::{
     build_crosswalk_report, generate_reviewed_manifest, provider_catalog_from_yaml,
     ApisGuruSnapshot, CrosswalkDiagnostics, CrosswalkOptions, ProviderCatalogEntry,
-    ProviderSeedClass, ProviderSpecCrosswalk, APIS_GURU_CROSSWALK_CSV, COVERAGE_SUMMARY_JSON,
-    PROVIDER_HARVEST_CANDIDATES_CSV, PROVIDER_SPEC_CROSSWALK_JSON, TABLE_SEED_CLASSES_CSV,
+    ProviderFulfillmentStatus, ProviderSeedClass, ProviderSpecCrosswalk, APIS_GURU_CROSSWALK_CSV,
+    API_GURU_FULFILLMENT_MATRIX_JSON, COVERAGE_SUMMARY_JSON, PROVIDER_HARVEST_CANDIDATES_CSV,
+    PROVIDER_SPEC_CROSSWALK_JSON, TABLE_SEED_CLASSES_CSV,
 };
 use spur_rest_table_gateway::adapter::manifest::Manifest;
 use spur_rest_table_gateway::adapter::nango::{
@@ -18,6 +19,8 @@ use spur_rest_table_gateway::adapter::nango::{
 
 const NANGO_LICENSE: &str = "Elastic License 2.0";
 const EXPERIMENTAL_MANIFEST_INDEX_JSON: &str = "experimental_manifest_index.json";
+const SUPPORTED_CONNECTIONS_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/connections/supported");
 const USAGE: &str = "usage: nango-catalog <providers.yaml> <apis-guru-list.json> <out_dir> --nango-commit <sha> --apis-guru-fetched-at <timestamp> [--reviewed-source <provider>=<spec-path>] [--experimental-crosswalk-manifests]";
 
 fn main() {
@@ -58,6 +61,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     write_provider_harvest(&args.out_dir, &providers)?;
     write_seed_classes(&args.out_dir, &report.diagnostics.providers_by_seed_class)?;
     write_apis_guru_crosswalk(&args.out_dir, &report.rows)?;
+    let fulfillment_matrix = build_fulfillment_matrix(&providers_yaml, &report.rows)?;
+    write_json(
+        &args.out_dir.join(API_GURU_FULFILLMENT_MATRIX_JSON),
+        &fulfillment_matrix,
+    )?;
     write_json(
         &args.out_dir.join(PROVIDER_SPEC_CROSSWALK_JSON),
         &ProviderSpecCrosswalkArtifact {
@@ -238,6 +246,159 @@ fn write_reviewed_manifests(
     Ok(())
 }
 
+fn build_fulfillment_matrix(
+    providers_yaml: &str,
+    rows: &[ProviderSpecCrosswalk],
+) -> Result<ApiGuruFulfillmentMatrix, Box<dyn Error>> {
+    let providers = parse_providers(providers_yaml)?;
+    let supported = load_supported_manifest_summaries()?;
+    let candidate_paths = candidate_manifest_paths(rows);
+    let mut matrix_rows = Vec::with_capacity(rows.len());
+
+    for (row, candidate_path) in rows.iter().zip(candidate_paths) {
+        if let Some(summary) = supported_manifest_for(&supported, &row.provider) {
+            matrix_rows.push(ApiGuruFulfillmentRow {
+                provider_key: row.provider.clone(),
+                spec_source_key: row.spec_source_key.clone(),
+                spec_url: row.url.clone(),
+                status: ProviderFulfillmentStatus::Ready,
+                blocked_reason: None,
+                supported_manifest: Some(summary.path.clone()),
+                candidate_manifest: None,
+                table_count: summary.table_count,
+                action_count: summary.action_count,
+            });
+            continue;
+        }
+
+        let Some(provider_entry) = providers.get(&row.provider) else {
+            matrix_rows.push(blocked_fulfillment_row(row, "missing_provider"));
+            continue;
+        };
+
+        if provider_entry
+            .proxy
+            .as_ref()
+            .and_then(|proxy| proxy.base_url.as_deref())
+            .is_none_or(|base_url| base_url.trim().is_empty())
+        {
+            matrix_rows.push(blocked_fulfillment_row(row, "missing_base_url"));
+            continue;
+        }
+
+        match experimental_crosswalk_manifest_toml(&row.provider, provider_entry, row) {
+            Ok(toml) => {
+                let manifest = Manifest::from_toml(&toml).map_err(|err| {
+                    format!(
+                        "candidate manifest for {} / {} failed to reparse after generation: {err}",
+                        row.provider, row.spec_source_key
+                    )
+                })?;
+                matrix_rows.push(ApiGuruFulfillmentRow {
+                    provider_key: row.provider.clone(),
+                    spec_source_key: row.spec_source_key.clone(),
+                    spec_url: row.url.clone(),
+                    status: ProviderFulfillmentStatus::Candidate,
+                    blocked_reason: None,
+                    supported_manifest: None,
+                    candidate_manifest: Some(candidate_path),
+                    table_count: manifest.tables.len(),
+                    action_count: manifest.actions.len(),
+                });
+            }
+            Err(_) => {
+                matrix_rows.push(blocked_fulfillment_row(
+                    row,
+                    "candidate_manifest_parse_failed",
+                ));
+            }
+        }
+    }
+
+    Ok(ApiGuruFulfillmentMatrix {
+        provider_count: matrix_rows
+            .iter()
+            .map(|row| row.provider_key.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        spec_row_count: matrix_rows.len(),
+        rows: matrix_rows,
+    })
+}
+
+fn blocked_fulfillment_row(row: &ProviderSpecCrosswalk, reason: &str) -> ApiGuruFulfillmentRow {
+    ApiGuruFulfillmentRow {
+        provider_key: row.provider.clone(),
+        spec_source_key: row.spec_source_key.clone(),
+        spec_url: row.url.clone(),
+        status: ProviderFulfillmentStatus::Blocked,
+        blocked_reason: Some(reason.to_string()),
+        supported_manifest: None,
+        candidate_manifest: None,
+        table_count: 0,
+        action_count: 0,
+    }
+}
+
+fn load_supported_manifest_summaries(
+) -> Result<BTreeMap<String, SupportedManifestSummary>, Box<dyn Error>> {
+    let mut paths = fs::read_dir(SUPPORTED_CONNECTIONS_DIR)
+        .map_err(|err| format!("failed to read {SUPPORTED_CONNECTIONS_DIR}: {err}"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort_by_key(|entry| entry.path());
+
+    let mut supported = BTreeMap::new();
+    for entry in paths {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+
+        let toml = fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let manifest = Manifest::from_toml(&toml).map_err(|err| {
+            format!(
+                "supported manifest {} failed to parse: {err}",
+                path.display()
+            )
+        })?;
+        let file_name = path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .ok_or_else(|| format!("supported manifest path is not UTF-8: {}", path.display()))?;
+        let file_stem = file_name
+            .strip_suffix(".connection.toml")
+            .ok_or_else(|| format!("unsupported manifest filename: {file_name}"))?;
+        let summary = SupportedManifestSummary {
+            path: format!("connections/supported/{file_name}"),
+            table_count: manifest.tables.len(),
+            action_count: manifest.actions.len(),
+        };
+        supported.insert(manifest.source.name, summary.clone());
+        supported.insert(file_stem.to_string(), summary);
+    }
+
+    Ok(supported)
+}
+
+fn supported_manifest_for<'a>(
+    supported: &'a BTreeMap<String, SupportedManifestSummary>,
+    provider: &str,
+) -> Option<&'a SupportedManifestSummary> {
+    supported
+        .get(provider)
+        .or_else(|| supported_provider_alias(provider).and_then(|alias| supported.get(alias)))
+}
+
+fn supported_provider_alias(provider: &str) -> Option<&'static str> {
+    match provider {
+        "github-pat" => Some("github"),
+        "sendgrid-api-key" => Some("sendgrid"),
+        "stripe-api-key" => Some("stripe"),
+        _ => None,
+    }
+}
+
 fn write_experimental_crosswalk_manifests(
     out_dir: &Path,
     providers_yaml: &str,
@@ -249,28 +410,25 @@ fn write_experimental_crosswalk_manifests(
         .map_err(|err| format!("failed to create {}: {err}", connections_dir.display()))?;
 
     let mut manifests = Vec::new();
-    let mut seen_paths = BTreeMap::<String, usize>::new();
+    let candidate_paths = candidate_manifest_paths(rows);
 
-    for row in rows {
+    for (row, relative_path) in rows.iter().zip(candidate_paths) {
         let provider_entry = providers.get(&row.provider).ok_or_else(|| {
             format!(
                 "crosswalk row provider {} is not present in providers.yaml",
                 row.provider
             )
         })?;
-        let mut file_stem = format!(
-            "{}--{}",
-            sanitize_filename_component(&row.provider),
-            sanitize_filename_component(&row.spec_source_key)
-        );
-        let base_file_stem = file_stem.clone();
-        let next = seen_paths.entry(base_file_stem.clone()).or_insert(0);
-        if *next > 0 {
-            file_stem = format!("{base_file_stem}-{}", *next + 1);
-        }
-        *next += 1;
 
-        let relative_path = format!("connections/experimental/{file_stem}.connection.toml");
+        if provider_entry
+            .proxy
+            .as_ref()
+            .and_then(|proxy| proxy.base_url.as_deref())
+            .is_none_or(|base_url| base_url.trim().is_empty())
+        {
+            continue;
+        }
+
         let toml = experimental_crosswalk_manifest_toml(&row.provider, provider_entry, row)?;
         let full_path = out_dir.join(&relative_path);
         fs::write(&full_path, toml)
@@ -297,6 +455,31 @@ fn write_experimental_crosswalk_manifests(
     )?;
 
     Ok(())
+}
+
+fn candidate_manifest_paths(rows: &[ProviderSpecCrosswalk]) -> Vec<String> {
+    let mut paths = Vec::with_capacity(rows.len());
+    let mut seen_paths = BTreeMap::<String, usize>::new();
+
+    for row in rows {
+        let mut file_stem = format!(
+            "{}--{}",
+            sanitize_filename_component(&row.provider),
+            sanitize_filename_component(&row.spec_source_key)
+        );
+        let base_file_stem = file_stem.clone();
+        let next = seen_paths.entry(base_file_stem.clone()).or_insert(0);
+        if *next > 0 {
+            file_stem = format!("{base_file_stem}-{}", *next + 1);
+        }
+        *next += 1;
+
+        paths.push(format!(
+            "connections/experimental/{file_stem}.connection.toml"
+        ));
+    }
+
+    paths
 }
 
 fn experimental_crosswalk_manifest_toml(
@@ -500,6 +683,33 @@ struct CoverageSummary<'a> {
     matched_provider_count: usize,
     rejected_ambiguous_candidates: usize,
     providers_by_seed_class: &'a BTreeMap<ProviderSeedClass, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiGuruFulfillmentMatrix {
+    provider_count: usize,
+    spec_row_count: usize,
+    rows: Vec<ApiGuruFulfillmentRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiGuruFulfillmentRow {
+    provider_key: String,
+    spec_source_key: String,
+    spec_url: String,
+    status: ProviderFulfillmentStatus,
+    blocked_reason: Option<String>,
+    supported_manifest: Option<String>,
+    candidate_manifest: Option<String>,
+    table_count: usize,
+    action_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SupportedManifestSummary {
+    path: String,
+    table_count: usize,
+    action_count: usize,
 }
 
 #[derive(Debug, Serialize)]
