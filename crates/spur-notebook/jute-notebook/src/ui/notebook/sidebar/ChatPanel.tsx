@@ -2,7 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { BotIcon, SendIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { ChangeEvent, FormEvent } from "react";
+import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
@@ -83,7 +83,6 @@ export default function ChatPanel() {
   const conversation = useChat((state) => state.conversations[chatScopeKey]);
   const scopeLabel = conversation?.scopeLabel ?? chatScopeLabel;
   const messages = conversation?.messages ?? EMPTY_MESSAGES;
-  const streaming = conversation?.streaming ?? false;
   const streamingText = conversation?.streamingText ?? "";
   const pendingPermission = conversation?.pendingPermission ?? null;
   const setScope = useChat((state) => state.setScope);
@@ -234,13 +233,24 @@ export default function ChatPanel() {
     }
   };
 
+  const canSubmitPrompt =
+    Boolean(notebookPath) &&
+    Boolean(selectedAgentName) &&
+    Boolean(prompt.trim()) &&
+    !submitting;
+
   const sendPrompt = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmedPrompt = prompt.trim();
     const turnNotebookPath = notebookPath;
     const turnScopeKey = chatScopeKey;
     const turnAgentName = selectedAgentName;
-    if (!trimmedPrompt || !turnNotebookPath || !turnAgentName || submitting)
+    if (
+      !canSubmitPrompt ||
+      !trimmedPrompt ||
+      !turnNotebookPath ||
+      !turnAgentName
+    )
       return;
 
     const onEvent = new Channel<ChatEvent>();
@@ -265,6 +275,18 @@ export default function ChatPanel() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const submitPromptOnEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing
+    )
+      return;
+
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
   };
 
   const respondToPermission = async (requestId: string, optionId: string) => {
@@ -407,6 +429,7 @@ export default function ChatPanel() {
             className="max-h-32 min-h-20 w-full resize-none rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-gray-900 disabled:cursor-not-allowed disabled:bg-gray-100"
             disabled={!notebookPath || !selectedAgentName || submitting}
             onChange={(event) => setPrompt(event.currentTarget.value)}
+            onKeyDown={submitPromptOnEnter}
             placeholder={
               !notebookPath
                 ? "Save the notebook to chat"
@@ -420,13 +443,7 @@ export default function ChatPanel() {
         <button
           aria-label="Send message"
           className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-gray-300 bg-white text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
-          disabled={
-            !notebookPath ||
-            !selectedAgentName ||
-            !prompt.trim() ||
-            submitting ||
-            streaming
-          }
+          disabled={!canSubmitPrompt}
           title="Send message"
           type="submit"
         >
