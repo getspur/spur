@@ -75,6 +75,58 @@ describe("ChatPanel", () => {
 
   afterEach(cleanup);
 
+  test("renders the approved notebook empty state and ready scope status", () => {
+    render(<ChatPanel />);
+
+    expect(screen.getByText("Ask inside this notebook")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The assistant can inspect cells, draft edits, and explain outputs.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Ready with scoped tools enabled"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Ready in revenue.ipynb")).toBeInTheDocument();
+  });
+
+  test("renders the approved app empty state when app context is open", () => {
+    appOpenInfo = {
+      app_name: "Revenue App",
+      app_root: "/tmp/revenue-app",
+    };
+
+    render(<ChatPanel />);
+
+    expect(screen.getByText("Ask inside this app context")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The assistant can inspect notebook cells, call app tools, and update panels.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  test("renders tool calls and results as timeline events", () => {
+    const s = useChat.getState();
+    s.setScope("notebook:/tmp/revenue.ipynb", "revenue.ipynb");
+    s.applyEvent({
+      type: "toolCall",
+      name: "code_symbol_search",
+      argsSummary: "query: ChatPanel",
+    });
+    s.applyEvent({
+      type: "toolResult",
+      summary: "Found ChatPanel symbol.",
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.getByText("Tool call: code_symbol_search"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Tool result")).toBeInTheDocument();
+  });
+
   test("renders scope, messages, streaming text, and permission prompt", async () => {
     const s = useChat.getState();
     s.setScope("notebook:/tmp/revenue.ipynb", "revenue.ipynb");
@@ -97,6 +149,7 @@ describe("ChatPanel", () => {
     expect(screen.getByText("revenue.ipynb")).toBeInTheDocument();
     expect(screen.getByText("Working")).toBeInTheDocument();
     expect(screen.getByText("Run notebook edit?")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for permission")).toBeInTheDocument();
     expect(await screen.findByRole("combobox", { name: "Agent" })).toHaveValue(
       "claude-code",
     );
