@@ -392,6 +392,51 @@ without a cycle — the scaffold must move down, not be borrowed sideways. Once
 it exists, a standalone spur-graph server can self-register into repo-resident
 app sessions for full `code_*` coverage alongside the notebook server.
 
+### Target end state — MCP architecture north star
+
+Checked against industry practice (Anthropic's tool-design and
+code-execution-with-MCP guidance; DDD-aligned MCP server organization;
+enterprise gateway/registry patterns). The end state SPUR converges on:
+
+1. **Domain servers, not god servers.** One MCP server per bounded context,
+   named for the domain it owns, not the crate or API it wraps:
+   - `notebook` (daemon) — notebook operations + this spec's context provider
+   - `code-intel` — `code_*`, `knowledge_context_pack`, analyst queries,
+     hosted from spur-graph/spur-analyst once the shared scaffold exists
+   - `orchestration` (spur-mcp residual) — delegation, plans, beads/PM
+   - per-app servers from `spur-app.json` manifests
+   Splitting code-intel out of spur-mcp is the one correction industry
+   practice demands of the current layout: code intelligence and work
+   orchestration are different bounded contexts with different consumers.
+2. **One shared host crate beneath all of them** (the §above extraction):
+   rmcp bootstrap, tool registry, error envelopes, and the response dialect —
+   refs, `next_queries`, version stamps, truncation markers, plus a
+   `response_format: concise|detailed` option on heavy tools (the
+   industry-standard token-efficiency knob).
+3. **Per-session composition is the registry.** `AppScope.mcp_servers` (and
+   brain session config) decide which domain servers a session mounts —
+   visibility-level access control applied *before* discovery: sidebar
+   sessions never see delegation tools; brain sessions don't mount
+   kernel-touching notebook tools. ACP session registration is sufficient as
+   the discovery layer at SPUR's scale; a central registry service only
+   becomes worthwhile when servers multiply beyond what session config can
+   comprehensibly express.
+4. **Progressive disclosure inside each domain.** Orientation tools
+   (`notebook_context_pack`, `knowledge_context_pack`) plus `next_queries`
+   are the in-band form; per-server tool counts stay low by shipping
+   workflow-shaped tools (lineage walks, context packs) instead of endpoint
+   wrappers.
+5. **Gateway concerns stay latent.** A runtime policy/audit control plane (an
+   MCP gateway proper) pays off only with multi-user or remote servers; the
+   notebook socket proxy already centralizes transport if audit is ever
+   needed. Horizon item, not a slice.
+
+Adopted tool-design conventions (Anthropic guidance): semantically meaningful
+refs over opaque UUIDs; consolidated workflow tools over CRUD wrappers;
+pagination/truncation with steering text; descriptions written as onboarding
+docs; and a transcript-driven evaluation loop — sidebar transcripts feed tool
+refinement the same way the lenses spec feeds prompt refinement.
+
 ## 9. Turn Context Extension
 
 The lenses spec's `ChatTurnContext` gains one optional field — the cheapest,
@@ -501,8 +546,8 @@ Slice 3 (extraction tests live in `spur-graph`; integration tests in the daemon)
 - **A daemon-owned parser** — the daemon never reimplements notebook parsing;
   it links the spur-graph extractor (one implementation, two modes).
 - **A standalone spur-graph MCP server** — requires first extracting the
-  shared hosting scaffold out of spur-mcp (see §8 hosting note); recorded as a
-  follow-up, not part of any slice here.
+  shared hosting scaffold out of spur-mcp (see §8 hosting note and target end
+  state); recorded as a follow-up, not part of any slice here.
 - **Cross-notebook lineage** for multi-notebook apps — v1 lineage is scoped to
   one notebook.
 - **Semantic/embedding retrieval over cells.**
