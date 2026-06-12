@@ -292,6 +292,10 @@ describe("loadNotebookFromPath", () => {
         expect(args).toEqual({ path });
         return notebook;
       }
+      if (command === "daemon_control") {
+        expect(args).toEqual({ cmd: { command: "load", path } });
+        return { ok: true };
+      }
       if (command === "notebook_open_mode") {
         expect(args).toEqual({ path });
         return {
@@ -324,6 +328,9 @@ describe("loadNotebookFromPath", () => {
 
     const notebookStore = new Notebook();
     await notebookStore.loadNotebookFromPath(path);
+    expect(invokeMock).toHaveBeenCalledWith("daemon_control", {
+      cmd: { command: "load", path },
+    });
     expect(notebookStore.store.getState().viewState.viewMode).toBe("app");
     expect(
       notebookStore.store.getState().viewState.appOpenInfo?.app_root,
@@ -343,6 +350,10 @@ describe("loadNotebookFromPath", () => {
       if (command === "get_notebook") {
         expect(args).toEqual({ path });
         return notebook;
+      }
+      if (command === "daemon_control") {
+        expect(args).toEqual({ cmd: { command: "load", path } });
+        return { ok: true };
       }
       if (command === "notebook_open_mode") {
         expect(args).toEqual({ path });
@@ -366,6 +377,54 @@ describe("loadNotebookFromPath", () => {
 
     const notebookStore = new Notebook();
     await notebookStore.loadNotebookFromPath(path);
+    expect(invokeMock).toHaveBeenCalledWith("daemon_control", {
+      cmd: { command: "load", path },
+    });
     expect(notebookStore.store.getState().viewState.viewMode).toBe("cells");
+  });
+
+  test("reports load error when daemon cannot hydrate the notebook path", async () => {
+    const path = "/x/broken.ipynb";
+    const notebook: NotebookRoot = {
+      nbformat: 4,
+      nbformat_minor: 5,
+      metadata: {},
+      cells: [],
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "get_notebook") {
+        expect(args).toEqual({ path });
+        return notebook;
+      }
+      if (command === "daemon_control") {
+        expect(args).toEqual({ cmd: { command: "load", path } });
+        return {
+          ok: false,
+          error: { message: "cell index unavailable" },
+        };
+      }
+      if (command === "start_kernel") {
+        return "kernel-1";
+      }
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebookStore = new Notebook();
+    await notebookStore.loadNotebookFromPath(path);
+
+    expect(notebookStore.store.getState().viewState.loadError).toBe(
+      "Error: cell index unavailable",
+    );
   });
 });
