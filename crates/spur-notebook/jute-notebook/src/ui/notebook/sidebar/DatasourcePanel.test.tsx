@@ -529,6 +529,9 @@ describe("DatasourcePanel", () => {
 
     const attachedHeading = await screen.findByText("In this notebook");
     const savedHeading = await screen.findByText("Saved connections");
+    const scrollRegion = screen.getByTestId("datasource-panel-scroll");
+    expect(scrollRegion).toHaveClass("overflow-y-auto", "pb-20");
+    expect(scrollRegion).toContainElement(savedHeading);
     expect(
       attachedHeading.compareDocumentPosition(savedHeading) &
         Node.DOCUMENT_POSITION_FOLLOWING,
