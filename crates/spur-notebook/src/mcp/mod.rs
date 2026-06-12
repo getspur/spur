@@ -863,7 +863,7 @@ const POLYMARKET_CLOB_BASE: &str = "https://clob.polymarket.com";
 
 #[cfg(feature = "datasource-introspect")]
 const NANGO_PROVIDERS_SNAPSHOT: &str =
-    include_str!("../../jute-notebook/src-tauri/src/nango_providers_snapshot.yaml");
+    include_str!("../../../../resources/nango/packages/providers/providers.yaml");
 
 #[cfg(feature = "datasource-introspect")]
 const DATASOURCE_SETUP_SENTINEL: &str = "# SPUR datasource setup cell v1";
@@ -4850,6 +4850,7 @@ paths:
 
         assert!(response.ok, "{:?}", response.error);
         let providers = provider_summaries_from_response(&response);
+        assert_eq!(providers.len(), 851);
         assert_eq!(
             providers
                 .iter()
@@ -4866,6 +4867,18 @@ paths:
                 .tier,
             "B"
         );
+        let asana = providers
+            .iter()
+            .find(|provider| provider.name == "asana")
+            .expect("asana crosswalk provider is listed");
+        assert_eq!(asana.support_level, "experimental");
+        assert_eq!(asana.experimental_spec_count, 1);
+        let github_pat = providers
+            .iter()
+            .find(|provider| provider.name == "github-pat")
+            .expect("github-pat crosswalk provider is listed");
+        assert_eq!(github_pat.support_level, "supported");
+        assert_eq!(github_pat.experimental_spec_count, 20);
         let github = providers
             .iter()
             .find(|provider| provider.name == "github")
