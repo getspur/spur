@@ -433,6 +433,40 @@ describe("AddRestApiWizard", () => {
     ).toBeInTheDocument();
   });
 
+  test("file_family_can_pick_local_file_and_attach_through_callbacks", async () => {
+    const onClose = vi.fn();
+    const onPickLocalFile = vi.fn().mockResolvedValue("/tmp/inventory.parquet");
+    const onAttachLocalFile = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <AddRestApiWizard
+        open
+        onAttachLocalFile={onAttachLocalFile}
+        onClose={onClose}
+        onPickLocalFile={onPickLocalFile}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /File or folder/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose local file" }));
+
+    await waitFor(() => expect(onPickLocalFile).toHaveBeenCalledTimes(1));
+    expect(screen.getByLabelText("File or folder path")).toHaveValue(
+      "/tmp/inventory.parquet",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Attach datasource" }));
+
+    await waitFor(() =>
+      expect(onAttachLocalFile).toHaveBeenCalledWith("/tmp/inventory.parquet"),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
   test("picking_a_catalog_provider_advances_to_resolved_connect_fields", async () => {
     renderWizard();
 

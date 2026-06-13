@@ -156,7 +156,7 @@ export default function DatasourcePanel() {
         setError(
           `Datasource "${name}" is already attached from ${collidingEntry.path}. Remove it before attaching ${path}.`,
         );
-        return;
+        return false;
       }
 
       setPendingPath(path);
@@ -172,8 +172,10 @@ export default function DatasourcePanel() {
         );
         const entry = datasourceEntryFromDaemonControlResponse(response);
         setEntries((current) => upsertDatasourceEntry(current, entry));
+        return true;
       } catch (caught) {
         setError(errorMessage(caught));
+        return false;
       } finally {
         setPendingPath(null);
       }
@@ -233,18 +235,25 @@ export default function DatasourcePanel() {
     }
   }, []);
 
-  const handleAddDatasource = useCallback(async () => {
+  const handlePickLocalDatasource = useCallback(async () => {
     const selected = await open({
       multiple: false,
       directory: false,
       filters: [{ name: "Datasource", extensions: DATASOURCE_EXTENSIONS }],
     });
 
-    const path = firstSelectedPath(selected);
-    if (path) {
-      await attachPath(path);
-    }
-  }, [attachPath]);
+    return firstSelectedPath(selected);
+  }, []);
+
+  const handleAttachLocalDatasource = useCallback(
+    async (path: string) => {
+      const attached = await attachPath(path);
+      if (!attached) {
+        throw new Error("Datasource could not be attached.");
+      }
+    },
+    [attachPath],
+  );
 
   const handleDrop = useCallback(
     (event: DragEvent<HTMLElement>) => {
@@ -456,24 +465,15 @@ export default function DatasourcePanel() {
             aria-label="Add datasource"
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border border-gray-300 bg-white text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
             disabled={pendingPath !== null}
-            onClick={() => void handleAddDatasource()}
+            onClick={() => {
+              setEditingConnection(null);
+              setRestWizardPrefill(null);
+              setApiModalOpen(true);
+            }}
             title="Add datasource"
             type="button"
           >
             <PlusIcon size={16} strokeWidth={1.5} />
-          </button>
-          <button
-            aria-label="Add API datasource"
-            className="inline-flex h-8 shrink-0 items-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs font-medium text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950"
-            onClick={() => {
-              setRestWizardPrefill(null);
-              setApiModalOpen(true);
-            }}
-            title="Add API datasource"
-            type="button"
-          >
-            <PlugIcon size={14} strokeWidth={1.5} />
-            API
           </button>
         </div>
 
@@ -565,7 +565,9 @@ export default function DatasourcePanel() {
       </div>
       <AddRestApiWizard
         editConnection={editingConnection}
+        onAttachLocalFile={handleAttachLocalDatasource}
         open={apiModalOpen || editingConnection !== null}
+        onPickLocalFile={handlePickLocalDatasource}
         prefill={restWizardPrefill}
         onClose={() => {
           setApiModalOpen(false);
