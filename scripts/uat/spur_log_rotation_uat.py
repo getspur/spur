@@ -3,7 +3,7 @@
 
 Verifies the acceptance criteria that need a live `spur tui` instance:
 
-  1. Boot + clean teardown leaves `.spur/logs/spur.log.<TODAY>` written.
+  1. Boot + clean teardown leaves `.spur/logs/spur.log.<TODAY>-<pid>` written.
   2. Active spur.log file stays bounded (≤ 8 MB + slop) within a short run.
   3. `RUST_LOG=debug` smoke: known debug strings reach disk within ~1s. This
      is the deferred acceptance criterion (lines 364-365 of the spec).
@@ -184,13 +184,13 @@ def scenario(
     # Inspect on-disk artifacts.
     log_files = today_basepath_glob(workdir)
     log_total = sum_bytes(log_files)
+    # Active is the basepath itself, e.g. spur.log.YYYY-MM-DD-<pid>: the
+    # non-.gz file whose suffix after `spur.log.` is only digits/hyphens
+    # (date + pid), with no extra `.N[.gz]` rotation suffix.
     active_log = next((f for f in log_files if not f.name.endswith(".gz")
                        and "." not in f.name.split("spur.log.")[-1].lstrip("0123456789-")),
                       None)
-    # Active is the basepath itself, e.g. spur.log.YYYY-MM-DD
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    active_log = workdir / ".spur" / "logs" / f"spur.log.{today}"
-    active_size = active_log.stat().st_size if active_log.exists() else 0
+    active_size = active_log.stat().st_size if active_log and active_log.exists() else 0
 
     ev_files = events_files(workdir)
     ev_total = sum_bytes(ev_files)
