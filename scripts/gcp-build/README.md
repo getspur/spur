@@ -9,6 +9,13 @@ to avoid OOM-killed concurrent `rust-lld` link bursts. Hyperdisk Balanced is
 cheaper than the old 300 GB SSD Persistent Disk while still providing enough IOPS
 for the cargo target/cache workload.
 
+Remote `sccache` uses a multi-level cache on the builder: a 16 GB tmpfs mounted
+at `/mnt/sccache-ram` is the fast L1 disk backend (`SCCACHE_CACHE_SIZE=15G`),
+and the regional GCS bucket remains the shared L2 backend. GCS hits are
+backfilled into tmpfs by `sccache 0.15.0`, so repeated hot compile artifacts
+avoid the network round trip while preserving cross-VM/worktree reuse through
+the bucket.
+
 Source sync prefers direct SSH to the VM's external IP on
 `SPUR_DIRECT_SSH_PORT` (default `22`) and falls back to IAP. Fresh VMs keep sshd
 on tcp:22 for GCE/IAP compatibility. Set `SPUR_DIRECT_SSH=0` to force IAP-only.
