@@ -71,6 +71,7 @@ pub(crate) struct CompiledQueries {
     pub(crate) spur_edges: Option<Query>,
     pub(crate) jsx_edges: Option<Query>,
     pub(crate) inline_spur_edges: Option<Query>,
+    pub(crate) spur_notebook_facts: Option<Query>,
 }
 
 impl CompiledQueries {
@@ -81,6 +82,7 @@ impl CompiledQueries {
             spur_edges: None,
             jsx_edges: None,
             inline_spur_edges: None,
+            spur_notebook_facts: None,
         })
     }
 }
@@ -335,7 +337,6 @@ impl<'a> FactBuilder<'a> {
         self.root
     }
 
-    #[cfg(test)]
     pub(crate) fn into_facts(self) -> GraphFacts {
         self.facts
     }
@@ -462,6 +463,30 @@ impl<'a> FactBuilder<'a> {
         );
     }
 
+    pub(crate) fn add_edge_with_bind_method(
+        &mut self,
+        source: NodeId,
+        target: Option<NodeId>,
+        relation: RelationKind,
+        target_label: Option<String>,
+        bind_method: &'static str,
+    ) {
+        let (confidence, confidence_score) = confidence_for_edge(relation, None);
+        self.add_edge_with_metadata(
+            source,
+            target,
+            relation,
+            target_label,
+            None,
+            EdgeMetadata {
+                confidence,
+                confidence_score,
+                import_path: None,
+                bind_method: Some(bind_method),
+            },
+        );
+    }
+
     fn add_pending_edge(&mut self, edge: &PendingEdge, target: Option<NodeId>) {
         self.add_pending_edge_with_bind_method(edge, target, None);
     }
@@ -535,7 +560,7 @@ impl<'a> FactBuilder<'a> {
         });
     }
 
-    fn resolve_pending_edges(&mut self) {
+    pub(crate) fn resolve_pending_edges(&mut self) {
         let mut singleton_symbols_by_label: HashMap<String, NodeId> = HashMap::new();
         let mut ambiguous_symbols_by_label: HashMap<String, usize> = HashMap::new();
         for (label, ids) in &self.symbol_index {
@@ -3156,7 +3181,7 @@ pub(crate) fn extract_file_contents_from_tree(
         let edge_definitions = emit_definitions_with_parents(
             config,
             builder,
-            &relative_path,
+            relative_path,
             file_id,
             file_node,
             source,
@@ -3200,6 +3225,7 @@ pub(crate) fn compile_queries(
     let mut spur_edges = None;
     let mut jsx_edges = None;
     let mut inline_spur_edges = None;
+    let mut spur_notebook_facts = None;
     for (name, source) in config.queries {
         match *name {
             "tags" => {
@@ -3231,6 +3257,14 @@ pub(crate) fn compile_queries(
                     )
                     })?);
             }
+            "spur-notebook-facts" => {
+                spur_notebook_facts =
+                    Some(Query::new(&config.language, source).with_context(|| {
+                        format!(
+                            "failed to compile tree-sitter query `{name}` for `{language_label}`"
+                        )
+                    })?);
+            }
             name => {
                 return Err(anyhow!(
                     "unknown tree-sitter query name `{name}` for `{language_label}`"
@@ -3250,6 +3284,7 @@ pub(crate) fn compile_queries(
         spur_edges,
         jsx_edges,
         inline_spur_edges,
+        spur_notebook_facts,
     })
 }
 
@@ -3758,17 +3793,32 @@ mod tests {
             .find(|node| node.kind == NodeKind::File && node.label == "nb.ipynb")
             .expect("notebook file node")
             .node_id;
+        let mut reachable = HashSet::from([file_node]);
+        loop {
+            let before = reachable.len();
+            for edge in facts
+                .edges
+                .iter()
+                .filter(|edge| edge.relation == RelationKind::Contains)
+            {
+                if reachable.contains(&edge.source_node_id) {
+                    if let Some(target) = edge.target_node_id {
+                        reachable.insert(target);
+                    }
+                }
+            }
+            if reachable.len() == before {
+                break;
+            }
+        }
+
         for label in ["load_df", "Analysis"] {
             let node = facts
                 .nodes
                 .iter()
                 .find(|node| node.label == label)
                 .unwrap_or_else(|| panic!("missing notebook child `{label}`"));
-            assert!(facts.edges.iter().any(|edge| {
-                edge.relation == RelationKind::Contains
-                    && edge.source_node_id == file_node
-                    && edge.target_node_id == Some(node.node_id)
-            }));
+            assert!(reachable.contains(&node.node_id));
         }
     }
 
