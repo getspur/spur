@@ -461,6 +461,30 @@ impl<'a> FactBuilder<'a> {
         );
     }
 
+    pub(crate) fn add_edge_with_bind_method(
+        &mut self,
+        source: NodeId,
+        target: Option<NodeId>,
+        relation: RelationKind,
+        target_label: Option<String>,
+        bind_method: &'static str,
+    ) {
+        let (confidence, confidence_score) = confidence_for_edge(relation, None);
+        self.add_edge_with_metadata(
+            source,
+            target,
+            relation,
+            target_label,
+            None,
+            EdgeMetadata {
+                confidence,
+                confidence_score,
+                import_path: None,
+                bind_method: Some(bind_method),
+            },
+        );
+    }
+
     fn add_pending_edge(&mut self, edge: &PendingEdge, target: Option<NodeId>) {
         self.add_pending_edge_with_bind_method(edge, target, None);
     }
