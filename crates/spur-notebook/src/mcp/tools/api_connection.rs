@@ -504,7 +504,7 @@ fn prepare_manifest(params: &AddApiConnectionParams) -> Result<PreparedManifest,
                     .filter(|value| !value.is_empty())
                     .map(ToOwned::to_owned)
             };
-            let (_source, manifest) =
+            let (_source, _manifest, manifest_toml) =
                 crate::mcp::build_api_import_manifest(&params.name, provider, spec_text).map_err(
                     |error| {
                         McpError::internal_error(
@@ -513,11 +513,6 @@ fn prepare_manifest(params: &AddApiConnectionParams) -> Result<PreparedManifest,
                         )
                     },
                 )?;
-            let mut manifest_toml =
-                spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest);
-            manifest_toml.push_str(&spur_rest_table_gateway::adapter::openapi::tables_to_toml(
-                &manifest.tables,
-            ));
             manifest_toml
         }
     };
