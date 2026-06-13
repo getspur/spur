@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::str;
 
@@ -68,6 +69,7 @@ pub(crate) fn extract_notebook_file(
         return Ok(());
     };
 
+    let mut port_nodes = HashMap::new();
     for (idx, cell) in cells.iter().enumerate() {
         let cell_source = cell_source_text(cell);
         let cell_id = cell_id(cell, idx);
@@ -78,6 +80,15 @@ pub(crate) fn extract_notebook_file(
             file_node,
             &cell_id,
             &cell_source,
+        );
+        emit_declared_metadata_facts(
+            builder,
+            &relative_path,
+            file_id,
+            cell_node,
+            cell,
+            &cell_source,
+            &mut port_nodes,
         );
         if cell_is_markdown(cell) {
             extract_cell(
@@ -145,6 +156,114 @@ fn add_cell_node(
     );
     builder.add_edge(file_node, Some(cell_node), RelationKind::Contains, None);
     cell_node
+}
+
+fn emit_declared_metadata_facts(
+    builder: &mut FactBuilder<'_>,
+    relative_path: &str,
+    file_id: FileId,
+    cell_node: NodeId,
+    cell: &Value,
+    source: &str,
+    port_nodes: &mut HashMap<String, NodeId>,
+) {
+    let Some(spur) = cell
+        .get("metadata")
+        .and_then(|metadata| metadata.get("spur"))
+    else {
+        return;
+    };
+
+    if let Some(dag) = spur.get("dag") {
+        if let Some(produces) = dag.get("produces").and_then(Value::as_array) {
+            for port in produces
+                .iter()
+                .filter_map(|entry| entry.get("port").and_then(Value::as_str))
+            {
+                let port_node =
+                    intern_port(builder, relative_path, file_id, source, port_nodes, port);
+                builder.add_edge_with_bind_method(
+                    cell_node,
+                    Some(port_node),
+                    RelationKind::Produces,
+                    None,
+                    "declared",
+                );
+            }
+        }
+
+        if let Some(consumes) = dag.get("consumes").and_then(Value::as_array) {
+            for port in consumes.iter().filter_map(Value::as_str) {
+                let port_node =
+                    intern_port(builder, relative_path, file_id, source, port_nodes, port);
+                builder.add_edge_with_bind_method(
+                    cell_node,
+                    Some(port_node),
+                    RelationKind::Consumes,
+                    None,
+                    "declared",
+                );
+            }
+        }
+
+        if let Some(source_ref) = dag.get("source") {
+            if let (Some(kind), Some(port)) = (
+                source_ref.get("kind").and_then(Value::as_str),
+                source_ref.get("port").and_then(Value::as_str),
+            ) {
+                builder.add_edge_with_bind_method(
+                    cell_node,
+                    None,
+                    RelationKind::References,
+                    Some(format!("ds://{kind}/{port}")),
+                    "declared",
+                );
+            }
+        }
+    }
+
+    if let Some(frontend) = spur.get("frontend") {
+        if let Some(binds) = frontend.get("binds").and_then(Value::as_array) {
+            for port in binds.iter().filter_map(Value::as_str) {
+                let port_node =
+                    intern_port(builder, relative_path, file_id, source, port_nodes, port);
+                builder.add_edge(cell_node, Some(port_node), RelationKind::Binds, None);
+            }
+        }
+
+        if let Some(emits) = frontend.get("emits").and_then(Value::as_array) {
+            for port in emits.iter().filter_map(Value::as_str) {
+                let port_node =
+                    intern_port(builder, relative_path, file_id, source, port_nodes, port);
+                builder.add_edge(cell_node, Some(port_node), RelationKind::Emits, None);
+            }
+        }
+    }
+}
+
+fn intern_port(
+    builder: &mut FactBuilder<'_>,
+    relative_path: &str,
+    file_id: FileId,
+    source: &str,
+    port_nodes: &mut HashMap<String, NodeId>,
+    port: &str,
+) -> NodeId {
+    if let Some(node_id) = port_nodes.get(port).copied() {
+        return node_id;
+    }
+
+    let port_label = format!("port://{port}");
+    let port_node = builder.add_node_with_range(
+        relative_path,
+        port_label.clone(),
+        port_label,
+        NodeKind::Port,
+        file_id,
+        source_range(source),
+    );
+    port_nodes.insert(port.to_owned(), port_node);
+    port_node
 }
 
 fn source_range(source: &str) -> Range {
@@ -345,6 +464,65 @@ mod tests {
         let labels: Vec<&str> = cell_nodes.iter().map(|node| node.label.as_str()).collect();
         assert!(labels.contains(&"cell://a3f1"));
         assert!(labels.contains(&"cell://b2c9"));
+    }
+
+    #[test]
+    fn declared_dag_and_frontend_facts_emitted() {
+        let nb = serde_json::to_vec(&serde_json::json!({
+            "nbformat":4,"nbformat_minor":5,"metadata":{},
+            "cells":[{
+                "cell_type":"code","id":"a3f1","source":["pass\n"],"outputs":[],"execution_count":null,
+                "metadata":{"spur":{"version":7,
+                    "dag":{"produces":[{"port":"sales","repr":"arrow"}],"consumes":["raw"],
+                            "source":{"kind":"csv","port":"raw"}},
+                    "frontend":{"binds":["risk"],"emits":["horizon"]}}}
+            },{
+                "cell_type":"code","id":"b2c9","source":["pass\n"],"outputs":[],"execution_count":null,
+                "metadata":{"spur":{"version":7,
+                    "dag":{"consumes":["sales"]}}}
+            }]
+        }))
+        .unwrap();
+        let mut builder = FactBuilder::new(Path::new("/nb"));
+        extract_notebook_file(&mut builder, Path::new("/nb/app.ipynb"), &nb).unwrap();
+        let f = builder.into_facts();
+        let has = |rel, label: &str, bm: Option<&str>| {
+            f.edges.iter().any(|edge| {
+                let target_label = edge
+                    .target_node_id
+                    .and_then(|target| f.nodes.iter().find(|node| node.node_id == target))
+                    .map(|node| node.label.as_str())
+                    .or(edge.target_label.as_deref());
+                edge.relation == rel
+                    && target_label == Some(label)
+                    && edge.bind_method.as_deref() == bm
+            })
+        };
+        assert!(has(
+            RelationKind::Produces,
+            "port://sales",
+            Some("declared")
+        ));
+        assert!(has(RelationKind::Consumes, "port://raw", Some("declared")));
+        assert!(has(
+            RelationKind::Consumes,
+            "port://sales",
+            Some("declared")
+        ));
+        assert!(has(
+            RelationKind::References,
+            "ds://csv/raw",
+            Some("declared")
+        ));
+        assert!(has(RelationKind::Binds, "port://risk", None));
+        assert!(has(RelationKind::Emits, "port://horizon", None));
+        assert_eq!(
+            f.nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::Port && node.label == "port://sales")
+                .count(),
+            1
+        );
     }
 
     #[test]
