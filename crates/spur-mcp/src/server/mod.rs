@@ -42,9 +42,7 @@ use spur_pm::{IssueFilter, IssueSummary, IssueUpdate, PmService, PrParams};
 use spur_worktree::WorktreeManager;
 
 use crate::outcome_materializer::OutcomeMaterializer;
-use crate::plan::proposers::{
-    CompositeProposer, RetryExhaustedProposer, ScopeDriftSplitProposer, TrivialScorer,
-};
+use crate::plan::proposers::{CompositeProposer, RetryExhaustedProposer, TrivialScorer};
 use crate::plan::reconciler::{
     Reconciler, ReconcilerConfig, ReconcilerDispatch, ReconcilerDispatchCtx,
 };
@@ -654,15 +652,8 @@ impl McpCallbackServer {
                 info!("spawning brain-side signal watcher (beads backend detected)");
                 let feature_gate = Arc::clone(&self.feature_gate);
                 let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-                    // bd-2m2u Phase 2e — fan out signals to both the
-                    // ScopeDrift split proposer (v0b) and the RetryExhausted
-                    // recovery proposer (v0e). Each inner proposer no-ops on
-                    // unmatched signal kinds, so the composite dispatch is
-                    // safe and ordering-insensitive.
-                    let proposer = CompositeProposer::new(vec![
-                        Box::new(ScopeDriftSplitProposer::default()),
-                        Box::new(RetryExhaustedProposer),
-                    ]);
+                    // See docs/superpowers/plans/2026-06-13-scope-drift-escalation-fix.md.
+                    let proposer = CompositeProposer::new(vec![Box::new(RetryExhaustedProposer)]);
                     let watcher = SignalWatcher::new(pm, proposer, TrivialScorer, feature_gate);
                     watcher.run(cancel_rx).await;
                 }));
