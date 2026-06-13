@@ -1296,6 +1296,18 @@ fn curated_preset_toml(source: &str) -> Option<&'static str> {
         "github" | "github_pat" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/github.connection.toml"
         )),
+        "1password_events" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/1password_events.connection.toml"
+        )),
+        "atlassian_admin" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/atlassian_admin.connection.toml"
+        )),
+        "azure_devops" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/azure_devops.connection.toml"
+        )),
+        "clicksend" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/clicksend.connection.toml"
+        )),
         "datadog" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/datadog.connection.toml"
         )),
@@ -5006,6 +5018,59 @@ paths:
             .tables
             .iter()
             .any(|table| table.name == "security_advisories"));
+        let simple_ready_providers = [
+            (
+                "1password-events",
+                "https://${connectionConfig.domain}",
+                &["ONEPASSWORD_EVENTS_TOKEN", "SPUR_CONN_domain"][..],
+                "auth_introspection",
+            ),
+            (
+                "atlassian-admin",
+                "https://api.atlassian.com",
+                &["ATLASSIAN_ADMIN_API_KEY", "SPUR_CONN_organizationId"][..],
+                "organizations",
+            ),
+            (
+                "azure-devops",
+                "https://${connectionConfig.organizationUrl}",
+                &[
+                    "AZURE_DEVOPS_USER",
+                    "AZURE_DEVOPS_PAT",
+                    "SPUR_CONN_organizationUrl",
+                ][..],
+                "projects",
+            ),
+            (
+                "clicksend",
+                "https://rest.clicksend.com",
+                &["CLICKSEND_USERNAME", "CLICKSEND_API_KEY"][..],
+                "account",
+            ),
+        ];
+        for (provider_name, base_url, env_vars, table_name) in simple_ready_providers {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.name == provider_name)
+                .unwrap_or_else(|| panic!("{provider_name} provider is listed"));
+            assert_eq!(provider.provider_key, provider_name);
+            assert_eq!(provider.support_level, "supported");
+            assert_eq!(provider.fulfillment_status, "Ready");
+            assert!(provider.blocked_reason.is_none());
+            assert_eq!(provider.base_url.as_deref(), Some(base_url));
+            assert_eq!(
+                provider
+                    .credential_env_vars
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                env_vars
+            );
+            assert!(
+                provider.tables.iter().any(|table| table.name == table_name),
+                "{provider_name} should expose {table_name} as a ready table"
+            );
+        }
         let google_ads = providers
             .iter()
             .find(|provider| provider.name == "google-ads")
@@ -5075,7 +5140,7 @@ paths:
             .iter()
             .filter(|provider| provider.support_level == "experimental")
             .collect::<Vec<_>>();
-        assert_eq!(experimental.len(), 81);
+        assert_eq!(experimental.len(), 77);
         assert_eq!(
             providers
                 .iter()
