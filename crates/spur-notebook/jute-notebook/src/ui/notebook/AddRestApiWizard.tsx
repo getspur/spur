@@ -35,14 +35,19 @@ import {
   updateSavedConnectionCommand,
 } from "@/daemon/control";
 import {
+  DATASOURCE_SOURCE_FAMILIES,
+  DATASOURCE_WIZARD_STEPS,
+  type DatasourceSourceFamily,
+  type DatasourceSourceFamilyKey,
+  type DatasourceWizardStepKey,
   REST_API_SOURCE_MODES,
-  REST_API_WIZARD_STEPS,
   type RestApiSourceModeKey,
-  type RestApiWizardStepKey,
+  datasourceFamilyByKey,
 } from "@/ui/notebook/datasourceWizardModel";
 
 type SourceMode = RestApiSourceModeKey;
-type WizardStep = RestApiWizardStepKey;
+type SourceFamily = DatasourceSourceFamilyKey;
+type WizardStep = DatasourceWizardStepKey;
 type ProviderLoadState = "idle" | "loading" | "loaded";
 type CredentialField = {
   key: string;
@@ -68,7 +73,7 @@ export type AddRestApiWizardProps = {
 };
 
 const STEPS: readonly { key: WizardStep; label: string; detail: string }[] =
-  REST_API_WIZARD_STEPS;
+  DATASOURCE_WIZARD_STEPS;
 
 const KNOWN_BASE_URLS: Record<string, string> = {
   airtable: "https://api.airtable.com",
@@ -92,6 +97,7 @@ export default function AddRestApiWizard({
 }: AddRestApiWizardProps) {
   const editMode = editConnection !== null;
   const [stepIndex, setStepIndex] = useState(0);
+  const [sourceFamily, setSourceFamily] = useState<SourceFamily>("rest_api");
   const [sourceMode, setSourceMode] = useState<SourceMode | null>(null);
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [providerLoadState, setProviderLoadState] =
@@ -122,6 +128,9 @@ export default function AddRestApiWizard({
     null,
   );
   const [specText, setSpecText] = useState("");
+  const [genericLocation, setGenericLocation] = useState(
+    datasourceFamilyByKey.file.defaultExampleInput,
+  );
   const [tablePreview, setTablePreview] = useState<OpenApiTablePreview | null>(
     null,
   );
@@ -134,7 +143,8 @@ export default function AddRestApiWizard({
     if (!open) return;
 
     if (editConnection) {
-      setStepIndex(1);
+      setStepIndex(2);
+      setSourceFamily("rest_api");
       setSourceMode("saved");
       setProviderSearch("");
       setProviderCategory("All");
@@ -147,6 +157,7 @@ export default function AddRestApiWizard({
       setPrefillCredentialKeys([]);
       setPrefillManifestToml(null);
       setSpecText("");
+      setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
       setTablePreview(tablePreviewFromTemplate(editConnection));
       setConnectionOnly(editConnection.tables.length === 0);
       setPendingPreview(false);
@@ -156,7 +167,8 @@ export default function AddRestApiWizard({
     }
 
     if (prefill) {
-      setStepIndex(1);
+      setStepIndex(2);
+      setSourceFamily("rest_api");
       setSourceMode(prefill.provider ? "catalog" : "openapi");
       setProviderSearch("");
       setProviderCategory("All");
@@ -175,6 +187,7 @@ export default function AddRestApiWizard({
           : null,
       );
       setSpecText(prefill.specText ?? "");
+      setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
       setTablePreview(null);
       setConnectionOnly(prefill.connectionOnly ?? false);
       setPendingPreview(false);
@@ -184,6 +197,7 @@ export default function AddRestApiWizard({
     }
 
     setStepIndex(0);
+    setSourceFamily("rest_api");
     setSourceMode(null);
     setProviderSearch("");
     setProviderCategory("All");
@@ -196,6 +210,7 @@ export default function AddRestApiWizard({
     setPrefillCredentialKeys([]);
     setPrefillManifestToml(null);
     setSpecText("");
+    setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
     setTablePreview(null);
     setConnectionOnly(false);
     setPendingPreview(false);
@@ -286,11 +301,35 @@ export default function AddRestApiWizard({
     [loadProviders, loadSavedConnections, selectedProvider?.name],
   );
 
+  const selectSourceFamily = useCallback((family: SourceFamily) => {
+    setSourceFamily(family);
+    setError(null);
+    setTablePreview(null);
+    setConnectionOnly(false);
+    setMissingSavedCredentialKeys([]);
+    setSavedConnectionCredentials({});
+    setPrefillCredentialKeys([]);
+    setPrefillManifestToml(null);
+    setGenericLocation(datasourceFamilyByKey[family].defaultExampleInput);
+
+    if (family === "rest_api") {
+      return;
+    }
+
+    setSourceMode(null);
+    setSelectedProvider(null);
+    setSelectedSavedConnection(null);
+    setCredentials({});
+    setDatasourceName(defaultDatasourceNameForFamily(family));
+    setSpecText("");
+  }, []);
+
   const selectProvider = useCallback((provider: ProviderSummary) => {
+    const defaultName = defaultDatasourceNameForProvider(provider);
     setSelectedProvider(provider);
     setSelectedSavedConnection(null);
     setDatasourceName((currentName) =>
-      !currentName || currentName === "rest_api" ? provider.name : currentName,
+      !currentName || currentName === "rest_api" ? defaultName : currentName,
     );
     setCredentials({});
     setTablePreview(tablePreviewFromProvider(provider));
@@ -366,10 +405,12 @@ export default function AddRestApiWizard({
     credentialFields,
     credentials,
     datasourceName,
+    genericLocation,
     missingSavedCredentialKeys,
     savedConnectionCredentials,
     selectedProvider,
     selectedSavedConnection,
+    sourceFamily,
     sourceMode,
     stepIndex,
     tablePreview,
@@ -380,15 +421,25 @@ export default function AddRestApiWizard({
   if (!open) return null;
 
   const step = STEPS[stepIndex]?.key ?? "source";
+  const selectedFamily = datasourceFamilyByKey[sourceFamily];
+  const restFamilySelected = sourceFamily === "rest_api";
 
   const goNext = () => {
     if (!canContinue) return;
-    setStepIndex((currentStep) => Math.min(STEPS.length - 1, currentStep + 1));
+    setStepIndex((currentStep) => {
+      if (sourceFamily === "rest_api" && currentStep === 0) return 2;
+      return Math.min(STEPS.length - 1, currentStep + 1);
+    });
     setError(null);
   };
 
   const goBack = () => {
-    setStepIndex((currentStep) => Math.max(editMode ? 1 : 0, currentStep - 1));
+    setStepIndex((currentStep) => {
+      if (sourceFamily === "rest_api" && currentStep === 2) {
+        return editMode ? 2 : 0;
+      }
+      return Math.max(editMode ? 2 : 0, currentStep - 1);
+    });
     setError(null);
   };
 
@@ -544,9 +595,11 @@ export default function AddRestApiWizard({
 
   const primaryActionLabel =
     step === "attach"
-      ? editMode
-        ? "Save changes"
-        : "Add datasource"
+      ? !restFamilySelected
+        ? "Attach datasource"
+        : editMode
+          ? "Save changes"
+          : "Add datasource"
       : manifestPrefillMode && step === "auth"
         ? "Add datasource"
         : step === "source" && sourceMode === "saved"
@@ -569,7 +622,7 @@ export default function AddRestApiWizard({
             <div className="flex min-w-0 items-center gap-2">
               <PlugIcon className="shrink-0 text-indigo-600" size={16} />
               <h2 className="truncate text-sm font-medium text-gray-950">
-                Add REST API
+                Add datasource
               </h2>
             </div>
             <button
@@ -641,6 +694,7 @@ export default function AddRestApiWizard({
                 filteredProviders={filteredProviders}
                 onCategoryChange={setProviderCategory}
                 onProviderSearch={setProviderSearch}
+                onSelectFamily={selectSourceFamily}
                 onSelectProvider={selectProvider}
                 onSelectSavedConnection={selectSavedConnection}
                 onSelectSourceMode={selectSourceMode}
@@ -660,65 +714,93 @@ export default function AddRestApiWizard({
                 selectedProvider={selectedProvider}
                 selectedSavedConnection={selectedSavedConnection}
                 missingSavedCredentialKeys={missingSavedCredentialKeys}
+                sourceFamily={sourceFamily}
                 sourceMode={sourceMode}
               />
             )}
-            {step === "auth" && (
-              <ConnectStep
-                credentials={credentials}
-                datasourceName={datasourceName}
-                fields={credentialFields}
-                nameReadOnly={editMode}
-                onCredentialChange={(key, value) =>
-                  setCredentials((current) => ({
-                    ...current,
-                    [key]: value,
-                  }))
-                }
-                onDatasourceNameChange={setDatasourceName}
-                assistantPrefillMode={manifestPrefillMode}
-                selectedProvider={selectedProvider}
-                sourceMode={sourceMode}
-              />
-            )}
-            {step === "inspect" && (
-              <TablesStep
-                connectionOnly={connectionOnly}
-                error={error}
-                onConnectionOnlyChange={(checked) => {
-                  setConnectionOnly(checked);
-                  if (checked) setTablePreview(null);
-                }}
-                onPreviewTables={() => void handlePreviewTables()}
-                onSpecTextChange={(value) => {
-                  setSpecText(value);
-                  setTablePreview(
-                    editConnection && value.trim().length === 0
-                      ? tablePreviewFromTemplate(editConnection)
-                      : null,
-                  );
-                  if (editConnection && value.trim().length === 0) {
-                    setConnectionOnly(editConnection.tables.length === 0);
+            {step === "locate" &&
+              (restFamilySelected ? (
+                <RestLocateStep
+                  selectedProvider={selectedProvider}
+                  sourceMode={sourceMode}
+                />
+              ) : (
+                <GenericLocateStep
+                  family={selectedFamily}
+                  location={genericLocation}
+                  onLocationChange={setGenericLocation}
+                />
+              ))}
+            {step === "auth" &&
+              (restFamilySelected ? (
+                <ConnectStep
+                  credentials={credentials}
+                  datasourceName={datasourceName}
+                  fields={credentialFields}
+                  nameReadOnly={editMode}
+                  onCredentialChange={(key, value) =>
+                    setCredentials((current) => ({
+                      ...current,
+                      [key]: value,
+                    }))
                   }
-                }}
-                pendingPreview={pendingPreview}
-                selectedProvider={selectedProvider}
-                specText={specText}
-                tablePreview={tablePreview}
-              />
-            )}
-            {step === "attach" && (
-              <ReviewStep
-                connectionOnly={connectionOnly}
-                credentialFields={credentialFields}
-                credentials={credentials}
-                datasourceName={datasourceName}
-                error={error}
-                selectedProvider={selectedProvider}
-                specText={specText}
-                tablePreview={tablePreview}
-              />
-            )}
+                  onDatasourceNameChange={setDatasourceName}
+                  assistantPrefillMode={manifestPrefillMode}
+                  selectedProvider={selectedProvider}
+                  selectedSavedConnection={selectedSavedConnection}
+                  sourceMode={sourceMode}
+                />
+              ) : (
+                <GenericAuthStep family={selectedFamily} />
+              ))}
+            {step === "inspect" &&
+              (restFamilySelected ? (
+                <TablesStep
+                  connectionOnly={connectionOnly}
+                  error={error}
+                  onConnectionOnlyChange={(checked) => {
+                    setConnectionOnly(checked);
+                    if (checked) setTablePreview(null);
+                  }}
+                  onPreviewTables={() => void handlePreviewTables()}
+                  onSpecTextChange={(value) => {
+                    setSpecText(value);
+                    setTablePreview(
+                      editConnection && value.trim().length === 0
+                        ? tablePreviewFromTemplate(editConnection)
+                        : null,
+                    );
+                    if (editConnection && value.trim().length === 0) {
+                      setConnectionOnly(editConnection.tables.length === 0);
+                    }
+                  }}
+                  pendingPreview={pendingPreview}
+                  selectedProvider={selectedProvider}
+                  specText={specText}
+                  tablePreview={tablePreview}
+                />
+              ) : (
+                <GenericInspectStep family={selectedFamily} />
+              ))}
+            {step === "attach" &&
+              (restFamilySelected ? (
+                <ReviewStep
+                  connectionOnly={connectionOnly}
+                  credentialFields={credentialFields}
+                  credentials={credentials}
+                  datasourceName={datasourceName}
+                  error={error}
+                  selectedProvider={selectedProvider}
+                  specText={specText}
+                  tablePreview={tablePreview}
+                />
+              ) : (
+                <GenericAttachStep
+                  error={error}
+                  family={selectedFamily}
+                  location={genericLocation}
+                />
+              ))}
           </div>
 
           <footer className="flex h-14 shrink-0 items-center justify-between border-t border-gray-200 bg-gray-50 px-5">
@@ -726,7 +808,7 @@ export default function AddRestApiWizard({
               className={clsx(
                 "rounded border border-transparent px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:text-gray-950",
                 stepIndex === 0 && "invisible",
-                editMode && stepIndex <= 1 && "invisible",
+                editMode && stepIndex <= 2 && "invisible",
               )}
               onClick={goBack}
               type="button"
@@ -742,7 +824,11 @@ export default function AddRestApiWizard({
                 } else if (manifestPrefillMode && step === "auth") {
                   void handleAddDatasource();
                 } else if (step === "attach") {
-                  if (editMode) void handleSaveEdit();
+                  if (!restFamilySelected) {
+                    setError(
+                      "Run the generated SQL in a notebook SQL cell to attach this datasource.",
+                    );
+                  } else if (editMode) void handleSaveEdit();
                   else void handleAddDatasource();
                 } else {
                   goNext();
@@ -764,6 +850,7 @@ function SourceStep({
   error,
   filteredProviders,
   onCategoryChange,
+  onSelectFamily,
   onProviderSearch,
   onSelectProvider,
   onSelectSavedConnection,
@@ -779,11 +866,13 @@ function SourceStep({
   selectedProvider,
   selectedSavedConnection,
   missingSavedCredentialKeys,
+  sourceFamily,
   sourceMode,
 }: {
   error: string | null;
   filteredProviders: ProviderSummary[];
   onCategoryChange: (category: string) => void;
+  onSelectFamily: (family: SourceFamily) => void;
   onProviderSearch: (value: string) => void;
   onSelectProvider: (provider: ProviderSummary) => void;
   onSelectSavedConnection: (connection: ConnectionTemplate) => void;
@@ -799,33 +888,61 @@ function SourceStep({
   selectedProvider: ProviderSummary | null;
   selectedSavedConnection: ConnectionTemplate | null;
   missingSavedCredentialKeys: string[];
+  sourceFamily: SourceFamily;
   sourceMode: SourceMode | null;
 }) {
   return (
     <div>
       <h3 className="text-base font-semibold text-gray-950">
-        How do you want to connect?
+        Choose a datasource family
       </h3>
       <p className="mt-1 text-sm text-gray-500">
-        Pick a saved connection, provider catalog entry, OpenAPI spec, or manual
-        shell.
+        Select the kind of data you want to attach, then fill in only the setup
+        details that apply to that source.
       </p>
 
-      <div className="mt-4 space-y-2">
-        {REST_API_SOURCE_MODES.map((mode) => (
+      <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {DATASOURCE_SOURCE_FAMILIES.map((family) => (
           <SourceOption
-            active={sourceMode === mode.key}
-            detail={mode.shortDetail}
-            icon={sourceModeIcon(mode.key)}
-            key={mode.key}
-            label={mode.label}
-            meta={sourceModeMeta(mode.key, savedConnections.length)}
-            onClick={() => onSelectSourceMode(mode.key)}
+            active={sourceFamily === family.key}
+            detail={family.shortDetail}
+            icon={sourceFamilyIcon(family.key)}
+            key={family.key}
+            label={family.label}
+            meta={sourceFamilyMeta(family)}
+            onClick={() => onSelectFamily(family.key)}
           />
         ))}
       </div>
 
-      {sourceMode === "catalog" && (
+      {sourceFamily === "rest_api" && (
+        <section className="mt-4 border-t border-gray-200 pt-4">
+          <div className="mb-3">
+            <h4 className="text-xs font-medium text-gray-950">
+              REST API route
+            </h4>
+            <p className="mt-0.5 text-xs text-gray-500">
+              Use the existing REST/API provider catalog, saved connections,
+              OpenAPI spec import, or manual connection path.
+            </p>
+          </div>
+          <div className="space-y-2">
+            {REST_API_SOURCE_MODES.map((mode) => (
+              <SourceOption
+                active={sourceMode === mode.key}
+                detail={mode.shortDetail}
+                icon={sourceModeIcon(mode.key)}
+                key={mode.key}
+                label={mode.label}
+                meta={sourceModeMeta(mode.key, savedConnections.length)}
+                onClick={() => onSelectSourceMode(mode.key)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {sourceFamily === "rest_api" && sourceMode === "catalog" && (
         <section className="mt-4 border-t border-gray-200 pt-4">
           <label className="relative block">
             <span className="sr-only">Search providers</span>
@@ -892,7 +1009,7 @@ function SourceStep({
         </section>
       )}
 
-      {sourceMode === "saved" && (
+      {sourceFamily === "rest_api" && sourceMode === "saved" && (
         <section className="mt-4 border-t border-gray-200 pt-4">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {savedConnectionLoadState === "loading" && (
@@ -933,6 +1050,25 @@ function SourceStep({
   );
 }
 
+function sourceFamilyIcon(family: SourceFamily): React.ReactNode {
+  if (family === "rest_api") return <PlugIcon size={18} strokeWidth={1.5} />;
+  if (family === "database") {
+    return <DatabaseIcon size={18} strokeWidth={1.5} />;
+  }
+  if (family === "advanced_sql") {
+    return <PencilIcon size={18} strokeWidth={1.5} />;
+  }
+  if (family === "lakehouse") return <TableIcon size={18} strokeWidth={1.5} />;
+  return <FileTextIcon size={18} strokeWidth={1.5} />;
+}
+
+function sourceFamilyMeta(family: DatasourceSourceFamily) {
+  if (family.key === "rest_api") return "preserved";
+  if (family.key === "file") return "local";
+  if (family.key === "advanced_sql") return "SQL";
+  return "DuckDB";
+}
+
 function sourceModeIcon(mode: SourceMode): React.ReactNode {
   if (mode === "catalog") return <PlugIcon size={18} strokeWidth={1.5} />;
   if (mode === "saved") return <DatabaseIcon size={18} strokeWidth={1.5} />;
@@ -963,6 +1099,7 @@ function SourceOption({
 }) {
   return (
     <button
+      aria-label={label}
       aria-pressed={active}
       className={clsx(
         "flex w-full items-start gap-3 rounded-lg border bg-white p-3 text-left transition-colors",
@@ -991,6 +1128,198 @@ function SourceOption({
         </span>
       )}
     </button>
+  );
+}
+
+function RestLocateStep({
+  selectedProvider,
+  sourceMode,
+}: {
+  selectedProvider: ProviderSummary | null;
+  sourceMode: SourceMode | null;
+}) {
+  return (
+    <div>
+      <h3 className="text-base font-semibold text-gray-950">Locate REST API</h3>
+      <p className="mt-1 text-sm text-gray-500">
+        REST/API keeps the existing route: the provider catalog, saved
+        connection, OpenAPI spec, or manual manifest supplies endpoint details.
+      </p>
+      <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50">
+        <SummaryRow label="Route">
+          {sourceMode ? restSourceModeLabel(sourceMode) : "Select REST source"}
+        </SummaryRow>
+        <SummaryRow label="Endpoint">
+          {selectedProvider
+            ? baseUrlForProvider(selectedProvider)
+            : "From spec or manifest"}
+        </SummaryRow>
+        <SummaryRow label="Setup">
+          REST imports continue through Auth, Inspect, and Attach.
+        </SummaryRow>
+      </div>
+    </div>
+  );
+}
+
+function GenericLocateStep({
+  family,
+  location,
+  onLocationChange,
+}: {
+  family: DatasourceSourceFamily;
+  location: string;
+  onLocationChange: (value: string) => void;
+}) {
+  return (
+    <div>
+      <h3 className="text-base font-semibold text-gray-950">
+        Locate {family.label.toLowerCase()}
+      </h3>
+      <p className="mt-1 text-sm text-gray-500">
+        Provide the path, URL, catalog URI, connection string, or SQL entry
+        point DuckDB will use to discover this source.
+      </p>
+
+      <label className="mt-4 block">
+        <span className="text-xs font-medium text-gray-600">
+          {locationLabelForFamily(family)}
+        </span>
+        <input
+          aria-label={locationLabelForFamily(family)}
+          className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+          onChange={(event) => onLocationChange(event.currentTarget.value)}
+          value={location}
+        />
+      </label>
+
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <section className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+          <h4 className="text-xs font-medium text-gray-950">Setup preview</h4>
+          <ul className="mt-2 space-y-1 text-xs text-gray-600">
+            {family.setupRequirements.map((requirement) => (
+              <li className="flex gap-2" key={requirement}>
+                <CheckIcon
+                  className="mt-0.5 shrink-0 text-green-600"
+                  size={12}
+                />
+                <span>{requirement}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+        <SqlPreview sql={generatedSqlForFamily(family, location)} />
+      </div>
+    </div>
+  );
+}
+
+function GenericAuthStep({ family }: { family: DatasourceSourceFamily }) {
+  const authDetail = authDetailForFamily(family);
+
+  return (
+    <div>
+      <h3 className="text-base font-semibold text-gray-950">
+        Auth for {family.label.toLowerCase()}
+      </h3>
+      <p className="mt-1 text-sm text-gray-500">
+        Configure credentials only when this source needs DuckDB secrets,
+        extension auth, or a database login.
+      </p>
+      <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50">
+        <SummaryRow label="Auth">{authDetail.title}</SummaryRow>
+        <SummaryRow label="Mechanism">{family.duckDbMechanism}</SummaryRow>
+        <SummaryRow label="Scope">{authDetail.scope}</SummaryRow>
+      </div>
+    </div>
+  );
+}
+
+function GenericInspectStep({ family }: { family: DatasourceSourceFamily }) {
+  const objectName = previewObjectNameForFamily(family);
+
+  return (
+    <div>
+      <h3 className="text-base font-semibold text-gray-950">
+        Inspect {family.label.toLowerCase()}
+      </h3>
+      <p className="mt-1 text-sm text-gray-500">
+        Preview the object DuckDB will expose and the first columns the notebook
+        can query after attach.
+      </p>
+      <div className="mt-4 space-y-3">
+        <article className="rounded-lg border border-gray-200 bg-white px-3 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h4 className="truncate font-mono text-sm font-medium text-gray-950">
+                {objectName}
+              </h4>
+              <p className="mt-1 text-xs text-gray-500">
+                {inspectDetailForFamily(family)}
+              </p>
+            </div>
+            <span className="shrink-0 rounded bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-600">
+              preview
+            </span>
+          </div>
+        </article>
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          {["id", "created_at", "payload"].map((column) => (
+            <div
+              className="rounded border border-gray-200 bg-gray-50 px-2 py-2 font-mono text-gray-700"
+              key={`${family.key}:${column}`}
+            >
+              {column}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GenericAttachStep({
+  error,
+  family,
+  location,
+}: {
+  error: string | null;
+  family: DatasourceSourceFamily;
+  location: string;
+}) {
+  return (
+    <div>
+      <h3 className="text-base font-semibold text-gray-950">
+        Attach {family.label.toLowerCase()}
+      </h3>
+      <p className="mt-1 text-sm text-gray-500">
+        Review the DuckDB attachment shape before running it in the notebook.
+      </p>
+      <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50">
+        <SummaryRow label="Family">{family.label}</SummaryRow>
+        <SummaryRow label="Location">{location}</SummaryRow>
+        <SummaryRow label="Object">
+          {previewObjectNameForFamily(family)}
+        </SummaryRow>
+      </div>
+      <div className="mt-4">
+        <SqlPreview sql={generatedSqlForFamily(family, location)} />
+      </div>
+      {error && <ErrorBanner message={error} />}
+    </div>
+  );
+}
+
+function SqlPreview({ sql }: { sql: string }) {
+  return (
+    <section className="overflow-hidden rounded-lg border border-gray-200 bg-gray-950">
+      <div className="border-b border-gray-800 px-3 py-2">
+        <h4 className="text-xs font-medium text-white">Generated SQL</h4>
+      </div>
+      <pre className="overflow-x-auto whitespace-pre-wrap px-3 py-3 font-mono text-[11px] leading-5 text-gray-100">
+        {sql}
+      </pre>
+    </section>
   );
 }
 
@@ -1188,6 +1517,7 @@ function ConnectStep({
   onCredentialChange,
   onDatasourceNameChange,
   selectedProvider,
+  selectedSavedConnection,
   sourceMode,
 }: {
   assistantPrefillMode: boolean;
@@ -1198,6 +1528,7 @@ function ConnectStep({
   onCredentialChange: (key: string, value: string) => void;
   onDatasourceNameChange: (value: string) => void;
   selectedProvider: ProviderSummary | null;
+  selectedSavedConnection: ConnectionTemplate | null;
   sourceMode: SourceMode | null;
 }) {
   const authScheme = selectedProvider
@@ -1212,7 +1543,9 @@ function ConnectStep({
     : false;
   const heading = selectedProvider
     ? `Connect to ${selectedProvider.displayName}`
-    : "Connect a custom REST API";
+    : selectedSavedConnection?.provider
+      ? `Connect to ${displayNameFromProvider(selectedSavedConnection.provider)}`
+      : "Connect a custom REST API";
 
   return (
     <div>
@@ -1251,7 +1584,9 @@ function ConnectStep({
           <p>
             <span className="font-medium">
               {supportedProvider
-                ? "Tables ready."
+                ? tier === "A"
+                  ? "Tables ready. Drop-in."
+                  : "Tables ready."
                 : tier === "A"
                   ? "Drop-in."
                   : "Bring your own token."}
@@ -1269,9 +1604,11 @@ function ConnectStep({
         <SummaryRow label="Provider">
           {selectedProvider
             ? `${selectedProvider.displayName} · ${selectedProvider.category}`
-            : sourceMode === "manual"
-              ? "Manual"
-              : "OpenAPI spec"}
+            : selectedSavedConnection?.provider
+              ? displayNameFromProvider(selectedSavedConnection.provider)
+              : sourceMode === "manual"
+                ? "Manual"
+                : "OpenAPI spec"}
         </SummaryRow>
         <SummaryRow label="Auth scheme">{authScheme}</SummaryRow>
         <SummaryRow label="Base URL">{baseUrl}</SummaryRow>
@@ -1352,7 +1689,7 @@ function TablesStep({
           ? "Bundled provider tables are ready. Review the table-functions before adding the datasource."
           : catalogActionsReady
             ? "Bundled provider actions are ready. Review the action-functions before adding the datasource."
-          : "Preview generated table-functions from an OpenAPI spec, or add the connection now and define tables later."}
+            : "Preview generated table-functions from an OpenAPI spec, or add the connection now and define tables later."}
       </p>
 
       {!catalogTablesReady && !catalogActionsReady && (
@@ -1680,10 +2017,12 @@ function canContinueFromStep({
   credentialFields,
   credentials,
   datasourceName,
+  genericLocation,
   missingSavedCredentialKeys,
   savedConnectionCredentials,
   selectedProvider,
   selectedSavedConnection,
+  sourceFamily,
   sourceMode,
   stepIndex,
   tablePreview,
@@ -1693,16 +2032,20 @@ function canContinueFromStep({
   credentialFields: CredentialField[];
   credentials: Record<string, string>;
   datasourceName: string;
+  genericLocation: string;
   missingSavedCredentialKeys: string[];
   savedConnectionCredentials: Record<string, string>;
   selectedProvider: ProviderSummary | null;
   selectedSavedConnection: ConnectionTemplate | null;
+  sourceFamily: SourceFamily;
   sourceMode: SourceMode | null;
   stepIndex: number;
   tablePreview: OpenApiTablePreview | null;
   editMode: boolean;
 }) {
   if (stepIndex === 0) {
+    if (sourceFamily !== "rest_api") return true;
+
     if (sourceMode === "saved") {
       return (
         Boolean(selectedSavedConnection) &&
@@ -1717,7 +2060,16 @@ function canContinueFromStep({
     );
   }
 
+  if (sourceFamily !== "rest_api") {
+    if (stepIndex === 1) return genericLocation.trim().length > 0;
+    return true;
+  }
+
   if (stepIndex === 1) {
+    return true;
+  }
+
+  if (stepIndex === 2) {
     const hasName = datasourceName.trim().length > 0;
     const credentialsSatisfied =
       editMode ||
@@ -1728,7 +2080,14 @@ function canContinueFromStep({
     return hasName && credentialsSatisfied;
   }
 
-  if (stepIndex === 2) {
+  if (stepIndex === 3) {
+    if (
+      selectedProvider &&
+      isSupportedProvider(selectedProvider) &&
+      (selectedProvider.actions?.length ?? 0) > 0
+    ) {
+      return true;
+    }
     return connectionOnly || tablePreview !== null;
   }
 
@@ -1792,6 +2151,141 @@ function providerSummaryFromPrefill(providerName: string): ProviderSummary {
     tables: [],
     actions: [],
   };
+}
+
+function defaultDatasourceNameForFamily(family: SourceFamily) {
+  if (family === "file") return "orders";
+  if (family === "cloud_object_storage") return "events";
+  if (family === "lakehouse") return "orders_delta";
+  if (family === "database") return "external_database";
+  if (family === "advanced_sql") return "custom_query";
+  return "rest_api";
+}
+
+function defaultDatasourceNameForProvider(provider: ProviderSummary) {
+  if (/^\d/.test(provider.name)) {
+    return provider.name.replace(/[^a-zA-Z0-9]+/g, "_");
+  }
+
+  return provider.name;
+}
+
+function restSourceModeLabel(mode: SourceMode) {
+  return REST_API_SOURCE_MODES.find((sourceMode) => sourceMode.key === mode)
+    ?.label;
+}
+
+function locationLabelForFamily(family: DatasourceSourceFamily) {
+  if (family.key === "file") return "File or folder path";
+  if (family.key === "cloud_object_storage") {
+    return "URL or object storage path";
+  }
+  if (family.key === "lakehouse") return "Lakehouse table URI";
+  if (family.key === "database") return "Database connection string";
+  if (family.key === "advanced_sql") return "SQL attach statement";
+  return "REST API endpoint";
+}
+
+function authDetailForFamily(family: DatasourceSourceFamily) {
+  if (family.key === "file") {
+    return {
+      title: "No credentials required",
+      scope: "DuckDB reads from the local filesystem.",
+    };
+  }
+  if (family.key === "cloud_object_storage" || family.key === "lakehouse") {
+    return {
+      title: "DuckDB secret or signed URL",
+      scope:
+        "Credentials stay in the notebook session and are referenced by generated SQL.",
+    };
+  }
+  if (family.key === "database") {
+    return {
+      title: "Database login",
+      scope:
+        "Use a connection string or a DuckDB secret for the attached engine.",
+    };
+  }
+  if (family.key === "advanced_sql") {
+    return {
+      title: "Depends on referenced SQL",
+      scope: "Any required secrets should be created before the SQL runs.",
+    };
+  }
+  return {
+    title: "API credentials",
+    scope: "REST/API credentials continue through the preserved route.",
+  };
+}
+
+function inspectDetailForFamily(family: DatasourceSourceFamily) {
+  if (family.key === "file") return "Local object inferred from file extension";
+  if (family.key === "cloud_object_storage") {
+    return "Remote object set resolved through httpfs";
+  }
+  if (family.key === "lakehouse") return "Lakehouse table metadata preview";
+  if (family.key === "database") return "Attached database schema preview";
+  if (family.key === "advanced_sql") return "SQL result-set preview";
+  return "REST/API table-function preview";
+}
+
+function previewObjectNameForFamily(family: DatasourceSourceFamily) {
+  if (family.key === "file") return "orders";
+  if (family.key === "cloud_object_storage") return "events";
+  if (family.key === "lakehouse") return "orders_delta";
+  if (family.key === "database") return "app.public.orders";
+  if (family.key === "advanced_sql") return "custom_query";
+  return "api_table";
+}
+
+function generatedSqlForFamily(
+  family: DatasourceSourceFamily,
+  location: string,
+) {
+  const escapedLocation = location.replaceAll("'", "''");
+
+  if (family.key === "file") {
+    return `create or replace view orders as
+select *
+from read_parquet('${escapedLocation}');
+
+-- CSV alternative:
+-- select * from read_csv_auto('${escapedLocation}');`;
+  }
+
+  if (family.key === "cloud_object_storage") {
+    return `install httpfs;
+load httpfs;
+
+create or replace view events as
+select *
+from read_parquet('${escapedLocation}');`;
+  }
+
+  if (family.key === "lakehouse") {
+    return `install delta;
+load delta;
+
+create or replace view orders_delta as
+select *
+from delta_scan('${escapedLocation}');`;
+  }
+
+  if (family.key === "database") {
+    return `attach '${escapedLocation}' as external_db;
+
+create or replace view external_database as
+select *
+from external_db.public.orders;`;
+  }
+
+  if (family.key === "advanced_sql") {
+    return `create or replace view custom_query as
+${location.trim().length > 0 ? location : "select 1 as id"};`;
+  }
+
+  return "-- REST/API uses the preserved import flow.";
 }
 
 function displayNameFromProvider(providerName: string) {
