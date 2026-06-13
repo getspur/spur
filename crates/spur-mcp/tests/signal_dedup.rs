@@ -14,8 +14,10 @@ use serde_json::json;
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::labels;
 use spur_mcp::plan::mutation::{MutationBatch, TaskDraft};
+use spur_mcp::plan::mutation_executor::SIGNAL_ESCALATED_LABEL;
 use spur_mcp::plan::proposers::{
-    MutationProposer, MutationScorer, ScopeDriftSplitProposer, TrivialScorer,
+    MutationProposer, MutationScorer, RetryExhaustedProposer, ScopeDriftSplitProposer,
+    TrivialScorer,
 };
 use spur_mcp::plan::signal_watcher::SignalWatcher;
 use spur_mcp::plan::signals::{self, WorkerSignal};
@@ -62,6 +64,15 @@ fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
         severity: 0.82,
         reason: "auth refactor pulls in 4 new subsystems".into(),
         estimated_subtasks: Some(3),
+    }
+}
+
+fn retry_exhausted_signal(signal_id: Uuid, task_id: &str) -> WorkerSignal {
+    WorkerSignal::RetryExhausted {
+        signal_id,
+        task_id: task_id.to_string(),
+        attempt: 1,
+        last_error: "retry budget exhausted".into(),
     }
 }
 
@@ -137,12 +148,12 @@ async fn seed_completion_with_base_oid(pm: &PmService, task_id: &str) {
         .expect("seed completion audit");
 }
 
-struct ProjectedPlanSplitProposer {
+struct ProjectedPlanRetryProposer {
     expected_plan_id: String,
 }
 
 #[async_trait]
-impl MutationProposer for ProjectedPlanSplitProposer {
+impl MutationProposer for ProjectedPlanRetryProposer {
     async fn propose(
         &self,
         state: &PlanState,
@@ -153,7 +164,7 @@ impl MutationProposer for ProjectedPlanSplitProposer {
             return Vec::new();
         }
 
-        ScopeDriftSplitProposer::default()
+        RetryExhaustedProposer
             .propose(state, signal, triggering_task)
             .await
     }
@@ -184,17 +195,16 @@ impl MutationProposer for FixedMutationIdProposer {
         };
 
         match signal {
-            WorkerSignal::ScopeDrift {
+            WorkerSignal::RetryExhausted {
                 signal_id,
-                reason,
-                estimated_subtasks,
+                last_error,
                 ..
             } => {
-                let child_count = estimated_subtasks.unwrap_or(2).max(2) as usize;
+                let child_count = 2;
                 let children = (0..child_count)
                     .map(|index| {
                         serde_json::from_value::<TaskDraft>(json!({
-                            "title": format!("[retry {}/{}] {}", index + 1, child_count, reason),
+                            "title": format!("[retry {}/{}] {}", index + 1, child_count, last_error),
                             "description": format!(
                                 "Deterministic retry split for signal {} on task {}.",
                                 signal_id, triggering_task
@@ -322,6 +332,7 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
 
     let pm = beads_pm(dir.path()).await;
     let task_id = build_single_task_plan(pm.as_ref(), "signal-dedup-1").await;
+    let signal_id = Uuid::new_v4();
     add_labels_individually(
         pm.as_ref(),
         &task_id,
@@ -333,7 +344,7 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
     .await;
     seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
-    let signal = scope_drift_signal(Uuid::new_v4());
+    let signal = scope_drift_signal(signal_id);
     let signal_comment = signals::encode_comment(&signal);
     let advanced = pm.advanced().expect("advanced beads surface");
     advanced
@@ -361,14 +372,36 @@ async fn duplicate_signal_comments_with_same_signal_id_commit_once() {
         .await
         .expect("list comments after signal watcher tick");
     let audits = audit_sentinels(&comments);
-    let mutation_commit_count = audits
+    let escalation_count = audits
         .iter()
-        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::MutationCommit { .. }))
+        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::EscalationRequested { .. }))
         .count();
 
     assert_eq!(
-        mutation_commit_count, 1,
-        "duplicate signal_id must produce exactly one MutationCommit sentinel; audits={audits:?}"
+        escalation_count, 1,
+        "duplicate signal_id must produce exactly one EscalationRequested sentinel; audits={audits:?}"
+    );
+    assert!(
+        !audits.iter().any(|sentinel| {
+            matches!(
+                sentinel,
+                AuditSentinelKind::MutationPlan { .. } | AuditSentinelKind::MutationCommit { .. }
+            )
+        }),
+        "scope_drift must not invoke the proposer/mutation path; audits={audits:?}"
+    );
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(issue.labels.contains(&SIGNAL_ESCALATED_LABEL.to_string()));
+    assert!(issue
+        .labels
+        .contains(&labels::signal_processed_label(&signal_id)));
+    assert!(
+        !issue
+            .labels
+            .iter()
+            .any(|label| label == labels::READY_FOR_REVIEW || label == "ready-for-review"),
+        "escalation must remove ready-for-review labels; labels={:?}",
+        issue.labels
     );
 }
 
@@ -420,13 +453,13 @@ async fn watcher_projects_real_plan_state_for_scoring() {
         &task_id,
         &[
             labels::READY_FOR_REVIEW.to_string(),
-            labels::signal_kind("scope-drift"),
+            labels::signal_kind("retry-exhausted"),
         ],
     )
     .await;
     seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
-    let signal = scope_drift_signal(Uuid::new_v4());
+    let signal = retry_exhausted_signal(Uuid::new_v4(), &task_id);
     pm.advanced()
         .expect("advanced beads surface")
         .add_comment(&task_id, &signals::encode_comment(&signal))
@@ -435,7 +468,7 @@ async fn watcher_projects_real_plan_state_for_scoring() {
 
     let watcher = SignalWatcher::new(
         Arc::clone(&pm),
-        ProjectedPlanSplitProposer {
+        ProjectedPlanRetryProposer {
             expected_plan_id: "signal-projector-1".into(),
         },
         TrivialScorer,
@@ -449,7 +482,7 @@ async fn watcher_projects_real_plan_state_for_scoring() {
             .labels
             .iter()
             .any(|label| label.starts_with("spur:signal-processed:")),
-        "watcher must use projected persisted plan state to drive scoring"
+        "watcher must use projected persisted plan state to drive retry-exhausted scoring"
     );
 }
 
@@ -473,26 +506,26 @@ async fn watcher_processes_only_one_signal_per_task_per_tick() {
     seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
     let advanced = pm.advanced().expect("advanced beads surface");
+    let first_signal_id = Uuid::new_v4();
+    let second_signal_id = Uuid::new_v4();
     advanced
         .add_comment(
             &task_id,
-            &signals::encode_comment(&scope_drift_signal(Uuid::new_v4())),
+            &signals::encode_comment(&scope_drift_signal(first_signal_id)),
         )
         .await
         .expect("first signal comment");
     advanced
         .add_comment(
             &task_id,
-            &signals::encode_comment(&scope_drift_signal(Uuid::new_v4())),
+            &signals::encode_comment(&scope_drift_signal(second_signal_id)),
         )
         .await
         .expect("second signal comment");
 
     let watcher = SignalWatcher::new(
         Arc::clone(&pm),
-        ProjectedPlanSplitProposer {
-            expected_plan_id: "signal-one-per-tick-1".into(),
-        },
+        ScopeDriftSplitProposer::default(),
         TrivialScorer,
         common::server_builder::pro_feature_gate(),
     );
@@ -503,13 +536,23 @@ async fn watcher_processes_only_one_signal_per_task_per_tick() {
         .await
         .expect("list comments after watcher tick");
     let audits = audit_sentinels(&comments);
-    let mutation_plans = audits
+    let escalations = audits
         .iter()
-        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::MutationPlan { .. }))
+        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::EscalationRequested { .. }))
         .count();
     assert_eq!(
-        mutation_plans, 1,
+        escalations, 1,
         "watcher must commit at most one signal decision per task per tick; audits={audits:?}"
+    );
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(issue
+        .labels
+        .contains(&labels::signal_processed_label(&first_signal_id)));
+    assert!(
+        !issue
+            .labels
+            .contains(&labels::signal_processed_label(&second_signal_id)),
+        "second signal must wait behind the first per-task signal decision"
     );
 }
 
@@ -559,7 +602,7 @@ async fn watcher_skips_review_rejected_tasks_even_if_signal_label_exists() {
 }
 
 #[tokio::test]
-async fn watcher_retries_signal_after_invariant_violation_without_marking_processed() {
+async fn watcher_reserves_signal_before_mutation_and_does_not_retry_on_failure() {
     let _guard = signal_test_guard().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init failed");
@@ -571,18 +614,14 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
         &task_id,
         &[
             labels::READY_FOR_REVIEW.to_string(),
-            labels::signal_kind("scope-drift"),
+            labels::signal_kind("retry-exhausted"),
         ],
     )
     .await;
     seed_completion_with_base_oid(pm.as_ref(), &task_id).await;
 
-    let signal = WorkerSignal::ScopeDrift {
-        signal_id: Uuid::new_v4(),
-        severity: 0.91,
-        reason: "retry mutation after rollback".into(),
-        estimated_subtasks: Some(12),
-    };
+    let signal_id = Uuid::new_v4();
+    let signal = retry_exhausted_signal(signal_id, &task_id);
     pm.advanced()
         .expect("advanced beads surface")
         .add_comment(&task_id, &signals::encode_comment(&signal))
@@ -590,10 +629,9 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
         .expect("signal comment");
 
     let first_mutation_id = Uuid::new_v4();
-    let second_mutation_id = Uuid::new_v4();
     let watcher = SignalWatcher::new(
         Arc::clone(&pm),
-        FixedMutationIdProposer::new(vec![first_mutation_id, second_mutation_id]),
+        FixedMutationIdProposer::new(vec![first_mutation_id]),
         TrivialScorer,
         common::server_builder::pro_feature_gate(),
     );
@@ -613,30 +651,22 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
         .await
         .expect("load task after first tick");
     assert!(
-        !first_issue
+        first_issue
             .labels
             .iter()
-            .any(|label| label.starts_with("spur:signal-processed:")),
-        "invariant-violation rollback must not mark the signal processed"
+            .any(|label| label == &labels::signal_processed_label(&signal_id)),
+        "failed mutation must keep the up-front signal reservation"
     );
 
-    let second_injector = tokio::spawn(inject_cycle_when_children_exist(
-        dir.path().to_path_buf(),
-        second_mutation_id,
-    ));
     tick_once_retrying_busy(&watcher, "second tick_once").await;
-    second_injector
-        .await
-        .expect("second injector task panicked")
-        .expect("second cycle injector failed");
 
     let issue = pm.get_issue(&task_id).await.expect("load task after retry");
     assert!(
-        !issue
+        issue
             .labels
             .iter()
-            .any(|label| label.starts_with("spur:signal-processed:")),
-        "failed mutation retries must stay eligible until a commit succeeds"
+            .any(|label| label == &labels::signal_processed_label(&signal_id)),
+        "processed reservation must continue to consume the failed signal"
     );
 
     let comments = pm
@@ -656,12 +686,12 @@ async fn watcher_retries_signal_after_invariant_violation_without_marking_proces
         .count();
 
     assert_eq!(
-        mutation_plan_count, 2,
-        "watcher must retry the same signal on a later tick after invariant violation: {audits:?}"
+        mutation_plan_count, 1,
+        "watcher must not retry a signal reserved before a failed mutation: {audits:?}"
     );
     assert_eq!(
-        violation_count, 2,
-        "each failed retry should leave an invariant-violation breadcrumb: {audits:?}"
+        violation_count, 1,
+        "the single failed mutation should leave one invariant-violation breadcrumb: {audits:?}"
     );
 }
 
@@ -673,6 +703,7 @@ async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
 
     let pm = beads_pm(dir.path()).await;
     let task_id = build_single_task_plan(pm.as_ref(), "signal-exact-dedup-1").await;
+    let new_signal_id = Uuid::new_v4();
     add_labels_individually(
         pm.as_ref(),
         &task_id,
@@ -695,7 +726,7 @@ async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
     .await
     .expect("add old processed label");
 
-    let new_signal = scope_drift_signal(Uuid::new_v4());
+    let new_signal = scope_drift_signal(new_signal_id);
     pm.advanced()
         .expect("advanced beads surface")
         .add_comment(&task_id, &signals::encode_comment(&new_signal))
@@ -717,13 +748,20 @@ async fn distinct_signal_on_task_with_prior_processed_label_is_not_skipped() {
         .await
         .expect("list comments after watcher tick");
     let audits = audit_sentinels(&comments);
-    let mutation_plan_count = audits
+    let escalation_count = audits
         .iter()
-        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::MutationPlan { .. }))
+        .filter(|sentinel| matches!(sentinel, AuditSentinelKind::EscalationRequested { .. }))
         .count();
 
     assert_eq!(
-        mutation_plan_count, 1,
-        "a distinct signal must be processed even when the task already carries a different signal-processed label; audits={audits:?}"
+        escalation_count, 1,
+        "a distinct signal must be escalated even when the task already carries a different signal-processed label; audits={audits:?}"
     );
+    let issue = pm.get_issue(&task_id).await.expect("get issue");
+    assert!(issue
+        .labels
+        .contains(&labels::signal_processed_label(&old_signal_id)));
+    assert!(issue
+        .labels
+        .contains(&labels::signal_processed_label(&new_signal_id)));
 }
