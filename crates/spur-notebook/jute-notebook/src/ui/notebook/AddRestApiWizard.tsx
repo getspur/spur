@@ -51,12 +51,9 @@ import {
 type SourceMode = RestApiSourceModeKey;
 type SourceFamily = DatasourceSourceFamilyKey;
 type WizardStep = DatasourceWizardStepKey;
+type StepVisualState = "active" | "complete" | "skipped" | "locked";
 type ProviderLoadState = "idle" | "loading" | "loaded";
-type ProviderFulfillmentStatus =
-  | "Ready"
-  | "Candidate"
-  | "Blocked"
-  | "Catalog";
+type ProviderFulfillmentStatus = "Ready" | "Candidate" | "Blocked" | "Catalog";
 type CredentialField = {
   key: string;
   label: string;
@@ -84,6 +81,9 @@ export type AddRestApiWizardProps = {
 
 const STEPS: readonly { key: WizardStep; label: string; detail: string }[] =
   DATASOURCE_WIZARD_STEPS;
+const ALL_STEP_INDEXES = STEPS.map((_, index) => index);
+const REST_API_STEP_INDEXES = [0, 2, 3, 4] as const;
+const RSS_STEP_INDEXES = [0, 4] as const;
 
 const KNOWN_BASE_URLS: Record<string, string> = {
   airtable: "https://api.airtable.com",
@@ -682,10 +682,10 @@ export default function AddRestApiWizard({
       ? rssFamilySelected
         ? "Add datasource"
         : !restFamilySelected
-        ? "Attach datasource"
-        : editMode
-          ? "Save changes"
-          : "Add datasource"
+          ? "Attach datasource"
+          : editMode
+            ? "Save changes"
+            : "Add datasource"
       : manifestPrefillMode && step === "auth"
         ? "Add datasource"
         : step === "source" && sourceMode === "saved"
@@ -726,21 +726,36 @@ export default function AddRestApiWizard({
           </div>
           <ol className="flex gap-1 overflow-x-auto sm:block sm:space-y-1">
             {STEPS.map((wizardStep, index) => {
-              const active = index === stepIndex;
-              const complete = index < stepIndex;
+              const visualState = stepVisualState({
+                editMode,
+                index,
+                sourceFamily,
+                stepIndex,
+              });
+              const active = visualState === "active";
+              const complete = visualState === "complete";
+              const skipped = visualState === "skipped";
+              const navigable = active || complete;
+              const visualDetail = skipped
+                ? "not needed"
+                : editMode && index === 0
+                  ? "locked"
+                  : wizardStep.detail;
+              const stateLabel = skipped ? "not needed" : visualState;
               return (
                 <li className="min-w-28 sm:min-w-0" key={wizardStep.key}>
                   <button
+                    aria-current={active ? "step" : undefined}
+                    aria-label={`${wizardStep.label}, ${stateLabel}, ${visualDetail}`}
                     className={clsx(
                       "flex w-full items-start gap-2 rounded px-2 py-2 text-left transition-colors",
                       active
                         ? "bg-white text-gray-950 shadow-sm ring-1 ring-gray-200"
                         : "text-gray-400",
                       complete && "text-gray-700 hover:bg-white",
+                      skipped && "text-gray-500",
                     )}
-                    disabled={
-                      (editMode && index === 0) || (!complete && !active)
-                    }
+                    disabled={!navigable}
                     onClick={() => setStepIndex(index)}
                     type="button"
                   >
@@ -750,13 +765,17 @@ export default function AddRestApiWizard({
                         active && "border-indigo-600 bg-indigo-600 text-white",
                         complete &&
                           "border-green-200 bg-green-50 text-green-700",
+                        skipped && "border-gray-200 bg-gray-50 text-gray-400",
                         !active &&
                           !complete &&
+                          !skipped &&
                           "border-gray-300 bg-white text-gray-400",
                       )}
                     >
                       {complete ? (
                         <CheckIcon size={12} strokeWidth={2} />
+                      ) : skipped ? (
+                        "-"
                       ) : (
                         index + 1
                       )}
@@ -766,7 +785,7 @@ export default function AddRestApiWizard({
                         {wizardStep.label}
                       </span>
                       <span className="block truncate text-[11px] text-gray-400">
-                        {wizardStep.detail}
+                        {visualDetail}
                       </span>
                     </span>
                   </button>
@@ -2116,7 +2135,9 @@ function RssAttachStep({
         <input
           aria-label="Datasource name"
           className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
-          onChange={(event) => onDatasourceNameChange(event.currentTarget.value)}
+          onChange={(event) =>
+            onDatasourceNameChange(event.currentTarget.value)
+          }
           placeholder="rss"
           value={datasourceName}
         />
@@ -2263,6 +2284,37 @@ function ErrorBanner({ message }: { message: string }) {
   );
 }
 
+function stepVisualState({
+  editMode,
+  index,
+  sourceFamily,
+  stepIndex,
+}: {
+  editMode: boolean;
+  index: number;
+  sourceFamily: SourceFamily;
+  stepIndex: number;
+}): StepVisualState {
+  if (index === stepIndex) return "active";
+  if (editMode && index === 0) return "locked";
+
+  const flowStepIndexes = stepIndexesForSourceFamily(sourceFamily);
+  if (!flowStepIndexes.includes(index)) {
+    return index < stepIndex ? "skipped" : "locked";
+  }
+
+  if (index < stepIndex) return "complete";
+  return "locked";
+}
+
+function stepIndexesForSourceFamily(
+  sourceFamily: SourceFamily,
+): readonly number[] {
+  if (sourceFamily === "rest_api") return REST_API_STEP_INDEXES;
+  if (sourceFamily === "rss") return RSS_STEP_INDEXES;
+  return ALL_STEP_INDEXES;
+}
+
 function canContinueFromStep({
   connectionOnly,
   credentialFields,
@@ -2308,8 +2360,8 @@ function canContinueFromStep({
 
     return Boolean(
       sourceMode &&
-        (sourceMode !== "catalog" ||
-          (selectedProvider && !isBlockedProvider(selectedProvider))),
+      (sourceMode !== "catalog" ||
+        (selectedProvider && !isBlockedProvider(selectedProvider))),
     );
   }
 
