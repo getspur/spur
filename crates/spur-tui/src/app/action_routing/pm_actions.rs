@@ -46,6 +46,14 @@ impl App {
                 None
             }
 
+            Action::RetryPlanTask { plan_id, issue_id } => {
+                self.flash_hint_short(format!("Retrying task {issue_id}..."));
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::RetryPlanTask { plan_id, issue_id });
+                }
+                None
+            }
+
             Action::OpenIssueInBacklog { id } => {
                 let just_created = self.issue_browser.is_none();
                 if just_created {
