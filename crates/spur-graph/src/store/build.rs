@@ -42,6 +42,16 @@ struct ManifestQueryBytes<'a> {
 
 const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
     ManifestQueryBytes {
+        language: "c",
+        query: "tags",
+        bytes: include_bytes!("../../queries/c/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "c",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/c/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
         language: "cpp",
         query: "tags",
         bytes: include_bytes!("../../queries/cpp/tags.scm"),
@@ -72,6 +82,16 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         bytes: include_bytes!("../../queries/markdown/inline-spur-edges.scm"),
     },
     ManifestQueryBytes {
+        language: "lua",
+        query: "tags",
+        bytes: include_bytes!("../../queries/lua/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "lua",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/lua/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
         language: "python",
         query: "tags",
         bytes: include_bytes!("../../queries/python/tags.scm"),
@@ -90,6 +110,16 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         language: "rust",
         query: "spur-edges",
         bytes: include_bytes!("../../queries/rust/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "shell",
+        query: "tags",
+        bytes: include_bytes!("../../queries/shell/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "shell",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/shell/spur-edges.scm"),
     },
     ManifestQueryBytes {
         language: "typescript",
