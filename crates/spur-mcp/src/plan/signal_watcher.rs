@@ -170,7 +170,24 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                     .ok_or_else(|| {
                         anyhow::anyhow!("signal task {} missing spur:plan-id label", issue.id)
                     })?;
-                if let WorkerSignal::Escalate { reason, .. } = &signal {
+                let escalation_last_error = match &signal {
+                    WorkerSignal::Escalate { reason, .. } => Some(reason.clone()),
+                    WorkerSignal::ScopeDrift {
+                        severity,
+                        reason,
+                        estimated_subtasks,
+                        ..
+                    } => {
+                        let estimated_subtasks = estimated_subtasks
+                            .map(|count| count.to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        Some(format!(
+                            "scope_drift severity={severity:.2}: {reason} (estimated_subtasks={estimated_subtasks})"
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some(last_error) = escalation_last_error {
                     let (attempt, delegation_id, worker_branch) = escalation_audit_context(&audits);
                     let task_id = issue
                         .labels
@@ -181,7 +198,7 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                         plan_id: plan_id.to_string(),
                         task_id,
                         attempt,
-                        last_error: reason.clone(),
+                        last_error,
                         worker_branch,
                         delegation_id,
                     };
@@ -459,6 +476,148 @@ mod tests {
                     && task_id == "task-escalate"
                     && *attempt == 2
                     && last_error == &reason
+                    && worker_branch.as_deref() == Some("spur/worker-watch")
+                    && delegation_id.as_deref() == Some("del-watch")
+            )),
+            "watcher must emit EscalationRequested audit; audits={audits:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_drift_routes_to_brain_escalation_without_proposer() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir(dir.path().join(".beads")).expect("create .beads");
+        let pm = Arc::new(
+            spur_pm::PmService::try_new(None, true, false, dir.path(), None)
+                .await
+                .expect("pm service init")
+                .expect("beads pm service"),
+        );
+        let task_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "Escalate scope drift".into(),
+                description: Some("task body".into()),
+                issue_type: Some("task".into()),
+                labels: vec![
+                    crate::plan::labels::plan_id("plan-watch"),
+                    crate::plan::labels::plan_task_id("task-scope-drift"),
+                    crate::plan::labels::READY_FOR_REVIEW.to_string(),
+                    crate::plan::labels::signal_kind("scope-drift"),
+                ],
+                ..Default::default()
+            })
+            .await
+            .expect("create task issue");
+        let gate = Arc::new(spur_license::FeatureGate::new(
+            spur_license::policy::PolicyResolver::embedded(),
+        ));
+        let features =
+            std::collections::BTreeSet::from([spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED
+                .as_str()
+                .to_string()]);
+        gate.update_state(&spur_license::LicenseState::active_validated(
+            spur_license::Plan::Pro,
+            features,
+        ));
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            gate.as_ref(),
+        )
+        .expect("test feature gate should allow beads advanced");
+        let adv = pm.advanced().expect("advanced beads surface");
+        adv.add_comment(
+            &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Dispatch {
+                delegation_id: "del-watch".into(),
+                worker: "codex".into(),
+                attempt: 2,
+            }),
+        )
+        .await
+        .expect("dispatch audit");
+        adv.add_comment(
+            &task_id,
+            &audit_sentinel::encode_comment(&AuditSentinelKind::Completion {
+                delegation_id: "del-watch".into(),
+                completion_state: CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-watch".into()),
+                result_summary: Some("worker paused".into()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+            }),
+        )
+        .await
+        .expect("completion audit");
+        let signal_id = Uuid::new_v4();
+        let reason = "auth refactor pulls in token store".to_string();
+        let expected_last_error =
+            "scope_drift severity=0.82: auth refactor pulls in token store (estimated_subtasks=3)"
+                .to_string();
+        adv.add_comment(
+            &task_id,
+            &encode_signal(&WorkerSignal::ScopeDrift {
+                signal_id,
+                severity: 0.82,
+                reason,
+                estimated_subtasks: Some(3),
+            }),
+        )
+        .await
+        .expect("signal comment");
+
+        let watcher = SignalWatcher::new(
+            Arc::clone(&pm),
+            PanicProposer,
+            PanicScorer,
+            crate::server::pro_feature_gate(),
+        );
+
+        watcher.tick_once().await.expect("watcher tick");
+
+        let issue = pm.get_issue(&task_id).await.expect("updated issue");
+        assert!(
+            !issue
+                .labels
+                .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
+            "escalation must remove ready-for-review label; labels={:?}",
+            issue.labels
+        );
+        assert!(
+            issue
+                .labels
+                .contains(&crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()),
+            "escalation must add signal:escalated label; labels={:?}",
+            issue.labels
+        );
+        assert!(
+            issue
+                .labels
+                .contains(&crate::plan::labels::signal_processed_label(&signal_id)),
+            "escalation must mark signal processed; labels={:?}",
+            issue.labels
+        );
+
+        let comments = adv.list_comments(&task_id).await.expect("comments");
+        let audits = comments
+            .iter()
+            .filter_map(|comment| audit_sentinel::parse_comment(&comment.body))
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert!(
+            audits.iter().any(|audit| matches!(
+                audit,
+                AuditSentinelKind::EscalationRequested {
+                    plan_id,
+                    task_id,
+                    attempt,
+                    last_error,
+                    worker_branch,
+                    delegation_id,
+                } if plan_id == "plan-watch"
+                    && task_id == "task-scope-drift"
+                    && *attempt == 2
+                    && last_error == &expected_last_error
                     && worker_branch.as_deref() == Some("spur/worker-watch")
                     && delegation_id.as_deref() == Some("del-watch")
             )),
