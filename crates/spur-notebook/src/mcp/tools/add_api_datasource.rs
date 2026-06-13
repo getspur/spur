@@ -34,7 +34,7 @@ pub fn tool() -> Tool {
                 "name": { "type": "string", "minLength": 1 },
                 "source": {
                     "type": "string",
-                    "enum": ["polymarket"]
+                    "enum": ["polymarket", "rss"]
                 }
             },
             "additionalProperties": false

@@ -856,6 +856,9 @@ const API_DATASOURCE_GROUP: &str = "API";
 const POLYMARKET_SOURCE: &str = "polymarket";
 
 #[cfg(feature = "datasource-introspect")]
+const RSS_SOURCE: &str = "rss";
+
+#[cfg(feature = "datasource-introspect")]
 const POLYMARKET_GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 
 #[cfg(feature = "datasource-introspect")]
@@ -863,7 +866,7 @@ const POLYMARKET_CLOB_BASE: &str = "https://clob.polymarket.com";
 
 #[cfg(feature = "datasource-introspect")]
 const NANGO_PROVIDERS_SNAPSHOT: &str =
-    include_str!("../../../../resources/nango/packages/providers/providers.yaml");
+    include_str!("../../jute-notebook/src-tauri/src/nango_providers_snapshot.yaml");
 
 #[cfg(feature = "datasource-introspect")]
 const DATASOURCE_SETUP_SENTINEL: &str = "# SPUR datasource setup cell v1";
@@ -1535,15 +1538,22 @@ fn api_datasource_tables(source: &str) -> Result<Vec<jute::commands::Table>, Bri
     use spur_rest_table_gateway::adapter::Adapter as _;
 
     let source = normalize_api_datasource_source(source)?;
-    let adapter = match source.as_str() {
-        POLYMARKET_SOURCE => spur_rest_table_gateway::adapters::polymarket::PolymarketAdapter::new(
-            POLYMARKET_GAMMA_BASE,
-            POLYMARKET_CLOB_BASE,
-        )
-        .map_err(|error| BridgeError::Handler {
-            code: "api_datasource_catalog_failed".to_string(),
-            message: error.to_string(),
-        })?,
+    let (adapter_name, catalog) = match source.as_str() {
+        POLYMARKET_SOURCE => {
+            let adapter = spur_rest_table_gateway::adapters::polymarket::PolymarketAdapter::new(
+                POLYMARKET_GAMMA_BASE,
+                POLYMARKET_CLOB_BASE,
+            )
+            .map_err(|error| BridgeError::Handler {
+                code: "api_datasource_catalog_failed".to_string(),
+                message: error.to_string(),
+            })?;
+            (adapter.name().to_string(), adapter.catalog())
+        }
+        RSS_SOURCE => {
+            let adapter = spur_rest_table_gateway::adapters::rss::RssAdapter::new();
+            (adapter.name().to_string(), adapter.catalog())
+        }
         _ => {
             return Err(BridgeError::Handler {
                 code: "unsupported_api_datasource".to_string(),
@@ -1551,12 +1561,8 @@ fn api_datasource_tables(source: &str) -> Result<Vec<jute::commands::Table>, Bri
             });
         }
     };
-    let adapter_name = adapter.name().to_string();
 
-    Ok(datasource_tables_from_catalog(
-        &adapter_name,
-        adapter.catalog(),
-    ))
+    Ok(datasource_tables_from_catalog(&adapter_name, catalog))
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -4729,6 +4735,105 @@ score = { json = "$.score", type = "Int64" }
                         jute::commands::Column {
                             name: "size".to_string(),
                             sql_type: "DOUBLE".to_string(),
+                        },
+                    ],
+                    row_count: None,
+                },
+            ]
+        );
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn add_api_datasource_command_builds_rss_catalog_entry() {
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "add_api_datasource",
+            "name": "feeds",
+            "source": "rss"
+        }))
+        .expect("add_api_datasource command deserializes");
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry = datasource_entry_from_response(&response);
+        assert_eq!(entry.name, "feeds");
+        assert_eq!(entry.path, "rss");
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
+        assert_eq!(entry.group.as_deref(), Some("API"));
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.row_count, None);
+        assert_eq!(
+            entry.tables,
+            vec![
+                jute::commands::Table {
+                    name: "rss_feed".to_string(),
+                    columns: vec![
+                        jute::commands::Column {
+                            name: "url".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "title".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "description".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "site_url".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                    ],
+                    row_count: None,
+                },
+                jute::commands::Table {
+                    name: "rss_entries".to_string(),
+                    columns: vec![
+                        jute::commands::Column {
+                            name: "feed_url".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "guid".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "title".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "url".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "description".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "published_at".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "author".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "categories".to_string(),
+                            sql_type: "VARCHAR".to_string(),
                         },
                     ],
                     row_count: None,

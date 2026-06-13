@@ -20,7 +20,7 @@ use spur_rest_table_gateway::{
         manifest::Manifest, manifest_adapter::ManifestAdapter, ActionRequest, Adapter, ArgLocation,
         ArgSpec, ResolvedAuth, ScalarValue, ScanRequest, TableKind,
     },
-    adapters::polymarket::PolymarketAdapter,
+    adapters::{polymarket::PolymarketAdapter, rss::RssAdapter},
     vtab::{
         bridge::IoBridge,
         table_fn::{ApiTableExtra, ApiTableVTab},
@@ -29,9 +29,13 @@ use spur_rest_table_gateway::{
 
 const DEFAULT_GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 const DEFAULT_CLOB_BASE: &str = "https://clob.polymarket.com";
+const DEFAULT_RSSHUB_BASE: &str = "https://rsshub.app";
 const CHUNK_SIZE: usize = 2048;
 
 thread_local! {
+    static FUNCTION_NAMED_PARAMETERS: std::cell::RefCell<Vec<(String, DataType)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+
     // Registration is single-threaded per connection; thread-local isolates each
     // register_*->named_parameters() handshake and cannot race across threads.
     static ACTION_NAMED_PARAMETERS: std::cell::RefCell<Vec<(String, DataType)>> =
@@ -44,10 +48,17 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
         env::var("SPUR_POLYMARKET_GAMMA_BASE").unwrap_or_else(|_| DEFAULT_GAMMA_BASE.to_string());
     let clob_base =
         env::var("SPUR_POLYMARKET_CLOB_BASE").unwrap_or_else(|_| DEFAULT_CLOB_BASE.to_string());
+    let rsshub_base =
+        env::var("SPUR_RSSHUB_BASE").unwrap_or_else(|_| DEFAULT_RSSHUB_BASE.to_string());
 
     let adapter: Arc<dyn Adapter> = Arc::new(PolymarketAdapter::new(&gamma_base, &clob_base)?);
     let bridge = Arc::new(IoBridge::new());
     register_adapter(&con, adapter, Arc::clone(&bridge))?;
+    register_adapter(
+        &con,
+        Arc::new(RssAdapter::with_rsshub_base(&rsshub_base)),
+        Arc::clone(&bridge),
+    )?;
 
     if let Ok(manifest_path) = env::var("SPUR_REST_MANIFEST") {
         let manifest_toml = fs::read_to_string(manifest_path)?;
@@ -201,9 +212,7 @@ fn register_adapter(
                     schema: table.schema,
                     arg_names,
                 };
-                con.register_table_function_with_extra_info::<ApiFunctionVTab, _>(
-                    &fn_name, &extra,
-                )?;
+                register_api_table_function(con, &fn_name, &extra)?;
                 registered += 1;
             }
             TableKind::Action {
@@ -232,6 +241,18 @@ fn register_adapter(
     Ok(registered)
 }
 
+fn register_api_table_function(
+    con: &Connection,
+    fn_name: &str,
+    extra: &ApiFunctionExtra,
+) -> Result<(), Box<dyn Error>> {
+    let named_parameters = table_function_named_parameter_types(&extra.arg_names);
+    with_function_named_parameters_set(named_parameters, || {
+        con.register_table_function_with_extra_info::<ApiFunctionVTab, _>(fn_name, extra)
+    })?;
+    Ok(())
+}
+
 fn register_action_table_function(
     con: &Connection,
     fn_name: &str,
@@ -244,8 +265,29 @@ fn register_action_table_function(
     Ok(())
 }
 
+fn read_function_named_parameters() -> Vec<(String, DataType)> {
+    FUNCTION_NAMED_PARAMETERS.with(|c| c.borrow().clone())
+}
+
 fn read_action_named_parameters() -> Vec<(String, DataType)> {
     ACTION_NAMED_PARAMETERS.with(|c| c.borrow().clone())
+}
+
+fn with_function_named_parameters_set<R>(
+    params: Vec<(String, DataType)>,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct ClearFunctionNamedParameters;
+
+    impl Drop for ClearFunctionNamedParameters {
+        fn drop(&mut self) {
+            FUNCTION_NAMED_PARAMETERS.with(|c| c.borrow_mut().clear());
+        }
+    }
+
+    FUNCTION_NAMED_PARAMETERS.with(|c| *c.borrow_mut() = params);
+    let _guard = ClearFunctionNamedParameters;
+    f()
 }
 
 /// Set the param list, run `f` (which performs DuckDB registration that calls
@@ -265,6 +307,19 @@ fn with_action_named_parameters_set<R>(
     ACTION_NAMED_PARAMETERS.with(|c| *c.borrow_mut() = params);
     let _guard = ClearActionNamedParameters;
     f()
+}
+
+fn table_function_named_parameter_types(arg_names: &[String]) -> Vec<(String, DataType)> {
+    arg_names
+        .iter()
+        .map(|name| {
+            let ty = match name.as_str() {
+                "depth" | "limit" => DataType::Int64,
+                _ => DataType::Utf8,
+            };
+            (name.clone(), ty)
+        })
+        .collect()
 }
 
 fn action_named_parameter_types(
@@ -398,16 +453,17 @@ impl VTab for ApiFunctionVTab {
     }
 
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-        Some(vec![
-            (
-                "token_id".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Varchar),
-            ),
-            (
-                "depth".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Bigint),
-            ),
-        ])
+        Some(
+            read_function_named_parameters()
+                .iter()
+                .map(|(name, data_type)| {
+                    (
+                        name.clone(),
+                        LogicalTypeHandle::from(action_arg_duckdb_type(data_type)),
+                    )
+                })
+                .collect(),
+        )
     }
 }
 
@@ -591,19 +647,23 @@ fn bind_named_args(
     let mut args = Vec::new();
     for arg_name in arg_names {
         match arg_name.as_str() {
-            "token_id" => {
-                let token_id = bind
-                    .get_named_parameter("token_id")
-                    .ok_or("polymarket_orderbook requires token_id")?
-                    .to_string();
-                args.push(ScalarValue::Utf8(token_id));
-            }
             "depth" => {
                 if let Some(depth) = bind.get_named_parameter("depth") {
                     args.push(ScalarValue::Int64(depth.to_int64()));
                 }
             }
-            other => return Err(format!("unsupported table function argument: {other}").into()),
+            "limit" => {
+                if let Some(limit) = bind.get_named_parameter("limit") {
+                    args.push(ScalarValue::Int64(limit.to_int64()));
+                }
+            }
+            other => {
+                let value = bind
+                    .get_named_parameter(other)
+                    .ok_or_else(|| format!("table function requires {other}"))?
+                    .to_string();
+                args.push(ScalarValue::Utf8(value));
+            }
         }
     }
     Ok(args)
