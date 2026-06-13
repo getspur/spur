@@ -429,6 +429,10 @@ pub(crate) fn python_config() -> LanguageConfig {
                 "spur-edges",
                 include_str!("../../queries/python/spur-edges.scm"),
             ),
+            (
+                "spur-notebook-facts",
+                include_str!("../../queries/python/spur-notebook-facts.scm"),
+            ),
         ],
         definition_kind_map: &[
             ("definition.function", NodeKind::Function),
@@ -449,6 +453,10 @@ const TYPESCRIPT_QUERIES: &[(&str, &str)] = &[
         "spur-edges",
         include_str!("../../queries/typescript/spur-edges.scm"),
     ),
+    (
+        "spur-notebook-facts",
+        include_str!("../../queries/typescript/spur-notebook-facts.scm"),
+    ),
 ];
 
 // TSX reuses the TypeScript tags/edges and adds JSX render edges. The JSX
@@ -459,6 +467,10 @@ const TSX_QUERIES: &[(&str, &str)] = &[
     (
         "spur-edges",
         include_str!("../../queries/typescript/spur-edges.scm"),
+    ),
+    (
+        "spur-notebook-facts",
+        include_str!("../../queries/typescript/spur-notebook-facts.scm"),
     ),
     (
         "jsx-edges",
