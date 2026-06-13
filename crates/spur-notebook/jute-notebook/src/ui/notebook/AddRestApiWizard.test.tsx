@@ -4,8 +4,8 @@ import {
   fireEvent,
   render,
   screen,
-  within,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -356,6 +356,10 @@ function renderWizard(onClose = vi.fn()) {
   return onClose;
 }
 
+function wizardStepButton(label: string) {
+  return screen.getByRole("button", { name: new RegExp(`^${label}\\b`) });
+}
+
 async function chooseStripeProvider() {
   fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
 
@@ -495,6 +499,30 @@ describe("AddRestApiWizard", () => {
     ).toBeInTheDocument();
   });
 
+  test("edit_mode_locks_source_and_marks_locate_as_not_needed", async () => {
+    const [savedConnection] = savedConnectionsResponse().result.data;
+
+    render(
+      <AddRestApiWizard
+        editConnection={savedConnection}
+        open
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to Stripe" }),
+    ).toBeInTheDocument();
+
+    const sourceStep = wizardStepButton("Source");
+    expect(sourceStep).toHaveTextContent("locked");
+    expect(sourceStep).toBeDisabled();
+
+    const locateStep = wizardStepButton("Locate");
+    expect(locateStep).toHaveTextContent("not needed");
+    expect(locateStep).toBeDisabled();
+  });
+
   test("source_state_presents_datasource_families_and_preserves_rest_route", () => {
     renderWizard();
 
@@ -522,6 +550,42 @@ describe("AddRestApiWizard", () => {
     expect(
       screen.getByRole("button", { name: /Provider catalog/i }),
     ).toBeInTheDocument();
+  });
+
+  test("rest_route_marks_locate_step_as_not_needed_after_source", async () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Connect a custom REST API",
+      }),
+    ).toBeInTheDocument();
+
+    const locateStep = wizardStepButton("Locate");
+    expect(locateStep).toHaveTextContent("not needed");
+    expect(locateStep).toBeDisabled();
+    expect(wizardStepButton("Source")).toBeEnabled();
+  });
+
+  test("rss_route_marks_intermediate_steps_as_not_needed_after_source", () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /RSS \/ RSSHub/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Add RSS / RSSHub" }),
+    ).toBeInTheDocument();
+
+    for (const label of ["Locate", "Auth", "Inspect"]) {
+      const skippedStep = wizardStepButton(label);
+      expect(skippedStep).toHaveTextContent("not needed");
+      expect(skippedStep).toBeDisabled();
+    }
+    expect(wizardStepButton("Source")).toBeEnabled();
   });
 
   test("rss_family_adds_backend_datasource_for_rsshub_catalog", async () => {
