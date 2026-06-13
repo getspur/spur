@@ -102,7 +102,7 @@ edges):
 | Co-change ring | `v_file_cochange` | `file_a, file_b, cochange_count, has_static_edge` |
 | Hotspots | `v_fix_hotspots` | `file_path, commits, fix_commits, fix_pct` |
 | Subgraph + reachability | `duckpgq_nodes`, `duckpgq_edges` | `edge_kind in (calls, references_other, references_hof, calls_dyn)` |
-| Co-change graph | `onager_edges` | temporal / co-change edges |
+| Co-change graph | `v_file_cochange` | `file_a, file_b, cochange_count, has_static_edge` |
 | Live index counts | `_meta` | `node_count, resolved_edge_count, graph_content_hash` |
 
 **Structural caution (verified via code graph + spur-analyst).** The original draft
@@ -152,9 +152,10 @@ transport.
 ```
 app_gallery/code-graph-workbench/
 ├── spur-app.json        # schema spur.app/v1, open_mode "app",
-│                        # runtime.features [frontend-cells, anywidget-afm, mcp-tools, ports-arrow],
+│                        # capabilities { "active_output_scripts": true }
 │                        # mcp_server { type python, entry server/main.py, requirements server/requirements.txt }
 │                        # skill "skill/SKILL.md"
+│                        # sdk { "typescript": "sdk" }
 ├── app.ipynb            # the DAG below (declares the source ports)
 ├── skill/
 │   └── SKILL.md         # tells the sidebar agent when/how to call wb_* tools
@@ -169,8 +170,12 @@ app_gallery/code-graph-workbench/
 │       ├── subgraph.py       # wb_subgraph(symbol, depth, edge_kinds)
 │       ├── scorecard.py      # wb_scorecard(symbol)
 │       └── cochange.py       # wb_cochange(file)
-├── README.md
-└── tests/               # pytest (mirrors html_video/tests)
+├── conftest.py
+├── tests/               # pytest (mirrors html_video/tests)
+├── sdk/
+│   ├── call_tool.ts
+│   └── wire.ts
+└── README.md
 ```
 
 **Declared source ports** (`cell.metadata.spur.dag` / `frontend`):
@@ -195,8 +200,8 @@ Each `wb_*` tool is a typed FastMCP function (html_video pattern):
    `v_symbol_scorecard`; `wb_subgraph` → bounded `duckpgq_*` + a shortest path; cheaper
    graph hops may call `code_*` via `SPUR_NOTEBOOK_MCP_SOCKET`).
 3. Build a `pyarrow.Table`, serialize to Arrow IPC bytes.
-4. `notebook_push_source(port, ipc_bytes)` over `SPUR_NOTEBOOK_MCP_SOCKET` to paint the
-   evidence source port (queues the engine → cascade).
+4. `spur_app.notebook.NotebookClient.push_source(port, ipc_bytes)` to call
+   `notebook_push_source` and paint the evidence source port (queues the engine → cascade).
 5. Return a small JSON result including the `stable_symbol_id`s pushed, so the agent's
    `[n1]`/`[n2]` citation markers map deterministically onto the painted nodes.
 
@@ -248,6 +253,9 @@ enhancement.
   ports stay rendered.
 - **Concurrency:** read-only DuckDB open; retry transient locks; engine debounces pushes
   per source.
+- **Installed app isolation:** the Deno kernel runs config-free
+  (`DENO_NO_PACKAGE_JSON=1` in the bundled kernelspec), so installed apps under
+  `~/.spur/apps/` are immune to ancestor `package.json` resolution breakage.
 
 ## 9. Testing
 
@@ -263,14 +271,19 @@ enhancement.
 - **Cascade:** integration test that a `notebook_push_source` on each evidence port reruns
   the bound widget cell (mirrors `push_source_reruns_only_downstream_cells_in_dependency_order`).
 - **App mode:** smoke test that the frontend cells render in document order.
+- **Doctor:** run `notebook_app_doctor` (exists) before pack.
 - **Packaging:** `notebook_export_spur_app` produces a clean `.spurapp`; import preflight
-  passes (deps + `mcp_server` + `skill/SKILL.md` present).
+  passes (deps + `mcp_server` + `skill/SKILL.md` present). Packaging acceptance depends on
+  the packer-parity precondition (authored manifest + `server/` + `skill/` + `sdk/` bundled).
 
 ## 10. Plan preconditions & deferred work
 
-- **Task 0 — API-drift check:** re-verify `ChatPanel`, `chat_turn`, `SidebarChat`,
-  `resolve_app_scope`, `push_source`/`SourcePush`, and `notebook_push_source` against HEAD
-  before building.
+- **Task 0 — API-drift check:** complete on 2026-06-13; re-verified `ChatPanel`,
+  `chat_turn`, `SidebarChat`, `resolve_app_scope`, `push_source`/`SourcePush`, and
+  `notebook_push_source` against HEAD. All §2 primitives are verified; `AppScope` lives in
+  `crates/spur-notebook/src/sidebar_chat/types.rs`.
+- **Preconditions (epic'd):** `spur_app.notebook.NotebookClient`; packer parity; doctor
+  plugin-prefix gate; app package seed.
 - **Task 1 — app package:** create `app_gallery/code-graph-workbench/` with
   `spur-app.json`, `app.ipynb`, `skill/SKILL.md`, and the Python FastMCP evidence server.
 - **Task 2 — evidence tools:** implement and test `wb_blast_radius`, `wb_subgraph`,
