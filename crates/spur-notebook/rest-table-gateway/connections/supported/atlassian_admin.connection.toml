@@ -1,0 +1,17 @@
+# Reviewed Atlassian Cloud Admin manifest for the REST table gateway.
+# Source grounding: Nango atlassian-admin auth metadata + Nango Atlassian Admin docs.
+
+[source]
+name = "atlassian_admin"
+base_url = "https://api.atlassian.com"
+auth = { scheme = "bearer", env = "ATLASSIAN_ADMIN_API_KEY" }
+connection_config = ["organizationId"]
+
+[[table]]
+name = "organizations"
+path = "/admin/v1/orgs"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }

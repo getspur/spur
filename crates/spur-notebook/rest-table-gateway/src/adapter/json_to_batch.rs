@@ -23,6 +23,9 @@ pub fn arrow_type(ty: &str) -> Result<DataType> {
 
 /// Resolve a simple `$.a.b` dotted JSON path against a row. Returns None when absent/null.
 pub fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
+    if path == "$" {
+        return (!row.is_null()).then_some(row);
+    }
     let p = path.strip_prefix("$.").unwrap_or(path);
     let mut cur = row;
     for seg in p.split('.') {
@@ -98,7 +101,7 @@ pub fn rows_to_batch(cols: &[ColumnExtract], rows: &[Value]) -> Result<RecordBat
 
 #[cfg(test)]
 mod tests {
-    use arrow_array::{Array, BooleanArray, Float64Array, Int64Array};
+    use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
     use arrow_schema::DataType;
     use serde_json::json;
 
@@ -184,5 +187,24 @@ mod tests {
             .expect("n column");
         assert_eq!(n.value(0), 42);
         assert!(!n.is_null(0));
+    }
+
+    #[test]
+    fn extracts_root_scalar_rows() {
+        let rows = vec![json!("signinattempts")];
+        let cols = vec![ColumnExtract {
+            name: "feature".to_string(),
+            data_type: DataType::Utf8,
+            json_path: "$".to_string(),
+        }];
+
+        let batch = rows_to_batch(&cols, &rows).expect("batch");
+
+        let feature = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("feature column");
+        assert_eq!(feature.value(0), "signinattempts");
     }
 }

@@ -1,8 +1,10 @@
 pub mod apis_guru;
 pub mod crosswalk;
+pub mod fulfillment;
 pub mod generate;
 pub mod provider;
 
+pub const API_GURU_FULFILLMENT_MATRIX_JSON: &str = "api_guru_fulfillment_matrix.json";
 pub const APIS_GURU_CROSSWALK_CSV: &str = "apis_guru_crosswalk.csv";
 pub const COVERAGE_SUMMARY_JSON: &str = "coverage_summary.json";
 pub const PROVIDER_HARVEST_CANDIDATES_CSV: &str = "provider_harvest_candidates.csv";
@@ -16,5 +18,9 @@ pub use crosswalk::{
     build_crosswalk, build_crosswalk_report, CrosswalkDiagnostics, CrosswalkOptions,
     CrosswalkReport, ProviderSpecCrosswalk,
 };
-pub use generate::{generate_reviewed_manifest, GeneratedReviewedManifest};
+pub use fulfillment::ProviderFulfillmentStatus;
+pub use generate::{
+    candidate_provider_blocked_reason, generate_candidate_manifest, generate_reviewed_manifest,
+    CandidateBlockedReason, GeneratedCandidateManifest, GeneratedReviewedManifest,
+};
 pub use provider::{provider_catalog_from_yaml, ProviderCatalogEntry, ProviderSeedClass};

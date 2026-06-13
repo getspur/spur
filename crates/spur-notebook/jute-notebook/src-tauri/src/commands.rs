@@ -212,6 +212,12 @@ pub struct ProviderSummary {
     pub auth_mode: String,
     /// Support level for the bundled catalog entry.
     pub support_level: String,
+    /// Provider-level fulfillment status for API-as-table readiness.
+    pub fulfillment_status: String,
+    /// Machine-readable reason when fulfillment is blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub blocked_reason: Option<String>,
     /// API spec source key when this row came from an experimental spec crosswalk.
     #[ts(type = "string | null")]
     pub spec_source_key: Option<String>,

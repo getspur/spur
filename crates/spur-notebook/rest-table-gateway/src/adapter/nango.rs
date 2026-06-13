@@ -179,6 +179,7 @@ fn auth_cfg(name: &str, p: &ProviderEntry, upper: &str) -> AuthCfg {
             user_env: format!("{upper}_USER"),
             pass_env: format!("{upper}_PASS"),
         },
+        Some("NONE") => AuthCfg::None,
         _ => {
             if let Some(token_url) = p.token_url.clone() {
                 AuthCfg::Oauth2Refresh {

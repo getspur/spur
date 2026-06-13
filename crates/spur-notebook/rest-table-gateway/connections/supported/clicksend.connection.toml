@@ -1,0 +1,17 @@
+# Reviewed ClickSend manifest for the REST table gateway.
+# Source grounding: Nango clicksend auth metadata + APIs.guru clicksend.com spec.
+
+[source]
+name = "clicksend"
+base_url = "https://rest.clicksend.com"
+auth = { scheme = "basic", user_env = "CLICKSEND_USERNAME", pass_env = "CLICKSEND_API_KEY" }
+
+[[table]]
+name = "account"
+path = "/v3/account"
+response_path = "$.data"
+
+[table.columns]
+user_id = { json = "$.user_id", type = "Int64" }
+username = { json = "$.username", type = "Utf8" }
+email = { json = "$.email", type = "Utf8" }

@@ -482,6 +482,10 @@ function isProviderSummary(value: unknown): value is ProviderSummary {
     typeof candidate.tier === "string" &&
     typeof candidate.authMode === "string" &&
     typeof candidate.supportLevel === "string" &&
+    typeof candidate.fulfillmentStatus === "string" &&
+    (candidate.blockedReason === undefined ||
+      candidate.blockedReason === null ||
+      typeof candidate.blockedReason === "string") &&
     (candidate.specSourceKey === null ||
       typeof candidate.specSourceKey === "string") &&
     (candidate.specUrl === null || typeof candidate.specUrl === "string") &&

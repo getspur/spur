@@ -6,18 +6,21 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use spur_rest_table_gateway::adapter::catalog::{
-    build_crosswalk_report, generate_reviewed_manifest, provider_catalog_from_yaml,
-    ApisGuruSnapshot, CrosswalkDiagnostics, CrosswalkOptions, ProviderCatalogEntry,
-    ProviderSeedClass, ProviderSpecCrosswalk, APIS_GURU_CROSSWALK_CSV, COVERAGE_SUMMARY_JSON,
-    PROVIDER_HARVEST_CANDIDATES_CSV, PROVIDER_SPEC_CROSSWALK_JSON, TABLE_SEED_CLASSES_CSV,
+    build_crosswalk_report, candidate_provider_blocked_reason, generate_candidate_manifest,
+    generate_reviewed_manifest, provider_catalog_from_yaml, ApisGuruSnapshot, CrosswalkDiagnostics,
+    CrosswalkOptions, ProviderCatalogEntry, ProviderFulfillmentStatus, ProviderSeedClass,
+    ProviderSpecCrosswalk, APIS_GURU_CROSSWALK_CSV, API_GURU_FULFILLMENT_MATRIX_JSON,
+    COVERAGE_SUMMARY_JSON, PROVIDER_HARVEST_CANDIDATES_CSV, PROVIDER_SPEC_CROSSWALK_JSON,
+    TABLE_SEED_CLASSES_CSV,
 };
+use spur_rest_table_gateway::adapter::default_http_client;
 use spur_rest_table_gateway::adapter::manifest::Manifest;
-use spur_rest_table_gateway::adapter::nango::{
-    manifest_to_toml, parse_providers, provider_to_manifest_stub,
-};
+use spur_rest_table_gateway::adapter::nango::parse_providers;
 
 const NANGO_LICENSE: &str = "Elastic License 2.0";
 const EXPERIMENTAL_MANIFEST_INDEX_JSON: &str = "experimental_manifest_index.json";
+const SUPPORTED_CONNECTIONS_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/connections/supported");
 const USAGE: &str = "usage: nango-catalog <providers.yaml> <apis-guru-list.json> <out_dir> --nango-commit <sha> --apis-guru-fetched-at <timestamp> [--reviewed-source <provider>=<spec-path>] [--experimental-crosswalk-manifests]";
 
 fn main() {
@@ -58,6 +61,20 @@ fn run() -> Result<(), Box<dyn Error>> {
     write_provider_harvest(&args.out_dir, &providers)?;
     write_seed_classes(&args.out_dir, &report.diagnostics.providers_by_seed_class)?;
     write_apis_guru_crosswalk(&args.out_dir, &report.rows)?;
+    let candidate_generations = if args.experimental_crosswalk_manifests {
+        Some(build_candidate_generations(&providers_yaml, &report.rows)?)
+    } else {
+        None
+    };
+    let fulfillment_matrix = build_fulfillment_matrix(
+        &providers_yaml,
+        &report.rows,
+        candidate_generations.as_deref(),
+    )?;
+    write_json(
+        &args.out_dir.join(API_GURU_FULFILLMENT_MATRIX_JSON),
+        &fulfillment_matrix,
+    )?;
     write_json(
         &args.out_dir.join(PROVIDER_SPEC_CROSSWALK_JSON),
         &ProviderSpecCrosswalkArtifact {
@@ -80,7 +97,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     )?;
     write_reviewed_manifests(&args.out_dir, &providers_yaml, &args.reviewed_sources)?;
     if args.experimental_crosswalk_manifests {
-        write_experimental_crosswalk_manifests(&args.out_dir, &providers_yaml, &report.rows)?;
+        write_experimental_crosswalk_manifests(
+            &args.out_dir,
+            &report.rows,
+            candidate_generations.as_deref().expect(
+                "candidate generations should be present when experimental output is enabled",
+            ),
+        )?;
     }
 
     println!(
@@ -238,47 +261,279 @@ fn write_reviewed_manifests(
     Ok(())
 }
 
-fn write_experimental_crosswalk_manifests(
-    out_dir: &Path,
+fn build_fulfillment_matrix(
     providers_yaml: &str,
     rows: &[ProviderSpecCrosswalk],
-) -> Result<(), Box<dyn Error>> {
+    candidate_generations: Option<&[CandidateGeneration]>,
+) -> Result<ApiGuruFulfillmentMatrix, Box<dyn Error>> {
     let providers = parse_providers(providers_yaml)?;
+    let supported = load_supported_manifest_summaries()?;
+    let candidate_paths = candidate_manifest_paths(rows);
+    let mut matrix_rows = Vec::with_capacity(rows.len());
+
+    for (index, (row, candidate_path)) in rows.iter().zip(candidate_paths).enumerate() {
+        if let Some(summary) = supported_manifest_for(&supported, &row.provider) {
+            matrix_rows.push(ApiGuruFulfillmentRow {
+                provider_key: row.provider.clone(),
+                spec_source_key: row.spec_source_key.clone(),
+                spec_url: row.url.clone(),
+                status: ProviderFulfillmentStatus::Ready,
+                blocked_reason: None,
+                supported_manifest: Some(summary.path.clone()),
+                candidate_manifest: None,
+                table_count: summary.table_count,
+                action_count: summary.action_count,
+            });
+            continue;
+        }
+
+        if let Some(candidate_generations) = candidate_generations {
+            let generation = candidate_generations
+                .get(index)
+                .ok_or("candidate generation count did not match crosswalk rows")?;
+            match &generation.outcome {
+                CandidateGenerationOutcome::Candidate { table_count, .. } => {
+                    matrix_rows.push(ApiGuruFulfillmentRow {
+                        provider_key: row.provider.clone(),
+                        spec_source_key: row.spec_source_key.clone(),
+                        spec_url: row.url.clone(),
+                        status: ProviderFulfillmentStatus::Candidate,
+                        blocked_reason: None,
+                        supported_manifest: None,
+                        candidate_manifest: Some(generation.path.clone()),
+                        table_count: *table_count,
+                        action_count: 0,
+                    });
+                }
+                CandidateGenerationOutcome::Blocked { reason } => {
+                    matrix_rows.push(blocked_fulfillment_row(row, reason));
+                }
+            }
+            continue;
+        }
+
+        let Some(provider_entry) = providers.get(&row.provider) else {
+            matrix_rows.push(blocked_fulfillment_row(row, "missing_provider"));
+            continue;
+        };
+
+        if provider_entry
+            .proxy
+            .as_ref()
+            .and_then(|proxy| proxy.base_url.as_deref())
+            .is_none_or(|base_url| base_url.trim().is_empty())
+        {
+            matrix_rows.push(blocked_fulfillment_row(row, "missing_base_url"));
+            continue;
+        }
+
+        matrix_rows.push(ApiGuruFulfillmentRow {
+            provider_key: row.provider.clone(),
+            spec_source_key: row.spec_source_key.clone(),
+            spec_url: row.url.clone(),
+            status: ProviderFulfillmentStatus::Candidate,
+            blocked_reason: None,
+            supported_manifest: None,
+            candidate_manifest: Some(candidate_path),
+            table_count: 0,
+            action_count: 0,
+        });
+    }
+
+    Ok(ApiGuruFulfillmentMatrix {
+        provider_count: matrix_rows
+            .iter()
+            .map(|row| row.provider_key.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        spec_row_count: matrix_rows.len(),
+        rows: matrix_rows,
+    })
+}
+
+fn blocked_fulfillment_row(row: &ProviderSpecCrosswalk, reason: &str) -> ApiGuruFulfillmentRow {
+    ApiGuruFulfillmentRow {
+        provider_key: row.provider.clone(),
+        spec_source_key: row.spec_source_key.clone(),
+        spec_url: row.url.clone(),
+        status: ProviderFulfillmentStatus::Blocked,
+        blocked_reason: Some(reason.to_string()),
+        supported_manifest: None,
+        candidate_manifest: None,
+        table_count: 0,
+        action_count: 0,
+    }
+}
+
+fn load_supported_manifest_summaries(
+) -> Result<BTreeMap<String, SupportedManifestSummary>, Box<dyn Error>> {
+    let mut paths = fs::read_dir(SUPPORTED_CONNECTIONS_DIR)
+        .map_err(|err| format!("failed to read {SUPPORTED_CONNECTIONS_DIR}: {err}"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort_by_key(|entry| entry.path());
+
+    let mut supported = BTreeMap::new();
+    for entry in paths {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+
+        let toml = fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let manifest = Manifest::from_toml(&toml).map_err(|err| {
+            format!(
+                "supported manifest {} failed to parse: {err}",
+                path.display()
+            )
+        })?;
+        let file_name = path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .ok_or_else(|| format!("supported manifest path is not UTF-8: {}", path.display()))?;
+        let file_stem = file_name
+            .strip_suffix(".connection.toml")
+            .ok_or_else(|| format!("unsupported manifest filename: {file_name}"))?;
+        let summary = SupportedManifestSummary {
+            path: format!("connections/supported/{file_name}"),
+            table_count: manifest.tables.len(),
+            action_count: manifest.actions.len(),
+        };
+        supported.insert(manifest.source.name, summary.clone());
+        supported.insert(file_stem.to_string(), summary);
+    }
+
+    Ok(supported)
+}
+
+fn supported_manifest_for<'a>(
+    supported: &'a BTreeMap<String, SupportedManifestSummary>,
+    provider: &str,
+) -> Option<&'a SupportedManifestSummary> {
+    supported
+        .get(provider)
+        .or_else(|| supported_provider_alias(provider).and_then(|alias| supported.get(alias)))
+}
+
+fn supported_provider_alias(provider: &str) -> Option<&'static str> {
+    match provider {
+        "github-pat" => Some("github"),
+        "sendgrid-api-key" => Some("sendgrid"),
+        "stripe-api-key" => Some("stripe"),
+        _ => None,
+    }
+}
+
+fn build_candidate_generations(
+    providers_yaml: &str,
+    rows: &[ProviderSpecCrosswalk],
+) -> Result<Vec<CandidateGeneration>, Box<dyn Error>> {
+    let providers = parse_providers(providers_yaml)?;
+    let candidate_paths = candidate_manifest_paths(rows);
+    let mut generations = Vec::with_capacity(rows.len());
+
+    for (row, path) in rows.iter().zip(candidate_paths) {
+        let outcome = match providers.get(&row.provider) {
+            Some(provider_entry) => {
+                if let Some(reason) = candidate_provider_blocked_reason(provider_entry) {
+                    CandidateGenerationOutcome::Blocked {
+                        reason: reason.as_str().to_string(),
+                    }
+                } else {
+                    match read_spec_text(&row.url) {
+                        Ok(spec_text) => match generate_candidate_manifest(
+                            &row.provider,
+                            provider_entry,
+                            &row.spec_source_key,
+                            &row.url,
+                            "Candidate",
+                            &spec_text,
+                        ) {
+                            Ok(generated) => CandidateGenerationOutcome::Candidate {
+                                toml: generated.toml,
+                                table_count: generated.table_count,
+                            },
+                            Err(reason) => CandidateGenerationOutcome::Blocked {
+                                reason: reason.as_str().to_string(),
+                            },
+                        },
+                        Err(_) => CandidateGenerationOutcome::Blocked {
+                            reason: "parse_failure".to_string(),
+                        },
+                    }
+                }
+            }
+            None => CandidateGenerationOutcome::Blocked {
+                reason: "missing_provider".to_string(),
+            },
+        };
+
+        generations.push(CandidateGeneration { path, outcome });
+    }
+
+    Ok(generations)
+}
+
+fn read_spec_text(url: &str) -> Result<String, Box<dyn Error>> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return fs::read_to_string(path)
+            .map_err(|err| format!("failed to read spec {url}: {err}").into());
+    }
+
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return fetch_http_spec_text(url);
+    }
+
+    fs::read_to_string(url).map_err(|err| format!("failed to read spec {url}: {err}").into())
+}
+
+fn fetch_http_spec_text(url: &str) -> Result<String, Box<dyn Error>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create runtime for spec fetch: {err}"))?;
+    let client = default_http_client();
+
+    runtime.block_on(async move {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|err| format!("failed to fetch spec {url}: {err}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("failed to fetch spec {url}: HTTP {status}").into());
+        }
+        response
+            .text()
+            .await
+            .map_err(|err| format!("failed to read spec {url}: {err}").into())
+    })
+}
+
+fn write_experimental_crosswalk_manifests(
+    out_dir: &Path,
+    rows: &[ProviderSpecCrosswalk],
+    candidate_generations: &[CandidateGeneration],
+) -> Result<(), Box<dyn Error>> {
     let connections_dir = out_dir.join("connections").join("experimental");
     fs::create_dir_all(&connections_dir)
         .map_err(|err| format!("failed to create {}: {err}", connections_dir.display()))?;
 
     let mut manifests = Vec::new();
-    let mut seen_paths = BTreeMap::<String, usize>::new();
 
-    for row in rows {
-        let provider_entry = providers.get(&row.provider).ok_or_else(|| {
-            format!(
-                "crosswalk row provider {} is not present in providers.yaml",
-                row.provider
-            )
-        })?;
-        let mut file_stem = format!(
-            "{}--{}",
-            sanitize_filename_component(&row.provider),
-            sanitize_filename_component(&row.spec_source_key)
-        );
-        let base_file_stem = file_stem.clone();
-        let next = seen_paths.entry(base_file_stem.clone()).or_insert(0);
-        if *next > 0 {
-            file_stem = format!("{base_file_stem}-{}", *next + 1);
-        }
-        *next += 1;
+    for (row, generation) in rows.iter().zip(candidate_generations) {
+        let CandidateGenerationOutcome::Candidate { toml, .. } = &generation.outcome else {
+            continue;
+        };
 
-        let relative_path = format!("connections/experimental/{file_stem}.connection.toml");
-        let toml = experimental_crosswalk_manifest_toml(&row.provider, provider_entry, row)?;
-        let full_path = out_dir.join(&relative_path);
+        let full_path = out_dir.join(&generation.path);
         fs::write(&full_path, toml)
             .map_err(|err| format!("failed to write {}: {err}", full_path.display()))?;
         manifests.push(ExperimentalManifestIndexEntry {
             provider: &row.provider,
             spec_source_key: &row.spec_source_key,
-            path: relative_path,
+            path: generation.path.clone(),
             confidence: format!("{:?}", row.confidence),
             license_status: format!("{:?}", row.license_status),
             generation_eligible: row.generation_eligible,
@@ -299,38 +554,29 @@ fn write_experimental_crosswalk_manifests(
     Ok(())
 }
 
-fn experimental_crosswalk_manifest_toml(
-    provider: &str,
-    provider_entry: &spur_rest_table_gateway::adapter::nango::ProviderEntry,
-    row: &ProviderSpecCrosswalk,
-) -> Result<String, Box<dyn Error>> {
-    let manifest = provider_to_manifest_stub(provider, provider_entry);
-    let mut toml = manifest_to_toml(&manifest).replace(
-        "# TODO: add [[table]] blocks (path/columns/filters)\n",
-        "# Experimental crosswalk candidate. This file is not supported until a reviewed OpenAPI source adds [[table]] blocks and provider E2E coverage.\n",
-    );
-    let provenance = experimental_provenance_comments(row);
-    toml = toml.replacen("\n[source]\n", &format!("\n{provenance}\n[source]\n"), 1);
+fn candidate_manifest_paths(rows: &[ProviderSpecCrosswalk]) -> Vec<String> {
+    let mut paths = Vec::with_capacity(rows.len());
+    let mut seen_paths = BTreeMap::<String, usize>::new();
 
-    Manifest::from_toml(&toml)
-        .map_err(|err| format!("experimental manifest for {provider} failed to reparse: {err}"))?;
-    Ok(toml)
-}
+    for row in rows {
+        let mut file_stem = format!(
+            "{}--{}",
+            sanitize_filename_component(&row.provider),
+            sanitize_filename_component(&row.spec_source_key)
+        );
+        let base_file_stem = file_stem.clone();
+        let next = seen_paths.entry(base_file_stem.clone()).or_insert(0);
+        if *next > 0 {
+            file_stem = format!("{base_file_stem}-{}", *next + 1);
+        }
+        *next += 1;
 
-fn experimental_provenance_comments(row: &ProviderSpecCrosswalk) -> String {
-    let mut lines = vec![
-        "# support_level: experimental_crosswalk".to_string(),
-        format!("# spec_source_key: {}", row.spec_source_key),
-        format!("# spec_url: {}", row.url),
-        format!("# match_confidence: {:?}", row.confidence),
-        format!("# license_status: {:?}", row.license_status),
-        format!("# generation_eligible: {}", row.generation_eligible),
-        format!("# nango_commit: {}", row.nango_commit),
-    ];
-    if let Some(apis_guru_hash) = &row.apis_guru_hash {
-        lines.push(format!("# apis_guru_sha256: {apis_guru_hash}"));
+        paths.push(format!(
+            "connections/experimental/{file_stem}.connection.toml"
+        ));
     }
-    lines.join("\n")
+
+    paths
 }
 
 fn write_provider_harvest(
@@ -500,6 +746,45 @@ struct CoverageSummary<'a> {
     matched_provider_count: usize,
     rejected_ambiguous_candidates: usize,
     providers_by_seed_class: &'a BTreeMap<ProviderSeedClass, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiGuruFulfillmentMatrix {
+    provider_count: usize,
+    spec_row_count: usize,
+    rows: Vec<ApiGuruFulfillmentRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiGuruFulfillmentRow {
+    provider_key: String,
+    spec_source_key: String,
+    spec_url: String,
+    status: ProviderFulfillmentStatus,
+    blocked_reason: Option<String>,
+    supported_manifest: Option<String>,
+    candidate_manifest: Option<String>,
+    table_count: usize,
+    action_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SupportedManifestSummary {
+    path: String,
+    table_count: usize,
+    action_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CandidateGeneration {
+    path: String,
+    outcome: CandidateGenerationOutcome,
+}
+
+#[derive(Debug, Clone)]
+enum CandidateGenerationOutcome {
+    Candidate { toml: String, table_count: usize },
+    Blocked { reason: String },
 }
 
 #[derive(Debug, Serialize)]

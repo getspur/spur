@@ -55,9 +55,23 @@ The output directory contains:
 - `table_seed_classes.csv`: provider counts by seed class.
 - `apis_guru_crosswalk.csv`: provider-to-spec candidate rows for review.
 - `provider_spec_crosswalk.json`: deterministic crosswalk rows with Nango ELv2 metadata and APIs.guru SHA-256 provenance.
+- `api_guru_fulfillment_matrix.json`: provider/spec rows classified as `Ready`, `Candidate`, or `Blocked`.
 - `coverage_summary.json`: provider/spec counts, match diagnostics, and snapshot metadata.
 
 Reviewed OpenAPI sources are opt-in through `--reviewed-source <provider>=<local-spec-path>`. Only those local reviewed specs are converted into `connections/<provider>.connection.toml`; APIs.guru URL matches with `NeedsReview`, `UrlOnly`, `Blocked`, or candidate confidence stay as catalog metadata and do not generate bundled manifests by themselves.
+
+Use `--experimental-crosswalk-manifests` when refreshing fulfillment status.
+That mode writes parseable generated candidates under the output directory and
+lets the matrix distinguish Candidate rows from Blocked rows with
+machine-readable reasons. Keep generated candidates out of
+`connections/supported/` until they have been manually reviewed and covered by
+provider-specific E2E tests.
+
+The 2026-06-13 status report records the current APIs.guru fulfillment state:
+87/87 providers visible, 295/295 spec rows traceable, and provider-level counts
+of 15 Ready, 52 Candidate, and 20 Blocked. The first ten promotions are
+`github-pat`, `1password-events`, `atlassian-admin`, `azure-devops`,
+`clicksend`, `asana`, `slack`, `jira`, `notion`, and `autotask`.
 
 ## OpenAPI table import
 

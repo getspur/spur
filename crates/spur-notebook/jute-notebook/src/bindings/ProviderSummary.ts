@@ -34,6 +34,14 @@ export type ProviderSummary = {
    */
   supportLevel: string;
   /**
+   * Provider-level fulfillment status for API-as-table readiness.
+   */
+  fulfillmentStatus: string;
+  /**
+   * Machine-readable reason when fulfillment is blocked.
+   */
+  blockedReason?: string;
+  /**
    * API spec source key when this row came from an experimental spec crosswalk.
    */
   specSourceKey: string | null;

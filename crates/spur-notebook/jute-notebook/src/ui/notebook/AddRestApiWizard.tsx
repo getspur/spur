@@ -8,6 +8,7 @@ import {
   Loader2Icon,
   PencilIcon,
   PlugIcon,
+  RssIcon,
   SearchIcon,
   TableIcon,
   XIcon,
@@ -21,6 +22,7 @@ import type {
   TablePreview,
 } from "@/bindings";
 import {
+  addApiDatasourceCommand,
   addApiDatasourceFromImportCommand,
   addApiDatasourceFromManifestCommand,
   attachSavedConnectionCommand,
@@ -50,6 +52,11 @@ type SourceMode = RestApiSourceModeKey;
 type SourceFamily = DatasourceSourceFamilyKey;
 type WizardStep = DatasourceWizardStepKey;
 type ProviderLoadState = "idle" | "loading" | "loaded";
+type ProviderFulfillmentStatus =
+  | "Ready"
+  | "Candidate"
+  | "Blocked"
+  | "Catalog";
 type CredentialField = {
   key: string;
   label: string;
@@ -336,6 +343,8 @@ export default function AddRestApiWizard({
 
   const selectProvider = useCallback((provider: ProviderSummary) => {
     const defaultName = defaultDatasourceNameForProvider(provider);
+    if (isBlockedProvider(provider)) return;
+
     setSelectedProvider(provider);
     setSelectedSavedConnection(null);
     setDatasourceName((currentName) =>
@@ -343,7 +352,7 @@ export default function AddRestApiWizard({
     );
     setCredentials({});
     setTablePreview(tablePreviewFromProvider(provider));
-    setSpecText(provider.specUrl ?? "");
+    setSpecText(isReadyProvider(provider) ? "" : (provider.specUrl ?? ""));
     setConnectionOnly(false);
     setPrefillCredentialKeys([]);
     setPrefillManifestToml(null);
@@ -434,11 +443,13 @@ export default function AddRestApiWizard({
   const step = STEPS[stepIndex]?.key ?? "source";
   const selectedFamily = datasourceFamilyByKey[sourceFamily];
   const restFamilySelected = sourceFamily === "rest_api";
+  const rssFamilySelected = sourceFamily === "rss";
 
   const goNext = () => {
     if (!canContinue) return;
     setStepIndex((currentStep) => {
       if (sourceFamily === "rest_api" && currentStep === 0) return 2;
+      if (sourceFamily === "rss" && currentStep === 0) return 4;
       return Math.min(STEPS.length - 1, currentStep + 1);
     });
     setError(null);
@@ -446,6 +457,7 @@ export default function AddRestApiWizard({
 
   const goBack = () => {
     setStepIndex((currentStep) => {
+      if (sourceFamily === "rss" && currentStep === 4) return editMode ? 2 : 0;
       if (sourceFamily === "rest_api" && currentStep === 2) {
         return editMode ? 2 : 0;
       }
@@ -507,6 +519,29 @@ export default function AddRestApiWizard({
 
     try {
       await onAttachLocalFile(path);
+      onClose();
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setPendingAdd(false);
+    }
+  };
+
+  const handleAddRssDatasource = async () => {
+    const name = datasourceName.trim();
+    if (name.length === 0) {
+      setError("Datasource name is required.");
+      return;
+    }
+
+    setPendingAdd(true);
+    setError(null);
+
+    try {
+      const response = await daemonControl(
+        addApiDatasourceCommand({ name, source: "rss" }),
+      );
+      importedApiDatasourceFromDaemonControlResponse(response);
       onClose();
     } catch (caught) {
       setError(errorMessage(caught));
@@ -644,7 +679,9 @@ export default function AddRestApiWizard({
 
   const primaryActionLabel =
     step === "attach"
-      ? !restFamilySelected
+      ? rssFamilySelected
+        ? "Add datasource"
+        : !restFamilySelected
         ? "Attach datasource"
         : editMode
           ? "Save changes"
@@ -851,6 +888,12 @@ export default function AddRestApiWizard({
                   specText={specText}
                   tablePreview={tablePreview}
                 />
+              ) : rssFamilySelected ? (
+                <RssAttachStep
+                  datasourceName={datasourceName}
+                  error={error}
+                  onDatasourceNameChange={setDatasourceName}
+                />
               ) : (
                 <GenericAttachStep
                   error={error}
@@ -881,8 +924,10 @@ export default function AddRestApiWizard({
                 } else if (manifestPrefillMode && step === "auth") {
                   void handleAddDatasource();
                 } else if (step === "attach") {
-                  if (!restFamilySelected) void handleAttachGenericDatasource();
-                  else if (editMode) void handleSaveEdit();
+                  if (rssFamilySelected) void handleAddRssDatasource();
+                  else if (!restFamilySelected) {
+                    void handleAttachGenericDatasource();
+                  } else if (editMode) void handleSaveEdit();
                   else void handleAddDatasource();
                 } else {
                   goNext();
@@ -1106,6 +1151,7 @@ function SourceStep({
 
 function sourceFamilyIcon(family: SourceFamily): React.ReactNode {
   if (family === "rest_api") return <PlugIcon size={18} strokeWidth={1.5} />;
+  if (family === "rss") return <RssIcon size={18} strokeWidth={1.5} />;
   if (family === "database") {
     return <DatabaseIcon size={18} strokeWidth={1.5} />;
   }
@@ -1118,6 +1164,7 @@ function sourceFamilyIcon(family: SourceFamily): React.ReactNode {
 
 function sourceFamilyMeta(family: DatasourceSourceFamily) {
   if (family.key === "rest_api") return "preserved";
+  if (family.key === "rss") return "RSSHub";
   if (family.key === "file") return "local";
   if (family.key === "advanced_sql") return "SQL";
   return "DuckDB";
@@ -1414,17 +1461,21 @@ function ProviderTile({
   const tier = normalizedTier(provider.tier);
   const tableCount = provider.tables.length;
   const actionCount = provider.actions?.length ?? 0;
-  const ready = isSupportedProvider(provider);
-  const experimental = isExperimentalProvider(provider);
+  const status = providerFulfillmentStatus(provider);
+  const blocked = status === "Blocked";
 
   return (
     <button
+      aria-disabled={blocked}
       className={clsx(
-        "min-w-0 rounded-lg border bg-white p-2.5 text-left transition-colors",
+        "min-w-0 rounded-lg border bg-white p-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:bg-gray-50 disabled:opacity-75",
         selected
           ? "border-indigo-600 bg-indigo-50 ring-1 ring-indigo-600"
-          : "border-gray-200 hover:border-indigo-300",
+          : blocked
+            ? "border-gray-200"
+            : "border-gray-200 hover:border-indigo-300",
       )}
+      disabled={blocked}
       onClick={() => onSelect(provider)}
       type="button"
     >
@@ -1440,18 +1491,23 @@ function ProviderTile({
         <span className="truncate text-[11px] text-gray-400">
           {provider.category}
         </span>
-        {ready ? (
-          <ReadyBadge />
-        ) : experimental ? (
-          <ExperimentalBadge />
-        ) : (
-          <TierBadge tier={tier} />
-        )}
+        <ProviderStatusBadge status={status} tier={tier} />
       </span>
-      {experimental && provider.experimentalSpecCount > 0 && (
-        <span className="mt-2 block truncate text-[11px] font-medium text-amber-700">
-          {provider.experimentalSpecCount} spec candidate
-          {provider.experimentalSpecCount === 1 ? "" : "s"}
+      {(status === "Candidate" || status === "Blocked") &&
+        provider.experimentalSpecCount > 0 && (
+          <span
+            className={clsx(
+              "mt-2 block truncate text-[11px] font-medium",
+              status === "Blocked" ? "text-red-700" : "text-amber-700",
+            )}
+          >
+            {provider.experimentalSpecCount} spec candidate
+            {provider.experimentalSpecCount === 1 ? "" : "s"}
+          </span>
+        )}
+      {status === "Blocked" && provider.blockedReason && (
+        <span className="mt-2 block truncate text-[11px] font-medium text-red-700">
+          {provider.blockedReason}
         </span>
       )}
       {tableCount > 0 && (
@@ -2034,6 +2090,96 @@ function ReviewStep({
   );
 }
 
+function RssAttachStep({
+  datasourceName,
+  error,
+  onDatasourceNameChange,
+}: {
+  datasourceName: string;
+  error: string | null;
+  onDatasourceNameChange: (value: string) => void;
+}) {
+  return (
+    <div>
+      <h3 className="text-base font-semibold text-gray-950">
+        Add RSS / RSSHub
+      </h3>
+      <p className="mt-1 text-sm text-gray-500">
+        Register the built-in RSS datasource so the notebook can browse RSSHub
+        routes and query direct feed URLs.
+      </p>
+
+      <label className="mt-4 block">
+        <span className="text-xs font-medium text-gray-600">
+          Datasource name
+        </span>
+        <input
+          aria-label="Datasource name"
+          className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+          onChange={(event) => onDatasourceNameChange(event.currentTarget.value)}
+          placeholder="rss"
+          value={datasourceName}
+        />
+      </label>
+
+      <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50">
+        <SummaryRow label="Source">rss</SummaryRow>
+        <SummaryRow label="Catalog">rss_routes</SummaryRow>
+        <SummaryRow label="Feed">rss_feed(url)</SummaryRow>
+        <SummaryRow label="Entries">rss_entries(url)</SummaryRow>
+      </div>
+
+      <section className="mt-4 overflow-hidden rounded-lg border border-gray-200">
+        <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
+          <h4 className="text-xs font-medium text-gray-950">
+            Available table-functions
+          </h4>
+        </div>
+        <div className="divide-y divide-gray-200">
+          <RssTableFunctionRow
+            detail="Browse RSSHub predefined sources, routes, categories, examples, and generated feed URLs."
+            name="rss_routes"
+          />
+          <RssTableFunctionRow
+            detail="Fetch channel-level metadata for a direct RSS URL or an rsshub:// route."
+            name="rss_feed"
+          />
+          <RssTableFunctionRow
+            detail="Fetch feed entries from a direct RSS URL or an rsshub:// route."
+            name="rss_entries"
+          />
+        </div>
+      </section>
+
+      {error && <ErrorBanner message={error} />}
+    </div>
+  );
+}
+
+function RssTableFunctionRow({
+  detail,
+  name,
+}: {
+  detail: string;
+  name: string;
+}) {
+  return (
+    <div className="bg-white px-3 py-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h5 className="truncate font-mono text-xs font-medium text-gray-950">
+            {name}
+          </h5>
+          <p className="mt-0.5 text-xs text-gray-500">{detail}</p>
+        </div>
+        <span className="shrink-0 rounded bg-green-50 px-2 py-1 text-[11px] font-medium text-green-700">
+          Ready
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function SummaryRow({
   children,
   label,
@@ -2051,6 +2197,48 @@ function SummaryRow({
   );
 }
 
+function ProviderStatusBadge({
+  status,
+  tier,
+}: {
+  status: ProviderFulfillmentStatus;
+  tier: string;
+}) {
+  if (status === "Ready") {
+    return (
+      <span className="rounded bg-green-50 px-1.5 py-0.5 text-[10px] font-semibold text-green-700">
+        Ready
+      </span>
+    );
+  }
+
+  if (status === "Candidate") {
+    return (
+      <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+        Candidate
+      </span>
+    );
+  }
+
+  if (status === "Blocked") {
+    return (
+      <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">
+        Blocked
+      </span>
+    );
+  }
+
+  if (status === "Catalog") {
+    return (
+      <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-600">
+        Catalog
+      </span>
+    );
+  }
+
+  return <TierBadge tier={tier} />;
+}
+
 function TierBadge({ tier }: { tier: string }) {
   return (
     <span
@@ -2062,22 +2250,6 @@ function TierBadge({ tier }: { tier: string }) {
       )}
     >
       Tier {tier}
-    </span>
-  );
-}
-
-function ReadyBadge() {
-  return (
-    <span className="rounded bg-green-50 px-1.5 py-0.5 text-[10px] font-semibold text-green-700">
-      Ready
-    </span>
-  );
-}
-
-function ExperimentalBadge() {
-  return (
-    <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
-      Experimental
     </span>
   );
 }
@@ -2135,11 +2307,16 @@ function canContinueFromStep({
     }
 
     return Boolean(
-      sourceMode && (sourceMode !== "catalog" || selectedProvider),
+      sourceMode &&
+        (sourceMode !== "catalog" ||
+          (selectedProvider && !isBlockedProvider(selectedProvider))),
     );
   }
 
   if (sourceFamily !== "rest_api") {
+    if (sourceFamily === "rss" && stepIndex === 4) {
+      return datasourceName.trim().length > 0;
+    }
     if (stepIndex === 1) return genericLocation.trim().length > 0;
     return true;
   }
@@ -2167,7 +2344,11 @@ function canContinueFromStep({
     ) {
       return true;
     }
-    return connectionOnly || tablePreview !== null;
+    return (
+      connectionOnly ||
+      tablePreview !== null ||
+      (selectedProvider !== null && isReadyProvider(selectedProvider))
+    );
   }
 
   return datasourceName.trim().length > 0;
@@ -2222,6 +2403,7 @@ function providerSummaryFromPrefill(providerName: string): ProviderSummary {
     tier: "B",
     authMode: "API_KEY",
     supportLevel: "catalog",
+    fulfillmentStatus: "Catalog",
     specSourceKey: null,
     specUrl: null,
     experimentalSpecCount: 0,
@@ -2237,6 +2419,7 @@ function defaultDatasourceNameForFamily(family: SourceFamily) {
   if (family === "cloud_object_storage") return "events";
   if (family === "lakehouse") return "orders_delta";
   if (family === "database") return "external_database";
+  if (family === "rss") return "rss";
   if (family === "advanced_sql") return "custom_query";
   return "rest_api";
 }
@@ -2436,19 +2619,38 @@ function tablePreviewFromTemplate(
 function tablePreviewFromProvider(
   provider: ProviderSummary,
 ): OpenApiTablePreview | null {
-  if (provider.tables.length === 0) return null;
+  if (!isReadyProvider(provider) || provider.tables.length === 0) return null;
   return { tables: provider.tables };
 }
 
 function isSupportedProvider(provider: ProviderSummary) {
-  return (
-    provider.supportLevel === "supported" &&
-    (provider.tables.length > 0 || (provider.actions?.length ?? 0) > 0)
-  );
+  return isReadyProvider(provider);
 }
 
-function isExperimentalProvider(provider: ProviderSummary) {
-  return provider.supportLevel === "experimental";
+function isReadyProvider(provider: ProviderSummary) {
+  return providerFulfillmentStatus(provider) === "Ready";
+}
+
+function isBlockedProvider(provider: ProviderSummary) {
+  return providerFulfillmentStatus(provider) === "Blocked";
+}
+
+function providerFulfillmentStatus(
+  provider: ProviderSummary,
+): ProviderFulfillmentStatus {
+  switch (provider.fulfillmentStatus) {
+    case "Ready":
+    case "Candidate":
+    case "Blocked":
+    case "Catalog":
+      return provider.fulfillmentStatus;
+    default:
+      break;
+  }
+
+  if (provider.supportLevel === "supported") return "Ready";
+  if (provider.supportLevel === "experimental") return "Candidate";
+  return "Catalog";
 }
 
 function errorMessage(caught: unknown) {
