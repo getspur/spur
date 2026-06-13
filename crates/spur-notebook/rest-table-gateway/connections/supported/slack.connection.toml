@@ -1,0 +1,26 @@
+# Curated Slack REST manifest for the REST table gateway.
+# Source grounding: Nango slack OAuth2 metadata + Slack Web API users.list table shape.
+# Auth is explicit BYO access token; hosted OAuth browser flow is intentionally out of scope.
+
+[source]
+name = "slack"
+base_url = "https://slack.com/api"
+auth = { scheme = "bearer", env = "SLACK_BOT_TOKEN" }
+
+[[table]]
+name = "users"
+path = "/users.list"
+response_path = "$.members"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+team_id = { json = "$.team_id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+real_name = { json = "$.real_name", type = "Utf8" }
+is_bot = { json = "$.is_bot", type = "Boolean" }
+deleted = { json = "$.deleted", type = "Boolean" }
+
+[table.filters]
+team_id = { param = "team_id" }
+cursor = { param = "cursor" }
+limit = { param = "limit" }

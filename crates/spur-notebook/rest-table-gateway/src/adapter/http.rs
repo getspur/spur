@@ -76,6 +76,9 @@ pub async fn send_request(a: &HttpAction<'_>) -> Result<(u16, serde_json::Value)
 }
 
 pub(crate) fn json_path_get<'a>(row: &'a Value, path: &str) -> Option<&'a Value> {
+    if path == "$" {
+        return (!row.is_null()).then_some(row);
+    }
     let p = path.strip_prefix("$.").unwrap_or(path);
     let mut cur = row;
     for seg in p.split('.') {
@@ -96,12 +99,18 @@ pub(crate) fn rows_from_body(body: &Value, response_path: Option<&str>) -> Resul
         None => body,
     };
 
-    value.as_array().cloned().ok_or_else(|| {
-        let target = response_path
-            .map(|path| format!(" at {path}"))
-            .unwrap_or_default();
-        GatewayError::Http(format!("expected JSON array{target}, got {value}"))
-    })
+    match value {
+        Value::Array(rows) => Ok(rows.clone()),
+        Value::Object(_) => Ok(vec![value.clone()]),
+        _ => {
+            let target = response_path
+                .map(|path| format!(" at {path}"))
+                .unwrap_or_default();
+            Err(GatewayError::Http(format!(
+                "expected JSON array or object{target}, got {value}"
+            )))
+        }
+    }
 }
 
 pub(crate) fn cursor_value(body: &Value, path: &str) -> Option<String> {
@@ -403,6 +412,39 @@ mod tests {
         let rows = fetch_rows(&fetch).await.unwrap();
 
         assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn envelope_extracts_single_object_response_path() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/account"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "id": 1, "email": "launch@example.com" }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let auth = ResolvedAuth::None;
+        let fetch = HttpFetch {
+            client: &client,
+            base_url: &server.uri(),
+            path: "/account",
+            query: Vec::new(),
+            pagination: None,
+            auth: &auth,
+            response_path: Some("$.data".to_string()),
+            headers: Vec::new(),
+        };
+
+        let rows = fetch_rows(&fetch).await.unwrap();
+
+        assert_eq!(
+            rows,
+            vec![json!({ "id": 1, "email": "launch@example.com" })]
+        );
     }
 
     #[tokio::test]

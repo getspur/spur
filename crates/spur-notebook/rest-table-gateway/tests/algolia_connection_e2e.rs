@@ -1,57 +1,33 @@
-use arrow_array::{BooleanArray, Int64Array, StringArray};
-use spur_rest_table_gateway::adapter::manifest::{AuthCfg, Manifest};
-use spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter;
-use spur_rest_table_gateway::adapter::{
-    Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest,
+#[path = "support/provider_manifest_harness.rs"]
+mod provider_manifest_harness;
+
+use spur_rest_table_gateway::adapter::manifest::AuthCfg;
+use spur_rest_table_gateway::adapter::{Predicate, PredicateOp, ScalarValue};
+use wiremock::MockServer;
+
+use provider_manifest_harness::{
+    scan_request_with_predicates, ExpectedRequest, ProviderManifestHarness, TypedCell,
 };
-use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = &self.previous {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
-
-fn scan_request(table: &str, predicates: Vec<Predicate>) -> ScanRequest {
-    ScanRequest {
-        table: table.to_string(),
-        predicates,
-        projection: None,
-        tvf_args: Vec::new(),
-        auth: ResolvedAuth::None,
-    }
-}
 
 #[tokio::test]
 async fn algolia_supported_manifest_scans_indices_with_connection_auth() {
     let server = MockServer::start().await;
-    let _app_id = EnvGuard::set("SPUR_CONN_algolia_app_id", "ALGAPPID");
-    let _api_key = EnvGuard::set("ALGOLIA_API_KEY", "algolia-test-key");
+    let mut harness = ProviderManifestHarness::from_toml(
+        "algolia",
+        include_str!("../connections/supported/algolia.connection.toml"),
+    )
+    .expect("algolia manifest parses");
+    harness.replace_base_url(
+        "https://${connectionConfig.algolia_app_id}-dsn.algolia.net",
+        &server.uri(),
+    );
+    let _env = harness.install_env();
 
-    Mock::given(method("GET"))
-        .and(path("/1/indexes"))
-        .and(header("x-algolia-api-key", "algolia-test-key"))
-        .and(header("x-algolia-application-id", "ALGAPPID"))
-        .and(query_param("hitsPerPage", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+    ExpectedRequest::get("/1/indexes")
+        .with_manifest_auth(harness.manifest(), "algolia")
+        .header("x-algolia-application-id", "algolia_algolia_app_id_value")
+        .query_param("hitsPerPage", "2")
+        .respond_json(serde_json::json!({
             "items": [
                 {
                     "name": "products",
@@ -72,16 +48,11 @@ async fn algolia_supported_manifest_scans_indices_with_connection_auth() {
                     "pendingTask": true
                 }
             ]
-        })))
+        }))
         .mount(&server)
         .await;
 
-    let manifest_toml = include_str!("../connections/supported/algolia.connection.toml").replace(
-        "https://${connectionConfig.algolia_app_id}-dsn.algolia.net",
-        &server.uri(),
-    );
-    let manifest = Manifest::from_toml(&manifest_toml).expect("algolia manifest parses");
-
+    let manifest = harness.manifest();
     assert_eq!(manifest.source.name, "algolia");
     assert_eq!(
         manifest.source.connection_config,
@@ -101,9 +72,8 @@ async fn algolia_supported_manifest_scans_indices_with_connection_auth() {
         Some("${connectionConfig.algolia_app_id}")
     );
 
-    let adapter = ManifestAdapter::new(manifest);
-    let batches = adapter
-        .scan(scan_request(
+    let batches = harness
+        .scan(scan_request_with_predicates(
             "list_indices",
             vec![Predicate {
                 column: "hits_per_page".to_string(),
@@ -114,30 +84,11 @@ async fn algolia_supported_manifest_scans_indices_with_connection_auth() {
         .await
         .expect("algolia indices scan succeeds");
 
-    assert_eq!(batches.len(), 1);
-    let batch = &batches[0];
-    assert_eq!(batch.num_rows(), 2);
-
-    let names = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("name should be Utf8");
-    let entries = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .expect("entries should be Int64");
-    let pending = batch
-        .column(6)
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .expect("pending_task should be Boolean");
-
-    assert_eq!(names.value(0), "products");
-    assert_eq!(names.value(1), "products_replica");
-    assert_eq!(entries.value(0), 125);
-    assert_eq!(entries.value(1), 125);
-    assert!(!pending.value(0));
-    assert!(pending.value(1));
+    harness.assert_typed_rows("list_indices", &batches, 2);
+    harness.assert_typed_cell(&batches[0], "name", 0, TypedCell::Utf8("products"));
+    harness.assert_typed_cell(&batches[0], "name", 1, TypedCell::Utf8("products_replica"));
+    harness.assert_typed_cell(&batches[0], "entries", 0, TypedCell::Int64(125));
+    harness.assert_typed_cell(&batches[0], "entries", 1, TypedCell::Int64(125));
+    harness.assert_typed_cell(&batches[0], "pending_task", 0, TypedCell::Boolean(false));
+    harness.assert_typed_cell(&batches[0], "pending_task", 1, TypedCell::Boolean(true));
 }

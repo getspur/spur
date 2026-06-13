@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -37,13 +38,14 @@ function providersResponse() {
       type: "nangoProviders" as const,
       data: [
         {
-          name: "github",
+          name: "github-pat",
           displayName: "GitHub",
           category: "Dev tools",
           tier: "A",
           authMode: "API_KEY",
           supportLevel: "supported",
-          providerKey: "github",
+          fulfillmentStatus: "Ready",
+          providerKey: "github-pat",
           baseUrl: "https://api.github.com",
           specSourceKey: null,
           specUrl: null,
@@ -68,12 +70,49 @@ function providersResponse() {
           actions: [],
         },
         {
+          name: "asana",
+          displayName: "Asana",
+          category: "Project management",
+          tier: "B",
+          authMode: "OAUTH2",
+          supportLevel: "experimental",
+          fulfillmentStatus: "Candidate",
+          providerKey: "asana",
+          baseUrl: "https://app.asana.com/api/1.0",
+          specSourceKey: "asana.com",
+          specUrl: "https://api.apis.guru/v2/specs/asana.com/1.0/openapi.json",
+          experimentalSpecCount: 1,
+          credentialEnvVars: [],
+          tables: [],
+          actions: [],
+        },
+        {
+          name: "blocked-mail",
+          displayName: "Blocked Mail",
+          category: "Messaging",
+          tier: "C",
+          authMode: "API_KEY",
+          supportLevel: "experimental",
+          fulfillmentStatus: "Blocked",
+          blockedReason: "unsupported_auth",
+          providerKey: "blocked-mail",
+          baseUrl: null,
+          specSourceKey: "blocked.example.com",
+          specUrl:
+            "https://api.apis.guru/v2/specs/blocked.example.com/1.0/openapi.json",
+          experimentalSpecCount: 2,
+          credentialEnvVars: [],
+          tables: [],
+          actions: [],
+        },
+        {
           name: "stripe",
           displayName: "Stripe",
           category: "Payments",
           tier: "A",
           authMode: "API_KEY",
           supportLevel: "supported",
+          fulfillmentStatus: "Ready",
           providerKey: "stripe",
           baseUrl: "https://api.stripe.com",
           specSourceKey: null,
@@ -98,6 +137,7 @@ function providersResponse() {
           tier: "B",
           authMode: "OAUTH2",
           supportLevel: "supported",
+          fulfillmentStatus: "Ready",
           providerKey: "facebook-ads",
           baseUrl: "https://graph.facebook.com/v21.0",
           specSourceKey: null,
@@ -129,6 +169,7 @@ function providersResponse() {
           tier: "A",
           authMode: "API_KEY",
           supportLevel: "experimental",
+          fulfillmentStatus: "Candidate",
           providerKey: "1password-events",
           baseUrl: "https://events.1password.com",
           specSourceKey: "1password.com:events",
@@ -146,6 +187,7 @@ function providersResponse() {
           tier: "B",
           authMode: "OAUTH2",
           supportLevel: "catalog",
+          fulfillmentStatus: "Catalog",
           providerKey: "hubspot",
           baseUrl: null,
           specSourceKey: null,
@@ -156,6 +198,35 @@ function providersResponse() {
           actions: [],
         },
       ],
+    },
+  };
+}
+
+function apiGuruProvidersResponse(count: number) {
+  return {
+    ok: true,
+    result: {
+      type: "nangoProviders" as const,
+      data: Array.from({ length: count }, (_, index) => {
+        const ordinal = index + 1;
+        return {
+          name: `api-guru-${ordinal}`,
+          displayName: `API Guru ${ordinal}`,
+          category: "APIs.guru",
+          tier: "B",
+          authMode: "API_KEY",
+          supportLevel: "experimental",
+          fulfillmentStatus: "Candidate",
+          providerKey: `api-guru-${ordinal}`,
+          baseUrl: `https://api-guru-${ordinal}.example.com`,
+          specSourceKey: `api-guru-${ordinal}.example.com`,
+          specUrl: `https://api.apis.guru/v2/specs/api-guru-${ordinal}.example.com/1.0/openapi.json`,
+          experimentalSpecCount: 1,
+          credentialEnvVars: [],
+          tables: [],
+          actions: [],
+        };
+      }),
     },
   };
 }
@@ -283,6 +354,13 @@ async function chooseGithubProvider() {
   fireEvent.click(github);
 }
 
+async function chooseAsanaProvider() {
+  fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
+
+  const asana = await screen.findByRole("button", { name: /Asana/i });
+  fireEvent.click(asana);
+}
+
 async function chooseFacebookAdsProvider() {
   fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
 
@@ -292,13 +370,12 @@ async function chooseFacebookAdsProvider() {
   fireEvent.click(facebookAds);
 }
 
-async function chooseExperimentalProvider() {
+async function chooseHubSpotProvider() {
   fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
 
-  const provider = await screen.findByRole("button", {
-    name: /1Password \(Events API\)/i,
-  });
-  fireEvent.click(provider);
+  const hubspot = await screen.findByRole("button", { name: /HubSpot/i });
+  fireEvent.click(hubspot);
+  return hubspot;
 }
 
 describe("AddRestApiWizard", () => {
@@ -501,10 +578,10 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("API key (Bearer)")).toBeInTheDocument();
     expect(screen.getByText("https://api.stripe.com")).toBeInTheDocument();
     expect(screen.getByLabelText("STRIPE_API_KEY")).toBeInTheDocument();
-    expect(screen.getByText(/Drop-in/i)).toBeInTheDocument();
+    expect(screen.getByText(/Tables ready/i)).toBeInTheDocument();
   });
 
-  test("supported_catalog_provider_shows_ready_tables_without_openapi_preview", async () => {
+  test("github_pat_ready_provider_shows_ready_tables_without_openapi_preview", async () => {
     const onClose = renderWizard();
 
     await chooseGithubProvider();
@@ -534,8 +611,8 @@ describe("AddRestApiWizard", () => {
     await waitFor(() =>
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "add_api_datasource_from_import",
-        name: "github",
-        provider: "github",
+        name: "github-pat",
+        provider: "github-pat",
         spec_text: null,
         credentials: [["GITHUB_TOKEN", "ghp_test"]],
       }),
@@ -603,31 +680,29 @@ describe("AddRestApiWizard", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
-  test("experimental_catalog_provider_uses_spec_url_and_provider_key", async () => {
+  test("asana_candidate_provider_uses_spec_url_and_provider_key", async () => {
     const onClose = renderWizard();
 
-    await chooseExperimentalProvider();
+    await chooseAsanaProvider();
 
-    expect(screen.getAllByText("Experimental").length).toBeGreaterThan(0);
-    expect(screen.getByText("1 spec candidate")).toBeInTheDocument();
+    expect(screen.getAllByText("Candidate").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("1 spec candidate").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(
       await screen.findByRole("heading", {
-        name: "Connect to 1Password (Events API)",
+        name: "Connect to Asana",
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByLabelText("1PASSWORD_EVENTS_API_KEY"),
-    ).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("1PASSWORD_EVENTS_API_KEY"), {
-      target: { value: "events_test" },
+    expect(screen.getByLabelText("ASANA_TOKEN")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("ASANA_TOKEN"), {
+      target: { value: "asana_test" },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     const specInput = screen.getByLabelText("OpenAPI spec text or URL");
     expect(specInput).toHaveValue(
-      "https://api.apis.guru/v2/specs/1password.com/events/1.0.0/openapi.json",
+      "https://api.apis.guru/v2/specs/asana.com/1.0/openapi.json",
     );
 
     fireEvent.click(screen.getByLabelText("Connection only"));
@@ -637,13 +712,72 @@ describe("AddRestApiWizard", () => {
     await waitFor(() =>
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "add_api_datasource_from_import",
-        name: "1password_events",
-        provider: "1password-events",
+        name: "asana",
+        provider: "asana",
         spec_text: null,
-        credentials: [["1PASSWORD_EVENTS_API_KEY", "events_test"]],
+        credentials: [["ASANA_TOKEN", "asana_test"]],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  test("blocked_provider_is_visible_with_reason_but_not_selectable", async () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
+
+    const blocked = await screen.findByRole("button", {
+      name: /Blocked Mail/i,
+    });
+    expect(blocked).toBeDisabled();
+    expect(screen.getByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByText("unsupported_auth")).toBeInTheDocument();
+    expect(screen.getByText("2 spec candidates")).toBeInTheDocument();
+  });
+
+  test("catalog_provider_shows_catalog_badge_and_uses_custom_spec_flow", async () => {
+    renderWizard();
+
+    const hubspot = await chooseHubSpotProvider();
+
+    expect(hubspot).toBeEnabled();
+    expect(within(hubspot).getByText("Catalog")).toBeInTheDocument();
+    expect(within(hubspot).queryByText("Tier B")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to HubSpot" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("HUBSPOT_TOKEN")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("HUBSPOT_TOKEN"), {
+      target: { value: "hubspot_test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByLabelText("OpenAPI spec text or URL")).toHaveValue("");
+  });
+
+  test("provider_catalog_can_render_all_api_guru_backed_providers_once", async () => {
+    daemonControlMock.mockImplementationOnce((command: { command: string }) => {
+      if (command.command === "list_nango_providers") {
+        return Promise.resolve(apiGuruProvidersResponse(87));
+      }
+      return Promise.resolve({
+        ok: true,
+        result: { type: "empty", data: {} },
+      });
+    });
+
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
+
+    expect(await screen.findByText("API Guru 1")).toBeInTheDocument();
+    expect(screen.getByText("API Guru 87")).toBeInTheDocument();
+    expect(screen.getAllByText("Candidate")).toHaveLength(87);
+    expect(screen.getAllByText("1 spec candidate")).toHaveLength(87);
   });
 
   test("prefill_opens_connect_step_with_blank_missing_credentials_and_saves_import", async () => {
@@ -806,13 +940,16 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("response_path = $.data")).toBeInTheDocument();
   });
 
-  test("review_adds_datasource_from_openapi_spec", async () => {
+  test("review_adds_datasource_from_import_with_candidate_spec_and_credentials", async () => {
     const onClose = renderWizard();
 
-    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    await chooseAsanaProvider();
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.change(await screen.findByLabelText("Datasource name"), {
-      target: { value: "stripe_reporting" },
+      target: { value: "asana_reporting" },
+    });
+    fireEvent.change(screen.getByLabelText("ASANA_TOKEN"), {
+      target: { value: "asana_test_123" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.change(screen.getByLabelText("OpenAPI spec text or URL"), {
@@ -828,10 +965,10 @@ describe("AddRestApiWizard", () => {
     await waitFor(() =>
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "add_api_datasource_from_import",
-        name: "stripe_reporting",
-        provider: null,
+        name: "asana_reporting",
+        provider: "asana",
         spec_text: SPEC_TEXT,
-        credentials: [],
+        credentials: [["ASANA_TOKEN", "asana_test_123"]],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
