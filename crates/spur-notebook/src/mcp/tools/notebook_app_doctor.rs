@@ -564,6 +564,23 @@ async fn check_plugin_and_skill(
     }
 }
 
+/// Prefixes (through the first '_') of the plugin's live tool names, e.g.
+/// {"wb_"} for a plugin exposing wb_subgraph/wb_scorecard. A gate name with a
+/// matching prefix is checkable against the live surface, so a renamed or
+/// phantom app tool fails the doctor instead of being silently skipped.
+fn plugin_tool_prefixes(plugin_tools: &[String]) -> std::collections::HashSet<String> {
+    plugin_tools
+        .iter()
+        .filter_map(|tool| tool.split_once('_').map(|(p, _)| format!("{p}_")))
+        .collect()
+}
+
+fn is_checkable_gate_name(tool: &str, plugin_prefixes: &std::collections::HashSet<String>) -> bool {
+    const KNOWN_PREFIXES: [&str; 3] = ["notebook_", "notebook.", "html_video_"];
+    KNOWN_PREFIXES.iter().any(|p| tool.starts_with(p))
+        || plugin_prefixes.iter().any(|p| tool.starts_with(p))
+}
+
 /// Check 5: skill file exists and HARD-GATE tool names are in the live surface.
 async fn check_skill(
     app_root: &Path,
@@ -615,12 +632,10 @@ async fn check_skill(
         .map(|t| t.name.to_string())
         .collect();
 
-    // Known notebook-tool-name prefixes that are gated in skills.
-    let known_prefixes = ["notebook_", "notebook.", "html_video_"];
+    let plugin_prefixes = plugin_tool_prefixes(plugin_tools);
 
     for tool in &gate_tools {
-        let starts_with_known_prefix = known_prefixes.iter().any(|p| tool.starts_with(p));
-        if !starts_with_known_prefix {
+        if !is_checkable_gate_name(tool, &plugin_prefixes) {
             // Not a notebook/app tool name — skip (could be a placeholder text)
             continue;
         }
@@ -708,4 +723,27 @@ fn ok_result(findings: Vec<Finding>) -> CallToolResult {
         "ok": ok,
         "findings": findings_json
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_tool_prefixes_derive_from_tools_list() {
+        let tools = vec!["wb_subgraph".to_string(), "wb_scorecard".to_string()];
+        let prefixes = plugin_tool_prefixes(&tools);
+        assert!(prefixes.contains("wb_"));
+        assert_eq!(prefixes.len(), 1);
+    }
+
+    #[test]
+    fn gate_name_checkable_when_prefix_matches_plugin_tools() {
+        let plugin_tools = vec!["wb_subgraph".to_string()];
+        let prefixes = plugin_tool_prefixes(&plugin_tools);
+        assert!(is_checkable_gate_name("wb_blast_radius", &prefixes));
+        assert!(is_checkable_gate_name("notebook_run_cell", &prefixes));
+        assert!(!is_checkable_gate_name("spur.put", &prefixes));
+        assert!(!is_checkable_gate_name("SPUR_PORTS_ROOT", &prefixes));
+    }
 }
