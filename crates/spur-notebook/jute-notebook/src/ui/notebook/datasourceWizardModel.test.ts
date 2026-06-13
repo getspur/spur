@@ -17,6 +17,7 @@ describe("datasourceWizardModel", () => {
       "lakehouse",
       "database",
       "rest_api",
+      "rss",
       "advanced_sql",
     ]);
 
@@ -29,6 +30,7 @@ describe("datasourceWizardModel", () => {
     }
 
     expect(datasourceFamilyByKey.rest_api.duckDbMechanism).toContain("httpfs");
+    expect(datasourceFamilyByKey.rss.defaultExampleInput).toContain("rsshub://");
   });
 
   test("defines generalized wizard steps and a REST-compatible subset", () => {
