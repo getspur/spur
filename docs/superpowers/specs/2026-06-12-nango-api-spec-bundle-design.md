@@ -90,6 +90,25 @@ Current committed provider-specific coverage is therefore:
 | Facebook Ads | REST | `facebook_ads_insights` POST action | Manifest declares OAuth refresh | Parse/shape coverage only | Not yet provider-specific request/auth E2E. |
 | GitHub | REST/OpenAPI | Generated `[[table]]` from reviewed local spec | Nango API-key/header metadata in generated manifest | Manifest reparses; no scan test yet | Generated candidate, not yet provider-specific E2E. |
 
+### APIs.guru Fulfillment Status
+
+Updated on 2026-06-13 after the provider visibility/status work and the first
+ten provider promotions. The detailed coverage report is
+`docs/superpowers/specs/2026-06-13-api-guru-provider-fulfillment-status.md`.
+
+| Measure | Current |
+|---|---:|
+| APIs.guru-backed providers visible in Wizard/backend | 87/87 |
+| APIs.guru spec rows traceable to provider/spec provenance | 295/295 |
+| Ready providers / spec rows | 15 / 99 |
+| Candidate providers / spec rows | 52 / 170 |
+| Blocked providers / spec rows | 20 / 26 |
+
+The first promotion batch made these providers Ready:
+`github-pat`, `1password-events`, `atlassian-admin`, `azure-devops`,
+`clicksend`, `asana`, `slack`, `jira`, `notion`, and `autotask`. `autotask`
+replaces `trello`, which remains visible but blocked on unsupported auth.
+
 Untracked generated manifests currently exist in the workspace for providers
 such as GitHub, Stripe, Zendesk, SendGrid, Twilio, OpenAI, Mailchimp, Datadog,
 Algolia, Square, and others. They must not be counted as supported until they
