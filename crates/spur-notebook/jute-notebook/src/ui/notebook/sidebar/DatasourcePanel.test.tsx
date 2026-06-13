@@ -147,6 +147,13 @@ function defaultDaemonResponse(
   }
 
   if (command.command === "attach_saved_connection") {
+    const savedConnection = savedConnectionTemplate();
+    const tables =
+      command.tables && command.tables.length > 0
+        ? savedConnection.tables.filter((table) =>
+            command.tables?.includes(table.name),
+          )
+        : savedConnection.tables;
     return {
       ok: true,
       result: {
@@ -159,7 +166,7 @@ function defaultDaemonResponse(
             group: "API",
             columns: [],
             rowCount: null,
-            tables: savedConnectionTemplate().tables,
+            tables,
           }),
           missing_env_vars: [],
         },
@@ -578,6 +585,12 @@ describe("DatasourcePanel", () => {
       }
 
       if (command.command === "attach_saved_connection") {
+        const tables =
+          command.tables && command.tables.length > 0
+            ? savedConnection.tables.filter((table) =>
+                command.tables?.includes(table.name),
+              )
+            : savedConnection.tables;
         return Promise.resolve({
           ok: true,
           result: {
@@ -590,7 +603,7 @@ describe("DatasourcePanel", () => {
                 group: "API",
                 columns: [],
                 rowCount: null,
-                tables: savedConnection.tables,
+                tables,
               }),
               missing_env_vars: ["STRIPE_API_KEY"],
             },
@@ -629,8 +642,18 @@ describe("DatasourcePanel", () => {
     expect(screen.getByText("stripe_customers")).toBeInTheDocument();
 
     fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "Select stripe_charges from stripe_reporting",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "Select stripe_customers from stripe_reporting",
+      }),
+    );
+    fireEvent.click(
       screen.getByRole("button", {
-        name: "Attach saved connection stripe_reporting",
+        name: "Attach selected table-functions from stripe_reporting",
       }),
     );
 
@@ -639,6 +662,7 @@ describe("DatasourcePanel", () => {
         command: "attach_saved_connection",
         name: "stripe_reporting",
         credentials: [],
+        tables: ["stripe_charges", "stripe_customers"],
       }),
     );
     expect(
@@ -722,6 +746,12 @@ describe("DatasourcePanel", () => {
       }
 
       if (command.command === "attach_saved_connection") {
+        const tables =
+          command.tables && command.tables.length > 0
+            ? savedConnection.tables.filter((table) =>
+                command.tables?.includes(table.name),
+              )
+            : savedConnection.tables;
         return Promise.resolve({
           ok: true,
           result: {
@@ -734,7 +764,7 @@ describe("DatasourcePanel", () => {
                 group: "API",
                 columns: [],
                 rowCount: null,
-                tables: savedConnection.tables,
+                tables,
               }),
               missing_env_vars: ["STRIPE_API_KEY"],
             },
@@ -751,7 +781,17 @@ describe("DatasourcePanel", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Attach saved connection stripe_reporting",
+        name: "Select table-functions from saved connection stripe_reporting",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "Select stripe_charges from stripe_reporting",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Attach selected table-functions from stripe_reporting",
       }),
     );
 
@@ -781,6 +821,121 @@ describe("DatasourcePanel", () => {
     expect(
       within(dialog).queryByLabelText("STRIPE_ACCOUNT"),
     ).not.toBeInTheDocument();
+  });
+
+  test("saved_connections_attach_selected_tables_from_multiple_connections", async () => {
+    const stripeConnection = savedConnectionTemplate();
+    const githubConnection = savedConnectionTemplate({
+      name: "github_reporting",
+      provider: "github",
+      manifestToml: "name = 'github'",
+      credentialEnvVars: ["GITHUB_TOKEN"],
+      tables: [
+        {
+          name: "github_issues",
+          columns: [{ name: "number", sqlType: "BIGINT" }],
+          rowCount: null,
+        },
+        {
+          name: "github_repositories",
+          columns: [{ name: "full_name", sqlType: "VARCHAR" }],
+          rowCount: null,
+        },
+      ],
+    });
+    const saved = [stripeConnection, githubConnection];
+    daemonControlMock.mockImplementation((command: DaemonControlCommand) => {
+      if (command.command === "list_saved_connections") {
+        return Promise.resolve({
+          ok: true,
+          result: { type: "savedConnections", data: saved },
+        });
+      }
+
+      if (command.command === "attach_saved_connection") {
+        const connection = saved.find(
+          (candidate) => candidate.name === command.name,
+        );
+        const tables =
+          command.tables && command.tables.length > 0
+            ? (connection?.tables ?? []).filter((table) =>
+                command.tables?.includes(table.name),
+              )
+            : (connection?.tables ?? []);
+
+        return Promise.resolve({
+          ok: true,
+          result: {
+            type: "attachedSavedConnection",
+            data: {
+              entry: datasourceEntry({
+                name: command.name,
+                path: `api://${command.name}`,
+                kind: "api_tables",
+                group: "API",
+                columns: [],
+                rowCount: null,
+                tables,
+              }),
+              missing_env_vars: [],
+            },
+          },
+        });
+      }
+
+      return Promise.resolve(defaultDaemonResponse(command));
+    });
+
+    render(<DatasourcePanel />);
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Expand saved connection stripe_reporting",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "Select stripe_charges from stripe_reporting",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Attach selected table-functions from stripe_reporting",
+      }),
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Expand saved connection github_reporting",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "Select github_issues from github_reporting",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Attach selected table-functions from github_reporting",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "attach_saved_connection",
+        name: "stripe_reporting",
+        credentials: [],
+        tables: ["stripe_charges"],
+      }),
+    );
+    expect(daemonControlMock).toHaveBeenCalledWith({
+      command: "attach_saved_connection",
+      name: "github_reporting",
+      credentials: [],
+      tables: ["github_issues"],
+    });
+    expect(await screen.findAllByText("stripe_charges")).not.toHaveLength(0);
+    expect(await screen.findAllByText("github_issues")).not.toHaveLength(0);
   });
 
   test("saved_connection_details_wrap_long_tokens_in_compact_sidebar", async () => {

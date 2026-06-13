@@ -52,6 +52,7 @@ export type DaemonControlCommand =
       command: "attach_saved_connection";
       name: string;
       credentials: [string, string][];
+      tables?: Array<string>;
     }
   | { command: "delete_saved_connection"; name: string }
   | {

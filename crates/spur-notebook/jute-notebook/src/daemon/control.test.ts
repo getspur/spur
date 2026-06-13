@@ -7,8 +7,8 @@ import {
   daemonControl,
   datasourceEntryFromDaemonControlResponse,
   deleteSavedConnectionCommand,
-  listSavedConnectionsCommand,
   listNangoProvidersCommand,
+  listSavedConnectionsCommand,
   nangoProvidersFromDaemonControlResponse,
   pathFromDaemonControlResponse,
   recentEntriesFromDaemonControlResponse,
@@ -154,11 +154,13 @@ describe("daemon control adapter", () => {
       attachSavedConnectionCommand({
         name: "stripe_reporting",
         credentials: [["STRIPE_API_KEY", "sk_test_123"]],
+        tables: ["stripe_charges", "stripe_customers"],
       }),
     ).toEqual({
       command: "attach_saved_connection",
       name: "stripe_reporting",
       credentials: [["STRIPE_API_KEY", "sk_test_123"]],
+      tables: ["stripe_charges", "stripe_customers"],
     });
     expect(
       deleteSavedConnectionCommand({

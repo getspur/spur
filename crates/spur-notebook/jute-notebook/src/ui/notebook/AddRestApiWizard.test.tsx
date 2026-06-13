@@ -1254,6 +1254,7 @@ describe("AddRestApiWizard", () => {
         initialSavedConnectionRecovery={{
           connection: savedConnection,
           missingEnvVars: ["STRIPE_API_KEY"],
+          tableNames: ["stripe_charges"],
         }}
         open
         onClose={onClose}
@@ -1279,6 +1280,7 @@ describe("AddRestApiWizard", () => {
         command: "attach_saved_connection",
         name: "stripe_reporting",
         credentials: [["STRIPE_API_KEY", "sk_test_recovery"]],
+        tables: ["stripe_charges"],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
