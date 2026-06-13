@@ -276,6 +276,28 @@ function datasourceResponse() {
   };
 }
 
+function rssDatasourceResponse() {
+  return {
+    ok: true,
+    result: {
+      type: "datasource" as const,
+      data: {
+        name: "rss",
+        path: "rss",
+        kind: "api_tables" as const,
+        group: "RSS",
+        columns: [],
+        rowCount: null,
+        tables: [
+          { name: "rss_routes", columns: [], rowCount: null },
+          { name: "rss_feed", columns: [], rowCount: null },
+          { name: "rss_entries", columns: [], rowCount: null },
+        ],
+      },
+    },
+  };
+}
+
 function savedConnectionsResponse() {
   return {
     ok: true,
@@ -399,6 +421,9 @@ describe("AddRestApiWizard", () => {
         if (command.command === "add_api_datasource_from_manifest") {
           return Promise.resolve(datasourceResponse());
         }
+        if (command.command === "add_api_datasource") {
+          return Promise.resolve(rssDatasourceResponse());
+        }
         if (command.command === "list_saved_connections") {
           return Promise.resolve(savedConnectionsResponse());
         }
@@ -489,11 +514,40 @@ describe("AddRestApiWizard", () => {
       screen.getByRole("button", { name: /REST API/i }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole("button", { name: /RSS \/ RSSHub/i }),
+    ).toBeInTheDocument();
+    expect(
       screen.getByRole("button", { name: /Advanced SQL attach/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /Provider catalog/i }),
     ).toBeInTheDocument();
+  });
+
+  test("rss_family_adds_backend_datasource_for_rsshub_catalog", async () => {
+    const onClose = renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /RSS \/ RSSHub/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Add RSS / RSSHub" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Datasource name")).toHaveValue("rss");
+    expect(screen.getAllByText("rss_routes").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("rss_feed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("rss_entries").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "add_api_datasource",
+        name: "rss",
+        source: "rss",
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   test("file_family_renders_locate_auth_inspect_and_attach_details", () => {

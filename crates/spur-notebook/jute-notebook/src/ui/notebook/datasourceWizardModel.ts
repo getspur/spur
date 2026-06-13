@@ -4,6 +4,7 @@ export type DatasourceSourceFamilyKey =
   | "lakehouse"
   | "database"
   | "rest_api"
+  | "rss"
   | "advanced_sql";
 
 export type DatasourceWizardStepKey =
@@ -86,6 +87,18 @@ export const DATASOURCE_SOURCE_FAMILIES = [
     duckDbMechanism: "httpfs plus generated table-functions over API responses",
     setupRequirements: ["Base URL or provider", "API credentials or token"],
     defaultExampleInput: "https://api.example.com/openapi.json",
+  },
+  {
+    key: "rss",
+    label: "RSS / RSSHub",
+    shortDetail: "Direct RSS feeds and RSSHub's predefined route catalog.",
+    duckDbMechanism: "spur_rest extension table-functions over RSSHub and RSS",
+    setupRequirements: [
+      "No credentials required",
+      "Browse routes with rss_routes()",
+      "Query feeds with rss_feed(url) or rss_entries(url)",
+    ],
+    defaultExampleInput: "rsshub://youtube/video/UC123",
   },
   {
     key: "advanced_sql",
