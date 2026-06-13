@@ -634,6 +634,43 @@ describe("DatasourcePanel", () => {
     );
   });
 
+  test("saved_connection_details_wrap_long_tokens_in_compact_sidebar", async () => {
+    const savedConnection = savedConnectionTemplate({
+      credentialEnvVars: [
+        "VERY_LONG_SERVICE_ACCOUNT_REFRESH_TOKEN_FOR_COMPACT_SIDEBAR",
+      ],
+    });
+    daemonControlMock.mockImplementation((command: DaemonControlCommand) => {
+      if (command.command === "list_saved_connections") {
+        return Promise.resolve({
+          ok: true,
+          result: { type: "savedConnections", data: [savedConnection] },
+        });
+      }
+
+      return Promise.resolve(defaultDaemonResponse(command));
+    });
+
+    render(<DatasourcePanel />);
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Expand saved connection stripe_reporting",
+      }),
+    );
+
+    expect(
+      screen.getByText(
+        "VERY_LONG_SERVICE_ACCOUNT_REFRESH_TOKEN_FOR_COMPACT_SIDEBAR",
+      ),
+    ).toHaveClass("max-w-full", "break-all");
+    expect(
+      screen.getByRole("button", {
+        name: "Edit saved connection stripe_reporting",
+      }).parentElement,
+    ).toHaveClass("flex-wrap");
+  });
+
   test("multi_table_entry_renders_tables", async () => {
     render(<DatasourcePanel />);
 

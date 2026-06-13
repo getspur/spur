@@ -12,7 +12,7 @@ import {
   TableIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
 import type {
   ConnectionTemplate,
@@ -144,6 +144,7 @@ export default function AddRestApiWizard({
   const [pendingPreview, setPendingPreview] = useState(false);
   const [pendingAdd, setPendingAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogTitleId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -426,6 +427,7 @@ export default function AddRestApiWizard({
     editMode,
   });
   const manifestPrefillMode = prefillManifestToml !== null;
+  const dialogTitle = editMode ? "Edit saved connection" : "Add datasource";
 
   if (!open) return null;
 
@@ -655,25 +657,29 @@ export default function AddRestApiWizard({
 
   return (
     <div
+      aria-labelledby={dialogTitleId}
       aria-modal="true"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-gray-950/35 px-4"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-gray-950/35 px-3 py-4 sm:px-4"
       onClick={onClose}
       role="dialog"
     >
       <section
-        className="flex h-[min(620px,calc(100vh-40px))] w-full max-w-3xl overflow-hidden rounded-lg border border-gray-200 bg-white shadow-2xl"
+        className="flex h-[min(620px,calc(100vh-32px))] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-2xl sm:h-[min(620px,calc(100vh-40px))] sm:flex-row"
         onClick={(event) => event.stopPropagation()}
       >
-        <aside className="w-48 shrink-0 border-r border-gray-200 bg-gray-50 px-3 py-4">
+        <aside className="w-full shrink-0 border-b border-gray-200 bg-gray-50 px-3 py-3 sm:w-48 sm:border-b-0 sm:border-r sm:py-4">
           <div className="mb-4 flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
               <PlugIcon className="shrink-0 text-indigo-600" size={16} />
-              <h2 className="truncate text-sm font-medium text-gray-950">
-                Add datasource
+              <h2
+                className="truncate text-sm font-medium text-gray-950"
+                id={dialogTitleId}
+              >
+                {dialogTitle}
               </h2>
             </div>
             <button
-              aria-label="Close"
+              aria-label={`Close ${dialogTitle.toLowerCase()}`}
               className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-950"
               onClick={onClose}
               type="button"
@@ -681,12 +687,12 @@ export default function AddRestApiWizard({
               <XIcon size={15} strokeWidth={1.5} />
             </button>
           </div>
-          <ol className="space-y-1">
+          <ol className="flex gap-1 overflow-x-auto sm:block sm:space-y-1">
             {STEPS.map((wizardStep, index) => {
               const active = index === stepIndex;
               const complete = index < stepIndex;
               return (
-                <li key={wizardStep.key}>
+                <li className="min-w-28 sm:min-w-0" key={wizardStep.key}>
                   <button
                     className={clsx(
                       "flex w-full items-start gap-2 rounded px-2 py-2 text-left transition-colors",
@@ -854,7 +860,7 @@ export default function AddRestApiWizard({
               ))}
           </div>
 
-          <footer className="flex h-14 shrink-0 items-center justify-between border-t border-gray-200 bg-gray-50 px-5">
+          <footer className="flex min-h-14 shrink-0 items-center justify-between gap-3 border-t border-gray-200 bg-gray-50 px-5 py-2">
             <button
               className={clsx(
                 "rounded border border-transparent px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:text-gray-950",
@@ -867,7 +873,7 @@ export default function AddRestApiWizard({
               Back
             </button>
             <button
-              className="inline-flex items-center gap-2 rounded border border-indigo-600 bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:border-gray-300 disabled:bg-gray-300"
+              className="inline-flex max-w-[65%] items-center justify-center gap-2 whitespace-normal rounded border border-indigo-600 bg-indigo-600 px-4 py-2 text-center text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:border-gray-300 disabled:bg-gray-300 sm:max-w-none"
               disabled={!canContinue || pendingAdd}
               onClick={() => {
                 if (step === "source" && sourceMode === "saved" && !editMode) {
@@ -1167,11 +1173,15 @@ function SourceOption({
         {icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-gray-950">{label}</span>
-        <span className="mt-0.5 block text-xs text-gray-500">{detail}</span>
+        <span className="block break-words text-sm font-medium text-gray-950">
+          {label}
+        </span>
+        <span className="mt-0.5 block break-words text-xs text-gray-500">
+          {detail}
+        </span>
       </span>
       {meta && (
-        <span className="rounded-full border border-indigo-200 bg-white px-2 py-1 text-xs font-medium text-indigo-600">
+        <span className="shrink-0 rounded-full border border-indigo-200 bg-white px-2 py-1 text-xs font-medium text-indigo-600">
           {meta}
         </span>
       )}
@@ -1237,7 +1247,7 @@ function GenericLocateStep({
         <span className="text-xs font-medium text-gray-600">
           {locationLabelForFamily(family)}
         </span>
-        <span className="mt-1 flex gap-2">
+        <span className="mt-1 flex flex-col gap-2 sm:flex-row">
           <input
             aria-label={locationLabelForFamily(family)}
             className="h-9 min-w-0 flex-1 rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
@@ -1246,7 +1256,7 @@ function GenericLocateStep({
           />
           {onPickLocalFile && (
             <button
-              className="inline-flex h-9 shrink-0 items-center gap-2 rounded border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 transition-colors hover:border-gray-950 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+              className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 transition-colors hover:border-gray-950 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
               disabled={pendingLocalFilePick}
               onClick={onPickLocalFile}
               type="button"
@@ -2032,7 +2042,7 @@ function SummaryRow({
   label: string;
 }) {
   return (
-    <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-3 border-b border-gray-200 px-3 py-2 last:border-b-0">
+    <div className="grid grid-cols-1 gap-1 border-b border-gray-200 px-3 py-2 last:border-b-0 sm:grid-cols-[112px_minmax(0,1fr)] sm:gap-3">
       <span className="text-xs text-gray-400">{label}</span>
       <span className="min-w-0 break-words font-mono text-xs text-gray-900">
         {children}
