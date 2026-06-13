@@ -347,6 +347,9 @@ describe("AddRestApiWizard", () => {
       screen.getByRole("heading", { name: "Add datasource" }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole("dialog", { name: "Add datasource" }),
+    ).toBeInTheDocument();
+    expect(
       screen.getByRole("button", { name: /Provider catalog/i }),
     ).toBeInTheDocument();
     expect(
@@ -368,6 +371,25 @@ describe("AddRestApiWizard", () => {
 
     expect(
       screen.getByText(/Hand-author the manifest later/i),
+    ).toBeInTheDocument();
+  });
+
+  test("edit_mode_labels_the_dialog_as_editing_a_saved_connection", () => {
+    const [savedConnection] = savedConnectionsResponse().result.data;
+
+    render(
+      <AddRestApiWizard
+        editConnection={savedConnection}
+        open
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "Edit saved connection" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Edit saved connection" }),
     ).toBeInTheDocument();
   });
 

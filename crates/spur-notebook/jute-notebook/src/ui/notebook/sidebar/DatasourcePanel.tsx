@@ -602,7 +602,7 @@ function SavedConnectionsSection({
         Saved connections
       </h3>
       {notice && (
-        <p className="mb-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+        <p className="mb-2 break-words rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
           {notice}
         </p>
       )}
@@ -698,15 +698,15 @@ function SavedConnectionRow({
             {provider} · {tableFunctionLabel}
           </p>
 
-          <div className="flex flex-wrap gap-1">
+          <div className="flex min-w-0 flex-wrap gap-1">
             {connection.credentialEnvVars.length === 0 ? (
-              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] uppercase text-emerald-700">
+              <span className="max-w-full break-all rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] uppercase text-emerald-700">
                 No credentials
               </span>
             ) : (
               connection.credentialEnvVars.map((envVar) => (
                 <span
-                  className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] uppercase text-amber-700"
+                  className="max-w-full break-all rounded bg-amber-50 px-1.5 py-0.5 text-[10px] uppercase text-amber-700"
                   key={envVar}
                 >
                   {envVar}
@@ -719,10 +719,12 @@ function SavedConnectionRow({
             <ul className="space-y-1">
               {connection.tables.map((table) => (
                 <li
-                  className="flex items-center justify-between gap-2"
+                  className="flex min-w-0 items-center justify-between gap-2"
                   key={table.name}
                 >
-                  <span className="truncate text-gray-700">{table.name}</span>
+                  <span className="min-w-0 truncate text-gray-700">
+                    {table.name}
+                  </span>
                   <span className="shrink-0 rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
                     function
                   </span>
@@ -731,7 +733,7 @@ function SavedConnectionRow({
             </ul>
           )}
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <button
               aria-label={`Edit saved connection ${connection.name}`}
               className="text-xs font-medium text-gray-600 transition-colors hover:text-gray-950"
@@ -742,7 +744,7 @@ function SavedConnectionRow({
             </button>
             <button
               aria-label={`Delete saved connection ${connection.name}`}
-              className="text-xs font-medium text-red-600 transition-colors hover:text-red-700"
+              className="text-left text-xs font-medium text-red-600 transition-colors hover:text-red-700"
               onClick={() => onDelete(connection.name)}
               type="button"
             >
@@ -768,7 +770,7 @@ function DatasourceListItem({
   return (
     <article className="rounded border border-gray-200 bg-white p-3">
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h4 className="truncate text-sm font-medium text-gray-950">
             {entry.name}
           </h4>
