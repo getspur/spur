@@ -4779,6 +4779,68 @@ score = { json = "$.score", type = "Int64" }
             entry.tables,
             vec![
                 jute::commands::Table {
+                    name: "rss_routes".to_string(),
+                    columns: vec![
+                        jute::commands::Column {
+                            name: "source_key".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "source_name".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "route".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "name".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "url".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "categories".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "heat".to_string(),
+                            sql_type: "BIGINT".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "example".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "rsshub_url".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "description".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "require_config".to_string(),
+                            sql_type: "BOOLEAN".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "require_puppeteer".to_string(),
+                            sql_type: "BOOLEAN".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "support_radar".to_string(),
+                            sql_type: "BOOLEAN".to_string(),
+                        },
+                        jute::commands::Column {
+                            name: "top_feed_url".to_string(),
+                            sql_type: "VARCHAR".to_string(),
+                        },
+                    ],
+                    row_count: None,
+                },
+                jute::commands::Table {
                     name: "rss_feed".to_string(),
                     columns: vec![
                         jute::commands::Column {
