@@ -2503,6 +2503,25 @@ function RssAttachStep({
       : sourceMode === "direct"
         ? "Direct URLs map straight into rss_feed(url) and rss_entries(url)."
         : "Route parameters generate a canonical rsshub:// URL.";
+  const queryUrl =
+    classification.mode === "direct" || classification.mode === "rsshub"
+      ? sourceInput.trim()
+      : generatedRssHubUrl;
+  const queryUrlLiteral = sqlStringLiteral(queryUrl || generatedRssHubUrl);
+  const queryTemplates = [
+    {
+      label: "Routes",
+      sql: "select * from rss_routes();",
+    },
+    {
+      label: "Feed metadata",
+      sql: `select * from rss_feed(${queryUrlLiteral});`,
+    },
+    {
+      label: "Feed entries",
+      sql: `select * from rss_entries(${queryUrlLiteral});`,
+    },
+  ];
 
   const selectMode = (mode: RssSourceMode) => {
     setSourceMode(mode);
@@ -2770,14 +2789,14 @@ function RssAttachStep({
         <section className="rounded-lg border border-gray-200 bg-gray-50">
           <div className="border-b border-gray-200 px-3 py-2">
             <h4 className="text-xs font-medium text-gray-950">
-              Subscription settings
+              Source registration
             </h4>
           </div>
           <SummaryRow label="Feed">{selectedRoute.previewTitle}</SummaryRow>
           <SummaryRow label="Source">{classification.label}</SummaryRow>
           <SummaryRow label="View">{selectedRoute.view}</SummaryRow>
           <SummaryRow label="Folder">{selectedRoute.category}</SummaryRow>
-          <SummaryRow label="Timeline">show in main feed</SummaryRow>
+          <SummaryRow label="Next action">run a notebook query</SummaryRow>
         </section>
 
         <section className="rounded-lg border border-gray-200 bg-gray-50">
@@ -2795,6 +2814,34 @@ function RssAttachStep({
           </SummaryRow>
         </section>
       </div>
+
+      <section className="mt-4 overflow-hidden rounded-lg border border-gray-200">
+        <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
+          <h4 className="text-xs font-medium text-gray-950">
+            Notebook query handoff
+          </h4>
+          <p className="mt-1 text-xs text-gray-500">
+            Run these templates in a notebook query cell after adding the
+            datasource.
+          </p>
+        </div>
+        <div className="divide-y divide-gray-200">
+          {queryTemplates.map((template) => (
+            <div className="bg-white px-3 py-2" key={template.label}>
+              <div className="text-[11px] font-medium uppercase text-gray-400">
+                {template.label}
+              </div>
+              <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all rounded border border-gray-200 bg-gray-950 px-3 py-2 font-mono text-xs leading-5 text-white">
+                {template.sql}
+              </pre>
+            </div>
+          ))}
+        </div>
+        <p className="border-t border-gray-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+          This registers the RSS table-functions only; it does not create a
+          durable shared feed subscription.
+        </p>
+      </section>
 
       <section className="mt-4 overflow-hidden rounded-lg border border-gray-200">
         <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
@@ -2873,6 +2920,10 @@ function rssHubUrlForRoute(
   }, route.template);
 
   return `rsshub://${path}`;
+}
+
+function sqlStringLiteral(value: string) {
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function encodeRssHubPathPart(value: string) {
