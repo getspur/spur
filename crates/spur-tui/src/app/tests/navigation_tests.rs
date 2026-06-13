@@ -149,6 +149,26 @@ mod plan_browser_navigation_tests {
     }
 
     #[test]
+    fn retry_plan_task_action_sends_user_input() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::RetryPlanTask {
+            plan_id: Some("plan-42".into()),
+            issue_id: "task-7".into(),
+        });
+
+        match rx.try_recv() {
+            Ok(UserInput::RetryPlanTask { plan_id, issue_id }) => {
+                assert_eq!(plan_id.as_deref(), Some("plan-42"));
+                assert_eq!(issue_id, "task-7");
+            }
+            Ok(_) => panic!("expected RetryPlanTask, got different user input"),
+            Err(err) => panic!("expected RetryPlanTask user input, got {err}"),
+        }
+    }
+
+    #[test]
     fn claim_plan_action_sends_user_input() {
         let (tx, mut rx) = mpsc::channel(8);
         let mut app = App::new(Some(tx), false);
