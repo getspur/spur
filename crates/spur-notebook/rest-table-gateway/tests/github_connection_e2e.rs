@@ -1,56 +1,30 @@
-use arrow_array::{BooleanArray, Int64Array, StringArray};
-use spur_rest_table_gateway::adapter::manifest::{AuthCfg, Manifest};
-use spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter;
-use spur_rest_table_gateway::adapter::{
-    Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest,
+#[path = "support/provider_manifest_harness.rs"]
+mod provider_manifest_harness;
+
+use spur_rest_table_gateway::adapter::manifest::AuthCfg;
+use spur_rest_table_gateway::adapter::{Predicate, PredicateOp, ScalarValue};
+use wiremock::MockServer;
+
+use provider_manifest_harness::{
+    scan_request_with_predicates, ExpectedRequest, ProviderManifestHarness, TypedCell,
 };
-use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = &self.previous {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
-
-fn scan_request(table: &str, predicates: Vec<Predicate>) -> ScanRequest {
-    ScanRequest {
-        table: table.to_string(),
-        predicates,
-        projection: None,
-        tvf_args: Vec::new(),
-        auth: ResolvedAuth::None,
-    }
-}
 
 #[tokio::test]
 async fn github_supported_manifest_scans_advisories_with_bearer_auth() {
     let server = MockServer::start().await;
-    let _token = EnvGuard::set("GITHUB_TOKEN", "ghp_mock_token");
+    let mut harness = ProviderManifestHarness::from_toml(
+        "github",
+        include_str!("../connections/supported/github.connection.toml"),
+    )
+    .expect("github manifest parses");
+    harness.replace_base_url("https://api.github.com", &server.uri());
+    let _env = harness.install_env();
 
-    Mock::given(method("GET"))
-        .and(path("/advisories"))
-        .and(header("authorization", "Bearer ghp_mock_token"))
-        .and(header("x-github-api-version", "2022-11-28"))
-        .and(query_param("severity", "high"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+    ExpectedRequest::get("/advisories")
+        .with_manifest_auth(harness.manifest(), "github")
+        .header("x-github-api-version", "2022-11-28")
+        .query_param("severity", "high")
+        .respond_json(serde_json::json!([
             {
                 "ghsa_id": "GHSA-xxxx-yyyy-zzzz",
                 "cve_id": "CVE-2026-0001",
@@ -59,24 +33,22 @@ async fn github_supported_manifest_scans_advisories_with_bearer_auth() {
                 "published_at": "2026-06-01T00:00:00Z",
                 "updated_at": "2026-06-02T00:00:00Z"
             }
-        ])))
+        ]))
         .mount(&server)
         .await;
 
-    let manifest_toml = include_str!("../connections/supported/github.connection.toml")
-        .replace("https://api.github.com", &server.uri());
-    let manifest = Manifest::from_toml(&manifest_toml).expect("github manifest parses");
-
-    assert_eq!(manifest.source.name, "github");
-    assert!(matches!(manifest.source.auth, AuthCfg::Bearer { ref env } if env == "GITHUB_TOKEN"));
-    assert!(manifest
+    assert_eq!(harness.manifest().source.name, "github");
+    assert!(
+        matches!(harness.manifest().source.auth, AuthCfg::Bearer { ref env } if env == "GITHUB_TOKEN")
+    );
+    assert!(harness
+        .manifest()
         .tables
         .iter()
         .any(|table| table.name == "security_advisories"));
 
-    let adapter = ManifestAdapter::new(manifest);
-    let batches = adapter
-        .scan(scan_request(
+    let batches = harness
+        .scan(scan_request_with_predicates(
             "security_advisories",
             vec![Predicate {
                 column: "severity".to_string(),
@@ -87,34 +59,30 @@ async fn github_supported_manifest_scans_advisories_with_bearer_auth() {
         .await
         .expect("github advisories scan succeeds");
 
-    assert_eq!(batches.len(), 1);
-    let batch = &batches[0];
-    assert_eq!(batch.num_rows(), 1);
-
-    let ghsa_ids = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("ghsa_id should be Utf8");
-    let severities = batch
-        .column(3)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("severity should be Utf8");
-
-    assert_eq!(ghsa_ids.value(0), "GHSA-xxxx-yyyy-zzzz");
-    assert_eq!(severities.value(0), "high");
+    harness.assert_one_typed_row("security_advisories", &batches);
+    harness.assert_typed_cell(
+        &batches[0],
+        "ghsa_id",
+        0,
+        TypedCell::Utf8("GHSA-xxxx-yyyy-zzzz"),
+    );
+    harness.assert_typed_cell(&batches[0], "severity", 0, TypedCell::Utf8("high"));
 }
 
 #[tokio::test]
 async fn github_supported_manifest_scans_authenticated_repos() {
     let server = MockServer::start().await;
-    let _token = EnvGuard::set("GITHUB_TOKEN", "ghp_mock_token");
+    let mut harness = ProviderManifestHarness::from_toml(
+        "github",
+        include_str!("../connections/supported/github.connection.toml"),
+    )
+    .expect("github manifest parses");
+    harness.replace_base_url("https://api.github.com", &server.uri());
+    let _env = harness.install_env();
 
-    Mock::given(method("GET"))
-        .and(path("/user/repos"))
-        .and(header("authorization", "Bearer ghp_mock_token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+    ExpectedRequest::get("/user/repos")
+        .with_manifest_auth(harness.manifest(), "github")
+        .respond_json(serde_json::json!([
             {
                 "id": 42,
                 "name": "spur",
@@ -124,17 +92,12 @@ async fn github_supported_manifest_scans_authenticated_repos() {
                 "default_branch": "main",
                 "updated_at": "2026-06-12T00:00:00Z"
             }
-        ])))
+        ]))
         .mount(&server)
         .await;
 
-    let manifest_toml = include_str!("../connections/supported/github.connection.toml")
-        .replace("https://api.github.com", &server.uri());
-    let manifest = Manifest::from_toml(&manifest_toml).expect("github manifest parses");
-    let adapter = ManifestAdapter::new(manifest);
-
-    let batches = adapter
-        .scan(scan_request(
+    let batches = harness
+        .scan(scan_request_with_predicates(
             "authenticated_repos",
             vec![Predicate {
                 column: "visibility".to_string(),
@@ -145,26 +108,8 @@ async fn github_supported_manifest_scans_authenticated_repos() {
         .await
         .expect("github repos scan succeeds");
 
-    let batch = &batches[0];
-    assert_eq!(batch.num_rows(), 1);
-
-    let ids = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .expect("id should be Int64");
-    let names = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("name should be Utf8");
-    let private = batch
-        .column(3)
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .expect("private should be Boolean");
-
-    assert_eq!(ids.value(0), 42);
-    assert_eq!(names.value(0), "spur");
-    assert!(private.value(0));
+    harness.assert_one_typed_row("authenticated_repos", &batches);
+    harness.assert_typed_cell(&batches[0], "id", 0, TypedCell::Int64(42));
+    harness.assert_typed_cell(&batches[0], "name", 0, TypedCell::Utf8("spur"));
+    harness.assert_typed_cell(&batches[0], "private", 0, TypedCell::Boolean(true));
 }
