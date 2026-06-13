@@ -684,11 +684,18 @@ function SavedConnectionRow({
   onEdit: (connection: ConnectionTemplate) => void;
   onToggle: (name: string) => void;
 }) {
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const credentialCount = connection.credentialEnvVars.length;
   const provider = connection.provider?.trim() || "custom";
   const tableFunctionLabel = `${connection.tables.length} ${
     connection.tables.length === 1 ? "table-function" : "table-functions"
   }`;
+
+  useEffect(() => {
+    if (!expanded) {
+      setConfirmingDelete(false);
+    }
+  }, [expanded]);
 
   return (
     <article className="rounded border border-gray-200 bg-white">
@@ -784,14 +791,38 @@ function SavedConnectionRow({
             >
               Edit
             </button>
-            <button
-              aria-label={`Delete saved connection ${connection.name}`}
-              className="text-left text-xs font-medium text-red-600 transition-colors hover:text-red-700"
-              onClick={() => onDelete(connection.name)}
-              type="button"
-            >
-              Delete saved connection
-            </button>
+            {confirmingDelete ? (
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <button
+                  aria-label={`Delete permanently ${connection.name}`}
+                  className="text-left text-xs font-semibold text-red-700 transition-colors hover:text-red-800"
+                  onClick={() => {
+                    setConfirmingDelete(false);
+                    onDelete(connection.name);
+                  }}
+                  type="button"
+                >
+                  Delete permanently
+                </button>
+                <button
+                  aria-label={`Cancel delete saved connection ${connection.name}`}
+                  className="text-left text-xs font-medium text-gray-500 transition-colors hover:text-gray-800"
+                  onClick={() => setConfirmingDelete(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                aria-label={`Delete saved connection ${connection.name}`}
+                className="text-left text-xs font-medium text-red-600 transition-colors hover:text-red-700"
+                onClick={() => setConfirmingDelete(true)}
+                type="button"
+              >
+                Delete saved connection
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -806,6 +837,7 @@ function DatasourceListItem({
   entry: DatasourceEntry;
   onRemove: (name: string) => void;
 }) {
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   const hasTables = entry.tables.length > 0;
   const isApiTables = entry.kind === "api_tables";
 
@@ -825,15 +857,39 @@ function DatasourceListItem({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <DatasourceKindBadge entry={entry} />
-          <button
-            aria-label={`Remove ${entry.name}`}
-            className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-900"
-            onClick={() => onRemove(entry.name)}
-            title={`Remove ${entry.name}`}
-            type="button"
-          >
-            <Trash2Icon size={14} strokeWidth={1.5} />
-          </button>
+          {confirmingRemove ? (
+            <div className="flex items-center gap-1">
+              <button
+                aria-label={`Confirm remove ${entry.name}`}
+                className="rounded border border-red-200 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 transition-colors hover:border-red-300 hover:text-red-800"
+                onClick={() => {
+                  setConfirmingRemove(false);
+                  onRemove(entry.name);
+                }}
+                type="button"
+              >
+                Remove
+              </button>
+              <button
+                aria-label={`Cancel remove ${entry.name}`}
+                className="rounded border border-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 transition-colors hover:border-gray-300 hover:text-gray-800"
+                onClick={() => setConfirmingRemove(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              aria-label={`Remove ${entry.name}`}
+              className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-900"
+              onClick={() => setConfirmingRemove(true)}
+              title={`Remove ${entry.name}`}
+              type="button"
+            >
+              <Trash2Icon size={14} strokeWidth={1.5} />
+            </button>
+          )}
         </div>
       </div>
 

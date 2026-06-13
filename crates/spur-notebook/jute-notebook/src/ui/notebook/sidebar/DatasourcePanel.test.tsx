@@ -503,7 +503,7 @@ describe("DatasourcePanel", () => {
     expect(eventCallbacks.has("datasources://changed")).toBe(true);
   });
 
-  test("remove_button_dispatches_detach_datasource", async () => {
+  test("remove_button_requires_confirmation_before_detach_datasource", async () => {
     render(<DatasourcePanel />);
 
     await waitFor(() =>
@@ -516,6 +516,32 @@ describe("DatasourcePanel", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Remove sales" }));
+
+    expect(
+      daemonControlMock.mock.calls.some(
+        ([command]) =>
+          command.command === "detach_datasource" && command.name === "sales",
+      ),
+    ).toBe(false);
+    expect(
+      screen.getByRole("button", { name: "Confirm remove sales" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Cancel remove sales" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Cancel remove sales" }),
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Confirm remove sales" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove sales" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Confirm remove sales" }),
+    );
 
     await waitFor(() =>
       expect(daemonControlMock).toHaveBeenCalledWith({
@@ -624,9 +650,56 @@ describe("DatasourcePanel", () => {
       }),
     ).toBeInTheDocument();
 
+    const initialDeleteCalls = daemonControlMock.mock.calls.filter(
+      ([command]) =>
+        command.command === "delete_saved_connection" &&
+        command.name === "stripe_reporting",
+    );
+
     fireEvent.click(
       screen.getByRole("button", {
         name: "Delete saved connection stripe_reporting",
+      }),
+    );
+
+    expect(
+      daemonControlMock.mock.calls.filter(
+        ([command]) =>
+          command.command === "delete_saved_connection" &&
+          command.name === "stripe_reporting",
+      ),
+    ).toHaveLength(initialDeleteCalls.length);
+    expect(
+      screen.getByRole("button", {
+        name: "Delete permanently stripe_reporting",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Cancel delete saved connection stripe_reporting",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Cancel delete saved connection stripe_reporting",
+      }),
+    );
+
+    expect(
+      screen.queryByRole("button", {
+        name: "Delete permanently stripe_reporting",
+      }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Delete saved connection stripe_reporting",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Delete permanently stripe_reporting",
       }),
     );
 
