@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Gauge, Paragraph},
     Frame,
@@ -40,6 +41,7 @@ pub struct PlanInspectorView {
     issue_states: HashMap<String, TaskIssueState>,
     task_detail_scroll: usize,
     mode: PlanInspectorMode,
+    confirm: Option<PlanInspectorConfirm>,
 }
 
 #[derive(Debug)]
@@ -47,6 +49,22 @@ enum TaskIssueState {
     Loading,
     Loaded(Box<spur_pm::Issue>),
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanInspectorConfirm {
+    Start {
+        plan_id: String,
+    },
+    RetryTask {
+        plan_id: String,
+        task_id: String,
+        task_name: String,
+        issue_id: String,
+        status: String,
+        attempt: u32,
+        max_attempts: u32,
+    },
 }
 
 impl PlanInspectorView {
@@ -61,6 +79,7 @@ impl PlanInspectorView {
             issue_states: HashMap::new(),
             task_detail_scroll: 0,
             mode: PlanInspectorMode::Browse,
+            confirm: None,
         }
     }
 
@@ -75,6 +94,7 @@ impl PlanInspectorView {
             issue_states: HashMap::new(),
             task_detail_scroll: 0,
             mode: PlanInspectorMode::Browse,
+            confirm: None,
         }
     }
 
@@ -397,6 +417,79 @@ impl PlanInspectorView {
             })
         }
     }
+
+    fn start_or_resume_plan(&mut self, plan: &TrackedPlan) -> Option<Action> {
+        if self.open_issue_id.is_some() || !matches!(self.mode, PlanInspectorMode::Browse) {
+            return None;
+        }
+
+        if !plan.is_active() {
+            return Some(Action::FlashHint {
+                message: format!("Cannot start: plan {} is terminal", plan.plan_id),
+            });
+        }
+
+        self.confirm = Some(PlanInspectorConfirm::Start {
+            plan_id: plan.plan_id.clone(),
+        });
+        None
+    }
+
+    fn retry_selected_task(&mut self, plan: &TrackedPlan) -> Option<Action> {
+        if self.open_issue_id.is_some() || !matches!(self.mode, PlanInspectorMode::Browse) {
+            return None;
+        }
+
+        let Some(task) = self.selected_task(plan) else {
+            return Some(Action::FlashHint {
+                message: "Cannot retry: no selected task".into(),
+            });
+        };
+        let Some(issue_id) = task.issue_id.clone() else {
+            return Some(Action::FlashHint {
+                message: "Cannot retry: selected task has no linked issue".into(),
+            });
+        };
+
+        if !is_retryable_task_status(&task.status) {
+            return Some(Action::FlashHint {
+                message: format!("Cannot retry: task {} is {}", task.task_id, task.status),
+            });
+        }
+
+        if task.attempt >= task.max_attempts {
+            return Some(Action::FlashHint {
+                message: format!(
+                    "Cannot retry: task {} is at attempt {}/{}",
+                    task.task_id, task.attempt, task.max_attempts
+                ),
+            });
+        }
+
+        self.confirm = Some(PlanInspectorConfirm::RetryTask {
+            plan_id: plan.plan_id.clone(),
+            task_id: task.task_id.clone(),
+            task_name: task.task_name.clone(),
+            issue_id,
+            status: task.status.clone(),
+            attempt: task.attempt,
+            max_attempts: task.max_attempts,
+        });
+        None
+    }
+
+    fn confirm_action(&mut self) -> Option<Action> {
+        let confirm = self.confirm.take()?;
+        match confirm {
+            PlanInspectorConfirm::Start { plan_id } => Some(Action::ResumePlan { plan_id }),
+            PlanInspectorConfirm::RetryTask {
+                plan_id, issue_id, ..
+            } => Some(Action::RetryPlanTask {
+                plan_id: Some(plan_id),
+                issue_id,
+            }),
+        }
+    }
 }
 
 impl PlanInspectorView {
@@ -623,6 +716,17 @@ fn is_terminal_phase(phase: LifecycleState) -> bool {
 impl View for PlanInspectorView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         let key = super::normalize_macos_option(key);
+        if self.confirm.is_some() {
+            return match key.code {
+                KeyCode::Enter if key.modifiers.is_empty() => self.confirm_action(),
+                KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => {
+                    self.confirm = None;
+                    None
+                }
+                _ => None,
+            };
+        }
+
         let plan = self.active_plan(ctx);
         if let Some(plan) = plan {
             self.ensure_selection(plan);
@@ -666,6 +770,14 @@ impl View for PlanInspectorView {
                 KeyCode::Char('G') => self.jump_lane_end(plan),
                 KeyCode::Char('b') if key.modifiers.is_empty() => {
                     return self.jump_to_next_blocker(plan);
+                }
+                KeyCode::Char('r') if key.modifiers.is_empty() => {
+                    return self.start_or_resume_plan(plan);
+                }
+                KeyCode::Char('R')
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    return self.retry_selected_task(plan);
                 }
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     if let Some(task) = self.selected_task(plan) {
@@ -972,6 +1084,11 @@ impl View for PlanInspectorView {
             );
             (false, false)
         };
+        let selected_task_retryable = self
+            .active_plan(ctx)
+            .and_then(|plan| self.selected_task(plan))
+            .map(is_retryable_task)
+            .unwrap_or(false);
 
         let enter_hint = if self.open_issue_id.is_some() {
             "Enter: close issue detail"
@@ -990,19 +1107,97 @@ impl View for PlanInspectorView {
         } else {
             ""
         };
+        let retry_hint = if self.open_issue_id.is_none() && selected_task_retryable {
+            "  R: retry"
+        } else {
+            ""
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                format!(
-                    " h/l: lane  j/k: task  b: blocker  {}  o: work item{}  g/G: ends  Alt+P/Esc: close {}",
-                    enter_hint, peek_hint, scroll_hint
+                footer_hint(
+                    area.width,
+                    enter_hint,
+                    peek_hint,
+                    retry_hint,
+                    scroll_hint,
+                    self.open_issue_id.is_none() && self.active_plan(ctx).is_some(),
                 ),
                 Style::default().fg(token(ctx.theme, "plan_inspector.footer_hint.fg")),
             )])),
             chunks[2],
         );
+        self.render_confirm(frame, area, ctx.theme);
     }
 
     fn tick(&mut self) {}
+}
+
+impl PlanInspectorView {
+    fn render_confirm(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let Some(confirm) = self.confirm.as_ref() else {
+            return;
+        };
+        let popup = centered_rect(area, 72, 9);
+        frame.render_widget(Clear, popup);
+
+        let (title, verb, body) = match confirm {
+            PlanInspectorConfirm::Start { plan_id } => (
+                " Start / Resume Plan ",
+                "Start",
+                vec![
+                    Line::from(format!("  Plan: {plan_id}")),
+                    Line::from(""),
+                    Line::from("  This starts/resumes execution in the current brain session."),
+                    Line::from("  A brain session can actively execute only one plan."),
+                    Line::from("  Workers may be dispatched after this starts."),
+                ],
+            ),
+            PlanInspectorConfirm::RetryTask {
+                task_id,
+                task_name,
+                issue_id,
+                status,
+                attempt,
+                max_attempts,
+                ..
+            } => (
+                " Retry Task ",
+                "Retry",
+                vec![
+                    Line::from(format!("  Task: {task_id} - {task_name}")),
+                    Line::from(format!("  Issue: {issue_id}")),
+                    Line::from(format!("  Status: {status}")),
+                    Line::from(format!("  Attempt: {attempt}/{max_attempts}")),
+                    Line::from("  This requeues the selected task for another worker attempt."),
+                ],
+            ),
+        };
+
+        let mut lines = body;
+        lines.push(Line::from(""));
+        lines.push(action_line(
+            "[Enter]",
+            verb,
+            "[Esc]",
+            "Cancel",
+            popup.width,
+            theme,
+        ));
+
+        let block = Block::default()
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(token(theme, "plan_browser.confirm.title.fg"))
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_alignment(Alignment::Left)
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(token(theme, "plan_browser.confirm.border.fg")));
+
+        frame.render_widget(Paragraph::new(lines).block(block), popup);
+    }
 }
 
 fn plan_status_color(theme: &Theme, status: &str) -> Color {
@@ -1098,6 +1293,16 @@ fn operator_status_label(status: &str) -> &str {
     }
 }
 
+fn is_retryable_task_status(status: &str) -> bool {
+    matches!(status, "failed" | "rejected" | "error")
+}
+
+fn is_retryable_task(task: &spur_core::TrackedTask) -> bool {
+    task.issue_id.is_some()
+        && is_retryable_task_status(&task.status)
+        && task.attempt < task.max_attempts
+}
+
 fn format_age(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
@@ -1121,6 +1326,96 @@ fn truncate_display(s: &str, max: usize) -> String {
     let mut out = s[..end].trim_end().to_string();
     out.push('…');
     out
+}
+
+fn footer_hint(
+    width: u16,
+    enter_hint: &str,
+    peek_hint: &str,
+    retry_hint: &str,
+    scroll_hint: &str,
+    show_start: bool,
+) -> String {
+    let start_hint = if show_start { "  r: start/resume" } else { "" };
+    let full = format!(
+        " h/l: lane  j/k: task  b: blocker  {}  o: work item{}{}{}  g/G: ends  Alt+P/Esc: close {}",
+        enter_hint, start_hint, retry_hint, peek_hint, scroll_hint
+    );
+    if full.chars().count() <= width as usize {
+        return full;
+    }
+
+    let compact_peek = if peek_hint.is_empty() {
+        ""
+    } else {
+        "  s: peek  S: worker"
+    };
+    let compact_start = if show_start { "  r: start" } else { "" };
+    let compact_retry = if retry_hint.is_empty() {
+        ""
+    } else {
+        "  R: retry"
+    };
+    let compact = format!(
+        " h/l lane  j/k task  b blocker  {}  o item{}{}{}  Esc close",
+        enter_hint, compact_start, compact_retry, compact_peek
+    );
+    if compact.chars().count() <= width as usize {
+        return compact;
+    }
+
+    truncate_display(
+        &format!(
+            " j/k task  b blocker{}{}  Esc close",
+            compact_start, compact_retry
+        ),
+        width as usize,
+    )
+}
+
+fn centered_rect(outer: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(outer.width);
+    let height = height.min(outer.height);
+    Rect {
+        x: outer.x + outer.width.saturating_sub(width) / 2,
+        y: outer.y + outer.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn action_line(
+    left_key: &'static str,
+    left_label: &'static str,
+    right_key: &'static str,
+    right_label: &'static str,
+    popup_width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let left_width = 1 + left_key.len() + 1 + left_label.len();
+    let right_width = right_key.len() + 1 + right_label.len();
+    let content_width = popup_width.saturating_sub(2) as usize;
+    let gap = content_width
+        .saturating_sub(left_width + right_width)
+        .max(1);
+
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            left_key,
+            Style::default()
+                .fg(token(theme, "plan_browser.confirm.primary_key.fg"))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {left_label}{}", " ".repeat(gap))),
+        Span::styled(
+            right_key,
+            Style::default()
+                .fg(token(theme, "plan_browser.confirm.cancel_key.fg"))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {right_label}")),
+    ])
 }
 
 #[cfg(test)]
@@ -1217,6 +1512,105 @@ mod tests {
                     mutation_id: None,
                     superseded_by: Vec::new(),
                     next_action: "wait".into(),
+                }],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
+    fn projection_with_terminal_plan(session_id: &SessionId) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "approved".into(),
+                progress: "1/1 done".into(),
+                next_action: "terminal".into(),
+                ready_to_merge: true,
+                counts: PlanSnapshotCounts {
+                    approved: 1,
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "t-12".into(),
+                    task_name: "Stage A".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-epic.1".into()),
+                    issue_title: None,
+                    status: "approved".into(),
+                    attempt: 1,
+                    max_attempts: 3,
+                    depends_on: Vec::new(),
+                    blocked_by: Vec::new(),
+                    unblocks: Vec::new(),
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: None,
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "done".into(),
+                }],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
+    fn projection_with_single_task_status(
+        session_id: &SessionId,
+        status: &str,
+        issue_id: Option<&str>,
+        attempt: u32,
+        max_attempts: u32,
+    ) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "running".into(),
+                progress: "0/1 done".into(),
+                next_action: "inspect failed task".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    failed: u32::from(status == "failed"),
+                    rejected: u32::from(status == "rejected"),
+                    pending: u32::from(status == "pending"),
+                    dispatched: u32::from(matches!(status, "running" | "dispatched")),
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "t-12".into(),
+                    task_name: "Stage A".into(),
+                    agent: "codex".into(),
+                    issue_id: issue_id.map(str::to_string),
+                    issue_title: None,
+                    status: status.into(),
+                    attempt,
+                    max_attempts,
+                    depends_on: Vec::new(),
+                    blocked_by: Vec::new(),
+                    unblocks: Vec::new(),
+                    summary: None,
+                    feedback: None,
+                    error: (status == "error").then(|| "worker error".into()),
+                    worker_branch: None,
+                    delegation_id: None,
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "operator retry".into(),
                 }],
                 owner_brain_session_id: Some(session_id.0.clone()),
                 owner_token: None,
@@ -1626,6 +2020,58 @@ mod tests {
             dump.contains("S: jump to worker"),
             "expected footer to advertise dashboard jump:\n{dump}"
         );
+        assert!(
+            dump.contains("r: start/resume"),
+            "expected footer to advertise start/resume:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn footer_uses_compact_start_hint_on_narrow_terminals() {
+        let hint = footer_hint(
+            50,
+            "Enter: issue detail",
+            "  s: stream peek  S: jump to worker",
+            "",
+            "",
+            true,
+        );
+
+        assert!(
+            hint.contains("r: start"),
+            "expected compact footer to advertise start:\n{hint}"
+        );
+        assert!(
+            hint.chars().count() <= 50,
+            "expected compact footer to fit narrow width:\n{hint}"
+        );
+    }
+
+    #[test]
+    fn footer_advertises_retry_only_for_retryable_task() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "failed", Some("bd-epic.1"), 1, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let dump = format!("{:?}", terminal.backend().buffer());
+        assert!(
+            dump.contains("R: retry"),
+            "expected footer to advertise retry for eligible task:\n{dump}"
+        );
     }
 
     #[test]
@@ -1756,6 +2202,216 @@ mod tests {
         assert!(matches!(
             action,
             Some(Action::OpenIssueInBacklog { id }) if id == "bd-epic"
+        ));
+    }
+
+    #[test]
+    fn r_opens_start_resume_confirmation_for_active_plan() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('r'), &ctx);
+
+        assert!(action.is_none(), "r should open confirmation first");
+        assert!(matches!(
+            view.confirm,
+            Some(PlanInspectorConfirm::Start { ref plan_id }) if plan_id == "plan-1"
+        ));
+    }
+
+    #[test]
+    fn enter_from_start_resume_confirmation_resumes_plan() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_char('r'), &ctx).is_none());
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::ResumePlan { plan_id }) if plan_id == "plan-1"
+        ));
+    }
+
+    #[test]
+    fn r_rejects_terminal_plan_with_hint() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_terminal_plan(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('r'), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::FlashHint { message })
+                if message == "Cannot start: plan plan-1 is terminal"
+        ));
+    }
+
+    #[test]
+    fn esc_or_q_dismisses_start_resume_confirmation_without_action() {
+        for close_key in [KeyCode::Esc, KeyCode::Char('q')] {
+            let session_id = SessionId("brain-1".into());
+            let projection = projection_with_epic(&session_id);
+            let lineage = ExecutorLineage::new();
+            let ctx = view_context_for_tests(&lineage, &projection);
+            let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+            assert!(view.handle_key(key_char('r'), &ctx).is_none());
+            let action = view.handle_key(key(close_key), &ctx);
+
+            assert!(action.is_none());
+            assert!(view.confirm.is_none());
+        }
+    }
+
+    #[test]
+    fn retryable_selected_task_opens_retry_confirmation() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "failed", Some("bd-epic.1"), 1, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('R'), &ctx);
+
+        assert!(action.is_none(), "R should open confirmation first");
+        assert!(matches!(
+            view.confirm,
+            Some(PlanInspectorConfirm::RetryTask {
+                ref plan_id,
+                ref task_id,
+                ref task_name,
+                ref issue_id,
+                ref status,
+                attempt,
+                max_attempts,
+            }) if plan_id == "plan-1"
+                && task_id == "t-12"
+                && task_name == "Stage A"
+                && issue_id == "bd-epic.1"
+                && status == "failed"
+                && attempt == 1
+                && max_attempts == 3
+        ));
+    }
+
+    #[test]
+    fn enter_from_retry_confirmation_dispatches_retry_action() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "rejected", Some("bd-epic.1"), 2, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_char('R'), &ctx).is_none());
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::RetryPlanTask {
+                plan_id: Some(plan_id),
+                issue_id
+            }) if plan_id == "plan-1" && issue_id == "bd-epic.1"
+        ));
+    }
+
+    #[test]
+    fn retry_missing_issue_id_flashes_hint() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_single_task_status(&session_id, "failed", None, 1, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('R'), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::FlashHint { message })
+                if message == "Cannot retry: selected task has no linked issue"
+        ));
+    }
+
+    #[test]
+    fn retry_blocks_when_attempts_are_exhausted() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "error", Some("bd-epic.1"), 3, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('R'), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::FlashHint { message })
+                if message == "Cannot retry: task t-12 is at attempt 3/3"
+        ));
+    }
+
+    #[test]
+    fn retry_blocks_non_retryable_running_and_pending_tasks() {
+        for status in ["running", "pending"] {
+            let session_id = SessionId(format!("brain-{status}"));
+            let projection =
+                projection_with_single_task_status(&session_id, status, Some("bd-epic.1"), 1, 3);
+            let lineage = ExecutorLineage::new();
+            let ctx = view_context_for_tests(&lineage, &projection);
+            let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+            let action = view.handle_key(key_char('R'), &ctx);
+
+            assert!(view.confirm.is_none());
+            assert!(matches!(
+                action,
+                Some(Action::FlashHint { message })
+                    if message == format!("Cannot retry: task t-12 is {status}")
+            ));
+        }
+    }
+
+    #[test]
+    fn retry_modal_focus_does_not_leak_through_issue_detail_or_stream_peek() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "failed", Some("bd-epic.1"), 1, 3);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+
+        let mut issue_view = PlanInspectorView::new_for_plan(session_id.clone(), "plan-1".into());
+        issue_view.set_selected_task_id_for_tests(Some("t-12".into()));
+        issue_view.set_open_issue_id_for_tests(Some("bd-epic.1".into()));
+        let issue_action = issue_view.handle_key_with_worker_streams(key_char('R'), &mut ws, &ctx);
+        assert!(issue_action.is_none());
+        assert!(issue_view.confirm.is_none());
+        assert!(matches!(issue_view.mode(), PlanInspectorMode::Browse));
+
+        let mut peek_view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        peek_view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+        let peek_action = peek_view.handle_key_with_worker_streams(key_char('R'), &mut ws, &ctx);
+        assert!(peek_action.is_none());
+        assert!(peek_view.confirm.is_none());
+        assert!(matches!(
+            peek_view.mode(),
+            PlanInspectorMode::StreamPeek { .. }
         ));
     }
 

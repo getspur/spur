@@ -204,6 +204,11 @@ pub enum Action {
     ResumePlan {
         plan_id: String,
     },
+    /// Retry one persisted plan task by beads issue id.
+    RetryPlanTask {
+        plan_id: Option<String>,
+        issue_id: String,
+    },
     /// Open a persisted implementation-plan snapshot by plan id.
     InspectPlan {
         session_id: SessionId,
