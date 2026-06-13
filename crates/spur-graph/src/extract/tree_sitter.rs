@@ -3156,7 +3156,7 @@ pub(crate) fn extract_file_contents_from_tree(
         let edge_definitions = emit_definitions_with_parents(
             config,
             builder,
-            &relative_path,
+            relative_path,
             file_id,
             file_node,
             source,
