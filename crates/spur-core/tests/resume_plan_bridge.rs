@@ -7,6 +7,7 @@
 //! | Test | Condition | Expected event |
 //! |------|-----------|----------------|
 //! | `no_brain_session_emits_plan_command_error` | No active brain session | `PlanCommandError { operation: "ResumePlan", error: "No active brain session — start one to resume plans" }` |
+//! | `retry_plan_task_no_brain_session_emits_plan_command_error` | No active brain session | `PlanCommandError { operation: "RetryPlanTask", error: "No active brain session — start one to retry plan tasks" }` |
 //! | `mcp_server_plan_owned_by_other_emits_plan_command_error` | Brain with MCP server; plan owned by different session | `PlanCommandError` with ownership-conflict message from `call_resume_plan` |
 //!
 //! ## Harness note
@@ -133,6 +134,55 @@ async fn no_brain_session_emits_plan_command_error() {
         matching.len(),
         1,
         "expected exactly one PlanCommandError(ResumePlan / 'No active brain session…') \
+         but found {}. All events: {:#?}",
+        matching.len(),
+        events.iter().map(|e| &e.body).collect::<Vec<_>>(),
+    );
+}
+
+/// When `RetryPlanTask` is sent without any active brain session, the
+/// orchestrator must emit exactly one `PlanCommandError` with the supplied
+/// optional plan id preserved for UI correlation.
+#[tokio::test]
+async fn retry_plan_task_no_brain_session_emits_plan_command_error() {
+    let plan_id = "plan-retry-no-brain";
+    let issue_id = "bd-retry-1";
+
+    let (input_tx, mut events_rx) = build_orchestrator();
+
+    tokio::task::yield_now().await;
+
+    input_tx
+        .send(InteractiveInput::RetryPlanTask {
+            plan_id: Some(plan_id.to_string()),
+            issue_id: issue_id.to_string(),
+        })
+        .await
+        .expect("send RetryPlanTask");
+
+    let events = drain_events(&mut events_rx, 32, Duration::from_secs(3)).await;
+
+    let matching: Vec<_> = events
+        .iter()
+        .filter(|ev| {
+            matches!(
+                &ev.body,
+                SpurEventBody::PlanCommandError {
+                    operation,
+                    plan_id: Some(pid),
+                    error,
+                }
+                if operation == "RetryPlanTask"
+                    && pid.as_str() == plan_id
+                    && error == "No active brain session — start one to retry plan tasks"
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one PlanCommandError(RetryPlanTask / 'No active brain session…') \
          but found {}. All events: {:#?}",
         matching.len(),
         events.iter().map(|e| &e.body).collect::<Vec<_>>(),

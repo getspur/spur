@@ -56,6 +56,34 @@ impl McpCallbackServer {
         }
     }
 
+    /// Public bridge for orchestrator/TUI: retry one persisted plan task via
+    /// the same `submit_plan_mutation` path exposed to brain tools.
+    pub async fn call_retry_plan_task(
+        &self,
+        plan_id: Option<&str>,
+        issue_id: &str,
+    ) -> Result<(), String> {
+        let mut args = serde_json::json!({
+            "trigger_task_id": issue_id,
+            "ops": [{
+                "op": "retry_task",
+                "issue_id": issue_id,
+            }],
+            "rationale": "Manual retry requested from Plan Inspector",
+        });
+        if let Some(plan_id) = plan_id {
+            args["plan_id"] = serde_json::Value::String(plan_id.to_string());
+        }
+
+        let resp = self
+            .handle_submit_plan_mutation(serde_json::Value::Null, args)
+            .await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
     /// Public bridge for orchestrator/TUI: claim ownership for a persisted plan
     /// without starting dispatch. The pending gate keeps the reconciler from
     /// observing ready work until `call_resume_plan` explicitly starts it.
