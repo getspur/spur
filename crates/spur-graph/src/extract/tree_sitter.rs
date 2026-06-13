@@ -335,7 +335,6 @@ impl<'a> FactBuilder<'a> {
         self.root
     }
 
-    #[cfg(test)]
     pub(crate) fn into_facts(self) -> GraphFacts {
         self.facts
     }
@@ -535,7 +534,7 @@ impl<'a> FactBuilder<'a> {
         });
     }
 
-    fn resolve_pending_edges(&mut self) {
+    pub(crate) fn resolve_pending_edges(&mut self) {
         let mut singleton_symbols_by_label: HashMap<String, NodeId> = HashMap::new();
         let mut ambiguous_symbols_by_label: HashMap<String, usize> = HashMap::new();
         for (label, ids) in &self.symbol_index {
@@ -3758,17 +3757,32 @@ mod tests {
             .find(|node| node.kind == NodeKind::File && node.label == "nb.ipynb")
             .expect("notebook file node")
             .node_id;
+        let mut reachable = HashSet::from([file_node]);
+        loop {
+            let before = reachable.len();
+            for edge in facts
+                .edges
+                .iter()
+                .filter(|edge| edge.relation == RelationKind::Contains)
+            {
+                if reachable.contains(&edge.source_node_id) {
+                    if let Some(target) = edge.target_node_id {
+                        reachable.insert(target);
+                    }
+                }
+            }
+            if reachable.len() == before {
+                break;
+            }
+        }
+
         for label in ["load_df", "Analysis"] {
             let node = facts
                 .nodes
                 .iter()
                 .find(|node| node.label == label)
                 .unwrap_or_else(|| panic!("missing notebook child `{label}`"));
-            assert!(facts.edges.iter().any(|edge| {
-                edge.relation == RelationKind::Contains
-                    && edge.source_node_id == file_node
-                    && edge.target_node_id == Some(node.node_id)
-            }));
+            assert!(reachable.contains(&node.node_id));
         }
     }
 

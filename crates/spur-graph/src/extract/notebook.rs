@@ -3,14 +3,14 @@ use std::str;
 
 use anyhow::Context as _;
 use serde_json::Value;
-use tree_sitter::Parser;
+use tree_sitter::{Parser, Point, Range};
 
 use crate::extract::languages::Language;
 use crate::extract::markdown::extract_markdown_contents;
 use crate::extract::tree_sitter::{
     compile_queries, extract_file_contents_from_tree, relative_path, FactBuilder,
 };
-use crate::{FileId, NodeId};
+use crate::{FileId, NodeId, NodeKind, RelationKind};
 
 fn language_for_token(token: &str) -> Option<Language> {
     match token.to_ascii_lowercase().as_str() {
@@ -68,14 +68,23 @@ pub(crate) fn extract_notebook_file(
         return Ok(());
     };
 
-    for cell in cells {
+    for (idx, cell) in cells.iter().enumerate() {
         let cell_source = cell_source_text(cell);
+        let cell_id = cell_id(cell, idx);
+        let cell_node = add_cell_node(
+            builder,
+            &relative_path,
+            file_id,
+            file_node,
+            &cell_id,
+            &cell_source,
+        );
         if cell_is_markdown(cell) {
             extract_cell(
                 builder,
                 &relative_path,
                 file_id,
-                file_node,
+                cell_node,
                 Language::Markdown,
                 &cell_source,
             )?;
@@ -92,7 +101,7 @@ pub(crate) fn extract_notebook_file(
                     builder,
                     &relative_path,
                     file_id,
-                    file_node,
+                    cell_node,
                     language,
                     &cell_source,
                 )?;
@@ -109,6 +118,58 @@ pub(crate) fn extract_notebook_file(
     Ok(())
 }
 
+fn cell_id(cell: &Value, idx: usize) -> String {
+    cell.get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        // nbformat 4.5 requires cell ids, but older notebooks may not have them.
+        .unwrap_or_else(|| format!("cell-{idx}"))
+}
+
+fn add_cell_node(
+    builder: &mut FactBuilder<'_>,
+    relative_path: &str,
+    file_id: FileId,
+    file_node: NodeId,
+    cell_id: &str,
+    source: &str,
+) -> NodeId {
+    let cell_label = format!("cell://{cell_id}");
+    let cell_node = builder.add_node_with_range(
+        relative_path,
+        cell_label.clone(),
+        cell_label,
+        NodeKind::Cell,
+        file_id,
+        source_range(source),
+    );
+    builder.add_edge(file_node, Some(cell_node), RelationKind::Contains, None);
+    cell_node
+}
+
+fn source_range(source: &str) -> Range {
+    Range {
+        start_byte: 0,
+        end_byte: source.len(),
+        start_point: Point { row: 0, column: 0 },
+        end_point: end_point(source),
+    }
+}
+
+fn end_point(source: &str) -> Point {
+    let mut row = 0;
+    let mut column = 0;
+    for byte in source.bytes() {
+        if byte == b'\n' {
+            row += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    Point { row, column }
+}
+
 fn cell_source_text(cell: &Value) -> String {
     match cell.get("source") {
         Some(Value::String(source)) => source.clone(),
@@ -121,7 +182,7 @@ fn extract_cell(
     builder: &mut FactBuilder<'_>,
     relative_path: &str,
     file_id: FileId,
-    file_node: NodeId,
+    parent_node: NodeId,
     language: Language,
     source: &str,
 ) -> anyhow::Result<()> {
@@ -136,7 +197,7 @@ fn extract_cell(
             &config,
             relative_path,
             file_id,
-            file_node,
+            parent_node,
             source,
             tree.root_node(),
             &queries,
@@ -150,7 +211,7 @@ fn extract_cell(
         &config,
         relative_path,
         file_id,
-        file_node,
+        parent_node,
         source,
         tree.root_node(),
         &queries,
@@ -183,6 +244,7 @@ fn markdown_inline_parser(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::Path;
 
     use serde_json::json;
@@ -229,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_python_def_and_markdown_heading_as_contained_children() {
+    fn extracts_python_def_and_markdown_heading_as_transitively_contained_children() {
         let nb = json!({
             "nbformat": 4,
             "nbformat_minor": 5,
@@ -254,7 +316,35 @@ mod tests {
 
         assert!(has_symbol(&facts, "load_df"));
         assert!(has_section(&facts, "Analysis"));
-        assert!(all_non_file_nodes_contained_by_file(&facts, "nb.ipynb"));
+        assert!(all_non_file_nodes_reachable_from_file_via_contains(
+            &facts, "nb.ipynb"
+        ));
+        assert!(all_symbols_contained_by_cells(&facts));
+        assert!(!file_directly_contains_symbols(&facts, "nb.ipynb"));
+    }
+
+    #[test]
+    fn each_cell_gets_a_cell_container_node() {
+        let nb = serde_json::to_vec(&serde_json::json!({
+            "nbformat": 4, "nbformat_minor": 5, "metadata": {},
+            "cells": [
+                {"cell_type":"code","id":"a3f1","source":["def load():\n"," pass\n"],"metadata":{},"outputs":[],"execution_count":null},
+                {"cell_type":"code","id":"b2c9","source":["x = load()\n"],"metadata":{},"outputs":[],"execution_count":null}
+            ]
+        }))
+        .unwrap();
+        let mut builder = FactBuilder::new(Path::new("/nb"));
+        extract_notebook_file(&mut builder, Path::new("/nb/app.ipynb"), &nb).unwrap();
+        let facts = builder.into_facts();
+        let cell_nodes: Vec<_> = facts
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Cell)
+            .collect();
+        assert_eq!(cell_nodes.len(), 2);
+        let labels: Vec<&str> = cell_nodes.iter().map(|node| node.label.as_str()).collect();
+        assert!(labels.contains(&"cell://a3f1"));
+        assert!(labels.contains(&"cell://b2c9"));
     }
 
     #[test]
@@ -294,6 +384,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn direct_notebook_facts_match_batch_extraction() {
+        let nb = json!({
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {"kernelspec": {"name": "python3"}},
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "id": "a3f1",
+                    "metadata": {},
+                    "source": ["def load():\n", "    return 1\n"]
+                },
+                {
+                    "cell_type": "code",
+                    "id": "b2c9",
+                    "metadata": {},
+                    "source": ["x = load()\n"]
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&nb).expect("serialize notebook");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nb.ipynb");
+        std::fs::write(&path, &bytes).expect("write notebook");
+
+        let batch = crate::extract::build_facts_for_paths(dir.path(), std::slice::from_ref(&path))
+            .expect("batch notebook facts");
+        let direct = crate::extract::extract_notebook_facts(dir.path(), &path, &bytes)
+            .expect("direct notebook facts");
+
+        assert_eq!(direct, batch);
+    }
+
     fn run_notebook_extraction(path: &Path, bytes: &[u8]) -> anyhow::Result<GraphFacts> {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(path);
@@ -315,23 +439,83 @@ mod tests {
             .any(|node| node.label == label && node.kind == NodeKind::Section)
     }
 
-    fn all_non_file_nodes_contained_by_file(facts: &GraphFacts, file_label: &str) -> bool {
+    fn all_non_file_nodes_reachable_from_file_via_contains(
+        facts: &GraphFacts,
+        file_label: &str,
+    ) -> bool {
         let file_node = facts
             .nodes
             .iter()
             .find(|node| node.kind == NodeKind::File && node.label == file_label)
             .expect("file node")
             .node_id;
+        let mut reachable = HashSet::from([file_node]);
+        loop {
+            let before = reachable.len();
+            for edge in facts
+                .edges
+                .iter()
+                .filter(|edge| edge.relation == RelationKind::Contains)
+            {
+                if reachable.contains(&edge.source_node_id) {
+                    if let Some(target) = edge.target_node_id {
+                        reachable.insert(target);
+                    }
+                }
+            }
+            if reachable.len() == before {
+                break;
+            }
+        }
+
         facts
             .nodes
             .iter()
             .filter(|node| node.kind != NodeKind::File)
+            .all(|node| reachable.contains(&node.node_id))
+    }
+
+    fn all_symbols_contained_by_cells(facts: &GraphFacts) -> bool {
+        let cell_nodes: HashSet<_> = facts
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Cell)
+            .map(|node| node.node_id)
+            .collect();
+
+        facts
+            .nodes
+            .iter()
+            .filter(|node| !matches!(node.kind, NodeKind::File | NodeKind::Cell))
             .all(|node| {
                 facts.edges.iter().any(|edge| {
                     edge.relation == RelationKind::Contains
-                        && edge.source_node_id == file_node
                         && edge.target_node_id == Some(node.node_id)
+                        && cell_nodes.contains(&edge.source_node_id)
                 })
             })
+    }
+
+    fn file_directly_contains_symbols(facts: &GraphFacts, file_label: &str) -> bool {
+        let file_node = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == file_label)
+            .expect("file node")
+            .node_id;
+        let symbol_nodes: HashSet<_> = facts
+            .nodes
+            .iter()
+            .filter(|node| !matches!(node.kind, NodeKind::File | NodeKind::Cell))
+            .map(|node| node.node_id)
+            .collect();
+
+        facts.edges.iter().any(|edge| {
+            edge.relation == RelationKind::Contains
+                && edge.source_node_id == file_node
+                && edge
+                    .target_node_id
+                    .is_some_and(|target| symbol_nodes.contains(&target))
+        })
     }
 }
