@@ -27,9 +27,11 @@ from .errors import (
     PortNotFoundError,
     SpurAppError,
 )
+from .notebook import NotebookClient
 
 __all__ = [
     "App",
+    "NotebookClient",
     "SpurAppError",
     "MissingCapabilityError",
     "PortNotFoundError",
