@@ -108,7 +108,7 @@ ensure_spur_gcs_sccache_server() {
     if ! SCCACHE_ERROR_LOG="$error_log" "$WRAPPER" --start-server >/dev/null 2>&1; then
         sccache --start-server >/dev/null 2>&1 || true
         echo "[spur-cargo] failed to start GCS sccache server for SPUR_SCCACHE_GCS=1" >&2
-        echo "[spur-cargo] see $error_log; configure SCCACHE_GCS_KEY_PATH or GOOGLE_APPLICATION_CREDENTIALS with a service/external account credential" >&2
+        echo "[spur-cargo] see $error_log; run scripts/gcloud_auth auth to refresh gcloud and start local sccache GCS auth" >&2
         exit 1
     fi
 }
