@@ -1605,6 +1605,9 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
         spur_tui::UserInput::ResumePlan { plan_id } => {
             spur_core::InteractiveInput::ResumePlan { plan_id }
         }
+        spur_tui::UserInput::RetryPlanTask { plan_id, issue_id } => {
+            spur_core::InteractiveInput::RetryPlanTask { plan_id, issue_id }
+        }
         spur_tui::UserInput::InspectPlan { plan_id } => {
             spur_core::InteractiveInput::InspectPlan { plan_id }
         }

@@ -133,6 +133,7 @@ impl App {
             | Action::ClaimPlan { .. }
             | Action::ForceReclaimPlan { .. }
             | Action::ResumePlan { .. }
+            | Action::RetryPlanTask { .. }
             | Action::GetIssueGraph { .. }
             | Action::OpenIssueInBacklog { .. }
             | Action::Issue(_)) => self.process_pm_action(action),
