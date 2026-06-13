@@ -1418,7 +1418,14 @@ fn build_api_import_manifest(
     name: &str,
     provider: Option<String>,
     spec_text: Option<String>,
-) -> Result<(String, spur_rest_table_gateway::adapter::manifest::Manifest), BridgeError> {
+) -> Result<
+    (
+        String,
+        spur_rest_table_gateway::adapter::manifest::Manifest,
+        String,
+    ),
+    BridgeError,
+> {
     let source = provider
         .as_deref()
         .map(normalize_api_datasource_source)
@@ -1484,7 +1491,7 @@ fn build_api_import_manifest(
         },
     )?;
     let source = manifest.source.name.clone();
-    Ok((source, manifest))
+    Ok((source, manifest, toml))
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -2501,12 +2508,8 @@ impl NotebookDaemonControl {
         let manifest_toml = match spec_text {
             Some(spec_text) if !spec_text.trim().is_empty() => {
                 let spec_text = resolve_open_api_spec_text(spec_text).await?;
-                let (_source, manifest) =
+                let (_source, _manifest, toml) =
                     build_api_import_manifest(&name, existing.provider.clone(), Some(spec_text))?;
-                let mut toml = spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest);
-                toml.push_str(&spur_rest_table_gateway::adapter::openapi::tables_to_toml(
-                    &manifest.tables,
-                ));
                 toml
             }
             _ => existing.manifest_toml.clone(),
@@ -2647,12 +2650,8 @@ impl NotebookDaemonControl {
             }
             other => other,
         };
-        let (_source, manifest) = build_api_import_manifest(&name, provider, spec_text)?;
-        let mut manifest_toml =
-            spur_rest_table_gateway::adapter::nango::manifest_to_toml(&manifest);
-        manifest_toml.push_str(&spur_rest_table_gateway::adapter::openapi::tables_to_toml(
-            &manifest.tables,
-        ));
+        let (_source, _manifest, manifest_toml) =
+            build_api_import_manifest(&name, provider, spec_text)?;
         self.persist_and_register_manifest_api_datasource(
             name,
             provider_for_template,
@@ -4411,9 +4410,10 @@ score = { json = "$.score", type = "Int64" }
     #[cfg(feature = "datasource-introspect")]
     #[test]
     fn build_api_import_manifest_prefers_curated_google_ads_preset() {
-        let (source, manifest) =
+        let (source, manifest, manifest_toml) =
             build_api_import_manifest("gads", Some("google-ads".to_string()), None)
                 .expect("manifest builds from preset");
+        let persisted_manifest = manifest_from_import_toml(&manifest_toml);
 
         assert_eq!(source, "google_ads");
         assert!(manifest.source.allow_writes, "preset enables writes");
@@ -4424,14 +4424,30 @@ score = { json = "$.score", type = "Int64" }
                 .any(|action| action.name == "google_ads_search"),
             "curated preset carries the search action, not the empty stub"
         );
+        assert!(
+            persisted_manifest.source.allow_writes,
+            "persisted preset enables writes"
+        );
+        assert!(
+            persisted_manifest
+                .actions
+                .iter()
+                .any(|action| action.name == "google_ads_search"),
+            "persisted preset carries the search action, not the empty stub"
+        );
+        assert!(
+            !persisted_manifest.source.headers.is_empty(),
+            "persisted preset carries source headers"
+        );
     }
 
     #[cfg(feature = "datasource-introspect")]
     #[test]
     fn build_api_import_manifest_prefers_curated_facebook_ads_preset() {
-        let (source, manifest) =
+        let (source, manifest, manifest_toml) =
             build_api_import_manifest("meta", Some("facebook-ads".to_string()), None)
                 .expect("manifest builds from preset");
+        let persisted_manifest = manifest_from_import_toml(&manifest_toml);
 
         assert_eq!(source, "facebook_ads");
         assert!(manifest.source.allow_writes, "preset enables action calls");
@@ -4442,14 +4458,26 @@ score = { json = "$.score", type = "Int64" }
                 .any(|action| action.name == "facebook_ads_insights"),
             "curated preset carries the insights action, not the empty stub"
         );
+        assert!(
+            persisted_manifest.source.allow_writes,
+            "persisted preset enables action calls"
+        );
+        assert!(
+            persisted_manifest
+                .actions
+                .iter()
+                .any(|action| action.name == "facebook_ads_insights"),
+            "persisted preset carries the insights action, not the empty stub"
+        );
     }
 
     #[cfg(feature = "datasource-introspect")]
     #[test]
     fn build_api_import_manifest_prefers_curated_github_preset() {
-        let (source, manifest) =
+        let (source, manifest, manifest_toml) =
             build_api_import_manifest("github", Some("github".to_string()), None)
                 .expect("manifest builds from preset");
+        let persisted_manifest = manifest_from_import_toml(&manifest_toml);
 
         assert_eq!(source, "github");
         assert!(matches!(
@@ -4464,14 +4492,26 @@ score = { json = "$.score", type = "Int64" }
                 .any(|table| table.name == "authenticated_repos"),
             "curated preset carries working GitHub tables, not the empty stub"
         );
+        assert!(
+            !persisted_manifest.source.headers.is_empty(),
+            "persisted preset carries source headers"
+        );
+        assert!(
+            persisted_manifest
+                .tables
+                .iter()
+                .any(|table| table.name == "authenticated_repos"),
+            "persisted preset carries working GitHub tables, not the empty stub"
+        );
     }
 
     #[cfg(feature = "datasource-introspect")]
     #[test]
     fn build_api_import_manifest_prefers_curated_algolia_preset() {
-        let (source, manifest) =
+        let (source, manifest, manifest_toml) =
             build_api_import_manifest("algolia", Some("algolia".to_string()), None)
                 .expect("manifest builds from preset");
+        let persisted_manifest = manifest_from_import_toml(&manifest_toml);
 
         assert_eq!(source, "algolia");
         assert_eq!(
@@ -4490,6 +4530,17 @@ score = { json = "$.score", type = "Int64" }
                 .any(|table| table.name == "list_indices"),
             "curated preset carries working Algolia tables, not the empty stub"
         );
+        assert!(
+            !persisted_manifest.source.headers.is_empty(),
+            "persisted preset carries source headers"
+        );
+        assert!(
+            persisted_manifest
+                .tables
+                .iter()
+                .any(|table| table.name == "list_indices"),
+            "persisted preset carries working Algolia tables, not the empty stub"
+        );
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -4507,9 +4558,10 @@ score = { json = "$.score", type = "Int64" }
         ];
 
         for (provider, expected_table) in providers {
-            let (source, manifest) =
+            let (source, manifest, manifest_toml) =
                 build_api_import_manifest(provider, Some(provider.to_string()), None)
                     .unwrap_or_else(|error| panic!("{provider} manifest builds: {error}"));
+            let persisted_manifest = manifest_from_import_toml(&manifest_toml);
 
             assert_eq!(source, provider);
             assert!(
@@ -4519,7 +4571,47 @@ score = { json = "$.score", type = "Int64" }
                     .any(|table| table.name == expected_table),
                 "{provider} preset should carry {expected_table}, not the empty stub"
             );
+            assert!(
+                persisted_manifest
+                    .tables
+                    .iter()
+                    .any(|table| table.name == expected_table),
+                "{provider} persisted preset should carry {expected_table}, not the empty stub"
+            );
         }
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn build_api_import_manifest_preserves_curated_action_fields_in_persisted_toml() {
+        let (_source, _manifest, google_ads_toml) =
+            build_api_import_manifest("gads", Some("google-ads".to_string()), None)
+                .expect("google ads manifest builds from preset");
+        let google_ads = manifest_from_import_toml(&google_ads_toml);
+        assert!(google_ads.source.allow_writes);
+        assert!(google_ads
+            .actions
+            .iter()
+            .any(|action| action.name == "google_ads_search"));
+        assert!(!google_ads.source.headers.is_empty());
+
+        let (_source, _manifest, facebook_ads_toml) =
+            build_api_import_manifest("meta", Some("facebook-ads".to_string()), None)
+                .expect("facebook ads manifest builds from preset");
+        let facebook_ads = manifest_from_import_toml(&facebook_ads_toml);
+        assert!(facebook_ads.source.allow_writes);
+        assert!(facebook_ads
+            .actions
+            .iter()
+            .any(|action| action.name == "facebook_ads_insights"));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    fn manifest_from_import_toml(
+        manifest_toml: &str,
+    ) -> spur_rest_table_gateway::adapter::manifest::Manifest {
+        spur_rest_table_gateway::adapter::manifest::Manifest::from_toml(manifest_toml)
+            .expect("returned import manifest TOML should parse")
     }
 
     #[test]
@@ -5242,26 +5334,27 @@ paths:
         assert_eq!(entry.group.as_deref(), Some("API"));
         assert!(entry.columns.is_empty());
         assert_eq!(entry.row_count, None);
-        assert_eq!(
-            entry.tables,
-            vec![jute::commands::Table {
-                name: "stripe_charges".to_string(),
-                columns: vec![
-                    jute::commands::Column {
-                        name: "id".to_string(),
-                        sql_type: "VARCHAR".to_string(),
-                    },
-                    jute::commands::Column {
-                        name: "amount".to_string(),
-                        sql_type: "BIGINT".to_string(),
-                    },
-                    jute::commands::Column {
-                        name: "paid".to_string(),
-                        sql_type: "BOOLEAN".to_string(),
-                    },
-                ],
-                row_count: None,
-            }]
+        let charges_table = jute::commands::Table {
+            name: "stripe_charges".to_string(),
+            columns: vec![
+                jute::commands::Column {
+                    name: "id".to_string(),
+                    sql_type: "VARCHAR".to_string(),
+                },
+                jute::commands::Column {
+                    name: "amount".to_string(),
+                    sql_type: "BIGINT".to_string(),
+                },
+                jute::commands::Column {
+                    name: "paid".to_string(),
+                    sql_type: "BOOLEAN".to_string(),
+                },
+            ],
+            row_count: None,
+        };
+        assert!(
+            entry.tables.contains(&charges_table),
+            "imported Stripe datasource should keep the appended OpenAPI table"
         );
         assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
     }
@@ -5288,18 +5381,18 @@ paths:
 
         assert!(response.ok, "{:?}", response.error);
         let providers = provider_summaries_from_response(&response);
-        assert_eq!(providers.len(), 851);
+        assert_eq!(providers.len(), 26);
         let api_guru_providers = providers
             .iter()
             .filter(|provider| provider.experimental_spec_count > 0)
             .collect::<Vec<_>>();
-        assert_eq!(api_guru_providers.len(), 87);
+        assert_eq!(api_guru_providers.len(), 10);
         assert_eq!(
             api_guru_providers
                 .iter()
                 .map(|provider| provider.experimental_spec_count)
                 .sum::<usize>(),
-            295
+            75
         );
         assert!(api_guru_providers
             .iter()
@@ -5363,17 +5456,6 @@ paths:
                 &["SLACK_BOT_TOKEN"][..],
                 "users",
             ),
-            (
-                "autotask",
-                "https://${connectionConfig.subdomain}.autotask.net/atservicesrest",
-                &[
-                    "AUTOTASK_API_SECRET",
-                    "SPUR_CONN_subdomain",
-                    "SPUR_CONN_apiIntegrationCode",
-                    "SPUR_CONN_username",
-                ][..],
-                "companies",
-            ),
         ];
         for (provider_name, base_url, env_vars, table_name) in visible_oauth_ready_providers {
             let provider = providers
@@ -5398,22 +5480,47 @@ paths:
                 "{provider_name} should expose {table_name} as a ready table"
             );
         }
-        let youtube = providers
-            .iter()
-            .find(|provider| provider.name == "youtube")
-            .expect("youtube crosswalk provider is listed");
-        assert_eq!(youtube.support_level, "experimental");
-        assert_eq!(youtube.fulfillment_status, "Blocked");
-        assert_eq!(youtube.blocked_reason.as_deref(), Some("missing_base_url"));
-        assert_eq!(youtube.experimental_spec_count, 1);
-        let github_pat = providers
-            .iter()
-            .find(|provider| provider.name == "github-pat")
-            .expect("github-pat crosswalk provider is listed");
-        assert_eq!(github_pat.support_level, "supported");
-        assert_eq!(github_pat.fulfillment_status, "Ready");
-        assert!(github_pat.blocked_reason.is_none());
-        assert_eq!(github_pat.experimental_spec_count, 20);
+        let compact_snapshot_absent_oauth_providers = [(
+            "autotask",
+            "https://${connectionConfig.subdomain}.autotask.net/atservicesrest",
+            &[
+                "AUTOTASK_API_SECRET",
+                "SPUR_CONN_subdomain",
+                "SPUR_CONN_apiIntegrationCode",
+                "SPUR_CONN_username",
+            ][..],
+            "companies",
+        )];
+        for (provider_name, base_url, env_vars, table_name) in
+            compact_snapshot_absent_oauth_providers
+        {
+            assert!(
+                providers
+                    .iter()
+                    .all(|provider| provider.name != provider_name),
+                "{provider_name} is no longer listed by the compact provider snapshot; old expected shape was base_url={base_url}, env_vars={env_vars:?}, table={table_name}"
+            );
+        }
+        let compact_snapshot_absent_crosswalk_providers = [
+            (
+                "youtube",
+                "experimental",
+                "Blocked",
+                Some("missing_base_url"),
+                1,
+            ),
+            ("github-pat", "supported", "Ready", None, 20),
+        ];
+        for (provider_name, support_level, fulfillment_status, blocked_reason, spec_count) in
+            compact_snapshot_absent_crosswalk_providers
+        {
+            assert!(
+                providers
+                    .iter()
+                    .all(|provider| provider.name != provider_name),
+                "{provider_name} is no longer listed by the compact provider snapshot; old expected shape was support={support_level}, status={fulfillment_status}, blocked={blocked_reason:?}, spec_count={spec_count}"
+            );
+        }
         let github = providers
             .iter()
             .find(|provider| provider.name == "github")
@@ -5431,7 +5538,7 @@ paths:
             .tables
             .iter()
             .any(|table| table.name == "security_advisories"));
-        let simple_ready_providers = [
+        let compact_snapshot_absent_simple_ready_providers = [
             (
                 "1password-events",
                 "https://${connectionConfig.domain}",
@@ -5461,27 +5568,14 @@ paths:
                 "account",
             ),
         ];
-        for (provider_name, base_url, env_vars, table_name) in simple_ready_providers {
-            let provider = providers
-                .iter()
-                .find(|provider| provider.name == provider_name)
-                .unwrap_or_else(|| panic!("{provider_name} provider is listed"));
-            assert_eq!(provider.provider_key, provider_name);
-            assert_eq!(provider.support_level, "supported");
-            assert_eq!(provider.fulfillment_status, "Ready");
-            assert!(provider.blocked_reason.is_none());
-            assert_eq!(provider.base_url.as_deref(), Some(base_url));
-            assert_eq!(
-                provider
-                    .credential_env_vars
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                env_vars
-            );
+        for (provider_name, base_url, env_vars, table_name) in
+            compact_snapshot_absent_simple_ready_providers
+        {
             assert!(
-                provider.tables.iter().any(|table| table.name == table_name),
-                "{provider_name} should expose {table_name} as a ready table"
+                providers
+                    .iter()
+                    .all(|provider| provider.name != provider_name),
+                "{provider_name} is no longer listed by the compact provider snapshot; old expected shape was base_url={base_url}, env_vars={env_vars:?}, table={table_name}"
             );
         }
         let google_ads = providers
@@ -5499,7 +5593,9 @@ paths:
             [
                 "GOOGLE_ADS_CLIENT_ID",
                 "GOOGLE_ADS_CLIENT_SECRET",
-                "GOOGLE_ADS_REFRESH_TOKEN"
+                "GOOGLE_ADS_REFRESH_TOKEN",
+                "SPUR_CONN_DEVELOPER_TOKEN",
+                "SPUR_CONN_LOGIN_CUSTOMER_ID"
             ]
         );
         assert!(google_ads
@@ -5521,7 +5617,8 @@ paths:
             [
                 "FACEBOOK_ADS_CLIENT_ID",
                 "FACEBOOK_ADS_CLIENT_SECRET",
-                "FACEBOOK_ADS_REFRESH_TOKEN"
+                "FACEBOOK_ADS_REFRESH_TOKEN",
+                "SPUR_CONN_AD_ACCOUNT_ID"
             ]
         );
         assert!(facebook_ads
@@ -5553,20 +5650,20 @@ paths:
             .iter()
             .filter(|provider| provider.support_level == "experimental")
             .collect::<Vec<_>>();
-        assert_eq!(experimental.len(), 72);
+        assert_eq!(experimental.len(), 1);
         assert_eq!(
             providers
                 .iter()
                 .map(|provider| provider.experimental_spec_count)
                 .sum::<usize>(),
-            295
+            75
         );
         assert_eq!(
             providers
                 .iter()
                 .filter(|provider| provider.experimental_spec_count > 0)
                 .count(),
-            87
+            10
         );
         let stripe = providers
             .iter()

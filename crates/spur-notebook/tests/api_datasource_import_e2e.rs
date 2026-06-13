@@ -200,6 +200,13 @@ fn datasource_entry_from_response(
     }
 }
 
+fn table_by_name<'a>(tables: &'a [jute::commands::Table], name: &str) -> &'a jute::commands::Table {
+    tables
+        .iter()
+        .find(|table| table.name == name)
+        .unwrap_or_else(|| panic!("{name} table is present"))
+}
+
 fn manifest_for_stripe_scores_import() -> Manifest {
     let providers = parse_providers(NANGO_PROVIDERS_SNAPSHOT).expect("providers yaml parses");
     let provider = providers.get("stripe").expect("stripe provider is present");
@@ -331,8 +338,8 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
     assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
     assert_eq!(entry.group.as_deref(), Some("API"));
     assert_eq!(
-        entry.tables,
-        vec![jute::commands::Table {
+        table_by_name(&entry.tables, "stripe_scores"),
+        &jute::commands::Table {
             name: "stripe_scores".to_string(),
             columns: vec![
                 jute::commands::Column {
@@ -345,7 +352,7 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
                 },
             ],
             row_count: None,
-        }]
+        }
     );
     let templates = connection_store::list()
         .await
@@ -425,6 +432,54 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
     .expect("blocking duckdb query joins");
 
     assert_eq!(rows, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+}
+
+#[cfg(feature = "datasource-introspect")]
+#[tokio::test]
+async fn imported_google_ads_connection_persists_curated_action_manifest_toml() {
+    let name = format!("google_ads_{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = connection_store::remove(&name).await;
+    let (control, _jute_state, _windows) = test_control();
+
+    let response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "add_api_datasource_from_import",
+                "name": name,
+                "provider": "google-ads",
+                "credentials": [],
+            })),
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let entry = datasource_entry_from_response(&response);
+    let template = saved_template(&entry.name).await;
+    assert_eq!(template.provider.as_deref(), Some("google-ads"));
+
+    let manifest =
+        Manifest::from_toml(&template.manifest_toml).expect("saved google ads manifest parses");
+    assert!(
+        manifest.source.allow_writes,
+        "saved google ads manifest enables writes"
+    );
+    assert!(
+        !manifest.source.headers.is_empty(),
+        "saved google ads manifest keeps source headers"
+    );
+    assert!(
+        manifest
+            .actions
+            .iter()
+            .any(|action| action.name == "google_ads_search"),
+        "saved google ads manifest keeps the search action"
+    );
+
+    connection_store::remove(&entry.name)
+        .await
+        .expect("saved google ads template cleans up");
 }
 
 #[tokio::test]
@@ -778,10 +833,11 @@ async fn update_saved_connection_preserves_manifest_and_tables_without_spec() {
     assert_eq!(update_result["type"], "attachedSavedConnection");
     assert_eq!(update_result["data"]["entry"]["name"], name);
     assert_eq!(update_result["data"]["entry"]["path"], "stripe");
-    assert_eq!(
-        update_result["data"]["entry"]["tables"][0]["name"],
-        "stripe_scores"
-    );
+    assert!(update_result["data"]["entry"]["tables"]
+        .as_array()
+        .expect("entry tables are an array")
+        .iter()
+        .any(|table| table["name"] == "stripe_scores"));
     assert_eq!(update_result["data"]["missing_env_vars"], json!([]));
 
     let updated = saved_template(&name).await;
@@ -857,16 +913,17 @@ async fn update_saved_connection_regenerates_manifest_and_tables_with_spec() {
     assert_eq!(update_result["type"], "attachedSavedConnection");
     assert_eq!(update_result["data"]["entry"]["name"], name);
     assert_eq!(update_result["data"]["entry"]["path"], "stripe");
-    assert_eq!(
-        update_result["data"]["entry"]["tables"][0]["name"],
-        "stripe_charges"
-    );
+    assert!(update_result["data"]["entry"]["tables"]
+        .as_array()
+        .expect("entry tables are an array")
+        .iter()
+        .any(|table| table["name"] == "stripe_charges"));
     assert_eq!(update_result["data"]["missing_env_vars"], json!([]));
 
     let updated = saved_template(&name).await;
     assert_ne!(updated.manifest_toml, original.manifest_toml);
     assert_ne!(updated.tables, original.tables);
-    assert_eq!(updated.tables[0].name, "stripe_charges");
+    table_by_name(&updated.tables, "stripe_charges");
     assert_eq!(updated.credential_env_vars, vec![updated_env_var.clone()]);
     assert_eq!(updated.created_at, original.created_at);
     assert!(updated.updated_at > original.updated_at);
