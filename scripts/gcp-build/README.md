@@ -2,12 +2,12 @@
 
 ## Production Builder Shape
 
-The default remote builder is `c4d-highcpu-16` in `asia-southeast1-a`, running
-as a Spot VM with a persistent 300 GB `hyperdisk-balanced` cache disk. This
-replaces the previous `c2d-highcpu-16` + `pd-ssd` setup: the C4D builder
-benchmarked faster for the Rust workspace, and Hyperdisk Balanced is cheaper
-than the old 300 GB SSD Persistent Disk while still providing enough IOPS for
-the cargo target/cache workload.
+The default remote builder is `c4d-standard-16` in `asia-southeast1-a`, running
+as a Spot VM with a persistent 300 GB `hyperdisk-balanced` cache disk. This keeps
+the 16 vCPU footprint of the previous `c4d-highcpu-16` builder while doubling RAM
+to avoid OOM-killed concurrent `rust-lld` link bursts. Hyperdisk Balanced is
+cheaper than the old 300 GB SSD Persistent Disk while still providing enough IOPS
+for the cargo target/cache workload.
 
 Source sync prefers direct SSH to the VM's external IP on
 `SPUR_DIRECT_SSH_PORT` (default `22`) and falls back to IAP. Fresh VMs keep sshd
