@@ -1788,6 +1788,7 @@ function providerSummaryFromPrefill(providerName: string): ProviderSummary {
     tier: "B",
     authMode: "API_KEY",
     supportLevel: "catalog",
+    fulfillmentStatus: "Catalog",
     specSourceKey: null,
     specUrl: null,
     experimentalSpecCount: 0,
