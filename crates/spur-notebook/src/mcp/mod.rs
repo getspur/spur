@@ -1032,6 +1032,8 @@ fn datasource_scan_expression(entry: &jute::commands::DatasourceEntry) -> String
 
 #[cfg(feature = "datasource-introspect")]
 fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, BridgeError> {
+    use spur_rest_table_gateway::adapter::catalog::CandidateBlockedReason;
+
     let providers =
         spur_rest_table_gateway::adapter::nango::parse_providers(NANGO_PROVIDERS_SNAPSHOT)
             .map_err(|error| BridgeError::Handler {
@@ -1060,6 +1062,25 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                 "experimental"
             } else {
                 "catalog"
+            };
+            let (fulfillment_status, blocked_reason) = if supported_manifest.is_some() {
+                ("Ready", None)
+            } else if let Some(experimental) = experimental {
+                if experimental.candidate_spec_available {
+                    ("Candidate", None)
+                } else {
+                    (
+                        "Blocked",
+                        experimental
+                            .blocked_reason
+                            .clone()
+                            .or_else(|| {
+                                Some(CandidateBlockedReason::UnsupportedAuth.as_str().to_string())
+                            }),
+                    )
+                }
+            } else {
+                ("Catalog", None)
             };
             let experimental_spec = if supported_manifest.is_some() {
                 None
@@ -1106,6 +1127,8 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                     .to_string(),
                 auth_mode,
                 support_level: support_level.to_string(),
+                fulfillment_status: fulfillment_status.to_string(),
+                blocked_reason,
                 spec_source_key: experimental_spec.map(|entry| entry.spec_source_key.clone()),
                 spec_url: experimental_spec.map(|entry| entry.spec_url.clone()),
                 experimental_spec_count: experimental.map(|entry| entry.count).unwrap_or(0),
@@ -1130,6 +1153,8 @@ struct ExperimentalNangoCrosswalkIndex {
 #[derive(Debug, Deserialize)]
 struct ExperimentalNangoCrosswalkRow {
     provider_key: String,
+    #[serde(default)]
+    auth_mode: Option<String>,
     base_url: Option<String>,
     spec_source_key: String,
     spec_url: String,
@@ -1142,6 +1167,8 @@ struct ExperimentalProviderSpecSummary {
     spec_source_key: String,
     spec_url: String,
     count: usize,
+    candidate_spec_available: bool,
+    blocked_reason: Option<String>,
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -1156,18 +1183,61 @@ fn experimental_nango_crosswalk_by_provider(
         })?;
     let mut grouped = std::collections::BTreeMap::new();
     for row in index.rows {
-        let entry =
-            grouped
-                .entry(row.provider_key)
-                .or_insert_with(|| ExperimentalProviderSpecSummary {
-                    base_url: row.base_url,
-                    spec_source_key: row.spec_source_key,
-                    spec_url: row.spec_url,
-                    count: 0,
-                });
+        let blocked_reason = experimental_crosswalk_row_blocked_reason(&row);
+        let candidate_spec_available = blocked_reason.is_none();
+        let entry = grouped.entry(row.provider_key.clone()).or_insert_with(|| {
+            ExperimentalProviderSpecSummary {
+                base_url: row.base_url.clone(),
+                spec_source_key: row.spec_source_key.clone(),
+                spec_url: row.spec_url.clone(),
+                count: 0,
+                candidate_spec_available,
+                blocked_reason: blocked_reason.map(str::to_string),
+            }
+        });
         entry.count += 1;
+        if candidate_spec_available && !entry.candidate_spec_available {
+            entry.base_url = row.base_url;
+            entry.spec_source_key = row.spec_source_key;
+            entry.spec_url = row.spec_url;
+            entry.candidate_spec_available = true;
+            entry.blocked_reason = None;
+        }
     }
     Ok(grouped)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn experimental_crosswalk_row_blocked_reason(
+    row: &ExperimentalNangoCrosswalkRow,
+) -> Option<&'static str> {
+    use spur_rest_table_gateway::adapter::catalog::CandidateBlockedReason;
+
+    if row
+        .base_url
+        .as_deref()
+        .is_none_or(|base_url| base_url.trim().is_empty())
+    {
+        return Some(CandidateBlockedReason::MissingBaseUrl.as_str());
+    }
+
+    if !experimental_candidate_auth_supported(row.auth_mode.as_deref()) {
+        return Some(CandidateBlockedReason::UnsupportedAuth.as_str());
+    }
+
+    None
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn experimental_candidate_auth_supported(auth_mode: Option<&str>) -> bool {
+    let normalized = auth_mode
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .map(|mode| mode.to_ascii_uppercase().replace('-', "_"));
+    matches!(
+        normalized.as_deref(),
+        None | Some("API_KEY" | "BASIC" | "NONE" | "OAUTH2")
+    )
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -4851,6 +4921,23 @@ paths:
         assert!(response.ok, "{:?}", response.error);
         let providers = provider_summaries_from_response(&response);
         assert_eq!(providers.len(), 851);
+        let api_guru_providers = providers
+            .iter()
+            .filter(|provider| provider.experimental_spec_count > 0)
+            .collect::<Vec<_>>();
+        assert_eq!(api_guru_providers.len(), 87);
+        assert_eq!(
+            api_guru_providers
+                .iter()
+                .map(|provider| provider.experimental_spec_count)
+                .sum::<usize>(),
+            295
+        );
+        assert!(api_guru_providers
+            .iter()
+            .all(|provider| provider.fulfillment_status == "Ready"
+                || provider.fulfillment_status == "Candidate"
+                || provider.fulfillment_status == "Blocked"));
         assert_eq!(
             providers
                 .iter()
@@ -4872,18 +4959,43 @@ paths:
             .find(|provider| provider.name == "asana")
             .expect("asana crosswalk provider is listed");
         assert_eq!(asana.support_level, "experimental");
+        assert_eq!(asana.fulfillment_status, "Candidate");
+        assert!(asana.blocked_reason.is_none());
         assert_eq!(asana.experimental_spec_count, 1);
+        let trello = providers
+            .iter()
+            .find(|provider| provider.name == "trello")
+            .expect("trello crosswalk provider is listed");
+        assert_eq!(trello.support_level, "experimental");
+        assert_eq!(trello.fulfillment_status, "Blocked");
+        assert_eq!(trello.blocked_reason.as_deref(), Some("unsupported_auth"));
+        assert_eq!(trello.experimental_spec_count, 1);
+        let youtube = providers
+            .iter()
+            .find(|provider| provider.name == "youtube")
+            .expect("youtube crosswalk provider is listed");
+        assert_eq!(youtube.support_level, "experimental");
+        assert_eq!(youtube.fulfillment_status, "Blocked");
+        assert_eq!(
+            youtube.blocked_reason.as_deref(),
+            Some("missing_base_url")
+        );
+        assert_eq!(youtube.experimental_spec_count, 1);
         let github_pat = providers
             .iter()
             .find(|provider| provider.name == "github-pat")
             .expect("github-pat crosswalk provider is listed");
         assert_eq!(github_pat.support_level, "supported");
+        assert_eq!(github_pat.fulfillment_status, "Ready");
+        assert!(github_pat.blocked_reason.is_none());
         assert_eq!(github_pat.experimental_spec_count, 20);
         let github = providers
             .iter()
             .find(|provider| provider.name == "github")
             .expect("github provider is listed");
         assert_eq!(github.support_level, "supported");
+        assert_eq!(github.fulfillment_status, "Ready");
+        assert!(github.blocked_reason.is_none());
         assert_eq!(github.base_url.as_deref(), Some("https://api.github.com"));
         assert_eq!(github.credential_env_vars, ["GITHUB_TOKEN"]);
         assert!(github
