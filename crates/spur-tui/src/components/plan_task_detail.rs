@@ -323,6 +323,15 @@ fn execution_strip(task: &TrackedTask, theme: &Theme) -> Line<'static> {
         format!("status {}", task.status),
         format!("attempt {}/{}", task.attempt, task.max_attempts),
     ];
+    if matches!(task.status.as_str(), "failed" | "rejected" | "error") {
+        if task.issue_id.is_none() {
+            fields.push("retry unavailable: no issue".into());
+        } else if task.attempt >= task.max_attempts {
+            fields.push("retry exhausted".into());
+        } else {
+            fields.push("R retry".into());
+        }
+    }
     if let Some(branch) = task.worker_branch.as_deref() {
         fields.push(format!("branch {branch}"));
     }
