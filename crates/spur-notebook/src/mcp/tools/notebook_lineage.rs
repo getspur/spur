@@ -394,6 +394,7 @@ mod tests {
             app: None,
             daemon: Some(control),
             plugins: None,
+            symbol_index: None,
         }
     }
 
