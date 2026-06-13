@@ -34,6 +34,7 @@ const tauriMocks = vi.hoisted(() => {
 });
 let notebookPath = "/tmp/revenue.ipynb";
 let appOpenInfo: { app_name?: string; app_root?: string } | undefined;
+let viewMode: "cells" | "dag" | "app" = "cells";
 
 vi.mock("@tauri-apps/api/core", () => ({
   Channel: tauriMocks.Channel,
@@ -44,10 +45,10 @@ vi.mock("@/stores/notebook", () => ({
   useNotebook: () => ({
     store: {
       getInitialState: () => ({
-        viewState: { appOpenInfo, path: notebookPath },
+        viewState: { appOpenInfo, path: notebookPath, viewMode },
       }),
       getState: () => ({
-        viewState: { appOpenInfo, path: notebookPath },
+        viewState: { appOpenInfo, path: notebookPath, viewMode },
       }),
       subscribe: () => () => undefined,
     },
@@ -71,6 +72,7 @@ describe("ChatPanel", () => {
     });
     notebookPath = "/tmp/revenue.ipynb";
     appOpenInfo = undefined;
+    viewMode = "cells";
   });
 
   afterEach(cleanup);
@@ -78,19 +80,66 @@ describe("ChatPanel", () => {
   test("renders the approved notebook empty state and ready scope status", () => {
     render(<ChatPanel />);
 
-    expect(screen.getByText("Ask inside this notebook")).toBeInTheDocument();
+    expect(screen.getByText("Build on this notebook")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "The assistant can inspect cells, draft edits, and explain outputs.",
+        "Ask for the next cell, a cleaner analysis path, or stronger explanation.",
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByText("Ready with scoped tools enabled"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Ready in revenue.ipynb")).toBeInTheDocument();
+    expect(
+      screen.getByText("Ready in revenue.ipynb - Builder lens"),
+    ).toBeInTheDocument();
   });
 
-  test("renders the approved app empty state when app context is open", () => {
+  test("renders notebook lens controls and updates copy for deep dive", () => {
+    render(<ChatPanel />);
+
+    expect(screen.getByRole("button", { name: "Builder" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Deep dive" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Deep dive" }));
+
+    expect(screen.getByText("Understand this notebook")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Ask how the cells, outputs, and assumptions fit together.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Ready in revenue.ipynb - Deep dive lens"),
+    ).toBeInTheDocument();
+  });
+
+  test("renders the operations indicator in dag mode without notebook toggle", () => {
+    viewMode = "dag";
+
+    render(<ChatPanel />);
+
+    expect(screen.getByText("Operations")).toBeInTheDocument();
+    expect(screen.getByText("Operate this graph")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Ask about failed nodes, stale dependencies, or recomputation order.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Ready in revenue.ipynb - Operations lens"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Builder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deep dive" })).toBeNull();
+  });
+
+  test("renders the product indicator in app mode", () => {
+    viewMode = "app";
     appOpenInfo = {
       app_name: "Revenue App",
       app_root: "/tmp/revenue-app",
@@ -98,12 +147,33 @@ describe("ChatPanel", () => {
 
     render(<ChatPanel />);
 
-    expect(screen.getByText("Ask inside this app context")).toBeInTheDocument();
+    expect(screen.getByText("Product")).toBeInTheDocument();
+    expect(screen.getByText("Improve this app")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "The assistant can inspect notebook cells, call app tools, and update panels.",
+        "Ask about workflow, UI quality, copy, or product behavior.",
       ),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText("Ready in Revenue App - Product lens"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Builder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deep dive" })).toBeNull();
+  });
+
+  test("resets manual notebook lens override when view mode changes", () => {
+    const { rerender } = render(<ChatPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Deep dive" }));
+    expect(screen.getByText("Understand this notebook")).toBeInTheDocument();
+
+    viewMode = "dag";
+    rerender(<ChatPanel />);
+    expect(screen.getByText("Operate this graph")).toBeInTheDocument();
+
+    viewMode = "cells";
+    rerender(<ChatPanel />);
+    expect(screen.getByText("Build on this notebook")).toBeInTheDocument();
   });
 
   test("renders tool calls and results as timeline events", () => {
