@@ -1762,6 +1762,49 @@ fn datasource_tables_from_catalog(
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn select_saved_connection_tables(
+    connection_name: &str,
+    tables: Vec<jute::commands::Table>,
+    requested_tables: Vec<String>,
+) -> Result<Vec<jute::commands::Table>, BridgeError> {
+    use std::collections::BTreeSet;
+
+    let requested_tables = requested_tables
+        .into_iter()
+        .map(|table| table.trim().to_string())
+        .filter(|table| !table.is_empty())
+        .collect::<BTreeSet<_>>();
+    if requested_tables.is_empty() {
+        return Ok(tables);
+    }
+
+    let selected_tables = tables
+        .into_iter()
+        .filter(|table| requested_tables.contains(&table.name))
+        .collect::<Vec<_>>();
+    let selected_names = selected_tables
+        .iter()
+        .map(|table| table.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let missing_tables = requested_tables
+        .iter()
+        .filter(|table| !selected_names.contains(table.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_tables.is_empty() {
+        return Err(BridgeError::Handler {
+            code: "saved_connection_table_not_found".to_string(),
+            message: format!(
+                "saved connection {connection_name} does not expose table-functions: {}",
+                missing_tables.join(", ")
+            ),
+        });
+    }
+
+    Ok(selected_tables)
+}
+
+#[cfg(feature = "datasource-introspect")]
 fn pending_connection_template(
     name: String,
     provider: Option<String>,
@@ -2149,8 +2192,13 @@ impl NotebookDaemonControl {
                 DaemonControlCommand::ListSavedConnections {} => {
                     self.list_saved_connections().await
                 }
-                DaemonControlCommand::AttachSavedConnection { name, credentials } => {
-                    self.attach_saved_connection(name, credentials).await
+                DaemonControlCommand::AttachSavedConnection {
+                    name,
+                    credentials,
+                    tables,
+                } => {
+                    self.attach_saved_connection(name, credentials, tables.unwrap_or_default())
+                        .await
                 }
                 DaemonControlCommand::DeleteSavedConnection { name } => {
                     self.delete_saved_connection(name).await
@@ -2357,6 +2405,7 @@ impl NotebookDaemonControl {
         &self,
         name: String,
         credentials: Vec<(String, String)>,
+        tables: Vec<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         use spur_rest_table_gateway::adapter::Adapter as _;
 
@@ -2396,7 +2445,11 @@ impl NotebookDaemonControl {
         let adapter =
             spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
         let adapter_name = adapter.name().to_string();
-        let tables = datasource_tables_from_catalog(&adapter_name, adapter.catalog());
+        let tables = select_saved_connection_tables(
+            &name,
+            datasource_tables_from_catalog(&adapter_name, adapter.catalog()),
+            tables,
+        )?;
 
         let entry = self
             .register_api_datasource_entry_inner(template.name, adapter_name, tables)
@@ -3114,6 +3167,7 @@ impl NotebookDaemonControl {
         &self,
         _name: String,
         _credentials: Vec<(String, String)>,
+        _tables: Vec<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
@@ -4233,6 +4287,69 @@ mod tests {
 
         assert!(tables.iter().any(|table| table.name == "svc_markets"));
         assert!(!tables.iter().any(|table| table.name == "svc_create"));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn saved_connection_table_selection_keeps_requested_subset() {
+        let tables = vec![
+            jute::commands::Table {
+                name: "stripe_charges".to_string(),
+                columns: vec![jute::commands::Column {
+                    name: "id".to_string(),
+                    sql_type: "VARCHAR".to_string(),
+                }],
+                row_count: None,
+            },
+            jute::commands::Table {
+                name: "stripe_customers".to_string(),
+                columns: vec![jute::commands::Column {
+                    name: "customer_id".to_string(),
+                    sql_type: "VARCHAR".to_string(),
+                }],
+                row_count: None,
+            },
+        ];
+
+        let selected = select_saved_connection_tables(
+            "stripe_reporting",
+            tables.clone(),
+            vec![" stripe_customers ".to_string()],
+        )
+        .expect("requested table is selected");
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "stripe_customers");
+        assert_eq!(
+            select_saved_connection_tables("stripe_reporting", tables.clone(), Vec::new())
+                .expect("empty selection preserves legacy full attach"),
+            tables
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn saved_connection_table_selection_rejects_unknown_tables() {
+        let tables = vec![jute::commands::Table {
+            name: "stripe_charges".to_string(),
+            columns: Vec::new(),
+            row_count: None,
+        }];
+
+        let error = select_saved_connection_tables(
+            "stripe_reporting",
+            tables,
+            vec!["stripe_refunds".to_string()],
+        )
+        .expect_err("unknown table is rejected");
+
+        match error {
+            BridgeError::Handler { code, message } => {
+                assert_eq!(code, "saved_connection_table_not_found");
+                assert!(message.contains("stripe_refunds"));
+            }
+            error => panic!("unexpected error: {error:?}"),
+        }
     }
 
     #[cfg(feature = "datasource-introspect")]

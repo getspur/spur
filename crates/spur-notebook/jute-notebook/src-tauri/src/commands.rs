@@ -397,6 +397,9 @@ pub enum DaemonControlCommand {
         #[serde(default)]
         #[ts(type = "[string, string][]")]
         credentials: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        tables: Option<Vec<String>>,
     },
     /// Delete a saved connection template from the global store.
     DeleteSavedConnection { name: String },
@@ -3210,9 +3213,14 @@ mod tests {
         }))
         .expect("attach saved connection without credentials decodes");
         match decoded.command {
-            DaemonControlCommand::AttachSavedConnection { name, credentials } => {
+            DaemonControlCommand::AttachSavedConnection {
+                name,
+                credentials,
+                tables,
+            } => {
                 assert_eq!(name, "stripe_reporting");
                 assert!(credentials.is_empty());
+                assert!(tables.is_none());
             }
             command => panic!("unexpected command: {command:?}"),
         }
@@ -3220,6 +3228,10 @@ mod tests {
         let request = DaemonControlRequest::new(DaemonControlCommand::AttachSavedConnection {
             name: "stripe_reporting".to_string(),
             credentials: vec![("STRIPE_API_KEY".to_string(), "sk_test_123".to_string())],
+            tables: Some(vec![
+                "stripe_charges".to_string(),
+                "stripe_customers".to_string(),
+            ]),
         });
 
         let value = serde_json::to_value(&request).expect("attach saved connection serializes");
@@ -3229,7 +3241,8 @@ mod tests {
                 "daemon": "notebook.v1",
                 "command": "attach_saved_connection",
                 "name": "stripe_reporting",
-                "credentials": [["STRIPE_API_KEY", "sk_test_123"]]
+                "credentials": [["STRIPE_API_KEY", "sk_test_123"]],
+                "tables": ["stripe_charges", "stripe_customers"]
             })
         );
     }

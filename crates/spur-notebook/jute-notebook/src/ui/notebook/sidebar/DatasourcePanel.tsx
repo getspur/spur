@@ -52,6 +52,7 @@ type DatasourceGroup = {
 };
 
 type SavedConnectionRecovery = AddRestApiWizardSavedConnectionRecovery;
+type SavedConnectionTableSelection = Record<string, string[]>;
 
 const DATASOURCE_EXTENSIONS = [
   "csv",
@@ -129,6 +130,8 @@ export default function DatasourcePanel() {
   const [expandedSavedConnection, setExpandedSavedConnection] = useState<
     string | null
   >(null);
+  const [selectedSavedConnectionTables, setSelectedSavedConnectionTables] =
+    useState<SavedConnectionTableSelection>({});
   const [savedConnectionRecovery, setSavedConnectionRecovery] =
     useState<SavedConnectionRecovery | null>(null);
   const [apiModalOpen, setApiModalOpen] = useState(false);
@@ -196,17 +199,18 @@ export default function DatasourcePanel() {
   }, []);
 
   const handleAttachSavedConnection = useCallback(
-    async (name: string) => {
+    async (name: string, tables: string[] = []) => {
       const savedConnection = savedConnections.find(
         (connection) => connection.name === name,
       );
+      const selectedTables = tables.filter((table) => table.trim().length > 0);
 
       setError(null);
       setSavedConnectionRecovery(null);
 
       try {
         const response = await daemonControl(
-          attachSavedConnectionCommand({ name }),
+          attachSavedConnectionCommand({ name, tables: selectedTables }),
         );
         const { entry, missingEnvVars } =
           attachedSavedConnectionFromDaemonControlResponse(response);
@@ -220,6 +224,7 @@ export default function DatasourcePanel() {
             setSavedConnectionRecovery({
               connection: savedConnection,
               missingEnvVars,
+              tableNames: selectedTables,
             });
           } else {
             setError(
@@ -228,6 +233,11 @@ export default function DatasourcePanel() {
               )}, but it is no longer in the saved list.`,
             );
           }
+        } else {
+          setSelectedSavedConnectionTables((current) => ({
+            ...current,
+            [name]: [],
+          }));
         }
       } catch (caught) {
         setError(errorMessage(caught));
@@ -247,11 +257,33 @@ export default function DatasourcePanel() {
       setExpandedSavedConnection((current) =>
         current === name ? null : current,
       );
+      setSelectedSavedConnectionTables((current) => {
+        const { [name]: _removed, ...rest } = current;
+        return rest;
+      });
       setSavedConnectionRecovery(null);
     } catch (caught) {
       setError(errorMessage(caught));
     }
   }, []);
+
+  const handleToggleSavedConnectionTable = useCallback(
+    (connectionName: string, tableName: string, checked: boolean) => {
+      setSelectedSavedConnectionTables((current) => {
+        const selected = current[connectionName] ?? [];
+        const nextSelected = checked
+          ? selected.includes(tableName)
+            ? selected
+            : [...selected, tableName]
+          : selected.filter((name) => name !== tableName);
+        return {
+          ...current,
+          [connectionName]: nextSelected,
+        };
+      });
+    },
+    [],
+  );
 
   const handlePickLocalDatasource = useCallback(async () => {
     const selected = await open({
@@ -568,7 +600,9 @@ export default function DatasourcePanel() {
           <SavedConnectionsSection
             connections={savedConnections}
             expandedName={expandedSavedConnection}
-            onAttach={(name) => void handleAttachSavedConnection(name)}
+            onAttach={(name, tables) =>
+              void handleAttachSavedConnection(name, tables)
+            }
             onDelete={(name) => void handleDeleteSavedConnection(name)}
             onEdit={(connection) => {
               setRestWizardPrefill(null);
@@ -587,6 +621,8 @@ export default function DatasourcePanel() {
               )
             }
             recovery={savedConnectionRecovery}
+            selectedTables={selectedSavedConnectionTables}
+            onToggleTable={handleToggleSavedConnectionTable}
           />
         </div>
       </div>
@@ -617,15 +653,23 @@ function SavedConnectionsSection({
   onFixAndAttach,
   onToggle,
   recovery,
+  selectedTables,
+  onToggleTable,
 }: {
   connections: ConnectionTemplate[];
   expandedName: string | null;
-  onAttach: (name: string) => void;
+  onAttach: (name: string, tables?: string[]) => void;
   onDelete: (name: string) => void;
   onEdit: (connection: ConnectionTemplate) => void;
   onFixAndAttach: (recovery: SavedConnectionRecovery) => void;
   onToggle: (name: string) => void;
   recovery: SavedConnectionRecovery | null;
+  selectedTables: SavedConnectionTableSelection;
+  onToggleTable: (
+    connectionName: string,
+    tableName: string,
+    checked: boolean,
+  ) => void;
 }) {
   return (
     <section className="border-t border-gray-200 pt-3">
@@ -661,6 +705,8 @@ function SavedConnectionsSection({
               onDelete={onDelete}
               onEdit={onEdit}
               onToggle={onToggle}
+              selectedTables={selectedTables[connection.name] ?? []}
+              onToggleTable={onToggleTable}
             />
           ))}
         </div>
@@ -676,17 +722,26 @@ function SavedConnectionRow({
   onDelete,
   onEdit,
   onToggle,
+  selectedTables,
+  onToggleTable,
 }: {
   connection: ConnectionTemplate;
   expanded: boolean;
-  onAttach: (name: string) => void;
+  onAttach: (name: string, tables?: string[]) => void;
   onDelete: (name: string) => void;
   onEdit: (connection: ConnectionTemplate) => void;
   onToggle: (name: string) => void;
+  selectedTables: string[];
+  onToggleTable: (
+    connectionName: string,
+    tableName: string,
+    checked: boolean,
+  ) => void;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const credentialCount = connection.credentialEnvVars.length;
   const provider = connection.provider?.trim() || "custom";
+  const hasTableFunctions = connection.tables.length > 0;
   const tableFunctionLabel = `${connection.tables.length} ${
     connection.tables.length === 1 ? "table-function" : "table-functions"
   }`;
@@ -732,12 +787,20 @@ function SavedConnectionRow({
           <span className="truncate font-medium">{connection.name}</span>
         </button>
         <button
-          aria-label={`Attach saved connection ${connection.name}`}
+          aria-label={
+            hasTableFunctions
+              ? `Select table-functions from saved connection ${connection.name}`
+              : `Attach saved connection ${connection.name}`
+          }
           className="shrink-0 rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950"
-          onClick={() => onAttach(connection.name)}
+          onClick={() =>
+            hasTableFunctions
+              ? onToggle(connection.name)
+              : onAttach(connection.name)
+          }
           type="button"
         >
-          Attach
+          {hasTableFunctions ? "Select" : "Attach"}
         </button>
       </div>
 
@@ -764,22 +827,46 @@ function SavedConnectionRow({
             )}
           </div>
 
-          {connection.tables.length > 0 && (
-            <ul className="space-y-1">
-              {connection.tables.map((table) => (
-                <li
-                  className="flex min-w-0 items-center justify-between gap-2"
-                  key={table.name}
-                >
-                  <span className="min-w-0 truncate text-gray-700">
-                    {table.name}
-                  </span>
-                  <span className="shrink-0 rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
-                    function
-                  </span>
-                </li>
-              ))}
-            </ul>
+          {hasTableFunctions && (
+            <div className="space-y-2">
+              <ul className="space-y-1">
+                {connection.tables.map((table) => (
+                  <li
+                    className="flex min-w-0 items-center justify-between gap-2"
+                    key={table.name}
+                  >
+                    <label className="flex min-w-0 flex-1 items-center gap-2 text-gray-700">
+                      <input
+                        aria-label={`Select ${table.name} from ${connection.name}`}
+                        checked={selectedTables.includes(table.name)}
+                        className="h-3.5 w-3.5 shrink-0 rounded border-gray-300 text-gray-900 focus:ring-gray-900"
+                        onChange={(event) =>
+                          onToggleTable(
+                            connection.name,
+                            table.name,
+                            event.currentTarget.checked,
+                          )
+                        }
+                        type="checkbox"
+                      />
+                      <span className="min-w-0 truncate">{table.name}</span>
+                    </label>
+                    <span className="shrink-0 rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
+                      function
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <button
+                aria-label={`Attach selected table-functions from ${connection.name}`}
+                className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+                disabled={selectedTables.length === 0}
+                onClick={() => onAttach(connection.name, selectedTables)}
+                type="button"
+              >
+                Attach selected
+              </button>
+            </div>
           )}
 
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

@@ -73,9 +73,10 @@ export type AddApiDatasourceFromManifestInput = Omit<
 >;
 export type AttachSavedConnectionInput = Omit<
   AttachSavedConnectionCommand,
-  "command" | "credentials"
+  "command" | "credentials" | "tables"
 > & {
   credentials?: [string, string][];
+  tables?: string[];
 };
 export type DeleteSavedConnectionInput = Omit<
   DeleteSavedConnectionCommand,
@@ -190,6 +191,9 @@ export function attachSavedConnectionCommand(
     command: "attach_saved_connection",
     name: input.name,
     credentials: input.credentials ?? [],
+    ...(input.tables && input.tables.length > 0
+      ? { tables: input.tables }
+      : {}),
   };
 }
 
@@ -506,8 +510,7 @@ function isOpenApiTablePreview(value: unknown): value is OpenApiTablePreview {
 
   const candidate = value as Partial<OpenApiTablePreview>;
   return (
-    Array.isArray(candidate.tables) &&
-    candidate.tables.every(isTablePreview)
+    Array.isArray(candidate.tables) && candidate.tables.every(isTablePreview)
   );
 }
 

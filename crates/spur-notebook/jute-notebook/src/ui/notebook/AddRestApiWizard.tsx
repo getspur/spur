@@ -73,6 +73,7 @@ export type AddRestApiWizardPrefill = {
 export type AddRestApiWizardSavedConnectionRecovery = {
   connection: ConnectionTemplate;
   missingEnvVars: string[];
+  tableNames?: string[];
 };
 
 export type AddRestApiWizardProps = {
@@ -132,6 +133,10 @@ export default function AddRestApiWizard({
     useState<ProviderSummary | null>(null);
   const [selectedSavedConnection, setSelectedSavedConnection] =
     useState<ConnectionTemplate | null>(null);
+  const [
+    selectedSavedConnectionTableNames,
+    setSelectedSavedConnectionTableNames,
+  ] = useState<string[]>([]);
   const [datasourceName, setDatasourceName] = useState("");
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [savedConnectionCredentials, setSavedConnectionCredentials] = useState<
@@ -191,6 +196,7 @@ export default function AddRestApiWizard({
       setProviderCategory("All");
       setSelectedProvider(null);
       setSelectedSavedConnection(editConnection);
+      setSelectedSavedConnectionTableNames([]);
       setDatasourceName(editConnection.name);
       setCredentials({});
       setSavedConnectionCredentials({});
@@ -224,6 +230,9 @@ export default function AddRestApiWizard({
       setProviderCategory("All");
       setSelectedProvider(null);
       setSelectedSavedConnection(initialSavedConnectionRecovery.connection);
+      setSelectedSavedConnectionTableNames(
+        initialSavedConnectionRecovery.tableNames ?? [],
+      );
       setDatasourceName("");
       setCredentials({});
       setSavedConnectionCredentials(recoveryCredentials);
@@ -253,6 +262,7 @@ export default function AddRestApiWizard({
         prefill.provider ? providerSummaryFromPrefill(prefill.provider) : null,
       );
       setSelectedSavedConnection(null);
+      setSelectedSavedConnectionTableNames([]);
       setDatasourceName(prefill.name);
       setCredentials({});
       setSavedConnectionCredentials({});
@@ -281,6 +291,7 @@ export default function AddRestApiWizard({
     setProviderCategory("All");
     setSelectedProvider(null);
     setSelectedSavedConnection(null);
+    setSelectedSavedConnectionTableNames([]);
     setDatasourceName("");
     setCredentials({});
     setSavedConnectionCredentials({});
@@ -361,6 +372,7 @@ export default function AddRestApiWizard({
 
       if (mode === "catalog") {
         setSelectedSavedConnection(null);
+        setSelectedSavedConnectionTableNames([]);
         void loadProviders();
       } else if (mode === "saved") {
         setSelectedProvider(null);
@@ -370,6 +382,7 @@ export default function AddRestApiWizard({
       } else {
         setSelectedProvider(null);
         setSelectedSavedConnection(null);
+        setSelectedSavedConnectionTableNames([]);
         setCredentials({});
         setDatasourceName((currentName) =>
           !currentName || currentName === selectedProvider?.name
@@ -407,6 +420,7 @@ export default function AddRestApiWizard({
       setSourceMode(null);
       setSelectedProvider(null);
       setSelectedSavedConnection(null);
+      setSelectedSavedConnectionTableNames([]);
       setCredentials({});
       setDatasourceName(defaultDatasourceNameForFamily(family));
       setSpecText("");
@@ -422,6 +436,7 @@ export default function AddRestApiWizard({
       if (selectedProvider?.name !== provider.name) markDirty();
       setSelectedProvider(provider);
       setSelectedSavedConnection(null);
+      setSelectedSavedConnectionTableNames([]);
       setDatasourceName((currentName) =>
         !currentName || currentName === "rest_api" ? defaultName : currentName,
       );
@@ -440,6 +455,7 @@ export default function AddRestApiWizard({
     (connection: ConnectionTemplate) => {
       if (selectedSavedConnection?.name !== connection.name) markDirty();
       setSelectedSavedConnection(connection);
+      setSelectedSavedConnectionTableNames([]);
       setSelectedProvider(null);
       setMissingSavedCredentialKeys([]);
       setSavedConnectionCredentials({});
@@ -723,14 +739,15 @@ export default function AddRestApiWizard({
 
     try {
       const response = await daemonControl(
-        attachSavedConnectionCommand(
-          credentialPairs.length > 0
-            ? {
-                credentials: credentialPairs,
-                name: selectedSavedConnection.name,
-              }
-            : { name: selectedSavedConnection.name },
-        ),
+        attachSavedConnectionCommand({
+          name: selectedSavedConnection.name,
+          ...(credentialPairs.length > 0
+            ? { credentials: credentialPairs }
+            : {}),
+          ...(selectedSavedConnectionTableNames.length > 0
+            ? { tables: selectedSavedConnectionTableNames }
+            : {}),
+        }),
       );
       const attached =
         attachedSavedConnectionFromDaemonControlResponse(response);
