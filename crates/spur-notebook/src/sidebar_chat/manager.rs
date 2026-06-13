@@ -565,7 +565,6 @@ mod turn {
         AppScope {
             cwd: PathBuf::from(cwd),
             mcp_servers: Vec::new(),
-            skill: None,
             app_key: app_key.to_string(),
             label: app_key.to_string(),
         }
