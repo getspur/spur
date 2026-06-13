@@ -8,6 +8,7 @@ use jute::{
     commands::{Column, DatasourceEntry, DatasourceKind, Table},
 };
 use serde::Serialize;
+use spur_graph::{extract::GraphFacts, GraphNode, NodeId, NodeKind, RelationKind};
 
 use crate::context::refs::Ref;
 
@@ -108,9 +109,7 @@ pub fn used_by_map(
             }
         }
 
-        let Some(source_text) = cell_source(cell) else {
-            continue;
-        };
+        let source_text = cell_source(cell);
         for (entry_id, needle) in &table_invokes {
             if source_text.contains(needle) {
                 push_used(
@@ -125,6 +124,99 @@ pub fn used_by_map(
         }
     }
 
+    used
+}
+
+pub fn used_by_map_with_index(
+    root: &NotebookRoot,
+    entries: &[DatasourceEntry],
+    facts: Option<&GraphFacts>,
+) -> BTreeMap<String, Vec<UsedBy>> {
+    if let Some(indexed) = facts.and_then(|facts| used_by_map_from_index(facts, entries)) {
+        let mut used = dag_source_used_by_map(root, entries);
+        for (id, entries) in indexed {
+            for evidence in entries {
+                push_used(&mut used, id.clone(), evidence);
+            }
+        }
+        return used;
+    }
+
+    used_by_map(root, entries)
+}
+
+pub fn used_by_map_from_index(
+    facts: &GraphFacts,
+    entries: &[DatasourceEntry],
+) -> Option<BTreeMap<String, Vec<UsedBy>>> {
+    let table_ref_ids = table_reference_ids(entries);
+    if table_ref_ids.is_empty() {
+        return Some(BTreeMap::new());
+    }
+    let node_by_id = facts
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node))
+        .collect::<BTreeMap<_, _>>();
+    let mut used = BTreeMap::<String, Vec<UsedBy>>::new();
+    let mut saw_cell = false;
+
+    for edge in &facts.edges {
+        let Some(source) = node_by_id.get(&edge.source_node_id) else {
+            continue;
+        };
+        if source.kind == NodeKind::Cell {
+            saw_cell = true;
+        }
+        if source.kind != NodeKind::Cell
+            || edge.relation != RelationKind::References
+            || edge.bind_method.as_deref() != Some("actual")
+        {
+            continue;
+        }
+        let Some(target) = edge_target_label(edge, &node_by_id) else {
+            continue;
+        };
+        let Some(entry_id) = table_ref_ids.get(target.as_str()) else {
+            continue;
+        };
+        push_used(
+            &mut used,
+            entry_id.clone(),
+            UsedBy {
+                cell: source.label.clone(),
+                via: "index.table_reference",
+            },
+        );
+    }
+
+    saw_cell.then_some(used)
+}
+
+fn dag_source_used_by_map(
+    root: &NotebookRoot,
+    entries: &[DatasourceEntry],
+) -> BTreeMap<String, Vec<UsedBy>> {
+    let mut used = BTreeMap::<String, Vec<UsedBy>>::new();
+    for cell in &root.cells {
+        let Some(cell_ref) = cell_ref(cell) else {
+            continue;
+        };
+        if let Some(source) = cell_dag(cell).and_then(|dag| dag.source.as_ref()) {
+            for entry in entries {
+                if source.kind == kind_name(entry.kind) && source.port == entry.name {
+                    push_used(
+                        &mut used,
+                        datasource_id(entry, entries),
+                        UsedBy {
+                            cell: cell_ref.clone(),
+                            via: "dag.source",
+                        },
+                    );
+                }
+            }
+        }
+    }
     used
 }
 
@@ -227,6 +319,39 @@ fn table_invokes(entries: &[DatasourceEntry]) -> Vec<(String, String)> {
         .collect()
 }
 
+fn table_reference_ids(entries: &[DatasourceEntry]) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .flat_map(|entry| {
+            let id = datasource_id(entry, entries);
+            if is_connection_kind(entry.kind) {
+                entry
+                    .tables
+                    .iter()
+                    .map(|table| {
+                        (
+                            format!("ds://{}", invoke_stem(entry, &table.name)),
+                            id.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![(format!("ds://{}", invoke_stem(entry, &entry.name)), id)]
+            }
+        })
+        .collect()
+}
+
+fn edge_target_label(
+    edge: &spur_graph::GraphEdge,
+    node_by_id: &BTreeMap<NodeId, &GraphNode>,
+) -> Option<String> {
+    edge.target_node_id
+        .and_then(|id| node_by_id.get(&id))
+        .map(|node| node.label.clone())
+        .or_else(|| edge.target_label.clone())
+}
+
 fn push_used(used: &mut BTreeMap<String, Vec<UsedBy>>, id: String, evidence: UsedBy) {
     let entries = used.entry(id).or_default();
     if !entries.contains(&evidence) {
@@ -280,11 +405,11 @@ fn cell_dag(cell: &Cell) -> Option<&CellDagMetadata> {
     }
 }
 
-fn cell_source(cell: &Cell) -> Option<String> {
+fn cell_source(cell: &Cell) -> String {
     match cell {
-        Cell::Code(cell) => Some(multiline_to_string(&cell.source)),
-        Cell::Raw(cell) => Some(multiline_to_string(&cell.source)),
-        Cell::Markdown(cell) => Some(multiline_to_string(&cell.source)),
+        Cell::Code(cell) => multiline_to_string(&cell.source),
+        Cell::Raw(cell) => multiline_to_string(&cell.source),
+        Cell::Markdown(cell) => multiline_to_string(&cell.source),
     }
 }
 
@@ -385,7 +510,7 @@ fn slug_identifier(value: &str) -> String {
 mod tests {
     use jute::{
         backend::notebook::{
-            Cell, CellDagMetadata, CellMetadata, CodeCell, DagSource, MultilineString,
+            Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, DagSource, MultilineString,
             NotebookMetadata, NotebookRoot, PortSpec, SpurCellMetadata,
         },
         commands::{Column, DatasourceEntry, DatasourceKind, Table},
@@ -464,7 +589,7 @@ mod tests {
                         consumes: Vec::new(),
                         source,
                     }),
-                    code_type: None,
+                    code_type: Some(CodeType::Python),
                     frontend: None,
                 }),
                 jute_deck: None,
@@ -546,6 +671,31 @@ mod tests {
             .values()
             .flatten()
             .any(|used_by| { used_by.cell == "cell://api@v7" && used_by.via == "table_function" }));
+    }
+
+    #[test]
+    fn scope_used_prefers_index_table_reference_facts() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("nb.ipynb");
+        let root = notebook(vec![cell(
+            "api",
+            "def load():\n    df = polymarket_markets()\n    return df\n",
+            None,
+        )]);
+        let entries = vec![csv_entry("sales", "/d/sales.csv"), api_entry("polymarket")];
+        let facts = spur_graph::extract_notebook_facts(
+            path.parent().unwrap(),
+            &path,
+            &serde_json::to_vec(&root).expect("serialize notebook"),
+        )
+        .expect("extract notebook facts");
+
+        let used = used_by_map_from_index(&facts, &entries).expect("index facts");
+
+        assert!(!used.contains_key("sales"));
+        assert!(used.values().flatten().any(|used_by| {
+            used_by.cell == "cell://api" && used_by.via == "index.table_reference"
+        }));
     }
 
     #[test]
