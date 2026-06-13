@@ -73,12 +73,11 @@ pub fn lens_preamble(lens: ChatLens) -> &'static str {
     }
 }
 
-/// The scope a session is created with. `mcp_servers`/`skill` come from the app.
+/// The scope a session is created with. `mcp_servers` come from the app.
 #[derive(Debug, Clone)]
 pub struct AppScope {
     pub cwd: PathBuf,
     pub mcp_servers: Vec<agent_client_protocol::schema::McpServer>,
-    pub skill: Option<String>,
     /// Stable key used to map app -> live session (app dir path, or `notebook:<path>`).
     pub app_key: String,
     /// Display label for the chat header.

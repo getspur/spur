@@ -45,7 +45,6 @@ pub fn resolve_app_scope(notebook_path: &Path, notebook_mcp_socket: &Path) -> Re
     Ok(AppScope {
         cwd: app_root.clone(),
         mcp_servers,
-        skill: read_skill(&app_root, manifest.skill.as_deref())?,
         app_key: app_root.display().to_string(),
         label: manifest.name,
     })
@@ -59,7 +58,6 @@ fn default_notebook_scope(
     AppScope {
         cwd,
         mcp_servers: foundation_mcp_servers(notebook_mcp_socket),
-        skill: None,
         app_key: format!("{}:{}", DEFAULT_NOTEBOOK_APP_KEY, notebook_path.display()),
         label: DEFAULT_NOTEBOOK_LABEL.to_owned(),
     }
@@ -96,6 +94,7 @@ pub(crate) fn find_manifest_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
+#[allow(dead_code)]
 pub(crate) fn read_skill(app_root: &Path, skill_path: Option<&str>) -> Result<Option<String>> {
     let explicit_skill = skill_path.map(|path| app_root.join(path));
     if let Some(path) = explicit_skill {
@@ -191,7 +190,6 @@ mod tests {
         assert_eq!(scope.cwd, dir.path());
         assert_eq!(scope.label, "Notebook");
         assert_eq!(scope.app_key, format!("notebook:{}", nb.display()));
-        assert!(scope.skill.is_none());
         assert_eq!(scope.mcp_servers.len(), 1);
         assert_notebook_mcp(&scope.mcp_servers[0]);
     }
@@ -216,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn spur_app_dir_yields_app_scope_with_skill_and_mcp() {
+    fn spur_app_dir_yields_app_scope_with_mcp_only() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("spur-app.json"),
@@ -246,13 +244,19 @@ mod tests {
         let socket = notebook_socket();
         let scope = resolve_app_scope(&nb, &socket).unwrap();
 
-        assert_eq!(scope.label, "Code Graph Workbench");
-        assert_eq!(scope.cwd, dir.path());
-        assert_eq!(scope.app_key, dir.path().display().to_string());
-        assert_eq!(scope.skill.as_deref(), Some("workbench skill"));
-        assert_eq!(scope.mcp_servers.len(), 2);
-        assert_notebook_mcp(&scope.mcp_servers[0]);
-        match &scope.mcp_servers[1] {
+        let AppScope {
+            cwd,
+            mcp_servers,
+            app_key,
+            label,
+        } = scope;
+
+        assert_eq!(label, "Code Graph Workbench");
+        assert_eq!(cwd, dir.path());
+        assert_eq!(app_key, dir.path().display().to_string());
+        assert_eq!(mcp_servers.len(), 2);
+        assert_notebook_mcp(&mcp_servers[0]);
+        match &mcp_servers[1] {
             McpServer::Stdio(server) => {
                 assert_eq!(server.name, "Code Graph Workbench");
                 assert_eq!(server.command, std::path::PathBuf::from("python"));

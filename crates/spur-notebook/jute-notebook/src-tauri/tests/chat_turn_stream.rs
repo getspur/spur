@@ -126,7 +126,6 @@ fn scope() -> AppScope {
     AppScope {
         cwd: PathBuf::from("/tmp/notebook"),
         mcp_servers: Vec::new(),
-        skill: None,
         app_key: "notebook".to_string(),
         label: "Notebook".to_string(),
     }
@@ -159,7 +158,7 @@ async fn stream_backed_fake_connection_emits_ordered_chunks_then_done() {
     state.lock().unwrap().prompt_chunks = vec!["Hello, ".into(), "stream".into()];
     let (tx, rx) = mpsc::unbounded_channel();
 
-    chat.turn(&scope(), "say hi", tx, CancellationToken::new())
+    chat.turn(&scope(), "say hi", None, tx, CancellationToken::new())
         .await
         .unwrap();
 
@@ -188,7 +187,7 @@ async fn broadcast_backed_fake_connection_with_empty_prompt_stream_emits_chunks_
     }
     let (tx, rx) = mpsc::unbounded_channel();
 
-    chat.turn(&scope(), "say hi", tx, CancellationToken::new())
+    chat.turn(&scope(), "say hi", None, tx, CancellationToken::new())
         .await
         .unwrap();
 
