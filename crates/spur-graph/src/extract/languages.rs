@@ -25,6 +25,7 @@ pub enum Language {
     Tsx,
     Javascript,
     Markdown,
+    JupyterNotebook,
     C,
     Cpp,
     Lua,
@@ -317,6 +318,7 @@ impl Language {
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Javascript => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Markdown => tree_sitter_md::LANGUAGE.into(),
+            Self::JupyterNotebook => tree_sitter_md::LANGUAGE.into(),
             Self::C => tree_sitter_c::LANGUAGE.into(),
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Self::Lua => tree_sitter_lua::LANGUAGE.into(),
@@ -332,6 +334,7 @@ impl Language {
             Self::Tsx => tsx_config(),
             Self::Javascript => javascript_config(),
             Self::Markdown => markdown_config(),
+            Self::JupyterNotebook => jupyter_notebook_config(),
             Self::C => c_config(),
             Self::Cpp => cpp_config(),
             Self::Lua => lua_config(),
@@ -349,7 +352,7 @@ impl Language {
             Self::Cpp => CPP_BUILTIN_METHODS,
             Self::Lua => LUA_BUILTIN_METHODS,
             Self::Shell => SHELL_BUILTIN_METHODS,
-            Self::Markdown => &[],
+            Self::Markdown | Self::JupyterNotebook => &[],
         }
     }
 
@@ -361,6 +364,7 @@ impl Language {
             Self::Tsx => "tsx",
             Self::Javascript => "javascript",
             Self::Markdown => "markdown",
+            Self::JupyterNotebook => "jupyter_notebook",
             Self::C => "c",
             Self::Cpp => "cpp",
             Self::Lua => "lua",
@@ -620,10 +624,28 @@ pub(crate) fn markdown_config() -> LanguageConfig {
     }
 }
 
+pub(crate) fn jupyter_notebook_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_md::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[],
+        definition_kind_map: &[],
+        relation_kind_map: None,
+        preserve_bare_import_path: false,
+        is_method: None,
+    }
+}
+
 fn markdown_matcher(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+fn jupyter_notebook_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"))
 }
 
 fn rust_matcher(path: &std::path::Path) -> bool {
@@ -771,6 +793,13 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::Markdown,
             label: "markdown",
             extensions: &["md"],
+        },
+        LanguageDescriptor {
+            matcher: jupyter_notebook_matcher,
+            factory: jupyter_notebook_config,
+            language: Language::JupyterNotebook,
+            label: "jupyter_notebook",
+            extensions: &["ipynb"],
         },
     ]
 }
@@ -1647,6 +1676,14 @@ mod gate_contract {
     }
 
     #[test]
+    fn ipynb_path_resolves_to_jupyter_notebook() {
+        assert_eq!(
+            Language::from_path(Path::new("analysis.ipynb")),
+            Some(Language::JupyterNotebook)
+        );
+    }
+
+    #[test]
     fn tsx_grammar_parses_plain_javascript_with_jsx_without_error() {
         let mut parser = Parser::new();
         let language = tree_sitter_typescript::LANGUAGE_TSX.into();
@@ -1686,6 +1723,10 @@ mod gate_contract {
             ("shell", SHELL_BUILTIN_METHODS),
             ("typescript", TS_BUILTIN_METHODS),
             ("javascript", TS_BUILTIN_METHODS),
+            (
+                "jupyter_notebook",
+                Language::JupyterNotebook.builtin_method_names(),
+            ),
         ] {
             assert!(
                 methods.is_sorted(),
@@ -1706,6 +1747,23 @@ mod gate_contract {
             let language = descriptor.language;
             let config = (descriptor.factory)();
             let label = language.label();
+
+            if is_container_language(language) {
+                assert_eq!(
+                    descriptor.extensions,
+                    &["ipynb"],
+                    "{label}: container language extension contract changed"
+                );
+                assert!(
+                    config.queries.is_empty(),
+                    "{label}: container extraction must not declare tree-sitter queries"
+                );
+                assert!(
+                    config.definition_kind_map.is_empty(),
+                    "{label}: container extraction must not declare direct definitions"
+                );
+                continue;
+            }
 
             let tags_source = config
                 .queries
@@ -1866,6 +1924,10 @@ mod gate_contract {
         }
 
         let definition_captures = compiled_definition_captures(language_label, config);
+        if is_container_language(language) {
+            relations.insert(relation_predicate(RelationKind::Contains));
+            return relations;
+        }
         if !definition_captures.is_empty() {
             relations.insert(relation_predicate(RelationKind::Contains));
             if language != Language::Markdown {
@@ -2051,6 +2113,10 @@ mod gate_contract {
                 // @import capture channel is remapped to RelationKind::Links.
                 relation_set(&["contains", "links"]),
             ),
+            (
+                Language::JupyterNotebook.label(),
+                relation_set(&["contains"]),
+            ),
         ])
     }
 
@@ -2138,7 +2204,12 @@ mod gate_contract {
             Language::Lua => &["definition.function", "definition.method"],
             Language::Shell => &["definition.function"],
             Language::Markdown => &["definition.section"],
+            Language::JupyterNotebook => &[],
         }
+    }
+
+    fn is_container_language(language: Language) -> bool {
+        matches!(language, Language::JupyterNotebook)
     }
 }
 
