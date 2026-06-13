@@ -27,6 +27,19 @@ spur-mcp infrastructure -> no domain crates
 
 This means `spur-mcp` must not depend on `spur-core`, `spur-pm`, `spur-graph`, `spur-analyst`, `spur-notebook`, `spur-cost`, or product-specific crates. Those crates may depend on `spur-mcp` to publish MCP tools.
 
+## 2.1 Current Grounding
+
+The current tree supports the refactor diagnosis:
+
+- `crates/spur-mcp/src/tools.rs::tools_list()` is the single brain-facing tool catalog.
+- `crates/spur-mcp/src/tools.rs::worker_tools_list()` is a second curated catalog for worker MCP.
+- `crates/spur-mcp/src/server/handlers/mod.rs::handle_tool_call()` is the single brain-facing dispatcher for delegation, PM, graph, analyst, plan, review, reconciler, and worker-signal tools.
+- `crates/spur-mcp/src/server/mod.rs::McpCallbackServer` owns a mix of transport/session state and domain state: delegation channel, worker list, brain session binding, PM service, feature gate, active plans, reconciler outcomes, plan registry, plan ownership lock, cancellation control, continuation context, blob outcome store, reconciler task handle, startup recovery, repo root, and graph rebuild coordination.
+- `crates/spur-mcp/Cargo.toml` currently depends on domain crates including `spur-analyst`, `spur-graph`, `spur-pm`, `spur-license`, `spur-blob-store`, and `spur-worktree`.
+- `crates/spur-core/Cargo.toml` already depends on `spur-mcp`; moving orchestration MCP modules into `spur-core` without first moving orchestration state would otherwise preserve a circular conceptual boundary.
+
+The refactor is therefore not just a catalog split. It must split server infrastructure from domain runtime state.
+
 ## 3. Target Crate Ownership
 
 | Domain | Tools / Capabilities | Owner |
@@ -44,6 +57,14 @@ This means `spur-mcp` must not depend on `spur-core`, `spur-pm`, `spur-graph`, `
 
 The ownership rule is: the crate that owns the business API owns the MCP adapter for that API.
 
+Adapter ownership does not mean every policy bit moves into the domain crate. Cross-cutting MCP policy stays explicit:
+
+- Transport/session/auth policy stays in `spur-mcp`.
+- Brain/worker authority policy is chosen by the composing application.
+- Plan ownership, delegation lifecycle, review authority, and worker-signal lifecycle stay with `spur-core`.
+- PM persistence contracts stay with `spur-pm`, but orchestration-specific signal and audit semantics stay with `spur-core` and call into `spur-pm`.
+- Shared JSON-RPC/RMCP error mapping and response shaping stay in `spur-mcp` so domain crates do not each invent protocol glue.
+
 ## 4. `spur-mcp` Infrastructure Surface
 
 `spur-mcp` keeps only reusable MCP primitives:
@@ -51,6 +72,7 @@ The ownership rule is: the crate that owns the business API owns the MCP adapter
 - `ToolDefinition`
 - `ToolRegistry`
 - `ToolModule`
+- `ToolCallContext`
 - schema helper functions
 - result/error conversion helpers
 - text/JSON/table response helpers
@@ -63,7 +85,19 @@ Sketch:
 ```rust
 pub trait ToolModule: Send + Sync + 'static {
     fn tools(&self) -> Vec<ToolDefinition>;
-    async fn call(&self, name: &str, args: serde_json::Value) -> Result<ToolResponse, McpError>;
+    async fn call(
+        &self,
+        ctx: ToolCallContext<'_>,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolResponse, McpError>;
+}
+
+pub struct ToolCallContext<'a> {
+    pub server_kind: ServerKind,
+    pub authority: ToolAuthority,
+    pub brain_session_id: Option<&'a spur_acp::BrainSessionId>,
+    pub request_id: Option<&'a serde_json::Value>,
 }
 
 pub struct ToolRegistry {
@@ -77,7 +111,9 @@ impl ToolRegistry {
 }
 ```
 
-The exact trait shape can be adjusted for `rmcp` constraints, but the boundary is stable: infrastructure dispatches, domain modules implement.
+The exact trait shape can be adjusted for `rmcp` constraints, but the boundary is stable: infrastructure dispatches, domain modules implement, and per-call context carries protocol/session/authority facts that modules need without depending on `McpCallbackServer`.
+
+`ToolRegistry` must also define duplicate-name behavior. During the compatibility phase, registering two modules with the same public tool name is an error unless the duplicate is an explicit alias for the same handler.
 
 ## 5. Composition Model
 
@@ -112,6 +148,8 @@ let registry = ToolRegistry::builder()
 
 The server identity and module set become application-level configuration, not a hard-coded `spur-mcp` catalog.
 
+For the brain/orchestrator server, the composition site should live in the application that already owns orchestrator dependencies. `spur-mcp` must not construct `spur_core::mcp::orchestrator_module(...)` itself, because that would reintroduce the dependency direction this refactor removes.
+
 ## 6. Worker MCP
 
 The current worker MCP is a curated subset. After the split, the subset is expressed as policy over modules/tools, not a separate copy of tool definitions.
@@ -126,6 +164,17 @@ ToolRegistry::builder()
 ```
 
 Worker authority remains narrower than brain authority. Workers can read state and emit progress/signals; they cannot self-dispatch, mutate plans directly, or claim review authority.
+
+The policy must preserve current worker-only runtime behavior, not only the visible tool list:
+
+- token/session validation and per-delegation context binding
+- feature gates for progress and advanced PM-backed signals
+- read-audit aggregation for worker read tools
+- plan resolution through a `PlanResolver`-like interface
+- access to reconciler outcome buffers and blob outcome materialization where required by read tools
+- explicit denial of brain-only tools in both `tools/list` and `tools/call`
+
+`allow(...)` and `read_only()` are policy builders over a module's advertised tools. They are not a substitute for runtime authority checks inside sensitive handlers.
 
 ## 7. DuckDB MCP Placement
 
@@ -143,6 +192,22 @@ Responsibilities:
 
 ## 8. Migration Plan
 
+### Phase 0 — Extract Shared Protocol Types and State Boundaries
+
+Before adding module registration, separate protocol/infrastructure types from domain state:
+
+- Move reusable `ToolDefinition`, response helpers, schema helpers, MCP/RMCP error conversion, and server transport helpers behind infrastructure modules in `spur-mcp`.
+- Introduce `ToolCallContext`, `ServerKind`, and `ToolAuthority`.
+- Define domain dependency structs for the current state bundles, starting with `CoreMcpDeps`, `WorkerMcpDeps`, `PmMcpDeps`, `GraphMcpDeps`, and `AnalystMcpDeps`.
+- Identify which `McpCallbackServer` fields are transport/session infrastructure and which belong to `spur-core`, `spur-pm`, `spur-graph`, or `spur-analyst`.
+
+Acceptance:
+
+- No tool behavior changes.
+- The old dispatcher can still call existing handlers.
+- A code comment or test fixture documents the intended owner for each current `McpCallbackServer` domain field.
+- `spur-core` is identified as the owner of active plans, plan registry, plan ownership locks, reconciler handles/outcomes, delegation lifecycle state, continuation context, and worker-signal lifecycle state.
+
 ### Phase 1 — Infrastructure Adapter Inside Existing Crate
 
 Add `ToolRegistry` and `ToolModule` to `spur-mcp`, then make the existing `tools_list()` and `handle_tool_call()` use the registry internally. Behavior and tool names remain unchanged.
@@ -152,6 +217,8 @@ Acceptance:
 - Existing MCP clients see the same tool list.
 - Existing worker MCP tests pass.
 - The old central dispatcher still exists but delegates to registry entries.
+- The registry rejects accidental duplicate tool names.
+- `tools/call` receives and forwards `ToolCallContext`; handlers no longer reach into `McpCallbackServer` for generic protocol/session facts.
 
 ### Phase 2 — PM Module Extraction
 
@@ -162,6 +229,8 @@ Acceptance:
 - `spur-pm` owns PM schemas and tool definitions.
 - `spur-mcp` no longer imports PM tool definitions directly.
 - Brain server composes the PM module.
+- PM MCP handlers depend on `PmService` and PM-domain request/response types, not on `McpCallbackServer`.
+- Orchestration-specific worker-signal/audit semantics do not move into `spur-pm`; they remain in `spur-core` and call PM persistence APIs.
 
 ### Phase 3 — Graph and Analyst Module Extraction
 
@@ -173,16 +242,19 @@ Acceptance:
 - `spur-graph` owns graph selectors, graph response formats, and graph tool schemas.
 - `spur-analyst` owns DuckDB and search-oriented MCP tools.
 - MotherDuck MCP is no longer needed for analyst DB access.
+- The code graph rebuild/singleflight policy is either moved into `spur-graph` or passed as an explicit `GraphMcpDeps` dependency; it must not remain hidden on `McpCallbackServer`.
 
 ### Phase 4 — Core Orchestration Extraction
 
-Move delegation, plan, review, reconciler, worker-signal MCP adapters into `crates/spur-core/src/mcp/`.
+Move delegation, plan, review, reconciler, worker-signal MCP adapters and their runtime state into `crates/spur-core/src/mcp/` or adjacent `spur-core` orchestration modules.
 
 Acceptance:
 
 - `spur-core` owns orchestration MCP tools.
 - Worker MCP becomes a composed server with a restricted registry policy.
 - `spur-mcp` has no plan/reconciler/delegation domain state.
+- `spur-core` constructs the brain/orchestrator registry at the application boundary and passes it to `spur-mcp` infrastructure.
+- `spur-core` no longer needs `McpCallbackServer` as a plan resolver or worker MCP dependency; it depends on explicit core-owned interfaces instead.
 
 ### Phase 5 — Notebook Adoption
 
@@ -192,6 +264,17 @@ Acceptance:
 
 - Notebook MCP retains current tool behavior.
 - Notebook no longer needs a parallel custom tool catalog pattern when the shared infra is sufficient.
+
+### Phase 6 — Dependency Cleanup and Enforcement
+
+Remove domain dependencies from `spur-mcp`.
+
+Acceptance:
+
+- `spur-mcp` no longer has normal dependencies on `spur-core`, `spur-pm`, `spur-graph`, `spur-analyst`, `spur-notebook`, `spur-cost`, `spur-license`, `spur-blob-store`, or `spur-worktree`.
+- Any remaining test-only dependencies are justified and do not affect the library dependency graph.
+- A lightweight dependency-direction check fails if `spur-mcp` regains a domain dependency.
+- The crate description and public exports describe infrastructure, not a brain callback server.
 
 ## 9. Compatibility
 
@@ -206,6 +289,8 @@ submit_plan
 
 to namespaced alternatives in the first migration. Namespacing can be introduced later as aliases if needed, but the refactor should first preserve behavior.
 
+Compatibility includes legacy aliases. For example, `code_search` must continue to route to `code_symbol_search` until a separate deprecation plan removes it.
+
 ## 10. Risks
 
 ### Circular Dependencies
@@ -213,6 +298,12 @@ to namespaced alternatives in the first migration. Namespacing can be introduced
 The main risk is moving MCP adapters into crates that currently depend on `spur-mcp` indirectly through higher-level crates. The migration must keep `spur-mcp` at the bottom of the dependency graph.
 
 Mitigation: domain MCP modules depend only on `spur-mcp` infra plus their crate-local domain APIs.
+
+### Thin Registry Abstraction
+
+A registry that only accepts `(name, args)` would force domain modules to recover session, authority, feature, and runtime dependency state through globals or server downcasts.
+
+Mitigation: make `ToolCallContext` and typed dependency bundles part of Phase 0/1 acceptance.
 
 ### Over-Moving Orchestration State
 
@@ -226,6 +317,12 @@ The worker MCP subset is security-sensitive. A registry model could accidentally
 
 Mitigation: encode worker registry construction explicitly, with tests asserting denied tools are absent.
 
+### Response Shape Drift
+
+Moving handlers into domain crates can accidentally change `content` formatting, JSON-RPC error codes, or legacy aliases.
+
+Mitigation: snapshot `tools/list`, targeted `tools/call` responses, and error cases before each extraction, then require byte-for-byte compatibility except where the phase explicitly approves a change.
+
 ## 11. Testing
 
 Each extraction phase needs:
@@ -235,6 +332,10 @@ Each extraction phase needs:
 - Worker subset tests.
 - Dependency-direction checks, either through crate graph review or a lightweight deny test.
 - Existing integration tests for plans, PM, code graph, and notebook MCP behavior.
+- Duplicate tool-name registration tests.
+- Alias-routing tests for compatibility aliases such as `code_search`.
+- Worker `tools/call` denial tests, not only `tools/list` absence tests.
+- Snapshot tests for representative success and error response envelopes.
 
 Build and test through `scripts/spur-cargo`, following the repository rule.
 
@@ -243,8 +344,11 @@ Build and test through `scripts/spur-cargo`, following the repository rule.
 The refactor is complete when:
 
 - `spur-mcp` exports infrastructure only.
+- `spur-mcp` has no normal dependency on domain crates.
 - Existing domain crates own their MCP adapters under `src/mcp/`.
 - The brain/orchestrator MCP server is composed from domain modules.
+- Core orchestration state is owned by `spur-core`, not by an infrastructure server struct.
+- Worker MCP authority, audit aggregation, feature gates, and denial behavior match the pre-refactor behavior.
 - Notebook MCP uses shared infrastructure where practical.
 - A built-in DuckDB MCP can be added through `spur-analyst/src/mcp/` without touching a central god-tool catalog.
 - Existing tool names and client behavior remain compatible during migration.
