@@ -30,6 +30,7 @@ use spur_rest_table_gateway::{
 const DEFAULT_GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 const DEFAULT_CLOB_BASE: &str = "https://clob.polymarket.com";
 const DEFAULT_RSSHUB_BASE: &str = "https://rsshub.app";
+const DEFAULT_RSSHUB_ROUTES_URL: &str = "https://docs.rsshub.app/routes.json";
 const CHUNK_SIZE: usize = 2048;
 
 thread_local! {
@@ -50,13 +51,15 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
         env::var("SPUR_POLYMARKET_CLOB_BASE").unwrap_or_else(|_| DEFAULT_CLOB_BASE.to_string());
     let rsshub_base =
         env::var("SPUR_RSSHUB_BASE").unwrap_or_else(|_| DEFAULT_RSSHUB_BASE.to_string());
+    let rsshub_routes_url =
+        env::var("SPUR_RSSHUB_ROUTES_URL").unwrap_or_else(|_| DEFAULT_RSSHUB_ROUTES_URL.to_string());
 
     let adapter: Arc<dyn Adapter> = Arc::new(PolymarketAdapter::new(&gamma_base, &clob_base)?);
     let bridge = Arc::new(IoBridge::new());
     register_adapter(&con, adapter, Arc::clone(&bridge))?;
     register_adapter(
         &con,
-        Arc::new(RssAdapter::with_rsshub_base(&rsshub_base)),
+        Arc::new(RssAdapter::with_config(&rsshub_base, &rsshub_routes_url)),
         Arc::clone(&bridge),
     )?;
 

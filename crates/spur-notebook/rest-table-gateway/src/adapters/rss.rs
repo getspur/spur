@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, RecordBatch, StringArray};
+use arrow_array::{ArrayRef, BooleanArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -9,9 +9,11 @@ use crate::adapter::{Adapter, ScalarValue, ScanRequest, TableDef, TableKind};
 use crate::error::{GatewayError, Result};
 
 const DEFAULT_RSSHUB_BASE: &str = "https://rsshub.app";
+const DEFAULT_RSSHUB_ROUTES_URL: &str = "https://docs.rsshub.app/routes.json";
 
 pub struct RssAdapter {
     rsshub_base: String,
+    routes_url: String,
     client: Client,
 }
 
@@ -40,8 +42,13 @@ impl RssAdapter {
     }
 
     pub fn with_rsshub_base(rsshub_base: &str) -> Self {
+        Self::with_config(rsshub_base, DEFAULT_RSSHUB_ROUTES_URL)
+    }
+
+    pub fn with_config(rsshub_base: &str, routes_url: &str) -> Self {
         Self {
             rsshub_base: rsshub_base.trim_end_matches('/').to_string(),
+            routes_url: routes_url.to_string(),
             client: crate::adapter::default_http_client(),
         }
     }
@@ -65,6 +72,25 @@ impl RssAdapter {
             Field::new("published_at", DataType::Utf8, true),
             Field::new("author", DataType::Utf8, true),
             Field::new("categories", DataType::Utf8, true),
+        ]))
+    }
+
+    fn routes_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("source_key", DataType::Utf8, true),
+            Field::new("source_name", DataType::Utf8, true),
+            Field::new("route", DataType::Utf8, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("url", DataType::Utf8, true),
+            Field::new("categories", DataType::Utf8, true),
+            Field::new("heat", DataType::Int64, true),
+            Field::new("example", DataType::Utf8, true),
+            Field::new("rsshub_url", DataType::Utf8, true),
+            Field::new("description", DataType::Utf8, true),
+            Field::new("require_config", DataType::Boolean, true),
+            Field::new("require_puppeteer", DataType::Boolean, true),
+            Field::new("support_radar", DataType::Boolean, true),
+            Field::new("top_feed_url", DataType::Utf8, true),
         ]))
     }
 
@@ -97,16 +123,20 @@ impl RssAdapter {
 
     async fn fetch_feed(&self, original_url: &str) -> Result<String> {
         let fetch_url = self.resolved_fetch_url(original_url)?;
+        self.fetch_text(&fetch_url, "RSS feed").await
+    }
+
+    async fn fetch_text(&self, url: &str, label: &str) -> Result<String> {
         let response = self
             .client
-            .get(fetch_url)
+            .get(url)
             .send()
             .await
             .map_err(|error| GatewayError::Http(error.to_string()))?;
         let status = response.status();
         if !status.is_success() {
             return Err(GatewayError::Http(format!(
-                "RSS feed request failed with HTTP {status}"
+                "{label} request failed with HTTP {status}"
             )));
         }
         response
@@ -171,6 +201,84 @@ impl RssAdapter {
             ],
         )
     }
+
+    async fn scan_routes(&self) -> Result<Vec<RecordBatch>> {
+        let text = self
+            .fetch_text(&self.routes_url, "RSSHub routes catalog")
+            .await?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| GatewayError::Adapter(error.to_string()))?;
+        let Some(sources) = value.as_object() else {
+            return Err(GatewayError::Adapter(
+                "RSSHub routes catalog must be a JSON object".to_string(),
+            ));
+        };
+
+        let mut source_keys = Vec::new();
+        let mut source_names = Vec::new();
+        let mut routes = Vec::new();
+        let mut names = Vec::new();
+        let mut urls = Vec::new();
+        let mut categories = Vec::new();
+        let mut heats = Vec::new();
+        let mut examples = Vec::new();
+        let mut rsshub_urls = Vec::new();
+        let mut descriptions = Vec::new();
+        let mut require_configs = Vec::new();
+        let mut require_puppeteers = Vec::new();
+        let mut support_radars = Vec::new();
+        let mut top_feed_urls = Vec::new();
+
+        for (source_key, source) in sources {
+            let source_name = json_string(source, "name");
+            let source_categories = json_string_array(source.get("categories"));
+            let Some(route_map) = source.get("routes").and_then(|routes| routes.as_object()) else {
+                continue;
+            };
+
+            for (route, route_meta) in route_map {
+                let route_categories =
+                    json_string_array(route_meta.get("categories")).or(source_categories.clone());
+                let example = json_string(route_meta, "example");
+                let rsshub_url = example
+                    .as_deref()
+                    .map(|example| format!("rsshub://{}", example.trim_start_matches('/')));
+                let features = route_meta.get("features");
+
+                source_keys.push(Some(source_key.clone()));
+                source_names.push(source_name.clone());
+                routes.push(Some(route.clone()));
+                names.push(json_string(route_meta, "name"));
+                urls.push(json_string(route_meta, "url").or_else(|| json_string(source, "url")));
+                categories.push(route_categories.map(|values| values.join(",")));
+                heats.push(route_meta.get("heat").and_then(|value| value.as_i64()));
+                examples.push(example);
+                rsshub_urls.push(rsshub_url);
+                descriptions.push(json_string(route_meta, "description"));
+                require_configs.push(json_bool(features, "requireConfig"));
+                require_puppeteers.push(json_bool(features, "requirePuppeteer"));
+                support_radars.push(json_bool(features, "supportRadar"));
+                top_feed_urls.push(top_feed_url(route_meta));
+            }
+        }
+
+        routes_record_batch(RoutesColumns {
+            source_keys,
+            source_names,
+            routes,
+            names,
+            urls,
+            categories,
+            heats,
+            examples,
+            rsshub_urls,
+            descriptions,
+            require_configs,
+            require_puppeteers,
+            support_radars,
+            top_feed_urls,
+        })
+    }
 }
 
 impl Default for RssAdapter {
@@ -187,6 +295,11 @@ impl Adapter for RssAdapter {
 
     fn catalog(&self) -> Vec<TableDef> {
         vec![
+            TableDef {
+                name: "routes".to_string(),
+                schema: Self::routes_schema(),
+                kind: TableKind::Table,
+            },
             TableDef {
                 name: "feed".to_string(),
                 schema: Self::feed_schema(),
@@ -206,6 +319,7 @@ impl Adapter for RssAdapter {
 
     async fn scan(&self, req: ScanRequest) -> Result<Vec<RecordBatch>> {
         match req.table.as_str() {
+            "routes" => self.scan_routes().await,
             "feed" => {
                 self.scan_feed(Self::feed_url_arg(&req.tvf_args, "feed")?)
                     .await
@@ -230,6 +344,77 @@ fn record_batch(
     let batch = RecordBatch::try_new(schema, arrays)
         .map_err(|error| GatewayError::Schema(error.to_string()))?;
     Ok(vec![batch])
+}
+
+struct RoutesColumns {
+    source_keys: Vec<Option<String>>,
+    source_names: Vec<Option<String>>,
+    routes: Vec<Option<String>>,
+    names: Vec<Option<String>>,
+    urls: Vec<Option<String>>,
+    categories: Vec<Option<String>>,
+    heats: Vec<Option<i64>>,
+    examples: Vec<Option<String>>,
+    rsshub_urls: Vec<Option<String>>,
+    descriptions: Vec<Option<String>>,
+    require_configs: Vec<Option<bool>>,
+    require_puppeteers: Vec<Option<bool>>,
+    support_radars: Vec<Option<bool>>,
+    top_feed_urls: Vec<Option<String>>,
+}
+
+fn routes_record_batch(columns: RoutesColumns) -> Result<Vec<RecordBatch>> {
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(columns.source_keys)) as ArrayRef,
+        Arc::new(StringArray::from(columns.source_names)) as ArrayRef,
+        Arc::new(StringArray::from(columns.routes)) as ArrayRef,
+        Arc::new(StringArray::from(columns.names)) as ArrayRef,
+        Arc::new(StringArray::from(columns.urls)) as ArrayRef,
+        Arc::new(StringArray::from(columns.categories)) as ArrayRef,
+        Arc::new(Int64Array::from(columns.heats)) as ArrayRef,
+        Arc::new(StringArray::from(columns.examples)) as ArrayRef,
+        Arc::new(StringArray::from(columns.rsshub_urls)) as ArrayRef,
+        Arc::new(StringArray::from(columns.descriptions)) as ArrayRef,
+        Arc::new(BooleanArray::from(columns.require_configs)) as ArrayRef,
+        Arc::new(BooleanArray::from(columns.require_puppeteers)) as ArrayRef,
+        Arc::new(BooleanArray::from(columns.support_radars)) as ArrayRef,
+        Arc::new(StringArray::from(columns.top_feed_urls)) as ArrayRef,
+    ];
+    let batch = RecordBatch::try_new(RssAdapter::routes_schema(), arrays)
+        .map_err(|error| GatewayError::Schema(error.to_string()))?;
+    Ok(vec![batch])
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn json_bool(value: Option<&serde_json::Value>, key: &str) -> Option<bool> {
+    value?.get(key).and_then(|value| value.as_bool())
+}
+
+fn json_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    let values: Vec<String> = value?
+        .as_array()?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+fn top_feed_url(route_meta: &serde_json::Value) -> Option<String> {
+    route_meta
+        .get("topFeeds")?
+        .as_array()?
+        .iter()
+        .find_map(|feed| json_string(feed, "url"))
 }
 
 fn parse_feed(text: &str) -> ParsedFeed {
@@ -391,14 +576,18 @@ mod tests {
     use super::RssAdapter;
     use crate::adapter::{Adapter, ResolvedAuth, ScalarValue, ScanRequest, TableKind};
 
-    fn scan_request(table: &str, url: String) -> ScanRequest {
+    fn scan_request_with_args(table: &str, tvf_args: Vec<ScalarValue>) -> ScanRequest {
         ScanRequest {
             table: table.to_string(),
             predicates: vec![],
             projection: None,
-            tvf_args: vec![ScalarValue::Utf8(url)],
+            tvf_args,
             auth: ResolvedAuth::None,
         }
+    }
+
+    fn scan_request(table: &str, url: String) -> ScanRequest {
+        scan_request_with_args(table, vec![ScalarValue::Utf8(url)])
     }
 
     fn string_value(batch: &arrow_array::RecordBatch, column: usize, row: usize) -> String {
@@ -411,12 +600,33 @@ mod tests {
             .to_string()
     }
 
+    fn bool_value(batch: &arrow_array::RecordBatch, column: usize, row: usize) -> bool {
+        batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<arrow_array::BooleanArray>()
+            .expect("column should be bool")
+            .value(row)
+    }
+
+    fn int_value(batch: &arrow_array::RecordBatch, column: usize, row: usize) -> i64 {
+        batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .expect("column should be int")
+            .value(row)
+    }
+
     #[test]
-    fn rss_catalog_exposes_feed_and_entries_functions() {
+    fn rss_catalog_exposes_routes_feed_and_entries_tables() {
         let adapter = RssAdapter::new();
         let catalog = adapter.catalog();
 
-        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog.len(), 3);
+        assert!(catalog
+            .iter()
+            .any(|table| table.name == "routes" && matches!(table.kind, TableKind::Table)));
         assert!(catalog.iter().any(|table| {
             table.name == "feed"
                 && matches!(
@@ -431,6 +641,78 @@ mod tests {
                     TableKind::TableFunction { ref arg_names } if arg_names == &["url".to_string()]
                 )
         }));
+    }
+
+    #[tokio::test]
+    async fn rss_routes_scan_flattens_rsshub_route_catalog() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/routes.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "youtube": {
+                    "name": "YouTube",
+                    "url": "youtube.com",
+                    "categories": ["multimedia", "popular"],
+                    "routes": {
+                        "/youtube/video/:id": {
+                            "path": "/video/:id",
+                            "name": "Channel videos",
+                            "url": "youtube.com",
+                            "example": "/youtube/video/UC123",
+                            "parameters": {
+                                "id": "Channel ID"
+                            },
+                            "description": "Latest videos",
+                            "categories": ["multimedia"],
+                            "features": {
+                                "requireConfig": false,
+                                "requirePuppeteer": true,
+                                "supportRadar": true
+                            },
+                            "heat": 42,
+                            "topFeeds": [
+                                {
+                                    "url": "rsshub://youtube/video/UC123",
+                                    "title": "Example channel"
+                                }
+                            ]
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let batches = RssAdapter::with_config(
+            "https://rsshub.example",
+            &format!("{}/routes.json", server.uri()),
+        )
+        .scan(scan_request_with_args("routes", vec![]))
+        .await
+        .expect("routes scan succeeds");
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(string_value(&batches[0], 0, 0), "youtube");
+        assert_eq!(string_value(&batches[0], 1, 0), "YouTube");
+        assert_eq!(string_value(&batches[0], 2, 0), "/youtube/video/:id");
+        assert_eq!(string_value(&batches[0], 3, 0), "Channel videos");
+        assert_eq!(string_value(&batches[0], 4, 0), "youtube.com");
+        assert_eq!(string_value(&batches[0], 5, 0), "multimedia");
+        assert_eq!(int_value(&batches[0], 6, 0), 42);
+        assert_eq!(string_value(&batches[0], 7, 0), "/youtube/video/UC123");
+        assert_eq!(
+            string_value(&batches[0], 8, 0),
+            "rsshub://youtube/video/UC123"
+        );
+        assert_eq!(string_value(&batches[0], 9, 0), "Latest videos");
+        assert!(!bool_value(&batches[0], 10, 0));
+        assert!(bool_value(&batches[0], 11, 0));
+        assert!(bool_value(&batches[0], 12, 0));
+        assert_eq!(
+            string_value(&batches[0], 13, 0),
+            "rsshub://youtube/video/UC123"
+        );
     }
 
     #[tokio::test]
