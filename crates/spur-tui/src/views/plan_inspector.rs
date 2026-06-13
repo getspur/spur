@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Gauge, Paragraph},
     Frame,
@@ -40,6 +41,7 @@ pub struct PlanInspectorView {
     issue_states: HashMap<String, TaskIssueState>,
     task_detail_scroll: usize,
     mode: PlanInspectorMode,
+    confirm: Option<PlanInspectorConfirm>,
 }
 
 #[derive(Debug)]
@@ -47,6 +49,11 @@ enum TaskIssueState {
     Loading,
     Loaded(Box<spur_pm::Issue>),
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanInspectorConfirm {
+    Start { plan_id: String },
 }
 
 impl PlanInspectorView {
@@ -61,6 +68,7 @@ impl PlanInspectorView {
             issue_states: HashMap::new(),
             task_detail_scroll: 0,
             mode: PlanInspectorMode::Browse,
+            confirm: None,
         }
     }
 
@@ -75,6 +83,7 @@ impl PlanInspectorView {
             issue_states: HashMap::new(),
             task_detail_scroll: 0,
             mode: PlanInspectorMode::Browse,
+            confirm: None,
         }
     }
 
@@ -397,6 +406,30 @@ impl PlanInspectorView {
             })
         }
     }
+
+    fn start_or_resume_plan(&mut self, plan: &TrackedPlan) -> Option<Action> {
+        if self.open_issue_id.is_some() || !matches!(self.mode, PlanInspectorMode::Browse) {
+            return None;
+        }
+
+        if !plan.is_active() {
+            return Some(Action::FlashHint {
+                message: format!("Cannot start: plan {} is terminal", plan.plan_id),
+            });
+        }
+
+        self.confirm = Some(PlanInspectorConfirm::Start {
+            plan_id: plan.plan_id.clone(),
+        });
+        None
+    }
+
+    fn confirm_action(&mut self) -> Option<Action> {
+        let confirm = self.confirm.take()?;
+        match confirm {
+            PlanInspectorConfirm::Start { plan_id } => Some(Action::ResumePlan { plan_id }),
+        }
+    }
 }
 
 impl PlanInspectorView {
@@ -623,6 +656,17 @@ fn is_terminal_phase(phase: LifecycleState) -> bool {
 impl View for PlanInspectorView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         let key = super::normalize_macos_option(key);
+        if self.confirm.is_some() {
+            return match key.code {
+                KeyCode::Enter if key.modifiers.is_empty() => self.confirm_action(),
+                KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => {
+                    self.confirm = None;
+                    None
+                }
+                _ => None,
+            };
+        }
+
         let plan = self.active_plan(ctx);
         if let Some(plan) = plan {
             self.ensure_selection(plan);
@@ -666,6 +710,9 @@ impl View for PlanInspectorView {
                 KeyCode::Char('G') => self.jump_lane_end(plan),
                 KeyCode::Char('b') if key.modifiers.is_empty() => {
                     return self.jump_to_next_blocker(plan);
+                }
+                KeyCode::Char('r') if key.modifiers.is_empty() => {
+                    return self.start_or_resume_plan(plan);
                 }
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     if let Some(task) = self.selected_task(plan) {
@@ -992,17 +1039,70 @@ impl View for PlanInspectorView {
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                format!(
-                    " h/l: lane  j/k: task  b: blocker  {}  o: work item{}  g/G: ends  Alt+P/Esc: close {}",
-                    enter_hint, peek_hint, scroll_hint
+                footer_hint(
+                    area.width,
+                    enter_hint,
+                    peek_hint,
+                    scroll_hint,
+                    self.open_issue_id.is_none() && self.active_plan(ctx).is_some(),
                 ),
                 Style::default().fg(token(ctx.theme, "plan_inspector.footer_hint.fg")),
             )])),
             chunks[2],
         );
+        self.render_confirm(frame, area, ctx.theme);
     }
 
     fn tick(&mut self) {}
+}
+
+impl PlanInspectorView {
+    fn render_confirm(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let Some(confirm) = self.confirm.as_ref() else {
+            return;
+        };
+        let popup = centered_rect(area, 72, 9);
+        frame.render_widget(Clear, popup);
+
+        let (title, verb, body) = match confirm {
+            PlanInspectorConfirm::Start { plan_id } => (
+                " Start / Resume Plan ",
+                "Start",
+                vec![
+                    Line::from(format!("  Plan: {plan_id}")),
+                    Line::from(""),
+                    Line::from("  This starts/resumes execution in the current brain session."),
+                    Line::from("  A brain session can actively execute only one plan."),
+                    Line::from("  Workers may be dispatched after this starts."),
+                ],
+            ),
+        };
+
+        let mut lines = body;
+        lines.push(Line::from(""));
+        lines.push(action_line(
+            "[Enter]",
+            verb,
+            "[Esc]",
+            "Cancel",
+            popup.width,
+            theme,
+        ));
+
+        let block = Block::default()
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(token(theme, "plan_browser.confirm.title.fg"))
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_alignment(Alignment::Left)
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(token(theme, "plan_browser.confirm.border.fg")));
+
+        frame.render_widget(Paragraph::new(lines).block(block), popup);
+    }
 }
 
 fn plan_status_color(theme: &Theme, status: &str) -> Color {
@@ -1123,6 +1223,87 @@ fn truncate_display(s: &str, max: usize) -> String {
     out
 }
 
+fn footer_hint(
+    width: u16,
+    enter_hint: &str,
+    peek_hint: &str,
+    scroll_hint: &str,
+    show_start: bool,
+) -> String {
+    let start_hint = if show_start { "  r: start/resume" } else { "" };
+    let full = format!(
+        " h/l: lane  j/k: task  b: blocker  {}  o: work item{}{}  g/G: ends  Alt+P/Esc: close {}",
+        enter_hint, start_hint, peek_hint, scroll_hint
+    );
+    if full.chars().count() <= width as usize {
+        return full;
+    }
+
+    let compact_peek = if peek_hint.is_empty() {
+        ""
+    } else {
+        "  s: peek  S: worker"
+    };
+    let compact_start = if show_start { "  r: start" } else { "" };
+    let compact = format!(
+        " h/l lane  j/k task  b blocker  {}  o item{}{}  Esc close",
+        enter_hint, compact_start, compact_peek
+    );
+    if compact.chars().count() <= width as usize {
+        return compact;
+    }
+
+    truncate_display(
+        &format!(" j/k task  b blocker{}  Esc close", compact_start),
+        width as usize,
+    )
+}
+
+fn centered_rect(outer: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(outer.width);
+    let height = height.min(outer.height);
+    Rect {
+        x: outer.x + outer.width.saturating_sub(width) / 2,
+        y: outer.y + outer.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn action_line(
+    left_key: &'static str,
+    left_label: &'static str,
+    right_key: &'static str,
+    right_label: &'static str,
+    popup_width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let left_width = 1 + left_key.len() + 1 + left_label.len();
+    let right_width = right_key.len() + 1 + right_label.len();
+    let content_width = popup_width.saturating_sub(2) as usize;
+    let gap = content_width
+        .saturating_sub(left_width + right_width)
+        .max(1);
+
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            left_key,
+            Style::default()
+                .fg(token(theme, "plan_browser.confirm.primary_key.fg"))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {left_label}{}", " ".repeat(gap))),
+        Span::styled(
+            right_key,
+            Style::default()
+                .fg(token(theme, "plan_browser.confirm.cancel_key.fg"))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {right_label}")),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1217,6 +1398,51 @@ mod tests {
                     mutation_id: None,
                     superseded_by: Vec::new(),
                     next_action: "wait".into(),
+                }],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
+    fn projection_with_terminal_plan(session_id: &SessionId) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "approved".into(),
+                progress: "1/1 done".into(),
+                next_action: "terminal".into(),
+                ready_to_merge: true,
+                counts: PlanSnapshotCounts {
+                    approved: 1,
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "t-12".into(),
+                    task_name: "Stage A".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-epic.1".into()),
+                    issue_title: None,
+                    status: "approved".into(),
+                    attempt: 1,
+                    max_attempts: 3,
+                    depends_on: Vec::new(),
+                    blocked_by: Vec::new(),
+                    unblocks: Vec::new(),
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: None,
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "done".into(),
                 }],
                 owner_brain_session_id: Some(session_id.0.clone()),
                 owner_token: None,
@@ -1626,6 +1852,30 @@ mod tests {
             dump.contains("S: jump to worker"),
             "expected footer to advertise dashboard jump:\n{dump}"
         );
+        assert!(
+            dump.contains("r: start/resume"),
+            "expected footer to advertise start/resume:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn footer_uses_compact_start_hint_on_narrow_terminals() {
+        let hint = footer_hint(
+            50,
+            "Enter: issue detail",
+            "  s: stream peek  S: jump to worker",
+            "",
+            true,
+        );
+
+        assert!(
+            hint.contains("r: start"),
+            "expected compact footer to advertise start:\n{hint}"
+        );
+        assert!(
+            hint.chars().count() <= 50,
+            "expected compact footer to fit narrow width:\n{hint}"
+        );
     }
 
     #[test]
@@ -1757,6 +2007,76 @@ mod tests {
             action,
             Some(Action::OpenIssueInBacklog { id }) if id == "bd-epic"
         ));
+    }
+
+    #[test]
+    fn r_opens_start_resume_confirmation_for_active_plan() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('r'), &ctx);
+
+        assert!(action.is_none(), "r should open confirmation first");
+        assert!(matches!(
+            view.confirm,
+            Some(PlanInspectorConfirm::Start { ref plan_id }) if plan_id == "plan-1"
+        ));
+    }
+
+    #[test]
+    fn enter_from_start_resume_confirmation_resumes_plan() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_char('r'), &ctx).is_none());
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::ResumePlan { plan_id }) if plan_id == "plan-1"
+        ));
+    }
+
+    #[test]
+    fn r_rejects_terminal_plan_with_hint() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_terminal_plan(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('r'), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::FlashHint { message })
+                if message == "Cannot start: plan plan-1 is terminal"
+        ));
+    }
+
+    #[test]
+    fn esc_or_q_dismisses_start_resume_confirmation_without_action() {
+        for close_key in [KeyCode::Esc, KeyCode::Char('q')] {
+            let session_id = SessionId("brain-1".into());
+            let projection = projection_with_epic(&session_id);
+            let lineage = ExecutorLineage::new();
+            let ctx = view_context_for_tests(&lineage, &projection);
+            let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+            assert!(view.handle_key(key_char('r'), &ctx).is_none());
+            let action = view.handle_key(key(close_key), &ctx);
+
+            assert!(action.is_none());
+            assert!(view.confirm.is_none());
+        }
     }
 
     #[test]
