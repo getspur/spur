@@ -27,7 +27,7 @@ doc, one creates the `app_gallery/code-graph-workbench/` seed mirroring `noteboo
 
 ### Task 1: `spur_app.notebook` — Python notebook-socket client
 
-**Task ID:** `task-1-sdk-python-notebook-client`
+**Task ID:** `t1-sdk-notebook-client`
 
 **Files:**
 - Create: `sdk/python/src/spur_app/notebook.py`
@@ -326,7 +326,7 @@ git commit -m "feat(sdk): add spur_app NotebookClient socket client"
 
 ### Task 2: `.spurapp` packer parity — bundle the authored app
 
-**Task ID:** `task-2-packer-authored-manifest`
+**Task ID:** `t2-packer-parity`
 
 **Files:**
 - Modify: `crates/spur-notebook/src/spur_app.rs` (`export_spur_app`, ~lines 210–253; helpers below it)
@@ -547,7 +547,7 @@ git commit -m "feat(spur-notebook): pack authored manifest, server, skill, sdk i
 
 ### Task 3: doctor HARD-GATE polices app plugin tool names
 
-**Task ID:** `task-3-doctor-plugin-tool-gate`
+**Task ID:** `t3-doctor-plugin-gate`
 
 **Files:**
 - Modify: `crates/spur-notebook/src/mcp/tools/notebook_app_doctor.rs` (`check_skill`, ~lines 567–657)
@@ -658,7 +658,7 @@ git commit -m "fix(spur-notebook): doctor gate checks app plugin tool prefixes"
 
 ### Task 4: refresh the workbench spec against verified HEAD
 
-**Task ID:** `task-4-spec-refresh`
+**Task ID:** `t4-spec-refresh`
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-06-09-code-graph-workbench-app-design.md`
@@ -707,7 +707,7 @@ git commit -m "docs(specs): refresh code-graph-workbench spec to verified HEAD"
 
 ### Task 5: `app_gallery/code-graph-workbench/` package seed
 
-**Task ID:** `task-5-workbench-app-seed`
+**Task ID:** `t5-workbench-app-seed`
 
 **Files:**
 - Create: `app_gallery/code-graph-workbench/spur-app.json`
@@ -950,11 +950,11 @@ git commit -m "feat(app-gallery): seed code-graph-workbench app package"
 ## Dependency DAG
 
 ```
-task-1-sdk-python-notebook-client   (root)
-task-2-packer-authored-manifest     (root)
-task-3-doctor-plugin-tool-gate      (root)
-task-4-spec-refresh                 (root)
-task-5-workbench-app-seed           (root)
+t1-sdk-notebook-client   (root)
+t2-packer-parity     (root)
+t3-doctor-plugin-gate      (root)
+t4-spec-refresh                 (root)
+t5-workbench-app-seed           (root)
 ```
 
 All five tasks are independent — maximum parallelism, no chains. The follow-up epic
