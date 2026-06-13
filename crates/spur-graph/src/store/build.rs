@@ -614,7 +614,9 @@ fn buckets_from_facts(
             | NodeKind::TypeAlias
             | NodeKind::Macro
             | NodeKind::Section
-            | NodeKind::McpTool => {
+            | NodeKind::McpTool
+            | NodeKind::Cell
+            | NodeKind::Port => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
                 if !current_entries.contains_key(&file_path) {
                     continue;
@@ -2184,6 +2186,10 @@ fn relation_discriminator(relation: RelationKind) -> &'static str {
         RelationKind::Extends => "extends",
         RelationKind::Links => "links",
         RelationKind::Touches => "touches",
+        RelationKind::Produces => "produces",
+        RelationKind::Consumes => "consumes",
+        RelationKind::Binds => "binds",
+        RelationKind::Emits => "emits",
     }
 }
 
