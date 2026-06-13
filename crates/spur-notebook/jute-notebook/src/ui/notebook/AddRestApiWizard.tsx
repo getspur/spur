@@ -4,6 +4,7 @@ import {
   CheckIcon,
   DatabaseIcon,
   FileTextIcon,
+  FolderOpenIcon,
   Loader2Icon,
   PencilIcon,
   PlugIcon,
@@ -67,7 +68,9 @@ export type AddRestApiWizardPrefill = {
 
 export type AddRestApiWizardProps = {
   editConnection?: ConnectionTemplate | null;
+  onAttachLocalFile?: (path: string) => Promise<void> | void;
   onClose: () => void;
+  onPickLocalFile?: () => Promise<string | null> | string | null;
   open: boolean;
   prefill?: AddRestApiWizardPrefill | null;
 };
@@ -91,7 +94,9 @@ const KNOWN_BASE_URLS: Record<string, string> = {
 
 export default function AddRestApiWizard({
   editConnection = null,
+  onAttachLocalFile,
   onClose,
+  onPickLocalFile,
   open,
   prefill = null,
 }: AddRestApiWizardProps) {
@@ -128,13 +133,14 @@ export default function AddRestApiWizard({
     null,
   );
   const [specText, setSpecText] = useState("");
-  const [genericLocation, setGenericLocation] = useState(
+  const [genericLocation, setGenericLocation] = useState<string>(
     datasourceFamilyByKey.file.defaultExampleInput,
   );
   const [tablePreview, setTablePreview] = useState<OpenApiTablePreview | null>(
     null,
   );
   const [connectionOnly, setConnectionOnly] = useState(false);
+  const [pendingLocalFilePick, setPendingLocalFilePick] = useState(false);
   const [pendingPreview, setPendingPreview] = useState(false);
   const [pendingAdd, setPendingAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -160,6 +166,7 @@ export default function AddRestApiWizard({
       setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
       setTablePreview(tablePreviewFromTemplate(editConnection));
       setConnectionOnly(editConnection.tables.length === 0);
+      setPendingLocalFilePick(false);
       setPendingPreview(false);
       setPendingAdd(false);
       setError(null);
@@ -190,6 +197,7 @@ export default function AddRestApiWizard({
       setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
       setTablePreview(null);
       setConnectionOnly(prefill.connectionOnly ?? false);
+      setPendingLocalFilePick(false);
       setPendingPreview(false);
       setPendingAdd(false);
       setError(null);
@@ -213,6 +221,7 @@ export default function AddRestApiWizard({
     setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
     setTablePreview(null);
     setConnectionOnly(false);
+    setPendingLocalFilePick(false);
     setPendingPreview(false);
     setPendingAdd(false);
     setError(null);
@@ -463,6 +472,44 @@ export default function AddRestApiWizard({
       setError(errorMessage(caught));
     } finally {
       setPendingPreview(false);
+    }
+  };
+
+  const handlePickLocalFile = async () => {
+    if (!onPickLocalFile) return;
+
+    setPendingLocalFilePick(true);
+    setError(null);
+
+    try {
+      const path = await onPickLocalFile();
+      if (path) setGenericLocation(path);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setPendingLocalFilePick(false);
+    }
+  };
+
+  const handleAttachGenericDatasource = async () => {
+    if (sourceFamily !== "file" || !onAttachLocalFile) {
+      setError(
+        "Run the generated SQL in a notebook SQL cell to attach this datasource.",
+      );
+      return;
+    }
+
+    const path = genericLocation.trim();
+    setPendingAdd(true);
+    setError(null);
+
+    try {
+      await onAttachLocalFile(path);
+      onClose();
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setPendingAdd(false);
     }
   };
 
@@ -728,7 +775,11 @@ export default function AddRestApiWizard({
                 <GenericLocateStep
                   family={selectedFamily}
                   location={genericLocation}
+                  onPickLocalFile={
+                    sourceFamily === "file" ? handlePickLocalFile : undefined
+                  }
                   onLocationChange={setGenericLocation}
+                  pendingLocalFilePick={pendingLocalFilePick}
                 />
               ))}
             {step === "auth" &&
@@ -824,11 +875,8 @@ export default function AddRestApiWizard({
                 } else if (manifestPrefillMode && step === "auth") {
                   void handleAddDatasource();
                 } else if (step === "attach") {
-                  if (!restFamilySelected) {
-                    setError(
-                      "Run the generated SQL in a notebook SQL cell to attach this datasource.",
-                    );
-                  } else if (editMode) void handleSaveEdit();
+                  if (!restFamilySelected) void handleAttachGenericDatasource();
+                  else if (editMode) void handleSaveEdit();
                   else void handleAddDatasource();
                 } else {
                   goNext();
@@ -1165,11 +1213,15 @@ function RestLocateStep({
 function GenericLocateStep({
   family,
   location,
+  onPickLocalFile,
   onLocationChange,
+  pendingLocalFilePick,
 }: {
   family: DatasourceSourceFamily;
   location: string;
+  onPickLocalFile?: () => void;
   onLocationChange: (value: string) => void;
+  pendingLocalFilePick: boolean;
 }) {
   return (
     <div>
@@ -1185,12 +1237,29 @@ function GenericLocateStep({
         <span className="text-xs font-medium text-gray-600">
           {locationLabelForFamily(family)}
         </span>
-        <input
-          aria-label={locationLabelForFamily(family)}
-          className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
-          onChange={(event) => onLocationChange(event.currentTarget.value)}
-          value={location}
-        />
+        <span className="mt-1 flex gap-2">
+          <input
+            aria-label={locationLabelForFamily(family)}
+            className="h-9 min-w-0 flex-1 rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+            onChange={(event) => onLocationChange(event.currentTarget.value)}
+            value={location}
+          />
+          {onPickLocalFile && (
+            <button
+              className="inline-flex h-9 shrink-0 items-center gap-2 rounded border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 transition-colors hover:border-gray-950 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
+              disabled={pendingLocalFilePick}
+              onClick={onPickLocalFile}
+              type="button"
+            >
+              {pendingLocalFilePick ? (
+                <Loader2Icon className="animate-spin" size={14} />
+              ) : (
+                <FolderOpenIcon size={14} strokeWidth={1.5} />
+              )}
+              Choose local file
+            </button>
+          )}
+        </span>
       </label>
 
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">

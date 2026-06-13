@@ -246,9 +246,7 @@ describe("DatasourcePanel", () => {
     });
   });
 
-  test("sidebar_attach_emits_command", async () => {
-    openMock.mockResolvedValueOnce("/tmp/inventory.parquet");
-
+  test("sidebar_drag_drop_attach_emits_command", async () => {
     render(<DatasourcePanel />);
 
     await waitFor(() => expect(dragDropCallbacks).toHaveLength(1));
@@ -295,11 +293,79 @@ describe("DatasourcePanel", () => {
     );
     expect(await screen.findByText("region")).toBeInTheDocument();
     expect(screen.getByText("revenue")).toBeInTheDocument();
+  });
+
+  test("add_datasource_opens_generalized_wizard", async () => {
+    render(<DatasourcePanel />);
 
     fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
 
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Choose a datasource family" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /File or folder/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /REST API/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Provider catalog/i }),
+    ).toBeInTheDocument();
+    expect(openMock).not.toHaveBeenCalled();
+  });
+
+  test("file_family_preserves_dialog_based_local_file_attach", async () => {
+    openMock.mockResolvedValueOnce("/tmp/inventory.parquet");
+
+    render(<DatasourcePanel />);
+
+    fireEvent.change(screen.getByLabelText("Group"), {
+      target: { value: "quarterly" },
+    });
+    await waitFor(() => expect(dragDropCallbacks).toHaveLength(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /File or folder/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose local file" }));
+
     await waitFor(() =>
-      expect(daemonControlMock).toHaveBeenLastCalledWith({
+      expect(openMock).toHaveBeenCalledWith({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Datasource",
+            extensions: [
+              "csv",
+              "parquet",
+              "parq",
+              "json",
+              "jsonl",
+              "ndjson",
+              "duckdb",
+              "db",
+              "sqlite",
+            ],
+          },
+        ],
+      }),
+    );
+    expect(screen.getByLabelText("File or folder path")).toHaveValue(
+      "/tmp/inventory.parquet",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Attach datasource" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
         command: "attach_datasource",
         name: "inventory",
         path: "/tmp/inventory.parquet",
@@ -341,26 +407,34 @@ describe("DatasourcePanel", () => {
     expect(screen.getByText("sku")).toBeInTheDocument();
   });
 
-  test("api_button_opens_rest_api_wizard", async () => {
+  test("open_rest_wizard_event_opens_wizard_and_activates_datasources_panel", async () => {
+    useSidebar.getState().activatePanel("chat");
+
     render(<DatasourcePanel />);
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Add API datasource" }),
+    await waitFor(() =>
+      expect(eventCallbacks.has("notebook://open_rest_wizard")).toBe(true),
     );
+
+    await act(async () => {
+      eventCallbacks.get("notebook://open_rest_wizard")?.({
+        payload: {
+          name: "stripe_reporting",
+          provider: "stripe",
+          manifest_toml: "name = 'stripe_reporting'",
+          missing_env_vars: ["STRIPE_API_KEY"],
+        },
+      });
+    });
 
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(
       screen.getByRole("heading", {
-        name: "How do you want to connect?",
+        name: "Connect to Stripe",
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Provider catalog/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /OpenAPI spec/i }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Manual/i })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("stripe_reporting")).toBeInTheDocument();
+    expect(useSidebar.getState().activePanelId).toBe("datasources");
     expect(
       daemonControlMock.mock.calls.some(
         ([command]) => command.command === "add_api_datasource",
@@ -390,31 +464,6 @@ describe("DatasourcePanel", () => {
     });
 
     expect(await screen.findByText("stripe_charges")).toBeInTheDocument();
-  });
-
-  test("open_rest_wizard_event_opens_wizard_and_activates_datasources_panel", async () => {
-    useSidebar.getState().activatePanel("chat");
-
-    render(<DatasourcePanel />);
-
-    await waitFor(() =>
-      expect(eventCallbacks.has("notebook://open_rest_wizard")).toBe(true),
-    );
-
-    await act(async () => {
-      eventCallbacks.get("notebook://open_rest_wizard")?.({
-        payload: {
-          name: "stripe_reporting",
-          provider: "stripe",
-          manifest_toml: "name = 'stripe_reporting'",
-          missing_env_vars: ["STRIPE_API_KEY"],
-        },
-      });
-    });
-
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("stripe_reporting")).toBeInTheDocument();
-    expect(useSidebar.getState().activePanelId).toBe("datasources");
   });
 
   test("mount_fetch_populates_list_without_datasources_changed_event", async () => {
@@ -660,7 +709,7 @@ describe("DatasourcePanel", () => {
       });
     });
 
-    expect(await screen.findAllByText("API")).toHaveLength(2);
+    expect(await screen.findAllByText("API")).toHaveLength(1);
     expect(screen.getByText("polymarket_markets")).toBeInTheDocument();
     expect(screen.getByText("market_id")).toBeInTheDocument();
     expect(screen.getByText("polymarket_trades")).toBeInTheDocument();
