@@ -73,6 +73,18 @@ pub(crate) struct CompiledQueries {
     pub(crate) inline_spur_edges: Option<Query>,
 }
 
+impl CompiledQueries {
+    fn empty(language: &tree_sitter::Language) -> anyhow::Result<Self> {
+        Ok(Self {
+            tags: Query::new(language, "").context("compile empty tags query")?,
+            symbols: Query::new(language, "").context("compile empty symbols query")?,
+            spur_edges: None,
+            jsx_edges: None,
+            inline_spur_edges: None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SymbolQueryPolicy {
     ReuseTags,
@@ -98,7 +110,8 @@ fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
         | Language::C
         | Language::Cpp
         | Language::Lua
-        | Language::Shell => SymbolQueryPolicy::ReuseTags,
+        | Language::Shell
+        | Language::JupyterNotebook => SymbolQueryPolicy::ReuseTags,
         Language::Markdown => {
             SymbolQueryPolicy::Dedicated(include_str!("../../queries/markdown/symbols.scm"))
         }
@@ -201,6 +214,18 @@ impl BytesExtractor {
     }
 
     fn new(language: Language, config: LanguageConfig) -> Result<Self, ExtractError> {
+        if language == Language::JupyterNotebook {
+            let queries = CompiledQueries::empty(&config.language)
+                .map_err(|err| ExtractError::Setup(err.to_string()))?;
+            return Ok(Self {
+                language,
+                config,
+                parser: Parser::new(),
+                queries,
+                markdown_inline_parser: None,
+            });
+        }
+
         let mut parser = Parser::new();
         parser
             .set_language(&config.language)
@@ -232,6 +257,10 @@ impl BytesExtractor {
         _logical_path: &Path,
         bytes: &[u8],
     ) -> Result<Vec<ExtractedSymbol>, ExtractError> {
+        if self.language == Language::JupyterNotebook {
+            return Ok(Vec::new());
+        }
+
         let source = str::from_utf8(bytes).map_err(ExtractError::InvalidUtf8)?;
         let tree = self
             .parser
@@ -250,6 +279,11 @@ impl BytesExtractor {
         path: &Path,
         bytes: &[u8],
     ) -> Result<(), ExtractError> {
+        if self.language == Language::JupyterNotebook {
+            return crate::extract::notebook::extract_notebook_file(builder, path, bytes)
+                .map_err(|err| ExtractError::Extraction(err.to_string()));
+        }
+
         let source = str::from_utf8(bytes).map_err(ExtractError::InvalidUtf8)?;
         let tree = self
             .parser
@@ -281,7 +315,7 @@ impl BytesExtractor {
 }
 
 impl<'a> FactBuilder<'a> {
-    fn new(root: &'a Path) -> Self {
+    pub(crate) fn new(root: &'a Path) -> Self {
         Self {
             root,
             facts: GraphFacts::empty(),
@@ -299,6 +333,11 @@ impl<'a> FactBuilder<'a> {
 
     pub(crate) fn root(&self) -> &'a Path {
         self.root
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_facts(self) -> GraphFacts {
+        self.facts
     }
 
     pub(crate) fn next_file_id(&mut self) -> u64 {
@@ -3066,11 +3105,36 @@ fn extract_file_from_tree(
     let file_id = FileId(builder.next_file_id());
     let file_node = builder.add_file_node(&relative_path, file_id, root_node);
 
+    extract_file_contents_from_tree(
+        builder,
+        language_label,
+        config,
+        &relative_path,
+        file_id,
+        file_node,
+        source,
+        root_node,
+        queries,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn extract_file_contents_from_tree(
+    builder: &mut FactBuilder<'_>,
+    language_label: &str,
+    config: &crate::extract::languages::LanguageConfig,
+    relative_path: &str,
+    file_id: FileId,
+    file_node: NodeId,
+    source: &str,
+    root_node: Node<'_>,
+    queries: &CompiledQueries,
+) -> anyhow::Result<()> {
     let tag_captures = run_query(&queries.tags, root_node, source);
     let mut definitions = emit_definitions(
         config,
         builder,
-        &relative_path,
+        relative_path,
         file_id,
         file_node,
         source,
@@ -3079,7 +3143,7 @@ fn extract_file_from_tree(
     if language_label == "rust" {
         emit_mcp_tools(
             builder,
-            &relative_path,
+            relative_path,
             file_id,
             file_node,
             source,
@@ -3126,7 +3190,10 @@ fn extract_file_from_tree(
     Ok(())
 }
 
-fn compile_queries(config: &LanguageConfig, language: Language) -> anyhow::Result<CompiledQueries> {
+pub(crate) fn compile_queries(
+    config: &LanguageConfig,
+    language: Language,
+) -> anyhow::Result<CompiledQueries> {
     let language_label = language.label();
     let mut tags = None;
     let mut tags_source = None;
@@ -3648,6 +3715,61 @@ mod tests {
             symbol_query_policy(Language::Markdown),
             SymbolQueryPolicy::Dedicated(_)
         ));
+        assert_eq!(
+            symbol_query_policy(Language::JupyterNotebook),
+            SymbolQueryPolicy::ReuseTags
+        );
+    }
+
+    #[test]
+    fn jupyter_notebook_extraction_routes_container_before_parse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nb.ipynb");
+        let notebook = serde_json::json!({
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {"kernelspec": {"name": "python3"}},
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": ["def load_df():\n", "    return 1\n"]
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["# Analysis\n"]
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&notebook).expect("serialize notebook");
+        let mut builder = FactBuilder::new(dir.path());
+        let mut extractor = BytesExtractor::for_language(Language::JupyterNotebook)
+            .expect("configure notebook extractor");
+
+        extractor
+            .extract_graph_facts(&mut builder, &path, &bytes)
+            .expect("extract notebook facts");
+        let facts = builder.into_facts();
+
+        let file_node = facts
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::File && node.label == "nb.ipynb")
+            .expect("notebook file node")
+            .node_id;
+        for label in ["load_df", "Analysis"] {
+            let node = facts
+                .nodes
+                .iter()
+                .find(|node| node.label == label)
+                .unwrap_or_else(|| panic!("missing notebook child `{label}`"));
+            assert!(facts.edges.iter().any(|edge| {
+                edge.relation == RelationKind::Contains
+                    && edge.source_node_id == file_node
+                    && edge.target_node_id == Some(node.node_id)
+            }));
+        }
     }
 
     #[test]
