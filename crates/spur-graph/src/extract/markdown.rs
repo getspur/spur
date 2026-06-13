@@ -25,11 +25,36 @@ pub(crate) fn extract_markdown_file(
     let file_id = FileId(builder.next_file_id());
     let file_node = builder.add_file_node(&relative_path, file_id, root_node);
 
+    extract_markdown_contents(
+        builder,
+        config,
+        &relative_path,
+        file_id,
+        file_node,
+        source,
+        root_node,
+        queries,
+        inline_parser,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn extract_markdown_contents(
+    builder: &mut FactBuilder<'_>,
+    config: &LanguageConfig,
+    relative_path: &str,
+    file_id: FileId,
+    file_node: NodeId,
+    source: &str,
+    root_node: Node<'_>,
+    queries: &CompiledQueries,
+    inline_parser: Option<&mut Parser>,
+) -> anyhow::Result<()> {
     let tag_captures = run_query(&queries.tags, root_node, source);
     let sections = emit_sections(
         config,
         builder,
-        &relative_path,
+        relative_path,
         file_id,
         file_node,
         source,
@@ -45,7 +70,7 @@ pub(crate) fn extract_markdown_file(
         root_node,
         queries,
         inline_parser,
-        &relative_path,
+        relative_path,
     )?;
     Ok(())
 }
