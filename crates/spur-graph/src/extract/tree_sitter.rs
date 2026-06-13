@@ -71,6 +71,7 @@ pub(crate) struct CompiledQueries {
     pub(crate) spur_edges: Option<Query>,
     pub(crate) jsx_edges: Option<Query>,
     pub(crate) inline_spur_edges: Option<Query>,
+    pub(crate) spur_notebook_facts: Option<Query>,
 }
 
 impl CompiledQueries {
@@ -81,6 +82,7 @@ impl CompiledQueries {
             spur_edges: None,
             jsx_edges: None,
             inline_spur_edges: None,
+            spur_notebook_facts: None,
         })
     }
 }
@@ -3223,6 +3225,7 @@ pub(crate) fn compile_queries(
     let mut spur_edges = None;
     let mut jsx_edges = None;
     let mut inline_spur_edges = None;
+    let mut spur_notebook_facts = None;
     for (name, source) in config.queries {
         match *name {
             "tags" => {
@@ -3254,6 +3257,14 @@ pub(crate) fn compile_queries(
                     )
                     })?);
             }
+            "spur-notebook-facts" => {
+                spur_notebook_facts =
+                    Some(Query::new(&config.language, source).with_context(|| {
+                        format!(
+                            "failed to compile tree-sitter query `{name}` for `{language_label}`"
+                        )
+                    })?);
+            }
             name => {
                 return Err(anyhow!(
                     "unknown tree-sitter query name `{name}` for `{language_label}`"
@@ -3273,6 +3284,7 @@ pub(crate) fn compile_queries(
         spur_edges,
         jsx_edges,
         inline_spur_edges,
+        spur_notebook_facts,
     })
 }
 
