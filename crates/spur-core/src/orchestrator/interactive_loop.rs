@@ -916,6 +916,38 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── RetryPlanTask ────────────────────────────────────
+                    InteractiveInput::RetryPlanTask { plan_id, issue_id } => {
+                        let server = brain
+                            .as_ref()
+                            .and_then(|b| b.mcp_server.as_ref())
+                            .map(Arc::clone);
+                        if let Some(server) = server {
+                            if let Err(error) = server
+                                .call_retry_plan_task(plan_id.as_deref(), &issue_id)
+                                .await
+                            {
+                                self.funnel.emit(SpurEventBody::PlanCommandError {
+                                    operation: "RetryPlanTask".into(),
+                                    plan_id,
+                                    error,
+                                });
+                            }
+                            // On success, the mutation event/reconciler refreshes plan state.
+                        } else {
+                            let error = if brain.is_some() {
+                                "Brain session initializing — try again in a moment".into()
+                            } else {
+                                "No active brain session — start one to retry plan tasks".into()
+                            };
+                            self.funnel.emit(SpurEventBody::PlanCommandError {
+                                operation: "RetryPlanTask".into(),
+                                plan_id,
+                                error,
+                            });
+                        }
+                    }
+
                     // ── InspectPlan ───────────────────────────────────────
                     InteractiveInput::InspectPlan { plan_id } => {
                         let server = brain
