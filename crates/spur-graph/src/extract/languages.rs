@@ -1926,6 +1926,11 @@ mod gate_contract {
         let definition_captures = compiled_definition_captures(language_label, config);
         if is_container_language(language) {
             relations.insert(relation_predicate(RelationKind::Contains));
+            relations.insert(relation_predicate(RelationKind::Produces));
+            relations.insert(relation_predicate(RelationKind::Consumes));
+            relations.insert(relation_predicate(RelationKind::Binds));
+            relations.insert(relation_predicate(RelationKind::Emits));
+            relations.insert(relation_predicate(RelationKind::References));
             return relations;
         }
         if !definition_captures.is_empty() {
@@ -2016,6 +2021,10 @@ mod gate_contract {
             RelationKind::Extends => "extends",
             RelationKind::Links => "links",
             RelationKind::Touches => "touches",
+            RelationKind::Produces => "produces",
+            RelationKind::Consumes => "consumes",
+            RelationKind::Binds => "binds",
+            RelationKind::Emits => "emits",
         }
     }
 
@@ -2115,7 +2124,14 @@ mod gate_contract {
             ),
             (
                 Language::JupyterNotebook.label(),
-                relation_set(&["contains"]),
+                relation_set(&[
+                    "contains",
+                    "produces",
+                    "consumes",
+                    "binds",
+                    "emits",
+                    "references",
+                ]),
             ),
         ])
     }
