@@ -19,7 +19,7 @@ use spur_notebook::sidebar_chat::{
 
 /// List agents configured for sidebar chat.
 #[tauri::command]
-pub async fn chat_agents_list(
+pub fn chat_agents_list(
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<Vec<SidebarAgentInfo>, Error> {
     Ok(state.sidebar_chat.agent_infos())

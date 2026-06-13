@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::{
     context::{catalog::catalog_layer1, refs::Ref},
     dag::{notebook_port_root, NotebookDag, PortStore},
-    sidebar_chat::scope::{find_manifest_dir, read_skill},
+    sidebar_chat::scope::find_manifest_dir,
     spur_app::{SpurAppManifest, SPUR_APP_SCHEMA},
 };
 
@@ -47,6 +47,26 @@ pub fn build_context_pack(
         "next_queries": next_queries(failed_refs),
         "truncated": truncated,
     })
+}
+
+fn read_skill(app_root: &Path, skill_path: Option<&str>) -> anyhow::Result<Option<String>> {
+    use anyhow::Context as _;
+
+    let explicit_skill = skill_path.map(|path| app_root.join(path));
+    if let Some(path) = explicit_skill {
+        return std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read app skill {}", path.display()))
+            .map(Some);
+    }
+
+    let default_path = app_root.join(DEFAULT_SKILL_PATH);
+    if default_path.is_file() {
+        return std::fs::read_to_string(&default_path)
+            .with_context(|| format!("failed to read app skill {}", default_path.display()))
+            .map(Some);
+    }
+
+    Ok(None)
 }
 
 fn app_section(notebook_path: &Path, notebook_version: u64) -> Option<Value> {

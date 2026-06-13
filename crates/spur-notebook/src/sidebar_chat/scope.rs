@@ -8,7 +8,6 @@ use crate::spur_app::{SpurAppManifest, SpurAppMcpServer, SPUR_APP_MANIFEST, SPUR
 
 const DEFAULT_NOTEBOOK_APP_KEY: &str = "notebook";
 const DEFAULT_NOTEBOOK_LABEL: &str = "Notebook";
-const DEFAULT_SKILL_PATH: &str = "skill/SKILL.md";
 
 pub fn resolve_app_scope(notebook_path: &Path, notebook_mcp_socket: &Path) -> Result<AppScope> {
     let notebook_dir = notebook_path
@@ -92,25 +91,6 @@ pub(crate) fn find_manifest_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
         }
     }
     None
-}
-
-#[allow(dead_code)]
-pub(crate) fn read_skill(app_root: &Path, skill_path: Option<&str>) -> Result<Option<String>> {
-    let explicit_skill = skill_path.map(|path| app_root.join(path));
-    if let Some(path) = explicit_skill {
-        return std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read app skill {}", path.display()))
-            .map(Some);
-    }
-
-    let default_path = app_root.join(DEFAULT_SKILL_PATH);
-    if default_path.is_file() {
-        return std::fs::read_to_string(&default_path)
-            .with_context(|| format!("failed to read app skill {}", default_path.display()))
-            .map(Some);
-    }
-
-    Ok(None)
 }
 
 fn app_mcp_server(name: &str, manifest: &SpurAppMcpServer) -> Result<McpServer> {
