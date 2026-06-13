@@ -60,6 +60,7 @@ Legend:
 | Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - |
 | Shell | - | Y | - | - | - | - | - | - | - | - | - | - | - | - | - |
 | Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - |
+| JupyterNotebook | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 
 Notes:
 
@@ -94,17 +95,17 @@ This table is the relation-level analogue of the Definition Coverage Matrix and 
 seed of the Tier-0 ontology realization contract
 (`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
 
-| Predicate | Rust | Python | TypeScript | Tsx | C | Cpp | Lua | Shell | Markdown |
-|---|---|---|---|---|---|---|---|---|---|
-| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y(links) |
-| calls | Y | Y | Y | Y | Y | Y | Y | Y | — |
-| constructs | Y | Y | Y | Y | Y | Y | — | — | — |
-| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y |
-| defines | Y | Y | Y | Y | Y | Y | Y | Y | — |
-| references (HOF) | Y | Y | TODO | TODO | — | Y | — | — | — |
-| links | — | — | — | — | — | — | — | — | Y |
-| implements | Y | Y | Y | Y | — | — | — | — | — |
-| extends | Y | Y | Y | Y | — | Y | — | — | — |
+| Predicate | Rust | Python | TypeScript | Tsx | C | Cpp | Lua | Shell | Markdown | JupyterNotebook |
+|---|---|---|---|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y(links) | — |
+| calls | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| constructs | Y | Y | Y | Y | Y | Y | — | — | — | — |
+| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| defines | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| references (HOF) | Y | Y | TODO | TODO | — | Y | — | — | — | — |
+| links | — | — | — | — | — | — | — | — | Y | — |
+| implements | Y | Y | Y | Y | — | — | — | — | — | — |
+| extends | Y | Y | Y | Y | — | Y | — | — | — | — |
 
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
