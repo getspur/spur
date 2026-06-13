@@ -11,6 +11,7 @@ echo "=== spur-startup $(date -u +%FT%TZ) ==="
 
 CACHE_DEV=/dev/disk/by-id/google-cargo-cache
 CACHE_MNT=/mnt/cargo
+SCCACHE_RAM_MNT=/mnt/sccache-ram
 
 # Format on first attach only.
 if ! blkid "$CACHE_DEV" >/dev/null 2>&1; then
@@ -19,6 +20,9 @@ if ! blkid "$CACHE_DEV" >/dev/null 2>&1; then
 fi
 mkdir -p "$CACHE_MNT"
 mountpoint -q "$CACHE_MNT" || mount "$CACHE_DEV" "$CACHE_MNT"
+mkdir -p "$SCCACHE_RAM_MNT"
+mountpoint -q "$SCCACHE_RAM_MNT" || mount -t tmpfs -o size=16G,mode=1777 tmpfs "$SCCACHE_RAM_MNT"
+chmod 1777 "$SCCACHE_RAM_MNT"
 
 # Default OS Login user is created on first ssh; chown lazily there.
 
@@ -181,6 +185,11 @@ export RUSTC_WRAPPER=/usr/local/bin/sccache-worktree
 # in parallel via cargo's jobserver, so every TU is independently cacheable.
 export CC=/usr/local/bin/sccache-cc
 export CXX=/usr/local/bin/sccache-cxx
+export SCCACHE_MULTILEVEL_CHAIN=disk,gcs
+export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0
+export SCCACHE_DIR=$SCCACHE_RAM_MNT/\${USER:-builder}
+mkdir -p "\$SCCACHE_DIR" 2>/dev/null || true
+export SCCACHE_CACHE_SIZE=15G
 export SCCACHE_GCS_BUCKET=${SCCACHE_GCS_BUCKET}
 export SCCACHE_GCS_RW_MODE=READ_WRITE
 export SCCACHE_GCS_KEY_PATH=
