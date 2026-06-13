@@ -34,9 +34,15 @@ import {
   savedConnectionsFromDaemonControlResponse,
   updateSavedConnectionCommand,
 } from "@/daemon/control";
+import {
+  REST_API_SOURCE_MODES,
+  REST_API_WIZARD_STEPS,
+  type RestApiSourceModeKey,
+  type RestApiWizardStepKey,
+} from "@/ui/notebook/datasourceWizardModel";
 
-type SourceMode = "catalog" | "saved" | "openapi" | "manual";
-type WizardStep = "source" | "connect" | "tables" | "review";
+type SourceMode = RestApiSourceModeKey;
+type WizardStep = RestApiWizardStepKey;
 type ProviderLoadState = "idle" | "loading" | "loaded";
 type CredentialField = {
   key: string;
@@ -61,12 +67,8 @@ export type AddRestApiWizardProps = {
   prefill?: AddRestApiWizardPrefill | null;
 };
 
-const STEPS: { key: WizardStep; label: string; detail: string }[] = [
-  { key: "source", label: "Source", detail: "pick how" },
-  { key: "connect", label: "Connect", detail: "auth and URL" },
-  { key: "tables", label: "Tables", detail: "schema" },
-  { key: "review", label: "Review", detail: "add" },
-];
+const STEPS: readonly { key: WizardStep; label: string; detail: string }[] =
+  REST_API_WIZARD_STEPS;
 
 const KNOWN_BASE_URLS: Record<string, string> = {
   airtable: "https://api.airtable.com",
@@ -541,11 +543,11 @@ export default function AddRestApiWizard({
   };
 
   const primaryActionLabel =
-    step === "review"
+    step === "attach"
       ? editMode
         ? "Save changes"
         : "Add datasource"
-      : manifestPrefillMode && step === "connect"
+      : manifestPrefillMode && step === "auth"
         ? "Add datasource"
         : step === "source" && sourceMode === "saved"
           ? "Use connection"
@@ -661,7 +663,7 @@ export default function AddRestApiWizard({
                 sourceMode={sourceMode}
               />
             )}
-            {step === "connect" && (
+            {step === "auth" && (
               <ConnectStep
                 credentials={credentials}
                 datasourceName={datasourceName}
@@ -679,7 +681,7 @@ export default function AddRestApiWizard({
                 sourceMode={sourceMode}
               />
             )}
-            {step === "tables" && (
+            {step === "inspect" && (
               <TablesStep
                 connectionOnly={connectionOnly}
                 error={error}
@@ -705,7 +707,7 @@ export default function AddRestApiWizard({
                 tablePreview={tablePreview}
               />
             )}
-            {step === "review" && (
+            {step === "attach" && (
               <ReviewStep
                 connectionOnly={connectionOnly}
                 credentialFields={credentialFields}
@@ -737,9 +739,9 @@ export default function AddRestApiWizard({
               onClick={() => {
                 if (step === "source" && sourceMode === "saved" && !editMode) {
                   void handleAttachSavedConnection();
-                } else if (manifestPrefillMode && step === "connect") {
+                } else if (manifestPrefillMode && step === "auth") {
                   void handleAddDatasource();
-                } else if (step === "review") {
+                } else if (step === "attach") {
                   if (editMode) void handleSaveEdit();
                   else void handleAddDatasource();
                 } else {
@@ -810,36 +812,17 @@ function SourceStep({
       </p>
 
       <div className="mt-4 space-y-2">
-        <SourceOption
-          active={sourceMode === "catalog"}
-          detail="Browse Nango providers with auth mode and import tier pre-filled."
-          icon={<PlugIcon size={18} strokeWidth={1.5} />}
-          label="Provider catalog"
-          meta="Nango"
-          onClick={() => onSelectSourceMode("catalog")}
-        />
-        <SourceOption
-          active={sourceMode === "saved"}
-          detail="Attach a reusable API connection template to this notebook."
-          icon={<DatabaseIcon size={18} strokeWidth={1.5} />}
-          label="Saved connections"
-          meta={`${savedConnections.length} saved`}
-          onClick={() => onSelectSourceMode("saved")}
-        />
-        <SourceOption
-          active={sourceMode === "openapi"}
-          detail="Paste a spec or URL and preview generated table-functions."
-          icon={<FileTextIcon size={18} strokeWidth={1.5} />}
-          label="OpenAPI spec"
-          onClick={() => onSelectSourceMode("openapi")}
-        />
-        <SourceOption
-          active={sourceMode === "manual"}
-          detail="Hand-author the manifest later and add tables when ready."
-          icon={<PencilIcon size={18} strokeWidth={1.5} />}
-          label="Manual"
-          onClick={() => onSelectSourceMode("manual")}
-        />
+        {REST_API_SOURCE_MODES.map((mode) => (
+          <SourceOption
+            active={sourceMode === mode.key}
+            detail={mode.shortDetail}
+            icon={sourceModeIcon(mode.key)}
+            key={mode.key}
+            label={mode.label}
+            meta={sourceModeMeta(mode.key, savedConnections.length)}
+            onClick={() => onSelectSourceMode(mode.key)}
+          />
+        ))}
       </div>
 
       {sourceMode === "catalog" && (
@@ -948,6 +931,19 @@ function SourceStep({
       {error && <ErrorBanner message={error} />}
     </div>
   );
+}
+
+function sourceModeIcon(mode: SourceMode): React.ReactNode {
+  if (mode === "catalog") return <PlugIcon size={18} strokeWidth={1.5} />;
+  if (mode === "saved") return <DatabaseIcon size={18} strokeWidth={1.5} />;
+  if (mode === "openapi") return <FileTextIcon size={18} strokeWidth={1.5} />;
+  return <PencilIcon size={18} strokeWidth={1.5} />;
+}
+
+function sourceModeMeta(mode: SourceMode, savedConnectionCount: number) {
+  if (mode === "catalog") return "Nango";
+  if (mode === "saved") return `${savedConnectionCount} saved`;
+  return undefined;
 }
 
 function SourceOption({
