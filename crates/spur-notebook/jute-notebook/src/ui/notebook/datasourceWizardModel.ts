@@ -28,11 +28,7 @@ export type DatasourceWizardStep = {
   detail: string;
 };
 
-export type RestApiSourceModeKey =
-  | "catalog"
-  | "saved"
-  | "openapi"
-  | "manual";
+export type RestApiSourceModeKey = "catalog" | "saved" | "openapi" | "manual";
 
 export type RestApiSourceMode = {
   key: RestApiSourceModeKey;
@@ -53,7 +49,7 @@ export type RestApiWizardStep = DatasourceWizardStep & {
 export const DATASOURCE_SOURCE_FAMILIES = [
   {
     key: "file",
-    label: "File",
+    label: "File or folder",
     shortDetail: "Local CSV, JSON, Parquet, SQLite, and DuckDB files.",
     duckDbMechanism: "Native file scans and read_csv/read_json/read_parquet",
     setupRequirements: ["Readable local path"],
@@ -61,7 +57,7 @@ export const DATASOURCE_SOURCE_FAMILIES = [
   },
   {
     key: "cloud_object_storage",
-    label: "Cloud/object storage",
+    label: "URL or object storage",
     shortDetail: "S3, GCS, Azure Blob, and HTTPS object paths.",
     duckDbMechanism: "httpfs extension with object-store secrets",
     setupRequirements: ["Bucket URL", "Cloud credentials or signed URL"],
@@ -69,7 +65,7 @@ export const DATASOURCE_SOURCE_FAMILIES = [
   },
   {
     key: "lakehouse",
-    label: "Lakehouse",
+    label: "Lakehouse table",
     shortDetail: "Delta, Iceberg, and partitioned data lake tables.",
     duckDbMechanism: "DuckDB lakehouse extensions and parquet metadata scans",
     setupRequirements: ["Table root or catalog URI", "Catalog credentials"],
@@ -77,7 +73,7 @@ export const DATASOURCE_SOURCE_FAMILIES = [
   },
   {
     key: "database",
-    label: "Database",
+    label: "External database",
     shortDetail: "Postgres, MySQL, SQLite, and attached database engines.",
     duckDbMechanism: "DuckDB database scanner extensions and ATTACH",
     setupRequirements: ["Connection string", "Database credentials"],
@@ -85,7 +81,7 @@ export const DATASOURCE_SOURCE_FAMILIES = [
   },
   {
     key: "rest_api",
-    label: "REST/API",
+    label: "REST API",
     shortDetail: "OpenAPI specs, provider catalogs, and saved API manifests.",
     duckDbMechanism: "httpfs plus generated table-functions over API responses",
     setupRequirements: ["Base URL or provider", "API credentials or token"],
@@ -93,7 +89,7 @@ export const DATASOURCE_SOURCE_FAMILIES = [
   },
   {
     key: "advanced_sql",
-    label: "Advanced SQL",
+    label: "Advanced SQL attach",
     shortDetail: "Custom SQL, views, macros, and table-function definitions.",
     duckDbMechanism: "User-authored DuckDB SQL, views, macros, and extensions",
     setupRequirements: ["SQL statement or script", "Referenced attachments"],
@@ -114,7 +110,8 @@ export const REST_API_SOURCE_MODES = [
     key: "catalog",
     family: "rest_api",
     label: "Provider catalog",
-    shortDetail: "Browse Nango providers with auth mode and import tier pre-filled.",
+    shortDetail:
+      "Browse Nango providers with auth mode and import tier pre-filled.",
   },
   {
     key: "saved",
