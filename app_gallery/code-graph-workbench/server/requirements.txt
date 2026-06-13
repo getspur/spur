@@ -1,0 +1,5 @@
+mcp>=1.0.0
+duckdb>=1.0.0
+pyarrow>=17.0.0
+# TODO(U7): replace with spur-app>=0.1.0 once published to PyPI
+../../sdk/python
