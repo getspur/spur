@@ -23,6 +23,7 @@ const DEPENDENCY_LOCK_FILES: &[&str] = &[
 ];
 const PORTS_DIR: &str = "ports";
 const PORTS_MANIFEST: &str = "ports/manifest.json";
+const DEFAULT_SKILL_PATH: &str = "skill/SKILL.md";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpurAppManifest {
@@ -212,13 +213,33 @@ pub fn export_spur_app(
     options: SpurAppExportOptions,
 ) -> Result<SpurAppExported, archive::SpurAppArchiveError> {
     let notebook_contents = fs::read(&options.notebook_path)?;
-    let mut entries = vec![(SPUR_APP_ENTRY_NOTEBOOK.to_string(), notebook_contents)];
     let mut preflight = SpurAppPreflight::default();
+    let app_root = options
+        .notebook_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let authored_manifest_path = app_root.join(SPUR_APP_MANIFEST);
+    let has_authored_manifest = authored_manifest_path.is_file();
 
-    let name = options
-        .name
-        .unwrap_or_else(|| default_app_name(&options.notebook_path));
-    let mut manifest = SpurAppManifest::minimal(name, SPUR_APP_ENTRY_NOTEBOOK);
+    let mut manifest = if has_authored_manifest {
+        let raw = fs::read(&authored_manifest_path)?;
+        serde_json::from_slice::<SpurAppManifest>(&raw)
+            .map_err(archive::SpurAppArchiveError::InvalidManifestJson)?
+    } else {
+        SpurAppManifest::minimal(
+            options
+                .name
+                .clone()
+                .unwrap_or_else(|| default_app_name(&options.notebook_path)),
+            SPUR_APP_ENTRY_NOTEBOOK,
+        )
+    };
+    if let Some(name) = options.name {
+        manifest.name = name;
+    }
+
+    let mut entries = vec![(manifest.entry_notebook.clone(), notebook_contents)];
 
     manifest.widgets = collect_widget_assets(&options.widget_assets, &mut entries)?;
     manifest.dependencies = collect_dependency_locks(&options.dependency_roots, &mut entries)?;
@@ -230,6 +251,10 @@ pub fn export_spur_app(
             &mut manifest,
             &mut preflight,
         )?;
+    }
+
+    if has_authored_manifest {
+        collect_app_files(&app_root, &manifest, &mut entries)?;
     }
 
     let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -414,6 +439,140 @@ fn collect_files_under(
     Ok(())
 }
 
+fn collect_app_files(
+    app_root: &Path,
+    manifest: &SpurAppManifest,
+    entries: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), archive::SpurAppArchiveError> {
+    if let Some(server) = &manifest.mcp_server {
+        let entry_path = Path::new(&server.entry);
+        if let Some(parent) = entry_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            collect_app_dir_recursive(app_root, parent, entries)?;
+        } else {
+            collect_app_file_if_exists(app_root, entry_path, entries)?;
+        }
+    }
+
+    if let Some(sdk_dir) = manifest
+        .sdk
+        .as_ref()
+        .and_then(|sdk| sdk.typescript.as_deref())
+    {
+        collect_app_dir_recursive(app_root, Path::new(sdk_dir), entries)?;
+    }
+
+    let skill_path = manifest.skill.as_deref().unwrap_or(DEFAULT_SKILL_PATH);
+    collect_app_file_if_exists(app_root, Path::new(skill_path), entries)?;
+    Ok(())
+}
+
+fn collect_app_dir_recursive(
+    app_root: &Path,
+    relative_dir: &Path,
+    entries: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), archive::SpurAppArchiveError> {
+    validate_relative_app_path(relative_dir)?;
+    let absolute_dir = app_root.join(relative_dir);
+    if !absolute_dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(absolute_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if should_skip_app_bundle_name(&name) {
+            continue;
+        }
+
+        let relative = relative_dir.join(&file_name);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_app_dir_recursive(app_root, &relative, entries)?;
+        } else if file_type.is_file() {
+            push_app_entry_once(entries, &relative, fs::read(entry.path())?)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_app_file_if_exists(
+    app_root: &Path,
+    relative_file: &Path,
+    entries: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), archive::SpurAppArchiveError> {
+    validate_relative_app_path(relative_file)?;
+    let absolute_file = app_root.join(relative_file);
+    if absolute_file.is_file() {
+        push_app_entry_once(entries, relative_file, fs::read(absolute_file)?)?;
+    }
+    Ok(())
+}
+
+fn push_app_entry_once(
+    entries: &mut Vec<(String, Vec<u8>)>,
+    relative: &Path,
+    contents: Vec<u8>,
+) -> Result<(), archive::SpurAppArchiveError> {
+    let archive_path = relative_app_archive_path(relative)?;
+    if !entries
+        .iter()
+        .any(|(existing, _)| existing.as_str() == archive_path)
+    {
+        entries.push((archive_path, contents));
+    }
+    Ok(())
+}
+
+fn relative_app_archive_path(relative: &Path) -> Result<String, archive::SpurAppArchiveError> {
+    validate_relative_app_path(relative)?;
+    let mut archive_path = String::new();
+
+    for component in relative.components() {
+        let Component::Normal(segment) = component else {
+            return Err(archive::SpurAppArchiveError::UnsafePath(
+                relative.display().to_string(),
+            ));
+        };
+        if !archive_path.is_empty() {
+            archive_path.push('/');
+        }
+        archive_path.push_str(&segment.to_string_lossy());
+    }
+
+    if !is_safe_archive_path(&archive_path) {
+        return Err(archive::SpurAppArchiveError::UnsafePath(archive_path));
+    }
+    Ok(archive_path)
+}
+
+fn validate_relative_app_path(path: &Path) -> Result<(), archive::SpurAppArchiveError> {
+    let mut has_component = false;
+    for component in path.components() {
+        let Component::Normal(_) = component else {
+            return Err(archive::SpurAppArchiveError::UnsafePath(
+                path.display().to_string(),
+            ));
+        };
+        has_component = true;
+    }
+
+    if !has_component {
+        return Err(archive::SpurAppArchiveError::UnsafePath(
+            path.display().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn should_skip_app_bundle_name(name: &str) -> bool {
+    name.starts_with('.') || name == "__pycache__" || name == ".pytest_cache"
+}
+
 fn build_import_preflight(root: &Path, manifest: &SpurAppManifest) -> SpurAppPreflight {
     let mut preflight = SpurAppPreflight::default();
 
@@ -531,6 +690,71 @@ fn blake3_hex(contents: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_bundles_authored_manifest_server_skill_and_sdk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("my-app");
+        std::fs::create_dir_all(root.join("server")).unwrap();
+        std::fs::create_dir_all(root.join("skill")).unwrap();
+        std::fs::create_dir_all(root.join("sdk")).unwrap();
+        std::fs::write(
+            root.join("app.ipynb"),
+            b"{\"cells\":[],\"metadata\":{},\"nbformat\":4,\"nbformat_minor\":5}",
+        )
+        .unwrap();
+        std::fs::write(root.join("server/main.py"), b"print('hi')\n").unwrap();
+        std::fs::write(root.join("server/requirements.txt"), b"mcp>=1.0.0\n").unwrap();
+        std::fs::write(root.join("skill/SKILL.md"), b"# skill\n").unwrap();
+        std::fs::write(root.join("sdk/call_tool.ts"), b"// vendored\n").unwrap();
+
+        let mut manifest = SpurAppManifest::minimal("authored-app", SPUR_APP_ENTRY_NOTEBOOK);
+        manifest.mcp_server = Some(SpurAppMcpServer {
+            server_type: "python".into(),
+            entry: "server/main.py".into(),
+            requirements: Some("server/requirements.txt".into()),
+            env: Default::default(),
+        });
+        manifest.skill = Some("skill/SKILL.md".into());
+        manifest.sdk = Some(SpurAppSdk {
+            typescript: Some("sdk".into()),
+        });
+        std::fs::write(
+            root.join(SPUR_APP_MANIFEST),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let out = tmp.path().join("out.spurapp");
+        let exported = export_spur_app(SpurAppExportOptions {
+            notebook_path: root.join("app.ipynb"),
+            output_path: out.clone(),
+            name: None,
+            widget_assets: vec![],
+            include_port_snapshots: false,
+            dependency_roots: vec![root.clone()],
+        })
+        .expect("export");
+
+        let read = archive::read_manifest(std::fs::File::open(&exported.output_path).unwrap())
+            .expect("manifest");
+        assert_eq!(read.name, "authored-app", "authored manifest must win");
+        assert!(read.mcp_server.is_some());
+
+        let zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).expect("zip");
+        let names = zip.file_names().map(ToOwned::to_owned).collect::<Vec<_>>();
+        for expected in [
+            "server/main.py",
+            "server/requirements.txt",
+            "skill/SKILL.md",
+            "sdk/call_tool.ts",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing {expected}: {names:?}"
+            );
+        }
+    }
 
     #[test]
     fn manifest_sdk_block_round_trips_and_defaults_to_none() {
