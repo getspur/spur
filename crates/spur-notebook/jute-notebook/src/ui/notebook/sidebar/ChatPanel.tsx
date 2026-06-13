@@ -19,6 +19,7 @@ import {
   EMPTY_STATE_COPY,
   composerLensLabel,
   defaultLensFor,
+  mapViewMode,
 } from "./lens";
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -94,12 +95,13 @@ function sessionsWithSelectedSession(
 
 export default function ChatPanel() {
   const notebook = useNotebook();
-  const [notebookPath, appOpenInfo, viewMode] = useStore(
+  const [notebookPath, appOpenInfo, viewMode, selectedCellId] = useStore(
     notebook.store,
     useShallow((state) => [
       state.viewState.path,
       state.viewState.appOpenInfo,
       state.viewState.viewMode,
+      state.viewState.selectedCellId,
     ]),
   );
   const [prompt, setPrompt] = useState("");
@@ -306,6 +308,9 @@ export default function ChatPanel() {
     const turnNotebookPath = notebookPath;
     const turnScopeKey = chatScopeKey;
     const turnAgentName = selectedAgentName;
+    const turnViewMode = viewMode;
+    const turnLens = lens;
+    const turnSelectedCellId = selectedCellId;
     if (
       !canSubmitPrompt ||
       !trimmedPrompt ||
@@ -327,6 +332,14 @@ export default function ChatPanel() {
         agentName: turnAgentName,
         notebookPath: turnNotebookPath,
         prompt: trimmedPrompt,
+        context: {
+          notebookPath: turnNotebookPath,
+          viewMode: mapViewMode(turnViewMode),
+          lens: turnLens,
+          ...(turnSelectedCellId
+            ? { selectedCellRef: `cell://${turnSelectedCellId}` }
+            : {}),
+        },
         onEvent,
       });
     } catch (error) {
