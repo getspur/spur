@@ -699,6 +699,82 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText(/Tables ready/i)).toBeInTheDocument();
   });
 
+  test("escape_after_credential_entry_prompts_before_closing", async () => {
+    const onClose = renderWizard();
+
+    await chooseGithubProvider();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(await screen.findByLabelText("GITHUB_TOKEN"), {
+      target: { value: "ghp_dirty" },
+    });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(
+      screen.getByRole("alertdialog", { name: "Discard changes?" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Add datasource" }),
+    ).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test("keep_editing_leaves_dirty_wizard_open", async () => {
+    const onClose = renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close add datasource" }),
+    );
+
+    expect(
+      screen.getByRole("alertdialog", { name: "Discard changes?" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+
+    expect(
+      screen.queryByRole("alertdialog", { name: "Discard changes?" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Add datasource" }),
+    ).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test("discard_changes_confirms_dirty_close", async () => {
+    const onClose = renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(screen.getByRole("dialog", { name: "Add datasource" }));
+
+    expect(
+      screen.getByRole("alertdialog", { name: "Discard changes?" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  test("successful_add_closes_without_discard_confirmation", async () => {
+    const onClose = renderWizard();
+
+    await chooseGithubProvider();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(await screen.findByLabelText("GITHUB_TOKEN"), {
+      target: { value: "ghp_test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(
+      screen.queryByRole("alertdialog", { name: "Discard changes?" }),
+    ).not.toBeInTheDocument();
+  });
+
   test("github_pat_ready_provider_shows_ready_tables_without_openapi_preview", async () => {
     const onClose = renderWizard();
 

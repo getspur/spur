@@ -151,10 +151,30 @@ export default function AddRestApiWizard({
   const [pendingPreview, setPendingPreview] = useState(false);
   const [pendingAdd, setPendingAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasUserChanges, setHasUserChanges] = useState(false);
+  const [confirmingClose, setConfirmingClose] = useState(false);
   const dialogTitleId = useId();
+  const closeConfirmationTitleId = useId();
+  const closeConfirmationDescriptionId = useId();
+
+  const markDirty = useCallback(() => {
+    setHasUserChanges(true);
+  }, []);
+
+  const requestClose = useCallback(() => {
+    if (hasUserChanges) {
+      setConfirmingClose(true);
+      return;
+    }
+
+    onClose();
+  }, [hasUserChanges, onClose]);
 
   useEffect(() => {
     if (!open) return;
+
+    setHasUserChanges(false);
+    setConfirmingClose(false);
 
     if (editConnection) {
       setStepIndex(2);
@@ -239,12 +259,12 @@ export default function AddRestApiWizard({
     if (!open) return;
 
     const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") requestClose();
     };
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose, open]);
+  }, [open, requestClose]);
 
   const loadProviders = useCallback(async () => {
     if (providerLoadState === "loading" || providerLoadState === "loaded") {
@@ -287,6 +307,7 @@ export default function AddRestApiWizard({
 
   const selectSourceMode = useCallback(
     (mode: SourceMode) => {
+      if (sourceMode !== mode) markDirty();
       setSourceMode(mode);
       setError(null);
       setTablePreview(null);
@@ -315,52 +336,67 @@ export default function AddRestApiWizard({
         );
       }
     },
-    [loadProviders, loadSavedConnections, selectedProvider?.name],
+    [
+      loadProviders,
+      loadSavedConnections,
+      markDirty,
+      selectedProvider?.name,
+      sourceMode,
+    ],
   );
 
-  const selectSourceFamily = useCallback((family: SourceFamily) => {
-    setSourceFamily(family);
-    setError(null);
-    setTablePreview(null);
-    setConnectionOnly(false);
-    setMissingSavedCredentialKeys([]);
-    setSavedConnectionCredentials({});
-    setPrefillCredentialKeys([]);
-    setPrefillManifestToml(null);
-    setGenericLocation(datasourceFamilyByKey[family].defaultExampleInput);
+  const selectSourceFamily = useCallback(
+    (family: SourceFamily) => {
+      if (sourceFamily !== family) markDirty();
+      setSourceFamily(family);
+      setError(null);
+      setTablePreview(null);
+      setConnectionOnly(false);
+      setMissingSavedCredentialKeys([]);
+      setSavedConnectionCredentials({});
+      setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
+      setGenericLocation(datasourceFamilyByKey[family].defaultExampleInput);
 
-    if (family === "rest_api") {
-      return;
-    }
+      if (family === "rest_api") {
+        return;
+      }
 
-    setSourceMode(null);
-    setSelectedProvider(null);
-    setSelectedSavedConnection(null);
-    setCredentials({});
-    setDatasourceName(defaultDatasourceNameForFamily(family));
-    setSpecText("");
-  }, []);
+      setSourceMode(null);
+      setSelectedProvider(null);
+      setSelectedSavedConnection(null);
+      setCredentials({});
+      setDatasourceName(defaultDatasourceNameForFamily(family));
+      setSpecText("");
+    },
+    [markDirty, sourceFamily],
+  );
 
-  const selectProvider = useCallback((provider: ProviderSummary) => {
-    const defaultName = defaultDatasourceNameForProvider(provider);
-    if (isBlockedProvider(provider)) return;
+  const selectProvider = useCallback(
+    (provider: ProviderSummary) => {
+      const defaultName = defaultDatasourceNameForProvider(provider);
+      if (isBlockedProvider(provider)) return;
 
-    setSelectedProvider(provider);
-    setSelectedSavedConnection(null);
-    setDatasourceName((currentName) =>
-      !currentName || currentName === "rest_api" ? defaultName : currentName,
-    );
-    setCredentials({});
-    setTablePreview(tablePreviewFromProvider(provider));
-    setSpecText(isReadyProvider(provider) ? "" : (provider.specUrl ?? ""));
-    setConnectionOnly(false);
-    setPrefillCredentialKeys([]);
-    setPrefillManifestToml(null);
-    setError(null);
-  }, []);
+      if (selectedProvider?.name !== provider.name) markDirty();
+      setSelectedProvider(provider);
+      setSelectedSavedConnection(null);
+      setDatasourceName((currentName) =>
+        !currentName || currentName === "rest_api" ? defaultName : currentName,
+      );
+      setCredentials({});
+      setTablePreview(tablePreviewFromProvider(provider));
+      setSpecText(isReadyProvider(provider) ? "" : (provider.specUrl ?? ""));
+      setConnectionOnly(false);
+      setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
+      setError(null);
+    },
+    [markDirty, selectedProvider?.name],
+  );
 
   const selectSavedConnection = useCallback(
     (connection: ConnectionTemplate) => {
+      if (selectedSavedConnection?.name !== connection.name) markDirty();
       setSelectedSavedConnection(connection);
       setSelectedProvider(null);
       setMissingSavedCredentialKeys([]);
@@ -369,7 +405,7 @@ export default function AddRestApiWizard({
       setPrefillManifestToml(null);
       setError(null);
     },
-    [],
+    [markDirty, selectedSavedConnection?.name],
   );
 
   const providerCategories = useMemo(() => {
@@ -697,7 +733,7 @@ export default function AddRestApiWizard({
       aria-labelledby={dialogTitleId}
       aria-modal="true"
       className="fixed inset-0 z-40 flex items-center justify-center bg-gray-950/35 px-3 py-4 sm:px-4"
-      onClick={onClose}
+      onClick={requestClose}
       role="dialog"
     >
       <section
@@ -718,7 +754,7 @@ export default function AddRestApiWizard({
             <button
               aria-label={`Close ${dialogTitle.toLowerCase()}`}
               className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-950"
-              onClick={onClose}
+              onClick={requestClose}
               type="button"
             >
               <XIcon size={15} strokeWidth={1.5} />
@@ -807,12 +843,15 @@ export default function AddRestApiWizard({
                 onSelectProvider={selectProvider}
                 onSelectSavedConnection={selectSavedConnection}
                 onSelectSourceMode={selectSourceMode}
-                onSavedCredentialChange={(key, value) =>
+                onSavedCredentialChange={(key, value) => {
+                  if ((savedConnectionCredentials[key] ?? "") !== value) {
+                    markDirty();
+                  }
                   setSavedConnectionCredentials((current) => ({
                     ...current,
                     [key]: value,
-                  }))
-                }
+                  }));
+                }}
                 providerCategories={providerCategories}
                 providerCategory={providerCategory}
                 providerLoadState={providerLoadState}
@@ -851,13 +890,17 @@ export default function AddRestApiWizard({
                   datasourceName={datasourceName}
                   fields={credentialFields}
                   nameReadOnly={editMode}
-                  onCredentialChange={(key, value) =>
+                  onCredentialChange={(key, value) => {
+                    if ((credentials[key] ?? "") !== value) markDirty();
                     setCredentials((current) => ({
                       ...current,
                       [key]: value,
-                    }))
-                  }
-                  onDatasourceNameChange={setDatasourceName}
+                    }));
+                  }}
+                  onDatasourceNameChange={(value) => {
+                    if (datasourceName !== value) markDirty();
+                    setDatasourceName(value);
+                  }}
                   assistantPrefillMode={manifestPrefillMode}
                   selectedProvider={selectedProvider}
                   selectedSavedConnection={selectedSavedConnection}
@@ -872,11 +915,13 @@ export default function AddRestApiWizard({
                   connectionOnly={connectionOnly}
                   error={error}
                   onConnectionOnlyChange={(checked) => {
+                    if (connectionOnly !== checked) markDirty();
                     setConnectionOnly(checked);
                     if (checked) setTablePreview(null);
                   }}
                   onPreviewTables={() => void handlePreviewTables()}
                   onSpecTextChange={(value) => {
+                    if (specText !== value) markDirty();
                     setSpecText(value);
                     setTablePreview(
                       editConnection && value.trim().length === 0
@@ -911,7 +956,10 @@ export default function AddRestApiWizard({
                 <RssAttachStep
                   datasourceName={datasourceName}
                   error={error}
-                  onDatasourceNameChange={setDatasourceName}
+                  onDatasourceNameChange={(value) => {
+                    if (datasourceName !== value) markDirty();
+                    setDatasourceName(value);
+                  }}
                 />
               ) : (
                 <GenericAttachStep
@@ -960,6 +1008,50 @@ export default function AddRestApiWizard({
           </footer>
         </div>
       </section>
+      {confirmingClose && (
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center bg-gray-950/30 px-4"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div
+            aria-describedby={closeConfirmationDescriptionId}
+            aria-labelledby={closeConfirmationTitleId}
+            aria-modal="true"
+            className="w-full max-w-sm rounded-lg border border-gray-200 bg-white p-4 shadow-xl"
+            role="alertdialog"
+          >
+            <h3
+              className="text-sm font-semibold text-gray-950"
+              id={closeConfirmationTitleId}
+            >
+              Discard changes?
+            </h3>
+            <p
+              className="mt-2 text-sm text-gray-600"
+              id={closeConfirmationDescriptionId}
+            >
+              Closing now will discard the connection details entered in this
+              wizard.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                className="rounded border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:border-gray-950 hover:text-gray-950"
+                onClick={() => setConfirmingClose(false)}
+                type="button"
+              >
+                Keep editing
+              </button>
+              <button
+                className="rounded border border-red-600 bg-red-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700"
+                onClick={onClose}
+                type="button"
+              >
+                Discard changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
