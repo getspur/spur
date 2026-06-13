@@ -34,6 +34,8 @@ pub mod notebook_run_cascade;
 pub mod notebook_run_cell;
 pub mod notebook_set_cell_code_type;
 pub mod notebook_set_dag_metadata;
+pub mod notebook_symbol_refs;
+pub mod notebook_symbol_search;
 pub mod open_design_get;
 pub mod open_design_search;
 pub mod read_cell;
@@ -73,6 +75,8 @@ pub fn tools() -> Vec<Tool> {
         notebook_catalog::tool(),
         notebook_dag_status::tool(),
         notebook_lineage::tool(),
+        notebook_symbol_search::tool(),
+        notebook_symbol_refs::tool(),
         notebook_run_cell::tool(),
         notebook_run_cascade::tool(),
         notebook_set_cell_code_type::tool(),

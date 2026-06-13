@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::{
     context::{
-        catalog::{catalog_layer1, datasource_id, descend, used_by_map, CatalogNode, UsedBy},
+        catalog::{catalog_layer1, datasource_id, descend, CatalogNode, UsedBy},
         refs::Ref,
     },
     mcp::ServerDeps,
@@ -56,7 +56,11 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     })?;
     let (root, notebook_version) = state.notebook_for_path(&path).snapshot();
     let entries = state.datasource_catalog.lock().list();
-    let used = used_by_map(&root, &entries);
+    let facts = deps
+        .symbol_index
+        .as_ref()
+        .and_then(|index| index.facts_for(&path));
+    let used = crate::context::catalog::used_by_map_with_index(&root, &entries, facts.as_ref());
     let visible_entries = if args.scope == Scope::Used {
         entries
             .iter()

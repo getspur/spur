@@ -205,7 +205,8 @@ impl ServerHandler for NotebookMcpServer {
 Navigation contract: call notebook_context_pack first to orient; every ref it \
 returns (ds://, cell://, port://) is queryable — notebook_catalog descends the \
 datasource tree one layer per call (catalog -> connection -> table), \
-notebook_lineage walks the DAG upstream/downstream from any ref. Responses \
+notebook_lineage walks the DAG upstream/downstream from any ref; slice-3 \
+symbol navigation uses notebook_symbol_search then notebook_symbol_refs. Responses \
 carry next_queries suggestions and version-anchored refs; truncated sections \
 name the ref to query deeper."
                 .into(),
@@ -231,6 +232,10 @@ name the ref to query deeper."
         Ok(ListToolsResult::with_all_items(self.merged_tools().await))
     }
 
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "foundation tool dispatch is centralized in one MCP handler"
+    )]
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -269,6 +274,12 @@ name the ref to query deeper."
             "notebook_catalog" => tools::notebook_catalog::call(&self.deps, arguments).await,
             "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
             "notebook_lineage" => tools::notebook_lineage::call(&self.deps, arguments).await,
+            "notebook_symbol_search" => {
+                tools::notebook_symbol_search::call(&self.deps, arguments).await
+            }
+            "notebook_symbol_refs" => {
+                tools::notebook_symbol_refs::call(&self.deps, arguments).await
+            }
             "notebook_run_cell" => tools::notebook_run_cell::call(&self.deps, arguments).await,
             "notebook_run_cascade" => {
                 tools::notebook_run_cascade::call(&self.deps, arguments).await
@@ -7328,6 +7339,8 @@ if __name__ == "__main__":
 
         for expected in [
             "notebook_catalog",
+            "notebook_symbol_search",
+            "notebook_symbol_refs",
             "notebook.venv_list",
             "notebook.venv_create",
             "notebook.venv_delete",
