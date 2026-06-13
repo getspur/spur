@@ -669,8 +669,69 @@ describe("AddRestApiWizard", () => {
     expect(screen.getAllByText("rss_routes").length).toBeGreaterThan(0);
     expect(screen.getAllByText("rss_feed(url)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("rss_entries(url)").length).toBeGreaterThan(0);
-    expect(screen.getByText("Subscription settings")).toBeInTheDocument();
+    expect(screen.getByText("Source registration")).toBeInTheDocument();
     expect(screen.getAllByText("Programming").length).toBeGreaterThan(0);
+  });
+
+  test("rss_workflow_shows_direct_url_query_templates", () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /RSS \/ RSSHub/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Direct URL" }));
+    fireEvent.change(screen.getByLabelText("Source URL or keyword"), {
+      target: { value: "https://example.com/feed.xml" },
+    });
+
+    expect(screen.getByText("Notebook query handoff")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Run these templates in a notebook query cell after adding the datasource.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("select * from rss_feed('https://example.com/feed.xml');"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "select * from rss_entries('https://example.com/feed.xml');",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("select * from rss_routes();")).toBeInTheDocument();
+  });
+
+  test("rss_workflow_shows_rsshub_route_query_templates", () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /RSS \/ RSSHub/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: /GitHub Issues/i }));
+    fireEvent.change(screen.getByLabelText("Parameter: owner"), {
+      target: { value: "openai" },
+    });
+    fireEvent.change(screen.getByLabelText("Parameter: repo"), {
+      target: { value: "codex" },
+    });
+
+    expect(
+      screen.getByText("rsshub://github/issue/openai/codex"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This registers the RSS table-functions only; it does not create a durable shared feed subscription.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "select * from rss_feed('rsshub://github/issue/openai/codex');",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "select * from rss_entries('rsshub://github/issue/openai/codex');",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("select * from rss_routes();")).toBeInTheDocument();
   });
 
   test("file_family_renders_locate_auth_inspect_and_attach_details", () => {
