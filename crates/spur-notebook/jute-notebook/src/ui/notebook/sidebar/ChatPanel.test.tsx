@@ -34,6 +34,7 @@ const tauriMocks = vi.hoisted(() => {
 });
 let notebookPath = "/tmp/revenue.ipynb";
 let appOpenInfo: { app_name?: string; app_root?: string } | undefined;
+let selectedCellId: string | undefined;
 let viewMode: "cells" | "dag" | "app" = "cells";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -45,10 +46,20 @@ vi.mock("@/stores/notebook", () => ({
   useNotebook: () => ({
     store: {
       getInitialState: () => ({
-        viewState: { appOpenInfo, path: notebookPath, viewMode },
+        viewState: {
+          appOpenInfo,
+          path: notebookPath,
+          selectedCellId,
+          viewMode,
+        },
       }),
       getState: () => ({
-        viewState: { appOpenInfo, path: notebookPath, viewMode },
+        viewState: {
+          appOpenInfo,
+          path: notebookPath,
+          selectedCellId,
+          viewMode,
+        },
       }),
       subscribe: () => () => undefined,
     },
@@ -72,6 +83,7 @@ describe("ChatPanel", () => {
     });
     notebookPath = "/tmp/revenue.ipynb";
     appOpenInfo = undefined;
+    selectedCellId = undefined;
     viewMode = "cells";
   });
 
@@ -117,6 +129,26 @@ describe("ChatPanel", () => {
     expect(
       screen.getByText("Ready in revenue.ipynb - Deep dive lens"),
     ).toBeInTheDocument();
+  });
+
+  test("changing notebook lens does not create a new chat session", async () => {
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(
+        tauriMocks.invoke.mock.calls.filter(
+          ([command]) => command === "chat_new_session",
+        ),
+      ).toHaveLength(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Deep dive" }));
+
+    expect(
+      tauriMocks.invoke.mock.calls.filter(
+        ([command]) => command === "chat_new_session",
+      ),
+    ).toHaveLength(1);
   });
 
   test("renders the operations indicator in dag mode without notebook toggle", () => {
@@ -240,6 +272,8 @@ describe("ChatPanel", () => {
   });
 
   test("ensures a session for path without loading it and streams chat_turn events", async () => {
+    selectedCellId = "cell-42";
+
     render(<ChatPanel />);
 
     await waitFor(() => {
@@ -266,6 +300,12 @@ describe("ChatPanel", () => {
           notebookPath: "/tmp/revenue.ipynb",
           prompt: "Summarize the notebook",
           agentName: "claude-code",
+          context: expect.objectContaining({
+            notebookPath: "/tmp/revenue.ipynb",
+            viewMode: "notebook",
+            lens: "notebook_builder",
+            selectedCellRef: "cell://cell-42",
+          }),
           onEvent: tauriMocks.channels[0],
         }),
       );
