@@ -84,6 +84,30 @@ pub async fn apply_mutation(
     .await
     .context("mutation-plan audit write-ahead")?;
 
+    if let Some(signal_id) = batch.trigger_signal_id {
+        let processed_label = signal_processed_label(&signal_id);
+        let trigger_issue = pm
+            .get_issue(&batch.trigger_task_id)
+            .await
+            .with_context(|| format!("load trigger issue {}", batch.trigger_task_id))?;
+        if trigger_issue
+            .labels
+            .iter()
+            .any(|label| label == &processed_label)
+        {
+            return Ok(Vec::new());
+        }
+        pm.update_issue(
+            &batch.trigger_task_id,
+            IssueUpdate {
+                add_labels: vec![processed_label],
+                ..Default::default()
+            },
+        )
+        .await
+        .context("reserve triggering signal processed")?;
+    }
+
     let mut children_created: Vec<String> = Vec::new();
     let mut affected_task_ids: Vec<String> = Vec::new();
     let mut executed_ops: Vec<ExecutedOp> = Vec::new();
@@ -420,18 +444,6 @@ pub async fn apply_mutation(
     )
     .await
     .context("emit mutation-commit audit")?;
-
-    if let Some(signal_id) = batch.trigger_signal_id {
-        pm.update_issue(
-            &batch.trigger_task_id,
-            IssueUpdate {
-                add_labels: vec![signal_processed_label(&signal_id)],
-                ..Default::default()
-            },
-        )
-        .await
-        .context("mark triggering signal processed")?;
-    }
 
     Ok(children_created)
 }
@@ -1807,6 +1819,7 @@ pub async fn submit_plan_mutation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::mutation::TaskDraft;
     use spur_pm::{IssueSummary, PmSource};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1827,6 +1840,16 @@ mod tests {
     }
 
     fn test_advanced(pm: &PmService) -> &dyn BeadsAdvanced {
+        let gate = test_feature_gate();
+        crate::server::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            gate.as_ref(),
+        )
+        .expect("test feature gate should allow beads advanced");
+        pm.advanced().expect("beads adv")
+    }
+
+    fn test_feature_gate() -> Arc<spur_license::FeatureGate> {
         let gate = Arc::new(spur_license::FeatureGate::new(
             spur_license::policy::PolicyResolver::embedded(),
         ));
@@ -1838,12 +1861,7 @@ mod tests {
             spur_license::Plan::Pro,
             features,
         ));
-        crate::server::require_feature(
-            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
-            gate.as_ref(),
-        )
-        .expect("test feature gate should allow beads advanced");
-        pm.advanced().expect("beads adv")
+        gate
     }
 
     #[tokio::test]
@@ -1908,6 +1926,67 @@ mod tests {
         assert_eq!(report.succeeded[0].kind, "noop");
         assert_eq!(report.succeeded[0].issue_id, "noop-target");
         assert_eq!(report.succeeded[0].depends_on_id, None);
+    }
+
+    #[tokio::test]
+    async fn same_signal_id_creates_children_only_once() {
+        let (pm, _dir) = test_pm().await;
+        let parent_id = pm
+            .create_issue(IssueCreate {
+                title: "Parent task".into(),
+                description: Some("Original task".into()),
+                issue_type: Some("task".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("create parent issue");
+        let mutation_id = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111")
+            .expect("valid mutation id");
+        let signal_id =
+            uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid signal id");
+        let batch = MutationBatch {
+            mutation_id,
+            trigger_signal_id: Some(signal_id),
+            trigger_task_id: parent_id.clone(),
+            ops: vec![PlanMutationOp::SplitTask {
+                parent: parent_id,
+                children: vec![
+                    TaskDraft {
+                        title: "First child".into(),
+                        description: "Split child one".into(),
+                        assignee: None,
+                        priority: None,
+                    },
+                    TaskDraft {
+                        title: "Second child".into(),
+                        description: "Split child two".into(),
+                        assignee: None,
+                        priority: None,
+                    },
+                ],
+                dep_rewire: DepRewirePolicy::Barrier,
+            }],
+        };
+
+        let first = apply_mutation(pm.clone(), test_feature_gate(), &batch)
+            .await
+            .expect("first mutation applies");
+        let second = apply_mutation(pm.clone(), test_feature_gate(), &batch)
+            .await
+            .expect("second mutation is an idempotent no-op");
+        let created = pm
+            .list_issues(IssueFilter {
+                labels: vec![mutation_id_label(&mutation_id)],
+                include_closed: true,
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .expect("list mutation-created issues");
+
+        assert_eq!(first.len(), 2);
+        assert!(second.is_empty());
+        assert_eq!(created.len(), 2);
     }
 
     fn summary(id: &str) -> IssueSummary {
