@@ -163,6 +163,11 @@ pub enum UserInput {
     ResumePlan {
         plan_id: String,
     },
+    /// Request the orchestrator to retry one persisted plan task by beads issue id.
+    RetryPlanTask {
+        plan_id: Option<String>,
+        issue_id: String,
+    },
     /// Request a read-only persisted implementation-plan snapshot.
     InspectPlan {
         plan_id: String,
