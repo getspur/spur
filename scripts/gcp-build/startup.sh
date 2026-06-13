@@ -196,14 +196,14 @@ chmod 0644 /etc/profile.d/spur-build.sh
 chmod 1777 "$CACHE_MNT"
 
 # ---------------------------------------------------------------------------
-# Idle auto-shutdown: terminate the VM after 15 min with no build / ssh / target
+# Idle auto-shutdown: terminate the VM after 30 min with no build / ssh / target
 # activity. Spot VMs created with --instance-termination-action=DELETE convert
 # `shutdown -h` into instance deletion; the persistent cache disk survives.
 # Override the threshold by passing instance metadata `idle-shutdown-minutes`.
 # ---------------------------------------------------------------------------
 IDLE_MINUTES=$(curl -fsS -H "Metadata-Flavor: Google" \
     http://metadata.google.internal/computeMetadata/v1/instance/attributes/idle-shutdown-minutes 2>/dev/null || echo "")
-[[ -z "$IDLE_MINUTES" || ! "$IDLE_MINUTES" =~ ^[0-9]+$ ]] && IDLE_MINUTES=15
+[[ -z "$IDLE_MINUTES" || ! "$IDLE_MINUTES" =~ ^[0-9]+$ ]] && IDLE_MINUTES=30
 
 # Heredoc is single-quoted so $-references stay literal inside the script.
 # IDLE_MIN substitution is done by sed afterward.
@@ -214,9 +214,9 @@ set -u
 IDLE_MIN=__IDLE_MIN__
 TARGETS=/mnt/cargo/targets
 
-# 1. Any cargo or rustc process? -> active. sccache runs as a long-lived
-#    daemon and is excluded; it would otherwise pin the VM up forever.
-if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; then
+# 1. Any cargo, rustc, or rust-lld process? -> active. sccache runs as a
+#    long-lived daemon and is excluded; it would otherwise pin the VM up forever.
+if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null || pgrep -x rust-lld >/dev/null; then
     echo "active: build process running"
     exit 1
 fi
