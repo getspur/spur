@@ -102,6 +102,11 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         bytes: include_bytes!("../../queries/python/spur-edges.scm"),
     },
     ManifestQueryBytes {
+        language: "python",
+        query: "spur-notebook-facts",
+        bytes: include_bytes!("../../queries/python/spur-notebook-facts.scm"),
+    },
+    ManifestQueryBytes {
         language: "rust",
         query: "tags",
         bytes: include_bytes!("../../queries/rust/tags.scm"),
@@ -130,6 +135,11 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         language: "typescript",
         query: "spur-edges",
         bytes: include_bytes!("../../queries/typescript/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "typescript",
+        query: "spur-notebook-facts",
+        bytes: include_bytes!("../../queries/typescript/spur-notebook-facts.scm"),
     },
     ManifestQueryBytes {
         language: "typescript",
