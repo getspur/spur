@@ -4,7 +4,7 @@ use std::str;
 
 use anyhow::Context as _;
 use serde_json::Value;
-use tree_sitter::{Parser, Point, Range};
+use tree_sitter::{Parser, Point, Query, QueryCursor, Range, StreamingIterator as _};
 
 use crate::extract::languages::Language;
 use crate::extract::markdown::extract_markdown_contents;
@@ -98,6 +98,7 @@ pub(crate) fn extract_notebook_file(
                 cell_node,
                 Language::Markdown,
                 &cell_source,
+                &mut port_nodes,
             )?;
             continue;
         }
@@ -115,6 +116,7 @@ pub(crate) fn extract_notebook_file(
                     cell_node,
                     language,
                     &cell_source,
+                    &mut port_nodes,
                 )?;
             }
             None => {
@@ -304,6 +306,7 @@ fn extract_cell(
     parent_node: NodeId,
     language: Language,
     source: &str,
+    port_nodes: &mut HashMap<String, NodeId>,
 ) -> anyhow::Result<()> {
     let config = language.config();
     let queries = compile_queries(&config, language)?;
@@ -324,6 +327,19 @@ fn extract_cell(
         );
     }
 
+    emit_actual_notebook_facts(
+        builder,
+        ActualNotebookFactInput {
+            relative_path,
+            file_id,
+            cell_node: parent_node,
+            query: queries.spur_notebook_facts.as_ref(),
+            source,
+            root_node: tree.root_node(),
+        },
+        port_nodes,
+    )?;
+
     extract_file_contents_from_tree(
         builder,
         language.label(),
@@ -335,6 +351,151 @@ fn extract_cell(
         tree.root_node(),
         &queries,
     )
+}
+
+struct ActualNotebookFactInput<'a, 'tree> {
+    relative_path: &'a str,
+    file_id: FileId,
+    cell_node: NodeId,
+    query: Option<&'a Query>,
+    source: &'a str,
+    root_node: tree_sitter::Node<'tree>,
+}
+
+fn emit_actual_notebook_facts(
+    builder: &mut FactBuilder<'_>,
+    input: ActualNotebookFactInput<'_, '_>,
+    port_nodes: &mut HashMap<String, NodeId>,
+) -> anyhow::Result<()> {
+    let Some(query) = input.query else {
+        return Ok(());
+    };
+
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, input.root_node, input.source.as_bytes());
+    while let Some(query_match) = matches.next() {
+        let mut produces = false;
+        let mut consumes = false;
+        let mut port_name = None;
+        let mut table_call = None;
+
+        for capture in query_match.captures {
+            let capture_name = capture_names[capture.index as usize];
+            match capture_name {
+                "port.produce" => produces = true,
+                "port.consume" => consumes = true,
+                "port.name" | "port.get.name" => {
+                    port_name = string_literal_value(input.source, capture.node);
+                }
+                "table.call" => {
+                    table_call = capture
+                        .node
+                        .utf8_text(input.source.as_bytes())
+                        .ok()
+                        .map(str::to_owned);
+                }
+                _ => {}
+            }
+        }
+
+        if produces {
+            if let Some(port) = port_name.as_deref() {
+                let port_node = intern_port(
+                    builder,
+                    input.relative_path,
+                    input.file_id,
+                    input.source,
+                    port_nodes,
+                    port,
+                );
+                builder.add_edge_with_bind_method(
+                    input.cell_node,
+                    Some(port_node),
+                    RelationKind::Produces,
+                    None,
+                    "actual",
+                );
+            } else {
+                builder.add_edge_with_bind_method(
+                    input.cell_node,
+                    None,
+                    RelationKind::References,
+                    Some("opaque_put".to_owned()),
+                    "actual",
+                );
+            }
+        }
+
+        if consumes {
+            if let Some(port) = port_name.as_deref() {
+                let port_node = intern_port(
+                    builder,
+                    input.relative_path,
+                    input.file_id,
+                    input.source,
+                    port_nodes,
+                    port,
+                );
+                builder.add_edge_with_bind_method(
+                    input.cell_node,
+                    Some(port_node),
+                    RelationKind::Consumes,
+                    None,
+                    "actual",
+                );
+            }
+        }
+
+        if let Some(call_name) = table_call
+            .as_deref()
+            .filter(|name| is_table_function_call(name))
+        {
+            builder.add_edge_with_bind_method(
+                input.cell_node,
+                None,
+                RelationKind::References,
+                Some(format!("ds://{call_name}")),
+                "actual",
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn string_literal_value(source: &str, node: tree_sitter::Node<'_>) -> Option<String> {
+    let text = node.utf8_text(source.as_bytes()).ok()?.trim();
+    let (start, quote) = text
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '"' | '\'' | '`'))?;
+    let end = text.rfind(quote)?;
+    if end <= start {
+        return None;
+    }
+    Some(text[start + quote.len_utf8()..end].to_owned())
+}
+
+fn is_table_function_call(name: &str) -> bool {
+    if !name.contains('_') {
+        return false;
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let mut parts = name.split('_');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    !first.is_empty()
+        && first
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && parts.all(|part| !part.is_empty())
 }
 
 fn parse_source(language: Language, source: &str) -> anyhow::Result<tree_sitter::Tree> {
@@ -523,6 +684,51 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn actual_port_facts_and_cross_slot_match() {
+        let nb = serde_json::to_vec(&serde_json::json!({
+            "nbformat":4,"nbformat_minor":5,"metadata":{"kernelspec":{"name":"python3"}},
+            "cells":[
+              {"cell_type":"code","id":"py","source":["spur.put(\"x\", df)\nspur.put(dyn_name, df)\nsales_orders(limit=10)\n"],
+               "outputs":[],"execution_count":null,"metadata":{}},
+              {"cell_type":"code","id":"js","source":["const v = spur.get(\"x\");\n"],
+               "outputs":[],"execution_count":null,"metadata":{"spur":{"code_type":"javascript"}}}
+            ]
+        }))
+        .unwrap();
+        let mut builder = FactBuilder::new(Path::new("/nb"));
+        extract_notebook_file(&mut builder, Path::new("/nb/app.ipynb"), &nb).unwrap();
+        let f = builder.into_facts();
+        let has = |rel, label: &str, bm: Option<&str>| {
+            f.edges.iter().any(|edge| {
+                let target_label = edge
+                    .target_node_id
+                    .and_then(|target| f.nodes.iter().find(|node| node.node_id == target))
+                    .map(|node| node.label.as_str())
+                    .or(edge.target_label.as_deref());
+                edge.relation == rel
+                    && target_label == Some(label)
+                    && edge.bind_method.as_deref() == bm
+            })
+        };
+
+        assert_eq!(
+            f.nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::Port && node.label == "port://x")
+                .count(),
+            1
+        );
+        assert!(has(RelationKind::Produces, "port://x", Some("actual")));
+        assert!(has(RelationKind::Consumes, "port://x", Some("actual")));
+        assert!(has(
+            RelationKind::References,
+            "ds://sales_orders",
+            Some("actual")
+        ));
+        assert!(has(RelationKind::References, "opaque_put", Some("actual")));
     }
 
     #[test]
