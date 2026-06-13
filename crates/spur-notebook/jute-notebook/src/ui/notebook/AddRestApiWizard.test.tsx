@@ -1058,6 +1058,29 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("response_path = $.data")).toBeInTheDocument();
   });
 
+  test("connection_only_mode_explains_tables_can_be_defined_later", async () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("Datasource name"), {
+      target: { value: "custom_api" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    fireEvent.click(screen.getByLabelText("Connection only"));
+
+    expect(
+      screen.getByText(/No tables will be created now/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/define table-functions later/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Preview tables" }),
+    ).toBeDisabled();
+  });
+
   test("review_adds_datasource_from_import_with_candidate_spec_and_credentials", async () => {
     const onClose = renderWizard();
 

@@ -1847,6 +1847,67 @@ function TablesStep({
       </p>
 
       {!catalogTablesReady && !catalogActionsReady && (
+        <fieldset className="mt-4">
+          <legend className="text-xs font-medium text-gray-600">
+            Datasource mode
+          </legend>
+          <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <label
+              className={clsx(
+                "flex min-h-24 cursor-pointer gap-3 rounded border bg-white px-3 py-3 text-sm transition-colors",
+                !connectionOnly
+                  ? "border-indigo-500 ring-1 ring-indigo-200"
+                  : "border-gray-200 hover:border-gray-300",
+              )}
+            >
+              <input
+                aria-label="Generate tables from OpenAPI"
+                checked={!connectionOnly}
+                className="mt-0.5 h-4 w-4 border-gray-300 text-indigo-600"
+                name="rest-api-table-mode"
+                onChange={() => onConnectionOnlyChange(false)}
+                type="radio"
+              />
+              <span className="min-w-0">
+                <span className="block font-medium text-gray-950">
+                  Generate tables from OpenAPI
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-gray-500">
+                  Paste a spec or URL, preview generated table-functions, then
+                  add them with this connection.
+                </span>
+              </span>
+            </label>
+            <label
+              className={clsx(
+                "flex min-h-24 cursor-pointer gap-3 rounded border bg-white px-3 py-3 text-sm transition-colors",
+                connectionOnly
+                  ? "border-indigo-500 ring-1 ring-indigo-200"
+                  : "border-gray-200 hover:border-gray-300",
+              )}
+            >
+              <input
+                aria-label="Connection only"
+                checked={connectionOnly}
+                className="mt-0.5 h-4 w-4 border-gray-300 text-indigo-600"
+                name="rest-api-table-mode"
+                onChange={() => onConnectionOnlyChange(true)}
+                type="radio"
+              />
+              <span className="min-w-0">
+                <span className="block font-medium text-gray-950">
+                  Connection only
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-gray-500">
+                  Save the connection without importing table definitions.
+                </span>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+      )}
+
+      {!catalogTablesReady && !catalogActionsReady && (
         <label className="mt-4 block">
           <span className="text-xs font-medium text-gray-600">
             OpenAPI spec text or URL
@@ -1877,17 +1938,16 @@ function TablesStep({
             )}
             Preview tables
           </button>
-          <label className="inline-flex items-center gap-2 text-sm text-gray-600">
-            <input
-              checked={connectionOnly}
-              className="h-4 w-4 rounded border-gray-300 text-indigo-600"
-              onChange={(event) =>
-                onConnectionOnlyChange(event.currentTarget.checked)
-              }
-              type="checkbox"
-            />
-            Connection only
-          </label>
+        </div>
+      )}
+
+      {connectionOnly && !catalogTablesReady && !catalogActionsReady && (
+        <div className="mt-3 flex gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <AlertCircleIcon className="mt-0.5 shrink-0" size={15} />
+          <p>
+            No tables will be created now. You can define table-functions later
+            from this saved connection.
+          </p>
         </div>
       )}
 
