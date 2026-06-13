@@ -58,13 +58,12 @@ local sccache server into the GCS config when needed. The wrapper exports
 caching. Older sccache builds ignore the multi-level variable and use GCS as the
 single configured backend.
 
-For the current Homebrew `sccache 0.14.0`, a user ADC file from
-`gcloud auth application-default login` is not enough: the binary rejects that
-`authorized_user` credential shape and falls through to GCE metadata. Provide a
-service-account or external-account credential via `SCCACHE_GCS_KEY_PATH` or
-`GOOGLE_APPLICATION_CREDENTIALS`, or use a newer/local sccache build that accepts
-your ADC format. If GCS startup fails, `spur-cargo` exits before invoking Cargo
-and points at `${SCCACHE_ERROR_LOG:-/tmp/spur-sccache-gcs.log}`.
+Run `scripts/gcloud_auth auth` once per local login session to authenticate
+gcloud and start a localhost token endpoint plus local `sccache` in
+`disk,gcs` mode. The token endpoint uses gcloud service-account impersonation,
+so no long-lived service-account key is stored on disk. If GCS startup fails,
+`spur-cargo` exits before invoking Cargo and points at
+`${SCCACHE_ERROR_LOG:-/tmp/spur-sccache-gcs.log}`.
 
 Override `SCCACHE_GCS_RW_MODE=READ_ONLY` to consume the shared bucket without
 writing local macOS artifacts back to it.
