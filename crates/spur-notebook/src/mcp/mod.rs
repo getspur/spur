@@ -245,6 +245,7 @@ name the ref to query deeper."
             }
             "notebook_catalog" => tools::notebook_catalog::call(&self.deps, arguments).await,
             "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
+            "notebook_lineage" => tools::notebook_lineage::call(&self.deps, arguments).await,
             "notebook_run_cell" => tools::notebook_run_cell::call(&self.deps, arguments).await,
             "notebook_run_cascade" => {
                 tools::notebook_run_cascade::call(&self.deps, arguments).await

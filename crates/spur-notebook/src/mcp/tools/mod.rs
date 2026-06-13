@@ -28,6 +28,7 @@ pub mod notebook_app_init;
 pub mod notebook_catalog;
 pub mod notebook_context_pack;
 pub mod notebook_dag_status;
+pub mod notebook_lineage;
 pub mod notebook_push_source;
 pub mod notebook_run_cascade;
 pub mod notebook_run_cell;
@@ -71,6 +72,7 @@ pub fn tools() -> Vec<Tool> {
         notebook_context_pack::tool(),
         notebook_catalog::tool(),
         notebook_dag_status::tool(),
+        notebook_lineage::tool(),
         notebook_run_cell::tool(),
         notebook_run_cascade::tool(),
         notebook_set_cell_code_type::tool(),
@@ -299,6 +301,7 @@ mod tests {
         assert!(names.iter().any(|name| name == "notebook_catalog"));
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
         assert!(names.iter().any(|name| name == "notebook_app_init"));
+        assert!(names.iter().any(|name| name == "notebook_lineage"));
         assert!(names.iter().any(|name| name == "notebook_run_cell"));
         assert!(names.iter().any(|name| name == "notebook_run_cascade"));
         assert!(names.iter().any(|name| name == "notebook.edit_cell"));
