@@ -177,8 +177,16 @@ impl NotebookMcpServer {
 impl ServerHandler for NotebookMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
-        info.instructions =
-            Some("Use notebook tools to inspect and operate the active SPUR notebook.".into());
+        info.instructions = Some(
+            "Use notebook tools to inspect and operate the active SPUR notebook. \
+Navigation contract: call notebook_context_pack first to orient; every ref it \
+returns (ds://, cell://, port://) is queryable — notebook_catalog descends the \
+datasource tree one layer per call (catalog -> connection -> table), \
+notebook_lineage walks the DAG upstream/downstream from any ref. Responses \
+carry next_queries suggestions and version-anchored refs; truncated sections \
+name the ref to query deeper."
+                .into(),
+        );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
 
         let mut implementation = Implementation::default();
@@ -231,6 +239,9 @@ impl ServerHandler for NotebookMcpServer {
             }
             "notebook_push_source" => {
                 tools::notebook_push_source::call(&self.deps, arguments).await
+            }
+            "notebook_context_pack" => {
+                tools::notebook_context_pack::call(&self.deps, arguments).await
             }
             "notebook_catalog" => tools::notebook_catalog::call(&self.deps, arguments).await,
             "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
@@ -5877,6 +5888,80 @@ paths:
                 ]
             })
         );
+
+        client.cancel().await.expect("client closes");
+    }
+
+    #[tokio::test]
+    async fn notebook_context_pack_returns_current_notebook_pack() {
+        let tempdir = tempfile::tempdir().expect("notebook fixture dir");
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        let jute_state = Arc::new(State::new());
+        let notebook_root: NotebookRoot =
+            serde_json::from_value(empty_notebook()).expect("empty notebook parses");
+        jute_state
+            .focus_notebook_path(&notebook_path)
+            .load(&notebook_path, notebook_root);
+        jute_state.attach_datasource(test_datasource_entry("sales"));
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        {
+            let mut state = control.state.lock().await;
+            state.current_path = Some(notebook_path);
+        }
+        let deps = Arc::new(ServerDeps {
+            bridge: test_bridge_requester(),
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+            plugins: None,
+        });
+        let server = NotebookMcpServer::new(Arc::clone(&deps));
+        assert!(server
+            .tools()
+            .into_iter()
+            .any(|tool| tool.name == "notebook_context_pack"));
+        let tempdir = tempfile::tempdir().expect("socket dir");
+        let socket_path = tempdir.path().join("notebook.sock");
+        let _server = start_multiplexed_server(&socket_path, deps, control)
+            .await
+            .expect("server starts");
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .expect("client connects");
+        let transport = LengthPrefixedJsonTransport::new(stream);
+        let client = rmcp::model::ClientInfo::default()
+            .serve(transport)
+            .await
+            .expect("client initializes");
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("notebook_context_pack"))
+            .await
+            .expect("context pack succeeds");
+        let structured = result
+            .structured_content
+            .expect("context pack returns structured content");
+
+        assert!(structured["notebook_version"].is_number());
+        for section in [
+            "app",
+            "notebook",
+            "catalog",
+            "dag",
+            "next_queries",
+            "truncated",
+        ] {
+            assert!(
+                structured.get(section).is_some(),
+                "missing context pack section: {section}"
+            );
+        }
 
         client.cancel().await.expect("client closes");
     }
