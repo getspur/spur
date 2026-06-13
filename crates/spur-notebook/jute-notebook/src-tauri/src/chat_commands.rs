@@ -12,7 +12,10 @@ use crate::{
     state::State,
     Error,
 };
-use spur_notebook::sidebar_chat::{scope::resolve_app_scope, types::ChatEvent};
+use spur_notebook::sidebar_chat::{
+    scope::resolve_app_scope,
+    types::{ChatEvent, ChatTurnContext},
+};
 
 /// List agents configured for sidebar chat.
 #[tauri::command]
@@ -27,6 +30,7 @@ pub async fn chat_agents_list(
 pub async fn chat_turn(
     notebook_path: &str,
     prompt: &str,
+    context: Option<ChatTurnContext>,
     agent_name: Option<String>,
     on_event: Channel<ChatEvent>,
     state: tauri::State<'_, Arc<State>>,
@@ -53,8 +57,11 @@ pub async fn chat_turn(
     let turn_chat = Arc::clone(&chat);
     let turn_tx = event_tx.clone();
     let turn_cancel = cancel.clone();
-    let mut turn =
-        tokio::spawn(async move { turn_chat.turn(&scope, &prompt, turn_tx, turn_cancel).await });
+    let mut turn = tokio::spawn(async move {
+        turn_chat
+            .turn(&scope, &prompt, context.as_ref(), turn_tx, turn_cancel)
+            .await
+    });
     let mut permission_rx = state.sidebar_chat.permission_receiver().await;
     let mut event_tx = Some(event_tx);
 

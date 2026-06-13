@@ -15,7 +15,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use super::types::{AppScope, ChatEvent, PermissionOptionView};
+use super::types::{lens_preamble, AppScope, ChatEvent, ChatTurnContext, PermissionOptionView};
 
 const TOOL_SUMMARY_MAX_CHARS: usize = 160;
 
@@ -98,13 +98,15 @@ impl SidebarChat {
         &self,
         scope: &AppScope,
         prompt: &str,
+        context: Option<&ChatTurnContext>,
         tx: mpsc::UnboundedSender<ChatEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         let session_id = self.ensure_session(scope).await?;
+        let prompt = framed_prompt(prompt, context);
         let prompt_request = PromptRequest::new(
             session_id.clone(),
-            vec![ContentBlock::Text(TextContent::new(prompt.to_owned()))],
+            vec![ContentBlock::Text(TextContent::new(prompt))],
         );
 
         let mut notif_rx = {
@@ -271,6 +273,24 @@ impl SidebarChat {
     }
 }
 
+fn framed_prompt(prompt: &str, context: Option<&ChatTurnContext>) -> String {
+    let Some(context) = context else {
+        return prompt.to_owned();
+    };
+    let focused = context
+        .selected_cell_ref
+        .as_ref()
+        .map(|cell_ref| format!("\nFocused cell: {cell_ref}"))
+        .unwrap_or_default();
+
+    format!(
+        "{}\nOrient via notebook_context_pack before answering from notebook state.{}\n\n{}",
+        lens_preamble(context.lens),
+        focused,
+        prompt
+    )
+}
+
 fn tool_call_event(tool_call: ToolCall) -> ChatEvent {
     ChatEvent::ToolCall {
         name: tool_call.title,
@@ -400,6 +420,7 @@ async fn poll_bcast(rx: &mut Option<broadcast::Receiver<SessionNotification>>) -
 #[cfg(test)]
 mod turn {
     use super::*;
+    use crate::sidebar_chat::types::{ChatLens, ChatTurnContext, NotebookViewMode};
     use agent_client_protocol::schema::{
         ContentChunk, InitializeResponse, ListSessionsResponse, McpServer, NewSessionResponse,
         PermissionOption, PermissionOptionKind, RequestPermissionRequest, ToolCall, ToolCallUpdate,
@@ -574,6 +595,15 @@ mod turn {
         events
     }
 
+    fn prompt_text(state: &Arc<StdMutex<FakeState>>) -> String {
+        let state = state.lock().unwrap();
+        let block = state.prompt_requests[0].prompt[0].clone();
+        match block {
+            ContentBlock::Text(text) => text.text,
+            _ => panic!("expected text prompt block"),
+        }
+    }
+
     #[tokio::test]
     async fn ensure_session_initializes_latest_and_creates_first_app_session() {
         let (chat, state) = chat_with_fake();
@@ -673,6 +703,7 @@ mod turn {
         chat.turn(
             &scope("app-a", "/workspace/app-a"),
             "say hi",
+            None,
             tx,
             CancellationToken::new(),
         )
@@ -711,6 +742,7 @@ mod turn {
         chat.turn(
             &scope("app-a", "/workspace/app-a"),
             "say hi",
+            None,
             tx,
             CancellationToken::new(),
         )
@@ -740,14 +772,48 @@ mod turn {
         cancel.cancel();
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        chat.turn(&scope("app-a", "/workspace/app-a"), "say hi", tx, cancel)
-            .await
-            .unwrap();
+        chat.turn(
+            &scope("app-a", "/workspace/app-a"),
+            "say hi",
+            None,
+            tx,
+            cancel,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             state.lock().unwrap().cancel_sessions,
             vec!["session-1".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn turn_prepends_lens_preamble_and_orient_hint() {
+        let (chat, state) = chat_with_fake();
+        let ctx = ChatTurnContext {
+            notebook_path: "/n.ipynb".into(),
+            view_mode: NotebookViewMode::Notebook,
+            lens: ChatLens::NotebookBuilder,
+            selected_cell_ref: Some("cell://a3f1@v7".into()),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        chat.turn(
+            &scope("a", "/w"),
+            "add a chart",
+            Some(&ctx),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let prompt = prompt_text(&state);
+        assert!(prompt.starts_with("Current user perspective: Notebook builder."));
+        assert!(prompt.contains("Orient via notebook_context_pack"));
+        assert!(prompt.contains("Focused cell: cell://a3f1@v7"));
+        assert!(prompt.ends_with("add a chart"));
     }
 
     #[tokio::test]
