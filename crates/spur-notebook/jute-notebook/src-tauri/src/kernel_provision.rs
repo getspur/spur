@@ -204,7 +204,7 @@ async fn ensure_deno_kernelspec_in_dir(spur_jupyter: &std::path::Path) -> Result
 
     let env: serde_json::Map<String, serde_json::Value> = DENO_KERNEL_ENV
         .iter()
-        .map(|(key, value)| ((*key).to_string(), serde_json::json!(value)))
+        .map(|(key, value)| ((*key).to_owned(), serde_json::json!(value)))
         .collect();
     let payload = serde_json::json!({
         "argv": [

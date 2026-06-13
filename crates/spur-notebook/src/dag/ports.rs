@@ -705,9 +705,9 @@ pub fn validate_declared_schema(
 fn data_type_label(data_type: &arrow_schema::DataType) -> String {
     serde_json::to_value(data_type)
         .ok()
-        .and_then(|value| match value {
-            Value::String(value) => Some(value),
-            other => Some(other.to_string()),
+        .map(|value| match value {
+            Value::String(value) => value,
+            other => other.to_string(),
         })
         .unwrap_or_else(|| format!("{data_type:?}"))
 }
