@@ -306,6 +306,8 @@ fn cell_source_text(cell: &Value) -> String {
     }
 }
 
+// pre-existing lint, unrelated to import-manifest fix
+#[allow(clippy::too_many_arguments)]
 fn extract_cell(
     builder: &mut FactBuilder<'_>,
     relative_path: &str,
