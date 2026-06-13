@@ -11805,6 +11805,7 @@ dependencies = [
  "serde_json",
  "spur-acp",
  "spur-core",
+ "spur-graph",
  "spur-rest-table-gateway",
  "tauri",
  "tauri-build",
