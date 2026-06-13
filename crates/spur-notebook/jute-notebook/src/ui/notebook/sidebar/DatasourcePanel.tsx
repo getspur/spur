@@ -37,6 +37,7 @@ import {
 import { DEFAULT_SIDEBAR_PANEL_ID, useSidebar } from "@/stores/sidebar";
 import AddRestApiWizard, {
   type AddRestApiWizardPrefill,
+  type AddRestApiWizardSavedConnectionRecovery,
 } from "@/ui/notebook/AddRestApiWizard";
 
 type DroppedFile = File & {
@@ -49,6 +50,8 @@ type DatasourceGroup = {
   label: string;
   entries: DatasourceEntry[];
 };
+
+type SavedConnectionRecovery = AddRestApiWizardSavedConnectionRecovery;
 
 const DATASOURCE_EXTENSIONS = [
   "csv",
@@ -126,9 +129,8 @@ export default function DatasourcePanel() {
   const [expandedSavedConnection, setExpandedSavedConnection] = useState<
     string | null
   >(null);
-  const [savedConnectionNotice, setSavedConnectionNotice] = useState<
-    string | null
-  >(null);
+  const [savedConnectionRecovery, setSavedConnectionRecovery] =
+    useState<SavedConnectionRecovery | null>(null);
   const [apiModalOpen, setApiModalOpen] = useState(false);
   const [restWizardPrefill, setRestWizardPrefill] =
     useState<AddRestApiWizardPrefill | null>(null);
@@ -193,30 +195,46 @@ export default function DatasourcePanel() {
     }
   }, []);
 
-  const handleAttachSavedConnection = useCallback(async (name: string) => {
-    setError(null);
-    setSavedConnectionNotice(null);
-
-    try {
-      const response = await daemonControl(
-        attachSavedConnectionCommand({ name }),
+  const handleAttachSavedConnection = useCallback(
+    async (name: string) => {
+      const savedConnection = savedConnections.find(
+        (connection) => connection.name === name,
       );
-      const { entry, missingEnvVars } =
-        attachedSavedConnectionFromDaemonControlResponse(response);
-      setEntries((current) => {
-        const nextEntries = upsertDatasourceEntry(current, entry);
-        entriesRef.current = nextEntries;
-        return nextEntries;
-      });
-      if (missingEnvVars.length > 0) {
-        setSavedConnectionNotice(
-          `Open the Add REST API wizard to supply ${missingEnvVars.join(", ")}.`,
+
+      setError(null);
+      setSavedConnectionRecovery(null);
+
+      try {
+        const response = await daemonControl(
+          attachSavedConnectionCommand({ name }),
         );
+        const { entry, missingEnvVars } =
+          attachedSavedConnectionFromDaemonControlResponse(response);
+        setEntries((current) => {
+          const nextEntries = upsertDatasourceEntry(current, entry);
+          entriesRef.current = nextEntries;
+          return nextEntries;
+        });
+        if (missingEnvVars.length > 0) {
+          if (savedConnection) {
+            setSavedConnectionRecovery({
+              connection: savedConnection,
+              missingEnvVars,
+            });
+          } else {
+            setError(
+              `Saved connection "${name}" needs ${missingEnvVars.join(
+                ", ",
+              )}, but it is no longer in the saved list.`,
+            );
+          }
+        }
+      } catch (caught) {
+        setError(errorMessage(caught));
       }
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
-  }, []);
+    },
+    [savedConnections],
+  );
 
   const handleDeleteSavedConnection = useCallback(async (name: string) => {
     setError(null);
@@ -229,7 +247,7 @@ export default function DatasourcePanel() {
       setExpandedSavedConnection((current) =>
         current === name ? null : current,
       );
-      setSavedConnectionNotice(null);
+      setSavedConnectionRecovery(null);
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -369,6 +387,7 @@ export default function DatasourcePanel() {
 
         useSidebar.getState().activatePanel(DEFAULT_SIDEBAR_PANEL_ID);
         setEditingConnection(null);
+        setSavedConnectionRecovery(null);
         setRestWizardPrefill(nextPrefill);
         setApiModalOpen(true);
       })
@@ -468,6 +487,7 @@ export default function DatasourcePanel() {
             onClick={() => {
               setEditingConnection(null);
               setRestWizardPrefill(null);
+              setSavedConnectionRecovery(null);
               setApiModalOpen(true);
             }}
             title="Add datasource"
@@ -548,23 +568,31 @@ export default function DatasourcePanel() {
           <SavedConnectionsSection
             connections={savedConnections}
             expandedName={expandedSavedConnection}
-            notice={savedConnectionNotice}
             onAttach={(name) => void handleAttachSavedConnection(name)}
             onDelete={(name) => void handleDeleteSavedConnection(name)}
             onEdit={(connection) => {
               setRestWizardPrefill(null);
+              setSavedConnectionRecovery(null);
               setEditingConnection(connection);
+            }}
+            onFixAndAttach={(recovery) => {
+              setEditingConnection(null);
+              setRestWizardPrefill(null);
+              setSavedConnectionRecovery(recovery);
+              setApiModalOpen(true);
             }}
             onToggle={(name) =>
               setExpandedSavedConnection((current) =>
                 current === name ? null : name,
               )
             }
+            recovery={savedConnectionRecovery}
           />
         </div>
       </div>
       <AddRestApiWizard
         editConnection={editingConnection}
+        initialSavedConnectionRecovery={savedConnectionRecovery}
         onAttachLocalFile={handleAttachLocalDatasource}
         open={apiModalOpen || editingConnection !== null}
         onPickLocalFile={handlePickLocalDatasource}
@@ -573,6 +601,7 @@ export default function DatasourcePanel() {
           setApiModalOpen(false);
           setEditingConnection(null);
           setRestWizardPrefill(null);
+          setSavedConnectionRecovery(null);
         }}
       />
     </>
@@ -582,29 +611,42 @@ export default function DatasourcePanel() {
 function SavedConnectionsSection({
   connections,
   expandedName,
-  notice,
   onAttach,
   onDelete,
   onEdit,
+  onFixAndAttach,
   onToggle,
+  recovery,
 }: {
   connections: ConnectionTemplate[];
   expandedName: string | null;
-  notice: string | null;
   onAttach: (name: string) => void;
   onDelete: (name: string) => void;
   onEdit: (connection: ConnectionTemplate) => void;
+  onFixAndAttach: (recovery: SavedConnectionRecovery) => void;
   onToggle: (name: string) => void;
+  recovery: SavedConnectionRecovery | null;
 }) {
   return (
     <section className="border-t border-gray-200 pt-3">
       <h3 className="mb-2 truncate text-xs uppercase tracking-wide text-gray-400">
         Saved connections
       </h3>
-      {notice && (
-        <p className="mb-2 break-words rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
-          {notice}
-        </p>
+      {recovery && (
+        <div className="mb-2 space-y-2 break-words rounded border border-amber-200 bg-amber-50 px-2 py-2 text-xs text-amber-800">
+          <p>
+            Missing credentials for {recovery.connection.name}:{" "}
+            {recovery.missingEnvVars.join(", ")}.
+          </p>
+          <button
+            aria-label={`Fix and attach ${recovery.connection.name}`}
+            className="rounded border border-amber-300 bg-white px-2 py-1 font-medium text-amber-900 transition-colors hover:border-amber-500 hover:text-amber-950"
+            onClick={() => onFixAndAttach(recovery)}
+            type="button"
+          >
+            Fix and attach
+          </button>
+        </div>
       )}
       {connections.length === 0 ? (
         <p className="px-1 py-1 text-xs text-gray-400">No saved connections.</p>

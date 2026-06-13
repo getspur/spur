@@ -1244,4 +1244,43 @@ describe("AddRestApiWizard", () => {
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
+
+  test("initial_saved_connection_recovery_retries_attach_with_credentials", async () => {
+    const onClose = vi.fn();
+    const [savedConnection] = savedConnectionsResponse().result.data;
+
+    render(
+      <AddRestApiWizard
+        initialSavedConnectionRecovery={{
+          connection: savedConnection,
+          missingEnvVars: ["STRIPE_API_KEY"],
+        }}
+        open
+        onClose={onClose}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /Saved connections/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /stripe_reporting/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("STRIPE_API_KEY")).toHaveValue("");
+    expect(screen.queryByLabelText("STRIPE_ACCOUNT")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("STRIPE_API_KEY"), {
+      target: { value: "sk_test_recovery" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Use connection" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "attach_saved_connection",
+        name: "stripe_reporting",
+        credentials: [["STRIPE_API_KEY", "sk_test_recovery"]],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
 });
