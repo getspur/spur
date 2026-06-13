@@ -630,6 +630,9 @@ describe("AddRestApiWizard", () => {
       screen.getByRole("button", { name: "Keyword discovery" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Detected: RSSHub route")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Detected: RSSHub route",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Direct URL" }));
     fireEvent.change(screen.getByLabelText("Source URL or keyword"), {
@@ -637,6 +640,9 @@ describe("AddRestApiWizard", () => {
     });
 
     expect(screen.getByText("Detected: Direct RSS URL")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Detected: Direct RSS URL",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Keyword discovery" }));
     fireEvent.change(screen.getByLabelText("Source URL or keyword"), {
@@ -644,6 +650,9 @@ describe("AddRestApiWizard", () => {
     });
 
     expect(screen.getByText("Detected: Keyword discovery")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Detected: Keyword discovery",
+    );
     expect(
       screen.getByText(/Searches seeded RSSHub routes/i),
     ).toBeInTheDocument();

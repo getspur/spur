@@ -2482,6 +2482,8 @@ function RssAttachStep({
   const [sourceInput, setSourceInput] = useState(
     "rsshub://youtube/channel/UCYO_jab_esuFRV4b17AJtAw",
   );
+  const sourceStatusId = useId();
+  const sourceModeDetailId = useId();
   const [selectedRouteId, setSelectedRouteId] = useState(
     RSSHUB_EXAMPLE_ROUTES[0]?.id ?? "",
   );
@@ -2578,7 +2580,11 @@ function RssAttachStep({
       </div>
 
       <section className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div
+          aria-label="RSS source mode"
+          className="grid grid-cols-1 gap-2 sm:grid-cols-3"
+          role="group"
+        >
           {RSS_SOURCE_MODES.map((mode) => (
             <button
               aria-label={mode.label}
@@ -2608,6 +2614,7 @@ function RssAttachStep({
             Source URL or keyword
           </span>
           <input
+            aria-describedby={`${sourceStatusId} ${sourceModeDetailId}`}
             aria-label="Source URL or keyword"
             className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
             onChange={(event) => setSourceInput(event.currentTarget.value)}
@@ -2633,10 +2640,17 @@ function RssAttachStep({
             </div>
           ))}
         </div>
-        <p className="mt-2 text-xs font-medium text-gray-700">
+        <p
+          aria-atomic="true"
+          className="mt-2 text-xs font-medium text-gray-700"
+          id={sourceStatusId}
+          role="status"
+        >
           Detected: {classification.label}
         </p>
-        <p className="mt-1 text-xs text-gray-500">{modeDetail}</p>
+        <p className="mt-1 text-xs text-gray-500" id={sourceModeDetailId}>
+          {modeDetail}
+        </p>
       </section>
 
       <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
@@ -2649,6 +2663,11 @@ function RssAttachStep({
           <div className="max-h-64 space-y-2 overflow-y-auto p-3">
             {RSSHUB_EXAMPLE_ROUTES.map((route) => (
               <button
+                aria-label={[
+                  `Select ${route.name} RSSHub route`,
+                  route.category,
+                  `${route.heat} heat`,
+                ].join(", ")}
                 aria-pressed={selectedRoute.id === route.id}
                 className={clsx(
                   "w-full rounded-lg border bg-white px-3 py-2 text-left transition-colors",
