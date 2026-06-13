@@ -262,6 +262,8 @@ pub enum NodeKind {
     Section,
     Commit,
     McpTool,
+    Cell,
+    Port,
 }
 
 impl NodeKind {
@@ -286,6 +288,8 @@ impl NodeKind {
             Self::Section => "section",
             Self::Commit => "commit",
             Self::McpTool => "mcp_tool",
+            Self::Cell => "cell",
+            Self::Port => "port",
         }
     }
 }
@@ -303,6 +307,10 @@ pub enum RelationKind {
     Extends,
     Links,
     Touches,
+    Produces,
+    Consumes,
+    Binds,
+    Emits,
 }
 
 /// Cardinality of a predicate: how many objects one subject may relate to (and back).
@@ -375,6 +383,26 @@ impl RelationKind {
             },
             Self::Touches => RelationMetadata {
                 inverse_label: Some("touched_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Produces => RelationMetadata {
+                inverse_label: Some("produced_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Consumes => RelationMetadata {
+                inverse_label: Some("consumed_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Binds => RelationMetadata {
+                inverse_label: Some("bound_by"),
+                cardinality: ManyToMany,
+                transitive: false,
+            },
+            Self::Emits => RelationMetadata {
+                inverse_label: Some("emitted_by"),
                 cardinality: ManyToMany,
                 transitive: false,
             },
@@ -1030,6 +1058,33 @@ mod change_kind_tests {
     }
 
     #[test]
+    fn notebook_node_and_relation_kinds_roundtrip() {
+        use serde_json::json;
+
+        for (kind, disc) in [(NodeKind::Cell, "cell"), (NodeKind::Port, "port")] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), json!(disc));
+            assert_eq!(kind.discriminator(), disc);
+            let back: NodeKind = serde_json::from_value(json!(disc)).unwrap();
+            assert_eq!(back, kind);
+        }
+
+        for (rel, disc, inverse) in [
+            (RelationKind::Produces, "produces", "produced_by"),
+            (RelationKind::Consumes, "consumes", "consumed_by"),
+            (RelationKind::Binds, "binds", "bound_by"),
+            (RelationKind::Emits, "emits", "emitted_by"),
+        ] {
+            assert_eq!(serde_json::to_value(rel).unwrap(), json!(disc));
+            let back: RelationKind = serde_json::from_value(json!(disc)).unwrap();
+            assert_eq!(back, rel);
+            let metadata = rel.metadata();
+            assert_eq!(metadata.inverse_label, Some(inverse));
+            assert_eq!(metadata.cardinality, RelationCardinality::ManyToMany);
+            assert!(!metadata.transitive);
+        }
+    }
+
+    #[test]
     fn relation_metadata_declares_algebra() {
         use RelationKind::*;
 
@@ -1042,10 +1097,14 @@ mod change_kind_tests {
         );
         assert_eq!(Imports.metadata().inverse_label, Some("imported_by"));
         assert!(Extends.metadata().transitive);
+        assert_eq!(Produces.metadata().inverse_label, Some("produced_by"));
+        assert_eq!(Consumes.metadata().inverse_label, Some("consumed_by"));
+        assert_eq!(Binds.metadata().inverse_label, Some("bound_by"));
+        assert_eq!(Emits.metadata().inverse_label, Some("emitted_by"));
 
         for relation in [
             Imports, Calls, Constructs, Contains, Implements, Defines, References, Extends, Links,
-            Touches,
+            Touches, Produces, Consumes, Binds, Emits,
         ] {
             let _ = relation.metadata();
         }

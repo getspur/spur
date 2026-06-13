@@ -290,6 +290,7 @@ mod tests {
             app: None,
             daemon: Some(control),
             plugins: None,
+            symbol_index: None,
         }
     }
 
@@ -370,6 +371,7 @@ mod tests {
             app: None,
             daemon: Some(control),
             plugins: None,
+            symbol_index: None,
         };
 
         let result = super::call(&deps, json!({}))

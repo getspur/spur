@@ -2793,6 +2793,10 @@ fn relation_to_str(relation: RelationKind) -> &'static str {
         RelationKind::Extends => "extends",
         RelationKind::Links => "links",
         RelationKind::Touches => "touches",
+        RelationKind::Produces => "produces",
+        RelationKind::Consumes => "consumes",
+        RelationKind::Binds => "binds",
+        RelationKind::Emits => "emits",
     }
 }
 
@@ -2808,6 +2812,10 @@ pub(crate) fn relation_from_str(value: &str) -> anyhow::Result<RelationKind> {
         "extends" => Ok(RelationKind::Extends),
         "links" => Ok(RelationKind::Links),
         "touches" => Ok(RelationKind::Touches),
+        "produces" => Ok(RelationKind::Produces),
+        "consumes" => Ok(RelationKind::Consumes),
+        "binds" => Ok(RelationKind::Binds),
+        "emits" => Ok(RelationKind::Emits),
         _ => bail!("unknown relation `{value}`"),
     }
 }

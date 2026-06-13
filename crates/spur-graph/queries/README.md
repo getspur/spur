@@ -101,8 +101,12 @@ seed of the Tier-0 ontology realization contract
 | calls | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
 | constructs | Y | Y | Y | Y | Y | Y | — | — | — | — |
 | contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| produces | — | — | — | — | — | — | — | — | — | Y |
+| consumes | — | — | — | — | — | — | — | — | — | Y |
+| binds | — | — | — | — | — | — | — | — | — | Y |
+| emits | — | — | — | — | — | — | — | — | — | Y |
 | defines | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| references (HOF) | Y | Y | TODO | TODO | — | Y | — | — | — | — |
+| references (HOF/notebook facts) | Y | Y | TODO | TODO | — | Y | — | — | — | Y |
 | links | — | — | — | — | — | — | — | — | Y | — |
 | implements | Y | Y | Y | Y | — | — | — | — | — | — |
 | extends | Y | Y | Y | Y | — | Y | — | — | — | — |
@@ -117,6 +121,23 @@ statements (`export { ... } from "..."`, `export * from "..."`), both mapped to
 
 HOF references are realized in Rust, Python, and C++ via closed HOF-method
 allowlists in the respective `spur-edges.scm`; TypeScript/Tsx are TODO.
+
+### Notebook Semantic Facts
+
+Jupyter notebook extraction reserves semantic fact relations for slice-3 data
+flow:
+
+- `produces`: a cell writes a named `port://...` value.
+- `consumes`: a cell reads a named `port://...` value.
+- `binds`: a frontend cell binds UI state to a port.
+- `emits`: a frontend cell emits UI events or values to a port.
+- `references`: a cell references a datasource such as `ds://...`.
+
+The schema and gate contract recognize these relations before extraction emits
+them. A later task adds `queries/python/spur-notebook-facts.scm` and
+`queries/typescript/spur-notebook-facts.scm`, registered in
+`MANIFEST_QUERY_BYTES`, to detect actual `spur.put`/`spur.get` calls and table
+references from cell source.
 
 ## Reference Capture Divergence
 

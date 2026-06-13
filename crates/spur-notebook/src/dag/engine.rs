@@ -2811,6 +2811,7 @@ mod tests {
             app: None,
             daemon: None,
             plugins: None,
+            symbol_index: None,
         };
         let runner = RunCellCommandRunner::new(Arc::new(deps));
         let mut engine = ReactiveEngine::new(
