@@ -14,6 +14,13 @@ import {
 } from "@/stores/chat";
 import { useNotebook } from "@/stores/notebook";
 
+import {
+  type ChatLens,
+  EMPTY_STATE_COPY,
+  composerLensLabel,
+  defaultLensFor,
+} from "./lens";
+
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
 type SessionInfo = {
@@ -31,8 +38,7 @@ type AgentInfo = {
 function messageClassName(kind: ChatMessage["kind"]) {
   return clsx(
     "max-w-[92%] rounded-md border px-3 py-2 text-[13px]",
-    kind === "user" &&
-      "ml-auto border-[#1e1f23] bg-[#1e1f23] text-[#fdfdf8]",
+    kind === "user" && "ml-auto border-[#1e1f23] bg-[#1e1f23] text-[#fdfdf8]",
     kind === "assistant" &&
       "mr-auto border-[#bfc1b7] bg-[#fdfdf8] text-[#23251d]",
     kind === "error" && "border-red-200 bg-red-50 text-red-700",
@@ -88,9 +94,13 @@ function sessionsWithSelectedSession(
 
 export default function ChatPanel() {
   const notebook = useNotebook();
-  const [notebookPath, appOpenInfo] = useStore(
+  const [notebookPath, appOpenInfo, viewMode] = useStore(
     notebook.store,
-    useShallow((state) => [state.viewState.path, state.viewState.appOpenInfo]),
+    useShallow((state) => [
+      state.viewState.path,
+      state.viewState.appOpenInfo,
+      state.viewState.viewMode,
+    ]),
   );
   const [prompt, setPrompt] = useState("");
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -99,7 +109,12 @@ export default function ChatPanel() {
   const [agentsLoaded, setAgentsLoaded] = useState(false);
   const [selectedAgentName, setSelectedAgentName] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [lensOverride, setLensOverride] = useState<ChatLens | null>(null);
 
+  const defaultLens = defaultLensFor(viewMode, appOpenInfo);
+  const lens =
+    viewMode === "cells" ? (lensOverride ?? defaultLens) : defaultLens;
+  const emptyStateCopy = EMPTY_STATE_COPY[lens];
   const chatScopeKey =
     appOpenInfo?.app_root ??
     (notebookPath ? `notebook:${notebookPath}` : DEFAULT_CHAT_APP_KEY);
@@ -108,7 +123,6 @@ export default function ChatPanel() {
   const conversation = useChat((state) => state.conversations[chatScopeKey]);
   const scopeLabel = conversation?.scopeLabel ?? chatScopeLabel;
   const scopeHint = appOpenInfo?.app_root ?? scopeHintForPath(notebookPath);
-  const isAppScoped = Boolean(appOpenInfo?.app_root || appOpenInfo?.app_name);
   const messages = conversation?.messages ?? EMPTY_MESSAGES;
   const streaming = conversation?.streaming ?? false;
   const streamingText = conversation?.streamingText ?? "";
@@ -121,7 +135,7 @@ export default function ChatPanel() {
     streaming,
   });
   const composerStatusText = notebookPath
-    ? `Ready in ${scopeLabel}`
+    ? `Ready in ${scopeLabel} - ${composerLensLabel(lens)}`
     : "Save notebook to chat";
   const setScope = useChat((state) => state.setScope);
   const applyEventForScope = useChat((state) => state.applyEventForScope);
@@ -135,6 +149,10 @@ export default function ChatPanel() {
   useEffect(() => {
     setScope(chatScopeKey, chatScopeLabel);
   }, [chatScopeKey, chatScopeLabel, setScope]);
+
+  useEffect(() => {
+    setLensOverride(null);
+  }, [viewMode]);
 
   useEffect(() => {
     let disposed = false;
@@ -383,9 +401,7 @@ export default function ChatPanel() {
         <div className="grid grid-cols-2 gap-2">
           {agents.length > 0 && (
             <label className="min-w-0">
-              <span className="sr-only">
-                Agent
-              </span>
+              <span className="sr-only">Agent</span>
               <select
                 aria-label="Agent"
                 className="h-8 w-full rounded-md border border-[#bfc1b7] bg-[#fdfdf8] px-2 text-xs text-[#23251d] outline-none transition-colors hover:border-[#f54e00] focus:border-[#1e1f23] disabled:cursor-not-allowed disabled:bg-[#eeefe9] disabled:text-[#65675e]"
@@ -403,9 +419,7 @@ export default function ChatPanel() {
           )}
           {sessions.length > 0 && (
             <label className="min-w-0">
-              <span className="sr-only">
-                Session
-              </span>
+              <span className="sr-only">Session</span>
               <select
                 aria-label="Agent session"
                 className="h-8 w-full rounded-md border border-[#bfc1b7] bg-[#fdfdf8] px-2 text-xs text-[#23251d] outline-none transition-colors hover:border-[#f54e00] focus:border-[#1e1f23] disabled:cursor-not-allowed disabled:bg-[#eeefe9] disabled:text-[#65675e]"
@@ -422,20 +436,48 @@ export default function ChatPanel() {
             </label>
           )}
         </div>
+        <div className="flex items-center gap-2 text-[11px] text-[#65675e]">
+          <span className="font-medium uppercase">Lens</span>
+          {viewMode === "cells" ? (
+            <div className="inline-flex rounded-md border border-[#d8d9d1] bg-[#fdfdf8] p-0.5">
+              {(
+                [
+                  ["notebook_builder", "Builder"],
+                  ["notebook_deep_dive", "Deep dive"],
+                ] satisfies Array<[ChatLens, string]>
+              ).map(([nextLens, label]) => (
+                <button
+                  aria-pressed={lens === nextLens}
+                  className={clsx(
+                    "h-6 rounded px-2 text-[11px] font-medium transition-colors",
+                    lens === nextLens
+                      ? "bg-[#23251d] text-[#fdfdf8]"
+                      : "text-[#65675e] hover:bg-[#eeefe9] hover:text-[#23251d]",
+                  )}
+                  key={nextLens}
+                  onClick={() => setLensOverride(nextLens)}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className="inline-flex h-6 items-center rounded-md border border-[#d8d9d1] bg-[#eeefe9] px-2 font-medium text-[#23251d]">
+              {composerLensLabel(lens).replace(/ lens$/, "")}
+            </span>
+          )}
+        </div>
       </header>
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
         {messages.length === 0 && !streamingText ? (
           <section className="rounded-md border border-[#bfc1b7] bg-[#fdfdf8] px-3 py-3">
             <div className="text-sm font-semibold text-[#23251d]">
-              {isAppScoped
-                ? "Ask inside this app context"
-                : "Ask inside this notebook"}
+              {emptyStateCopy.heading}
             </div>
             <p className="mt-1 text-xs leading-5 text-[#65675e]">
-              {isAppScoped
-                ? "The assistant can inspect notebook cells, call app tools, and update panels."
-                : "The assistant can inspect cells, draft edits, and explain outputs."}
+              {emptyStateCopy.copy}
             </p>
           </section>
         ) : (
