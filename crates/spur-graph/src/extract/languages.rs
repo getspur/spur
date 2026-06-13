@@ -429,6 +429,10 @@ pub(crate) fn python_config() -> LanguageConfig {
                 "spur-edges",
                 include_str!("../../queries/python/spur-edges.scm"),
             ),
+            (
+                "spur-notebook-facts",
+                include_str!("../../queries/python/spur-notebook-facts.scm"),
+            ),
         ],
         definition_kind_map: &[
             ("definition.function", NodeKind::Function),
@@ -449,6 +453,10 @@ const TYPESCRIPT_QUERIES: &[(&str, &str)] = &[
         "spur-edges",
         include_str!("../../queries/typescript/spur-edges.scm"),
     ),
+    (
+        "spur-notebook-facts",
+        include_str!("../../queries/typescript/spur-notebook-facts.scm"),
+    ),
 ];
 
 // TSX reuses the TypeScript tags/edges and adds JSX render edges. The JSX
@@ -459,6 +467,10 @@ const TSX_QUERIES: &[(&str, &str)] = &[
     (
         "spur-edges",
         include_str!("../../queries/typescript/spur-edges.scm"),
+    ),
+    (
+        "spur-notebook-facts",
+        include_str!("../../queries/typescript/spur-notebook-facts.scm"),
     ),
     (
         "jsx-edges",
@@ -1926,6 +1938,11 @@ mod gate_contract {
         let definition_captures = compiled_definition_captures(language_label, config);
         if is_container_language(language) {
             relations.insert(relation_predicate(RelationKind::Contains));
+            relations.insert(relation_predicate(RelationKind::Produces));
+            relations.insert(relation_predicate(RelationKind::Consumes));
+            relations.insert(relation_predicate(RelationKind::Binds));
+            relations.insert(relation_predicate(RelationKind::Emits));
+            relations.insert(relation_predicate(RelationKind::References));
             return relations;
         }
         if !definition_captures.is_empty() {
@@ -2016,6 +2033,10 @@ mod gate_contract {
             RelationKind::Extends => "extends",
             RelationKind::Links => "links",
             RelationKind::Touches => "touches",
+            RelationKind::Produces => "produces",
+            RelationKind::Consumes => "consumes",
+            RelationKind::Binds => "binds",
+            RelationKind::Emits => "emits",
         }
     }
 
@@ -2115,7 +2136,14 @@ mod gate_contract {
             ),
             (
                 Language::JupyterNotebook.label(),
-                relation_set(&["contains"]),
+                relation_set(&[
+                    "contains",
+                    "produces",
+                    "consumes",
+                    "binds",
+                    "emits",
+                    "references",
+                ]),
             ),
         ])
     }
