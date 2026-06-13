@@ -38,6 +38,11 @@ import {
 type SourceMode = "catalog" | "saved" | "openapi" | "manual";
 type WizardStep = "source" | "connect" | "tables" | "review";
 type ProviderLoadState = "idle" | "loading" | "loaded";
+type ProviderFulfillmentStatus =
+  | "Ready"
+  | "Candidate"
+  | "Blocked"
+  | "Catalog";
 type CredentialField = {
   key: string;
   label: string;
@@ -285,6 +290,8 @@ export default function AddRestApiWizard({
   );
 
   const selectProvider = useCallback((provider: ProviderSummary) => {
+    if (isBlockedProvider(provider)) return;
+
     setSelectedProvider(provider);
     setSelectedSavedConnection(null);
     setDatasourceName((currentName) =>
@@ -292,7 +299,7 @@ export default function AddRestApiWizard({
     );
     setCredentials({});
     setTablePreview(tablePreviewFromProvider(provider));
-    setSpecText(provider.specUrl ?? "");
+    setSpecText(isReadyProvider(provider) ? "" : (provider.specUrl ?? ""));
     setConnectionOnly(false);
     setPrefillCredentialKeys([]);
     setPrefillManifestToml(null);
@@ -1010,17 +1017,21 @@ function ProviderTile({
   const tier = normalizedTier(provider.tier);
   const tableCount = provider.tables.length;
   const actionCount = provider.actions?.length ?? 0;
-  const ready = isSupportedProvider(provider);
-  const experimental = isExperimentalProvider(provider);
+  const status = providerFulfillmentStatus(provider);
+  const blocked = status === "Blocked";
 
   return (
     <button
+      aria-disabled={blocked}
       className={clsx(
-        "min-w-0 rounded-lg border bg-white p-2.5 text-left transition-colors",
+        "min-w-0 rounded-lg border bg-white p-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:bg-gray-50 disabled:opacity-75",
         selected
           ? "border-indigo-600 bg-indigo-50 ring-1 ring-indigo-600"
-          : "border-gray-200 hover:border-indigo-300",
+          : blocked
+            ? "border-gray-200"
+            : "border-gray-200 hover:border-indigo-300",
       )}
+      disabled={blocked}
       onClick={() => onSelect(provider)}
       type="button"
     >
@@ -1036,18 +1047,23 @@ function ProviderTile({
         <span className="truncate text-[11px] text-gray-400">
           {provider.category}
         </span>
-        {ready ? (
-          <ReadyBadge />
-        ) : experimental ? (
-          <ExperimentalBadge />
-        ) : (
-          <TierBadge tier={tier} />
-        )}
+        <ProviderStatusBadge status={status} tier={tier} />
       </span>
-      {experimental && provider.experimentalSpecCount > 0 && (
-        <span className="mt-2 block truncate text-[11px] font-medium text-amber-700">
-          {provider.experimentalSpecCount} spec candidate
-          {provider.experimentalSpecCount === 1 ? "" : "s"}
+      {(status === "Candidate" || status === "Blocked") &&
+        provider.experimentalSpecCount > 0 && (
+          <span
+            className={clsx(
+              "mt-2 block truncate text-[11px] font-medium",
+              status === "Blocked" ? "text-red-700" : "text-amber-700",
+            )}
+          >
+            {provider.experimentalSpecCount} spec candidate
+            {provider.experimentalSpecCount === 1 ? "" : "s"}
+          </span>
+        )}
+      {status === "Blocked" && provider.blockedReason && (
+        <span className="mt-2 block truncate text-[11px] font-medium text-red-700">
+          {provider.blockedReason}
         </span>
       )}
       {tableCount > 0 && (
@@ -1639,6 +1655,48 @@ function SummaryRow({
   );
 }
 
+function ProviderStatusBadge({
+  status,
+  tier,
+}: {
+  status: ProviderFulfillmentStatus;
+  tier: string;
+}) {
+  if (status === "Ready") {
+    return (
+      <span className="rounded bg-green-50 px-1.5 py-0.5 text-[10px] font-semibold text-green-700">
+        Ready
+      </span>
+    );
+  }
+
+  if (status === "Candidate") {
+    return (
+      <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+        Candidate
+      </span>
+    );
+  }
+
+  if (status === "Blocked") {
+    return (
+      <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">
+        Blocked
+      </span>
+    );
+  }
+
+  if (status === "Catalog") {
+    return (
+      <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-600">
+        Catalog
+      </span>
+    );
+  }
+
+  return <TierBadge tier={tier} />;
+}
+
 function TierBadge({ tier }: { tier: string }) {
   return (
     <span
@@ -1650,22 +1708,6 @@ function TierBadge({ tier }: { tier: string }) {
       )}
     >
       Tier {tier}
-    </span>
-  );
-}
-
-function ReadyBadge() {
-  return (
-    <span className="rounded bg-green-50 px-1.5 py-0.5 text-[10px] font-semibold text-green-700">
-      Ready
-    </span>
-  );
-}
-
-function ExperimentalBadge() {
-  return (
-    <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
-      Experimental
     </span>
   );
 }
@@ -1717,7 +1759,9 @@ function canContinueFromStep({
     }
 
     return Boolean(
-      sourceMode && (sourceMode !== "catalog" || selectedProvider),
+      sourceMode &&
+        (sourceMode !== "catalog" ||
+          (selectedProvider && !isBlockedProvider(selectedProvider))),
     );
   }
 
@@ -1733,7 +1777,11 @@ function canContinueFromStep({
   }
 
   if (stepIndex === 2) {
-    return connectionOnly || tablePreview !== null;
+    return (
+      connectionOnly ||
+      tablePreview !== null ||
+      (selectedProvider !== null && isReadyProvider(selectedProvider))
+    );
   }
 
   return datasourceName.trim().length > 0;
@@ -1868,19 +1916,38 @@ function tablePreviewFromTemplate(
 function tablePreviewFromProvider(
   provider: ProviderSummary,
 ): OpenApiTablePreview | null {
-  if (provider.tables.length === 0) return null;
+  if (!isReadyProvider(provider) || provider.tables.length === 0) return null;
   return { tables: provider.tables };
 }
 
 function isSupportedProvider(provider: ProviderSummary) {
-  return (
-    provider.supportLevel === "supported" &&
-    (provider.tables.length > 0 || (provider.actions?.length ?? 0) > 0)
-  );
+  return isReadyProvider(provider);
 }
 
-function isExperimentalProvider(provider: ProviderSummary) {
-  return provider.supportLevel === "experimental";
+function isReadyProvider(provider: ProviderSummary) {
+  return providerFulfillmentStatus(provider) === "Ready";
+}
+
+function isBlockedProvider(provider: ProviderSummary) {
+  return providerFulfillmentStatus(provider) === "Blocked";
+}
+
+function providerFulfillmentStatus(
+  provider: ProviderSummary,
+): ProviderFulfillmentStatus {
+  switch (provider.fulfillmentStatus) {
+    case "Ready":
+    case "Candidate":
+    case "Blocked":
+    case "Catalog":
+      return provider.fulfillmentStatus;
+    default:
+      break;
+  }
+
+  if (provider.supportLevel === "supported") return "Ready";
+  if (provider.supportLevel === "experimental") return "Candidate";
+  return "Catalog";
 }
 
 function errorMessage(caught: unknown) {

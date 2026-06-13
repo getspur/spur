@@ -8,6 +8,8 @@ import {
   datasourceEntryFromDaemonControlResponse,
   deleteSavedConnectionCommand,
   listSavedConnectionsCommand,
+  listNangoProvidersCommand,
+  nangoProvidersFromDaemonControlResponse,
   pathFromDaemonControlResponse,
   recentEntriesFromDaemonControlResponse,
   savedConnectionsFromDaemonControlResponse,
@@ -133,6 +135,9 @@ describe("daemon control adapter", () => {
   });
 
   test("builds saved connection commands", () => {
+    expect(listNangoProvidersCommand()).toEqual({
+      command: "list_nango_providers",
+    });
     expect(listSavedConnectionsCommand()).toEqual({
       command: "list_saved_connections",
     });
@@ -224,6 +229,93 @@ describe("daemon control adapter", () => {
         credentialEnvVars: ["STRIPE_API_KEY"],
         createdAt: "2026-06-01T12:00:00Z",
         updatedAt: "2026-06-01T12:00:00Z",
+      },
+    ]);
+  });
+
+  test("unwraps nango provider fulfillment statuses", () => {
+    expect(
+      nangoProvidersFromDaemonControlResponse({
+        ok: true,
+        result: {
+          type: "nangoProviders",
+          data: [
+            {
+              name: "asana",
+              providerKey: "asana",
+              displayName: "Asana",
+              category: "Project management",
+              tier: "B",
+              authMode: "OAUTH2",
+              supportLevel: "experimental",
+              fulfillmentStatus: "Candidate",
+              blockedReason: null,
+              specSourceKey: "asana.com",
+              specUrl:
+                "https://api.apis.guru/v2/specs/asana.com/1.0/openapi.json",
+              experimentalSpecCount: 1,
+              baseUrl: "https://app.asana.com/api/1.0",
+              credentialEnvVars: [],
+              tables: [],
+              actions: [],
+            },
+            {
+              name: "blocked-mail",
+              providerKey: "blocked-mail",
+              displayName: "Blocked Mail",
+              category: "Messaging",
+              tier: "C",
+              authMode: "API_KEY",
+              supportLevel: "experimental",
+              fulfillmentStatus: "Blocked",
+              blockedReason: "unsupported_auth",
+              specSourceKey: "blocked.example.com",
+              specUrl: null,
+              experimentalSpecCount: 2,
+              baseUrl: null,
+              credentialEnvVars: [],
+              tables: [],
+              actions: [],
+            },
+          ],
+        },
+      } as never),
+    ).toEqual([
+      {
+        name: "asana",
+        providerKey: "asana",
+        displayName: "Asana",
+        category: "Project management",
+        tier: "B",
+        authMode: "OAUTH2",
+        supportLevel: "experimental",
+        fulfillmentStatus: "Candidate",
+        blockedReason: null,
+        specSourceKey: "asana.com",
+        specUrl: "https://api.apis.guru/v2/specs/asana.com/1.0/openapi.json",
+        experimentalSpecCount: 1,
+        baseUrl: "https://app.asana.com/api/1.0",
+        credentialEnvVars: [],
+        tables: [],
+        actions: [],
+      },
+      {
+        name: "blocked-mail",
+        providerKey: "blocked-mail",
+        displayName: "Blocked Mail",
+        category: "Messaging",
+        tier: "C",
+        authMode: "API_KEY",
+        supportLevel: "experimental",
+        fulfillmentStatus: "Blocked",
+        blockedReason: "unsupported_auth",
+        specSourceKey: "blocked.example.com",
+        specUrl: null,
+        experimentalSpecCount: 2,
+        baseUrl: null,
+        credentialEnvVars: [],
+        tables: [],
+        actions: [],
       },
     ]);
   });
