@@ -4,8 +4,8 @@ mod provider_manifest_harness;
 use wiremock::MockServer;
 
 use provider_manifest_harness::{
-    action_request, mount_oauth_refresh, scan_request, scan_request_with_predicates,
-    ExpectedRequest, ProviderManifestHarness, TypedCell,
+    action_request, connection_config_value, mount_oauth_refresh, scan_request,
+    scan_request_with_predicates, ExpectedRequest, ProviderManifestHarness, TypedCell,
 };
 use spur_rest_table_gateway::adapter::manifest::{AuthCfg, Manifest};
 use spur_rest_table_gateway::adapter::{Predicate, PredicateOp, ScalarValue};
@@ -274,6 +274,197 @@ async fn provider_manifest_harness_scans_simple_auth_promotion_batch() {
     }
 }
 
+#[tokio::test]
+async fn provider_manifest_harness_scans_visible_oauth_promotion_batch() {
+    let provider_cases = [
+        ProviderCase {
+            provider_name: "asana",
+            source_name: "asana",
+            manifest_file: "asana.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://app.asana.com/api/1.0",
+                expected_auth: ExpectedAuth::Bearer,
+                connection_config: &[],
+            },
+            table_name: "workspaces",
+            path: "/workspaces",
+            response: serde_json::json!({
+                "data": [{
+                    "gid": "1200000000000001",
+                    "resource_type": "workspace",
+                    "name": "SPUR Workspace"
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("SPUR Workspace"),
+        },
+        ProviderCase {
+            provider_name: "slack",
+            source_name: "slack",
+            manifest_file: "slack.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://slack.com/api",
+                expected_auth: ExpectedAuth::Bearer,
+                connection_config: &[],
+            },
+            table_name: "users",
+            path: "/users.list",
+            response: serde_json::json!({
+                "ok": true,
+                "cache_ts": 1710000000,
+                "members": [{
+                    "id": "U123",
+                    "team_id": "T123",
+                    "name": "kevin",
+                    "real_name": "Kevin",
+                    "is_bot": false,
+                    "deleted": false
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "real_name",
+            typed_value: TypedCell::Utf8("Kevin"),
+        },
+        ProviderCase {
+            provider_name: "jira",
+            source_name: "jira",
+            manifest_file: "jira.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url:
+                    "https://api.atlassian.com/ex/jira/${connectionConfig.cloudId}/rest/api/3",
+                expected_auth: ExpectedAuth::Bearer,
+                connection_config: &["cloudId"],
+            },
+            table_name: "projects",
+            path: "/project/search",
+            response: serde_json::json!({
+                "values": [{
+                    "id": "10000",
+                    "key": "SPUR",
+                    "name": "SPUR",
+                    "projectTypeKey": "software",
+                    "simplified": true
+                }],
+                "total": 1,
+                "isLast": true
+            }),
+            predicates: Vec::new(),
+            typed_column: "key",
+            typed_value: TypedCell::Utf8("SPUR"),
+        },
+        ProviderCase {
+            provider_name: "notion",
+            source_name: "notion",
+            manifest_file: "notion.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://api.notion.com",
+                expected_auth: ExpectedAuth::Bearer,
+                connection_config: &[],
+            },
+            table_name: "comments",
+            path: "/v1/comments",
+            response: serde_json::json!({
+                "object": "list",
+                "type": "comment",
+                "results": [{
+                    "object": "comment",
+                    "id": "ed4c62f2-c0ad-4081-b6b8-dad025637741",
+                    "discussion_id": "ce18f8c6-ef2a-427f-b416-43531fc7c117",
+                    "created_time": "2022-07-15T21:38:00.000Z",
+                    "last_edited_time": "2022-07-15T21:38:00.000Z",
+                    "created_by": {
+                        "object": "user",
+                        "id": "952f41bb-da96-4d36-9c2e-74924eee8ef1"
+                    }
+                }]
+            }),
+            predicates: vec![Predicate {
+                column: "block_id".to_string(),
+                op: PredicateOp::Eq,
+                value: ScalarValue::Utf8("5d4ca33c-d6b7-4675-93d9-84b70af45d1c".to_string()),
+            }],
+            typed_column: "discussion_id",
+            typed_value: TypedCell::Utf8("ce18f8c6-ef2a-427f-b416-43531fc7c117"),
+        },
+        ProviderCase {
+            provider_name: "autotask",
+            source_name: "autotask",
+            manifest_file: "autotask.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "API_KEY",
+                expected_base_url:
+                    "https://${connectionConfig.subdomain}.autotask.net/atservicesrest",
+                expected_auth: ExpectedAuth::Header,
+                connection_config: &["subdomain", "apiIntegrationCode", "username"],
+            },
+            table_name: "companies",
+            path: "/V1.0/Companies/query",
+            response: serde_json::json!({
+                "items": [{
+                    "id": 1001,
+                    "companyName": "SPUR",
+                    "companyNumber": "ACME-001",
+                    "isActive": true,
+                    "webAddress": "https://example.com"
+                }],
+                "pageDetails": { "count": 1 }
+            }),
+            predicates: vec![Predicate {
+                column: "search".to_string(),
+                op: PredicateOp::Eq,
+                value: ScalarValue::Utf8("{\"filter\":[]}".to_string()),
+            }],
+            typed_column: "company_name",
+            typed_value: TypedCell::Utf8("SPUR"),
+        },
+    ];
+
+    for case in provider_cases {
+        let server = MockServer::start().await;
+        let manifest_toml = read_supported_manifest(case.manifest_file);
+        let mut harness = ProviderManifestHarness::from_toml(case.provider_name, &manifest_toml)
+            .unwrap_or_else(|error| panic!("{} manifest parses: {error}", case.provider_name));
+        assert_manifest_contract(&case, harness.manifest());
+        harness.replace_base_url(case.contract.expected_base_url, &server.uri());
+        let _env = harness.install_env();
+
+        assert_eq!(harness.manifest().source.name, case.source_name);
+
+        let mut request = ExpectedRequest::get(case.path)
+            .with_manifest_auth(harness.manifest(), case.provider_name);
+        for (name, value) in provider_static_header_expectations(&case) {
+            request = request.header(name, value);
+        }
+        for predicate in &case.predicates {
+            let param =
+                manifest_filter_param(harness.manifest(), case.table_name, &predicate.column);
+            request = request.query_param(&param, scalar_value_string(&predicate.value));
+        }
+        request.respond_json(case.response).mount(&server).await;
+
+        let batches = harness
+            .scan(scan_request_with_predicates(
+                case.table_name,
+                case.predicates.clone(),
+            ))
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} {} scan should succeed: {error}",
+                    case.provider_name, case.table_name
+                )
+            });
+
+        harness.assert_one_typed_row(case.table_name, &batches);
+        harness.assert_typed_cell(&batches[0], case.typed_column, 0, case.typed_value);
+    }
+}
+
 struct ProviderCase {
     provider_name: &'static str,
     source_name: &'static str,
@@ -299,6 +490,7 @@ struct ProviderContract {
 enum ExpectedAuth {
     Bearer,
     Basic,
+    Header,
 }
 
 fn assert_manifest_contract(case: &ProviderCase, manifest: &Manifest) {
@@ -315,6 +507,7 @@ fn assert_manifest_contract(case: &ProviderCase, manifest: &Manifest) {
     match (case.contract.expected_auth, &manifest.source.auth) {
         (ExpectedAuth::Bearer, AuthCfg::Bearer { .. }) => {}
         (ExpectedAuth::Basic, AuthCfg::Basic { .. }) => {}
+        (ExpectedAuth::Header, AuthCfg::Header { .. }) => {}
         _ => panic!(
             "{} should map Nango {} auth to {:?}",
             case.provider_name, case.contract.nango_auth_mode, case.contract.expected_auth
@@ -335,6 +528,23 @@ fn assert_manifest_contract(case: &ProviderCase, manifest: &Manifest) {
         "{} {} path should match local Nango/API.guru grounding",
         case.provider_name, case.table_name
     );
+}
+
+fn provider_static_header_expectations(case: &ProviderCase) -> Vec<(&'static str, String)> {
+    match case.provider_name {
+        "notion" => vec![("notion-version", "2022-06-28".to_string())],
+        "autotask" => vec![
+            (
+                "apiintegrationcode",
+                connection_config_value(case.provider_name, "apiIntegrationCode"),
+            ),
+            (
+                "username",
+                connection_config_value(case.provider_name, "username"),
+            ),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 fn read_supported_manifest(file_name: &str) -> String {

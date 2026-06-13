@@ -1,0 +1,26 @@
+# Curated Jira REST manifest for the REST table gateway.
+# Source grounding: Nango jira OAuth2 metadata + Atlassian Jira project search table shape.
+# Auth is explicit BYO access token; hosted OAuth browser flow is intentionally out of scope.
+
+[source]
+name = "jira"
+base_url = "https://api.atlassian.com/ex/jira/${connectionConfig.cloudId}/rest/api/3"
+connection_config = ["cloudId"]
+auth = { scheme = "bearer", env = "JIRA_ACCESS_TOKEN" }
+
+[[table]]
+name = "projects"
+path = "/project/search"
+response_path = "$.values"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+key = { json = "$.key", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+project_type_key = { json = "$.projectTypeKey", type = "Utf8" }
+simplified = { json = "$.simplified", type = "Boolean" }
+
+[table.filters]
+query = { param = "query" }
+start_at = { param = "startAt" }
+max_results = { param = "maxResults" }

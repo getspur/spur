@@ -1071,12 +1071,9 @@ fn nango_provider_summaries() -> Result<Vec<jute::commands::ProviderSummary>, Br
                 } else {
                     (
                         "Blocked",
-                        experimental
-                            .blocked_reason
-                            .clone()
-                            .or_else(|| {
-                                Some(CandidateBlockedReason::UnsupportedAuth.as_str().to_string())
-                            }),
+                        experimental.blocked_reason.clone().or_else(|| {
+                            Some(CandidateBlockedReason::UnsupportedAuth.as_str().to_string())
+                        }),
                     )
                 }
             } else {
@@ -1293,6 +1290,12 @@ fn curated_preset_toml(source: &str) -> Option<&'static str> {
         "algolia" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/algolia.connection.toml"
         )),
+        "asana" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/asana.connection.toml"
+        )),
+        "autotask" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/autotask.connection.toml"
+        )),
         "github" | "github_pat" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/github.connection.toml"
         )),
@@ -1337,6 +1340,15 @@ fn curated_preset_toml(source: &str) -> Option<&'static str> {
         )),
         "google_ads" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/google_ads.connection.toml"
+        )),
+        "jira" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/jira.connection.toml"
+        )),
+        "notion" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/notion.connection.toml"
+        )),
+        "slack" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/slack.connection.toml"
         )),
         _ => None,
     }
@@ -4970,8 +4982,8 @@ paths:
             .iter()
             .find(|provider| provider.name == "asana")
             .expect("asana crosswalk provider is listed");
-        assert_eq!(asana.support_level, "experimental");
-        assert_eq!(asana.fulfillment_status, "Candidate");
+        assert_eq!(asana.support_level, "supported");
+        assert_eq!(asana.fulfillment_status, "Ready");
         assert!(asana.blocked_reason.is_none());
         assert_eq!(asana.experimental_spec_count, 1);
         let trello = providers
@@ -4982,16 +4994,73 @@ paths:
         assert_eq!(trello.fulfillment_status, "Blocked");
         assert_eq!(trello.blocked_reason.as_deref(), Some("unsupported_auth"));
         assert_eq!(trello.experimental_spec_count, 1);
+        let visible_oauth_ready_providers = [
+            (
+                "asana",
+                "https://app.asana.com/api/1.0",
+                &["ASANA_ACCESS_TOKEN"][..],
+                "workspaces",
+            ),
+            (
+                "jira",
+                "https://api.atlassian.com/ex/jira/${connectionConfig.cloudId}/rest/api/3",
+                &["JIRA_ACCESS_TOKEN", "SPUR_CONN_cloudId"][..],
+                "projects",
+            ),
+            (
+                "notion",
+                "https://api.notion.com",
+                &["NOTION_ACCESS_TOKEN"][..],
+                "comments",
+            ),
+            (
+                "slack",
+                "https://slack.com/api",
+                &["SLACK_BOT_TOKEN"][..],
+                "users",
+            ),
+            (
+                "autotask",
+                "https://${connectionConfig.subdomain}.autotask.net/atservicesrest",
+                &[
+                    "AUTOTASK_API_SECRET",
+                    "SPUR_CONN_subdomain",
+                    "SPUR_CONN_apiIntegrationCode",
+                    "SPUR_CONN_username",
+                ][..],
+                "companies",
+            ),
+        ];
+        for (provider_name, base_url, env_vars, table_name) in visible_oauth_ready_providers {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.name == provider_name)
+                .unwrap_or_else(|| panic!("{provider_name} provider is listed"));
+            assert_eq!(provider.provider_key, provider_name);
+            assert_eq!(provider.support_level, "supported");
+            assert_eq!(provider.fulfillment_status, "Ready");
+            assert!(provider.blocked_reason.is_none());
+            assert_eq!(provider.base_url.as_deref(), Some(base_url));
+            assert_eq!(
+                provider
+                    .credential_env_vars
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                env_vars
+            );
+            assert!(
+                provider.tables.iter().any(|table| table.name == table_name),
+                "{provider_name} should expose {table_name} as a ready table"
+            );
+        }
         let youtube = providers
             .iter()
             .find(|provider| provider.name == "youtube")
             .expect("youtube crosswalk provider is listed");
         assert_eq!(youtube.support_level, "experimental");
         assert_eq!(youtube.fulfillment_status, "Blocked");
-        assert_eq!(
-            youtube.blocked_reason.as_deref(),
-            Some("missing_base_url")
-        );
+        assert_eq!(youtube.blocked_reason.as_deref(), Some("missing_base_url"));
         assert_eq!(youtube.experimental_spec_count, 1);
         let github_pat = providers
             .iter()
@@ -5140,7 +5209,7 @@ paths:
             .iter()
             .filter(|provider| provider.support_level == "experimental")
             .collect::<Vec<_>>();
-        assert_eq!(experimental.len(), 77);
+        assert_eq!(experimental.len(), 72);
         assert_eq!(
             providers
                 .iter()
