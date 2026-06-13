@@ -239,13 +239,12 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
                 scored_batches
                     .sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap_or(Ordering::Equal));
 
-                // Mark `seen` only on a decisive outcome: successful apply, or no
-                // proposer candidates (re-running an empty proposer every tick is
-                // wasteful). A failed `apply_mutation` leaves `seen` untouched so
-                // the next tick retries the signal — crucial for transient PM
-                // errors, which would otherwise suppress retry for the process
-                // lifetime. Pairs with the durable `spur:signal-processed:<uuid>`
-                // label written by the executor on commit for cross-tick dedup.
+                // Mark in-memory `seen` only on a decisive watcher outcome:
+                // successful apply, or no proposer candidates. Durable dedup for
+                // mutation-backed signals is owned by `apply_mutation`, which
+                // reserves `spur:signal-processed:<uuid>` before performing ops;
+                // a post-reservation failure consumes the signal rather than
+                // retrying it on a later tick.
                 match scored_batches.into_iter().next() {
                     Some((_score, batch)) => match apply_mutation(
                         self.pm.clone(),
