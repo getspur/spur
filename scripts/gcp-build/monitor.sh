@@ -98,8 +98,43 @@ fi
 echo
 echo "--- sccache ---"
 sccache --show-stats 2>&1 \
-    | grep -E "^(Compile requests( executed)?|Cache (hits|misses|hits rate|read errors|write errors)|Non-cacheable c)" \
-    | head -12
+    | awk '
+        /^(Compile requests( executed)?|Cache (hits|misses|hits rate|read errors|write errors|errors)|Non-cacheable c)/ {
+            print
+            next
+        }
+        /^Multi-level cache levels/ {
+            in_multilevel = 1
+            print
+            next
+        }
+        in_multilevel && /^  L[0-9]+ / {
+            print
+            next
+        }
+        in_multilevel && NF == 0 {
+            in_multilevel = 0
+            print
+            next
+        }
+        /^Cache location/ {
+            in_location = 1
+            print
+            next
+        }
+        in_location && /^  L[0-9]+ / {
+            print
+            next
+        }
+        in_location && NF == 0 {
+            in_location = 0
+            next
+        }
+        /^(Cache size|Max cache size)/ {
+            print
+            next
+        }
+    '
 REMOTE
 }
 
