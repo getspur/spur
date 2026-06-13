@@ -50,6 +50,7 @@ import {
 
 type SourceMode = RestApiSourceModeKey;
 type SourceFamily = DatasourceSourceFamilyKey;
+type RssSourceMode = "direct" | "rsshub" | "keyword";
 type WizardStep = DatasourceWizardStepKey;
 type StepVisualState = "active" | "complete" | "skipped" | "locked";
 type ProviderLoadState = "idle" | "loading" | "loaded";
@@ -58,6 +59,28 @@ type CredentialField = {
   key: string;
   label: string;
   type: "password" | "text";
+};
+type RssRouteParameter = {
+  key: string;
+  label: string;
+  defaultValue: string;
+};
+type RssRouteExample = {
+  title: string;
+  meta: string;
+};
+type RssHubRoute = {
+  id: string;
+  name: string;
+  template: string;
+  category: string;
+  heat: string;
+  view: string;
+  tags: string[];
+  parameters: RssRouteParameter[];
+  previewTitle: string;
+  previewDescription: string;
+  examples: RssRouteExample[];
 };
 
 export type AddRestApiWizardPrefill = {
@@ -105,6 +128,132 @@ const KNOWN_BASE_URLS: Record<string, string> = {
   twilio: "https://api.twilio.com",
   zendesk: "https://{subdomain}.zendesk.com/api/v2",
 };
+
+const RSS_SOURCE_MODES: readonly {
+  key: RssSourceMode;
+  label: string;
+  detail: string;
+}[] = [
+  {
+    key: "direct",
+    label: "Direct URL",
+    detail: "Paste an existing RSS or Atom feed URL.",
+  },
+  {
+    key: "rsshub",
+    label: "RSSHub route",
+    detail: "Browse a route and fill its path parameters.",
+  },
+  {
+    key: "keyword",
+    label: "Keyword discovery",
+    detail: "Search route examples before choosing a feed.",
+  },
+] as const;
+
+const RSSHUB_EXAMPLE_ROUTES: readonly RssHubRoute[] = [
+  {
+    id: "youtube-channel",
+    name: "YouTube Channel",
+    template: "youtube/channel/:id",
+    category: "Video",
+    heat: "278k",
+    view: "Videos",
+    tags: ["video", "parameterized", "top feed"],
+    parameters: [
+      {
+        key: "id",
+        label: "Channel ID",
+        defaultValue: "UCYO_jab_esuFRV4b17AJtAw",
+      },
+    ],
+    previewTitle: "3Blue1Brown uploads",
+    previewDescription:
+      "Validated through RSSHub. Latest entries are fetched with rss_entries(url) before subscription persistence is added.",
+    examples: [
+      {
+        title: "But what is a convolution?",
+        meta: "2 days ago - video - canonical link found",
+      },
+      {
+        title: "A visual guide to transformers",
+        meta: "1 week ago - author and categories parsed",
+      },
+    ],
+  },
+  {
+    id: "github-issues",
+    name: "GitHub Issues",
+    template: "github/issue/:owner/:repo",
+    category: "Programming",
+    heat: "92k",
+    view: "Articles",
+    tags: ["programming", "issues", "radar"],
+    parameters: [
+      { key: "owner", label: "Owner", defaultValue: "spur-dev" },
+      { key: "repo", label: "Repository", defaultValue: "spur" },
+    ],
+    previewTitle: "GitHub Issues radar",
+    previewDescription:
+      "Issues are exposed as feed entries, with links and timestamps available through rss_entries(url).",
+    examples: [
+      {
+        title: "Add RSSHub subscription onboarding",
+        meta: "open issue - labels and author mapped",
+      },
+      {
+        title: "Improve feed preview status states",
+        meta: "updated recently - comments linked",
+      },
+    ],
+  },
+  {
+    id: "reddit-subreddit",
+    name: "Reddit Subreddit",
+    template: "reddit/subreddit/:name",
+    category: "Social",
+    heat: "184k",
+    view: "Social",
+    tags: ["social", "community"],
+    parameters: [{ key: "name", label: "Subreddit", defaultValue: "rust" }],
+    previewTitle: "r/rust posts",
+    previewDescription:
+      "Community posts are fetched through RSSHub and normalized into rss_entries(url).",
+    examples: [
+      {
+        title: "Rust 2026 roadmap discussion",
+        meta: "hot post - comments linked",
+      },
+      {
+        title: "Async ecosystem release notes",
+        meta: "new post - category preserved",
+      },
+    ],
+  },
+  {
+    id: "hackernews-jobs",
+    name: "Hacker News Jobs",
+    template: "hackernews/jobs",
+    category: "News",
+    heat: "61k",
+    view: "Jobs",
+    tags: ["news", "no params"],
+    parameters: [],
+    previewTitle: "Hacker News jobs",
+    previewDescription:
+      "A no-parameter route that can be previewed directly through rss_feed(url).",
+    examples: [
+      {
+        title: "Backend engineer, data systems",
+        meta: "today - source link found",
+      },
+      {
+        title: "Product engineer, notebooks",
+        meta: "yesterday - company metadata parsed",
+      },
+    ],
+  },
+] as const;
 
 export default function AddRestApiWizard({
   editConnection = null,
@@ -2329,36 +2478,322 @@ function RssAttachStep({
   error: string | null;
   onDatasourceNameChange: (value: string) => void;
 }) {
+  const [sourceMode, setSourceMode] = useState<RssSourceMode>("rsshub");
+  const [sourceInput, setSourceInput] = useState(
+    "rsshub://youtube/channel/UCYO_jab_esuFRV4b17AJtAw",
+  );
+  const [selectedRouteId, setSelectedRouteId] = useState(
+    RSSHUB_EXAMPLE_ROUTES[0]?.id ?? "",
+  );
+  const [routeParams, setRouteParams] = useState<Record<string, string>>(() =>
+    defaultRssRouteParams(RSSHUB_EXAMPLE_ROUTES[0]),
+  );
+
+  const selectedRoute =
+    RSSHUB_EXAMPLE_ROUTES.find((route) => route.id === selectedRouteId) ??
+    RSSHUB_EXAMPLE_ROUTES[0];
+  const generatedRssHubUrl = useMemo(
+    () => rssHubUrlForRoute(selectedRoute, routeParams),
+    [routeParams, selectedRoute],
+  );
+  const classification = classifyRssInput(sourceInput);
+  const modeDetail =
+    sourceMode === "keyword"
+      ? "Searches seeded RSSHub routes for the MVP. Live rss_routes browsing can replace this list later."
+      : sourceMode === "direct"
+        ? "Direct URLs map straight into rss_feed(url) and rss_entries(url)."
+        : "Route parameters generate a canonical rsshub:// URL.";
+
+  const selectMode = (mode: RssSourceMode) => {
+    setSourceMode(mode);
+    if (mode === "direct") {
+      setSourceInput("https://example.com/feed.xml");
+    } else if (mode === "keyword") {
+      setSourceInput("rust async release notes");
+    } else {
+      setSourceInput(generatedRssHubUrl);
+    }
+  };
+
+  const selectRoute = (route: RssHubRoute) => {
+    const nextParams = defaultRssRouteParams(route);
+    setSelectedRouteId(route.id);
+    setRouteParams(nextParams);
+    setSourceMode("rsshub");
+    setSourceInput(rssHubUrlForRoute(route, nextParams));
+  };
+
+  const updateRouteParam = (key: string, value: string) => {
+    const nextParams = { ...routeParams, [key]: value };
+    setRouteParams(nextParams);
+    setSourceInput(rssHubUrlForRoute(selectedRoute, nextParams));
+  };
+
   return (
     <div>
-      <h3 className="text-base font-semibold text-gray-950">
-        Add RSS / RSSHub
-      </h3>
-      <p className="mt-1 text-sm text-gray-500">
-        Register the built-in RSS datasource so the notebook can browse RSSHub
-        routes and query direct feed URLs.
-      </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <h3 className="text-base font-semibold text-gray-950">
+            Add RSS / RSSHub
+          </h3>
+          <p className="mt-1 text-sm text-gray-500">
+            Register the built-in RSS datasource, classify the source input,
+            and prepare the feed query shape for direct RSS URLs or RSSHub
+            routes.
+          </p>
+        </div>
+        <label className="w-full sm:w-56">
+          <span className="text-xs font-medium text-gray-600">
+            Datasource name
+          </span>
+          <input
+            aria-label="Datasource name"
+            className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+            onChange={(event) =>
+              onDatasourceNameChange(event.currentTarget.value)
+            }
+            placeholder="rss"
+            value={datasourceName}
+          />
+        </label>
+      </div>
 
-      <label className="mt-4 block">
-        <span className="text-xs font-medium text-gray-600">
-          Datasource name
-        </span>
-        <input
-          aria-label="Datasource name"
-          className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
-          onChange={(event) =>
-            onDatasourceNameChange(event.currentTarget.value)
-          }
-          placeholder="rss"
-          value={datasourceName}
-        />
-      </label>
+      <section className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {RSS_SOURCE_MODES.map((mode) => (
+            <button
+              aria-label={mode.label}
+              aria-pressed={sourceMode === mode.key}
+              className={clsx(
+                "rounded border bg-white px-3 py-2 text-left transition-colors",
+                sourceMode === mode.key
+                  ? "border-indigo-600 bg-indigo-50 ring-1 ring-indigo-600"
+                  : "border-gray-200 hover:border-indigo-300",
+              )}
+              key={mode.key}
+              onClick={() => selectMode(mode.key)}
+              type="button"
+            >
+              <span className="block text-xs font-medium text-gray-950">
+                {mode.label}
+              </span>
+              <span className="mt-1 block text-[11px] leading-4 text-gray-500">
+                {mode.detail}
+              </span>
+            </button>
+          ))}
+        </div>
 
-      <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50">
-        <SummaryRow label="Source">rss</SummaryRow>
-        <SummaryRow label="Catalog">rss_routes</SummaryRow>
-        <SummaryRow label="Feed">rss_feed(url)</SummaryRow>
-        <SummaryRow label="Entries">rss_entries(url)</SummaryRow>
+        <label className="mt-3 block">
+          <span className="text-xs font-medium text-gray-600">
+            Source URL or keyword
+          </span>
+          <input
+            aria-label="Source URL or keyword"
+            className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+            onChange={(event) => setSourceInput(event.currentTarget.value)}
+            value={sourceInput}
+          />
+        </label>
+
+        <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
+          {(["direct", "rsshub", "keyword"] as const).map((kind) => (
+            <div
+              className={clsx(
+                "rounded border px-2 py-2",
+                classification.mode === kind
+                  ? "border-green-200 bg-green-50 text-green-800"
+                  : "border-gray-200 bg-white text-gray-500",
+              )}
+              key={kind}
+            >
+              <div className="font-medium">{rssClassificationLabel(kind)}</div>
+              <div className="mt-0.5 leading-4">
+                {rssClassificationDetail(kind)}
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-2 text-xs font-medium text-gray-700">
+          Detected: {classification.label}
+        </p>
+        <p className="mt-1 text-xs text-gray-500">{modeDetail}</p>
+      </section>
+
+      <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <section className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+          <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
+            <h4 className="text-xs font-medium text-gray-950">
+              RSSHub route cards
+            </h4>
+          </div>
+          <div className="max-h-64 space-y-2 overflow-y-auto p-3">
+            {RSSHUB_EXAMPLE_ROUTES.map((route) => (
+              <button
+                aria-pressed={selectedRoute.id === route.id}
+                className={clsx(
+                  "w-full rounded-lg border bg-white px-3 py-2 text-left transition-colors",
+                  selectedRoute.id === route.id
+                    ? "border-indigo-600 bg-indigo-50 ring-1 ring-indigo-600"
+                    : "border-gray-200 hover:border-indigo-300",
+                )}
+                key={route.id}
+                onClick={() => selectRoute(route)}
+                type="button"
+              >
+                <span className="flex items-start justify-between gap-2">
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium text-gray-950">
+                      {route.name}
+                    </span>
+                    <span className="mt-0.5 block break-all font-mono text-[11px] text-gray-500">
+                      {route.template}
+                    </span>
+                  </span>
+                  <span className="shrink-0 rounded bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700">
+                    {route.heat}
+                  </span>
+                </span>
+                <span className="mt-2 flex flex-wrap gap-1.5">
+                  <span className="rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium text-gray-600">
+                    {route.category}
+                  </span>
+                  {route.tags.map((tag) => (
+                    <span
+                      className="rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[10px] text-gray-500"
+                      key={`${route.id}:${tag}`}
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="space-y-3">
+          <div className="rounded-lg border border-gray-200 bg-white">
+            <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
+              <h4 className="text-xs font-medium text-gray-950">
+                Route setup
+              </h4>
+            </div>
+            <div className="space-y-3 px-3 py-3">
+              <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2">
+                <div className="text-[11px] font-medium uppercase text-gray-400">
+                  Template
+                </div>
+                <div className="mt-1 break-all font-mono text-xs text-gray-950">
+                  {selectedRoute.template}
+                </div>
+              </div>
+              {selectedRoute.parameters.length === 0 ? (
+                <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">
+                  This RSSHub route has no parameters.
+                </div>
+              ) : (
+                selectedRoute.parameters.map((parameter) => (
+                  <label className="block" key={parameter.key}>
+                    <span className="text-xs font-medium text-gray-600">
+                      Parameter: {parameter.key}
+                    </span>
+                    <input
+                      aria-label={`Parameter: ${parameter.key}`}
+                      className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+                      onChange={(event) =>
+                        updateRouteParam(
+                          parameter.key,
+                          event.currentTarget.value,
+                        )
+                      }
+                      value={routeParams[parameter.key] ?? ""}
+                    />
+                    <span className="mt-1 block text-[11px] text-gray-400">
+                      {parameter.label}
+                    </span>
+                  </label>
+                ))
+              )}
+              <div>
+                <div className="text-xs font-medium text-gray-600">
+                  Generated feed URL
+                </div>
+                <div className="mt-1 break-all rounded border border-gray-200 bg-gray-950 px-3 py-2 font-mono text-xs leading-5 text-white">
+                  {generatedRssHubUrl}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-gray-200 bg-white">
+            <div className="flex items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2">
+              <h4 className="text-xs font-medium text-gray-950">
+                Feed status
+              </h4>
+              <span className="rounded bg-green-50 px-2 py-1 text-[11px] font-medium text-green-700">
+                Preview ready
+              </span>
+            </div>
+            <div className="px-3 py-3">
+              <div className="flex gap-3">
+                <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded bg-orange-100 text-xs font-semibold text-orange-700">
+                  RSS
+                </span>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-gray-950">
+                    {selectedRoute.previewTitle}
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-gray-500">
+                    {selectedRoute.previewDescription}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-3 divide-y divide-gray-200 rounded border border-gray-200">
+                {selectedRoute.examples.map((entry) => (
+                  <div className="bg-white px-3 py-2" key={entry.title}>
+                    <div className="text-xs font-medium text-gray-950">
+                      {entry.title}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-gray-500">
+                      {entry.meta}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <section className="rounded-lg border border-gray-200 bg-gray-50">
+          <div className="border-b border-gray-200 px-3 py-2">
+            <h4 className="text-xs font-medium text-gray-950">
+              Subscription settings
+            </h4>
+          </div>
+          <SummaryRow label="Feed">{selectedRoute.previewTitle}</SummaryRow>
+          <SummaryRow label="Source">{classification.label}</SummaryRow>
+          <SummaryRow label="View">{selectedRoute.view}</SummaryRow>
+          <SummaryRow label="Folder">{selectedRoute.category}</SummaryRow>
+          <SummaryRow label="Timeline">show in main feed</SummaryRow>
+        </section>
+
+        <section className="rounded-lg border border-gray-200 bg-gray-50">
+          <div className="border-b border-gray-200 px-3 py-2">
+            <h4 className="text-xs font-medium text-gray-950">
+              Implementation mapping
+            </h4>
+          </div>
+          <SummaryRow label="Attach">add_api_datasource source = rss</SummaryRow>
+          <SummaryRow label="Discovery">rss_routes</SummaryRow>
+          <SummaryRow label="Preview">rss_feed(url)</SummaryRow>
+          <SummaryRow label="Entries">rss_entries(url)</SummaryRow>
+          <SummaryRow label="Persist">
+            backend subscription tables and user state are out of scope here
+          </SummaryRow>
+        </section>
       </div>
 
       <section className="mt-4 overflow-hidden rounded-lg border border-gray-200">
@@ -2386,6 +2821,65 @@ function RssAttachStep({
       {error && <ErrorBanner message={error} />}
     </div>
   );
+}
+
+function classifyRssInput(input: string): {
+  mode: RssSourceMode;
+  label: string;
+} {
+  const trimmed = input.trim();
+  if (/^rsshub:\/\//i.test(trimmed)) {
+    return { mode: "rsshub", label: "RSSHub route" };
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return { mode: "direct", label: "Direct RSS URL" };
+  }
+  return { mode: "keyword", label: "Keyword discovery" };
+}
+
+function rssClassificationLabel(mode: RssSourceMode) {
+  if (mode === "direct") return "Direct RSS";
+  if (mode === "rsshub") return "RSSHub";
+  return "Search";
+}
+
+function rssClassificationDetail(mode: RssSourceMode) {
+  if (mode === "direct") return "http or https feed URL";
+  if (mode === "rsshub") return "rsshub:// route gateway";
+  return "plain text discovery";
+}
+
+function defaultRssRouteParams(
+  route: RssHubRoute | undefined,
+): Record<string, string> {
+  if (!route) return {};
+  return Object.fromEntries(
+    route.parameters.map((parameter) => [
+      parameter.key,
+      parameter.defaultValue,
+    ]),
+  );
+}
+
+function rssHubUrlForRoute(
+  route: RssHubRoute | undefined,
+  params: Record<string, string>,
+) {
+  if (!route) return "rsshub://";
+
+  const path = route.parameters.reduce((currentPath, parameter) => {
+    const value = params[parameter.key]?.trim() || `{${parameter.key}}`;
+    return currentPath.replace(`:${parameter.key}`, encodeRssHubPathPart(value));
+  }, route.template);
+
+  return `rsshub://${path}`;
+}
+
+function encodeRssHubPathPart(value: string) {
+  return value
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
 }
 
 function RssTableFunctionRow({
