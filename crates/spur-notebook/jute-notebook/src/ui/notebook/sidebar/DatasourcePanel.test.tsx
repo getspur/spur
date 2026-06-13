@@ -758,6 +758,10 @@ describe("DatasourcePanel", () => {
     const fixButton = await screen.findByRole("button", {
       name: "Fix and attach stripe_reporting",
     });
+    expect(fixButton).toBeInstanceOf(HTMLButtonElement);
+    expect((fixButton as HTMLButtonElement).disabled).toBe(false);
+    fixButton.focus();
+    expect(document.activeElement).toBe(fixButton);
     expect(
       screen.getByText(/Missing credentials for stripe_reporting/i),
     ).toBeInTheDocument();
