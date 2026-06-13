@@ -261,6 +261,7 @@ mod tests {
                 app: None,
                 daemon: Some(control),
                 plugins: None,
+                symbol_index: None,
             },
             rx,
             temp,
@@ -332,6 +333,7 @@ mod tests {
             app: None,
             daemon: Some(control),
             plugins: None,
+            symbol_index: None,
         };
 
         super::call(&deps, json!({ "port": "sales", "payload": [9] }))

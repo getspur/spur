@@ -160,6 +160,7 @@ mod tests {
             app: None,
             daemon: None,
             plugins: None,
+            symbol_index: None,
         }
     }
 

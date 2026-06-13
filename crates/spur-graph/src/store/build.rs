@@ -102,6 +102,11 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         bytes: include_bytes!("../../queries/python/spur-edges.scm"),
     },
     ManifestQueryBytes {
+        language: "python",
+        query: "spur-notebook-facts",
+        bytes: include_bytes!("../../queries/python/spur-notebook-facts.scm"),
+    },
+    ManifestQueryBytes {
         language: "rust",
         query: "tags",
         bytes: include_bytes!("../../queries/rust/tags.scm"),
@@ -130,6 +135,11 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         language: "typescript",
         query: "spur-edges",
         bytes: include_bytes!("../../queries/typescript/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "typescript",
+        query: "spur-notebook-facts",
+        bytes: include_bytes!("../../queries/typescript/spur-notebook-facts.scm"),
     },
     ManifestQueryBytes {
         language: "typescript",
@@ -614,7 +624,9 @@ fn buckets_from_facts(
             | NodeKind::TypeAlias
             | NodeKind::Macro
             | NodeKind::Section
-            | NodeKind::McpTool => {
+            | NodeKind::McpTool
+            | NodeKind::Cell
+            | NodeKind::Port => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
                 if !current_entries.contains_key(&file_path) {
                     continue;
@@ -2184,6 +2196,10 @@ fn relation_discriminator(relation: RelationKind) -> &'static str {
         RelationKind::Extends => "extends",
         RelationKind::Links => "links",
         RelationKind::Touches => "touches",
+        RelationKind::Produces => "produces",
+        RelationKind::Consumes => "consumes",
+        RelationKind::Binds => "binds",
+        RelationKind::Emits => "emits",
     }
 }
 

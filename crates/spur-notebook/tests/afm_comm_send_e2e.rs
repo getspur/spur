@@ -312,6 +312,7 @@ fn deps_with_state(state: Arc<State>) -> ServerDeps {
         app: None,
         daemon: None,
         plugins: None,
+        symbol_index: None,
     }
 }
 

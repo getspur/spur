@@ -32,6 +32,7 @@ use tokio::{
 };
 use tracing::warn;
 
+use crate::context::symbol_index::SymbolIndex;
 use crate::recents::{self, RecentEntry};
 
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
@@ -75,6 +76,9 @@ pub struct ServerDeps {
     /// and are routed only after the foundation registry has been checked.
     /// `None` for entry points that do not load plugins.
     pub plugins: Option<SharedPluginRegistry>,
+    /// Live in-memory notebook fact index. Populated only by the daemon path;
+    /// standalone and most unit-test entry points leave this as `None`.
+    pub symbol_index: Option<Arc<SymbolIndex>>,
 }
 
 impl ServerDeps {
@@ -91,6 +95,25 @@ impl ServerDeps {
             app,
             daemon,
             plugins,
+            symbol_index: None,
+        }
+    }
+
+    fn new_with_symbol_index(
+        bridge: Arc<dyn BridgeRequester>,
+        state: Option<Arc<State>>,
+        app: Option<tauri::AppHandle>,
+        daemon: Option<NotebookDaemonControl>,
+        plugins: Option<SharedPluginRegistry>,
+        symbol_index: Arc<SymbolIndex>,
+    ) -> Self {
+        Self {
+            bridge,
+            state,
+            app,
+            daemon,
+            plugins,
+            symbol_index: Some(symbol_index),
         }
     }
 
@@ -182,7 +205,8 @@ impl ServerHandler for NotebookMcpServer {
 Navigation contract: call notebook_context_pack first to orient; every ref it \
 returns (ds://, cell://, port://) is queryable — notebook_catalog descends the \
 datasource tree one layer per call (catalog -> connection -> table), \
-notebook_lineage walks the DAG upstream/downstream from any ref. Responses \
+notebook_lineage walks the DAG upstream/downstream from any ref; slice-3 \
+symbol navigation uses notebook_symbol_search then notebook_symbol_refs. Responses \
 carry next_queries suggestions and version-anchored refs; truncated sections \
 name the ref to query deeper."
                 .into(),
@@ -208,6 +232,10 @@ name the ref to query deeper."
         Ok(ListToolsResult::with_all_items(self.merged_tools().await))
     }
 
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "foundation tool dispatch is centralized in one MCP handler"
+    )]
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -246,6 +274,12 @@ name the ref to query deeper."
             "notebook_catalog" => tools::notebook_catalog::call(&self.deps, arguments).await,
             "notebook_dag_status" => tools::notebook_dag_status::call(&self.deps, arguments).await,
             "notebook_lineage" => tools::notebook_lineage::call(&self.deps, arguments).await,
+            "notebook_symbol_search" => {
+                tools::notebook_symbol_search::call(&self.deps, arguments).await
+            }
+            "notebook_symbol_refs" => {
+                tools::notebook_symbol_refs::call(&self.deps, arguments).await
+            }
             "notebook_run_cell" => tools::notebook_run_cell::call(&self.deps, arguments).await,
             "notebook_run_cascade" => {
                 tools::notebook_run_cascade::call(&self.deps, arguments).await
@@ -364,12 +398,17 @@ pub struct NotebookMcpServerHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
     reactive_engine: Option<crate::dag::engine::ReactiveEngineHandle>,
+    symbol_index_updater: Option<JoinHandle<()>>,
 }
 
 impl NotebookMcpServerHandle {
     pub async fn shutdown(mut self) {
         if let Some(engine) = self.reactive_engine.take() {
             engine.shutdown().await;
+        }
+        if let Some(task) = self.symbol_index_updater.take() {
+            task.abort();
+            let _ = task.await;
         }
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -386,6 +425,9 @@ impl NotebookMcpServerHandle {
 impl Drop for NotebookMcpServerHandle {
     fn drop(&mut self) {
         self.reactive_engine.take();
+        if let Some(task) = self.symbol_index_updater.take() {
+            task.abort();
+        }
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -562,6 +604,7 @@ async fn start_server_with_bridge_requester(
         shutdown_tx: Some(shutdown_tx),
         task,
         reactive_engine: None,
+        symbol_index_updater: None,
     })
 }
 
@@ -3848,6 +3891,7 @@ pub async fn start_daemon_server(
         Arc::new(LoopbackDaemonRequester::new(socket_path.clone()));
     let windows: Arc<dyn DaemonWindowOps> = Arc::new(TauriDaemonWindowOps { app });
     let plugins: SharedPluginRegistry = Arc::new(tokio::sync::RwLock::new(PluginRegistry::new()));
+    let symbol_index = SymbolIndex::shared();
     let control = NotebookDaemonControl::new_with_parts_and_app_and_plugins(
         lifecycle_bridge,
         Arc::clone(&requester),
@@ -3857,12 +3901,13 @@ pub async fn start_daemon_server(
         Some(Arc::clone(&plugins)),
         None,
     );
-    let deps = Arc::new(ServerDeps::new(
+    let deps = Arc::new(ServerDeps::new_with_symbol_index(
         requester,
-        Some(state),
+        Some(Arc::clone(&state)),
         Some(app_for_deps),
         Some(control.clone()),
         Some(plugins),
+        Arc::clone(&symbol_index),
     ));
     let reactive_engine = match crate::dag::engine::spawn_reactive_engine(
         Arc::clone(&deps),
@@ -3879,6 +3924,7 @@ pub async fn start_daemon_server(
     };
     let mut handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
     handle.reactive_engine = reactive_engine;
+    handle.symbol_index_updater = Some(SymbolIndex::spawn_updater(symbol_index, state));
     control.restore_last_open_notebook().await;
     Ok((handle, control))
 }
@@ -3922,6 +3968,7 @@ async fn start_multiplexed_server(
         shutdown_tx: Some(shutdown_tx),
         task,
         reactive_engine: None,
+        symbol_index_updater: None,
     })
 }
 
@@ -5775,6 +5822,7 @@ paths:
             app: None,
             daemon: Some(control.clone()),
             plugins: None,
+            symbol_index: None,
         });
         let tempdir = tempfile::tempdir().expect("socket dir");
         let socket_path = tempdir.path().join("notebook.sock");
@@ -5840,6 +5888,7 @@ paths:
             app: None,
             daemon: Some(control.clone()),
             plugins: None,
+            symbol_index: None,
         });
         let server = NotebookMcpServer::new(Arc::clone(&deps));
         assert!(server
@@ -5921,6 +5970,7 @@ paths:
             app: None,
             daemon: Some(control.clone()),
             plugins: None,
+            symbol_index: None,
         });
         let server = NotebookMcpServer::new(Arc::clone(&deps));
         assert!(server
@@ -5984,6 +6034,7 @@ paths:
             app: None,
             daemon: Some(control.clone()),
             plugins: None,
+            symbol_index: None,
         });
         let server = NotebookMcpServer::new(Arc::clone(&deps));
         assert!(server
@@ -6040,6 +6091,7 @@ paths:
             app: None,
             daemon: None,
             plugins: None,
+            symbol_index: None,
         };
 
         let result = tools::list_datasources::call(&deps, json!({}))
@@ -6361,6 +6413,7 @@ paths:
             app: None,
             daemon: Some(control.clone()),
             plugins: None,
+            symbol_index: None,
         });
         let _server = start_multiplexed_server(&socket_path, deps, control.clone()).await?;
         let mut events = jute_state.event_tx.subscribe();
@@ -7073,6 +7126,7 @@ if __name__ == "__main__":
             app: None,
             daemon: Some(control.clone()),
             plugins: Some(Arc::clone(&plugins)),
+            symbol_index: None,
         });
         let _server = start_multiplexed_server(&socket_path, deps, control.clone())
             .await
@@ -7285,6 +7339,8 @@ if __name__ == "__main__":
 
         for expected in [
             "notebook_catalog",
+            "notebook_symbol_search",
+            "notebook_symbol_refs",
             "notebook.venv_list",
             "notebook.venv_create",
             "notebook.venv_delete",
