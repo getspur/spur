@@ -614,6 +614,65 @@ describe("AddRestApiWizard", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
+  test("rss_workflow_classifies_direct_rsshub_and_keyword_inputs", () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /RSS \/ RSSHub/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      screen.getByRole("button", { name: "Direct URL" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "RSSHub route" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Keyword discovery" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Detected: RSSHub route")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Direct URL" }));
+    fireEvent.change(screen.getByLabelText("Source URL or keyword"), {
+      target: { value: "https://example.com/feed.xml" },
+    });
+
+    expect(screen.getByText("Detected: Direct RSS URL")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Keyword discovery" }));
+    fireEvent.change(screen.getByLabelText("Source URL or keyword"), {
+      target: { value: "rust async release notes" },
+    });
+
+    expect(screen.getByText("Detected: Keyword discovery")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Searches seeded RSSHub routes/i),
+    ).toBeInTheDocument();
+  });
+
+  test("rss_workflow_selects_route_and_shows_generated_url_preview_and_mapping", () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /RSS \/ RSSHub/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /GitHub Issues/i }));
+
+    expect(screen.getByLabelText("Parameter: owner")).toHaveValue("spur-dev");
+    expect(screen.getByLabelText("Parameter: repo")).toHaveValue("spur");
+    expect(
+      screen.getByText("rsshub://github/issue/spur-dev/spur"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Feed status")).toBeInTheDocument();
+    expect(screen.getAllByText("GitHub Issues radar").length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getAllByText("rss_routes").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("rss_feed(url)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("rss_entries(url)").length).toBeGreaterThan(0);
+    expect(screen.getByText("Subscription settings")).toBeInTheDocument();
+    expect(screen.getAllByText("Programming").length).toBeGreaterThan(0);
+  });
+
   test("file_family_renders_locate_auth_inspect_and_attach_details", () => {
     renderWizard();
 
