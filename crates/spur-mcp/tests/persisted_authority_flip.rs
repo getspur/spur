@@ -791,12 +791,13 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
         )
         .await
         .expect("seed completion audit");
+    let signal_id = Uuid::new_v4();
     pm.advanced()
         .expect("advanced beads surface")
         .add_comment(
             &task_id,
             &signals::encode_comment(&WorkerSignal::ScopeDrift {
-                signal_id: Uuid::new_v4(),
+                signal_id,
                 severity: 0.82,
                 reason: "auth refactor pulls in 4 new subsystems".into(),
                 estimated_subtasks: Some(3),
@@ -812,21 +813,30 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
         common::server_builder::pro_feature_gate(),
     );
     watcher.tick_once().await.expect("tick_once");
-    pm.update_issue(
-        &task_id,
-        spur_pm::IssueUpdate {
-            remove_labels: vec![labels::READY_FOR_REVIEW.to_string()],
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("clear stale ready-for-review label on superseded parent");
 
     let issue = pm.get_issue(&task_id).await.expect("get issue");
-    assert!(issue
-        .labels
-        .iter()
-        .any(|label| label.starts_with("spur:signal-processed:")));
+    assert!(
+        issue
+            .labels
+            .contains(&spur_mcp::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()),
+        "scope_drift must route to brain escalation; labels={:?}",
+        issue.labels
+    );
+    assert!(
+        issue
+            .labels
+            .contains(&labels::signal_processed_label(&signal_id)),
+        "scope_drift escalation must mark the signal processed; labels={:?}",
+        issue.labels
+    );
+    assert!(
+        !issue
+            .labels
+            .iter()
+            .any(|label| label == labels::READY_FOR_REVIEW || label == "ready-for-review"),
+        "scope_drift escalation must remove ready-for-review labels; labels={:?}",
+        issue.labels
+    );
 
     let projected = spur_mcp::plan::projector::project_plan_from_beads(
         pm.as_ref(),
@@ -834,24 +844,23 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
         common::server_builder::pro_feature_gate().as_ref(),
     )
     .await
-    .expect("projected split plan");
-    assert!(
-        projected.tasks.len() > 1,
-        "split children should reappear after restart projection"
-    );
-    let child = projected
+    .expect("projected escalated plan");
+    let task = projected
         .tasks
         .iter()
-        .find(|task| task.spec.issue_id.as_deref() != Some(task_id.as_str()))
-        .expect("split child");
+        .find(|task| task.spec.issue_id.as_deref() == Some(task_id.as_str()))
+        .expect("projected original task");
     assert_eq!(
-        child.spec.context_files,
+        task.spec.context_files,
         vec!["docs/spec.md".to_string(), "src/lib.rs".to_string()]
     );
-    assert!(
-        matches!(child.status, PlanTaskStatus::Ready),
-        "split child should be dispatchable after parent supersession"
-    );
+    match &task.status {
+        PlanTaskStatus::EscalatedToBrain { last_error } => assert_eq!(
+            last_error,
+            "scope_drift severity=0.82: auth refactor pulls in 4 new subsystems (estimated_subtasks=3)"
+        ),
+        other => panic!("expected projected task to be EscalatedToBrain, got {other:?}"),
+    }
 }
 
 #[tokio::test]
