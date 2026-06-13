@@ -37,6 +37,42 @@ pub struct PermissionOptionView {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatLens {
+    NotebookBuilder,
+    NotebookDeepDive,
+    DagOps,
+    AppProduct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotebookViewMode {
+    Notebook,
+    Dag,
+    App,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTurnContext {
+    pub notebook_path: String,
+    pub view_mode: NotebookViewMode,
+    pub lens: ChatLens,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_cell_ref: Option<String>,
+}
+
+pub fn lens_preamble(lens: ChatLens) -> &'static str {
+    match lens {
+        ChatLens::NotebookBuilder => "Current user perspective: Notebook builder. Help the user grow and improve this notebook; prefer concrete next cells and executable edits.",
+        ChatLens::NotebookDeepDive => "Current user perspective: Notebook deep dive. Explain what the notebook does and how cells, outputs, and assumptions connect.",
+        ChatLens::DagOps => "Current user perspective: DAG operations. Reason about failed, stale, and blocked nodes and recomputation order; start from the failing ref and walk lineage upstream.",
+        ChatLens::AppProduct => "Current user perspective: App product. Review the rendered app as a product; suggest workflow, copy, and interaction improvements.",
+    }
+}
+
 /// The scope a session is created with. `mcp_servers`/`skill` come from the app.
 #[derive(Debug, Clone)]
 pub struct AppScope {
@@ -144,5 +180,15 @@ mod tests {
 
         let back: SessionRef = serde_json::from_value(json).unwrap();
         assert_eq!(back, session_ref);
+    }
+
+    #[test]
+    fn chat_turn_context_round_trips_camel_case() {
+        let json = r#"{"notebookPath":"/n.ipynb","viewMode":"dag","lens":"dag_ops","selectedCellRef":"cell://a3f1@v7"}"#;
+
+        let ctx: ChatTurnContext = serde_json::from_str(json).unwrap();
+
+        assert_eq!(ctx.lens, ChatLens::DagOps);
+        assert_eq!(serde_json::to_value(&ctx).unwrap()["viewMode"], "dag");
     }
 }
