@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -615,9 +616,12 @@ describe("DatasourcePanel", () => {
       }),
     );
     expect(
-      await screen.findByText(
-        "Open the Add REST API wizard to supply STRIPE_API_KEY.",
-      ),
+      await screen.findByText(/Missing credentials for stripe_reporting/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Fix and attach stripe_reporting",
+      }),
     ).toBeInTheDocument();
 
     fireEvent.click(
@@ -632,6 +636,74 @@ describe("DatasourcePanel", () => {
         name: "stripe_reporting",
       }),
     );
+  });
+
+  test("missing_saved_connection_credentials_open_fix_and_attach_recovery", async () => {
+    const savedConnection = savedConnectionTemplate();
+    daemonControlMock.mockImplementation((command: DaemonControlCommand) => {
+      if (command.command === "list_saved_connections") {
+        return Promise.resolve({
+          ok: true,
+          result: { type: "savedConnections", data: [savedConnection] },
+        });
+      }
+
+      if (command.command === "attach_saved_connection") {
+        return Promise.resolve({
+          ok: true,
+          result: {
+            type: "attachedSavedConnection",
+            data: {
+              entry: datasourceEntry({
+                name: command.name,
+                path: `api://${command.name}`,
+                kind: "api_tables",
+                group: "API",
+                columns: [],
+                rowCount: null,
+                tables: savedConnection.tables,
+              }),
+              missing_env_vars: ["STRIPE_API_KEY"],
+            },
+          },
+        });
+      }
+
+      return Promise.resolve(defaultDaemonResponse(command));
+    });
+
+    render(<DatasourcePanel />);
+
+    expect(await screen.findByText("stripe_reporting")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Attach saved connection stripe_reporting",
+      }),
+    );
+
+    const fixButton = await screen.findByRole("button", {
+      name: "Fix and attach stripe_reporting",
+    });
+    expect(
+      screen.getByText(/Missing credentials for stripe_reporting/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(fixButton);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Add datasource",
+    });
+    expect(
+      within(dialog).getByRole("button", { name: /Saved connections/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(dialog).getByRole("button", { name: /stripe_reporting/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(within(dialog).getByLabelText("STRIPE_API_KEY")).toBeInTheDocument();
+    expect(
+      within(dialog).queryByLabelText("STRIPE_ACCOUNT"),
+    ).not.toBeInTheDocument();
   });
 
   test("saved_connection_details_wrap_long_tokens_in_compact_sidebar", async () => {

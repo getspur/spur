@@ -70,8 +70,14 @@ export type AddRestApiWizardPrefill = {
   step: "connect";
 };
 
+export type AddRestApiWizardSavedConnectionRecovery = {
+  connection: ConnectionTemplate;
+  missingEnvVars: string[];
+};
+
 export type AddRestApiWizardProps = {
   editConnection?: ConnectionTemplate | null;
+  initialSavedConnectionRecovery?: AddRestApiWizardSavedConnectionRecovery | null;
   onAttachLocalFile?: (path: string) => Promise<void> | void;
   onClose: () => void;
   onPickLocalFile?: () => Promise<string | null> | string | null;
@@ -101,6 +107,7 @@ const KNOWN_BASE_URLS: Record<string, string> = {
 
 export default function AddRestApiWizard({
   editConnection = null,
+  initialSavedConnectionRecovery = null,
   onAttachLocalFile,
   onClose,
   onPickLocalFile,
@@ -201,6 +208,41 @@ export default function AddRestApiWizard({
       return;
     }
 
+    if (initialSavedConnectionRecovery) {
+      const recoveryCredentials = credentialsFromKeys(
+        initialSavedConnectionRecovery.missingEnvVars,
+      );
+
+      setStepIndex(0);
+      setSourceFamily("rest_api");
+      setSourceMode("saved");
+      setProviders([]);
+      setProviderLoadState("idle");
+      setSavedConnections([initialSavedConnectionRecovery.connection]);
+      setSavedConnectionLoadState("loaded");
+      setProviderSearch("");
+      setProviderCategory("All");
+      setSelectedProvider(null);
+      setSelectedSavedConnection(initialSavedConnectionRecovery.connection);
+      setDatasourceName("");
+      setCredentials({});
+      setSavedConnectionCredentials(recoveryCredentials);
+      setMissingSavedCredentialKeys(
+        initialSavedConnectionRecovery.missingEnvVars,
+      );
+      setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
+      setSpecText("");
+      setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
+      setTablePreview(null);
+      setConnectionOnly(false);
+      setPendingLocalFilePick(false);
+      setPendingPreview(false);
+      setPendingAdd(false);
+      setError(null);
+      return;
+    }
+
     if (prefill) {
       setStepIndex(2);
       setSourceFamily("rest_api");
@@ -253,7 +295,7 @@ export default function AddRestApiWizard({
     setPendingPreview(false);
     setPendingAdd(false);
     setError(null);
-  }, [editConnection, open, prefill]);
+  }, [editConnection, initialSavedConnectionRecovery, open, prefill]);
 
   useEffect(() => {
     if (!open) return;
@@ -2556,6 +2598,10 @@ function canContinueFromStep({
   }
 
   return datasourceName.trim().length > 0;
+}
+
+function credentialsFromKeys(keys: string[]): Record<string, string> {
+  return Object.fromEntries(keys.map((key) => [key, ""]));
 }
 
 function credentialFieldsForProvider(
