@@ -1072,9 +1072,6 @@ mod edge_rows_test {
 }
 
 fn write_nodes(path: &Path, rows: &[NodeRow]) -> anyhow::Result<()> {
-    let mut rows = rows.to_vec();
-    rows.sort_by(|a, b| a.symbol.stable_symbol_id.cmp(&b.symbol.stable_symbol_id));
-
     write_table(
         path,
         r"
@@ -4114,9 +4111,9 @@ mod parquet_temporal_test {
     }
 
     #[test]
-    fn parquet_writer_emits_node_stats_bloom_filter_and_sorted_ids() -> anyhow::Result<()> {
+    fn parquet_writer_emits_node_stats_bloom_filter_and_clusters_paths() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let mut artifact = empty_artifact("node-stats-bloom-sort");
+        let mut artifact = empty_artifact("node-stats-bloom-cluster-paths");
         artifact.symbols = vec![
             GraphSymbolArtifact {
                 stable_symbol_id: "sym-z".to_owned(),
@@ -4162,23 +4159,23 @@ mod parquet_temporal_test {
         )?;
         let reader = SerializedFileReader::new(File::open(dir.join("nodes.parquet"))?)?;
         let metadata = reader.metadata();
-        let stable_symbol_id_column = metadata.row_group(0).column(0);
-        let stats = stable_symbol_id_column
+        let file_path_column = metadata.row_group(0).column(2);
+        let stats = file_path_column
             .statistics()
-            .expect("stable_symbol_id should have row-group statistics");
+            .expect("file_path should have row-group statistics");
 
         assert!(stats.min_bytes_opt().is_some());
         assert!(stats.max_bytes_opt().is_some());
-        assert!(stable_symbol_id_column.bloom_filter_offset().is_some());
+        assert!(file_path_column.bloom_filter_offset().is_some());
 
         let decoded = read_artifact_parquet(&dir)?;
-        let stable_symbol_ids = decoded
+        let file_paths = decoded
             .symbols
             .iter()
-            .map(|symbol| symbol.stable_symbol_id.as_str())
+            .map(|symbol| symbol.file_path.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(stable_symbol_ids, vec!["sym-a", "sym-m", "sym-z"]);
+        assert_eq!(file_paths, vec!["src/a.rs", "src/m.rs", "src/z.rs"]);
         Ok(())
     }
 
