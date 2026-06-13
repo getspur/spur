@@ -73,6 +73,7 @@ pub(crate) fn extract_notebook_file(
     for (idx, cell) in cells.iter().enumerate() {
         let cell_source = cell_source_text(cell);
         let cell_id = cell_id(cell, idx);
+        let cell_identity_path = cell_identity_path(&relative_path, &cell_id);
         let cell_node = add_cell_node(
             builder,
             &relative_path,
@@ -94,6 +95,7 @@ pub(crate) fn extract_notebook_file(
             extract_cell(
                 builder,
                 &relative_path,
+                &cell_identity_path,
                 file_id,
                 cell_node,
                 Language::Markdown,
@@ -112,6 +114,7 @@ pub(crate) fn extract_notebook_file(
                 extract_cell(
                     builder,
                     &relative_path,
+                    &cell_identity_path,
                     file_id,
                     cell_node,
                     language,
@@ -137,6 +140,10 @@ fn cell_id(cell: &Value, idx: usize) -> String {
         .map(str::to_owned)
         // nbformat 4.5 requires cell ids, but older notebooks may not have them.
         .unwrap_or_else(|| format!("cell-{idx}"))
+}
+
+fn cell_identity_path(relative_path: &str, cell_id: &str) -> String {
+    format!("{relative_path}#cell:{cell_id}")
 }
 
 fn add_cell_node(
@@ -302,6 +309,7 @@ fn cell_source_text(cell: &Value) -> String {
 fn extract_cell(
     builder: &mut FactBuilder<'_>,
     relative_path: &str,
+    identity_relative_path: &str,
     file_id: FileId,
     parent_node: NodeId,
     language: Language,
@@ -317,7 +325,7 @@ fn extract_cell(
         return extract_markdown_contents(
             builder,
             &config,
-            relative_path,
+            identity_relative_path,
             file_id,
             parent_node,
             source,
@@ -344,7 +352,7 @@ fn extract_cell(
         builder,
         language.label(),
         &config,
-        relative_path,
+        identity_relative_path,
         file_id,
         parent_node,
         source,
@@ -625,6 +633,33 @@ mod tests {
         let labels: Vec<&str> = cell_nodes.iter().map(|node| node.label.as_str()).collect();
         assert!(labels.contains(&"cell://a3f1"));
         assert!(labels.contains(&"cell://b2c9"));
+    }
+
+    #[test]
+    fn same_cell_local_symbol_offsets_get_distinct_stable_keys() {
+        let source = "const callTool = (globalThis as any).callTool;\n";
+        let nb = serde_json::to_vec(&serde_json::json!({
+            "nbformat": 4, "nbformat_minor": 5, "metadata": {},
+            "cells": [
+                {"cell_type":"code","id":"preview","source":[source],"metadata":{"spur":{"code_type":"javascript"}},"outputs":[],"execution_count":null},
+                {"cell_type":"code","id":"controls","source":[source],"metadata":{"spur":{"code_type":"javascript"}},"outputs":[],"execution_count":null}
+            ]
+        }))
+        .unwrap();
+        let mut builder = FactBuilder::new(Path::new("/nb"));
+        extract_notebook_file(&mut builder, Path::new("/nb/app.ipynb"), &nb).unwrap();
+        let facts = builder.into_facts();
+        let call_tool_constants: Vec<_> = facts
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Constant && node.label == "callTool")
+            .collect();
+
+        assert_eq!(call_tool_constants.len(), 2);
+        assert_ne!(
+            call_tool_constants[0].stable_key,
+            call_tool_constants[1].stable_key
+        );
     }
 
     #[test]
