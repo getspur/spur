@@ -51,12 +51,9 @@ import {
 type SourceMode = RestApiSourceModeKey;
 type SourceFamily = DatasourceSourceFamilyKey;
 type WizardStep = DatasourceWizardStepKey;
+type StepVisualState = "active" | "complete" | "skipped" | "locked";
 type ProviderLoadState = "idle" | "loading" | "loaded";
-type ProviderFulfillmentStatus =
-  | "Ready"
-  | "Candidate"
-  | "Blocked"
-  | "Catalog";
+type ProviderFulfillmentStatus = "Ready" | "Candidate" | "Blocked" | "Catalog";
 type CredentialField = {
   key: string;
   label: string;
@@ -73,8 +70,14 @@ export type AddRestApiWizardPrefill = {
   step: "connect";
 };
 
+export type AddRestApiWizardSavedConnectionRecovery = {
+  connection: ConnectionTemplate;
+  missingEnvVars: string[];
+};
+
 export type AddRestApiWizardProps = {
   editConnection?: ConnectionTemplate | null;
+  initialSavedConnectionRecovery?: AddRestApiWizardSavedConnectionRecovery | null;
   onAttachLocalFile?: (path: string) => Promise<void> | void;
   onClose: () => void;
   onPickLocalFile?: () => Promise<string | null> | string | null;
@@ -84,6 +87,9 @@ export type AddRestApiWizardProps = {
 
 const STEPS: readonly { key: WizardStep; label: string; detail: string }[] =
   DATASOURCE_WIZARD_STEPS;
+const ALL_STEP_INDEXES = STEPS.map((_, index) => index);
+const REST_API_STEP_INDEXES = [0, 2, 3, 4] as const;
+const RSS_STEP_INDEXES = [0, 4] as const;
 
 const KNOWN_BASE_URLS: Record<string, string> = {
   airtable: "https://api.airtable.com",
@@ -101,6 +107,7 @@ const KNOWN_BASE_URLS: Record<string, string> = {
 
 export default function AddRestApiWizard({
   editConnection = null,
+  initialSavedConnectionRecovery = null,
   onAttachLocalFile,
   onClose,
   onPickLocalFile,
@@ -151,10 +158,30 @@ export default function AddRestApiWizard({
   const [pendingPreview, setPendingPreview] = useState(false);
   const [pendingAdd, setPendingAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasUserChanges, setHasUserChanges] = useState(false);
+  const [confirmingClose, setConfirmingClose] = useState(false);
   const dialogTitleId = useId();
+  const closeConfirmationTitleId = useId();
+  const closeConfirmationDescriptionId = useId();
+
+  const markDirty = useCallback(() => {
+    setHasUserChanges(true);
+  }, []);
+
+  const requestClose = useCallback(() => {
+    if (hasUserChanges) {
+      setConfirmingClose(true);
+      return;
+    }
+
+    onClose();
+  }, [hasUserChanges, onClose]);
 
   useEffect(() => {
     if (!open) return;
+
+    setHasUserChanges(false);
+    setConfirmingClose(false);
 
     if (editConnection) {
       setStepIndex(2);
@@ -174,6 +201,41 @@ export default function AddRestApiWizard({
       setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
       setTablePreview(tablePreviewFromTemplate(editConnection));
       setConnectionOnly(editConnection.tables.length === 0);
+      setPendingLocalFilePick(false);
+      setPendingPreview(false);
+      setPendingAdd(false);
+      setError(null);
+      return;
+    }
+
+    if (initialSavedConnectionRecovery) {
+      const recoveryCredentials = credentialsFromKeys(
+        initialSavedConnectionRecovery.missingEnvVars,
+      );
+
+      setStepIndex(0);
+      setSourceFamily("rest_api");
+      setSourceMode("saved");
+      setProviders([]);
+      setProviderLoadState("idle");
+      setSavedConnections([initialSavedConnectionRecovery.connection]);
+      setSavedConnectionLoadState("loaded");
+      setProviderSearch("");
+      setProviderCategory("All");
+      setSelectedProvider(null);
+      setSelectedSavedConnection(initialSavedConnectionRecovery.connection);
+      setDatasourceName("");
+      setCredentials({});
+      setSavedConnectionCredentials(recoveryCredentials);
+      setMissingSavedCredentialKeys(
+        initialSavedConnectionRecovery.missingEnvVars,
+      );
+      setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
+      setSpecText("");
+      setGenericLocation(datasourceFamilyByKey.rest_api.defaultExampleInput);
+      setTablePreview(null);
+      setConnectionOnly(false);
       setPendingLocalFilePick(false);
       setPendingPreview(false);
       setPendingAdd(false);
@@ -233,18 +295,18 @@ export default function AddRestApiWizard({
     setPendingPreview(false);
     setPendingAdd(false);
     setError(null);
-  }, [editConnection, open, prefill]);
+  }, [editConnection, initialSavedConnectionRecovery, open, prefill]);
 
   useEffect(() => {
     if (!open) return;
 
     const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") requestClose();
     };
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose, open]);
+  }, [open, requestClose]);
 
   const loadProviders = useCallback(async () => {
     if (providerLoadState === "loading" || providerLoadState === "loaded") {
@@ -287,6 +349,7 @@ export default function AddRestApiWizard({
 
   const selectSourceMode = useCallback(
     (mode: SourceMode) => {
+      if (sourceMode !== mode) markDirty();
       setSourceMode(mode);
       setError(null);
       setTablePreview(null);
@@ -315,52 +378,67 @@ export default function AddRestApiWizard({
         );
       }
     },
-    [loadProviders, loadSavedConnections, selectedProvider?.name],
+    [
+      loadProviders,
+      loadSavedConnections,
+      markDirty,
+      selectedProvider?.name,
+      sourceMode,
+    ],
   );
 
-  const selectSourceFamily = useCallback((family: SourceFamily) => {
-    setSourceFamily(family);
-    setError(null);
-    setTablePreview(null);
-    setConnectionOnly(false);
-    setMissingSavedCredentialKeys([]);
-    setSavedConnectionCredentials({});
-    setPrefillCredentialKeys([]);
-    setPrefillManifestToml(null);
-    setGenericLocation(datasourceFamilyByKey[family].defaultExampleInput);
+  const selectSourceFamily = useCallback(
+    (family: SourceFamily) => {
+      if (sourceFamily !== family) markDirty();
+      setSourceFamily(family);
+      setError(null);
+      setTablePreview(null);
+      setConnectionOnly(false);
+      setMissingSavedCredentialKeys([]);
+      setSavedConnectionCredentials({});
+      setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
+      setGenericLocation(datasourceFamilyByKey[family].defaultExampleInput);
 
-    if (family === "rest_api") {
-      return;
-    }
+      if (family === "rest_api") {
+        return;
+      }
 
-    setSourceMode(null);
-    setSelectedProvider(null);
-    setSelectedSavedConnection(null);
-    setCredentials({});
-    setDatasourceName(defaultDatasourceNameForFamily(family));
-    setSpecText("");
-  }, []);
+      setSourceMode(null);
+      setSelectedProvider(null);
+      setSelectedSavedConnection(null);
+      setCredentials({});
+      setDatasourceName(defaultDatasourceNameForFamily(family));
+      setSpecText("");
+    },
+    [markDirty, sourceFamily],
+  );
 
-  const selectProvider = useCallback((provider: ProviderSummary) => {
-    const defaultName = defaultDatasourceNameForProvider(provider);
-    if (isBlockedProvider(provider)) return;
+  const selectProvider = useCallback(
+    (provider: ProviderSummary) => {
+      const defaultName = defaultDatasourceNameForProvider(provider);
+      if (isBlockedProvider(provider)) return;
 
-    setSelectedProvider(provider);
-    setSelectedSavedConnection(null);
-    setDatasourceName((currentName) =>
-      !currentName || currentName === "rest_api" ? defaultName : currentName,
-    );
-    setCredentials({});
-    setTablePreview(tablePreviewFromProvider(provider));
-    setSpecText(isReadyProvider(provider) ? "" : (provider.specUrl ?? ""));
-    setConnectionOnly(false);
-    setPrefillCredentialKeys([]);
-    setPrefillManifestToml(null);
-    setError(null);
-  }, []);
+      if (selectedProvider?.name !== provider.name) markDirty();
+      setSelectedProvider(provider);
+      setSelectedSavedConnection(null);
+      setDatasourceName((currentName) =>
+        !currentName || currentName === "rest_api" ? defaultName : currentName,
+      );
+      setCredentials({});
+      setTablePreview(tablePreviewFromProvider(provider));
+      setSpecText(isReadyProvider(provider) ? "" : (provider.specUrl ?? ""));
+      setConnectionOnly(false);
+      setPrefillCredentialKeys([]);
+      setPrefillManifestToml(null);
+      setError(null);
+    },
+    [markDirty, selectedProvider?.name],
+  );
 
   const selectSavedConnection = useCallback(
     (connection: ConnectionTemplate) => {
+      if (selectedSavedConnection?.name !== connection.name) markDirty();
       setSelectedSavedConnection(connection);
       setSelectedProvider(null);
       setMissingSavedCredentialKeys([]);
@@ -369,7 +447,7 @@ export default function AddRestApiWizard({
       setPrefillManifestToml(null);
       setError(null);
     },
-    [],
+    [markDirty, selectedSavedConnection?.name],
   );
 
   const providerCategories = useMemo(() => {
@@ -682,10 +760,10 @@ export default function AddRestApiWizard({
       ? rssFamilySelected
         ? "Add datasource"
         : !restFamilySelected
-        ? "Attach datasource"
-        : editMode
-          ? "Save changes"
-          : "Add datasource"
+          ? "Attach datasource"
+          : editMode
+            ? "Save changes"
+            : "Add datasource"
       : manifestPrefillMode && step === "auth"
         ? "Add datasource"
         : step === "source" && sourceMode === "saved"
@@ -697,7 +775,7 @@ export default function AddRestApiWizard({
       aria-labelledby={dialogTitleId}
       aria-modal="true"
       className="fixed inset-0 z-40 flex items-center justify-center bg-gray-950/35 px-3 py-4 sm:px-4"
-      onClick={onClose}
+      onClick={requestClose}
       role="dialog"
     >
       <section
@@ -718,7 +796,7 @@ export default function AddRestApiWizard({
             <button
               aria-label={`Close ${dialogTitle.toLowerCase()}`}
               className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-950"
-              onClick={onClose}
+              onClick={requestClose}
               type="button"
             >
               <XIcon size={15} strokeWidth={1.5} />
@@ -726,21 +804,36 @@ export default function AddRestApiWizard({
           </div>
           <ol className="flex gap-1 overflow-x-auto sm:block sm:space-y-1">
             {STEPS.map((wizardStep, index) => {
-              const active = index === stepIndex;
-              const complete = index < stepIndex;
+              const visualState = stepVisualState({
+                editMode,
+                index,
+                sourceFamily,
+                stepIndex,
+              });
+              const active = visualState === "active";
+              const complete = visualState === "complete";
+              const skipped = visualState === "skipped";
+              const navigable = active || complete;
+              const visualDetail = skipped
+                ? "not needed"
+                : editMode && index === 0
+                  ? "locked"
+                  : wizardStep.detail;
+              const stateLabel = skipped ? "not needed" : visualState;
               return (
                 <li className="min-w-28 sm:min-w-0" key={wizardStep.key}>
                   <button
+                    aria-current={active ? "step" : undefined}
+                    aria-label={`${wizardStep.label}, ${stateLabel}, ${visualDetail}`}
                     className={clsx(
                       "flex w-full items-start gap-2 rounded px-2 py-2 text-left transition-colors",
                       active
                         ? "bg-white text-gray-950 shadow-sm ring-1 ring-gray-200"
                         : "text-gray-400",
                       complete && "text-gray-700 hover:bg-white",
+                      skipped && "text-gray-500",
                     )}
-                    disabled={
-                      (editMode && index === 0) || (!complete && !active)
-                    }
+                    disabled={!navigable}
                     onClick={() => setStepIndex(index)}
                     type="button"
                   >
@@ -750,13 +843,17 @@ export default function AddRestApiWizard({
                         active && "border-indigo-600 bg-indigo-600 text-white",
                         complete &&
                           "border-green-200 bg-green-50 text-green-700",
+                        skipped && "border-gray-200 bg-gray-50 text-gray-400",
                         !active &&
                           !complete &&
+                          !skipped &&
                           "border-gray-300 bg-white text-gray-400",
                       )}
                     >
                       {complete ? (
                         <CheckIcon size={12} strokeWidth={2} />
+                      ) : skipped ? (
+                        "-"
                       ) : (
                         index + 1
                       )}
@@ -766,7 +863,7 @@ export default function AddRestApiWizard({
                         {wizardStep.label}
                       </span>
                       <span className="block truncate text-[11px] text-gray-400">
-                        {wizardStep.detail}
+                        {visualDetail}
                       </span>
                     </span>
                   </button>
@@ -788,12 +885,15 @@ export default function AddRestApiWizard({
                 onSelectProvider={selectProvider}
                 onSelectSavedConnection={selectSavedConnection}
                 onSelectSourceMode={selectSourceMode}
-                onSavedCredentialChange={(key, value) =>
+                onSavedCredentialChange={(key, value) => {
+                  if ((savedConnectionCredentials[key] ?? "") !== value) {
+                    markDirty();
+                  }
                   setSavedConnectionCredentials((current) => ({
                     ...current,
                     [key]: value,
-                  }))
-                }
+                  }));
+                }}
                 providerCategories={providerCategories}
                 providerCategory={providerCategory}
                 providerLoadState={providerLoadState}
@@ -832,13 +932,17 @@ export default function AddRestApiWizard({
                   datasourceName={datasourceName}
                   fields={credentialFields}
                   nameReadOnly={editMode}
-                  onCredentialChange={(key, value) =>
+                  onCredentialChange={(key, value) => {
+                    if ((credentials[key] ?? "") !== value) markDirty();
                     setCredentials((current) => ({
                       ...current,
                       [key]: value,
-                    }))
-                  }
-                  onDatasourceNameChange={setDatasourceName}
+                    }));
+                  }}
+                  onDatasourceNameChange={(value) => {
+                    if (datasourceName !== value) markDirty();
+                    setDatasourceName(value);
+                  }}
                   assistantPrefillMode={manifestPrefillMode}
                   selectedProvider={selectedProvider}
                   selectedSavedConnection={selectedSavedConnection}
@@ -853,11 +957,13 @@ export default function AddRestApiWizard({
                   connectionOnly={connectionOnly}
                   error={error}
                   onConnectionOnlyChange={(checked) => {
+                    if (connectionOnly !== checked) markDirty();
                     setConnectionOnly(checked);
                     if (checked) setTablePreview(null);
                   }}
                   onPreviewTables={() => void handlePreviewTables()}
                   onSpecTextChange={(value) => {
+                    if (specText !== value) markDirty();
                     setSpecText(value);
                     setTablePreview(
                       editConnection && value.trim().length === 0
@@ -892,7 +998,10 @@ export default function AddRestApiWizard({
                 <RssAttachStep
                   datasourceName={datasourceName}
                   error={error}
-                  onDatasourceNameChange={setDatasourceName}
+                  onDatasourceNameChange={(value) => {
+                    if (datasourceName !== value) markDirty();
+                    setDatasourceName(value);
+                  }}
                 />
               ) : (
                 <GenericAttachStep
@@ -941,6 +1050,50 @@ export default function AddRestApiWizard({
           </footer>
         </div>
       </section>
+      {confirmingClose && (
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center bg-gray-950/30 px-4"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div
+            aria-describedby={closeConfirmationDescriptionId}
+            aria-labelledby={closeConfirmationTitleId}
+            aria-modal="true"
+            className="w-full max-w-sm rounded-lg border border-gray-200 bg-white p-4 shadow-xl"
+            role="alertdialog"
+          >
+            <h3
+              className="text-sm font-semibold text-gray-950"
+              id={closeConfirmationTitleId}
+            >
+              Discard changes?
+            </h3>
+            <p
+              className="mt-2 text-sm text-gray-600"
+              id={closeConfirmationDescriptionId}
+            >
+              Closing now will discard the connection details entered in this
+              wizard.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                className="rounded border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:border-gray-950 hover:text-gray-950"
+                onClick={() => setConfirmingClose(false)}
+                type="button"
+              >
+                Keep editing
+              </button>
+              <button
+                className="rounded border border-red-600 bg-red-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700"
+                onClick={onClose}
+                type="button"
+              >
+                Discard changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1828,6 +1981,67 @@ function TablesStep({
       </p>
 
       {!catalogTablesReady && !catalogActionsReady && (
+        <fieldset className="mt-4">
+          <legend className="text-xs font-medium text-gray-600">
+            Datasource mode
+          </legend>
+          <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <label
+              className={clsx(
+                "flex min-h-24 cursor-pointer gap-3 rounded border bg-white px-3 py-3 text-sm transition-colors",
+                !connectionOnly
+                  ? "border-indigo-500 ring-1 ring-indigo-200"
+                  : "border-gray-200 hover:border-gray-300",
+              )}
+            >
+              <input
+                aria-label="Generate tables from OpenAPI"
+                checked={!connectionOnly}
+                className="mt-0.5 h-4 w-4 border-gray-300 text-indigo-600"
+                name="rest-api-table-mode"
+                onChange={() => onConnectionOnlyChange(false)}
+                type="radio"
+              />
+              <span className="min-w-0">
+                <span className="block font-medium text-gray-950">
+                  Generate tables from OpenAPI
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-gray-500">
+                  Paste a spec or URL, preview generated table-functions, then
+                  add them with this connection.
+                </span>
+              </span>
+            </label>
+            <label
+              className={clsx(
+                "flex min-h-24 cursor-pointer gap-3 rounded border bg-white px-3 py-3 text-sm transition-colors",
+                connectionOnly
+                  ? "border-indigo-500 ring-1 ring-indigo-200"
+                  : "border-gray-200 hover:border-gray-300",
+              )}
+            >
+              <input
+                aria-label="Connection only"
+                checked={connectionOnly}
+                className="mt-0.5 h-4 w-4 border-gray-300 text-indigo-600"
+                name="rest-api-table-mode"
+                onChange={() => onConnectionOnlyChange(true)}
+                type="radio"
+              />
+              <span className="min-w-0">
+                <span className="block font-medium text-gray-950">
+                  Connection only
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-gray-500">
+                  Save the connection without importing table definitions.
+                </span>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+      )}
+
+      {!catalogTablesReady && !catalogActionsReady && (
         <label className="mt-4 block">
           <span className="text-xs font-medium text-gray-600">
             OpenAPI spec text or URL
@@ -1858,17 +2072,16 @@ function TablesStep({
             )}
             Preview tables
           </button>
-          <label className="inline-flex items-center gap-2 text-sm text-gray-600">
-            <input
-              checked={connectionOnly}
-              className="h-4 w-4 rounded border-gray-300 text-indigo-600"
-              onChange={(event) =>
-                onConnectionOnlyChange(event.currentTarget.checked)
-              }
-              type="checkbox"
-            />
-            Connection only
-          </label>
+        </div>
+      )}
+
+      {connectionOnly && !catalogTablesReady && !catalogActionsReady && (
+        <div className="mt-3 flex gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <AlertCircleIcon className="mt-0.5 shrink-0" size={15} />
+          <p>
+            No tables will be created now. You can define table-functions later
+            from this saved connection.
+          </p>
         </div>
       )}
 
@@ -2116,7 +2329,9 @@ function RssAttachStep({
         <input
           aria-label="Datasource name"
           className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
-          onChange={(event) => onDatasourceNameChange(event.currentTarget.value)}
+          onChange={(event) =>
+            onDatasourceNameChange(event.currentTarget.value)
+          }
           placeholder="rss"
           value={datasourceName}
         />
@@ -2263,6 +2478,37 @@ function ErrorBanner({ message }: { message: string }) {
   );
 }
 
+function stepVisualState({
+  editMode,
+  index,
+  sourceFamily,
+  stepIndex,
+}: {
+  editMode: boolean;
+  index: number;
+  sourceFamily: SourceFamily;
+  stepIndex: number;
+}): StepVisualState {
+  if (index === stepIndex) return "active";
+  if (editMode && index === 0) return "locked";
+
+  const flowStepIndexes = stepIndexesForSourceFamily(sourceFamily);
+  if (!flowStepIndexes.includes(index)) {
+    return index < stepIndex ? "skipped" : "locked";
+  }
+
+  if (index < stepIndex) return "complete";
+  return "locked";
+}
+
+function stepIndexesForSourceFamily(
+  sourceFamily: SourceFamily,
+): readonly number[] {
+  if (sourceFamily === "rest_api") return REST_API_STEP_INDEXES;
+  if (sourceFamily === "rss") return RSS_STEP_INDEXES;
+  return ALL_STEP_INDEXES;
+}
+
 function canContinueFromStep({
   connectionOnly,
   credentialFields,
@@ -2308,8 +2554,8 @@ function canContinueFromStep({
 
     return Boolean(
       sourceMode &&
-        (sourceMode !== "catalog" ||
-          (selectedProvider && !isBlockedProvider(selectedProvider))),
+      (sourceMode !== "catalog" ||
+        (selectedProvider && !isBlockedProvider(selectedProvider))),
     );
   }
 
@@ -2352,6 +2598,10 @@ function canContinueFromStep({
   }
 
   return datasourceName.trim().length > 0;
+}
+
+function credentialsFromKeys(keys: string[]): Record<string, string> {
+  return Object.fromEntries(keys.map((key) => [key, ""]));
 }
 
 function credentialFieldsForProvider(

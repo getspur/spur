@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
-import { ErrorBoundary } from "react-error-boundary";
 import { useStore } from "zustand";
 
 import { KernelUsageInfo } from "@/bindings";
 import { useNotebook } from "@/stores/notebook";
+import { ErrorBoundary } from "@/ui/shared/ErrorBoundary";
 
 const round = (n: number, precision: number = 0) => {
   const factor = Math.pow(10, precision);

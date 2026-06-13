@@ -4,8 +4,8 @@ import {
   fireEvent,
   render,
   screen,
-  within,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -356,6 +356,10 @@ function renderWizard(onClose = vi.fn()) {
   return onClose;
 }
 
+function wizardStepButton(label: string) {
+  return screen.getByRole("button", { name: new RegExp(`^${label}\\b`) });
+}
+
 async function chooseStripeProvider() {
   fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
 
@@ -495,6 +499,30 @@ describe("AddRestApiWizard", () => {
     ).toBeInTheDocument();
   });
 
+  test("edit_mode_locks_source_and_marks_locate_as_not_needed", async () => {
+    const [savedConnection] = savedConnectionsResponse().result.data;
+
+    render(
+      <AddRestApiWizard
+        editConnection={savedConnection}
+        open
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to Stripe" }),
+    ).toBeInTheDocument();
+
+    const sourceStep = wizardStepButton("Source");
+    expect(sourceStep).toHaveTextContent("locked");
+    expect(sourceStep).toBeDisabled();
+
+    const locateStep = wizardStepButton("Locate");
+    expect(locateStep).toHaveTextContent("not needed");
+    expect(locateStep).toBeDisabled();
+  });
+
   test("source_state_presents_datasource_families_and_preserves_rest_route", () => {
     renderWizard();
 
@@ -522,6 +550,42 @@ describe("AddRestApiWizard", () => {
     expect(
       screen.getByRole("button", { name: /Provider catalog/i }),
     ).toBeInTheDocument();
+  });
+
+  test("rest_route_marks_locate_step_as_not_needed_after_source", async () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Connect a custom REST API",
+      }),
+    ).toBeInTheDocument();
+
+    const locateStep = wizardStepButton("Locate");
+    expect(locateStep).toHaveTextContent("not needed");
+    expect(locateStep).toBeDisabled();
+    expect(wizardStepButton("Source")).toBeEnabled();
+  });
+
+  test("rss_route_marks_intermediate_steps_as_not_needed_after_source", () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /RSS \/ RSSHub/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Add RSS / RSSHub" }),
+    ).toBeInTheDocument();
+
+    for (const label of ["Locate", "Auth", "Inspect"]) {
+      const skippedStep = wizardStepButton(label);
+      expect(skippedStep).toHaveTextContent("not needed");
+      expect(skippedStep).toBeDisabled();
+    }
+    expect(wizardStepButton("Source")).toBeEnabled();
   });
 
   test("rss_family_adds_backend_datasource_for_rsshub_catalog", async () => {
@@ -633,6 +697,82 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("https://api.stripe.com")).toBeInTheDocument();
     expect(screen.getByLabelText("STRIPE_API_KEY")).toBeInTheDocument();
     expect(screen.getByText(/Tables ready/i)).toBeInTheDocument();
+  });
+
+  test("escape_after_credential_entry_prompts_before_closing", async () => {
+    const onClose = renderWizard();
+
+    await chooseGithubProvider();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(await screen.findByLabelText("GITHUB_TOKEN"), {
+      target: { value: "ghp_dirty" },
+    });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(
+      screen.getByRole("alertdialog", { name: "Discard changes?" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Add datasource" }),
+    ).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test("keep_editing_leaves_dirty_wizard_open", async () => {
+    const onClose = renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close add datasource" }),
+    );
+
+    expect(
+      screen.getByRole("alertdialog", { name: "Discard changes?" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+
+    expect(
+      screen.queryByRole("alertdialog", { name: "Discard changes?" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Add datasource" }),
+    ).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test("discard_changes_confirms_dirty_close", async () => {
+    const onClose = renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(screen.getByRole("dialog", { name: "Add datasource" }));
+
+    expect(
+      screen.getByRole("alertdialog", { name: "Discard changes?" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  test("successful_add_closes_without_discard_confirmation", async () => {
+    const onClose = renderWizard();
+
+    await chooseGithubProvider();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(await screen.findByLabelText("GITHUB_TOKEN"), {
+      target: { value: "ghp_test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(
+      screen.queryByRole("alertdialog", { name: "Discard changes?" }),
+    ).not.toBeInTheDocument();
   });
 
   test("github_pat_ready_provider_shows_ready_tables_without_openapi_preview", async () => {
@@ -994,6 +1134,29 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("response_path = $.data")).toBeInTheDocument();
   });
 
+  test("connection_only_mode_explains_tables_can_be_defined_later", async () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("Datasource name"), {
+      target: { value: "custom_api" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    fireEvent.click(screen.getByLabelText("Connection only"));
+
+    expect(
+      screen.getByText(/No tables will be created now/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/define table-functions later/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Preview tables" }),
+    ).toBeDisabled();
+  });
+
   test("review_adds_datasource_from_import_with_candidate_spec_and_credentials", async () => {
     const onClose = renderWizard();
 
@@ -1077,6 +1240,45 @@ describe("AddRestApiWizard", () => {
         command: "attach_saved_connection",
         name: "stripe_reporting",
         credentials: [["STRIPE_API_KEY", "sk_test_saved"]],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  test("initial_saved_connection_recovery_retries_attach_with_credentials", async () => {
+    const onClose = vi.fn();
+    const [savedConnection] = savedConnectionsResponse().result.data;
+
+    render(
+      <AddRestApiWizard
+        initialSavedConnectionRecovery={{
+          connection: savedConnection,
+          missingEnvVars: ["STRIPE_API_KEY"],
+        }}
+        open
+        onClose={onClose}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /Saved connections/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /stripe_reporting/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("STRIPE_API_KEY")).toHaveValue("");
+    expect(screen.queryByLabelText("STRIPE_ACCOUNT")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("STRIPE_API_KEY"), {
+      target: { value: "sk_test_recovery" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Use connection" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "attach_saved_connection",
+        name: "stripe_reporting",
+        credentials: [["STRIPE_API_KEY", "sk_test_recovery"]],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
