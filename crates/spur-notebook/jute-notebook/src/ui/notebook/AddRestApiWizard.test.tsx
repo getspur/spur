@@ -132,7 +132,8 @@ function providersResponse() {
           providerKey: "1password-events",
           baseUrl: "https://events.1password.com",
           specSourceKey: "1password.com:events",
-          specUrl: "https://api.apis.guru/v2/specs/1password.com/events/1.0.0/openapi.json",
+          specUrl:
+            "https://api.apis.guru/v2/specs/1password.com/events/1.0.0/openapi.json",
           experimentalSpecCount: 1,
           credentialEnvVars: [],
           tables: [],
@@ -265,7 +266,9 @@ function renderWizard(onClose = vi.fn()) {
 async function chooseStripeProvider() {
   fireEvent.click(screen.getByRole("button", { name: /Provider catalog/i }));
 
-  const stripeButtons = await screen.findAllByRole("button", { name: /Stripe/i });
+  const stripeButtons = await screen.findAllByRole("button", {
+    name: /Stripe/i,
+  });
   const stripe = stripeButtons.find(
     (button) => !button.textContent?.includes("Stripe API"),
   );
@@ -341,6 +344,12 @@ describe("AddRestApiWizard", () => {
     renderWizard();
 
     expect(
+      screen.getByRole("heading", { name: "Add datasource" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Add datasource" }),
+    ).toBeInTheDocument();
+    expect(
       screen.getByRole("button", { name: /Provider catalog/i }),
     ).toBeInTheDocument();
     expect(
@@ -365,6 +374,121 @@ describe("AddRestApiWizard", () => {
     ).toBeInTheDocument();
   });
 
+  test("edit_mode_labels_the_dialog_as_editing_a_saved_connection", () => {
+    const [savedConnection] = savedConnectionsResponse().result.data;
+
+    render(
+      <AddRestApiWizard
+        editConnection={savedConnection}
+        open
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "Edit saved connection" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Edit saved connection" }),
+    ).toBeInTheDocument();
+  });
+
+  test("source_state_presents_datasource_families_and_preserves_rest_route", () => {
+    renderWizard();
+
+    expect(
+      screen.getByRole("button", { name: /File or folder/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /URL or object storage/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Lakehouse table/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /External database/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /REST API/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Advanced SQL attach/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Provider catalog/i }),
+    ).toBeInTheDocument();
+  });
+
+  test("file_family_renders_locate_auth_inspect_and_attach_details", () => {
+    renderWizard();
+
+    fireEvent.click(screen.getByRole("button", { name: /File or folder/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Locate file or folder" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("File or folder path")).toHaveValue(
+      "/Users/me/data/orders.parquet",
+    );
+    expect(screen.getByText(/read_csv_auto/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      screen.getByRole("heading", { name: "Auth for file or folder" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No credentials required")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      screen.getByRole("heading", { name: "Inspect file or folder" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("orders")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      screen.getByRole("heading", { name: "Attach file or folder" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Generated SQL")).toBeInTheDocument();
+    expect(
+      screen.getByText(/create or replace view orders/i),
+    ).toBeInTheDocument();
+  });
+
+  test("file_family_can_pick_local_file_and_attach_through_callbacks", async () => {
+    const onClose = vi.fn();
+    const onPickLocalFile = vi.fn().mockResolvedValue("/tmp/inventory.parquet");
+    const onAttachLocalFile = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <AddRestApiWizard
+        open
+        onAttachLocalFile={onAttachLocalFile}
+        onClose={onClose}
+        onPickLocalFile={onPickLocalFile}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /File or folder/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose local file" }));
+
+    await waitFor(() => expect(onPickLocalFile).toHaveBeenCalledTimes(1));
+    expect(screen.getByLabelText("File or folder path")).toHaveValue(
+      "/tmp/inventory.parquet",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Attach datasource" }));
+
+    await waitFor(() =>
+      expect(onAttachLocalFile).toHaveBeenCalledWith("/tmp/inventory.parquet"),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
   test("picking_a_catalog_provider_advances_to_resolved_connect_fields", async () => {
     renderWizard();
 
@@ -385,7 +509,7 @@ describe("AddRestApiWizard", () => {
 
     await chooseGithubProvider();
     expect(screen.getByText("2 table-functions")).toBeInTheDocument();
-    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getAllByText("Ready").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -424,7 +548,7 @@ describe("AddRestApiWizard", () => {
 
     await chooseFacebookAdsProvider();
     expect(screen.getByText("1 action-function")).toBeInTheDocument();
-    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getAllByText("Ready").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -493,7 +617,9 @@ describe("AddRestApiWizard", () => {
         name: "Connect to 1Password (Events API)",
       }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("1PASSWORD_EVENTS_API_KEY")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("1PASSWORD_EVENTS_API_KEY"),
+    ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("1PASSWORD_EVENTS_API_KEY"), {
       target: { value: "events_test" },
     });
@@ -680,16 +806,13 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("response_path = $.data")).toBeInTheDocument();
   });
 
-  test("review_adds_datasource_from_import_with_provider_spec_and_credentials", async () => {
+  test("review_adds_datasource_from_openapi_spec", async () => {
     const onClose = renderWizard();
 
-    await chooseStripeProvider();
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.change(await screen.findByLabelText("Datasource name"), {
       target: { value: "stripe_reporting" },
-    });
-    fireEvent.change(screen.getByLabelText("STRIPE_API_KEY"), {
-      target: { value: "sk_test_123" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.change(screen.getByLabelText("OpenAPI spec text or URL"), {
@@ -706,9 +829,9 @@ describe("AddRestApiWizard", () => {
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "add_api_datasource_from_import",
         name: "stripe_reporting",
-        provider: "stripe",
+        provider: null,
         spec_text: SPEC_TEXT,
-        credentials: [["STRIPE_API_KEY", "sk_test_123"]],
+        credentials: [],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));

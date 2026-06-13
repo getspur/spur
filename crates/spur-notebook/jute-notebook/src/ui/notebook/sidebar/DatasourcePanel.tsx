@@ -156,7 +156,7 @@ export default function DatasourcePanel() {
         setError(
           `Datasource "${name}" is already attached from ${collidingEntry.path}. Remove it before attaching ${path}.`,
         );
-        return;
+        return false;
       }
 
       setPendingPath(path);
@@ -172,8 +172,10 @@ export default function DatasourcePanel() {
         );
         const entry = datasourceEntryFromDaemonControlResponse(response);
         setEntries((current) => upsertDatasourceEntry(current, entry));
+        return true;
       } catch (caught) {
         setError(errorMessage(caught));
+        return false;
       } finally {
         setPendingPath(null);
       }
@@ -233,18 +235,25 @@ export default function DatasourcePanel() {
     }
   }, []);
 
-  const handleAddDatasource = useCallback(async () => {
+  const handlePickLocalDatasource = useCallback(async () => {
     const selected = await open({
       multiple: false,
       directory: false,
       filters: [{ name: "Datasource", extensions: DATASOURCE_EXTENSIONS }],
     });
 
-    const path = firstSelectedPath(selected);
-    if (path) {
-      await attachPath(path);
-    }
-  }, [attachPath]);
+    return firstSelectedPath(selected);
+  }, []);
+
+  const handleAttachLocalDatasource = useCallback(
+    async (path: string) => {
+      const attached = await attachPath(path);
+      if (!attached) {
+        throw new Error("Datasource could not be attached.");
+      }
+    },
+    [attachPath],
+  );
 
   const handleDrop = useCallback(
     (event: DragEvent<HTMLElement>) => {
@@ -456,24 +465,15 @@ export default function DatasourcePanel() {
             aria-label="Add datasource"
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border border-gray-300 bg-white text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-300"
             disabled={pendingPath !== null}
-            onClick={() => void handleAddDatasource()}
+            onClick={() => {
+              setEditingConnection(null);
+              setRestWizardPrefill(null);
+              setApiModalOpen(true);
+            }}
             title="Add datasource"
             type="button"
           >
             <PlusIcon size={16} strokeWidth={1.5} />
-          </button>
-          <button
-            aria-label="Add API datasource"
-            className="inline-flex h-8 shrink-0 items-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs font-medium text-gray-600 transition-colors hover:border-gray-900 hover:text-gray-950"
-            onClick={() => {
-              setRestWizardPrefill(null);
-              setApiModalOpen(true);
-            }}
-            title="Add API datasource"
-            type="button"
-          >
-            <PlugIcon size={14} strokeWidth={1.5} />
-            API
           </button>
         </div>
 
@@ -565,7 +565,9 @@ export default function DatasourcePanel() {
       </div>
       <AddRestApiWizard
         editConnection={editingConnection}
+        onAttachLocalFile={handleAttachLocalDatasource}
         open={apiModalOpen || editingConnection !== null}
+        onPickLocalFile={handlePickLocalDatasource}
         prefill={restWizardPrefill}
         onClose={() => {
           setApiModalOpen(false);
@@ -600,7 +602,7 @@ function SavedConnectionsSection({
         Saved connections
       </h3>
       {notice && (
-        <p className="mb-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+        <p className="mb-2 break-words rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
           {notice}
         </p>
       )}
@@ -696,15 +698,15 @@ function SavedConnectionRow({
             {provider} · {tableFunctionLabel}
           </p>
 
-          <div className="flex flex-wrap gap-1">
+          <div className="flex min-w-0 flex-wrap gap-1">
             {connection.credentialEnvVars.length === 0 ? (
-              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] uppercase text-emerald-700">
+              <span className="max-w-full break-all rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] uppercase text-emerald-700">
                 No credentials
               </span>
             ) : (
               connection.credentialEnvVars.map((envVar) => (
                 <span
-                  className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] uppercase text-amber-700"
+                  className="max-w-full break-all rounded bg-amber-50 px-1.5 py-0.5 text-[10px] uppercase text-amber-700"
                   key={envVar}
                 >
                   {envVar}
@@ -717,10 +719,12 @@ function SavedConnectionRow({
             <ul className="space-y-1">
               {connection.tables.map((table) => (
                 <li
-                  className="flex items-center justify-between gap-2"
+                  className="flex min-w-0 items-center justify-between gap-2"
                   key={table.name}
                 >
-                  <span className="truncate text-gray-700">{table.name}</span>
+                  <span className="min-w-0 truncate text-gray-700">
+                    {table.name}
+                  </span>
                   <span className="shrink-0 rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
                     function
                   </span>
@@ -729,7 +733,7 @@ function SavedConnectionRow({
             </ul>
           )}
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <button
               aria-label={`Edit saved connection ${connection.name}`}
               className="text-xs font-medium text-gray-600 transition-colors hover:text-gray-950"
@@ -740,7 +744,7 @@ function SavedConnectionRow({
             </button>
             <button
               aria-label={`Delete saved connection ${connection.name}`}
-              className="text-xs font-medium text-red-600 transition-colors hover:text-red-700"
+              className="text-left text-xs font-medium text-red-600 transition-colors hover:text-red-700"
               onClick={() => onDelete(connection.name)}
               type="button"
             >
@@ -766,7 +770,7 @@ function DatasourceListItem({
   return (
     <article className="rounded border border-gray-200 bg-white p-3">
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h4 className="truncate text-sm font-medium text-gray-950">
             {entry.name}
           </h4>
