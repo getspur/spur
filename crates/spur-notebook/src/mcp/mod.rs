@@ -291,6 +291,9 @@ name the ref to query deeper."
             "notebook_set_dag_metadata" => {
                 tools::notebook_set_dag_metadata::call(&self.deps, arguments).await
             }
+            "notebook_set_schedule" => {
+                tools::notebook_set_schedule::call(&self.deps, arguments).await
+            }
             "notebook.set_cell_metadata" => {
                 tools::set_cell_metadata::call(&self.deps, arguments).await
             }
