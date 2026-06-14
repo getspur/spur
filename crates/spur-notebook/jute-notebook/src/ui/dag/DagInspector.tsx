@@ -7,6 +7,7 @@ import { daemonControl } from "@/daemon/control";
 import { type NodeStatus, useNotebook } from "@/stores/notebook";
 
 import CellInputFallback from "../notebook/CellInputFallback";
+import { ScheduleSection } from "./ScheduleSection";
 import {
   type DagPortManifest,
   runNotebookCascade,
@@ -171,6 +172,12 @@ export default function DagInspector({
           </div>
         </section>
       ) : null}
+
+      <ScheduleSection
+        cellId={node.id}
+        version={node.version ?? 0}
+        schedule={node.schedule}
+      />
 
       <PortList title="Consumes">
         {node.consumes.length > 0 ? (
