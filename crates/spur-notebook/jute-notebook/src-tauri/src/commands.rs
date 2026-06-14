@@ -26,6 +26,7 @@ use crate::{
             code_type_for_spec, kernelspec_for, Cell, CellDagMetadata, CodeType,
             FrontendCellMetadata, NotebookRoot,
         },
+        schedule::CellCronTrigger,
         wire_protocol::{build_comm_msg, KernelConnection},
     },
     notebook_store::{daemon_cell, CellKind, NotebookDelta, NotebookOp, StoreError},
@@ -1094,6 +1095,23 @@ async fn handle_daemon_control_inner(
                     .apply(NotebookOp::SetSpurDagMetadata {
                         id,
                         patch: dag,
+                        expected_version,
+                    })
+                    .map(DaemonControlResult::Delta)
+                    .map_err(store_error_response);
+            }
+            if let Some(cron) = patch.get("spur").and_then(|spur| spur.get("cron")) {
+                let cron = serde_json::from_value::<Option<CellCronTrigger>>(cron.clone())
+                    .map_err(|error| {
+                        DaemonControlResponse::failure(
+                            "invalid_params",
+                            format!("invalid spur cron metadata patch: {error}"),
+                        )
+                    })?;
+                return notebook
+                    .apply(NotebookOp::SetSpurCronMetadata {
+                        id,
+                        patch: cron,
                         expected_version,
                     })
                     .map(DaemonControlResult::Delta)

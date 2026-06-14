@@ -27,6 +27,7 @@ use crate::{
             Output, OutputDisplayData, OutputError, OutputExecuteResult, OutputStream, RawCell,
             SpurCellMetadata,
         },
+        schedule::CellCronTrigger,
     },
     commands::SaveCoordinator,
     Error as JuteError,
@@ -111,6 +112,15 @@ pub enum NotebookOp {
         id: String,
         /// DAG metadata patch.
         patch: CellDagMetadata,
+        /// Expected cell version for optimistic concurrency.
+        expected_version: u64,
+    },
+    /// Set or clear SPUR cron metadata for an existing cell after checking cell version.
+    SetSpurCronMetadata {
+        /// Cell identifier.
+        id: String,
+        /// Cron metadata patch. `None` clears the existing trigger.
+        patch: Option<CellCronTrigger>,
         /// Expected cell version for optimistic concurrency.
         expected_version: u64,
     },
@@ -478,6 +488,20 @@ impl NotebookStore {
                 let metadata = cell_metadata_mut(cell);
                 let spur = metadata.spur.get_or_insert_with(empty_spur_cell_metadata);
                 spur.dag = Some(patch);
+                let metadata_update = Some((id.clone(), Some("brain".to_owned())));
+                (PendingDelta::Written { id }, metadata_update)
+            }
+            NotebookOp::SetSpurCronMetadata {
+                id,
+                patch,
+                expected_version,
+            } => {
+                Self::ensure_cell_version(&root, &id, expected_version)?;
+                let cell = find_cell_mut(&mut root, &id)
+                    .ok_or_else(|| StoreError::CellNotFound { id: id.clone() })?;
+                let metadata = cell_metadata_mut(cell);
+                let spur = metadata.spur.get_or_insert_with(empty_spur_cell_metadata);
+                spur.cron = patch;
                 let metadata_update = Some((id.clone(), Some("brain".to_owned())));
                 (PendingDelta::Written { id }, metadata_update)
             }
@@ -1081,10 +1105,13 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::backend::notebook::{
-        Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, DagSource, JuteDeckCellMetadata,
-        JuteDeckLayout, MultilineString, NotebookMetadata, Output, OutputStream, PortSpec,
-        SpurCellMetadata,
+    use crate::backend::{
+        notebook::{
+            Cell, CellDagMetadata, CellMetadata, CodeCell, CodeType, DagSource,
+            JuteDeckCellMetadata, JuteDeckLayout, MultilineString, NotebookMetadata, Output,
+            OutputStream, PortSpec, SpurCellMetadata,
+        },
+        schedule::{CellCronTrigger, RunTarget},
     };
 
     const CELL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -1664,6 +1691,78 @@ mod tests {
             .apply(NotebookOp::SetSpurDagMetadata {
                 id: CELL_ID.to_string(),
                 patch: CellDagMetadata::default(),
+                expected_version: 100,
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            StoreError::OptimisticConcurrency {
+                expected: 100,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn set_spur_cron_metadata_sets_and_clears_patch() {
+        let store = store_with_notebook();
+
+        let patch = CellCronTrigger {
+            enabled: true,
+            cron: "*/15 * * * *".to_string(),
+            timezone: "America/Los_Angeles".to_string(),
+            run_target: RunTarget::Cascade,
+            skip_if_running: true,
+            catch_up: false,
+        };
+        let set_delta = store
+            .apply(NotebookOp::SetSpurCronMetadata {
+                id: CELL_ID.to_string(),
+                patch: Some(patch.clone()),
+                expected_version: 1,
+            })
+            .expect("cron metadata patch applies");
+
+        assert!(matches!(
+            set_delta.kind,
+            DeltaKind::CellWritten { cell } if cell.id == CELL_ID
+        ));
+        let (snapshot, _version) = store.snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        let spur = cell.metadata.spur.as_ref().expect("spur metadata present");
+        assert_eq!(spur.cron.as_ref(), Some(&patch));
+        assert_eq!(spur.version, set_delta.version);
+        assert_eq!(spur.last_edited_by.as_deref(), Some("brain"));
+
+        let clear_delta = store
+            .apply(NotebookOp::SetSpurCronMetadata {
+                id: CELL_ID.to_string(),
+                patch: None,
+                expected_version: set_delta.version,
+            })
+            .expect("cron metadata clears");
+
+        let (snapshot, _version) = store.snapshot();
+        let Cell::Code(cell) = &snapshot.cells[0] else {
+            panic!("expected code cell");
+        };
+        let spur = cell.metadata.spur.as_ref().expect("spur metadata present");
+        assert_eq!(spur.cron, None);
+        assert_eq!(spur.version, clear_delta.version);
+        assert_eq!(spur.last_edited_by.as_deref(), Some("brain"));
+    }
+
+    #[test]
+    fn set_spur_cron_metadata_rejects_stale_version() {
+        let store = store_with_notebook();
+
+        let err = store
+            .apply(NotebookOp::SetSpurCronMetadata {
+                id: CELL_ID.to_string(),
+                patch: None,
                 expected_version: 100,
             })
             .unwrap_err();
