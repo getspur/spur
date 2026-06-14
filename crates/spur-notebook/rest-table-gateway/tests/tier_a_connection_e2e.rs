@@ -41,6 +41,10 @@ const SUPPORTED_TIER_A_TABLE_PROVIDERS: &[(&str, &str)] = &[
         include_str!("../connections/supported/twilio.connection.toml"),
     ),
     (
+        "vercel",
+        include_str!("../connections/supported/vercel.connection.toml"),
+    ),
+    (
         "zendesk",
         include_str!("../connections/supported/zendesk.connection.toml"),
     ),
@@ -62,6 +66,7 @@ async fn generated_tier_a_supported_manifests_scan_one_table_each() {
             "square",
             "stripe",
             "twilio",
+            "vercel",
             "zendesk",
         ])
     );
