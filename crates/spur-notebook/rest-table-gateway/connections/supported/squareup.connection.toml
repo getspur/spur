@@ -1,0 +1,70 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier B OpenAPI sources.
+
+[source]
+name = "squareup"
+base_url = "https://connect.squareup.com"
+auth = { scheme = "oauth2_refresh", token_url = "https://connect.squareup.com/oauth2/token", client_id_env = "SQUAREUP_CLIENT_ID", client_secret_env = "SQUAREUP_CLIENT_SECRET", refresh_token_env = "SQUAREUP_REFRESH_TOKEN" }
+
+[[table]]
+name = "listemployees"
+path = "/v1/me/employees"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+first_name = { json = "$.first_name", type = "Utf8" }
+last_name = { json = "$.last_name", type = "Utf8" }
+email = { json = "$.email", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+external_id = { json = "$.external_id", type = "Utf8" }
+authorized_location_ids = { json = "$.authorized_location_ids", type = "Utf8" }
+role_ids = { json = "$.role_ids", type = "Utf8" }
+
+[table.filters]
+batch_token = { param = "batch_token" }
+begin_created_at = { param = "begin_created_at" }
+begin_updated_at = { param = "begin_updated_at" }
+end_created_at = { param = "end_created_at" }
+end_updated_at = { param = "end_updated_at" }
+external_id = { param = "external_id" }
+order = { param = "order" }
+status = { param = "status" }
+
+[[table]]
+name = "listemployeeroles"
+path = "/v1/me/roles"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+is_owner = { json = "$.is_owner", type = "Boolean" }
+created_at = { json = "$.created_at", type = "Utf8" }
+updated_at = { json = "$.updated_at", type = "Utf8" }
+permissions = { json = "$.permissions", type = "Utf8" }
+
+[table.filters]
+batch_token = { param = "batch_token" }
+order = { param = "order" }
+
+[[table]]
+name = "listcashdrawershifts"
+path = "/v2/cash-drawers/shifts"
+response_path = "$.items"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+state = { json = "$.state", type = "Utf8" }
+opened_at = { json = "$.opened_at", type = "Utf8" }
+ended_at = { json = "$.ended_at", type = "Utf8" }
+closed_at = { json = "$.closed_at", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+closed_cash_money_amount = { json = "$.closed_cash_money.amount", type = "Int64" }
+closed_cash_money_currency = { json = "$.closed_cash_money.currency", type = "Utf8" }
+
+[table.filters]
+begin_time = { param = "begin_time" }
+end_time = { param = "end_time" }
+location_id = { param = "location_id" }
+sort_order = { param = "sort_order" }

@@ -1,0 +1,141 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier A OpenAPI sources.
+
+[source]
+name = "jira-basic"
+base_url = "https://${connectionConfig.subdomain}.atlassian.net"
+connection_config = ["subdomain"]
+auth = { scheme = "basic", user_env = "JIRA_BASIC_USER", pass_env = "JIRA_BASIC_PASS" }
+
+
+[[table]]
+name = "getapplicationproperty"
+path = "/rest/api/3/application-properties"
+response_path = "$"
+
+[table.columns]
+allowedvalues = { json = "$.allowedValues", type = "Utf8" }
+defaultvalue = { json = "$.defaultValue", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+key = { json = "$.key", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+value = { json = "$.value", type = "Utf8" }
+
+[table.filters]
+key = { param = "key" }
+keyfilter = { param = "keyFilter" }
+permissionlevel = { param = "permissionLevel" }
+
+[[table]]
+name = "getadvancedsettings"
+path = "/rest/api/3/application-properties/advanced-settings"
+response_path = "$"
+
+[table.columns]
+defaultvalue = { json = "$.defaultValue", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+key = { json = "$.key", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+value = { json = "$.value", type = "Utf8" }
+
+[[table]]
+name = "getallapplicationroles"
+path = "/rest/api/3/applicationrole"
+response_path = "$"
+
+[table.columns]
+defined = { json = "$.defined", type = "Boolean" }
+hasunlimitedseats = { json = "$.hasUnlimitedSeats", type = "Boolean" }
+key = { json = "$.key", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+numberofseats = { json = "$.numberOfSeats", type = "Int64" }
+platform = { json = "$.platform", type = "Boolean" }
+remainingseats = { json = "$.remainingSeats", type = "Int64" }
+usercount = { json = "$.userCount", type = "Int64" }
+
+[[table]]
+name = "getauditrecords"
+path = "/rest/api/3/auditing/record"
+response_path = "$.records"
+
+[table.columns]
+category = { json = "$.category", type = "Utf8" }
+created = { json = "$.created", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+eventsource = { json = "$.eventSource", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+objectitem_name = { json = "$.objectItem.name", type = "Utf8" }
+remoteaddress = { json = "$.remoteAddress", type = "Utf8" }
+summary = { json = "$.summary", type = "Utf8" }
+
+[table.filters]
+filter = { param = "filter" }
+from = { param = "from" }
+to = { param = "to" }
+
+[[table]]
+name = "getavailabletimetrackingimplementations"
+path = "/rest/api/3/configuration/timetracking/list"
+response_path = "$"
+
+[table.columns]
+key = { json = "$.key", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[table]]
+name = "getalldashboards"
+path = "/rest/api/3/dashboard"
+response_path = "$.dashboards"
+
+[table.columns]
+automaticrefreshms = { json = "$.automaticRefreshMs", type = "Int64" }
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+isfavourite = { json = "$.isFavourite", type = "Boolean" }
+iswritable = { json = "$.isWritable", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+owner_accountid = { json = "$.owner.accountId", type = "Utf8" }
+popularity = { json = "$.popularity", type = "Int64" }
+rank = { json = "$.rank", type = "Int64" }
+systemdashboard = { json = "$.systemDashboard", type = "Boolean" }
+
+[table.filters]
+filter = { param = "filter" }
+maxresults = { param = "maxResults" }
+startat = { param = "startAt" }
+
+[[table]]
+name = "getallavailabledashboardgadgets"
+path = "/rest/api/3/dashboard/gadgets"
+response_path = "$.gadgets"
+
+[table.columns]
+modulekey = { json = "$.moduleKey", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+uri = { json = "$.uri", type = "Utf8" }
+
+[[table]]
+name = "getdashboardspaginated"
+path = "/rest/api/3/dashboard/search"
+response_path = "$.values"
+
+[table.columns]
+description = { json = "$.description", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+isfavourite = { json = "$.isFavourite", type = "Boolean" }
+iswritable = { json = "$.isWritable", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+owner_accountid = { json = "$.owner.accountId", type = "Utf8" }
+popularity = { json = "$.popularity", type = "Int64" }
+rank = { json = "$.rank", type = "Int64" }
+systemdashboard = { json = "$.systemDashboard", type = "Boolean" }
+
+[table.filters]
+dashboardname = { param = "dashboardName" }
+maxresults = { param = "maxResults" }
+orderby = { param = "orderBy" }
+startat = { param = "startAt" }
+status = { param = "status" }

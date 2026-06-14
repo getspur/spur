@@ -1,0 +1,119 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier B OpenAPI sources.
+
+[source]
+name = "bitbucket"
+base_url = "https://api.bitbucket.org"
+auth = { scheme = "oauth2_refresh", token_url = "https://bitbucket.org/site/oauth2/access_token", client_id_env = "BITBUCKET_CLIENT_ID", client_secret_env = "BITBUCKET_CLIENT_SECRET", refresh_token_env = "BITBUCKET_REFRESH_TOKEN" }
+
+
+[[table]]
+name = "repositories"
+path = "/repositories"
+response_path = "$.values"
+
+[table.columns]
+created_on = { json = "$.created_on", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+fork_policy = { json = "$.fork_policy", type = "Utf8" }
+full_name = { json = "$.full_name", type = "Utf8" }
+has_issues = { json = "$.has_issues", type = "Boolean" }
+has_wiki = { json = "$.has_wiki", type = "Boolean" }
+is_private = { json = "$.is_private", type = "Boolean" }
+language = { json = "$.language", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+scm = { json = "$.scm", type = "Utf8" }
+size = { json = "$.size", type = "Int64" }
+updated_on = { json = "$.updated_on", type = "Utf8" }
+uuid = { json = "$.uuid", type = "Utf8" }
+website = { json = "$.website", type = "Utf8" }
+
+[table.filters]
+q = { param = "q" }
+role = { param = "role" }
+sort = { param = "sort" }
+
+[[table]]
+name = "snippets"
+path = "/snippets"
+response_path = "$.values"
+
+[table.columns]
+created_on = { json = "$.created_on", type = "Utf8" }
+creator_display_name = { json = "$.creator.display_name", type = "Utf8" }
+creator_username = { json = "$.creator.username", type = "Utf8" }
+creator_uuid = { json = "$.creator.uuid", type = "Utf8" }
+id = { json = "$.id", type = "Int64" }
+is_private = { json = "$.is_private", type = "Boolean" }
+owner_display_name = { json = "$.owner.display_name", type = "Utf8" }
+owner_username = { json = "$.owner.username", type = "Utf8" }
+owner_uuid = { json = "$.owner.uuid", type = "Utf8" }
+scm = { json = "$.scm", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+updated_on = { json = "$.updated_on", type = "Utf8" }
+
+[table.filters]
+role = { param = "role" }
+
+[[table]]
+name = "user_permission_repositories"
+path = "/user/permissions/repositories"
+response_path = "$.values"
+
+[table.columns]
+permission = { json = "$.permission", type = "Utf8" }
+repository_created_on = { json = "$.repository.created_on", type = "Utf8" }
+repository_description = { json = "$.repository.description", type = "Utf8" }
+repository_full_name = { json = "$.repository.full_name", type = "Utf8" }
+repository_has_issues = { json = "$.repository.has_issues", type = "Boolean" }
+repository_has_wiki = { json = "$.repository.has_wiki", type = "Boolean" }
+repository_is_private = { json = "$.repository.is_private", type = "Boolean" }
+repository_language = { json = "$.repository.language", type = "Utf8" }
+repository_name = { json = "$.repository.name", type = "Utf8" }
+repository_owner_username = { json = "$.repository.owner.username", type = "Utf8" }
+repository_owner_uuid = { json = "$.repository.owner.uuid", type = "Utf8" }
+repository_uuid = { json = "$.repository.uuid", type = "Utf8" }
+
+[table.filters]
+q = { param = "q" }
+sort = { param = "sort" }
+
+[[table]]
+name = "user_permission_workspaces"
+path = "/user/permissions/workspaces"
+response_path = "$.values"
+
+[table.columns]
+type = { json = "$.type", type = "Utf8" }
+user_display_name = { json = "$.user.display_name", type = "Utf8" }
+user_username = { json = "$.user.username", type = "Utf8" }
+user_uuid = { json = "$.user.uuid", type = "Utf8" }
+workspace_created_on = { json = "$.workspace.created_on", type = "Utf8" }
+workspace_is_private = { json = "$.workspace.is_private", type = "Boolean" }
+workspace_name = { json = "$.workspace.name", type = "Utf8" }
+workspace_slug = { json = "$.workspace.slug", type = "Utf8" }
+workspace_updated_on = { json = "$.workspace.updated_on", type = "Utf8" }
+workspace_uuid = { json = "$.workspace.uuid", type = "Utf8" }
+
+[table.filters]
+q = { param = "q" }
+sort = { param = "sort" }
+
+[[table]]
+name = "workspaces"
+path = "/workspaces"
+response_path = "$.values"
+
+[table.columns]
+created_on = { json = "$.created_on", type = "Utf8" }
+is_private = { json = "$.is_private", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+slug = { json = "$.slug", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+updated_on = { json = "$.updated_on", type = "Utf8" }
+uuid = { json = "$.uuid", type = "Utf8" }
+
+[table.filters]
+q = { param = "q" }
+role = { param = "role" }
+sort = { param = "sort" }

@@ -1,0 +1,147 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier B OpenAPI sources.
+
+[source]
+name = "instagram"
+base_url = "https://graph.instagram.com"
+auth = { scheme = "oauth2_refresh", token_url = "https://api.instagram.com/oauth/access_token", client_id_env = "INSTAGRAM_CLIENT_ID", client_secret_env = "INSTAGRAM_CLIENT_SECRET", refresh_token_env = "INSTAGRAM_REFRESH_TOKEN" }
+
+
+[[table]]
+name = "locations_search"
+path = "/locations/search"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+latitude = { json = "$.latitude", type = "Float64" }
+longitude = { json = "$.longitude", type = "Float64" }
+name = { json = "$.name", type = "Utf8" }
+
+[table.filters]
+distance = { param = "distance" }
+facebook_places_id = { param = "facebook_places_id" }
+foursquare_id = { param = "foursquare_id" }
+foursquare_v2_id = { param = "foursquare_v2_id" }
+lat = { param = "lat" }
+lng = { param = "lng" }
+
+[[table]]
+name = "media_popular"
+path = "/media/popular"
+response_path = "$.data"
+
+[table.columns]
+caption_text = { json = "$.caption.text", type = "Utf8" }
+comments_count = { json = "$.comments.count", type = "Int64" }
+created_time = { json = "$.created_time", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+images_standard_resolution_url = { json = "$.images.standard_resolution.url", type = "Utf8" }
+likes_count = { json = "$.likes.count", type = "Int64" }
+link = { json = "$.link", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+user_id = { json = "$.user.id", type = "Utf8" }
+user_username = { json = "$.user.username", type = "Utf8" }
+
+[[table]]
+name = "media_search"
+path = "/media/search"
+response_path = "$.data"
+
+[table.columns]
+caption_text = { json = "$.caption.text", type = "Utf8" }
+comments_count = { json = "$.comments.count", type = "Int64" }
+created_time = { json = "$.created_time", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+likes_count = { json = "$.likes.count", type = "Int64" }
+link = { json = "$.link", type = "Utf8" }
+location_latitude = { json = "$.location.latitude", type = "Float64" }
+location_longitude = { json = "$.location.longitude", type = "Float64" }
+type = { json = "$.type", type = "Utf8" }
+user_username = { json = "$.user.username", type = "Utf8" }
+
+[table.filters]
+distance = { param = "distance" }
+lat = { param = "lat" }
+lng = { param = "lng" }
+max_timestamp = { param = "max_timestamp" }
+min_timestamp = { param = "min_timestamp" }
+
+[[table]]
+name = "tags_search"
+path = "/tags/search"
+response_path = "$.data"
+
+[table.columns]
+media_count = { json = "$.media_count", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+
+[table.filters]
+q = { param = "q" }
+
+[[table]]
+name = "users_search"
+path = "/users/search"
+response_path = "$.data"
+
+[table.columns]
+full_name = { json = "$.full_name", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+profile_picture = { json = "$.profile_picture", type = "Utf8" }
+username = { json = "$.username", type = "Utf8" }
+
+[table.filters]
+count = { param = "count" }
+q = { param = "q" }
+
+[[table]]
+name = "users_self_feed"
+path = "/users/self/feed"
+response_path = "$.data"
+
+[table.columns]
+caption_text = { json = "$.caption.text", type = "Utf8" }
+comments_count = { json = "$.comments.count", type = "Int64" }
+created_time = { json = "$.created_time", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+likes_count = { json = "$.likes.count", type = "Int64" }
+link = { json = "$.link", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+user_id = { json = "$.user.id", type = "Utf8" }
+user_username = { json = "$.user.username", type = "Utf8" }
+
+[table.filters]
+count = { param = "count" }
+max_id = { param = "max_id" }
+min_id = { param = "min_id" }
+
+[[table]]
+name = "users_self_media_liked"
+path = "/users/self/media/liked"
+response_path = "$.data"
+
+[table.columns]
+caption_text = { json = "$.caption.text", type = "Utf8" }
+comments_count = { json = "$.comments.count", type = "Int64" }
+created_time = { json = "$.created_time", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+likes_count = { json = "$.likes.count", type = "Int64" }
+link = { json = "$.link", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+user_id = { json = "$.user.id", type = "Utf8" }
+user_username = { json = "$.user.username", type = "Utf8" }
+
+[table.filters]
+count = { param = "count" }
+max_like_id = { param = "max_like_id" }
+
+[[table]]
+name = "users_self_requested_by"
+path = "/users/self/requested-by"
+response_path = "$.data"
+
+[table.columns]
+full_name = { json = "$.full_name", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+profile_picture = { json = "$.profile_picture", type = "Utf8" }
+username = { json = "$.username", type = "Utf8" }

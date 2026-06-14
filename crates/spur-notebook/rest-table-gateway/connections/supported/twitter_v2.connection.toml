@@ -1,0 +1,199 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier B OpenAPI sources.
+
+[source]
+name = "twitter-v2"
+base_url = "https://api.twitter.com"
+auth = { scheme = "oauth2_refresh", token_url = "https://api.twitter.com/2/oauth2/token", client_id_env = "TWITTER_V2_CLIENT_ID", client_secret_env = "TWITTER_V2_CLIENT_SECRET", refresh_token_env = "TWITTER_V2_REFRESH_TOKEN" }
+
+[[table]]
+name = "listbatchcompliancejobs"
+path = "/2/compliance/jobs"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+upload_expires_at = { json = "$.upload_expires_at", type = "Utf8" }
+download_expires_at = { json = "$.download_expires_at", type = "Utf8" }
+upload_url = { json = "$.upload_url", type = "Utf8" }
+download_url = { json = "$.download_url", type = "Utf8" }
+
+[table.filters]
+compliance_job_fields = { param = "compliance_job.fields" }
+status = { param = "status" }
+type = { param = "type" }
+
+[[table]]
+name = "getdmevents"
+path = "/2/dm_events"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+event_type = { json = "$.event_type", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+dm_conversation_id = { json = "$.dm_conversation_id", type = "Utf8" }
+sender_id = { json = "$.sender_id", type = "Utf8" }
+participant_ids = { json = "$.participant_ids", type = "Utf8" }
+text = { json = "$.text", type = "Utf8" }
+attachments_media_keys = { json = "$.attachments.media_keys", type = "Utf8" }
+
+[table.filters]
+dm_event_fields = { param = "dm_event.fields" }
+event_types = { param = "event_types" }
+expansions = { param = "expansions" }
+max_results = { param = "max_results" }
+media_fields = { param = "media.fields" }
+pagination_token = { param = "pagination_token" }
+tweet_fields = { param = "tweet.fields" }
+user_fields = { param = "user.fields" }
+
+[[table]]
+name = "findspacesbyids"
+path = "/2/spaces"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+state = { json = "$.state", type = "Utf8" }
+lang = { json = "$.lang", type = "Utf8" }
+creator_id = { json = "$.creator_id", type = "Utf8" }
+host_ids = { json = "$.host_ids", type = "Utf8" }
+speaker_ids = { json = "$.speaker_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+started_at = { json = "$.started_at", type = "Utf8" }
+ended_at = { json = "$.ended_at", type = "Utf8" }
+is_ticketed = { json = "$.is_ticketed", type = "Boolean" }
+
+[table.filters]
+expansions = { param = "expansions" }
+ids = { param = "ids" }
+space_fields = { param = "space.fields" }
+topic_fields = { param = "topic.fields" }
+user_fields = { param = "user.fields" }
+
+[[table]]
+name = "findspacesbycreatorids"
+path = "/2/spaces/by/creator_ids"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+state = { json = "$.state", type = "Utf8" }
+lang = { json = "$.lang", type = "Utf8" }
+creator_id = { json = "$.creator_id", type = "Utf8" }
+host_ids = { json = "$.host_ids", type = "Utf8" }
+speaker_ids = { json = "$.speaker_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+started_at = { json = "$.started_at", type = "Utf8" }
+ended_at = { json = "$.ended_at", type = "Utf8" }
+is_ticketed = { json = "$.is_ticketed", type = "Boolean" }
+
+[table.filters]
+expansions = { param = "expansions" }
+space_fields = { param = "space.fields" }
+topic_fields = { param = "topic.fields" }
+user_fields = { param = "user.fields" }
+user_ids = { param = "user_ids" }
+
+[[table]]
+name = "searchspaces"
+path = "/2/spaces/search"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+title = { json = "$.title", type = "Utf8" }
+state = { json = "$.state", type = "Utf8" }
+lang = { json = "$.lang", type = "Utf8" }
+creator_id = { json = "$.creator_id", type = "Utf8" }
+host_ids = { json = "$.host_ids", type = "Utf8" }
+speaker_ids = { json = "$.speaker_ids", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+started_at = { json = "$.started_at", type = "Utf8" }
+ended_at = { json = "$.ended_at", type = "Utf8" }
+is_ticketed = { json = "$.is_ticketed", type = "Boolean" }
+
+[table.filters]
+expansions = { param = "expansions" }
+max_results = { param = "max_results" }
+query = { param = "query" }
+space_fields = { param = "space.fields" }
+state = { param = "state" }
+topic_fields = { param = "topic.fields" }
+user_fields = { param = "user.fields" }
+
+[[table]]
+name = "tweetcountsrecentsearch"
+path = "/2/tweets/counts/recent"
+response_path = "$.data"
+
+[table.columns]
+start = { json = "$.start", type = "Utf8" }
+end = { json = "$.end", type = "Utf8" }
+tweet_count = { json = "$.tweet_count", type = "Int64" }
+
+[table.filters]
+end_time = { param = "end_time" }
+granularity = { param = "granularity" }
+next_token = { param = "next_token" }
+pagination_token = { param = "pagination_token" }
+query = { param = "query" }
+search_count_fields = { param = "search_count.fields" }
+since_id = { param = "since_id" }
+start_time = { param = "start_time" }
+until_id = { param = "until_id" }
+
+[[table]]
+name = "tweetsrecentsearch"
+path = "/2/tweets/search/recent"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+text = { json = "$.text", type = "Utf8" }
+author_id = { json = "$.author_id", type = "Utf8" }
+created_at = { json = "$.created_at", type = "Utf8" }
+conversation_id = { json = "$.conversation_id", type = "Utf8" }
+lang = { json = "$.lang", type = "Utf8" }
+possibly_sensitive = { json = "$.possibly_sensitive", type = "Boolean" }
+public_metrics_like_count = { json = "$.public_metrics.like_count", type = "Int64" }
+public_metrics_retweet_count = { json = "$.public_metrics.retweet_count", type = "Int64" }
+
+[table.filters]
+end_time = { param = "end_time" }
+expansions = { param = "expansions" }
+max_results = { param = "max_results" }
+media_fields = { param = "media.fields" }
+next_token = { param = "next_token" }
+pagination_token = { param = "pagination_token" }
+place_fields = { param = "place.fields" }
+poll_fields = { param = "poll.fields" }
+query = { param = "query" }
+since_id = { param = "since_id" }
+sort_order = { param = "sort_order" }
+start_time = { param = "start_time" }
+tweet_fields = { param = "tweet.fields" }
+until_id = { param = "until_id" }
+user_fields = { param = "user.fields" }
+
+[[table]]
+name = "getrules"
+path = "/2/tweets/search/stream/rules"
+response_path = "$.data"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+value = { json = "$.value", type = "Utf8" }
+tag = { json = "$.tag", type = "Utf8" }
+
+[table.filters]
+ids = { param = "ids" }
+max_results = { param = "max_results" }
+pagination_token = { param = "pagination_token" }
