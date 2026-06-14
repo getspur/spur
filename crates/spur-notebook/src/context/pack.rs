@@ -426,6 +426,7 @@ mod tests {
                     }),
                     code_type,
                     frontend,
+                    cron: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),
