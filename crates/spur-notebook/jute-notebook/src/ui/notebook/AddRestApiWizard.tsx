@@ -2510,6 +2510,8 @@ function RssAttachStep({
       ? sourceInput.trim()
       : generatedRssHubUrl;
   const queryUrlLiteral = sqlStringLiteral(queryUrl || generatedRssHubUrl);
+  const feedQuery = `select * from rss_feed(${queryUrlLiteral});`;
+  const entriesQuery = `select * from rss_entries(${queryUrlLiteral});`;
   const queryTemplates = [
     {
       label: "Routes",
@@ -2517,11 +2519,11 @@ function RssAttachStep({
     },
     {
       label: "Feed metadata",
-      sql: `select * from rss_feed(${queryUrlLiteral});`,
+      sql: feedQuery,
     },
     {
       label: "Feed entries",
-      sql: `select * from rss_entries(${queryUrlLiteral});`,
+      sql: entriesQuery,
     },
   ];
 
@@ -2813,9 +2815,11 @@ function RssAttachStep({
           </div>
           <SummaryRow label="Feed">{selectedRoute.previewTitle}</SummaryRow>
           <SummaryRow label="Source">{classification.label}</SummaryRow>
+          <SummaryRow label="Entry function">rss_entries(url)</SummaryRow>
+          <SummaryRow label="Entry query">{entriesQuery}</SummaryRow>
           <SummaryRow label="View">{selectedRoute.view}</SummaryRow>
           <SummaryRow label="Folder">{selectedRoute.category}</SummaryRow>
-          <SummaryRow label="Next action">run a notebook query</SummaryRow>
+          <SummaryRow label="Next action">run the entry query</SummaryRow>
         </section>
 
         <section className="rounded-lg border border-gray-200 bg-gray-50">
@@ -2840,8 +2844,8 @@ function RssAttachStep({
             Notebook query handoff
           </h4>
           <p className="mt-1 text-xs text-gray-500">
-            Run these templates in a notebook query cell after adding the
-            datasource.
+            Run the feed entries query as the selected source entry point after
+            adding the datasource.
           </p>
         </div>
         <div className="divide-y divide-gray-200">
