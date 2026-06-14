@@ -386,6 +386,7 @@ mod tests {
                     }),
                     code_type: Some(CodeType::Python),
                     frontend: None,
+                    cron: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),

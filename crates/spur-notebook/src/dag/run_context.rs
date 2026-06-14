@@ -256,6 +256,7 @@ mod tests {
                 }),
                 code_type: None,
                 frontend: None,
+                cron: None,
             }),
             jute_deck: None,
             other: Default::default(),
