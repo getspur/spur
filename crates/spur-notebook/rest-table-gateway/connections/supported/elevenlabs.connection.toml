@@ -1,0 +1,56 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier A OpenAPI sources.
+
+[source]
+name = "elevenlabs"
+base_url = "https://api.elevenlabs.io"
+auth = { scheme = "header", name = "xi-api-key", env = "ELEVENLABS_API_KEY" }
+
+
+[[table]]
+name = "get_generated_items_v1_history_get"
+path = "/v1/history"
+response_path = "$.history"
+
+[table.columns]
+character_count_change_from = { json = "$.character_count_change_from", type = "Int64" }
+character_count_change_to = { json = "$.character_count_change_to", type = "Int64" }
+content_type = { json = "$.content_type", type = "Utf8" }
+date_unix = { json = "$.date_unix", type = "Int64" }
+feedback_review_status = { json = "$.feedback.review_status", type = "Utf8" }
+feedback_thumbs_up = { json = "$.feedback.thumbs_up", type = "Boolean" }
+history_item_id = { json = "$.history_item_id", type = "Utf8" }
+request_id = { json = "$.request_id", type = "Utf8" }
+state = { json = "$.state", type = "Utf8" }
+text = { json = "$.text", type = "Utf8" }
+voice_id = { json = "$.voice_id", type = "Utf8" }
+voice_name = { json = "$.voice_name", type = "Utf8" }
+
+[[table]]
+name = "get_user_subscription_info_v1_user_subscription_get"
+path = "/v1/user/subscription"
+response_path = "$.available_models"
+
+[table.columns]
+display_name = { json = "$.display_name", type = "Utf8" }
+model_id = { json = "$.model_id", type = "Utf8" }
+supported_language = { json = "$.supported_language", type = "Utf8" }
+
+[[table]]
+name = "get_voices_v1_voices_get"
+path = "/v1/voices"
+response_path = "$.voices"
+
+[table.columns]
+available_for_tiers = { json = "$.available_for_tiers", type = "Utf8" }
+category = { json = "$.category", type = "Utf8" }
+description = { json = "$.description", type = "Utf8" }
+fine_tuning_fine_tuning_requested = { json = "$.fine_tuning.fine_tuning_requested", type = "Boolean" }
+fine_tuning_finetuning_state = { json = "$.fine_tuning.finetuning_state", type = "Utf8" }
+fine_tuning_is_allowed_to_fine_tune = { json = "$.fine_tuning.is_allowed_to_fine_tune", type = "Boolean" }
+labels = { json = "$.labels", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+preview_url = { json = "$.preview_url", type = "Utf8" }
+settings_similarity_boost = { json = "$.settings.similarity_boost", type = "Float64" }
+settings_stability = { json = "$.settings.stability", type = "Float64" }
+voice_id = { json = "$.voice_id", type = "Utf8" }

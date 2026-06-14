@@ -1,0 +1,185 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier B OpenAPI sources.
+
+[source]
+name = "zoom"
+base_url = "https://api.zoom.us/v2"
+auth = { scheme = "oauth2_refresh", token_url = "https://zoom.us/oauth/token", client_id_env = "ZOOM_CLIENT_ID", client_secret_env = "ZOOM_CLIENT_SECRET", refresh_token_env = "ZOOM_REFRESH_TOKEN" }
+
+
+[[table]]
+name = "searchcompanycontacts"
+path = "/contacts"
+response_path = "$.contacts"
+
+[table.columns]
+dept = { json = "$.dept", type = "Utf8" }
+direct_numbers = { json = "$.direct_numbers", type = "Utf8" }
+email = { json = "$.email", type = "Utf8" }
+extension_number = { json = "$.extension_number", type = "Utf8" }
+first_name = { json = "$.first_name", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+im_group_id = { json = "$.im_group_id", type = "Utf8" }
+im_group_name = { json = "$.im_group_name", type = "Utf8" }
+job_title = { json = "$.job_title", type = "Utf8" }
+last_name = { json = "$.last_name", type = "Utf8" }
+location = { json = "$.location", type = "Utf8" }
+phone_number = { json = "$.phone_number", type = "Utf8" }
+presence_status = { json = "$.presence_status", type = "Utf8" }
+sip_phone_number = { json = "$.sip_phone_number", type = "Utf8" }
+
+[table.filters]
+next_page_token = { param = "next_page_token" }
+page_size = { param = "page_size" }
+query_presence_status = { param = "query_presence_status" }
+search_key = { param = "search_key" }
+
+[[table]]
+name = "groups"
+path = "/groups"
+response_path = "$.groups"
+
+[table.columns]
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+total_members = { json = "$.total_members", type = "Int64" }
+
+[[table]]
+name = "listcallqueues"
+path = "/phone/call_queues"
+response_path = "$.call_queues"
+
+[table.columns]
+extension_number = { json = "$.extension_number", type = "Int64" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+phone_numbers = { json = "$.phone_numbers", type = "Utf8" }
+site_id = { json = "$.site.id", type = "Utf8" }
+site_name = { json = "$.site.name", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+next_page_token = { param = "next_page_token" }
+page_size = { param = "page_size" }
+
+[[table]]
+name = "listcallingplans"
+path = "/phone/calling_plans"
+response_path = "$.calling_plans"
+
+[table.columns]
+assigned = { json = "$.assigned", type = "Int64" }
+available = { json = "$.available", type = "Int64" }
+name = { json = "$.name", type = "Utf8" }
+subscribed = { json = "$.subscribed", type = "Int64" }
+type = { json = "$.type", type = "Int64" }
+
+[[table]]
+name = "listcommonareaphones"
+path = "/phone/common_area_phones"
+response_path = "$.common_area_phones"
+
+[table.columns]
+calling_plans = { json = "$.calling_plans", type = "Utf8" }
+device_type = { json = "$.device_type", type = "Utf8" }
+display_name = { json = "$.display_name", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+mac_address = { json = "$.mac_address", type = "Utf8" }
+phone_numbers = { json = "$.phone_numbers", type = "Utf8" }
+site_id = { json = "$.site.id", type = "Utf8" }
+site_name = { json = "$.site.name", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+next_page_token = { param = "next_page_token" }
+page_size = { param = "page_size" }
+
+[[table]]
+name = "listphonedevices"
+path = "/phone/devices"
+response_path = "$.devices"
+
+[table.columns]
+assignee_extension_number = { json = "$.assignee.extension_number", type = "Int64" }
+assignee_id = { json = "$.assignee.id", type = "Utf8" }
+assignee_name = { json = "$.assignee.name", type = "Utf8" }
+device_type = { json = "$.device_type", type = "Utf8" }
+display_name = { json = "$.display_name", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+mac_address = { json = "$.mac_address", type = "Utf8" }
+site_id = { json = "$.site.id", type = "Utf8" }
+site_name = { json = "$.site.name", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+next_page_token = { param = "next_page_token" }
+page_size = { param = "page_size" }
+type = { param = "type" }
+
+[[table]]
+name = "listaccountphonenumbers"
+path = "/phone/numbers"
+response_path = "$.phone_numbers"
+
+[table.columns]
+assignee_extension_number = { json = "$.assignee.extension_number", type = "Int64" }
+assignee_id = { json = "$.assignee.id", type = "Utf8" }
+assignee_name = { json = "$.assignee.name", type = "Utf8" }
+assignee_type = { json = "$.assignee.type", type = "Utf8" }
+capability = { json = "$.capability", type = "Utf8" }
+carrier_code = { json = "$.carrier.code", type = "Utf8" }
+carrier_name = { json = "$.carrier.name", type = "Utf8" }
+display_name = { json = "$.display_name", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+location = { json = "$.location", type = "Utf8" }
+number = { json = "$.number", type = "Utf8" }
+number_type = { json = "$.number_type", type = "Utf8" }
+sip_group_id = { json = "$.sip_group.id", type = "Utf8" }
+sip_group_name = { json = "$.sip_group.name", type = "Utf8" }
+site_id = { json = "$.site.id", type = "Utf8" }
+site_name = { json = "$.site.name", type = "Utf8" }
+source = { json = "$.source", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+
+[table.filters]
+extension_type = { param = "extension_type" }
+next_page_token = { param = "next_page_token" }
+number_type = { param = "number_type" }
+page_size = { param = "page_size" }
+pending_numbers = { param = "pending_numbers" }
+site_id = { param = "site_id" }
+type = { param = "type" }
+
+[[table]]
+name = "users"
+path = "/users"
+response_path = "$.users"
+
+[table.columns]
+created_at = { json = "$.created_at", type = "Utf8" }
+custom_attributes = { json = "$.custom_attributes", type = "Utf8" }
+dept = { json = "$.dept", type = "Utf8" }
+email = { json = "$.email", type = "Utf8" }
+first_name = { json = "$.first_name", type = "Utf8" }
+group_ids = { json = "$.group_ids", type = "Utf8" }
+host_key = { json = "$.host_key", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+im_group_ids = { json = "$.im_group_ids", type = "Utf8" }
+last_client_version = { json = "$.last_client_version", type = "Utf8" }
+last_login_time = { json = "$.last_login_time", type = "Utf8" }
+last_name = { json = "$.last_name", type = "Utf8" }
+plan_united_type = { json = "$.plan_united_type", type = "Utf8" }
+pmi = { json = "$.pmi", type = "Int64" }
+role_id = { json = "$.role_id", type = "Utf8" }
+status = { json = "$.status", type = "Utf8" }
+timezone = { json = "$.timezone", type = "Utf8" }
+type = { json = "$.type", type = "Int64" }
+verified = { json = "$.verified", type = "Int64" }
+
+[table.filters]
+include_fields = { param = "include_fields" }
+next_page_token = { param = "next_page_token" }
+page_number = { param = "page_number" }
+page_size = { param = "page_size" }
+role_id = { param = "role_id" }
+status = { param = "status" }
