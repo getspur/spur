@@ -1363,18 +1363,19 @@ impl<'a> SectionRowBatcher<'a> {
         };
 
         if let Some(sections) = self.sections_by_path.get(path) {
-            return sections
-                .iter()
-                .map(|section| {
-                    section_row(
-                        section,
-                        source,
-                        content_hash.as_str(),
-                        &self.child_count_by_parent,
-                        &self.parent_by_child,
-                    )
-                })
-                .collect();
+            let mut rows = Vec::new();
+            for section in sections {
+                if let Some(row) = section_row(
+                    section,
+                    source,
+                    content_hash.as_str(),
+                    &self.child_count_by_parent,
+                    &self.parent_by_child,
+                )? {
+                    rows.push(row);
+                }
+            }
+            return Ok(rows);
         }
 
         let Some(manifest) = self.manifest_by_path.get(path) else {
@@ -1535,19 +1536,21 @@ fn section_row(
     content_hash: &str,
     child_count_by_parent: &HashMap<&str, u32>,
     parent_by_child: &HashMap<&str, String>,
-) -> Result<SectionRow> {
+) -> Result<Option<SectionRow>> {
     let start = section.byte_range[0];
     let end = section.byte_range[1];
-    let body_text = source
-        .get(start..end)
-        .with_context(|| {
-            format!(
-                "section byte range {}..{} is not a UTF-8 boundary in `{}`",
-                start, end, section.file_path
-            )
-        })?
-        .to_owned();
-    Ok(SectionRow {
+    let Some(body_text) = source.get(start..end) else {
+        tracing::warn!(
+            file_path = %section.file_path,
+            stable_symbol_id = %section.stable_symbol_id,
+            byte_start = start,
+            byte_end = end,
+            "section_rows: skipping non-UTF-8-boundary byte range"
+        );
+        return Ok(None);
+    };
+    let body_text = body_text.to_owned();
+    Ok(Some(SectionRow {
         stable_symbol_id: section.stable_symbol_id.clone(),
         file_path: section.file_path.clone(),
         qualified_name: section.qualified_name.clone(),
@@ -1564,7 +1567,7 @@ fn section_row(
             .cloned(),
         content_hash: content_hash.to_owned(),
         vector: None,
-    })
+    }))
 }
 
 fn symbol_row(
@@ -1572,7 +1575,20 @@ fn symbol_row(
     source: &str,
     content_hash: &str,
 ) -> Result<Option<SymbolRow>> {
-    let doc_text = doc_text_for_symbol(source, symbol.byte_range[0]).with_context(|| {
+    let start = symbol.byte_range[0];
+    let end = symbol.byte_range[1];
+    if source.get(start..end).is_none() {
+        tracing::warn!(
+            file_path = %symbol.file_path,
+            stable_symbol_id = %symbol.stable_symbol_id,
+            byte_start = start,
+            byte_end = end,
+            "symbol_rows: skipping non-UTF-8-boundary byte range"
+        );
+        return Ok(None);
+    }
+
+    let doc_text = doc_text_for_symbol(source, start).with_context(|| {
         format!(
             "failed to derive doc text for symbol `{}` in `{}`",
             symbol.stable_symbol_id, symbol.file_path
@@ -3048,6 +3064,40 @@ mod tests {
         }
     }
 
+    fn graph_artifact_for_path(
+        stable_file_id: &str,
+        path: &str,
+        symbols: Vec<GraphSymbolArtifact>,
+    ) -> GraphIndexArtifact {
+        GraphIndexArtifact {
+            header: crate::GraphIndexHeader {
+                graph_index_version: "test".to_owned(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_owned(),
+            graph_content_hash: "test".to_owned(),
+            file_manifests: vec![GraphFileManifestEntry {
+                stable_file_id: stable_file_id.to_owned(),
+                path: path.to_owned(),
+                content_oid: "blob-oid".to_owned(),
+                node_ids: Vec::new(),
+            }],
+            files: vec![crate::GraphFileArtifact {
+                stable_file_id: stable_file_id.to_owned(),
+                file_path: path.to_owned(),
+            }],
+            file_node_ids: Vec::new(),
+            symbols,
+            symbol_node_ids: Vec::new(),
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
+        }
+    }
+
     struct EnvGuard {
         key: &'static str,
         previous: Option<std::ffi::OsString>,
@@ -3290,6 +3340,57 @@ mod tests {
     }
 
     #[test]
+    fn section_row_batcher_skips_non_utf8_boundary_ranges() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        let path = "docs/sections.md";
+        let source = "## Bad\n\ncaf\u{e9}\n\n## Good\n\nBody.\n";
+        std::fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+        std::fs::write(root.join(path), source).expect("write markdown");
+
+        let mid_char_end = source.find('\u{e9}').expect("accent") + 1;
+        assert!(source.get(0..mid_char_end).is_none());
+        let good_start = source.find("## Good").expect("good start");
+        let artifact = graph_artifact_for_path(
+            "file-sections",
+            path,
+            vec![
+                GraphSymbolArtifact {
+                    stable_symbol_id: "bad-section".to_owned(),
+                    file_path: path.to_owned(),
+                    byte_range: [0, mid_char_end],
+                    line_range: [1, 3],
+                    entity_name: "Bad".to_owned(),
+                    qualified_name: "docs/sections.md::Bad".to_owned(),
+                    symbol_kind: "section".to_owned(),
+                    anchor_hash: "bad-anchor".to_owned(),
+                    enclosing_scope: None,
+                },
+                GraphSymbolArtifact {
+                    stable_symbol_id: "good-section".to_owned(),
+                    file_path: path.to_owned(),
+                    byte_range: [good_start, source.len()],
+                    line_range: [5, 7],
+                    entity_name: "Good".to_owned(),
+                    qualified_name: "docs/sections.md::Good".to_owned(),
+                    symbol_kind: "section".to_owned(),
+                    anchor_hash: "good-anchor".to_owned(),
+                    enclosing_scope: None,
+                },
+            ],
+        );
+
+        let mut batcher = SectionRowBatcher::new(&artifact, root, 16, None);
+        let rows = batcher
+            .next_batch()
+            .expect("section batch")
+            .expect("section rows");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stable_symbol_id, "good-section");
+    }
+
+    #[test]
     fn symbol_row_batcher_prepends_first_source_line_for_long_bodies_only() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let root = tempdir.path();
@@ -3384,6 +3485,69 @@ mod tests {
                 "fn handle_error(delegation: Delegation) { handle_error crate::handle_error function"
             )
         );
+    }
+
+    #[test]
+    fn symbol_row_batcher_skips_non_utf8_boundary_ranges() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        let path = "src/lib.rs";
+        let source = concat!(
+            "fn bad_symbol() {\n",
+            "    let word = \"caf\u{e9}\";\n",
+            "    consume(word);\n",
+            "    consume(word);\n",
+            "    consume(word);\n",
+            "    consume(word);\n",
+            "}\n",
+            "\n",
+            "fn good_symbol() {\n",
+            "    ready();\n",
+            "}\n",
+        );
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join(path), source).expect("write source");
+
+        let mid_char_end = source.find('\u{e9}').expect("accent") + 1;
+        assert!(source.get(0..mid_char_end).is_none());
+        let good_start = source.find("fn good_symbol").expect("good start");
+        let artifact = graph_artifact_for_path(
+            "file-lib",
+            path,
+            vec![
+                GraphSymbolArtifact {
+                    stable_symbol_id: "bad-symbol".to_owned(),
+                    file_path: path.to_owned(),
+                    byte_range: [0, mid_char_end],
+                    line_range: [1, 7],
+                    entity_name: "bad_symbol".to_owned(),
+                    qualified_name: "crate::bad_symbol".to_owned(),
+                    symbol_kind: "function".to_owned(),
+                    anchor_hash: "bad-anchor".to_owned(),
+                    enclosing_scope: None,
+                },
+                GraphSymbolArtifact {
+                    stable_symbol_id: "good-symbol".to_owned(),
+                    file_path: path.to_owned(),
+                    byte_range: [good_start, source.len()],
+                    line_range: [9, 11],
+                    entity_name: "good_symbol".to_owned(),
+                    qualified_name: "crate::good_symbol".to_owned(),
+                    symbol_kind: "function".to_owned(),
+                    anchor_hash: "good-anchor".to_owned(),
+                    enclosing_scope: None,
+                },
+            ],
+        );
+
+        let mut batcher = SymbolRowBatcher::new(&artifact, root, 16, None);
+        let rows = batcher
+            .next_batch()
+            .expect("symbol batch")
+            .expect("symbol rows");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stable_symbol_id, "good-symbol");
     }
 
     #[tokio::test]
