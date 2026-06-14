@@ -90,5 +90,6 @@ pub mod extension_install;
 pub mod mcp;
 pub mod open_design;
 pub mod recents;
+pub mod schedule;
 pub mod sidebar_chat;
 pub mod spur_app;

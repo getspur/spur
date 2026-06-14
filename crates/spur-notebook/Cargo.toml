@@ -24,6 +24,8 @@ async-trait = { workspace = true }
 base64 = "0.22"
 blake3 = "1"
 chrono.workspace = true
+chrono-tz.workspace = true
+croner.workspace = true
 directories.workspace = true
 duckdb = { workspace = true, optional = true, features = ["bundled"] }
 fastembed = { version = "4", default-features = false }
