@@ -2541,7 +2541,7 @@ function RssAttachStep({
       sql: friendlyEntriesQuery,
     },
     {
-      label: "Create entries view",
+      label: "Generated DuckDB view over rss_entries(url)",
       sql: createEntriesViewSql,
     },
     {
@@ -2666,10 +2666,10 @@ function RssAttachStep({
 
         <label className="mt-3 block">
           <span className="text-xs font-medium text-gray-600">
-            Source handle
+            Friendly view name
           </span>
           <input
-            aria-label="Source handle"
+            aria-label="Friendly view name"
             className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
             onChange={(event) =>
               setSourceHandleOverride(
@@ -2678,6 +2678,10 @@ function RssAttachStep({
             }
             value={sourceHandle}
           />
+          <span className="mt-1 block text-[11px] leading-4 text-gray-500">
+            Used only to name the generated DuckDB view; it does not register a
+            dynamic backend table-function.
+          </span>
         </label>
 
         <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
@@ -2871,7 +2875,7 @@ function RssAttachStep({
           </div>
           <SummaryRow label="Feed">{selectedRoute.previewTitle}</SummaryRow>
           <SummaryRow label="Source">{classification.label}</SummaryRow>
-          <SummaryRow label="Entries view">{entriesViewName}</SummaryRow>
+          <SummaryRow label="Friendly view name">{entriesViewName}</SummaryRow>
           <SummaryRow label="Entry function">rss_entries(url)</SummaryRow>
           <SummaryRow label="Entry query">{friendlyEntriesQuery}</SummaryRow>
           <SummaryRow label="View">{selectedRoute.view}</SummaryRow>
@@ -2882,7 +2886,7 @@ function RssAttachStep({
         <section className="rounded-lg border border-gray-200 bg-gray-50">
           <div className="border-b border-gray-200 px-3 py-2">
             <h4 className="text-xs font-medium text-gray-950">
-              Implementation mapping
+              Raw backend mapping
             </h4>
           </div>
           <SummaryRow label="Attach">add_api_datasource source = rss</SummaryRow>
