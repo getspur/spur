@@ -705,6 +705,9 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("Source registration")).toBeInTheDocument();
     expect(screen.getByText("Entry function")).toBeInTheDocument();
     expect(screen.getAllByText("rss_entries(url)").length).toBeGreaterThan(1);
+    expect(
+      screen.getByText("github_issues_openai_codex_entries"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Entry query")).toBeInTheDocument();
     expect(screen.getAllByText("Programming").length).toBeGreaterThan(0);
   });
@@ -725,12 +728,21 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("Notebook query handoff")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Run the feed entries query as the selected source entry point after adding the datasource.",
+        "Query the friendly entries view after creating the generated DuckDB view over rss_entries(url).",
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByText("select * from rss_feed('https://example.com/feed.xml');"),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "create or replace view direct_example_feed_xml_entries as",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("select * from direct_example_feed_xml_entries"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("order by published_at desc;")).toBeInTheDocument();
     expect(
       screen.getAllByText(
         "select * from rss_entries('https://example.com/feed.xml');",
@@ -765,6 +777,15 @@ describe("AddRestApiWizard", () => {
         "select * from rss_feed('rsshub://github/issue/openai/codex');",
       ),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "create or replace view github_issues_openai_codex_entries as",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("select * from github_issues_openai_codex_entries"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("order by published_at desc;")).toBeInTheDocument();
     expect(
       screen.getAllByText(
         "select * from rss_entries('rsshub://github/issue/openai/codex');",
