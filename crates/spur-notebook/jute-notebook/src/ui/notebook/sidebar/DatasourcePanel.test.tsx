@@ -28,6 +28,7 @@ const eventCallbacks = vi.hoisted(() => new Map<string, TauriEventCallback>());
 const listenMock = vi.hoisted(() => vi.fn());
 const onDragDropEventMock = vi.hoisted(() => vi.fn());
 const openMock = vi.hoisted(() => vi.fn());
+const setCellScheduleMock = vi.hoisted(() => vi.fn());
 const unlistenEventMock = vi.hoisted(() => vi.fn());
 const unlistenMock = vi.hoisted(() => vi.fn());
 
@@ -65,6 +66,10 @@ vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({
     onDragDropEvent: onDragDropEventMock,
   }),
+}));
+
+vi.mock("../../dag/scheduleApi", () => ({
+  setCellSchedule: setCellScheduleMock,
 }));
 
 function datasourceEntry(overrides: Partial<DatasourceEntry>): DatasourceEntry {
@@ -146,6 +151,37 @@ function defaultDaemonResponse(
     };
   }
 
+  if (command.command === "insert_cell") {
+    return {
+      ok: true,
+      result: {
+        type: "delta",
+        data: {
+          version: 2,
+          kind: {
+            type: "cellInserted",
+            after_id: command.after_id,
+            cell: {
+              id: "scheduled-query-cell",
+              kind: command.kind,
+              version: 1,
+              lastEditedBy: command.last_edited_by,
+              datasourceSetup: undefined,
+              dagMetadata: undefined,
+              codeType: command.code_type,
+              frontendMetadata: undefined,
+              juteDeckMetadata: undefined,
+              source: command.source,
+              execCount: null,
+              status: "idle",
+              outputs: [],
+            },
+          },
+        },
+      },
+    };
+  }
+
   if (command.command === "attach_saved_connection") {
     const savedConnection = savedConnectionTemplate();
     const tables =
@@ -215,6 +251,8 @@ describe("DatasourcePanel", () => {
       },
     );
     openMock.mockReset();
+    setCellScheduleMock.mockReset();
+    setCellScheduleMock.mockResolvedValue(undefined);
     unlistenEventMock.mockReset();
     unlistenMock.mockReset();
   });
@@ -1055,5 +1093,67 @@ describe("DatasourcePanel", () => {
     expect(screen.getByText("market_id")).toBeInTheDocument();
     expect(screen.getByText("polymarket_trades")).toBeInTheDocument();
     expect(screen.getByText("price")).toBeInTheDocument();
+  });
+
+  test("schedule_query_button_creates_python_table_function_cell_with_cron", async () => {
+    render(<DatasourcePanel />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [
+          datasourceEntry({
+            name: "polymarket",
+            path: "api://polymarket",
+            kind: "api_tables",
+            group: null,
+            columns: [],
+            rowCount: null,
+            tables: [
+              {
+                name: "polymarket_markets",
+                columns: [{ name: "market_id", sqlType: "VARCHAR" }],
+                rowCount: null,
+              },
+            ],
+          }),
+        ],
+      });
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Schedule query polymarket_markets",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "insert_cell",
+        kind: "code",
+        after_id: null,
+        source:
+          'import duckdb\n\n' +
+          'duckdb.sql("SELECT * FROM polymarket_markets() LIMIT 100").df()\n',
+        last_edited_by: "datasource",
+        code_type: "python",
+      }),
+    );
+    await waitFor(() =>
+      expect(setCellScheduleMock).toHaveBeenCalledWith(
+        "scheduled-query-cell",
+        {
+          enabled: true,
+          cron: "*/15 * * * *",
+          timezone: "UTC",
+          run_target: "cascade",
+          skip_if_running: true,
+          catch_up: false,
+        },
+        1,
+      ),
+    );
   });
 });
