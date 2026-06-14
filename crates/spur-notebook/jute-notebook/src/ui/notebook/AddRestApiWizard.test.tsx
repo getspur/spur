@@ -639,6 +639,9 @@ describe("AddRestApiWizard", () => {
       target: { value: "https://example.com/feed.xml" },
     });
 
+    expect(screen.getByLabelText("Source handle")).toHaveValue(
+      "direct_example_feed_xml",
+    );
     expect(screen.getByText("Detected: Direct RSS URL")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Detected: Direct RSS URL",
@@ -649,6 +652,9 @@ describe("AddRestApiWizard", () => {
       target: { value: "rust async release notes" },
     });
 
+    expect(screen.getByLabelText("Source handle")).toHaveValue(
+      "rust_async_release_notes",
+    );
     expect(screen.getByText("Detected: Keyword discovery")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Detected: Keyword discovery",
@@ -656,6 +662,12 @@ describe("AddRestApiWizard", () => {
     expect(
       screen.getByText(/Searches seeded RSSHub routes/i),
     ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Source URL or keyword"), {
+      target: { value: "!!!" },
+    });
+
+    expect(screen.getByLabelText("Source handle")).toHaveValue("rss_source");
   });
 
   test("rss_workflow_selects_route_and_shows_generated_url_preview_and_mapping", () => {
@@ -668,9 +680,21 @@ describe("AddRestApiWizard", () => {
 
     expect(screen.getByLabelText("Parameter: owner")).toHaveValue("spur-dev");
     expect(screen.getByLabelText("Parameter: repo")).toHaveValue("spur");
+    expect(screen.getByLabelText("Source handle")).toHaveValue(
+      "github_issues_spur_dev_spur",
+    );
     expect(
       screen.getByText("rsshub://github/issue/spur-dev/spur"),
     ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Parameter: owner"), {
+      target: { value: "openai" },
+    });
+    fireEvent.change(screen.getByLabelText("Parameter: repo"), {
+      target: { value: "codex" },
+    });
+    expect(screen.getByLabelText("Source handle")).toHaveValue(
+      "github_issues_openai_codex",
+    );
     expect(screen.getByText("Feed status")).toBeInTheDocument();
     expect(screen.getAllByText("GitHub Issues radar").length).toBeGreaterThan(
       0,
@@ -695,6 +719,9 @@ describe("AddRestApiWizard", () => {
       target: { value: "https://example.com/feed.xml" },
     });
 
+    expect(screen.getByLabelText("Source handle")).toHaveValue(
+      "direct_example_feed_xml",
+    );
     expect(screen.getByText("Notebook query handoff")).toBeInTheDocument();
     expect(
       screen.getByText(
