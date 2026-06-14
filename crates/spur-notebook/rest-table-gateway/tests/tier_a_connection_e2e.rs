@@ -17,6 +17,14 @@ const SUPPORTED_TIER_A_TABLE_PROVIDERS: &[(&str, &str)] = &[
         include_str!("../connections/supported/datadog.connection.toml"),
     ),
     (
+        "elevenlabs",
+        include_str!("../connections/supported/elevenlabs.connection.toml"),
+    ),
+    (
+        "jira_basic",
+        include_str!("../connections/supported/jira_basic.connection.toml"),
+    ),
+    (
         "mailchimp",
         include_str!("../connections/supported/mailchimp.connection.toml"),
     ),
@@ -35,6 +43,10 @@ const SUPPORTED_TIER_A_TABLE_PROVIDERS: &[(&str, &str)] = &[
     (
         "stripe",
         include_str!("../connections/supported/stripe.connection.toml"),
+    ),
+    (
+        "stripe_api_key",
+        include_str!("../connections/supported/stripe_api_key.connection.toml"),
     ),
     (
         "twilio",
@@ -60,11 +72,14 @@ async fn generated_tier_a_supported_manifests_scan_one_table_each() {
         provider_names,
         BTreeSet::from([
             "datadog",
+            "elevenlabs",
+            "jira_basic",
             "mailchimp",
             "openai",
             "sendgrid",
             "square",
             "stripe",
+            "stripe_api_key",
             "twilio",
             "vercel",
             "zendesk",
@@ -74,7 +89,7 @@ async fn generated_tier_a_supported_manifests_scan_one_table_each() {
     for (provider_name, manifest_toml) in SUPPORTED_TIER_A_TABLE_PROVIDERS {
         let manifest = Manifest::from_toml(manifest_toml)
             .unwrap_or_else(|error| panic!("{provider_name} manifest should parse: {error}"));
-        assert_eq!(manifest.source.name, *provider_name);
+        assert_eq!(manifest.source.name.replace('-', "_"), *provider_name);
         assert!(
             !manifest.tables.is_empty(),
             "{provider_name} should expose table scans"

@@ -73,6 +73,20 @@ impl ProviderManifestHarness {
         self.manifest.source.base_url = replacement.to_string();
     }
 
+    pub fn replace_oauth_token_url(&mut self, expected: &str, replacement: &str) {
+        match &mut self.manifest.source.auth {
+            AuthCfg::Oauth2Refresh { token_url, .. } => {
+                assert_eq!(
+                    token_url, expected,
+                    "{} OAuth token_url fixture changed",
+                    self.provider_name
+                );
+                *token_url = replacement.to_string();
+            }
+            _ => panic!("{} should use oauth2_refresh auth", self.provider_name),
+        }
+    }
+
     pub fn install_env(&self) -> Vec<EnvGuard> {
         install_manifest_env(&self.manifest, &self.provider_name)
     }
@@ -375,6 +389,7 @@ fn response_body_for_columns(
 ) -> Value {
     let row = row_for_columns(columns);
     match response_path {
+        Some("$") => Value::Array(vec![row]),
         Some("$.data") => object_with_array("data", row),
         Some("$.items") => object_with_array("items", row),
         Some("$.logs") => object_with_array("logs", row),

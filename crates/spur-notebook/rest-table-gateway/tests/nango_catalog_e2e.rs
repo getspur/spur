@@ -354,12 +354,22 @@ fn nango_catalog_cli_writes_deterministic_crosswalk_outputs() {
         "connections/supported/github.connection.toml"
     );
     assert_eq!(matrix_rows[0]["candidate_manifest"], Value::Null);
-    assert_eq!(matrix_rows[0]["table_count"], 2);
+    assert_eq!(matrix_rows[0]["table_count"], 12);
     assert_eq!(matrix_rows[0]["action_count"], 0);
     assert_eq!(matrix_rows[1]["provider_key"], "metadata-only");
     assert_eq!(matrix_rows[1]["status"], "Blocked");
     assert_eq!(matrix_rows[1]["blocked_reason"], "missing_base_url");
     assert_eq!(matrix_rows[1]["candidate_manifest"], Value::Null);
+    assert_eq!(matrix_rows[2]["provider_key"], "stripe-api-key");
+    assert_eq!(matrix_rows[2]["status"], "Ready");
+    assert_eq!(matrix_rows[2]["blocked_reason"], Value::Null);
+    assert_eq!(
+        matrix_rows[2]["supported_manifest"],
+        "connections/supported/stripe_api_key.connection.toml"
+    );
+    assert_eq!(matrix_rows[2]["candidate_manifest"], Value::Null);
+    assert_eq!(matrix_rows[2]["table_count"], 8);
+    assert_eq!(matrix_rows[2]["action_count"], 0);
     assert_eq!(matrix_rows[3]["provider_key"], "zz-candidate");
     assert_eq!(matrix_rows[3]["status"], "Candidate");
     assert_eq!(matrix_rows[3]["blocked_reason"], Value::Null);
@@ -692,7 +702,7 @@ fn nango_catalog_cli_marks_committed_supported_manifests_ready() {
         "connections/supported/github.connection.toml"
     );
     assert_eq!(rows[0]["candidate_manifest"], Value::Null);
-    assert_eq!(rows[0]["table_count"], 2);
+    assert_eq!(rows[0]["table_count"], 12);
     assert_eq!(rows[0]["action_count"], 0);
 
     std::fs::remove_dir_all(temp).ok();

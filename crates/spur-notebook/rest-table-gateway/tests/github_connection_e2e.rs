@@ -113,3 +113,67 @@ async fn github_supported_manifest_scans_authenticated_repos() {
     harness.assert_typed_cell(&batches[0], "name", 0, TypedCell::Utf8("spur"));
     harness.assert_typed_cell(&batches[0], "private", 0, TypedCell::Boolean(true));
 }
+
+#[tokio::test]
+async fn github_supported_manifest_scans_notifications() {
+    let server = MockServer::start().await;
+    let mut harness = ProviderManifestHarness::from_toml(
+        "github",
+        include_str!("../connections/supported/github.connection.toml"),
+    )
+    .expect("github manifest parses");
+    harness.replace_base_url("https://api.github.com", &server.uri());
+    let _env = harness.install_env();
+
+    ExpectedRequest::get("/notifications")
+        .with_manifest_auth(harness.manifest(), "github")
+        .header("x-github-api-version", "2022-11-28")
+        .query_param("all", "true")
+        .respond_json(serde_json::json!([
+            {
+                "id": "1001",
+                "reason": "mention",
+                "unread": true,
+                "updated_at": "2026-06-13T00:00:00Z",
+                "subject": {
+                    "title": "Review requested",
+                    "type": "PullRequest",
+                    "url": "https://api.github.com/repos/acme/spur/pulls/7",
+                    "latest_comment_url": "https://api.github.com/repos/acme/spur/issues/comments/8"
+                },
+                "repository": {
+                    "full_name": "acme/spur"
+                }
+            }
+        ]))
+        .mount(&server)
+        .await;
+
+    let batches = harness
+        .scan(scan_request_with_predicates(
+            "notifications",
+            vec![Predicate {
+                column: "all".to_string(),
+                op: PredicateOp::Eq,
+                value: ScalarValue::Bool(true),
+            }],
+        ))
+        .await
+        .expect("github notifications scan succeeds");
+
+    harness.assert_one_typed_row("notifications", &batches);
+    harness.assert_typed_cell(&batches[0], "id", 0, TypedCell::Utf8("1001"));
+    harness.assert_typed_cell(
+        &batches[0],
+        "subject_title",
+        0,
+        TypedCell::Utf8("Review requested"),
+    );
+    harness.assert_typed_cell(
+        &batches[0],
+        "repository_full_name",
+        0,
+        TypedCell::Utf8("acme/spur"),
+    );
+    harness.assert_typed_cell(&batches[0], "unread", 0, TypedCell::Boolean(true));
+}
