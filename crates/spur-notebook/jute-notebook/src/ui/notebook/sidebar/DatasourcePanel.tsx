@@ -6,6 +6,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   FileUpIcon,
+  PlayIcon,
   PlugIcon,
   PlusIcon,
   Trash2Icon,
@@ -19,7 +20,11 @@ import {
   useState,
 } from "react";
 
-import type { ConnectionTemplate, DatasourceEntry } from "@/bindings";
+import type {
+  CellCronTrigger,
+  ConnectionTemplate,
+  DatasourceEntry,
+} from "@/bindings";
 import {
   attachDatasourceCommand,
   attachSavedConnectionCommand,
@@ -39,6 +44,8 @@ import AddRestApiWizard, {
   type AddRestApiWizardPrefill,
   type AddRestApiWizardSavedConnectionRecovery,
 } from "@/ui/notebook/AddRestApiWizard";
+
+import { setCellSchedule } from "../../dag/scheduleApi";
 
 type DroppedFile = File & {
   path?: string;
@@ -65,6 +72,15 @@ const DATASOURCE_EXTENSIONS = [
   "db",
   "sqlite",
 ];
+
+const DEFAULT_TABLE_QUERY_TRIGGER: CellCronTrigger = {
+  enabled: true,
+  cron: "*/15 * * * *",
+  timezone: "UTC",
+  run_target: "cascade",
+  skip_if_running: true,
+  catch_up: false,
+};
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function restWizardPrefillFromPayload(
@@ -304,6 +320,39 @@ export default function DatasourcePanel() {
     },
     [attachPath],
   );
+
+  const handleScheduleTableFunction = useCallback(async (tableName: string) => {
+    setError(null);
+    try {
+      const response = await daemonControl({
+        command: "insert_cell",
+        kind: "code",
+        after_id: null,
+        source: tableFunctionQuerySource(tableName),
+        last_edited_by: "datasource",
+        code_type: "python",
+      });
+      if (!response.ok) {
+        throw new Error(
+          response.error?.message ?? "Failed to create query cell",
+        );
+      }
+      if (
+        response.result?.type !== "delta" ||
+        response.result.data.kind.type !== "cellInserted"
+      ) {
+        throw new Error("daemon insert_cell did not return an inserted cell");
+      }
+
+      await setCellSchedule(
+        response.result.data.kind.cell.id,
+        DEFAULT_TABLE_QUERY_TRIGGER,
+        response.result.data.kind.cell.version,
+      );
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, []);
 
   const handleDrop = useCallback(
     (event: DragEvent<HTMLElement>) => {
@@ -587,6 +636,7 @@ export default function DatasourcePanel() {
                         <DatasourceListItem
                           entry={entry}
                           key={entry.name}
+                          onScheduleTableFunction={handleScheduleTableFunction}
                           onRemove={handleDetachDatasource}
                         />
                       ))}
@@ -919,9 +969,11 @@ function SavedConnectionRow({
 
 function DatasourceListItem({
   entry,
+  onScheduleTableFunction,
   onRemove,
 }: {
   entry: DatasourceEntry;
+  onScheduleTableFunction: (tableName: string) => void;
   onRemove: (name: string) => void;
 }) {
   const [confirmingRemove, setConfirmingRemove] = useState(false);
@@ -989,9 +1041,20 @@ function DatasourceListItem({
                   {table.name}
                 </span>
                 {isApiTables ? (
-                  <span className="shrink-0 rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
-                    function
-                  </span>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
+                      function
+                    </span>
+                    <button
+                      aria-label={`Schedule query ${table.name}`}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-200 bg-white text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-900"
+                      onClick={() => onScheduleTableFunction(table.name)}
+                      title={`Create scheduled query for ${table.name}`}
+                      type="button"
+                    >
+                      <PlayIcon size={12} strokeWidth={1.8} />
+                    </button>
+                  </div>
                 ) : (
                   table.rowCount !== null && (
                     <span className="shrink-0 text-gray-400">
@@ -1082,6 +1145,21 @@ function upsertDatasourceEntry(
   const next = [...entries];
   next[index] = entry;
   return next;
+}
+
+function tableFunctionQuerySource(tableName: string): string {
+  const relation = `${duckDbIdentifier(tableName)}()`;
+  return `import duckdb
+
+duckdb.sql("SELECT * FROM ${relation} LIMIT 100").df()
+`;
+}
+
+function duckDbIdentifier(value: string): string {
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    return value;
+  }
+  return `"${value.replaceAll('"', '""')}"`;
 }
 
 function datasourceNameFromPath(path: string): string {
