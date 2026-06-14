@@ -6,7 +6,10 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use jute::backend::notebook::{Cell, CellDagMetadata, NotebookRoot};
+use jute::backend::{
+    notebook::{Cell, CellDagMetadata, NotebookRoot},
+    schedule::CellCronTrigger,
+};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 use tracing::warn;
@@ -31,9 +34,70 @@ const INTENT_SOURCE_PUSH: &str = "source.push";
 const INTENT_MODEL_STATE_UPDATE: &str = "model-state.update";
 const INTENT_MODEL_STATE_CUSTOM: &str = "model-state.custom";
 
-/// Shared Tauri state slot for the notebook daemon control plane.
-pub type NotebookDaemonControlSlot =
-    Arc<tokio::sync::Mutex<Option<Arc<crate::mcp::NotebookDaemonControl>>>>;
+/// Shared Tauri state slot for the notebook daemon runtime.
+pub type NotebookDaemonControlSlot = Arc<tokio::sync::Mutex<Option<Arc<NotebookDaemonRuntime>>>>;
+
+/// In-process notebook daemon pieces needed by frontend-facing Tauri commands.
+pub struct NotebookDaemonRuntime {
+    control: Arc<crate::mcp::NotebookDaemonControl>,
+    handle: tokio::sync::Mutex<crate::mcp::NotebookMcpServerHandle>,
+}
+
+impl NotebookDaemonRuntime {
+    pub fn new(
+        control: crate::mcp::NotebookDaemonControl,
+        handle: crate::mcp::NotebookMcpServerHandle,
+    ) -> Self {
+        Self {
+            control: Arc::new(control),
+            handle: tokio::sync::Mutex::new(handle),
+        }
+    }
+
+    pub async fn reactive_engine_client(&self) -> Option<ReactiveEngineClient> {
+        self.control.reactive_engine_client().await
+    }
+
+    pub async fn reopen(&self, activate: bool) -> Result<PathBuf, crate::mcp::bridge::BridgeError> {
+        self.control.reopen(activate).await
+    }
+
+    pub async fn set_cell_metadata(
+        &self,
+        cell_id: String,
+        patch: Value,
+        expected_version: u64,
+    ) -> Result<(), jute::Error> {
+        let response = self
+            .control
+            .handle(crate::mcp::DaemonControlRequest {
+                id: None,
+                request: jute::commands::DaemonControlRequest::new(
+                    jute::commands::DaemonControlCommand::SetCellMetadata {
+                        notebook_id: None,
+                        id: cell_id,
+                        patch,
+                        expected_version,
+                    },
+                ),
+            })
+            .await;
+        if response.ok {
+            return Ok(());
+        }
+
+        let message = response
+            .error
+            .map(|error| format!("{}: {}", error.code, error.message))
+            .unwrap_or_else(|| "set_cell_metadata failed without an error body".to_owned());
+        Err(jute::Error::NotebookDaemon(message))
+    }
+
+    pub async fn schedule_snapshot(&self) -> crate::schedule::scheduler::ScheduleSnapshot {
+        let handle = self.handle.lock().await;
+        handle.schedule_snapshot().await
+    }
+}
 
 /// A frontend-originated anywidget command intent.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -911,6 +975,65 @@ pub async fn notebook_run_cell(
     }))
 }
 
+#[tauri::command]
+pub async fn notebook_set_cell_schedule(
+    daemon_control: tauri::State<'_, NotebookDaemonControlSlot>,
+    cell_id: String,
+    trigger: CellCronTrigger,
+    expected_version: u64,
+) -> Result<(), jute::Error> {
+    let runtime = require_daemon_runtime(daemon_control.inner()).await?;
+    runtime
+        .set_cell_metadata(
+            cell_id,
+            json!({
+                "spur": {
+                    "cron": trigger,
+                },
+            }),
+            expected_version,
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn notebook_remove_cell_schedule(
+    daemon_control: tauri::State<'_, NotebookDaemonControlSlot>,
+    cell_id: String,
+    expected_version: u64,
+) -> Result<(), jute::Error> {
+    let runtime = require_daemon_runtime(daemon_control.inner()).await?;
+    runtime
+        .set_cell_metadata(
+            cell_id,
+            json!({
+                "spur": {
+                    "cron": null,
+                },
+            }),
+            expected_version,
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn notebook_list_schedules(
+    daemon_control: tauri::State<'_, NotebookDaemonControlSlot>,
+) -> Result<crate::schedule::scheduler::ScheduleSnapshot, jute::Error> {
+    let runtime = require_daemon_runtime(daemon_control.inner()).await?;
+    Ok(runtime.schedule_snapshot().await)
+}
+
+async fn require_daemon_runtime(
+    daemon_control: &NotebookDaemonControlSlot,
+) -> Result<Arc<NotebookDaemonRuntime>, jute::Error> {
+    daemon_control
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| jute::Error::NotebookDaemon("notebook daemon is not ready".to_owned()))
+}
+
 fn notebook_dag_status_for_state(state: &jute::state::State) -> Result<Value, jute::Error> {
     let notebook = state.get_notebook();
     let path = notebook.path().ok_or_else(|| {
@@ -1148,6 +1271,7 @@ mod tests {
                     }),
                     code_type: None,
                     frontend: None,
+                    cron: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),
@@ -1173,6 +1297,7 @@ mod tests {
                     }),
                     code_type: None,
                     frontend: None,
+                    cron: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),
@@ -1202,6 +1327,7 @@ mod tests {
                         binds: Vec::new(),
                         emits: emits.into_iter().map(str::to_owned).collect(),
                     }),
+                    cron: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),

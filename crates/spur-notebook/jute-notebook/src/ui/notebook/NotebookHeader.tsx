@@ -1,6 +1,7 @@
 import clsx from "clsx";
 import {
   ChartLineIcon,
+  ClockIcon,
   PlayIcon,
   RefreshCwIcon,
   SettingsIcon,
@@ -16,6 +17,7 @@ import {
 
 import SettingsPanel from "../settings/SettingsPanel";
 import Header from "../shared/Header";
+import SchedulesOverview from "./SchedulesOverview";
 
 const KERNEL_STATS_POLL_MS = 2000;
 const VIEW_MODES = [
@@ -47,11 +49,19 @@ export default function NotebookHeader({ kernelName }: Props) {
     notebook.store,
     (state) => state.viewState.viewMode,
   );
+  const armedCount = useStore(
+    notebook.store,
+    (state) =>
+      Object.values(state.serverState.cells).filter(
+        (cell) => cell.schedule?.enabled,
+      ).length,
+  );
   const setViewMode = useStore(
     notebook.store,
     (state) => state.viewStateActions.setViewMode,
   );
   const [statsOpen, setStatsOpen] = useState(false);
+  const [schedulesOpen, setSchedulesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [kernelStats, setKernelStats] = useState<KernelSlotInfo | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
@@ -213,6 +223,18 @@ export default function NotebookHeader({ kernelName }: Props) {
 
       {/* Top-right UI components. Notebook management lives in the tab strip. */}
       <div className="flex items-center">
+        <button
+          className="mr-1 inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700 transition-colors hover:bg-violet-100"
+          title="Scheduled cells"
+          onClick={() => setSchedulesOpen((open) => !open)}
+          type="button"
+        >
+          <ClockIcon size={13} strokeWidth={2} />
+          {armedCount} armed
+        </button>
+        {schedulesOpen && (
+          <SchedulesOverview onClose={() => setSchedulesOpen(false)} />
+        )}
         <div className="relative">
           <button
             className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110"

@@ -2,6 +2,7 @@ import clsx from "clsx";
 import {
   BotIcon,
   CheckIcon,
+  ClockIcon,
   Code2Icon,
   LetterTextIcon,
   LucideIcon,
@@ -22,6 +23,7 @@ import { useStore } from "zustand";
 
 import { type NotebookStoreState, useNotebook } from "@/stores/notebook";
 
+import { scheduleLabel } from "../dag/scheduleApi";
 import CellInputFallback from "./CellInputFallback";
 import CellLanguageMenu from "./CellLanguageMenu";
 import type { AfmPortBindingSnapshot } from "./JuteAppOutput";
@@ -223,6 +225,7 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
   const languageId = cellLanguageId(cell);
   const isAi = languageId === "spur";
   const live = isAi && cellAiLive(cell);
+  const armedSchedule = cell.schedule?.enabled ? cell.schedule : undefined;
   return (
     <div className="flex items-center gap-2 pl-[57px] pr-[18px] pt-3">
       <div className="relative inline-flex">
@@ -275,6 +278,12 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
           {live ? "● LIVE" : "manual"}
         </span>
       )}
+      {armedSchedule ? (
+        <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[9.5px] font-semibold text-violet-700">
+          <ClockIcon size={10} />
+          {scheduleLabel(armedSchedule.cron)}
+        </span>
+      ) : null}
     </div>
   );
 }

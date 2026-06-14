@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use ts_rs::TS;
 
+use super::schedule::CellCronTrigger;
+
 /// Represents the root structure of a Jupyter Notebook file.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, TS)]
 pub struct NotebookRoot {
@@ -254,6 +256,11 @@ pub struct SpurCellMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub frontend: Option<FrontendCellMetadata>,
+
+    /// Per-cell cron trigger configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cron: Option<CellCronTrigger>,
 }
 
 /// App-mode frontend declaration persisted under `cell.metadata.spur.frontend`.

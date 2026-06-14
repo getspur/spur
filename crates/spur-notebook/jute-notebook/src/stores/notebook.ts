@@ -8,6 +8,7 @@ import { immer } from "zustand/middleware/immer";
 
 import type {
   Cell,
+  CellCronTrigger,
   CellDagMetadata,
   CellMetadata,
   CodeType,
@@ -96,6 +97,7 @@ export type NotebookCellState = {
   lastEditedBy?: string;
   datasourceSetup?: boolean;
   dagMetadata?: CellDagMetadata;
+  schedule?: CellCronTrigger;
   frontendMetadata?: CellFrontendMetadata;
   codeType?: CodeType;
   juteDeckMetadata?: JuteDeckCellMetadata;
@@ -915,6 +917,7 @@ function loadNotebookRootDraft(
         lastEditedBy: spur?.last_edited_by,
         datasourceSetup: spur?.datasource_setup,
         dagMetadata: spur?.dag,
+        schedule: spur?.cron,
         frontendMetadata: frontendMetadataFromSpur(spur),
         codeType: spur?.code_type,
         juteDeckMetadata: jute_deck,
@@ -1486,6 +1489,7 @@ export class Notebook {
             cell.lastEditedBy,
             cell.datasourceSetup,
             cell.dagMetadata,
+            cell.schedule,
             cell.frontendMetadata,
             cell.codeType,
             cell.juteDeckMetadata,
@@ -1502,6 +1506,7 @@ export class Notebook {
             cell.lastEditedBy,
             cell.datasourceSetup,
             cell.dagMetadata,
+            cell.schedule,
             cell.frontendMetadata,
             cell.codeType,
             cell.juteDeckMetadata,
@@ -1686,6 +1691,7 @@ export class Notebook {
         cell.lastEditedBy,
         cell.datasourceSetup,
         cell.dagMetadata,
+        cell.schedule,
         cell.frontendMetadata,
         cell.codeType,
         cell.juteDeckMetadata,
@@ -1700,6 +1706,7 @@ export class Notebook {
       spur?: {
         datasource_setup?: boolean;
         dag?: CellDagMetadata;
+        cron?: CellCronTrigger | null;
         frontend?: CellFrontendMetadata;
         code_type?: CodeType;
       };
@@ -1724,6 +1731,10 @@ export class Notebook {
     const datasourceSetup =
       patch.spur?.datasource_setup ?? cell.datasourceSetup;
     const dagMetadata = patch.spur?.dag ?? cell.dagMetadata;
+    const schedule =
+      patch.spur && Object.hasOwn(patch.spur, "cron")
+        ? (patch.spur.cron ?? undefined)
+        : cell.schedule;
     const frontendMetadata =
       patch.spur && Object.hasOwn(patch.spur, "frontend")
         ? normalizeFrontendMetadata(patch.spur.frontend)
@@ -1736,6 +1747,7 @@ export class Notebook {
       juteDeckMetadata: merged,
       datasourceSetup,
       dagMetadata,
+      schedule,
       frontendMetadata,
       codeType,
       version: nextVersion,
@@ -2118,6 +2130,7 @@ function cellMetadata(
   lastEditedBy?: string,
   datasourceSetup?: boolean,
   dagMetadata?: CellDagMetadata,
+  schedule?: CellCronTrigger,
   frontendMetadata?: CellFrontendMetadata,
   codeType?: CodeType,
   juteDeckMetadata?: JuteDeckCellMetadata,
@@ -2129,6 +2142,7 @@ function cellMetadata(
     last_edited_by: lastEditedBy,
     datasource_setup: datasourceSetup,
     dag: dagMetadata,
+    cron: schedule,
     frontend,
     code_type: codeType,
   };

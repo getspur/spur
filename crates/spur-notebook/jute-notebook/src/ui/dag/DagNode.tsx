@@ -1,4 +1,5 @@
 import clsx from "clsx";
+import { ClockIcon } from "lucide-react";
 
 import type {
   DagConsumedPort,
@@ -6,6 +7,7 @@ import type {
   DagNodeState,
   DagProducedPort,
 } from "./useDagGraph";
+import { scheduleLabel } from "./scheduleApi";
 
 type DagNodeProps = {
   data: DagNodeData;
@@ -41,6 +43,7 @@ export default function DagNode({
 }: DagNodeProps) {
   const hasConsumes = data.consumes.length > 0 || Boolean(data.source);
   const isAi = data.kind === "ai";
+  const armedSchedule = data.schedule?.enabled ? data.schedule : undefined;
 
   return (
     <article
@@ -75,21 +78,31 @@ export default function DagNode({
             {data.id}
           </span>
         </div>
-        {isAi ? (
+        {isAi || armedSchedule ? (
           <div className="mt-1.5 flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[9.5px] font-semibold text-violet-700">
-              ✦ AI
-            </span>
-            <span
-              className={clsx(
-                "rounded border px-1.5 py-px font-mono text-[9px]",
-                data.aiLive
-                  ? "border-violet-600 bg-violet-600 text-white"
-                  : "border-gray-300 bg-white text-gray-500",
-              )}
-            >
-              {data.aiLive ? "● LIVE" : "manual"}
-            </span>
+            {isAi ? (
+              <>
+                <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[9.5px] font-semibold text-violet-700">
+                  ✦ AI
+                </span>
+                <span
+                  className={clsx(
+                    "rounded border px-1.5 py-px font-mono text-[9px]",
+                    data.aiLive
+                      ? "border-violet-600 bg-violet-600 text-white"
+                      : "border-gray-300 bg-white text-gray-500",
+                  )}
+                >
+                  {data.aiLive ? "● LIVE" : "manual"}
+                </span>
+              </>
+            ) : null}
+            {armedSchedule ? (
+              <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[9.5px] font-semibold text-violet-700">
+                <ClockIcon size={10} />
+                {scheduleLabel(armedSchedule.cron)}
+              </span>
+            ) : null}
           </div>
         ) : null}
         {isAi ? (

@@ -34,6 +34,7 @@ use tracing::warn;
 
 use crate::context::symbol_index::SymbolIndex;
 use crate::recents::{self, RecentEntry};
+use crate::schedule::scheduler::{ScheduleSnapshot, SchedulerHandle};
 
 use self::bridge::{BridgeRequester, TauriBridgeRequester};
 use self::loopback_requester::LoopbackDaemonRequester;
@@ -290,6 +291,9 @@ name the ref to query deeper."
             "notebook_set_dag_metadata" => {
                 tools::notebook_set_dag_metadata::call(&self.deps, arguments).await
             }
+            "notebook_set_schedule" => {
+                tools::notebook_set_schedule::call(&self.deps, arguments).await
+            }
             "notebook.set_cell_metadata" => {
                 tools::set_cell_metadata::call(&self.deps, arguments).await
             }
@@ -398,11 +402,13 @@ pub struct NotebookMcpServerHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
     reactive_engine: Option<crate::dag::engine::ReactiveEngineHandle>,
+    scheduler: Option<SchedulerHandle>,
     symbol_index_updater: Option<JoinHandle<()>>,
 }
 
 impl NotebookMcpServerHandle {
     pub async fn shutdown(mut self) {
+        self.scheduler.take();
         if let Some(engine) = self.reactive_engine.take() {
             engine.shutdown().await;
         }
@@ -420,10 +426,18 @@ impl NotebookMcpServerHandle {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
+
+    pub async fn schedule_snapshot(&self) -> ScheduleSnapshot {
+        match self.scheduler.as_ref() {
+            Some(scheduler) => scheduler.snapshot().await,
+            None => Vec::new(),
+        }
+    }
 }
 
 impl Drop for NotebookMcpServerHandle {
     fn drop(&mut self) {
+        self.scheduler.take();
         self.reactive_engine.take();
         if let Some(task) = self.symbol_index_updater.take() {
             task.abort();
@@ -604,6 +618,7 @@ async fn start_server_with_bridge_requester(
         shutdown_tx: Some(shutdown_tx),
         task,
         reactive_engine: None,
+        scheduler: None,
         symbol_index_updater: None,
     })
 }
@@ -4017,8 +4032,15 @@ pub async fn start_daemon_server(
             None
         }
     };
+    let scheduler = deps.state.as_ref().map(|state| {
+        crate::schedule::scheduler::spawn_scheduler(
+            Arc::clone(&deps),
+            state.subscribe_notebook_deltas(),
+        )
+    });
     let mut handle = start_multiplexed_server(socket_path, deps, control.clone()).await?;
     handle.reactive_engine = reactive_engine;
+    handle.scheduler = scheduler;
     handle.symbol_index_updater = Some(SymbolIndex::spawn_updater(symbol_index, state));
     control.restore_last_open_notebook().await;
     Ok((handle, control))
@@ -4063,6 +4085,7 @@ async fn start_multiplexed_server(
         shutdown_tx: Some(shutdown_tx),
         task,
         reactive_engine: None,
+        scheduler: None,
         symbol_index_updater: None,
     })
 }
