@@ -355,7 +355,7 @@ fn nango_catalog_cli_writes_deterministic_crosswalk_outputs() {
     );
     assert_eq!(matrix_rows[0]["candidate_manifest"], Value::Null);
     assert_eq!(matrix_rows[0]["table_count"], 12);
-    assert_eq!(matrix_rows[0]["action_count"], 0);
+    assert_eq!(matrix_rows[0]["action_count"], 5);
     assert_eq!(matrix_rows[1]["provider_key"], "metadata-only");
     assert_eq!(matrix_rows[1]["status"], "Blocked");
     assert_eq!(matrix_rows[1]["blocked_reason"], "missing_base_url");
@@ -703,7 +703,7 @@ fn nango_catalog_cli_marks_committed_supported_manifests_ready() {
     );
     assert_eq!(rows[0]["candidate_manifest"], Value::Null);
     assert_eq!(rows[0]["table_count"], 12);
-    assert_eq!(rows[0]["action_count"], 0);
+    assert_eq!(rows[0]["action_count"], 5);
 
     std::fs::remove_dir_all(temp).ok();
 }

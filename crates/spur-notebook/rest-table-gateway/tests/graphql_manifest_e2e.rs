@@ -3,7 +3,7 @@ use arrow_schema::DataType;
 use spur_rest_table_gateway::adapter::manifest::{AuthCfg, Manifest, Transport};
 use spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter;
 use spur_rest_table_gateway::adapter::{
-    Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest,
+    ActionRequest, Adapter, Predicate, PredicateOp, ResolvedAuth, ScalarValue, ScanRequest,
 };
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -11,6 +11,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const ISSUES_QUERY: &str = "query Issues($owner: String!, $repoName: String!, $state: [String!]!) { repository(owner: $owner, name: $repoName) { issues(states: $state, first: 100) { nodes { id number title open weight } } } }";
 const LINEAR_ISSUES_QUERY: &str = "query Issues($first:Int!, $after:String, $stateFilter:String){ issues(first:$first, after:$after, filter:{state:{name:{eq:$stateFilter}}}){ nodes{ id identifier title priority state{name} assignee{name} createdAt } pageInfo{ hasNextPage endCursor } } }";
 const LINEAR_TEAMS_QUERY: &str = "query Teams{ teams(first:250){ nodes{ id key name description timezone cyclesEnabled createdAt updatedAt } pageInfo{ hasNextPage endCursor } } }";
+const LINEAR_CREATE_ISSUE_MUTATION: &str = "mutation CreateIssue($title:String!, $teamId:String!, $description:String){ issueCreate(input:{title:$title, teamId:$teamId, description:$description}){ issue{ id identifier url } } }";
 
 fn scan_request(table: &str) -> ScanRequest {
     ScanRequest {
@@ -24,6 +25,113 @@ fn scan_request(table: &str) -> ScanRequest {
         tvf_args: Vec::new(),
         auth: ResolvedAuth::None,
     }
+}
+
+#[tokio::test]
+async fn graphql_manifest_action_posts_mutation_variables_and_returns_typed_row() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_json(serde_json::json!({
+            "query": LINEAR_CREATE_ISSUE_MUTATION,
+            "variables": {
+                "title": "Ship GraphQL actions",
+                "teamId": "team_123",
+                "description": "Make Linear writes two-way"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "issueCreate": {
+                    "issue": {
+                        "id": "lin_123",
+                        "identifier": "ENG-123",
+                        "url": "https://linear.app/acme/issue/ENG-123"
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let manifest = Manifest::from_toml(&format!(
+        r#"
+[source]
+name = "linear"
+base_url = "{}/graphql"
+transport = "graphql"
+allow_writes = true
+
+[[action]]
+name = "create_issue"
+method = "POST"
+path = "/graphql"
+response_path = "$.data.issueCreate.issue"
+
+[action.graphql]
+query = "{}"
+arg_vars = {{ title = "title", teamId = "teamId", description = "description" }}
+
+[action.args]
+title = {{ in = "body", type = "Utf8", required = true }}
+teamId = {{ in = "body", type = "Utf8", required = true }}
+description = {{ in = "body", type = "Utf8" }}
+
+[action.columns]
+id = {{ json = "$.id", type = "Utf8" }}
+identifier = {{ json = "$.identifier", type = "Utf8" }}
+url = {{ json = "$.url", type = "Utf8" }}
+"#,
+        server.uri(),
+        LINEAR_CREATE_ISSUE_MUTATION
+    ))
+    .expect("manifest toml should parse");
+    let adapter = ManifestAdapter::new(manifest);
+
+    let batches = adapter
+        .act(ActionRequest {
+            name: "create_issue".to_string(),
+            method: "POST".to_string(),
+            path: "/graphql".to_string(),
+            query: vec![],
+            body: Some(serde_json::json!({
+                "title": "Ship GraphQL actions",
+                "teamId": "team_123",
+                "description": "Make Linear writes two-way"
+            })),
+            idempotency_key: None,
+            dry_run: false,
+        })
+        .await
+        .expect("GraphQL action should return typed mutation result");
+
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(batch.schema().field(0).data_type(), &DataType::Utf8);
+    assert_eq!(batch.schema().field(1).data_type(), &DataType::Utf8);
+    assert_eq!(batch.schema().field(2).data_type(), &DataType::Utf8);
+
+    let ids = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("id should be Utf8");
+    let identifiers = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("identifier should be Utf8");
+    let urls = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("url should be Utf8");
+
+    assert_eq!(ids.value(0), "lin_123");
+    assert_eq!(identifiers.value(0), "ENG-123");
+    assert_eq!(urls.value(0), "https://linear.app/acme/issue/ENG-123");
 }
 
 #[tokio::test]
@@ -149,6 +257,7 @@ async fn linear_connection_manifest_parses_and_scans_graphql_issues() {
     assert_eq!(manifest.source.name, "linear");
     assert_eq!(manifest.source.base_url, "https://api.linear.app/graphql");
     assert_eq!(manifest.source.transport, Transport::Graphql);
+    assert!(manifest.source.allow_writes);
     match &manifest.source.auth {
         AuthCfg::Header { name, env } => {
             assert_eq!(name, "authorization");
@@ -209,6 +318,35 @@ async fn linear_connection_manifest_parses_and_scans_graphql_issues() {
     );
     let teams_graphql = teams_table.graphql.as_ref().expect("teams graphql config");
     assert_eq!(teams_graphql.query, LINEAR_TEAMS_QUERY);
+
+    let create_issue = manifest
+        .actions
+        .iter()
+        .find(|action| action.name == "create_issue")
+        .expect("create_issue action");
+    assert_eq!(
+        create_issue.response_path.as_deref(),
+        Some("$.data.issueCreate.issue")
+    );
+    let create_issue_graphql = create_issue.graphql.as_ref().expect("create_issue graphql");
+    assert_eq!(create_issue_graphql.query, LINEAR_CREATE_ISSUE_MUTATION);
+    assert_eq!(create_issue_graphql.arg_vars["title"], "title");
+    assert_eq!(create_issue_graphql.arg_vars["teamId"], "teamId");
+    assert_eq!(create_issue_graphql.arg_vars["description"], "description");
+    for expected in [
+        "create_issue",
+        "update_issue",
+        "create_comment",
+        "create_project",
+    ] {
+        assert!(
+            manifest
+                .actions
+                .iter()
+                .any(|action| action.name == expected),
+            "missing Linear action {expected}"
+        );
+    }
 
     let server = MockServer::start().await;
     Mock::given(method("POST"))

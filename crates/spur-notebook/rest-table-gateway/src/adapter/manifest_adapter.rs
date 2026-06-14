@@ -7,7 +7,9 @@ use indexmap::IndexMap;
 use reqwest::Client;
 use serde_json::{Map, Number, Value};
 
-use crate::adapter::graphql::{fetch_graphql_rows, GraphqlFetch};
+use crate::adapter::graphql::{
+    fetch_graphql_rows, send_graphql_action, GraphqlAction, GraphqlFetch,
+};
 use crate::adapter::http::{cursor_value, fetch_rows, send_request, HttpAction, HttpFetch};
 use crate::adapter::json_to_batch::{arrow_type, json_path_get, rows_to_batch, ColumnExtract};
 use crate::adapter::manifest::{
@@ -348,6 +350,56 @@ impl ManifestAdapter {
 
         Ok(variables)
     }
+
+    fn action_arg_value<'a>(
+        action: &'a ActionCfg,
+        arg_name: &str,
+        body: Option<&'a Value>,
+        query: &'a [(String, String)],
+    ) -> Option<Value> {
+        let arg = action.args.get(arg_name)?;
+        match arg.in_ {
+            ManifestArgLocation::Body => {
+                let key = arg.json.as_deref().unwrap_or(arg_name);
+                body.and_then(|body| body.get(key)).cloned()
+            }
+            ManifestArgLocation::Query => {
+                let key = arg.param.as_deref().unwrap_or(arg_name);
+                query
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| Value::String(value.clone()))
+            }
+            ManifestArgLocation::Path => None,
+        }
+    }
+
+    fn graphql_action_variables(
+        action: &ActionCfg,
+        body: Option<&Value>,
+        query: &[(String, String)],
+    ) -> Result<Map<String, Value>> {
+        let mut variables = Map::new();
+        let Some(graphql) = &action.graphql else {
+            return Ok(variables);
+        };
+
+        for (arg_name, variable_name) in &graphql.arg_vars {
+            match Self::action_arg_value(action, arg_name, body, query) {
+                Some(value) => {
+                    variables.insert(variable_name.clone(), value);
+                }
+                None if action.args.get(arg_name).is_some_and(|arg| arg.required) => {
+                    return Err(GatewayError::Adapter(format!(
+                        "missing required GraphQL action argument {arg_name}"
+                    )));
+                }
+                None => {}
+            }
+        }
+
+        Ok(variables)
+    }
 }
 
 #[async_trait]
@@ -474,6 +526,26 @@ impl Adapter for ManifestAdapter {
             (Some(header), Some(value)) => Some((header.clone(), value)),
             _ => None,
         };
+
+        if let Some(graphql) = &action.graphql {
+            let graphql_action = GraphqlAction {
+                client: &self.client,
+                endpoint: &base_url,
+                query: &graphql.query,
+                variables: Self::graphql_action_variables(action, body.as_ref(), &query)?,
+                auth: &auth,
+                response_path: action.response_path.clone(),
+            };
+            let (status, rows, body) = send_graphql_action(&graphql_action).await?;
+
+            return match &action.columns {
+                Some(_) => {
+                    let columns = Self::action_column_extracts(action)?;
+                    Ok(vec![rows_to_batch(&columns, &rows)?])
+                }
+                None => Self::render_generic_row(status, body),
+            };
+        }
 
         if action.pagination.is_none() {
             let http_action = HttpAction {
