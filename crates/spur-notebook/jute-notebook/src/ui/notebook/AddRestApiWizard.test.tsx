@@ -679,6 +679,9 @@ describe("AddRestApiWizard", () => {
     expect(screen.getAllByText("rss_feed(url)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("rss_entries(url)").length).toBeGreaterThan(0);
     expect(screen.getByText("Source registration")).toBeInTheDocument();
+    expect(screen.getByText("Entry function")).toBeInTheDocument();
+    expect(screen.getAllByText("rss_entries(url)").length).toBeGreaterThan(1);
+    expect(screen.getByText("Entry query")).toBeInTheDocument();
     expect(screen.getAllByText("Programming").length).toBeGreaterThan(0);
   });
 
@@ -695,17 +698,17 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByText("Notebook query handoff")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Run these templates in a notebook query cell after adding the datasource.",
+        "Run the feed entries query as the selected source entry point after adding the datasource.",
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByText("select * from rss_feed('https://example.com/feed.xml');"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
+      screen.getAllByText(
         "select * from rss_entries('https://example.com/feed.xml');",
-      ),
-    ).toBeInTheDocument();
+      ).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText("select * from rss_routes();")).toBeInTheDocument();
   });
 
@@ -736,10 +739,10 @@ describe("AddRestApiWizard", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
+      screen.getAllByText(
         "select * from rss_entries('rsshub://github/issue/openai/codex');",
-      ),
-    ).toBeInTheDocument();
+      ).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText("select * from rss_routes();")).toBeInTheDocument();
   });
 
