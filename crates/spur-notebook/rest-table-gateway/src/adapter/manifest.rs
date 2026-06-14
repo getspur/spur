@@ -130,6 +130,8 @@ pub struct ActionCfg {
     pub method: String,
     pub path: String,
     #[serde(default)]
+    pub graphql: Option<GraphqlActionCfg>,
+    #[serde(default)]
     pub response_path: Option<String>,
     #[serde(default)]
     pub idempotency_header: Option<String>,
@@ -140,6 +142,13 @@ pub struct ActionCfg {
     pub columns: Option<IndexMap<String, ColumnCfg>>,
     #[serde(default)]
     pub pagination: Option<ActionPaginationCfg>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphqlActionCfg {
+    pub query: String,
+    #[serde(default)]
+    pub arg_vars: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

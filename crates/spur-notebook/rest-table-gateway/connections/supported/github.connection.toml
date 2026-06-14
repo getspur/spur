@@ -4,6 +4,7 @@
 [source]
 name = "github"
 base_url = "https://api.github.com"
+allow_writes = true
 auth = { scheme = "bearer", env = "GITHUB_TOKEN" }
 
 [source.pagination]
@@ -185,6 +186,88 @@ comments = { json = "$.comments", type = "Int64" }
 q = { param = "q" }
 sort = { param = "sort" }
 order = { param = "order" }
+
+[[action]]
+name = "create_issue"
+method = "POST"
+path = "/repos/{owner}/{repo}/issues"
+
+[action.args]
+owner = { in = "path", type = "Utf8", required = true }
+repo = { in = "path", type = "Utf8", required = true }
+title = { in = "body", type = "Utf8", required = true }
+body = { in = "body", type = "Utf8" }
+labels = { in = "body", type = "Utf8" }
+
+[action.columns]
+number = { json = "$.number", type = "Int64" }
+html_url = { json = "$.html_url", type = "Utf8" }
+state = { json = "$.state", type = "Utf8" }
+
+[[action]]
+name = "add_issue_comment"
+method = "POST"
+path = "/repos/{owner}/{repo}/issues/{issue_number}/comments"
+
+[action.args]
+owner = { in = "path", type = "Utf8", required = true }
+repo = { in = "path", type = "Utf8", required = true }
+issue_number = { in = "path", type = "Int64", required = true }
+body = { in = "body", type = "Utf8", required = true }
+
+[action.columns]
+id = { json = "$.id", type = "Int64" }
+html_url = { json = "$.html_url", type = "Utf8" }
+
+[[action]]
+name = "update_issue"
+method = "PATCH"
+path = "/repos/{owner}/{repo}/issues/{issue_number}"
+
+[action.args]
+owner = { in = "path", type = "Utf8", required = true }
+repo = { in = "path", type = "Utf8", required = true }
+issue_number = { in = "path", type = "Int64", required = true }
+title = { in = "body", type = "Utf8" }
+body = { in = "body", type = "Utf8" }
+state = { in = "body", type = "Utf8" }
+
+[action.columns]
+number = { json = "$.number", type = "Int64" }
+state = { json = "$.state", type = "Utf8" }
+
+[[action]]
+name = "create_pull_request"
+method = "POST"
+path = "/repos/{owner}/{repo}/pulls"
+
+[action.args]
+owner = { in = "path", type = "Utf8", required = true }
+repo = { in = "path", type = "Utf8", required = true }
+title = { in = "body", type = "Utf8", required = true }
+head = { in = "body", type = "Utf8", required = true }
+base = { in = "body", type = "Utf8", required = true }
+body = { in = "body", type = "Utf8" }
+
+[action.columns]
+number = { json = "$.number", type = "Int64" }
+html_url = { json = "$.html_url", type = "Utf8" }
+
+[[action]]
+name = "create_release"
+method = "POST"
+path = "/repos/{owner}/{repo}/releases"
+
+[action.args]
+owner = { in = "path", type = "Utf8", required = true }
+repo = { in = "path", type = "Utf8", required = true }
+tag_name = { in = "body", type = "Utf8", required = true }
+name = { in = "body", type = "Utf8" }
+body = { in = "body", type = "Utf8" }
+
+[action.columns]
+id = { json = "$.id", type = "Int64" }
+html_url = { json = "$.html_url", type = "Utf8" }
 
 [[table]]
 name = "search_repos"

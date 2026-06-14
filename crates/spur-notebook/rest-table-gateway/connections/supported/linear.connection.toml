@@ -2,6 +2,7 @@
 name = "linear"
 base_url = "https://api.linear.app/graphql"
 transport = "graphql"
+allow_writes = true
 auth = { scheme = "header", name = "authorization", env = "LINEAR_API_KEY" }
 
 [source.pagination]
@@ -178,3 +179,76 @@ name = { json = "$.name", type = "Utf8" }
 url_key = { json = "$.urlKey", type = "Utf8" }
 created_at = { json = "$.createdAt", type = "Utf8" }
 updated_at = { json = "$.updatedAt", type = "Utf8" }
+
+[[action]]
+name = "create_issue"
+method = "POST"
+path = "/graphql"
+response_path = "$.data.issueCreate.issue"
+
+[action.graphql]
+query = "mutation CreateIssue($title:String!, $teamId:String!, $description:String){ issueCreate(input:{title:$title, teamId:$teamId, description:$description}){ issue{ id identifier url } } }"
+arg_vars = { title = "title", teamId = "teamId", description = "description" }
+
+[action.args]
+title = { in = "body", type = "Utf8", required = true }
+teamId = { in = "body", type = "Utf8", required = true }
+description = { in = "body", type = "Utf8" }
+
+[action.columns]
+id = { json = "$.id", type = "Utf8" }
+identifier = { json = "$.identifier", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[[action]]
+name = "update_issue"
+method = "POST"
+path = "/graphql"
+response_path = "$.data.issueUpdate.issue"
+
+[action.graphql]
+query = "mutation UpdateIssue($id:String!, $title:String, $stateId:String){ issueUpdate(id:$id, input:{title:$title, stateId:$stateId}){ issue{ id } } }"
+arg_vars = { id = "id", title = "title", stateId = "stateId" }
+
+[action.args]
+id = { in = "body", type = "Utf8", required = true }
+title = { in = "body", type = "Utf8" }
+stateId = { in = "body", type = "Utf8" }
+
+[action.columns]
+id = { json = "$.id", type = "Utf8" }
+
+[[action]]
+name = "create_comment"
+method = "POST"
+path = "/graphql"
+response_path = "$.data.commentCreate.comment"
+
+[action.graphql]
+query = "mutation CreateComment($issueId:String!, $body:String!){ commentCreate(input:{issueId:$issueId, body:$body}){ comment{ id } } }"
+arg_vars = { issueId = "issueId", body = "body" }
+
+[action.args]
+issueId = { in = "body", type = "Utf8", required = true }
+body = { in = "body", type = "Utf8", required = true }
+
+[action.columns]
+id = { json = "$.id", type = "Utf8" }
+
+[[action]]
+name = "create_project"
+method = "POST"
+path = "/graphql"
+response_path = "$.data.projectCreate.project"
+
+[action.graphql]
+query = "mutation CreateProject($name:String!, $teamIds:[String!]!){ projectCreate(input:{name:$name, teamIds:$teamIds}){ project{ id name } } }"
+arg_vars = { name = "name", teamIds = "teamIds" }
+
+[action.args]
+name = { in = "body", type = "Utf8", required = true }
+teamIds = { in = "body", type = "Utf8", required = true }
+
+[action.columns]
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }

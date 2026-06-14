@@ -16,22 +16,32 @@ pub struct GraphqlFetch<'a> {
     pub response_path: Option<String>,
 }
 
+pub struct GraphqlAction<'a> {
+    pub client: &'a Client,
+    pub endpoint: &'a str,
+    pub query: &'a str,
+    pub variables: Map<String, Value>,
+    pub auth: &'a ResolvedAuth,
+    pub response_path: Option<String>,
+}
+
 struct GraphqlPage {
     rows: Vec<Value>,
     body: Value,
 }
 
-async fn post_page(f: &GraphqlFetch<'_>, page_vars: Map<String, Value>) -> Result<GraphqlPage> {
-    let mut variables = f.variables.clone();
-    for (name, value) in page_vars {
-        variables.insert(name, value);
-    }
-
-    let req = f.client.post(f.endpoint).json(&json!({
-        "query": f.query,
+async fn post_graphql(
+    client: &Client,
+    endpoint: &str,
+    query: &str,
+    variables: Map<String, Value>,
+    auth: &ResolvedAuth,
+) -> Result<(u16, Value)> {
+    let req = client.post(endpoint).json(&json!({
+        "query": query,
         "variables": variables,
     }));
-    let req = apply_auth(req, f.auth);
+    let req = apply_auth(req, auth);
 
     let resp = req
         .send()
@@ -40,6 +50,7 @@ async fn post_page(f: &GraphqlFetch<'_>, page_vars: Map<String, Value>) -> Resul
     if !resp.status().is_success() {
         return Err(GatewayError::Http(format!("status {}", resp.status())));
     }
+    let status = resp.status().as_u16();
 
     let body: Value = resp
         .json()
@@ -53,8 +64,25 @@ async fn post_page(f: &GraphqlFetch<'_>, page_vars: Map<String, Value>) -> Resul
         }
     }
 
+    Ok((status, body))
+}
+
+async fn post_page(f: &GraphqlFetch<'_>, page_vars: Map<String, Value>) -> Result<GraphqlPage> {
+    let mut variables = f.variables.clone();
+    for (name, value) in page_vars {
+        variables.insert(name, value);
+    }
+
+    let (_, body) = post_graphql(f.client, f.endpoint, f.query, variables, f.auth).await?;
     let rows = rows_from_body(&body, f.response_path.as_deref())?;
     Ok(GraphqlPage { rows, body })
+}
+
+pub async fn send_graphql_action(a: &GraphqlAction<'_>) -> Result<(u16, Vec<Value>, Value)> {
+    let (status, body) =
+        post_graphql(a.client, a.endpoint, a.query, a.variables.clone(), a.auth).await?;
+    let rows = rows_from_body(&body, a.response_path.as_deref())?;
+    Ok((status, rows, body))
 }
 
 pub async fn fetch_graphql_rows(f: &GraphqlFetch<'_>) -> Result<Vec<Value>> {
