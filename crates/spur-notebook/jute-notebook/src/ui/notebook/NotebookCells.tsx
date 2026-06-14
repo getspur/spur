@@ -23,6 +23,7 @@ import { useStore } from "zustand";
 
 import { type NotebookStoreState, useNotebook } from "@/stores/notebook";
 
+import { ScheduleSection } from "../dag/ScheduleSection";
 import { scheduleLabel } from "../dag/scheduleApi";
 import CellInputFallback from "./CellInputFallback";
 import CellLanguageMenu from "./CellLanguageMenu";
@@ -219,6 +220,7 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
   const notebook = useNotebook();
   const cell = useStore(notebook.store, (s) => s.serverState.cells[cellId]);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const chipButtonRef = useRef<HTMLButtonElement>(null);
   if (!cell || cell.type !== "code") return null;
   const token = cellLanguageToken(cell);
@@ -227,7 +229,7 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
   const live = isAi && cellAiLive(cell);
   const armedSchedule = cell.schedule?.enabled ? cell.schedule : undefined;
   return (
-    <div className="flex items-center gap-2 pl-[57px] pr-[18px] pt-3">
+    <div className="relative flex items-center gap-2 pl-[57px] pr-[18px] pt-3">
       <div className="relative inline-flex">
         <button
           ref={chipButtonRef}
@@ -279,10 +281,53 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
         </span>
       )}
       {armedSchedule ? (
-        <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[9.5px] font-semibold text-violet-700">
+        <button
+          type="button"
+          aria-label="Edit schedule trigger"
+          className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-px font-mono text-[9.5px] font-semibold text-violet-700 transition-colors hover:border-violet-300 hover:bg-violet-100"
+          onClick={() => setScheduleOpen((open) => !open)}
+        >
           <ClockIcon size={10} />
           {scheduleLabel(armedSchedule.cron)}
-        </span>
+        </button>
+      ) : (
+        <button
+          type="button"
+          aria-label="Edit schedule trigger"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded border border-gray-200 bg-white text-gray-400 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-700"
+          onClick={() => setScheduleOpen((open) => !open)}
+          title="Schedule trigger"
+        >
+          <ClockIcon size={12} />
+        </button>
+      )}
+      {scheduleOpen ? (
+        <div
+          role="dialog"
+          aria-label="Schedule trigger"
+          className="absolute left-[57px] top-9 z-30 w-[320px] rounded border border-gray-200 bg-white p-3 text-left shadow-lg"
+        >
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div className="text-sm font-semibold text-gray-950">
+              Schedule trigger
+            </div>
+            <button
+              type="button"
+              aria-label="Close schedule trigger"
+              className="inline-flex h-7 w-7 items-center justify-center rounded border border-gray-200 bg-white text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-700"
+              onClick={() => setScheduleOpen(false)}
+            >
+              <XIcon size={14} />
+            </button>
+          </div>
+          <ScheduleSection
+            cellId={cellId}
+            heading="Trigger"
+            schedule={cell.schedule}
+            variant="compact"
+            version={cell.version ?? 0}
+          />
+        </div>
       ) : null}
     </div>
   );

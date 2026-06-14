@@ -37,6 +37,13 @@ vi.mock("@/stores/notebook", () => ({
   },
 }));
 
+vi.mock("../dag/scheduleApi", () => ({
+  scheduleLabel: (cron: string) =>
+    cron === "*/15 * * * *" ? "every 15m" : cron,
+  setCellSchedule: vi.fn().mockResolvedValue(undefined),
+  removeCellSchedule: vi.fn().mockResolvedValue(undefined),
+}));
+
 const WIDGET_VIEW_MIME = "application/vnd.jupyter.widget-view+json";
 const AFM_MODEL_ID = "notebook-cells-afm-model";
 
@@ -231,6 +238,40 @@ describe("NotebookCells", () => {
 
     expect(screen.getByText("AI Agent")).toBeInTheDocument();
     expect(screen.getByText("manual")).toBeInTheDocument();
+  });
+
+  test("opens a compact schedule editor from the cell header", () => {
+    mocks.notebook = {
+      store: createNotebookStoreForCell({
+        schedule: {
+          enabled: true,
+          cron: "*/15 * * * *",
+          timezone: "UTC",
+          run_target: "cascade",
+          skip_if_running: true,
+          catch_up: false,
+        },
+      }),
+      addCell: vi.fn(),
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    expect(screen.getByText("every 15m")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit schedule trigger" }),
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "Schedule trigger" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Schedule trigger")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("*/15 * * * *")).toBeInTheDocument();
+    expect(screen.getByText("Next runs")).toBeInTheDocument();
   });
 
   test("updates AFM bound-port model state without reloading the iframe", async () => {
