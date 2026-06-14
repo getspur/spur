@@ -1391,6 +1391,9 @@ fn curated_preset_toml(source: &str) -> Option<&'static str> {
         "twilio" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/twilio.connection.toml"
         )),
+        "vercel" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/vercel.connection.toml"
+        )),
         "zendesk" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/zendesk.connection.toml"
         )),

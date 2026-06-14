@@ -1,0 +1,163 @@
+# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
+# Table blocks generated from reviewed Tier A OpenAPI sources.
+
+[source]
+name = "vercel"
+base_url = "https://api.vercel.com"
+auth = { scheme = "header", name = "authorization", env = "VERCEL_API_KEY" }
+
+
+[[table]]
+name = "getteams"
+path = "/v2/teams"
+response_path = "$.teams"
+
+[table.columns]
+avatar = { json = "$.avatar", type = "Utf8" }
+created = { json = "$.created", type = "Utf8" }
+createdat = { json = "$.createdAt", type = "Float64" }
+id = { json = "$.id", type = "Utf8" }
+limited = { json = "$.limited", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+slug = { json = "$.slug", type = "Utf8" }
+
+[table.filters]
+since = { param = "since" }
+until = { param = "until" }
+
+[[table]]
+name = "getprojects"
+path = "/v9/projects"
+response_path = "$.projects"
+
+[table.columns]
+accountid = { json = "$.accountId", type = "Utf8" }
+createdat = { json = "$.createdAt", type = "Float64" }
+framework = { json = "$.framework", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+live = { json = "$.live", type = "Boolean" }
+name = { json = "$.name", type = "Utf8" }
+nodeversion = { json = "$.nodeVersion", type = "Utf8" }
+updatedat = { json = "$.updatedAt", type = "Float64" }
+
+[table.filters]
+from = { param = "from" }
+repo = { param = "repo" }
+repoid = { param = "repoId" }
+search = { param = "search" }
+teamid = { param = "teamId" }
+
+[[table]]
+name = "getdeployments"
+path = "/v6/deployments"
+response_path = "$.deployments"
+
+[table.columns]
+buildingat = { json = "$.buildingAt", type = "Float64" }
+created = { json = "$.created", type = "Float64" }
+createdat = { json = "$.createdAt", type = "Float64" }
+creator_email = { json = "$.creator.email", type = "Utf8" }
+creator_uid = { json = "$.creator.uid", type = "Utf8" }
+inspectorurl = { json = "$.inspectorUrl", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+ready = { json = "$.ready", type = "Float64" }
+state = { json = "$.state", type = "Utf8" }
+target = { json = "$.target", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+uid = { json = "$.uid", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+from = { param = "from" }
+projectid = { param = "projectId" }
+since = { param = "since" }
+state = { param = "state" }
+target = { param = "target" }
+teamid = { param = "teamId" }
+until = { param = "until" }
+
+[[table]]
+name = "listaliases"
+path = "/v4/aliases"
+response_path = "$.aliases"
+
+[table.columns]
+alias = { json = "$.alias", type = "Utf8" }
+created = { json = "$.created", type = "Utf8" }
+createdat = { json = "$.createdAt", type = "Float64" }
+creator_email = { json = "$.creator.email", type = "Utf8" }
+creator_uid = { json = "$.creator.uid", type = "Utf8" }
+deployment_url = { json = "$.deployment.url", type = "Utf8" }
+deploymentid = { json = "$.deploymentId", type = "Utf8" }
+projectid = { json = "$.projectId", type = "Utf8" }
+uid = { json = "$.uid", type = "Utf8" }
+updatedat = { json = "$.updatedAt", type = "Float64" }
+
+[table.filters]
+domain = { param = "domain" }
+from = { param = "from" }
+projectid = { param = "projectId" }
+since = { param = "since" }
+teamid = { param = "teamId" }
+until = { param = "until" }
+
+[[table]]
+name = "getdomains"
+path = "/v5/domains"
+response_path = "$.domains"
+
+[table.columns]
+boughtat = { json = "$.boughtAt", type = "Float64" }
+createdat = { json = "$.createdAt", type = "Float64" }
+expiresat = { json = "$.expiresAt", type = "Float64" }
+id = { json = "$.id", type = "Utf8" }
+name = { json = "$.name", type = "Utf8" }
+renew = { json = "$.renew", type = "Boolean" }
+servicetype = { json = "$.serviceType", type = "Utf8" }
+verified = { json = "$.verified", type = "Boolean" }
+
+[table.filters]
+since = { param = "since" }
+teamid = { param = "teamId" }
+until = { param = "until" }
+
+[[table]]
+name = "listuserevents"
+path = "/v3/events"
+response_path = "$.events"
+
+[table.columns]
+createdat = { json = "$.createdAt", type = "Float64" }
+entities = { json = "$.entities", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+text = { json = "$.text", type = "Utf8" }
+user_email = { json = "$.user.email", type = "Utf8" }
+user_slug = { json = "$.user.slug", type = "Utf8" }
+user_uid = { json = "$.user.uid", type = "Utf8" }
+userid = { json = "$.userId", type = "Utf8" }
+
+[table.filters]
+since = { param = "since" }
+teamid = { param = "teamId" }
+types = { param = "types" }
+until = { param = "until" }
+userid = { param = "userId" }
+
+[[table]]
+name = "getconfigurablelogdrains"
+path = "/v1/log-drains"
+
+[table.columns]
+branch = { json = "$.branch", type = "Utf8" }
+configurationid = { json = "$.configurationId", type = "Utf8" }
+createdat = { json = "$.createdAt", type = "Float64" }
+deliveryformat = { json = "$.deliveryFormat", type = "Utf8" }
+environment = { json = "$.environment", type = "Utf8" }
+id = { json = "$.id", type = "Utf8" }
+ownerid = { json = "$.ownerId", type = "Utf8" }
+type = { json = "$.type", type = "Utf8" }
+url = { json = "$.url", type = "Utf8" }
+
+[table.filters]
+projectid = { param = "projectId" }
+teamid = { param = "teamId" }
