@@ -9,4 +9,6 @@ pub mod commands;
 pub mod local;
 pub mod notebook;
 pub mod remote;
+/// Per-cell schedule metadata.
+pub mod schedule;
 pub mod wire_protocol;
