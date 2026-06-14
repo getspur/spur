@@ -32,6 +32,18 @@ type Invoke = (
   args: Record<string, never> | SetScheduleArgs | RemoveScheduleArgs,
 ) => Promise<unknown>;
 
+const SCHEDULE_LABEL_PRESETS: Record<string, string> = {
+  "*/5 * * * *": "every 5m",
+  "*/15 * * * *": "every 15m",
+  "0 * * * *": "every 1h",
+  "0 6 * * *": "daily",
+  "0 6 * * 1": "weekly",
+};
+
+export function scheduleLabel(cron: string): string {
+  return SCHEDULE_LABEL_PRESETS[cron] ?? cron;
+}
+
 export async function setCellSchedule(
   cellId: string,
   trigger: CellCronTrigger,

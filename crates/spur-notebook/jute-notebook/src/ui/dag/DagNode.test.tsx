@@ -49,4 +49,43 @@ describe("DagNode", () => {
     expect(screen.queryByText(/LIVE/)).not.toBeInTheDocument();
     expect(screen.queryByText("manual")).not.toBeInTheDocument();
   });
+
+  it("renders an armed schedule badge for a code node", () => {
+    render(
+      <DagNode
+        data={data({
+          kind: "code",
+          schedule: {
+            enabled: true,
+            cron: "*/15 * * * *",
+            timezone: "UTC",
+            run_target: "cascade",
+            skip_if_running: true,
+            catch_up: false,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("every 15m")).toBeInTheDocument();
+  });
+
+  it("does not render a schedule badge when the schedule is disabled", () => {
+    render(
+      <DagNode
+        data={data({
+          schedule: {
+            enabled: false,
+            cron: "*/15 * * * *",
+            timezone: "UTC",
+            run_target: "cascade",
+            skip_if_running: true,
+            catch_up: false,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.queryByText("every 15m")).not.toBeInTheDocument();
+  });
 });
