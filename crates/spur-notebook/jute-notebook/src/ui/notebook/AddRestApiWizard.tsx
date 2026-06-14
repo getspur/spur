@@ -2526,7 +2526,28 @@ function RssAttachStep({
   const queryUrlLiteral = sqlStringLiteral(queryUrl || generatedRssHubUrl);
   const feedQuery = `select * from rss_feed(${queryUrlLiteral});`;
   const entriesQuery = `select * from rss_entries(${queryUrlLiteral});`;
+  const entriesViewName = `${sourceHandle}_entries`;
+  const createEntriesViewSql = [
+    `create or replace view ${entriesViewName} as`,
+    `select * from rss_entries(${queryUrlLiteral});`,
+  ].join("\n");
+  const friendlyEntriesQuery = [
+    `select * from ${entriesViewName}`,
+    "order by published_at desc;",
+  ].join("\n");
   const queryTemplates = [
+    {
+      label: "Friendly entries query",
+      sql: friendlyEntriesQuery,
+    },
+    {
+      label: "Create entries view",
+      sql: createEntriesViewSql,
+    },
+    {
+      label: "Raw backend mapping",
+      sql: entriesQuery,
+    },
     {
       label: "Routes",
       sql: "select * from rss_routes();",
@@ -2850,11 +2871,12 @@ function RssAttachStep({
           </div>
           <SummaryRow label="Feed">{selectedRoute.previewTitle}</SummaryRow>
           <SummaryRow label="Source">{classification.label}</SummaryRow>
+          <SummaryRow label="Entries view">{entriesViewName}</SummaryRow>
           <SummaryRow label="Entry function">rss_entries(url)</SummaryRow>
-          <SummaryRow label="Entry query">{entriesQuery}</SummaryRow>
+          <SummaryRow label="Entry query">{friendlyEntriesQuery}</SummaryRow>
           <SummaryRow label="View">{selectedRoute.view}</SummaryRow>
           <SummaryRow label="Folder">{selectedRoute.category}</SummaryRow>
-          <SummaryRow label="Next action">run the entry query</SummaryRow>
+          <SummaryRow label="Next action">create view, then query entries</SummaryRow>
         </section>
 
         <section className="rounded-lg border border-gray-200 bg-gray-50">
@@ -2867,6 +2889,7 @@ function RssAttachStep({
           <SummaryRow label="Discovery">rss_routes</SummaryRow>
           <SummaryRow label="Preview">rss_feed(url)</SummaryRow>
           <SummaryRow label="Entries">rss_entries(url)</SummaryRow>
+          <SummaryRow label="Mapping">{entriesQuery}</SummaryRow>
           <SummaryRow label="Persist">
             backend subscription tables and user state are out of scope here
           </SummaryRow>
@@ -2879,8 +2902,8 @@ function RssAttachStep({
             Notebook query handoff
           </h4>
           <p className="mt-1 text-xs text-gray-500">
-            Run the feed entries query as the selected source entry point after
-            adding the datasource.
+            Query the friendly entries view after creating the generated DuckDB
+            view over rss_entries(url).
           </p>
         </div>
         <div className="divide-y divide-gray-200">
@@ -2890,7 +2913,9 @@ function RssAttachStep({
                 {template.label}
               </div>
               <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all rounded border border-gray-200 bg-gray-950 px-3 py-2 font-mono text-xs leading-5 text-white">
-                {template.sql}
+                {template.sql.split("\n").map((line) => (
+                  <div key={`${template.label}:${line}`}>{line}</div>
+                ))}
               </pre>
             </div>
           ))}
