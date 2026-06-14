@@ -106,6 +106,12 @@ REMOTE_TARGET="/mnt/cargo/targets/$WORKTREE_KEY"
 # runs, and the NUL-delimited list of worktree files newer than it afterwards.
 REMOTE_RUN_MARKER="/tmp/spur-run-marker.$WORKTREE_FILE_KEY"
 REMOTE_RUN_CHANGED="/tmp/spur-run-changed.$WORKTREE_FILE_KEY"
+# Per-invocation PRIVATE run dir (only used for `run` sync-back). A remote `run`
+# executes the binary in this private copy of the just-synced worktree instead of
+# the shared ~/spur/<key>, so the post-run `find -newer` capture can never pick up
+# files a CONCURRENT build wrote into the shared tree. Unique per build.sh process
+# ($$ + epoch); the shared compile cache is reused via a target/ symlink.
+REMOTE_RUN_DIR="/mnt/cargo/spur-runs/$WORKTREE_FILE_KEY.$$.$(date +%s)"
 REMOTE_PNPM_VIRTUAL_STORE="/mnt/cargo/pnpm-vstore/$WORKTREE_KEY/.pnpm"
 JOBS="${SPUR_BUILD_JOBS:-8}"
 NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=0
@@ -653,15 +659,26 @@ run_payload() {
     # then record every worktree file newer than it (excluding build artifacts).
     # %P prints worktree-relative paths so the list feeds rsync --files-from on
     # the way back. Empty strings when sync-back is off (any non-run subcommand).
-    local run_marker_cmd="" run_capture_cmd=""
+    local run_setup_cmd="" run_marker_cmd="" run_capture_cmd=""
     if [[ $RUN_SYNC_BACK -eq 1 ]]; then
+        # Isolation: copy the just-synced shared worktree into a PRIVATE per-run
+        # dir and cd into it, so the binary executes where no concurrent build can
+        # write — the post-run `find` capture then sees only THIS run's outputs.
+        # The compile cache is reused via a target/ symlink to the shared
+        # /mnt/cargo/targets/<key> (target/ is excluded from the copy and capture).
+        # Old run dirs (>2h) are swept opportunistically so they don't accumulate.
+        run_setup_cmd="mkdir -p /mnt/cargo/spur-runs; find /mnt/cargo/spur-runs -maxdepth 1 -type d -mmin +120 -exec rm -rf {} + 2>/dev/null || true; rsync -a --delete --exclude /target --exclude /.git \"\$HOME/$REMOTE_DIR/\" \"$REMOTE_RUN_DIR/\" && ln -sfn \"$REMOTE_TARGET\" \"$REMOTE_RUN_DIR/target\" && cd \"$REMOTE_RUN_DIR\""
         run_marker_cmd="touch \"$REMOTE_RUN_MARKER\""
         # Capture worktree files the binary wrote. Exclude build artifacts
         # (target/), git internals (.git/), and nested worktrees
         # (.spur/worktrees/ — each has its own target/ and must never sync), but
         # KEEP other .spur outputs (e.g. .spur/analyst.duckdb from `analyst
         # build`) so graph-producing runs land their DB locally.
-        run_capture_cmd="find . -type f -newer \"$REMOTE_RUN_MARKER\" -not -path './target/*' -not -path './.git/*' -not -path './.spur/worktrees/*' -printf '%P\\0' > \"$REMOTE_RUN_CHANGED\""
+        # NOTE: this string is embedded inside a remote `bash -lc '...'` (single
+        # quotes). Path patterns MUST use escaped double quotes, not single
+        # quotes — a literal ' would close the bash -lc wrapper early and the
+        # pattern would glob-expand on the VM (CWD has target/), breaking find.
+        run_capture_cmd="find . -type f -newer \"$REMOTE_RUN_MARKER\" -not -path \"./target/*\" -not -path \"./.git/*\" -not -path \"./.spur/worktrees/*\" -printf \"%P\\0\" > \"$REMOTE_RUN_CHANGED\" || true"
     fi
     remote_ssh \
         --command="bash -lc '
@@ -689,6 +706,7 @@ run_payload() {
                 (cd $NOTEBOOK_FRONTEND_DIR && $NOTEBOOK_FRONTEND_INSTALL_CMD && $NOTEBOOK_FRONTEND_BUILD_CMD)
             fi
             cargo_log=/tmp/spur-cargo-output.$WORKTREE_FILE_KEY.log
+            $run_setup_cmd
             $run_marker_cmd
             if [[ $capture_cargo_output -eq 1 ]]; then
                 set +e
@@ -723,25 +741,24 @@ run_payload() {
 # from a genuine error (VM still RUNNING).
 sync_back_workspace() {
     [[ $RUN_SYNC_BACK -eq 1 ]] || return 0
-    local list
+    local rc=0 list
     list=$(mktemp)
-    if ! rsync -az -e "$TRANSPORT" "$VM_NAME:$REMOTE_RUN_CHANGED" "$list" 2>/dev/null; then
-        log "Run sync-back: no change manifest on VM; nothing to pull."
-        rm -f "$list"
-        return 0
-    fi
-    if [[ ! -s "$list" ]]; then
+    if rsync -az -e "$TRANSPORT" "$VM_NAME:$REMOTE_RUN_CHANGED" "$list" 2>/dev/null && [[ -s "$list" ]]; then
+        local count
+        count=$(tr -cd '\0' <"$list" | wc -c | tr -d ' ')
+        log "Run sync-back: pulling $count worktree path(s) from $VM_NAME -> $GIT_TOPLEVEL ..."
+        # Pull from the PRIVATE run dir (isolated copy), not the shared tree, so we
+        # only ever land this run's own outputs. No --delete: add/update only.
+        rsync -azc --from0 --files-from="$list" -e "$TRANSPORT" \
+            "$VM_NAME:$REMOTE_RUN_DIR/" "$GIT_TOPLEVEL/" || rc=$?
+    else
         log "Run sync-back: binary wrote no worktree files."
-        rm -f "$list"
-        return 0
     fi
-    local count
-    count=$(tr -cd '\0' <"$list" | wc -c | tr -d ' ')
-    log "Run sync-back: pulling $count worktree path(s) from $VM_NAME -> $GIT_TOPLEVEL ..."
-    local rc=0
-    rsync -azc --from0 --files-from="$list" -e "$TRANSPORT" \
-        "$VM_NAME:$REMOTE_DIR/" "$GIT_TOPLEVEL/" || rc=$?
     rm -f "$list"
+    # Remove the private run dir (best-effort; rm drops the target/ symlink, never
+    # the shared cache it points at). The 2h sweep in run_setup_cmd catches any
+    # stragglers left by a crash/preemption.
+    remote_ssh --command="rm -rf -- \"$REMOTE_RUN_DIR\"" >/dev/null 2>&1 || true
     return $rc
 }
 
