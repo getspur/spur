@@ -1,3 +1,4 @@
+import type { CellCronTrigger } from "@/bindings/CellCronTrigger";
 import type { NodeStatus, NotebookCellState } from "@/stores/notebook";
 
 import { type DagPortManifest, staleConsumedPorts } from "./dagStatus";
@@ -25,6 +26,8 @@ export type DagNodeData = {
   aiLive?: boolean;
   label: string;
   cellType: NotebookCellState["type"];
+  version?: number;
+  schedule?: CellCronTrigger;
   code: string;
   codePreview: string;
   produces: DagProducedPort[];
@@ -101,6 +104,8 @@ export function buildDagGraph(
           aiLive: deriveAiLive(dagMetadata),
           label: deriveLabel(dagMetadata, id),
           cellType: cell.type,
+          version: cell.version,
+          schedule: cell.schedule,
           code: cell.source,
           codePreview: firstSourceLine(cell.source),
           produces: (dagMetadata?.produces ?? []).map((port) => ({
@@ -191,9 +196,9 @@ function isDagCell(
   const dagMetadata = cell?.dagMetadata;
   return Boolean(
     dagMetadata &&
-      ((dagMetadata.produces?.length ?? 0) > 0 ||
-        (dagMetadata.consumes?.length ?? 0) > 0 ||
-        dagMetadata.source),
+    ((dagMetadata.produces?.length ?? 0) > 0 ||
+      (dagMetadata.consumes?.length ?? 0) > 0 ||
+      dagMetadata.source),
   );
 }
 
