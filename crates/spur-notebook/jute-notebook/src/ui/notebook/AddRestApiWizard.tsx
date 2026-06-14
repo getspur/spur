@@ -2482,6 +2482,9 @@ function RssAttachStep({
   const [sourceInput, setSourceInput] = useState(
     "rsshub://youtube/channel/UCYO_jab_esuFRV4b17AJtAw",
   );
+  const [sourceHandleOverride, setSourceHandleOverride] = useState<
+    string | null
+  >(null);
   const sourceStatusId = useId();
   const sourceModeDetailId = useId();
   const [selectedRouteId, setSelectedRouteId] = useState(
@@ -2499,6 +2502,17 @@ function RssAttachStep({
     [routeParams, selectedRoute],
   );
   const classification = classifyRssInput(sourceInput);
+  const derivedSourceHandle = useMemo(
+    () =>
+      rssSourceHandleForSelection({
+        input: sourceInput,
+        mode: sourceMode,
+        route: selectedRoute,
+        routeParams,
+      }),
+    [routeParams, selectedRoute, sourceInput, sourceMode],
+  );
+  const sourceHandle = sourceHandleOverride ?? derivedSourceHandle;
   const modeDetail =
     sourceMode === "keyword"
       ? "Searches seeded RSSHub routes for the MVP. Live rss_routes browsing can replace this list later."
@@ -2529,6 +2543,7 @@ function RssAttachStep({
 
   const selectMode = (mode: RssSourceMode) => {
     setSourceMode(mode);
+    setSourceHandleOverride(null);
     if (mode === "direct") {
       setSourceInput("https://example.com/feed.xml");
     } else if (mode === "keyword") {
@@ -2544,6 +2559,7 @@ function RssAttachStep({
     setRouteParams(nextParams);
     setSourceMode("rsshub");
     setSourceInput(rssHubUrlForRoute(route, nextParams));
+    setSourceHandleOverride(null);
   };
 
   const updateRouteParam = (key: string, value: string) => {
@@ -2619,8 +2635,27 @@ function RssAttachStep({
             aria-describedby={`${sourceStatusId} ${sourceModeDetailId}`}
             aria-label="Source URL or keyword"
             className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
-            onChange={(event) => setSourceInput(event.currentTarget.value)}
+            onChange={(event) => {
+              setSourceInput(event.currentTarget.value);
+              setSourceHandleOverride(null);
+            }}
             value={sourceInput}
+          />
+        </label>
+
+        <label className="mt-3 block">
+          <span className="text-xs font-medium text-gray-600">
+            Source handle
+          </span>
+          <input
+            aria-label="Source handle"
+            className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
+            onChange={(event) =>
+              setSourceHandleOverride(
+                rssSourceHandleFromParts([event.currentTarget.value]),
+              )
+            }
+            value={sourceHandle}
           />
         </label>
 
@@ -2905,6 +2940,57 @@ function classifyRssInput(input: string): {
     return { mode: "direct", label: "Direct RSS URL" };
   }
   return { mode: "keyword", label: "Keyword discovery" };
+}
+
+function rssSourceHandleForSelection({
+  input,
+  mode,
+  route,
+  routeParams,
+}: {
+  input: string;
+  mode: RssSourceMode;
+  route: RssHubRoute | undefined;
+  routeParams: Record<string, string>;
+}) {
+  if (mode === "rsshub" && route) {
+    return rssSourceHandleFromParts([
+      route.id,
+      ...route.parameters.map((parameter) => routeParams[parameter.key] ?? ""),
+    ]);
+  }
+
+  if (mode === "direct") {
+    return rssSourceHandleFromParts(directRssSourceHandleParts(input));
+  }
+
+  return rssSourceHandleFromParts([input]);
+}
+
+function directRssSourceHandleParts(input: string) {
+  try {
+    const url = new URL(input.trim());
+    const hostnameParts = url.hostname
+      .split(".")
+      .filter(Boolean)
+      .filter((part, index) => index !== 0 || part !== "www");
+    const hostWithoutSuffix =
+      hostnameParts.length > 1 ? hostnameParts.slice(0, -1) : hostnameParts;
+    const pathParts = url.pathname.split("/").filter(Boolean);
+
+    return ["direct", ...hostWithoutSuffix, ...pathParts];
+  } catch {
+    return ["direct", input];
+  }
+}
+
+function rssSourceHandleFromParts(parts: string[]) {
+  const value = parts
+    .join("_")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return value || "rss_source";
 }
 
 function rssClassificationLabel(mode: RssSourceMode) {
