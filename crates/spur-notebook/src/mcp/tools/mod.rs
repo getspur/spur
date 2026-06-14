@@ -34,6 +34,7 @@ pub mod notebook_run_cascade;
 pub mod notebook_run_cell;
 pub mod notebook_set_cell_code_type;
 pub mod notebook_set_dag_metadata;
+pub mod notebook_set_schedule;
 pub mod notebook_symbol_refs;
 pub mod notebook_symbol_search;
 pub mod open_design_get;
@@ -81,6 +82,7 @@ pub fn tools() -> Vec<Tool> {
         notebook_run_cascade::tool(),
         notebook_set_cell_code_type::tool(),
         notebook_set_dag_metadata::tool(),
+        notebook_set_schedule::tool(),
         open_design_search::tool(),
         open_design_get::tool(),
         code_semantic_search::tool(),
@@ -304,6 +306,7 @@ mod tests {
         assert!(names.iter().any(|name| name == "notebook_context_pack"));
         assert!(names.iter().any(|name| name == "notebook_catalog"));
         assert!(names.iter().any(|name| name == "notebook_dag_status"));
+        assert!(names.iter().any(|name| name == "notebook_set_schedule"));
         assert!(names.iter().any(|name| name == "notebook_app_init"));
         assert!(names.iter().any(|name| name == "notebook_lineage"));
         assert!(names.iter().any(|name| name == "notebook_run_cell"));
@@ -340,6 +343,7 @@ mod tests {
             "notebook.venv_list_python_versions",
             "notebook.set_cell_metadata",
             "notebook_set_dag_metadata",
+            "notebook_set_schedule",
             "notebook_set_cell_code_type",
             "notebook.list_recents",
             "notebook.set_pinned",
