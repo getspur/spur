@@ -161,17 +161,47 @@ chmod 0755 /usr/local/bin/sccache-worktree
 # not OUT_DIR, so paths embedded in __FILE__/preprocessed output stay
 # worktree-absolute and miss the cache cross-worktree. Setting
 # SCCACHE_BASEDIR=$OUT_DIR — inherited from build.rs — normalizes those
-# paths to relative form. Verified: libduckdb-sys cold compile drops from
-# ~280s to ~107s cross-worktree at 99% C++ hit rate.
+# paths to relative form. GCC also emits absolute source/include linemarkers in
+# preprocessor output under `-g`; run from OUT_DIR, rewrite OUT_DIR-scoped args
+# to relative paths, and suppress the working-directory linemarker so generated
+# C/C++ inputs do not hash differently for ~/spur/main vs ~/spur/worktrees/*.
 cat >/usr/local/bin/sccache-cc <<'WRAPPER'
 #!/bin/bash
-[[ -n "$OUT_DIR" ]] && export SCCACHE_BASEDIR="$OUT_DIR" || export SCCACHE_BASEDIR="$PWD"
-exec /usr/local/bin/sccache /usr/bin/cc "$@"
+if [[ -n "${OUT_DIR:-}" ]]; then
+    export SCCACHE_BASEDIR="$OUT_DIR"
+    mapped=()
+    while [[ $# -gt 0 ]]; do
+        arg="$1"; shift
+        case "$arg" in
+            "$OUT_DIR"/*) mapped+=("${arg#$OUT_DIR/}") ;;
+            -I"$OUT_DIR"/*) mapped+=("-I${arg#-I$OUT_DIR/}") ;;
+            *) mapped+=("$arg") ;;
+        esac
+    done
+    cd "$OUT_DIR"
+    exec /usr/local/bin/sccache /usr/bin/cc -fno-working-directory "${mapped[@]}"
+fi
+export SCCACHE_BASEDIR="$PWD"
+exec /usr/local/bin/sccache /usr/bin/cc -fno-working-directory "$@"
 WRAPPER
 cat >/usr/local/bin/sccache-cxx <<'WRAPPER'
 #!/bin/bash
-[[ -n "$OUT_DIR" ]] && export SCCACHE_BASEDIR="$OUT_DIR" || export SCCACHE_BASEDIR="$PWD"
-exec /usr/local/bin/sccache /usr/bin/c++ "$@"
+if [[ -n "${OUT_DIR:-}" ]]; then
+    export SCCACHE_BASEDIR="$OUT_DIR"
+    mapped=()
+    while [[ $# -gt 0 ]]; do
+        arg="$1"; shift
+        case "$arg" in
+            "$OUT_DIR"/*) mapped+=("${arg#$OUT_DIR/}") ;;
+            -I"$OUT_DIR"/*) mapped+=("-I${arg#-I$OUT_DIR/}") ;;
+            *) mapped+=("$arg") ;;
+        esac
+    done
+    cd "$OUT_DIR"
+    exec /usr/local/bin/sccache /usr/bin/c++ -fno-working-directory "${mapped[@]}"
+fi
+export SCCACHE_BASEDIR="$PWD"
+exec /usr/local/bin/sccache /usr/bin/c++ -fno-working-directory "$@"
 WRAPPER
 chmod 0755 /usr/local/bin/sccache-cc /usr/local/bin/sccache-cxx
 

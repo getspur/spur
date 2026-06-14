@@ -28,3 +28,14 @@ def test_sccache_uses_ram_l1_before_gcs_l2():
     assert "export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0" in startup
     assert "export SCCACHE_DIR=$SCCACHE_RAM_MNT/\\${USER:-builder}" in startup
     assert "export SCCACHE_CACHE_SIZE=15G" in startup
+
+
+def test_c_wrappers_disable_working_directory_linemarkers_for_stable_sccache_keys():
+    startup = STARTUP_SH.read_text()
+
+    assert '[[ -n "${OUT_DIR:-}" ]]' in startup
+    assert 'mapped+=("${arg#$OUT_DIR/}")' in startup
+    assert 'mapped+=("-I${arg#-I$OUT_DIR/}")' in startup
+    assert 'cd "$OUT_DIR"' in startup
+    assert 'exec /usr/local/bin/sccache /usr/bin/cc -fno-working-directory "${mapped[@]}"' in startup
+    assert 'exec /usr/local/bin/sccache /usr/bin/c++ -fno-working-directory "${mapped[@]}"' in startup
