@@ -404,6 +404,9 @@ fn main() {
             spur_notebook::commands::notebook_dag_status,
             spur_notebook::commands::notebook_run_cascade,
             spur_notebook::commands::notebook_run_cell,
+            spur_notebook::commands::notebook_set_cell_schedule,
+            spur_notebook::commands::notebook_remove_cell_schedule,
+            spur_notebook::commands::notebook_list_schedules,
             spur_notebook::commands::anywidget_command,
             spur_notebook::commands::push_capture_port,
             spur_notebook::commands::publish_spur_app,
@@ -459,12 +462,12 @@ fn main() {
                 {
                     Ok((handle, control)) => {
                         let mut slot = daemon_control.lock().await;
-                        *slot = Some(Arc::new(control));
+                        *slot = Some(Arc::new(
+                            spur_notebook::commands::NotebookDaemonRuntime::new(control, handle),
+                        ));
                         drop(slot);
 
-                        let keep_alive = handle;
                         std::future::pending::<()>().await;
-                        drop(keep_alive);
                     }
                     Err(error) => tracing::error!(%error, "failed to start notebook MCP server"),
                 }
@@ -579,6 +582,18 @@ mod tests {
             "jute::chat_commands::chat_new_session",
             "jute::chat_commands::chat_cancel",
             "jute::chat_commands::chat_permission_respond",
+        ] {
+            assert!(registered.contains(command), "{command} is not registered");
+        }
+    }
+
+    #[test]
+    fn registered_invoke_handler_source_includes_schedule_commands() {
+        let registered = registered_invoke_handler_source();
+        for command in [
+            "spur_notebook::commands::notebook_set_cell_schedule",
+            "spur_notebook::commands::notebook_remove_cell_schedule",
+            "spur_notebook::commands::notebook_list_schedules",
         ] {
             assert!(registered.contains(command), "{command} is not registered");
         }

@@ -211,6 +211,7 @@ mod tests {
                     dag: Some(dag),
                     code_type: None,
                     frontend: None,
+                    cron: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),

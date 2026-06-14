@@ -75,6 +75,7 @@ mod tests {
                     }),
                     code_type: None,
                     frontend,
+                    cron: None,
                 }),
                 jute_deck: None,
                 other: Default::default(),
