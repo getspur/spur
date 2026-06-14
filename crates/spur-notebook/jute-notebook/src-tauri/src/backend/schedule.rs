@@ -4,20 +4,15 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// What a scheduled fire runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum RunTarget {
     /// Run only the armed cell.
     CellOnly,
     /// Run the armed cell and cascade downstream (default).
+    #[default]
     Cascade,
-}
-
-impl Default for RunTarget {
-    fn default() -> Self {
-        RunTarget::Cascade
-    }
 }
 
 /// Persisted per-cell cron trigger config (`cell.metadata.spur.cron`).
@@ -30,9 +25,9 @@ impl Default for RunTarget {
 pub struct CellCronTrigger {
     /// Whether the schedule is currently armed.
     pub enabled: bool,
-    /// 5-field Unix cron expression, such as every 15 minutes.
+    /// 5-field `Unix` cron expression, such as every 15 minutes.
     pub cron: String,
-    /// IANA timezone name, e.g. "America/Los_Angeles".
+    /// `IANA` timezone name, for example `America/Los_Angeles`.
     pub timezone: String,
     /// Cell-only vs cascade. Defaults to cascade.
     #[serde(default)]
@@ -40,7 +35,7 @@ pub struct CellCronTrigger {
     /// Skip a fire if the previous run is still going. Defaults true.
     #[serde(default = "default_true")]
     pub skip_if_running: bool,
-    /// Back-fill a window that elapsed while SPUR was closed. Defaults false.
+    /// Back-fill a window that elapsed while `SPUR` was closed. Defaults false.
     #[serde(default)]
     pub catch_up: bool,
 }
