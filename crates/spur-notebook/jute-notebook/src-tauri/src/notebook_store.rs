@@ -783,6 +783,7 @@ fn empty_spur_cell_metadata() -> SpurCellMetadata {
         dag: None,
         code_type: None,
         frontend: None,
+        cron: None,
     }
 }
 
@@ -869,6 +870,7 @@ pub(crate) fn merge_authoritative_spur_metadata_for_save(
                 dag: None,
                 code_type: authoritative_spur.code_type,
                 frontend: authoritative_spur.frontend.clone(),
+                cron: authoritative_spur.cron.clone(),
             }
         });
 
@@ -883,6 +885,9 @@ pub(crate) fn merge_authoritative_spur_metadata_for_save(
         }
         if let Some(frontend) = authoritative_spur.frontend.clone() {
             target_spur.frontend = Some(frontend);
+        }
+        if let Some(cron) = authoritative_spur.cron.clone() {
+            target_spur.cron = Some(cron);
         }
         if target_spur.last_edited_by.is_none() {
             target_spur.last_edited_by = authoritative_spur.last_edited_by.clone();
@@ -985,6 +990,7 @@ fn set_cell_spur_metadata(cell: &mut Cell, version: u64, last_edited_by: Option<
         .spur
         .as_ref()
         .and_then(|spur| spur.frontend.clone());
+    let previous_cron = metadata.spur.as_ref().and_then(|spur| spur.cron.clone());
     metadata.spur = Some(crate::backend::notebook::SpurCellMetadata {
         version,
         last_edited_by: last_edited_by.or(previous_last_edited_by),
@@ -992,6 +998,7 @@ fn set_cell_spur_metadata(cell: &mut Cell, version: u64, last_edited_by: Option<
         dag: previous_dag,
         code_type: previous_code_type,
         frontend: previous_frontend,
+        cron: previous_cron,
     });
 }
 
@@ -1094,6 +1101,7 @@ mod tests {
                     dag: None,
                     code_type: None,
                     frontend: None,
+                    cron: None,
                 }),
                 jute_deck: None,
                 other: Map::new(),

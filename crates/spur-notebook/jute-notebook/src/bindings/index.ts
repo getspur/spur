@@ -1,3 +1,4 @@
+export * from "./CellCronTrigger";
 export * from "./DaemonControlError";
 export * from "./DaemonCell";
 export * from "./CodeType";
@@ -49,6 +50,7 @@ export * from "./DatasourceEntry";
 export * from "./CellDagMetadata";
 export * from "./MultilineString";
 export * from "./SpurCellMetadata";
+export * from "./RunTarget";
 export * from "./DaemonControlRequest";
 export * from "./RecentsChangedEvent";
 export * from "./NotebookRoot";

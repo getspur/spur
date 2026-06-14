@@ -815,6 +815,7 @@ mod tests {
                         dag: None,
                         frontend: None,
                         code_type: None,
+                        cron: None,
                     }),
                     jute_deck: None,
                     other: Map::new(),
