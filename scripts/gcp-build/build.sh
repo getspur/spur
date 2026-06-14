@@ -54,6 +54,15 @@ while [[ "${1:-}" == --* ]]; do
     esac
 done
 CARGO_ARGS="${CARGO_ARGS:-${*:-build --release --workspace}}"
+# A `run` subcommand executes the built binary ON the VM, so any files it writes
+# into the worktree must be synced back to the local tree (the forward sync is
+# one-way: local -> VM). Only `run` triggers this; SPUR_RUN_SYNC_BACK=0 opts out.
+# Caveat: only paths under the worktree are captured — a binary that writes to an
+# out-of-tree path (e.g. /tmp) leaves those outputs on the VM.
+RUN_SYNC_BACK=0
+if [[ "${CARGO_ARGS%% *}" == "run" && "${SPUR_RUN_SYNC_BACK:-1}" != "0" ]]; then
+    RUN_SYNC_BACK=1
+fi
 PNPM_ARGS=("$@")
 if [[ $PNPM -eq 1 && "${PNPM_ARGS[0]:-}" == "--" ]]; then
     PNPM_ARGS=("${PNPM_ARGS[@]:1}")
@@ -93,6 +102,10 @@ fi
 WORKTREE_FILE_KEY="${WORKTREE_KEY//\//_}"
 REMOTE_DIR="spur/$WORKTREE_KEY"                       # e.g. spur/worktrees/UUID
 REMOTE_TARGET="/mnt/cargo/targets/$WORKTREE_KEY"
+# Run-sync-back scratch paths (VM-side): a marker stamped just before the binary
+# runs, and the NUL-delimited list of worktree files newer than it afterwards.
+REMOTE_RUN_MARKER="/tmp/spur-run-marker.$WORKTREE_FILE_KEY"
+REMOTE_RUN_CHANGED="/tmp/spur-run-changed.$WORKTREE_FILE_KEY"
 REMOTE_PNPM_VIRTUAL_STORE="/mnt/cargo/pnpm-vstore/$WORKTREE_KEY/.pnpm"
 JOBS="${SPUR_BUILD_JOBS:-8}"
 NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=0
@@ -636,6 +649,20 @@ run_payload() {
         capture_cargo_output=1
         log "No source content delta; capturing cargo output on VM (set SPUR_CAPTURE_FRESH_CARGO_OUTPUT=0 to stream)."
     fi
+    # For a remote `run`, stamp a marker immediately before the binary executes,
+    # then record every worktree file newer than it (excluding build artifacts).
+    # %P prints worktree-relative paths so the list feeds rsync --files-from on
+    # the way back. Empty strings when sync-back is off (any non-run subcommand).
+    local run_marker_cmd="" run_capture_cmd=""
+    if [[ $RUN_SYNC_BACK -eq 1 ]]; then
+        run_marker_cmd="touch \"$REMOTE_RUN_MARKER\""
+        # Capture worktree files the binary wrote. Exclude build artifacts
+        # (target/), git internals (.git/), and nested worktrees
+        # (.spur/worktrees/ — each has its own target/ and must never sync), but
+        # KEEP other .spur outputs (e.g. .spur/analyst.duckdb from `analyst
+        # build`) so graph-producing runs land their DB locally.
+        run_capture_cmd="find . -type f -newer \"$REMOTE_RUN_MARKER\" -not -path './target/*' -not -path './.git/*' -not -path './.spur/worktrees/*' -printf '%P\\0' > \"$REMOTE_RUN_CHANGED\""
+    fi
     remote_ssh \
         --command="bash -lc '
             set -e
@@ -662,6 +689,7 @@ run_payload() {
                 (cd $NOTEBOOK_FRONTEND_DIR && $NOTEBOOK_FRONTEND_INSTALL_CMD && $NOTEBOOK_FRONTEND_BUILD_CMD)
             fi
             cargo_log=/tmp/spur-cargo-output.$WORKTREE_FILE_KEY.log
+            $run_marker_cmd
             if [[ $capture_cargo_output -eq 1 ]]; then
                 set +e
                 cargo $CARGO_ARGS >\"\$cargo_log\" 2>&1
@@ -675,6 +703,7 @@ run_payload() {
             else
                 cargo $CARGO_ARGS
             fi
+            $run_capture_cmd
             echo
             echo \"--- sccache stats ($WORKTREE_KEY) ---\"
             sccache --show-stats > /tmp/spur-sccache-stats.$WORKTREE_FILE_KEY
@@ -683,6 +712,37 @@ run_payload() {
 
     log "Done. target lives at $VM_NAME:$REMOTE_TARGET — use scripts/gcp-build/fetch.sh to pull artifacts."
     return 0
+}
+
+# ---- sync run outputs back from the VM -------------------------------------
+# A remote `run` executes the binary on the VM, so worktree files it created or
+# modified live only there. run_payload recorded them in $REMOTE_RUN_CHANGED
+# (NUL-delimited, worktree-relative); pull exactly those paths into the local
+# worktree. No --delete: we only add/update, never remove local files. Returns
+# nonzero on transfer failure so the orchestrator can tell a preemption (VM gone)
+# from a genuine error (VM still RUNNING).
+sync_back_workspace() {
+    [[ $RUN_SYNC_BACK -eq 1 ]] || return 0
+    local list
+    list=$(mktemp)
+    if ! rsync -az -e "$TRANSPORT" "$VM_NAME:$REMOTE_RUN_CHANGED" "$list" 2>/dev/null; then
+        log "Run sync-back: no change manifest on VM; nothing to pull."
+        rm -f "$list"
+        return 0
+    fi
+    if [[ ! -s "$list" ]]; then
+        log "Run sync-back: binary wrote no worktree files."
+        rm -f "$list"
+        return 0
+    fi
+    local count
+    count=$(tr -cd '\0' <"$list" | wc -c | tr -d ' ')
+    log "Run sync-back: pulling $count worktree path(s) from $VM_NAME -> $GIT_TOPLEVEL ..."
+    local rc=0
+    rsync -azc --from0 --files-from="$list" -e "$TRANSPORT" \
+        "$VM_NAME:$REMOTE_DIR/" "$GIT_TOPLEVEL/" || rc=$?
+    rm -f "$list"
+    return $rc
 }
 
 # ---- orchestrate: ensure VM, sync, run — with one preemption retry ----------
@@ -730,6 +790,9 @@ while : ; do
     sync_workspace || rc=$?
     if [[ $rc -eq 0 ]]; then
         run_payload || rc=$?
+    fi
+    if [[ $rc -eq 0 ]]; then
+        sync_back_workspace || rc=$?
     fi
     if [[ $rc -eq 0 ]]; then
         exit 0
