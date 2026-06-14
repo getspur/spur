@@ -135,6 +135,28 @@ describe("buildDagGraph", () => {
     ).toEqual([]);
   });
 
+  test("includes source-only table function cells as named dag nodes", () => {
+    const graph = buildDagGraph(["table-query"], {
+      "table-query": cell(
+        "duckdb.sql('SELECT * FROM polymarket_markets()').df()",
+        {
+          produces: [],
+          consumes: [],
+          source: {
+            kind: "api_tables",
+            port: "polymarket_markets",
+            class: "dataframe",
+          },
+        },
+        2,
+      ),
+    });
+
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0]?.data.label).toBe("polymarket_markets");
+    expect(graph.nodes[0]?.data.source).toBe("api_tables:polymarket_markets");
+  });
+
   test("marks stale edges from live dag status run-input versions", () => {
     const graph = buildDagGraph(
       ["root", "consumer"],

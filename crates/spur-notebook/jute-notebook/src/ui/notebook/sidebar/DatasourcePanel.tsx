@@ -22,6 +22,7 @@ import {
 
 import type {
   CellCronTrigger,
+  CellDagMetadata,
   ConnectionTemplate,
   DatasourceEntry,
 } from "@/bindings";
@@ -344,11 +345,13 @@ export default function DatasourcePanel() {
         throw new Error("daemon insert_cell did not return an inserted cell");
       }
 
-      await setCellSchedule(
-        response.result.data.kind.cell.id,
-        DEFAULT_TABLE_QUERY_TRIGGER,
-        response.result.data.kind.cell.version,
+      const cell = response.result.data.kind.cell;
+      const version = await setCellDagMetadata(
+        cell.id,
+        tableFunctionDagMetadata(tableName),
+        cell.version,
       );
+      await setCellSchedule(cell.id, DEFAULT_TABLE_QUERY_TRIGGER, version);
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -1149,10 +1152,61 @@ function upsertDatasourceEntry(
 
 function tableFunctionQuerySource(tableName: string): string {
   const relation = `${duckDbIdentifier(tableName)}()`;
-  return `import duckdb
+  const query = `SELECT * FROM ${relation} LIMIT 100`;
+  return `from pathlib import Path
+import duckdb
 
-duckdb.sql("SELECT * FROM ${relation} LIMIT 100").df()
+_SPUR_DUCKDB_EXTENSION_PATH = str(Path.home() / ".spur" / "extensions" / "spur_rest.duckdb_extension")
+_SPUR_DUCKDB_EXTENSION_SQL = _SPUR_DUCKDB_EXTENSION_PATH.replace("'", "''")
+
+if "_SPUR_DUCKDB_CONNECTION" not in globals():
+    _SPUR_DUCKDB_CONNECTION = duckdb.connect(
+        database=":memory:",
+        config={"allow_unsigned_extensions": "true"},
+    )
+
+duckdb.set_default_connection(_SPUR_DUCKDB_CONNECTION)
+duckdb.sql(f"LOAD '{_SPUR_DUCKDB_EXTENSION_SQL}'")
+
+duckdb.sql(${pythonStringLiteral(query)}).df()
 `;
+}
+
+async function setCellDagMetadata(
+  cellId: string,
+  dag: CellDagMetadata,
+  expectedVersion: number,
+): Promise<number> {
+  const response = await daemonControl({
+    command: "set_cell_metadata",
+    id: cellId,
+    patch: { spur: { dag } },
+    expected_version: expectedVersion,
+  });
+  if (!response.ok) {
+    throw new Error(
+      response.error?.message ?? "Failed to mark query as DAG node",
+    );
+  }
+  if (
+    response.result?.type !== "delta" ||
+    response.result.data.kind.type !== "cellWritten"
+  ) {
+    throw new Error("daemon set_cell_metadata did not return an updated cell");
+  }
+  return response.result.data.kind.cell.version;
+}
+
+function tableFunctionDagMetadata(tableName: string): CellDagMetadata {
+  return {
+    produces: [],
+    consumes: [],
+    source: {
+      kind: "api_tables",
+      port: tableName,
+      class: "dataframe",
+    },
+  };
 }
 
 function duckDbIdentifier(value: string): string {
@@ -1160,6 +1214,10 @@ function duckDbIdentifier(value: string): string {
     return value;
   }
   return `"${value.replaceAll('"', '""')}"`;
+}
+
+function pythonStringLiteral(value: string): string {
+  return JSON.stringify(value);
 }
 
 function datasourceNameFromPath(path: string): string {

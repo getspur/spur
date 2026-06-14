@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type {
+  CellDagMetadata,
   ConnectionTemplate,
   DaemonControlCommand,
   DaemonControlResponse,
@@ -172,6 +173,37 @@ function defaultDaemonResponse(
               frontendMetadata: undefined,
               juteDeckMetadata: undefined,
               source: command.source,
+              execCount: null,
+              status: "idle",
+              outputs: [],
+            },
+          },
+        },
+      },
+    };
+  }
+
+  if (command.command === "set_cell_metadata") {
+    const patch = command.patch as { spur?: { dag?: CellDagMetadata } };
+    return {
+      ok: true,
+      result: {
+        type: "delta",
+        data: {
+          version: 3,
+          kind: {
+            type: "cellWritten",
+            cell: {
+              id: command.id,
+              kind: "code",
+              version: 2,
+              lastEditedBy: "brain",
+              datasourceSetup: undefined,
+              dagMetadata: patch.spur?.dag,
+              codeType: "python",
+              frontendMetadata: undefined,
+              juteDeckMetadata: undefined,
+              source: "",
               execCount: null,
               status: "idle",
               outputs: [],
@@ -1129,16 +1161,44 @@ describe("DatasourcePanel", () => {
       }),
     );
 
-    await waitFor(() =>
+    await waitFor(() => {
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "insert_cell",
         kind: "code",
         after_id: null,
-        source:
-          'import duckdb\n\n' +
-          'duckdb.sql("SELECT * FROM polymarket_markets() LIMIT 100").df()\n',
+        source: expect.stringContaining(
+          'duckdb.sql("SELECT * FROM polymarket_markets() LIMIT 100").df()',
+        ),
         last_edited_by: "datasource",
         code_type: "python",
+      });
+    });
+    expect(
+      daemonControlMock.mock.calls.find(
+        ([command]) =>
+          (command as DaemonControlCommand).command === "insert_cell",
+      )?.[0],
+    ).toMatchObject({
+      source: expect.stringContaining("spur_rest.duckdb_extension"),
+    });
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "set_cell_metadata",
+        id: "scheduled-query-cell",
+        patch: {
+          spur: {
+            dag: {
+              produces: [],
+              consumes: [],
+              source: {
+                kind: "api_tables",
+                port: "polymarket_markets",
+                class: "dataframe",
+              },
+            },
+          },
+        },
+        expected_version: 1,
       }),
     );
     await waitFor(() =>
@@ -1152,7 +1212,7 @@ describe("DatasourcePanel", () => {
           skip_if_running: true,
           catch_up: false,
         },
-        1,
+        2,
       ),
     );
   });
