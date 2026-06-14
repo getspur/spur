@@ -301,6 +301,90 @@ async fn provider_manifest_harness_scans_visible_oauth_promotion_batch() {
             typed_value: TypedCell::Utf8("SPUR Workspace"),
         },
         ProviderCase {
+            provider_name: "bitbucket",
+            source_name: "bitbucket",
+            manifest_file: "bitbucket.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://api.bitbucket.org",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "repositories",
+            path: "/repositories",
+            response: serde_json::json!({
+                "values": [{
+                    "name": "spur"
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("spur"),
+        },
+        ProviderCase {
+            provider_name: "box",
+            source_name: "box",
+            manifest_file: "box.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://api.box.com",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "get_events",
+            path: "/events",
+            response: serde_json::json!({
+                "entries": [{
+                    "event_id": "evt_1"
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "event_id",
+            typed_value: TypedCell::Utf8("evt_1"),
+        },
+        ProviderCase {
+            provider_name: "digitalocean",
+            source_name: "digitalocean",
+            manifest_file: "digitalocean.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://api.digitalocean.com",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "apps_list_tiers",
+            path: "/v2/apps/tiers",
+            response: serde_json::json!({
+                "tiers": [{
+                    "name": "Basic"
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("Basic"),
+        },
+        ProviderCase {
+            provider_name: "instagram",
+            source_name: "instagram",
+            manifest_file: "instagram.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://graph.instagram.com",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "locations_search",
+            path: "/locations/search",
+            response: serde_json::json!({
+                "data": [{
+                    "name": "SPUR Place"
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("SPUR Place"),
+        },
+        ProviderCase {
             provider_name: "slack",
             source_name: "slack",
             manifest_file: "slack.connection.toml",
@@ -392,6 +476,107 @@ async fn provider_manifest_harness_scans_visible_oauth_promotion_batch() {
             typed_value: TypedCell::Utf8("ce18f8c6-ef2a-427f-b416-43531fc7c117"),
         },
         ProviderCase {
+            provider_name: "spotify",
+            source_name: "spotify",
+            manifest_file: "spotify.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://api.spotify.com",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "get_multiple_albums",
+            path: "/albums",
+            response: serde_json::json!({
+                "albums": [{
+                    "name": "SPUR Album"
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("SPUR Album"),
+        },
+        ProviderCase {
+            provider_name: "squareup",
+            source_name: "squareup",
+            manifest_file: "squareup.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://connect.squareup.com",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "listemployeeroles",
+            path: "/v1/me/roles",
+            response: serde_json::json!([{
+                "name": "SPUR Role"
+            }]),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("SPUR Role"),
+        },
+        ProviderCase {
+            provider_name: "twitter-v2",
+            source_name: "twitter-v2",
+            manifest_file: "twitter_v2.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://api.twitter.com",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "listbatchcompliancejobs",
+            path: "/2/compliance/jobs",
+            response: serde_json::json!({
+                "data": [{
+                    "name": "SPUR Compliance"
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("SPUR Compliance"),
+        },
+        ProviderCase {
+            provider_name: "vimeo",
+            source_name: "vimeo",
+            manifest_file: "vimeo.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://api.vimeo.com",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "get_albums_alt1",
+            path: "/me/albums",
+            response: serde_json::json!([{
+                "name": "SPUR Album"
+            }]),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("SPUR Album"),
+        },
+        ProviderCase {
+            provider_name: "zoom",
+            source_name: "zoom",
+            manifest_file: "zoom.connection.toml",
+            contract: ProviderContract {
+                nango_auth_mode: "OAUTH2",
+                expected_base_url: "https://api.zoom.us/v2",
+                expected_auth: ExpectedAuth::Oauth2Refresh,
+                connection_config: &[],
+            },
+            table_name: "groups",
+            path: "/groups",
+            response: serde_json::json!({
+                "groups": [{
+                    "name": "SPUR Group"
+                }]
+            }),
+            predicates: Vec::new(),
+            typed_column: "name",
+            typed_value: TypedCell::Utf8("SPUR Group"),
+        },
+        ProviderCase {
             provider_name: "autotask",
             source_name: "autotask",
             manifest_file: "autotask.connection.toml",
@@ -431,12 +616,26 @@ async fn provider_manifest_harness_scans_visible_oauth_promotion_batch() {
             .unwrap_or_else(|error| panic!("{} manifest parses: {error}", case.provider_name));
         assert_manifest_contract(&case, harness.manifest());
         harness.replace_base_url(case.contract.expected_base_url, &server.uri());
+        let oauth_access_token = "minted-access-token";
+        let uses_oauth_refresh = matches!(case.contract.expected_auth, ExpectedAuth::Oauth2Refresh);
+        if uses_oauth_refresh {
+            harness.replace_oauth_token_url(
+                expected_oauth_token_url(case.provider_name),
+                &format!("{}/oauth/token", server.uri()),
+            );
+            mount_oauth_refresh(&server, "/oauth/token", oauth_access_token).await;
+        }
         let _env = harness.install_env();
 
         assert_eq!(harness.manifest().source.name, case.source_name);
 
-        let mut request = ExpectedRequest::get(case.path)
-            .with_manifest_auth(harness.manifest(), case.provider_name);
+        let mut request = ExpectedRequest::get(case.path);
+        if uses_oauth_refresh {
+            request =
+                request.with_oauth_bearer(&harness.manifest().source.auth, oauth_access_token);
+        } else {
+            request = request.with_manifest_auth(harness.manifest(), case.provider_name);
+        }
         for (name, value) in provider_static_header_expectations(&case) {
             request = request.header(name, value);
         }
@@ -491,6 +690,7 @@ enum ExpectedAuth {
     Bearer,
     Basic,
     Header,
+    Oauth2Refresh,
 }
 
 fn assert_manifest_contract(case: &ProviderCase, manifest: &Manifest) {
@@ -508,6 +708,7 @@ fn assert_manifest_contract(case: &ProviderCase, manifest: &Manifest) {
         (ExpectedAuth::Bearer, AuthCfg::Bearer { .. }) => {}
         (ExpectedAuth::Basic, AuthCfg::Basic { .. }) => {}
         (ExpectedAuth::Header, AuthCfg::Header { .. }) => {}
+        (ExpectedAuth::Oauth2Refresh, AuthCfg::Oauth2Refresh { .. }) => {}
         _ => panic!(
             "{} should map Nango {} auth to {:?}",
             case.provider_name, case.contract.nango_auth_mode, case.contract.expected_auth
@@ -528,6 +729,21 @@ fn assert_manifest_contract(case: &ProviderCase, manifest: &Manifest) {
         "{} {} path should match local Nango/API.guru grounding",
         case.provider_name, case.table_name
     );
+}
+
+fn expected_oauth_token_url(provider_name: &str) -> &'static str {
+    match provider_name {
+        "bitbucket" => "https://bitbucket.org/site/oauth2/access_token",
+        "box" => "https://api.box.com/oauth2/token",
+        "digitalocean" => "https://cloud.digitalocean.com/v1/oauth/token",
+        "instagram" => "https://api.instagram.com/oauth/access_token",
+        "spotify" => "https://accounts.spotify.com/api/token",
+        "squareup" => "https://connect.squareup.com/oauth2/token",
+        "twitter-v2" => "https://api.twitter.com/2/oauth2/token",
+        "vimeo" => "https://api.vimeo.com/oauth/access_token",
+        "zoom" => "https://zoom.us/oauth/token",
+        _ => panic!("{provider_name} should not use oauth2_refresh auth"),
+    }
 }
 
 fn provider_static_header_expectations(case: &ProviderCase) -> Vec<(&'static str, String)> {

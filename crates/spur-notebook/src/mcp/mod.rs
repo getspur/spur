@@ -1346,26 +1346,29 @@ async fn resolve_open_api_spec_text(spec_text: String) -> Result<String, BridgeE
 fn curated_preset_toml(source: &str) -> Option<&'static str> {
     let key = source.replace('-', "_");
     match key.as_str() {
+        "1password_events" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/1password_events.connection.toml"
+        )),
         "algolia" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/algolia.connection.toml"
         )),
         "asana" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/asana.connection.toml"
         )),
-        "autotask" => Some(include_str!(
-            "../../rest-table-gateway/connections/supported/autotask.connection.toml"
-        )),
-        "github" | "github_pat" => Some(include_str!(
-            "../../rest-table-gateway/connections/supported/github.connection.toml"
-        )),
-        "1password_events" => Some(include_str!(
-            "../../rest-table-gateway/connections/supported/1password_events.connection.toml"
-        )),
         "atlassian_admin" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/atlassian_admin.connection.toml"
         )),
+        "autotask" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/autotask.connection.toml"
+        )),
         "azure_devops" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/azure_devops.connection.toml"
+        )),
+        "bitbucket" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/bitbucket.connection.toml"
+        )),
+        "box" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/box.connection.toml"
         )),
         "clicksend" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/clicksend.connection.toml"
@@ -1373,8 +1376,38 @@ fn curated_preset_toml(source: &str) -> Option<&'static str> {
         "datadog" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/datadog.connection.toml"
         )),
+        "digitalocean" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/digitalocean.connection.toml"
+        )),
+        "elevenlabs" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/elevenlabs.connection.toml"
+        )),
+        "facebook_ads" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/facebook_ads.connection.toml"
+        )),
+        "github" | "github_pat" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/github.connection.toml"
+        )),
+        "google_ads" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/google_ads.connection.toml"
+        )),
+        "instagram" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/instagram.connection.toml"
+        )),
+        "jira" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/jira.connection.toml"
+        )),
+        "jira_basic" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/jira_basic.connection.toml"
+        )),
+        "linear" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/linear.connection.toml"
+        )),
         "mailchimp" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/mailchimp.connection.toml"
+        )),
+        "notion" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/notion.connection.toml"
         )),
         "openai" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/openai.connection.toml"
@@ -1382,35 +1415,41 @@ fn curated_preset_toml(source: &str) -> Option<&'static str> {
         "sendgrid" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/sendgrid.connection.toml"
         )),
+        "slack" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/slack.connection.toml"
+        )),
+        "spotify" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/spotify.connection.toml"
+        )),
         "square" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/square.connection.toml"
+        )),
+        "squareup" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/squareup.connection.toml"
         )),
         "stripe" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/stripe.connection.toml"
         )),
+        "stripe_api_key" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/stripe_api_key.connection.toml"
+        )),
         "twilio" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/twilio.connection.toml"
+        )),
+        "twitter_v2" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/twitter_v2.connection.toml"
         )),
         "vercel" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/vercel.connection.toml"
         )),
+        "vimeo" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/vimeo.connection.toml"
+        )),
         "zendesk" => Some(include_str!(
             "../../rest-table-gateway/connections/supported/zendesk.connection.toml"
         )),
-        "facebook_ads" => Some(include_str!(
-            "../../rest-table-gateway/connections/supported/facebook_ads.connection.toml"
-        )),
-        "google_ads" => Some(include_str!(
-            "../../rest-table-gateway/connections/supported/google_ads.connection.toml"
-        )),
-        "jira" => Some(include_str!(
-            "../../rest-table-gateway/connections/supported/jira.connection.toml"
-        )),
-        "notion" => Some(include_str!(
-            "../../rest-table-gateway/connections/supported/notion.connection.toml"
-        )),
-        "slack" => Some(include_str!(
-            "../../rest-table-gateway/connections/supported/slack.connection.toml"
+        "zoom" => Some(include_str!(
+            "../../rest-table-gateway/connections/supported/zoom.connection.toml"
         )),
         _ => None,
     }
@@ -5483,17 +5522,101 @@ paths:
                 "{provider_name} should expose {table_name} as a ready table"
             );
         }
-        let compact_snapshot_absent_oauth_providers = [(
-            "autotask",
-            "https://${connectionConfig.subdomain}.autotask.net/atservicesrest",
-            &[
-                "AUTOTASK_API_SECRET",
-                "SPUR_CONN_subdomain",
-                "SPUR_CONN_apiIntegrationCode",
-                "SPUR_CONN_username",
-            ][..],
-            "companies",
-        )];
+        let compact_snapshot_absent_oauth_providers = [
+            (
+                "autotask",
+                "https://${connectionConfig.subdomain}.autotask.net/atservicesrest",
+                &[
+                    "AUTOTASK_API_SECRET",
+                    "SPUR_CONN_subdomain",
+                    "SPUR_CONN_apiIntegrationCode",
+                    "SPUR_CONN_username",
+                ][..],
+                "companies",
+            ),
+            (
+                "bitbucket",
+                "https://api.bitbucket.org",
+                &[
+                    "BITBUCKET_CLIENT_ID",
+                    "BITBUCKET_CLIENT_SECRET",
+                    "BITBUCKET_REFRESH_TOKEN",
+                ][..],
+                "repositories",
+            ),
+            (
+                "box",
+                "https://api.box.com",
+                &["BOX_CLIENT_ID", "BOX_CLIENT_SECRET", "BOX_REFRESH_TOKEN"][..],
+                "get_events",
+            ),
+            (
+                "digitalocean",
+                "https://api.digitalocean.com",
+                &[
+                    "DIGITALOCEAN_CLIENT_ID",
+                    "DIGITALOCEAN_CLIENT_SECRET",
+                    "DIGITALOCEAN_REFRESH_TOKEN",
+                ][..],
+                "apps_list_tiers",
+            ),
+            (
+                "instagram",
+                "https://graph.instagram.com",
+                &[
+                    "INSTAGRAM_CLIENT_ID",
+                    "INSTAGRAM_CLIENT_SECRET",
+                    "INSTAGRAM_REFRESH_TOKEN",
+                ][..],
+                "locations_search",
+            ),
+            (
+                "spotify",
+                "https://api.spotify.com",
+                &[
+                    "SPOTIFY_CLIENT_ID",
+                    "SPOTIFY_CLIENT_SECRET",
+                    "SPOTIFY_REFRESH_TOKEN",
+                ][..],
+                "get_multiple_albums",
+            ),
+            (
+                "squareup",
+                "https://connect.squareup.com",
+                &[
+                    "SQUAREUP_CLIENT_ID",
+                    "SQUAREUP_CLIENT_SECRET",
+                    "SQUAREUP_REFRESH_TOKEN",
+                ][..],
+                "listemployees",
+            ),
+            (
+                "twitter-v2",
+                "https://api.twitter.com",
+                &[
+                    "TWITTER_V2_CLIENT_ID",
+                    "TWITTER_V2_CLIENT_SECRET",
+                    "TWITTER_V2_REFRESH_TOKEN",
+                ][..],
+                "listbatchcompliancejobs",
+            ),
+            (
+                "vimeo",
+                "https://api.vimeo.com",
+                &[
+                    "VIMEO_CLIENT_ID",
+                    "VIMEO_CLIENT_SECRET",
+                    "VIMEO_REFRESH_TOKEN",
+                ][..],
+                "get_albums_alt1",
+            ),
+            (
+                "zoom",
+                "https://api.zoom.us/v2",
+                &["ZOOM_CLIENT_ID", "ZOOM_CLIENT_SECRET", "ZOOM_REFRESH_TOKEN"][..],
+                "searchcompanycontacts",
+            ),
+        ];
         for (provider_name, base_url, env_vars, table_name) in
             compact_snapshot_absent_oauth_providers
         {
@@ -5569,6 +5692,24 @@ paths:
                 "https://rest.clicksend.com",
                 &["CLICKSEND_USERNAME", "CLICKSEND_API_KEY"][..],
                 "account",
+            ),
+            (
+                "elevenlabs",
+                "https://api.elevenlabs.io",
+                &["ELEVENLABS_API_KEY"][..],
+                "get_generated_items_v1_history_get",
+            ),
+            (
+                "jira-basic",
+                "https://${connectionConfig.subdomain}.atlassian.net",
+                &["JIRA_BASIC_USER", "JIRA_BASIC_PASS", "SPUR_CONN_subdomain"][..],
+                "getapplicationproperty",
+            ),
+            (
+                "stripe-api-key",
+                "https://api.stripe.com",
+                &["STRIPE_API_KEY_USER", "STRIPE_API_KEY_PASS"][..],
+                "getapplepaydomains",
             ),
         ];
         for (provider_name, base_url, env_vars, table_name) in

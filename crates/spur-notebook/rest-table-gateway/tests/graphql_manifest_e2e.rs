@@ -10,6 +10,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const ISSUES_QUERY: &str = "query Issues($owner: String!, $repoName: String!, $state: [String!]!) { repository(owner: $owner, name: $repoName) { issues(states: $state, first: 100) { nodes { id number title open weight } } } }";
 const LINEAR_ISSUES_QUERY: &str = "query Issues($first:Int!, $after:String, $stateFilter:String){ issues(first:$first, after:$after, filter:{state:{name:{eq:$stateFilter}}}){ nodes{ id identifier title priority state{name} assignee{name} createdAt } pageInfo{ hasNextPage endCursor } } }";
+const LINEAR_TEAMS_QUERY: &str = "query Teams{ teams(first:250){ nodes{ id key name description timezone cyclesEnabled createdAt updatedAt } pageInfo{ hasNextPage endCursor } } }";
 
 fn scan_request(table: &str) -> ScanRequest {
     ScanRequest {
@@ -140,7 +141,7 @@ repository = "repoName"
 #[tokio::test]
 async fn linear_connection_manifest_parses_and_scans_graphql_issues() {
     let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("connections/tier-a/linear.connection.toml");
+        .join("connections/supported/linear.connection.toml");
     let manifest_toml =
         std::fs::read_to_string(manifest_path).expect("linear manifest should exist");
     let mut manifest = Manifest::from_toml(&manifest_toml).expect("linear manifest should parse");
@@ -180,6 +181,35 @@ async fn linear_connection_manifest_parses_and_scans_graphql_issues() {
     assert_eq!(graphql.query, LINEAR_ISSUES_QUERY);
     assert_eq!(graphql.arg_vars["state"], "stateFilter");
 
+    let expected_tables = [
+        "issues",
+        "projects",
+        "teams",
+        "users",
+        "cycles",
+        "issue_labels",
+        "workflow_states",
+        "comments",
+        "organization",
+    ];
+    for expected in expected_tables {
+        assert!(
+            manifest.tables.iter().any(|table| table.name == expected),
+            "missing Linear table {expected}"
+        );
+    }
+    let teams_table = manifest
+        .tables
+        .iter()
+        .find(|table| table.name == "teams")
+        .expect("teams table");
+    assert_eq!(
+        teams_table.response_path.as_deref(),
+        Some("$.data.teams.nodes")
+    );
+    let teams_graphql = teams_table.graphql.as_ref().expect("teams graphql config");
+    assert_eq!(teams_graphql.query, LINEAR_TEAMS_QUERY);
+
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
@@ -216,6 +246,38 @@ async fn linear_connection_manifest_parses_and_scans_graphql_issues() {
                     "pageInfo": {
                         "hasNextPage": false,
                         "endCursor": "cursor-2"
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_json(serde_json::json!({
+            "query": LINEAR_TEAMS_QUERY,
+            "variables": {
+                "first": 50
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "teams": {
+                    "nodes": [
+                        {
+                            "id": "team_1",
+                            "key": "ENG",
+                            "name": "Engineering",
+                            "description": "Product engineering",
+                            "timezone": "America/Los_Angeles",
+                            "cyclesEnabled": true,
+                            "createdAt": "2026-01-01T00:00:00.000Z",
+                            "updatedAt": "2026-01-02T00:00:00.000Z"
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": true,
+                        "endCursor": "ignored-by-global-issues-pagination"
                     }
                 }
             }
@@ -292,4 +354,41 @@ async fn linear_connection_manifest_parses_and_scans_graphql_issues() {
     assert_eq!(states.value(0), "In Progress");
     assert_eq!(assignees.value(1), "Grace");
     assert_eq!(created_at.value(0), "2026-06-01T00:00:00.000Z");
+
+    let team_batches = adapter
+        .scan(ScanRequest {
+            table: "teams".to_string(),
+            predicates: vec![],
+            projection: None,
+            tvf_args: vec![],
+            auth: ResolvedAuth::None,
+        })
+        .await
+        .expect("scan should fetch typed Linear teams");
+
+    assert_eq!(team_batches.len(), 1);
+    let team_batch = &team_batches[0];
+    assert_eq!(team_batch.num_rows(), 1);
+    assert_eq!(team_batch.schema().field(0).data_type(), &DataType::Utf8);
+    assert_eq!(team_batch.schema().field(5).data_type(), &DataType::Boolean);
+
+    let team_keys = team_batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("team key should be Utf8");
+    let team_names = team_batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("team name should be Utf8");
+    let cycles_enabled = team_batch
+        .column(5)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("cycles_enabled should be Boolean");
+
+    assert_eq!(team_keys.value(0), "ENG");
+    assert_eq!(team_names.value(0), "Engineering");
+    assert!(cycles_enabled.value(0));
 }
