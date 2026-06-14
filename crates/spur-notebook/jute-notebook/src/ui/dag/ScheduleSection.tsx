@@ -14,6 +14,8 @@ import { removeCellSchedule, setCellSchedule } from "./scheduleApi";
 
 type ScheduleSectionProps = {
   cellId: string;
+  heading?: string;
+  variant?: "section" | "compact";
   version: number;
   schedule?: CellCronTrigger;
 };
@@ -43,10 +45,13 @@ const PRESETS: Preset[] = [
 
 export function ScheduleSection({
   cellId,
+  heading = "Schedule",
   schedule,
+  variant = "section",
   version,
 }: ScheduleSectionProps) {
   const current = schedule ?? DEFAULT_TRIGGER;
+  const compact = variant === "compact";
   const selectedPreset =
     PRESETS.find((preset) => preset.cron && preset.cron === current.cron)
       ?.label ?? "Custom";
@@ -58,8 +63,8 @@ export function ScheduleSection({
   return (
     <section>
       <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-normal text-gray-500">
-          Schedule
+        <div className="text-[11px] font-semibold uppercase tracking-normal text-gray-500">
+          {heading}
         </div>
         {schedule ? (
           <button
@@ -76,7 +81,12 @@ export function ScheduleSection({
       </div>
 
       {!schedule ? (
-        <div className="rounded border border-dashed border-gray-200 bg-gray-50 px-3 py-3">
+        <div
+          className={clsx(
+            "rounded border border-dashed border-gray-200 bg-gray-50",
+            compact ? "px-2.5 py-2.5" : "px-3 py-3",
+          )}
+        >
           <div className="flex items-start gap-2">
             <Clock className="mt-0.5 text-gray-400" size={16} />
             <div className="min-w-0">
@@ -98,7 +108,12 @@ export function ScheduleSection({
           </div>
         </div>
       ) : (
-        <div className="grid gap-3 rounded border border-gray-200 bg-white p-3 text-xs">
+        <div
+          className={clsx(
+            "grid gap-3 rounded border border-gray-200 bg-white text-xs",
+            compact ? "p-2.5" : "p-3",
+          )}
+        >
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
               <span
