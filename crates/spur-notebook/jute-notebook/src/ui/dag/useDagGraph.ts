@@ -213,7 +213,8 @@ function deriveLabel(
   id: string,
 ): string {
   const produced = metadata?.produces?.[0];
-  return produced ? (produced.display ?? produced.port) : id;
+  if (produced) return produced.display ?? produced.port;
+  return metadata?.source?.port ?? id;
 }
 
 function formatSource(
