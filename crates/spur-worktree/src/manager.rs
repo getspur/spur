@@ -36,6 +36,7 @@ const GIT_QUICK_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_ABORT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_WORKTREE_OP_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
+const STALE_INDEX_LOCK_THRESHOLD: Duration = Duration::from_secs(10);
 
 /// Backoff schedule for retrying git invocations that fail on transient
 /// `index.lock` / `cannot lock ref` errors. Five attempts produce four
@@ -284,6 +285,48 @@ impl WorktreeManager {
         }
     }
 
+    fn git_command(args: &[&str], work_dir: &Path) -> Command {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(work_dir)
+            .env("GIT_OPTIONAL_LOCKS", "0");
+        command
+    }
+
+    fn git_command_bounded(args: &[&str], work_dir: &Path) -> Command {
+        let mut command = Self::git_command(args, work_dir);
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        command
+    }
+
+    fn reap_stale_index_lock(repo_root: &Path) -> Result<bool> {
+        let lock_path = repo_root.join(".git/index.lock");
+        let Ok(metadata) = std::fs::metadata(&lock_path) else {
+            return Ok(false);
+        };
+        let modified = metadata
+            .modified()
+            .with_context(|| format!("failed to read mtime for {}", lock_path.display()))?;
+        let age = modified.elapsed().unwrap_or_default();
+        if age < STALE_INDEX_LOCK_THRESHOLD {
+            return Ok(false);
+        }
+
+        std::fs::remove_file(&lock_path)
+            .with_context(|| format!("failed to remove stale {}", lock_path.display()))?;
+        tracing::warn!(
+            path = %lock_path.display(),
+            age_ms = age.as_millis(),
+            threshold_ms = STALE_INDEX_LOCK_THRESHOLD.as_millis(),
+            "removed stale git index lock before snapshot stash",
+        );
+        Ok(true)
+    }
+
     /// Run a git command with the given args, optionally in a specific directory.
     /// Returns stdout on success, or an error containing stderr on failure.
     /// Retries automatically on transient lock errors (`index.lock`, `cannot
@@ -296,9 +339,7 @@ impl WorktreeManager {
                 cwd = %work_dir.display(),
                 "running git command"
             );
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(work_dir)
+            let output = Self::git_command(args, work_dir)
                 .output()
                 .await
                 .context("failed to execute git command")?;
@@ -329,13 +370,7 @@ impl WorktreeManager {
                 cwd = %work_dir.display(),
                 "running git command"
             );
-            let mut command = Command::new("git");
-            command
-                .args(args)
-                .current_dir(work_dir)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true);
+            let mut command = Self::git_command_bounded(args, work_dir);
             let mut child = command.spawn().context("failed to execute git command")?;
             let output = wait_for_git_output_bounded(&mut child, args, timeout_duration).await?;
             if output.status.success() {
@@ -639,6 +674,7 @@ impl WorktreeManager {
         let branch_name = format!("spur/brain-snapshot-{timestamp}-{seq}");
 
         if dirty {
+            Self::reap_stale_index_lock(&self.repo_root)?;
             // Retry stash create up to 3 times — concurrent calls can hit
             // index.lock contention when multiple plan tasks snapshot in parallel.
             let mut stash_ref = String::new();
@@ -2401,6 +2437,83 @@ mod tests_option_e {
         git(tmp, &["add", "a.txt"]).await;
         git(tmp, &["commit", "-q", "-m", "base"]).await;
         git(tmp, &["rev-parse", "HEAD"]).await
+    }
+
+    #[test]
+    fn git_runners_disable_optional_locks() {
+        let command =
+            WorktreeManager::git_command(&["status", "--porcelain"], std::path::Path::new("."));
+        let envs: std::collections::HashMap<_, _> = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(|value| value.to_owned())))
+            .collect();
+
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("GIT_OPTIONAL_LOCKS")),
+            Some(&Some(std::ffi::OsString::from("0")))
+        );
+
+        let command = WorktreeManager::git_command_bounded(
+            &["status", "--porcelain"],
+            std::path::Path::new("."),
+        );
+        let envs: std::collections::HashMap<_, _> = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(|value| value.to_owned())))
+            .collect();
+
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("GIT_OPTIONAL_LOCKS")),
+            Some(&Some(std::ffi::OsString::from("0")))
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_brain_state_reaps_stale_index_lock_before_stash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _base_sha = seed_base_repo(tmp.path()).await;
+        tokio::fs::write(tmp.path().join("a.txt"), "dirty\n")
+            .await
+            .unwrap();
+        let lock_path = tmp.path().join(".git/index.lock");
+        tokio::fs::write(&lock_path, "orphaned\n").await.unwrap();
+        let stale_mtime = std::time::SystemTime::now()
+            - STALE_INDEX_LOCK_THRESHOLD
+            - std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&lock_path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stale_mtime))
+            .unwrap();
+
+        let manager = WorktreeManager::new_for_test(tmp.path().to_path_buf());
+        let branch = manager
+            .snapshot_brain_state()
+            .await
+            .expect("stale index lock should be reaped before stashing");
+
+        assert!(branch.starts_with("spur/brain-snapshot-"));
+        assert!(
+            !lock_path.exists(),
+            "stale .git/index.lock should be removed before stash create retries"
+        );
+    }
+
+    #[test]
+    fn fresh_index_lock_is_not_reaped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        let lock_path = tmp.path().join(".git/index.lock");
+        std::fs::write(&lock_path, "live git\n").unwrap();
+
+        let reaped = WorktreeManager::reap_stale_index_lock(tmp.path())
+            .expect("fresh lock check should succeed");
+
+        assert!(!reaped, "fresh .git/index.lock must not be removed");
+        assert!(lock_path.exists(), "fresh .git/index.lock should remain");
     }
 
     #[tokio::test]
