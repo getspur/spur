@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type StoreApi, createStore } from "zustand/vanilla";
 
+import { NOTEBOOK_COMMAND_MENU_OPEN_EVENT } from "./NotebookCommandMenuEvents";
 import NotebookHeader from "./NotebookHeader";
 
 const mocks = vi.hoisted(() => ({
@@ -75,13 +76,25 @@ describe("NotebookHeader", () => {
       "Run selected cell",
       "Restart kernel",
       "Kernel stats",
+      "Command palette",
       "Scheduled cells",
       "Settings",
     ]) {
       const button = screen.getByRole("button", { name });
       expect(button).toHaveAttribute("aria-label", name);
-      expect(button).toHaveAttribute("title", name);
+      expect(button).toHaveAttribute("title", expect.stringContaining(name));
     }
+  });
+
+  test("opens the command palette from the visible shortcut trigger", () => {
+    const openListener = vi.fn();
+    window.addEventListener(NOTEBOOK_COMMAND_MENU_OPEN_EVENT, openListener);
+    render(<NotebookHeader kernelName="python3" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Command palette" }));
+
+    expect(openListener).toHaveBeenCalledTimes(1);
+    window.removeEventListener(NOTEBOOK_COMMAND_MENU_OPEN_EVENT, openListener);
   });
 
   test("switches notebook view mode from the segmented toggle and shortcut", () => {
