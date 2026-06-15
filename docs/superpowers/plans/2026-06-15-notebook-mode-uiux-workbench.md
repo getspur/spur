@@ -33,7 +33,7 @@
 
 ### Task 1: Cell-Local Action Rail
 
-**Task ID:** `task-1-cell-local-action-rail`
+**Task ID:** `t1-cell-rail`
 
 **Files:**
 - Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCells.tsx`
@@ -77,14 +77,14 @@ git commit -m "fix(spur-notebook): improve notebook cell action rail"
 
 ### Task 2: Safe Cell Deletion
 
-**Task ID:** `task-2-safe-cell-deletion`
+**Task ID:** `t2-safe-delete`
 
 **Files:**
 - Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCells.tsx`
 - Test: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCells.test.tsx`
 - Reference: `crates/spur-notebook/jute-notebook/src/ui/shared/ConfirmModal.tsx`
 
-**Depends on:** `task-1-cell-local-action-rail`
+**Depends on:** `t1-cell-rail`
 
 **Acceptance Criteria:**
 - [ ] Deleting a cell is no longer a single accidental click.
@@ -122,7 +122,7 @@ git commit -m "fix(spur-notebook): require confirmation before deleting cells"
 
 ### Task 3: Header and Mode Clarity
 
-**Task ID:** `task-3-header-mode-clarity`
+**Task ID:** `t3-header-modes`
 
 **Files:**
 - Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookHeader.tsx`
@@ -167,7 +167,7 @@ git commit -m "fix(spur-notebook): clarify notebook header modes"
 
 ### Task 4: Command Palette Rationalization
 
-**Task ID:** `task-4-command-palette-rationalization`
+**Task ID:** `t4-cmd-palette`
 
 **Files:**
 - Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCommandMenu.tsx`
@@ -175,7 +175,7 @@ git commit -m "fix(spur-notebook): clarify notebook header modes"
 - Optional Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookHeader.tsx`
 - Optional Test: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookHeader.test.tsx`
 
-**Depends on:** `task-3-header-mode-clarity`
+**Depends on:** `t3-header-modes`
 
 **Acceptance Criteria:**
 - [ ] The command palette no longer shows disabled placeholder actions for run-all, restart-and-run-all, move cell up/down, or Black formatting.
@@ -213,7 +213,7 @@ git commit -m "fix(spur-notebook): rationalize notebook command palette"
 
 ### Task 5: Integrated Notebook Mode Verification
 
-**Task ID:** `task-5-integrated-notebook-mode-verification`
+**Task ID:** `t5-ux-verify`
 
 **Files:**
 - Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookView.test.tsx`
@@ -221,7 +221,7 @@ git commit -m "fix(spur-notebook): rationalize notebook command palette"
 - Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookHeader.test.tsx`
 - Modify: `crates/spur-notebook/jute-notebook/src/ui/notebook/NotebookCommandMenu.test.tsx`
 
-**Depends on:** `task-2-safe-cell-deletion`, `task-4-command-palette-rationalization`
+**Depends on:** `t2-safe-delete`, `t4-cmd-palette`
 
 **Acceptance Criteria:**
 - [ ] A user can discover and execute the core notebook flow in tests: select cell, run cell, insert below, cancel delete, confirm delete, switch to DAG, and return to Notebook.
