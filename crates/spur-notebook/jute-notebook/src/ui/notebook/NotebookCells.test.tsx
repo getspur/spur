@@ -23,7 +23,9 @@ const mocks = vi.hoisted(() => ({
     | {
         store: StoreApi<any>;
         addCell: ReturnType<typeof vi.fn>;
+        addCellSynced?: ReturnType<typeof vi.fn>;
         insertCellAfter: ReturnType<typeof vi.fn>;
+        insertCellAfterSynced?: ReturnType<typeof vi.fn>;
         deleteCell: ReturnType<typeof vi.fn>;
         clearResult: ReturnType<typeof vi.fn>;
         setCellType: ReturnType<typeof vi.fn>;
@@ -147,7 +149,9 @@ describe("NotebookCells", () => {
     mocks.notebook = {
       store: createNotebookStore(startedAt),
       addCell: vi.fn(),
+      addCellSynced: vi.fn(),
       insertCellAfter: vi.fn(),
+      insertCellAfterSynced: vi.fn(),
       deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
@@ -191,7 +195,9 @@ describe("NotebookCells", () => {
     mocks.notebook = {
       store: createNotebookStore(startedAt, "smawk"),
       addCell: vi.fn(),
+      addCellSynced: vi.fn(),
       insertCellAfter: vi.fn(),
+      insertCellAfterSynced: vi.fn(),
       deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
@@ -424,13 +430,15 @@ describe("NotebookCells", () => {
   });
 
   test("routes cell insertion and deletion controls through the notebook store", () => {
-    const insertCellAfter = vi.fn();
+    const insertCellAfterSynced = vi.fn();
     const deleteCell = vi.fn();
-    const addCell = vi.fn();
+    const addCellSynced = vi.fn();
     mocks.notebook = {
       store: createNotebookStoreForCell({ result: undefined }),
-      addCell,
-      insertCellAfter,
+      addCell: vi.fn(),
+      addCellSynced,
+      insertCellAfter: vi.fn(),
+      insertCellAfterSynced,
       deleteCell,
       clearResult: vi.fn(),
       setCellType: vi.fn(),
@@ -440,12 +448,12 @@ describe("NotebookCells", () => {
     render(<NotebookCells />);
 
     fireEvent.click(screen.getByRole("button", { name: "Insert cell below" }));
-    expect(insertCellAfter).toHaveBeenCalledWith("cell-1", "code", "");
+    expect(insertCellAfterSynced).toHaveBeenCalledWith("cell-1", "code", "");
 
     fireEvent.click(screen.getByRole("button", { name: "Delete cell" }));
     expect(deleteCell).toHaveBeenCalledWith("cell-1");
 
     fireEvent.click(screen.getByRole("button", { name: "New cell" }));
-    expect(addCell).toHaveBeenCalledWith("code", "");
+    expect(addCellSynced).toHaveBeenCalledWith("code", "");
   });
 });

@@ -533,6 +533,105 @@ describe("reconcileNotebookDelta", () => {
     expect(notebook.export().cells[0]?.metadata.spur?.dag).toEqual(dag);
   });
 
+  test("daemon-backed cell insertion can be converted to DuckDB SQL", async () => {
+    const firstCellId = "cell-1";
+    const insertedCellId = "sql-cell";
+
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "start_kernel") return "kernel-1";
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      if (command === "daemon_control") {
+        const cmd = (args as { cmd: { command: string } }).cmd;
+        if (cmd.command === "insert_cell") {
+          expect(args).toEqual({
+            cmd: {
+              command: "insert_cell",
+              kind: "code",
+              after_id: firstCellId,
+              source: "",
+              last_edited_by: null,
+              code_type: undefined,
+            },
+          });
+          return {
+            ok: true,
+            result: {
+              type: "delta",
+              data: {
+                version: 1,
+                kind: {
+                  type: "cellInserted",
+                  cell: daemonCell(insertedCellId, "", 1),
+                  after_id: firstCellId,
+                },
+              },
+            },
+          };
+        }
+        if (cmd.command === "set_cell_metadata") {
+          expect(args).toEqual({
+            cmd: {
+              command: "set_cell_metadata",
+              id: insertedCellId,
+              patch: { spur: { code_type: "sql" } },
+              expected_version: 1,
+            },
+          });
+          return {
+            ok: true,
+            result: {
+              type: "delta",
+              data: {
+                version: 2,
+                kind: {
+                  type: "cellWritten",
+                  cell: {
+                    ...daemonCell(insertedCellId, "", 2),
+                    codeType: "sql",
+                  },
+                },
+              },
+            },
+          };
+        }
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const notebook = new Notebook();
+    notebook.loadNotebook(notebookRoot(firstCellId, "answer = 42"));
+    await notebook.kernelStartPromise;
+
+    const cellId = await notebook.insertCellAfterSynced(
+      firstCellId,
+      "code",
+      "",
+    );
+    await notebook.setCellCodeType(cellId, "sql");
+
+    expect(cellId).toBe(insertedCellId);
+    expect(notebook.store.getState().serverState.cellIds).toEqual([
+      firstCellId,
+      insertedCellId,
+    ]);
+    expect(selectCell(notebook.store.getState(), insertedCellId)).toMatchObject(
+      {
+        type: "code",
+        codeType: "sql",
+        version: 2,
+      },
+    );
+  });
+
   test("setCellCodeType converts to code and persists code_type metadata", async () => {
     const cellId = "markdown-cell";
 
