@@ -6,13 +6,13 @@ import {
   Code2Icon,
   LetterTextIcon,
   LucideIcon,
+  PlayIcon,
   PlusIcon,
   Trash2Icon,
   XIcon,
   XSquareIcon,
 } from "lucide-react";
 import {
-  ReactNode,
   Suspense,
   lazy,
   useEffect,
@@ -26,6 +26,7 @@ import { type NotebookStoreState, useNotebook } from "@/stores/notebook";
 
 import { ScheduleSection } from "../dag/ScheduleSection";
 import { scheduleLabel } from "../dag/scheduleApi";
+import ConfirmModal from "../shared/ConfirmModal";
 import CellInputFallback from "./CellInputFallback";
 import CellLanguageMenu from "./CellLanguageMenu";
 import type { AfmPortBindingSnapshot } from "./JuteAppOutput";
@@ -57,11 +58,7 @@ function cellAiLive(
   return Boolean(dag?.ai_live ?? dag?.aiLive);
 }
 
-const Aside = ({ children }: { children: ReactNode }) => (
-  <aside className="absolute right-[-200px] w-[200px] px-2">{children}</aside>
-);
-
-const AsideIconButton = ({
+const CellActionButton = ({
   label,
   Icon,
   onClick,
@@ -72,7 +69,7 @@ const AsideIconButton = ({
 }) => (
   <button
     aria-label={label}
-    className="rounded p-1 text-gray-500 transition-all hover:bg-gray-200 hover:text-black active:scale-110"
+    className="inline-flex h-7 w-7 items-center justify-center rounded border border-transparent text-gray-500 transition-all hover:border-gray-200 hover:bg-gray-50 hover:text-black active:scale-105"
     onClick={onClick}
     title={label}
     type="button"
@@ -81,8 +78,9 @@ const AsideIconButton = ({
   </button>
 );
 
-function CellInputAside({ cellId }: { cellId: string }) {
+function CellInputToolbar({ cellId }: { cellId: string }) {
   const notebook = useNotebook();
+  const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false);
   const type = useStore(
     notebook.store,
     (state) => state.serverState.cells[cellId].type,
@@ -107,54 +105,81 @@ function CellInputAside({ cellId }: { cellId: string }) {
   };
 
   return (
-    <Aside>
-      <div className="mt-1 flex gap-0.5">
-        {lastEditedBy && (
-          <span
-            aria-label={`Agent-edited cell. Last edited by ${lastEditedBy}`}
-            className="inline-flex items-center rounded p-1 text-gray-500"
-            title={`last-edited-by: ${lastEditedBy}`}
-          >
-            <BotIcon size={16} />
-          </span>
-        )}
-        <AsideIconButton
-          label={type === "code" ? "Convert cell to markdown" : "Convert cell to code"}
-          Icon={type === "code" ? Code2Icon : LetterTextIcon}
-          onClick={() => {
-            notebook.setCellType(cellId, type === "code" ? "markdown" : "code");
-          }}
-        />
-        <AsideIconButton
-          label="Insert cell below"
-          Icon={PlusIcon}
-          onClick={() => {
-            void notebook.insertCellAfterSynced(cellId, "code", "");
-          }}
-        />
-        <AsideIconButton
-          label="Delete cell"
-          Icon={Trash2Icon}
-          onClick={() => {
-            notebook.deleteCell(cellId);
-          }}
-        />
-      </div>
-      {output?.timings?.finishedAt ? (
-        <div className="mt-0.5 flex items-center">
-          {output.status === "success" ? (
-            <CheckIcon size={16} className="mr-1 text-green-500" />
-          ) : (
-            <XIcon size={16} className="mr-1 text-red-500" />
+    <>
+      <div className="flex min-h-8 items-center gap-1 pr-[18px] pt-2">
+        <div className="flex items-center gap-1 rounded border border-gray-200 bg-white px-1 py-0.5 shadow-sm">
+          {lastEditedBy && (
+            <span
+              aria-label={`Agent-edited cell. Last edited by ${lastEditedBy}`}
+              className="inline-flex items-center rounded p-1 text-gray-500"
+              title={`last-edited-by: ${lastEditedBy}`}
+            >
+              <BotIcon size={16} />
+            </span>
           )}
-          <p className="text-sm text-gray-400">
-            {formatExecutionDuration(
-              output?.timings.finishedAt - output?.timings.startedAt,
-            )}
-          </p>
+          {type === "code" ? (
+            <CellActionButton
+              label="Run cell"
+              Icon={PlayIcon}
+              onClick={() => {
+                void notebook.execute(cellId);
+              }}
+            />
+          ) : null}
+          <CellActionButton
+            label={
+              type === "code"
+                ? "Convert cell to markdown"
+                : "Convert cell to code"
+            }
+            Icon={type === "code" ? Code2Icon : LetterTextIcon}
+            onClick={() => {
+              notebook.setCellType(cellId, type === "code" ? "markdown" : "code");
+            }}
+          />
+          <CellActionButton
+            label="Insert cell below"
+            Icon={PlusIcon}
+            onClick={() => {
+              void notebook.insertCellAfterSynced(cellId, "code", "");
+            }}
+          />
+          <CellActionButton
+            label="Delete cell"
+            Icon={Trash2Icon}
+            onClick={() => {
+              setDeleteConfirmationOpen(true);
+            }}
+          />
         </div>
-      ) : null}
-    </Aside>
+        {output?.timings?.finishedAt ? (
+          <div className="mt-0.5 flex items-center">
+            {output.status === "success" ? (
+              <CheckIcon size={16} className="mr-1 text-green-500" />
+            ) : (
+              <XIcon size={16} className="mr-1 text-red-500" />
+            )}
+            <p className="text-sm text-gray-400">
+              {formatExecutionDuration(
+                output?.timings.finishedAt - output?.timings.startedAt,
+              )}
+            </p>
+          </div>
+        ) : null}
+      </div>
+      <ConfirmModal
+        body="This will permanently delete the cell."
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setDeleteConfirmationOpen(false)}
+        onConfirm={() => {
+          setDeleteConfirmationOpen(false);
+          notebook.deleteCell(cellId);
+        }}
+        open={deleteConfirmationOpen}
+        title="Delete cell?"
+      />
+    </>
   );
 }
 
@@ -287,7 +312,7 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
   const live = isAi && cellAiLive(cell);
   const armedSchedule = cell.schedule?.enabled ? cell.schedule : undefined;
   return (
-    <div className="relative flex items-center gap-2 pl-[57px] pr-[18px] pt-3">
+    <div className="relative flex flex-1 items-center gap-2 pl-[57px] pt-3">
       <div className="relative inline-flex">
         <button
           ref={chipButtonRef}
@@ -511,8 +536,10 @@ export default function NotebookCells() {
             />
           )}
           <CellExecutionMarker cellId={id} />
-          <CellInputAside cellId={id} />
-          <CellLanguageHeader cellId={id} />
+          <div className="flex items-start justify-between gap-3">
+            <CellLanguageHeader cellId={id} />
+            <CellInputToolbar cellId={id} />
+          </div>
           <Suspense fallback={<CellInputFallback cellId={id} />}>
             <CellInput cellId={id} />
           </Suspense>
@@ -520,15 +547,15 @@ export default function NotebookCells() {
           {cells[id]?.result && (
             <>
               <hr className="border-gray-200" />
-              <Aside>
-                <div className="mt-1 flex gap-0.5">
-                  <AsideIconButton
+              <div className="flex justify-end px-[18px] pt-2">
+                <div className="rounded border border-gray-200 bg-white px-1 py-0.5 shadow-sm">
+                  <CellActionButton
                     label="Clear cell output"
                     Icon={XSquareIcon}
                     onClick={() => notebook.clearResult(id)}
                   />
                 </div>
-              </Aside>
+              </div>
               <div className="max-h-[680px] overflow-y-auto">
                 {/* TODO: Move this icon into the output view itself. Also it should only be displayed
                   when the cell has a return value, and next to the return value. */}
