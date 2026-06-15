@@ -489,13 +489,65 @@ describe("NotebookCells", () => {
       screen.getByRole("button", { name: "Edit schedule trigger" }),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete cell" }));
-    expect(deleteCell).toHaveBeenCalledWith("cell-1");
-
     fireEvent.click(screen.getByRole("button", { name: "Clear cell output" }));
     expect(clearResult).toHaveBeenCalledWith("cell-1");
 
     fireEvent.click(screen.getByRole("button", { name: "New cell" }));
     expect(addCell).toHaveBeenCalledWith("code", "");
+  });
+
+  test("does not delete a cell when deletion confirmation is canceled", () => {
+    const deleteCell = vi.fn();
+    mocks.notebook = {
+      store: createNotebookStoreForCell({}),
+      addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell,
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
+      execute: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete cell" }));
+
+    expect(
+      screen.getByRole("dialog", { name: "Delete cell?" }),
+    ).toBeInTheDocument();
+    expect(deleteCell).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(deleteCell).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("dialog", { name: "Delete cell?" }),
+    ).not.toBeInTheDocument();
+  });
+
+  test("deletes a cell exactly once after deletion confirmation", () => {
+    const deleteCell = vi.fn();
+    mocks.notebook = {
+      store: createNotebookStoreForCell({}),
+      addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell,
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
+      execute: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete cell" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(deleteCell).toHaveBeenCalledTimes(1);
+    expect(deleteCell).toHaveBeenCalledWith("cell-1");
+    expect(
+      screen.queryByRole("dialog", { name: "Delete cell?" }),
+    ).not.toBeInTheDocument();
   });
 });
