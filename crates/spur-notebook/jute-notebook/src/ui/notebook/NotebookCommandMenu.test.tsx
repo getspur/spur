@@ -48,8 +48,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 function notebookWithPath(path: string | null) {
   return {
     store: createStore<any>()(() => ({
-      serverState: { cells: {} },
-      viewState: { selectedCellId: null, path },
+      serverState: { cells: { "cell-1": { type: "code" } } },
+      viewState: { selectedCellId: "cell-1", path },
     })),
     saveNow: vi.fn(() => Promise.resolve()),
     execute: vi.fn(),
@@ -159,5 +159,44 @@ describe("NotebookCommandMenu", () => {
 
     await waitFor(() => expect(mocks.notebook?.saveNow).toHaveBeenCalled());
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  test("hides unavailable placeholder commands from the normal command list", () => {
+    mocks.notebook = notebookWithPath("/tmp/forecast.ipynb");
+    render(<NotebookCommandMenu />);
+
+    openCommandMenu();
+
+    for (const label of [
+      "Run all cells",
+      "Restart kernel and run all cells",
+      "Move cell up",
+      "Move cell down",
+      "Format code with Black",
+    ]) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
+  test("keeps working notebook, deck, app, and cell commands available", () => {
+    mocks.notebook = notebookWithPath("/tmp/forecast.ipynb");
+    render(<NotebookCommandMenu />);
+
+    openCommandMenu();
+
+    for (const label of [
+      "Run cell",
+      "Interrupt kernel",
+      "Restart kernel",
+      "Enter present mode",
+      "Draft deck with AI…",
+      "Restructure deck…",
+      "Polish slides for audience…",
+      "Generate speaker notes",
+      "Publish Spur App...",
+      "Change cell type",
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
   });
 });

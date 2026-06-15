@@ -1,13 +1,8 @@
 import { Command } from "cmdk";
 import {
-  ArrowDownIcon,
-  ArrowUpIcon,
   FileTypeIcon,
-  ListRestartIcon,
-  ListVideoIcon,
   MessageSquareIcon,
   PackageIcon,
-  PaletteIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
@@ -21,6 +16,7 @@ import { useStore } from "zustand";
 import { dispatchDeckCommand } from "@/agent/deck";
 import { useNotebook } from "@/stores/notebook";
 
+import { NOTEBOOK_COMMAND_MENU_OPEN_EVENT } from "./NotebookCommandMenuEvents";
 import { publishSpurApp } from "./publishSpurApp";
 
 type DeckPromptKind = "draft" | "restructure" | "polish" | "notes";
@@ -80,6 +76,7 @@ export default function NotebookCommandMenu() {
   );
 
   useEffect(() => {
+    const openFromTrigger = () => setOpen(true);
     const down = (e: KeyboardEvent) => {
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -90,8 +87,15 @@ export default function NotebookCommandMenu() {
       }
     };
 
+    window.addEventListener(NOTEBOOK_COMMAND_MENU_OPEN_EVENT, openFromTrigger);
     document.addEventListener("keydown", down);
-    return () => document.removeEventListener("keydown", down);
+    return () => {
+      window.removeEventListener(
+        NOTEBOOK_COMMAND_MENU_OPEN_EVENT,
+        openFromTrigger,
+      );
+      document.removeEventListener("keydown", down);
+    };
   }, [enterPresentMode]);
 
   return (
@@ -113,10 +117,6 @@ export default function NotebookCommandMenu() {
           >
             <PlayIcon /> Run cell
           </Command.Item>
-          {/* TODO: Wire when the notebook store exposes run-all execution. */}
-          <Command.Item disabled>
-            <ListVideoIcon /> Run all cells
-          </Command.Item>
           <Command.Item
             onSelect={() => closeAndRun(() => void notebook.interruptKernel())}
           >
@@ -128,11 +128,6 @@ export default function NotebookCommandMenu() {
           >
             <RotateCcw />
             Restart kernel
-          </Command.Item>
-          {/* TODO: Wire when run-all execution exists after kernel restart. */}
-          <Command.Item disabled>
-            <ListRestartIcon />
-            Restart kernel and run all cells
           </Command.Item>
         </Command.Group>
 
@@ -178,14 +173,6 @@ export default function NotebookCommandMenu() {
           </Command.Item>
         </Command.Group>
 
-        <Command.Group heading="Formatting">
-          {/* TODO: Wire when the notebook store exposes Black formatting. */}
-          <Command.Item disabled>
-            <PaletteIcon />
-            Format code with Black
-          </Command.Item>
-        </Command.Group>
-
         <Command.Group heading="Notebook">
           <Command.Item
             disabled={!notebookPath}
@@ -193,16 +180,6 @@ export default function NotebookCommandMenu() {
           >
             <PackageIcon />
             Publish Spur App...
-          </Command.Item>
-          {/* TODO: Wire when the notebook store exposes cell reordering. */}
-          <Command.Item disabled>
-            <ArrowUpIcon />
-            Move cell up
-          </Command.Item>
-          {/* TODO: Wire when the notebook store exposes cell reordering. */}
-          <Command.Item disabled>
-            <ArrowDownIcon />
-            Move cell down
           </Command.Item>
           <Command.Item
             disabled={selectedCellId === null}

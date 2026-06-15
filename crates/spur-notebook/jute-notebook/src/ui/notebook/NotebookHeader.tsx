@@ -17,6 +17,7 @@ import {
 
 import SettingsPanel from "../settings/SettingsPanel";
 import Header from "../shared/Header";
+import { NOTEBOOK_COMMAND_MENU_OPEN_EVENT } from "./NotebookCommandMenuEvents";
 import SchedulesOverview from "./SchedulesOverview";
 
 const KERNEL_STATS_POLL_MS = 2000;
@@ -242,6 +243,17 @@ export default function NotebookHeader({ kernelName }: Props) {
 
       {/* Top-right UI components. Notebook management lives in the tab strip. */}
       <div className="flex items-center">
+        <button
+          className="mr-1 rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-semibold text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
+          aria-label="Command palette"
+          title="Command palette (⌘K)"
+          onClick={() =>
+            window.dispatchEvent(new Event(NOTEBOOK_COMMAND_MENU_OPEN_EVENT))
+          }
+          type="button"
+        >
+          ⌘K
+        </button>
         <button
           className="mr-1 inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700 transition-colors hover:bg-violet-100"
           aria-label="Scheduled cells"
