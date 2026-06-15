@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
     | {
         store: StoreApi<any>;
         addCell: ReturnType<typeof vi.fn>;
+        insertCellAfter: ReturnType<typeof vi.fn>;
+        deleteCell: ReturnType<typeof vi.fn>;
         clearResult: ReturnType<typeof vi.fn>;
         setCellType: ReturnType<typeof vi.fn>;
         setCellCodeType: ReturnType<typeof vi.fn>;
@@ -145,6 +147,8 @@ describe("NotebookCells", () => {
     mocks.notebook = {
       store: createNotebookStore(startedAt),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
@@ -187,6 +191,8 @@ describe("NotebookCells", () => {
     mocks.notebook = {
       store: createNotebookStore(startedAt, "smawk"),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
@@ -209,6 +215,8 @@ describe("NotebookCells", () => {
         dagMetadata: { ai_live: true },
       }),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
@@ -229,6 +237,8 @@ describe("NotebookCells", () => {
         dagMetadata: { ai_live: false },
       }),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
@@ -253,6 +263,8 @@ describe("NotebookCells", () => {
         },
       }),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
@@ -301,6 +313,8 @@ describe("NotebookCells", () => {
         },
       }),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
@@ -345,6 +359,8 @@ describe("NotebookCells", () => {
     mocks.notebook = {
       store: createNotebookStoreForCell({}),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
@@ -362,6 +378,8 @@ describe("NotebookCells", () => {
     mocks.notebook = {
       store: createNotebookStoreForCell({ codeType: "rust" }),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
@@ -381,6 +399,8 @@ describe("NotebookCells", () => {
     mocks.notebook = {
       store: createNotebookStoreForCell({}),
       addCell: vi.fn(),
+      insertCellAfter: vi.fn(),
+      deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType,
       setCellCodeType,
@@ -401,5 +421,31 @@ describe("NotebookCells", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Markdown" }));
     expect(setCellType).toHaveBeenCalledWith("cell-1", "markdown");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  test("routes cell insertion and deletion controls through the notebook store", () => {
+    const insertCellAfter = vi.fn();
+    const deleteCell = vi.fn();
+    const addCell = vi.fn();
+    mocks.notebook = {
+      store: createNotebookStoreForCell({ result: undefined }),
+      addCell,
+      insertCellAfter,
+      deleteCell,
+      clearResult: vi.fn(),
+      setCellType: vi.fn(),
+      setCellCodeType: vi.fn(),
+    };
+
+    render(<NotebookCells />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert cell below" }));
+    expect(insertCellAfter).toHaveBeenCalledWith("cell-1", "code", "");
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete cell" }));
+    expect(deleteCell).toHaveBeenCalledWith("cell-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "New cell" }));
+    expect(addCell).toHaveBeenCalledWith("code", "");
   });
 });
