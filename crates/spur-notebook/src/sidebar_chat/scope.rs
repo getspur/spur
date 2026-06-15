@@ -1,12 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::{EnvVariable, McpServer, McpServerStdio};
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{anyhow, Result};
 
 use super::types::AppScope;
-use crate::spur_app::{
-    manifest_from_notebook, SpurAppManifest, SpurAppMcpServer, SPUR_APP_MANIFEST, SPUR_APP_SCHEMA,
-};
+use crate::spur_app::{resolve_app_manifest, ManifestSource, SpurAppMcpServer, SPUR_APP_SCHEMA};
 
 const DEFAULT_NOTEBOOK_APP_KEY: &str = "notebook";
 const DEFAULT_NOTEBOOK_LABEL: &str = "Notebook";
@@ -17,38 +15,23 @@ pub fn resolve_app_scope(notebook_path: &Path, notebook_mcp_socket: &Path) -> Re
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let manifest_source = if let Some((app_root, manifest)) = manifest_from_notebook(notebook_path)
-    {
-        Some((app_root, manifest, notebook_path.to_path_buf()))
-    } else {
-        let Some((app_root, manifest_path)) = find_manifest_dir(&notebook_dir) else {
-            return Ok(default_notebook_scope(
-                notebook_path,
-                notebook_dir,
-                notebook_mcp_socket,
-            ));
-        };
-
-        let manifest_bytes = std::fs::read(&manifest_path)
-            .with_context(|| format!("failed to read app manifest {}", manifest_path.display()))?;
-        let manifest: SpurAppManifest = serde_json::from_slice(&manifest_bytes)
-            .with_context(|| format!("failed to parse app manifest {}", manifest_path.display()))?;
-        Some((app_root, manifest, manifest_path))
-    };
-
-    let Some((app_root, manifest, manifest_path)) = manifest_source else {
+    let Some((app_root, manifest, source)) = resolve_app_manifest(notebook_path) else {
         return Ok(default_notebook_scope(
             notebook_path,
             notebook_dir,
             notebook_mcp_socket,
         ));
     };
+    let manifest_location = match &source {
+        ManifestSource::Embedded => notebook_path.display().to_string(),
+        ManifestSource::SiblingJson(path) => path.display().to_string(),
+    };
 
     if manifest.schema != SPUR_APP_SCHEMA {
         return Err(anyhow!(
             "unsupported Spur App schema {:?} in {}",
             manifest.schema,
-            manifest_path.display()
+            manifest_location
         ));
     }
 
@@ -97,16 +80,6 @@ fn notebook_binary_path() -> PathBuf {
     }
 
     PathBuf::from("spur-notebook")
-}
-
-pub(crate) fn find_manifest_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
-    for candidate in start.ancestors() {
-        let manifest_path = candidate.join(SPUR_APP_MANIFEST);
-        if manifest_path.is_file() {
-            return Some((candidate.to_path_buf(), manifest_path));
-        }
-    }
-    None
 }
 
 fn app_mcp_server(name: &str, manifest: &SpurAppMcpServer) -> Result<McpServer> {

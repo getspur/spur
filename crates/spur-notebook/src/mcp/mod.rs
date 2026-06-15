@@ -3584,25 +3584,10 @@ impl NotebookDaemonControl {
         &self,
         path: &Path,
     ) -> Result<Option<PluginConfig>, BridgeError> {
-        let Some(app_root) = path.parent() else {
+        let Some((app_root, manifest, _source)) = crate::spur_app::resolve_app_manifest(path)
+        else {
             return Ok(None);
         };
-        let manifest_path = app_root.join(crate::spur_app::SPUR_APP_MANIFEST);
-        let content = match tokio::fs::read_to_string(&manifest_path).await {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(BridgeError::Handler {
-                    code: "app_manifest_read_failed".to_string(),
-                    message: format!("failed to read {}: {error}", manifest_path.display()),
-                });
-            }
-        };
-        let manifest: crate::spur_app::SpurAppManifest =
-            serde_json::from_str(&content).map_err(|error| BridgeError::Handler {
-                code: "app_manifest_parse_failed".to_string(),
-                message: format!("failed to parse {}: {error}", manifest_path.display()),
-            })?;
 
         if manifest.open_mode != "app" {
             return Ok(None);
@@ -7263,6 +7248,18 @@ paths:
         Ok(notebook_path)
     }
 
+    fn embedded_app_notebook(manifest: Value) -> Vec<u8> {
+        serde_json::to_vec_pretty(&json!({
+            "metadata": {
+                "spur_app": manifest
+            },
+            "nbformat_minor": 5,
+            "nbformat": 4,
+            "cells": []
+        }))
+        .expect("embedded app notebook serializes")
+    }
+
     const PYTHON_TEST_APP_SERVER: &str = r#"
 from mcp.server.fastmcp import FastMCP
 import os
@@ -8200,6 +8197,109 @@ if __name__ == "__main__":
             !env.contains_key("SPUR_ARTIFACTS_DIR"),
             "SPUR_ARTIFACTS_DIR must not be injected when artifacts_dir is false"
         );
+    }
+
+    #[tokio::test]
+    async fn app_plugin_config_for_notebook_embedded_only_returns_absolute_working_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let notebook_path = dir.path().join("app.ipynb");
+        fs::write(
+            &notebook_path,
+            embedded_app_notebook(json!({
+                "schema": crate::spur_app::SPUR_APP_SCHEMA,
+                "name": "Embedded Plugin App",
+                "entry_notebook": "app.ipynb",
+                "open_mode": "app",
+                "runtime": {
+                    "jute_min": "0.1.0",
+                    "features": ["mcp-tools"]
+                },
+                "capabilities": {
+                    "artifacts_dir": true
+                },
+                "mcp_server": {
+                    "type": "python",
+                    "entry": "server/main.py",
+                    "requirements": "server/requirements.txt",
+                    "env": {
+                        "APP_ENV": "embedded"
+                    }
+                }
+            })),
+        )
+        .await
+        .expect("write embedded app notebook");
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let config = control
+            .app_plugin_config_for_notebook(&notebook_path)
+            .await
+            .expect("plugin config resolves")
+            .expect("embedded app plugin config");
+
+        assert_eq!(config.name, "Embedded Plugin App");
+        assert_eq!(config.entry, "server/main.py");
+        assert_eq!(
+            config.requirements.as_deref(),
+            Some("server/requirements.txt")
+        );
+        assert_eq!(
+            config.env.get("APP_ENV").map(String::as_str),
+            Some("embedded")
+        );
+        assert!(config.env.contains_key("SPUR_ARTIFACTS_DIR"));
+        assert!(config.working_dir.is_absolute());
+        assert_eq!(
+            config.working_dir,
+            dir.path().canonicalize().expect("canonical app root")
+        );
+    }
+
+    #[tokio::test]
+    async fn app_plugin_config_for_notebook_embedded_non_entry_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let notebook_path = dir.path().join("other.ipynb");
+        fs::write(
+            &notebook_path,
+            embedded_app_notebook(json!({
+                "schema": crate::spur_app::SPUR_APP_SCHEMA,
+                "name": "Embedded Plugin App",
+                "entry_notebook": "app.ipynb",
+                "open_mode": "app",
+                "runtime": { "jute_min": "0.1.0" },
+                "mcp_server": {
+                    "type": "python",
+                    "entry": "server/main.py",
+                    "env": {}
+                }
+            })),
+        )
+        .await
+        .expect("write embedded non-entry notebook");
+
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+
+        let config = control
+            .app_plugin_config_for_notebook(&notebook_path)
+            .await
+            .expect("plugin config resolves");
+
+        assert!(config.is_none());
     }
 
     #[test]

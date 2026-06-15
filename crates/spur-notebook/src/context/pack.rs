@@ -12,8 +12,7 @@ use serde_json::{json, Value};
 use crate::{
     context::{catalog::catalog_layer1, refs::Ref},
     dag::{notebook_port_root, NotebookDag, PortStore},
-    sidebar_chat::scope::find_manifest_dir,
-    spur_app::{manifest_from_notebook, SpurAppManifest, SPUR_APP_SCHEMA},
+    spur_app::{resolve_app_manifest, SPUR_APP_SCHEMA},
 };
 
 const DEFAULT_SKILL_PATH: &str = "skill/SKILL.md";
@@ -70,11 +69,7 @@ fn read_skill(app_root: &Path, skill_path: Option<&str>) -> anyhow::Result<Optio
 }
 
 fn app_section(notebook_path: &Path, notebook_version: u64) -> Option<Value> {
-    let notebook_dir = notebook_path.parent().unwrap_or_else(|| Path::new("."));
-    let (app_root, manifest) = manifest_from_notebook(notebook_path).or_else(|| {
-        let (app_root, manifest_path) = find_manifest_dir(notebook_dir)?;
-        Some((app_root, read_manifest(&manifest_path)?))
-    })?;
+    let (app_root, manifest, _source) = resolve_app_manifest(notebook_path)?;
     if manifest.schema != SPUR_APP_SCHEMA {
         return None;
     }
@@ -97,11 +92,6 @@ fn app_section(notebook_path: &Path, notebook_version: u64) -> Option<Value> {
         "skill": skill,
         "skill_path": skill_path,
     }))
-}
-
-fn read_manifest(path: &Path) -> Option<SpurAppManifest> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
 }
 
 fn notebook_section(root: &NotebookRoot, notebook_path: &Path, notebook_version: u64) -> Value {
