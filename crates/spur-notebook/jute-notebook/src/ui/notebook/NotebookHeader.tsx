@@ -49,6 +49,10 @@ export default function NotebookHeader({ kernelName }: Props) {
     notebook.store,
     (state) => state.viewState.viewMode,
   );
+  const appOpenInfo = useStore(
+    notebook.store,
+    (state) => state.viewState.appOpenInfo,
+  );
   const armedCount = useStore(
     notebook.store,
     (state) =>
@@ -65,6 +69,7 @@ export default function NotebookHeader({ kernelName }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [kernelStats, setKernelStats] = useState<KernelSlotInfo | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const appModeAvailable = appOpenInfo !== undefined;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -132,6 +137,9 @@ export default function NotebookHeader({ kernelName }: Props) {
         <button
           className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-gray-500 disabled:active:scale-100"
           disabled={selectedCellId === null}
+          aria-label="Run selected cell"
+          title="Run selected cell"
+          type="button"
           onClick={() => {
             if (selectedCellId) {
               void notebook.execute(selectedCellId);
@@ -142,6 +150,9 @@ export default function NotebookHeader({ kernelName }: Props) {
         </button>
         <button
           className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110"
+          aria-label="Restart kernel"
+          title="Restart kernel"
+          type="button"
           onClick={() => void notebook.restartKernel()}
         >
           <RefreshCwIcon size={16} />
@@ -165,6 +176,9 @@ export default function NotebookHeader({ kernelName }: Props) {
         <div className="relative">
           <button
             className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110"
+            aria-label="Kernel stats"
+            title="Kernel stats"
+            type="button"
             onClick={() => setStatsOpen((open) => !open)}
           >
             <ChartLineIcon size={16} />
@@ -205,15 +219,20 @@ export default function NotebookHeader({ kernelName }: Props) {
             <button
               key={mode}
               className={clsx(
-                "rounded px-2 py-0.5 transition-colors",
+                "rounded px-2 py-0.5 transition-colors disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-gray-500",
                 viewMode === mode
                   ? "bg-gray-900 text-white"
                   : "text-gray-500 hover:bg-gray-100 hover:text-gray-900",
               )}
               type="button"
               aria-pressed={viewMode === mode}
-              title={viewModeTitle(mode)}
-              onClick={() => setViewMode(mode)}
+              disabled={mode === "app" && !appModeAvailable}
+              title={viewModeTitle(mode, appModeAvailable)}
+              onClick={() => {
+                if (mode !== "app" || appModeAvailable) {
+                  setViewMode(mode);
+                }
+              }}
             >
               {viewModeLabel(mode)}
             </button>
@@ -225,6 +244,7 @@ export default function NotebookHeader({ kernelName }: Props) {
       <div className="flex items-center">
         <button
           className="mr-1 inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700 transition-colors hover:bg-violet-100"
+          aria-label="Scheduled cells"
           title="Scheduled cells"
           onClick={() => setSchedulesOpen((open) => !open)}
           type="button"
@@ -238,7 +258,9 @@ export default function NotebookHeader({ kernelName }: Props) {
         <div className="relative">
           <button
             className="rounded p-1 text-gray-500 transition-all hover:bg-gray-100 hover:text-black active:scale-110"
+            aria-label="Settings"
             title="Settings"
+            type="button"
             onClick={() => setSettingsOpen((open) => !open)}
           >
             <SettingsIcon size={20} strokeWidth={1.5} />
@@ -261,13 +283,16 @@ function viewModeLabel(mode: NotebookViewMode): string {
   }
 }
 
-function viewModeTitle(mode: NotebookViewMode): string {
+function viewModeTitle(
+  mode: NotebookViewMode,
+  appModeAvailable: boolean,
+): string {
   switch (mode) {
     case "cells":
       return "Notebook cells";
     case "dag":
       return "DAG view";
     case "app":
-      return "App view";
+      return appModeAvailable ? "App view" : "App mode unavailable";
   }
 }
