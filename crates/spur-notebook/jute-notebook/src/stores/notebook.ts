@@ -10,6 +10,7 @@ import type {
   Cell,
   CellCronTrigger,
   CellDagMetadata,
+  CellKind,
   CellMetadata,
   CodeType,
   CompilePhase,
@@ -1598,6 +1599,21 @@ export class Notebook {
     return cellId;
   }
 
+  async addCellSynced(
+    type: CellType,
+    initialText: string,
+    lastEditedBy?: string,
+    codeType?: CodeType,
+  ): Promise<string> {
+    return this.insertCellAfterSynced(
+      undefined,
+      type,
+      initialText,
+      lastEditedBy,
+      codeType,
+    );
+  }
+
   insertCellAfter(
     afterId: string | undefined,
     type: CellType,
@@ -1621,6 +1637,35 @@ export class Notebook {
       afterId,
     );
     return cellId;
+  }
+
+  async insertCellAfterSynced(
+    afterId: string | undefined,
+    type: CellType,
+    initialText: string,
+    lastEditedBy?: string,
+    codeType?: CodeType,
+  ): Promise<string> {
+    const response = await daemonControl({
+      command: "insert_cell",
+      kind: type as CellKind,
+      after_id: afterId ?? null,
+      source: initialText,
+      last_edited_by: lastEditedBy ?? null,
+      code_type: codeType,
+    });
+    if (!response.ok) {
+      throw new Error(response.error?.message ?? "Failed to insert cell");
+    }
+    if (
+      response.result?.type !== "delta" ||
+      response.result.data.kind.type !== "cellInserted"
+    ) {
+      throw new Error("daemon insert_cell did not return an inserted cell");
+    }
+
+    await reconcileNotebookDelta(this, response.result.data as NotebookDelta);
+    return response.result.data.kind.cell.id;
   }
 
   deleteCell(cellId: string) {

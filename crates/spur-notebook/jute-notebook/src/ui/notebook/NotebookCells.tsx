@@ -129,7 +129,7 @@ function CellInputAside({ cellId }: { cellId: string }) {
           label="Insert cell below"
           Icon={PlusIcon}
           onClick={() => {
-            notebook.insertCellAfter(cellId, "code", "");
+            void notebook.insertCellAfterSynced(cellId, "code", "");
           }}
         />
         <AsideIconButton
@@ -544,7 +544,7 @@ export default function NotebookCells() {
         <button
           className="flex w-full items-center justify-center gap-1.5 rounded border border-gray-200 p-2 transition-colors hover:border-gray-300 hover:bg-gray-50"
           onClick={() => {
-            notebook.addCell("code", "");
+            void notebook.addCellSynced("code", "");
           }}
         >
           <PlusIcon size={18} />
