@@ -157,7 +157,7 @@ fn resolve_cell_routing(request: &CellRunRequest) -> Result<CellRouting, EngineE
         .or_else(|| code_type.as_deref().and_then(code_type_kernelspec))
         .or(root_kernelspec)
         .unwrap_or_else(|| "python3".to_owned());
-    let consumed = dag
+    let mut consumed: Vec<String> = dag
         .get("consumes")
         .and_then(Value::as_array)
         .into_iter()
@@ -165,6 +165,16 @@ fn resolve_cell_routing(request: &CellRunRequest) -> Result<CellRouting, EngineE
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect();
+    // SQL cells declare their dependencies implicitly via FROM/JOIN. Derive
+    // those relations from the cell source and union them into `consumed` so the
+    // DAG tracks lineage and cascade ordering without manual `dag.consumes`.
+    if code_type.as_deref() == Some("sql") {
+        for relation in sql_referenced_relations(&request.code) {
+            if !consumed.iter().any(|existing| *existing == relation) {
+                consumed.push(relation);
+            }
+        }
+    }
     let produced = dag
         .get("produces")
         .and_then(Value::as_array)
@@ -222,6 +232,39 @@ fn transpile_sql_cell(sql: &str, produced: Option<&str>) -> String {
         }
         None => format!("import duckdb\nduckdb.sql(r\"\"\"{literal}\"\"\")"),
     }
+}
+
+/// Conservative lineage helper: the identifier token immediately after a `FROM`
+/// or `JOIN` keyword (case-insensitive). Dotted names (`ds.events`) are kept
+/// whole and duplicates are removed. This is not a full SQL parser; it is good
+/// enough to wire DAG dependency edges for a SQL cell without pulling in a SQL
+/// parser dependency.
+fn sql_referenced_relations(sql: &str) -> Vec<String> {
+    let mut relations: Vec<String> = Vec::new();
+    let mut expect_relation = false;
+    for token in sql.split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')') {
+        let word = token.trim();
+        if word.is_empty() {
+            continue;
+        }
+        if expect_relation {
+            let name = word.trim_end_matches(';');
+            let is_ident = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+            if is_ident && !relations.iter().any(|existing| existing == name) {
+                relations.push(name.to_owned());
+            }
+            expect_relation = false;
+            continue;
+        }
+        let upper = word.to_ascii_uppercase();
+        if upper == "FROM" || upper == "JOIN" {
+            expect_relation = true;
+        }
+    }
+    relations
 }
 
 fn produced_port_name(value: &Value) -> Option<String> {
@@ -410,6 +453,25 @@ mod tests {
         let py = transpile_sql_cell("SELECT 1", None);
         assert!(py.contains("duckdb.sql("));
         assert!(!py.contains(" = duckdb.sql"));
+    }
+
+    #[test]
+    fn sql_referenced_relations_extracts_from_and_join() {
+        let rels = sql_referenced_relations(
+            "SELECT * FROM matches m JOIN ds.events e USING (id) WHERE e.type = 'Goal'",
+        );
+        assert!(rels.iter().any(|r| r == "matches"));
+        assert!(rels.iter().any(|r| r == "ds.events"));
+        // de-duplicated and no stray keywords captured.
+        assert_eq!(rels.iter().filter(|r| *r == "matches").count(), 1);
+        assert!(!rels.iter().any(|r| r.eq_ignore_ascii_case("join")));
+    }
+
+    #[test]
+    fn sql_referenced_relations_handles_lowercase_and_no_tables() {
+        assert!(sql_referenced_relations("SELECT 1 AS x").is_empty());
+        let rels = sql_referenced_relations("select * from top_scorers where goals >= 5");
+        assert_eq!(rels, vec!["top_scorers".to_owned()]);
     }
 
     #[tokio::test]
