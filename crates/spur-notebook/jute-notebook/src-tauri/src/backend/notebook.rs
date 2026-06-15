@@ -297,18 +297,17 @@ pub enum CodeType {
     Rust,
     /// Go code routed to the `gonb` kernelspec.
     Go,
-    /// DuckDB SQL transpiled to a `duckdb` call on the shared `python3` kernel.
+    /// `DuckDB` SQL transpiled to a `duckdb` call on the shared `python3` kernel.
     Sql,
 }
 
 /// Return the kernelspec name for a per-cell code type.
 pub fn kernelspec_for(code_type: CodeType) -> &'static str {
     match code_type {
-        CodeType::Python => "python3",
         CodeType::Javascript => "deno",
         CodeType::Rust => "evcxr",
         CodeType::Go => "gonb",
-        CodeType::Sql => "python3",
+        CodeType::Python | CodeType::Sql => "python3",
     }
 }
 

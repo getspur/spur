@@ -3526,28 +3526,47 @@ impl NotebookDaemonControl {
 
         self.shutdown_app_plugins().await;
 
-        let window_label = if activate {
-            // Try to open the new window first; only mutate state on success so
-            // a failure leaves the previously open notebook recoverable (H2).
-            let label = match self.windows.open_notebook_path(&path) {
-                Ok(label) => label,
-                Err(error) => {
-                    if previous_path.is_some() {
-                        if let Some(label) = previous_window_label.as_deref() {
-                            let _ = self.windows.show_and_focus(label);
+        let (window_label, opened_window) = if activate {
+            if let Some(previous_label) = previous_window_label.as_deref() {
+                if self.windows.show_and_focus(previous_label) {
+                    (Some(previous_label.to_string()), false)
+                } else {
+                    // Try to open the new window first; only mutate state on success so
+                    // a failure leaves the previously open notebook recoverable (H2).
+                    let label = match self.windows.open_notebook_path(&path) {
+                        Ok(label) => label,
+                        Err(error) => {
+                            if previous_path.is_some() {
+                                if let Some(label) = previous_window_label.as_deref() {
+                                    let _ = self.windows.show_and_focus(label);
+                                }
+                            }
+                            return Err(error);
                         }
-                    }
-                    return Err(error);
-                }
-            };
+                    };
 
-            if let Some(label) = previous_window_label.as_deref() {
-                self.windows.hide(label);
+                    self.windows.hide(previous_label);
+                    self.bridge.set_notebook_open(false);
+                    (Some(label), true)
+                }
+            } else {
+                let label = match self.windows.open_notebook_path(&path) {
+                    Ok(label) => label,
+                    Err(error) => {
+                        if previous_path.is_some() {
+                            if let Some(label) = previous_window_label.as_deref() {
+                                let _ = self.windows.show_and_focus(label);
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+
+                self.bridge.set_notebook_open(false);
+                (Some(label), true)
             }
-            self.bridge.set_notebook_open(false);
-            Some(label)
         } else {
-            previous_window_label
+            (previous_window_label, false)
         };
 
         {
@@ -3560,7 +3579,7 @@ impl NotebookDaemonControl {
             }
         }
         self.jute_state.focus_notebook_path(&path);
-        if activate {
+        if opened_window {
             self.load_open_notebook(&path).await?;
         }
         #[cfg(feature = "datasource-introspect")]
@@ -7145,6 +7164,7 @@ paths:
     struct RecordingWindowOps {
         opened: StdMutex<Vec<PathBuf>>,
         hidden: StdMutex<Vec<String>>,
+        focused: StdMutex<Vec<String>>,
         recents_changed: StdMutex<Vec<RecentsChangedEvent>>,
         exited: AtomicBool,
     }
@@ -7156,6 +7176,10 @@ paths:
 
         fn hidden(&self) -> Vec<String> {
             self.hidden.lock().expect("hidden lock").clone()
+        }
+
+        fn focused(&self) -> Vec<String> {
+            self.focused.lock().expect("focused lock").clone()
         }
 
         fn recents_changed_count(&self) -> usize {
@@ -7174,8 +7198,15 @@ paths:
     }
 
     impl DaemonWindowOps for RecordingWindowOps {
-        fn show_and_focus(&self, _label: &str) -> bool {
-            false
+        fn show_and_focus(&self, label: &str) -> bool {
+            self.focused
+                .lock()
+                .expect("focused lock")
+                .push(label.to_string());
+            self.opened()
+                .iter()
+                .enumerate()
+                .any(|(index, _)| label == format!("window-{}", index + 1))
         }
 
         fn hide(&self, label: &str) {
@@ -7834,6 +7865,112 @@ if __name__ == "__main__":
         let state = control.state.lock().await;
         assert_eq!(state.current_path.as_deref(), Some(notebook_path.as_path()));
         assert_eq!(state.window_label, None);
+    }
+
+    #[tokio::test]
+    async fn activate_true_reuses_existing_window_for_new_open_and_reopen() {
+        let workspace_dir = std::env::current_dir().expect("current dir");
+        let tempdir = tempfile::Builder::new()
+            .prefix("spur-notebook-active-open-")
+            .tempdir_in(&workspace_dir)
+            .expect("workspace-local fixture dir");
+        let first_path = tempdir.path().join("first.ipynb");
+        let second_path = tempdir.path().join("second.ipynb");
+        for path in [&first_path, &second_path] {
+            tokio::fs::write(
+                path,
+                serde_json::to_vec_pretty(&empty_notebook()).expect("empty notebook serializes"),
+            )
+            .await
+            .expect("write notebook fixture");
+        }
+
+        let windows = Arc::new(RecordingWindowOps::default());
+        let window_ops: Arc<dyn DaemonWindowOps> = windows.clone();
+        let bridge = Arc::new(AgentBridge::new());
+        bridge.set_notebook_open(true);
+        let requester = Arc::new(BufferedNotebookBridge::new(
+            first_path.clone(),
+            empty_notebook(),
+        ));
+        let bridge_requester: Arc<dyn BridgeRequester> = requester.clone();
+        let control = NotebookDaemonControl::new_for_test_with_recents_record(
+            bridge,
+            bridge_requester,
+            Arc::new(State::new()),
+            window_ops,
+            Some(tempdir.path().join("last-notebook.json")),
+            Some(tempdir.path().join("recents.json")),
+        );
+        let notebook_load_count = |calls: &[String]| {
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "notebook.load")
+                .count()
+        };
+
+        let first_response = control
+            .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+                path: first_path.display().to_string(),
+                activate: Some(true),
+            }))
+            .await;
+        assert!(first_response.ok, "{:?}", first_response.error);
+        assert_eq!(windows.opened(), vec![first_path.clone()]);
+        assert_eq!(windows.hidden(), Vec::<String>::new());
+        assert_eq!(notebook_load_count(&requester.calls().await), 1);
+
+        let open_response = control
+            .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+                path: second_path.display().to_string(),
+                activate: Some(true),
+            }))
+            .await;
+        assert!(open_response.ok, "{:?}", open_response.error);
+        assert_eq!(windows.opened(), vec![first_path.clone()]);
+        assert_eq!(windows.hidden(), Vec::<String>::new());
+        assert_eq!(windows.focused(), vec!["window-1".to_string()]);
+        assert_eq!(notebook_load_count(&requester.calls().await), 1);
+        {
+            let state = control.state.lock().await;
+            assert_eq!(state.current_path.as_deref(), Some(second_path.as_path()));
+            assert_eq!(state.window_label.as_deref(), Some("window-1"));
+        }
+
+        let new_response = control
+            .handle(daemon_request(jute::commands::DaemonControlCommand::New {
+                activate: Some(true),
+            }))
+            .await;
+        assert!(new_response.ok, "{:?}", new_response.error);
+        assert_eq!(windows.opened(), vec![first_path.clone()]);
+        assert_eq!(windows.hidden(), Vec::<String>::new());
+        assert_eq!(notebook_load_count(&requester.calls().await), 1);
+        let new_path = PathBuf::from(new_response.path.expect("new path"));
+        {
+            let state = control.state.lock().await;
+            assert_eq!(state.current_path.as_deref(), Some(new_path.as_path()));
+            assert_eq!(state.window_label.as_deref(), Some("window-1"));
+        }
+
+        let reopen_response = control
+            .handle(daemon_request(
+                jute::commands::DaemonControlCommand::Reopen {
+                    activate: Some(true),
+                },
+            ))
+            .await;
+        assert!(reopen_response.ok, "{:?}", reopen_response.error);
+        assert_eq!(windows.opened(), vec![first_path]);
+        assert_eq!(windows.hidden(), Vec::<String>::new());
+        assert_eq!(
+            reopen_response.path.as_deref(),
+            Some(new_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(notebook_load_count(&requester.calls().await), 1);
+        let state = control.state.lock().await;
+        assert_eq!(state.current_path.as_deref(), Some(new_path.as_path()));
+        assert_eq!(state.window_label.as_deref(), Some("window-1"));
     }
 
     #[tokio::test]
