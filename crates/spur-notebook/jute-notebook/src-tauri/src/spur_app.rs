@@ -1,7 +1,4 @@
-//! Spur App manifest resolver shared by Tauri commands and path-included
-//! sidebar chat modules.
-
-#![allow(missing_docs)]
+//! Minimal Spur App manifest surface needed by code compiled into the Tauri crate.
 
 use std::{
     collections::BTreeMap,
@@ -13,68 +10,68 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::notebook::NotebookRoot;
 
-pub const SPUR_APP_MANIFEST: &str = "spur-app.json";
-pub const SPUR_APP_ENTRY_NOTEBOOK: &str = "app.ipynb";
-pub const SPUR_APP_SCHEMA: &str = "spur.app/v1";
-pub const SPUR_APP_METADATA_KEY: &str = "spur_app";
+pub(crate) const SPUR_APP_MANIFEST: &str = "spur-app.json";
+const SPUR_APP_ENTRY_NOTEBOOK: &str = "app.ipynb";
+pub(crate) const SPUR_APP_SCHEMA: &str = "spur.app/v1";
+const SPUR_APP_METADATA_KEY: &str = "spur_app";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpurAppManifest {
-    pub schema: String,
-    pub name: String,
+pub(crate) struct SpurAppManifest {
+    pub(crate) schema: String,
+    pub(crate) name: String,
     #[serde(default)]
-    pub entry_notebook: String,
-    pub open_mode: String,
-    pub runtime: SpurAppRuntime,
+    pub(crate) entry_notebook: String,
+    pub(crate) open_mode: String,
+    pub(crate) runtime: SpurAppRuntime,
     #[serde(default)]
-    pub capabilities: SpurAppCapabilities,
+    pub(crate) capabilities: SpurAppCapabilities,
     #[serde(default)]
-    pub mcp_server: Option<SpurAppMcpServer>,
+    pub(crate) mcp_server: Option<SpurAppMcpServer>,
     #[serde(default)]
-    pub skill: Option<String>,
+    pub(crate) skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SpurAppCapabilities {
+pub(crate) struct SpurAppCapabilities {
     #[serde(default)]
-    pub ports: Option<SpurAppCapabilityPorts>,
+    pub(crate) ports: Option<SpurAppCapabilityPorts>,
     #[serde(default)]
-    pub canvas_capture: bool,
+    pub(crate) canvas_capture: bool,
     #[serde(default)]
-    pub active_output_scripts: bool,
+    pub(crate) active_output_scripts: bool,
     #[serde(default)]
-    pub artifacts_dir: bool,
+    pub(crate) artifacts_dir: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpurAppCapabilityPorts {
+pub(crate) struct SpurAppCapabilityPorts {
     #[serde(default)]
-    pub read: Vec<String>,
+    pub(crate) read: Vec<String>,
     #[serde(default)]
-    pub write: Vec<String>,
+    pub(crate) write: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpurAppMcpServer {
+pub(crate) struct SpurAppMcpServer {
     #[serde(rename = "type")]
-    pub server_type: String,
-    pub entry: String,
+    pub(crate) server_type: String,
+    pub(crate) entry: String,
     #[serde(default)]
-    pub requirements: Option<String>,
+    pub(crate) requirements: Option<String>,
     #[serde(default)]
-    pub env: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpurAppRuntime {
-    pub jute_min: String,
+pub(crate) struct SpurAppRuntime {
+    pub(crate) jute_min: String,
     #[serde(default)]
-    pub features: Vec<String>,
+    pub(crate) features: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManifestSource {
+pub(crate) enum ManifestSource {
     Embedded,
     SiblingJson(PathBuf),
 }
@@ -93,7 +90,7 @@ fn absolute_notebook_path(notebook_path: &Path) -> PathBuf {
         .unwrap_or_else(|_| notebook_path.to_path_buf())
 }
 
-pub fn manifest_from_notebook(notebook_path: &Path) -> Option<(PathBuf, SpurAppManifest)> {
+fn manifest_from_notebook(notebook_path: &Path) -> Option<(PathBuf, SpurAppManifest)> {
     let notebook_path = absolute_notebook_path(notebook_path);
     let raw = fs::read_to_string(&notebook_path).ok()?;
     let root: NotebookRoot = match serde_json::from_str(&raw) {
@@ -135,7 +132,7 @@ pub fn manifest_from_notebook(notebook_path: &Path) -> Option<(PathBuf, SpurAppM
     Some((app_root, manifest))
 }
 
-pub fn resolve_app_manifest(
+pub(crate) fn resolve_app_manifest(
     notebook_path: &Path,
 ) -> Option<(PathBuf, SpurAppManifest, ManifestSource)> {
     let notebook_path = absolute_notebook_path(notebook_path);

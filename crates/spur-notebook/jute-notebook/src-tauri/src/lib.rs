@@ -23,7 +23,7 @@ pub mod menu;
 pub mod notebook_store;
 pub mod ports;
 pub mod sidebar_chat;
-pub mod spur_app;
+mod spur_app;
 pub mod state;
 pub mod window;
 
