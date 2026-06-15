@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
         clearResult: ReturnType<typeof vi.fn>;
         setCellType: ReturnType<typeof vi.fn>;
         setCellCodeType: ReturnType<typeof vi.fn>;
+        execute: ReturnType<typeof vi.fn>;
       }
     | undefined,
 }));
@@ -152,6 +153,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
+      execute: vi.fn(),
     };
   });
 
@@ -196,6 +198,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
+      execute: vi.fn(),
     };
 
     render(<NotebookCells />);
@@ -220,6 +223,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
+      execute: vi.fn(),
     };
 
     const { container } = render(<NotebookCells />);
@@ -242,6 +246,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
+      execute: vi.fn(),
     };
 
     render(<NotebookCells />);
@@ -268,6 +273,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
+      execute: vi.fn(),
     };
 
     render(<NotebookCells />);
@@ -318,6 +324,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
+      execute: vi.fn(),
     };
 
     render(<NotebookCells />);
@@ -364,6 +371,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
+      execute: vi.fn(),
     };
 
     const { container } = render(<NotebookCells />);
@@ -383,6 +391,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType: vi.fn(),
       setCellCodeType: vi.fn(),
+      execute: vi.fn(),
     };
 
     const { container } = render(<NotebookCells />);
@@ -404,6 +413,7 @@ describe("NotebookCells", () => {
       clearResult: vi.fn(),
       setCellType,
       setCellCodeType,
+      execute: vi.fn(),
     };
 
     render(<NotebookCells />);
@@ -423,27 +433,67 @@ describe("NotebookCells", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
-  test("routes cell insertion and deletion controls through the notebook store", () => {
+  test("routes visible cell-local controls through the notebook store", () => {
     const insertCellAfter = vi.fn();
     const deleteCell = vi.fn();
     const addCell = vi.fn();
+    const clearResult = vi.fn();
+    const setCellType = vi.fn();
+    const execute = vi.fn();
     mocks.notebook = {
-      store: createNotebookStoreForCell({ result: undefined }),
+      store: createNotebookStoreForCell({
+        result: {
+          status: "success",
+          timings: {
+            startedAt: Date.now() - 250,
+            finishedAt: Date.now(),
+          },
+          executionCount: 1,
+          outputs: [],
+        },
+      }),
       addCell,
       insertCellAfter,
       deleteCell,
-      clearResult: vi.fn(),
-      setCellType: vi.fn(),
+      clearResult,
+      setCellType,
       setCellCodeType: vi.fn(),
+      execute,
     };
 
-    render(<NotebookCells />);
+    const { container } = render(<NotebookCells />);
+
+    const hasLegacyRightRail = Array.from(container.querySelectorAll("*")).some(
+      (node) =>
+        typeof node.className === "string" &&
+        node.className.includes("right-[-200px]"),
+    );
+    expect(hasLegacyRightRail).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Run cell" }));
+    expect(execute).toHaveBeenCalledWith("cell-1");
 
     fireEvent.click(screen.getByRole("button", { name: "Insert cell below" }));
     expect(insertCellAfter).toHaveBeenCalledWith("cell-1", "code", "");
 
+    expect(
+      screen.getByRole("button", { name: "Change cell language: Python" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Convert cell to markdown" }),
+    );
+    expect(setCellType).toHaveBeenCalledWith("cell-1", "markdown");
+
+    expect(
+      screen.getByRole("button", { name: "Edit schedule trigger" }),
+    ).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "Delete cell" }));
     expect(deleteCell).toHaveBeenCalledWith("cell-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear cell output" }));
+    expect(clearResult).toHaveBeenCalledWith("cell-1");
 
     fireEvent.click(screen.getByRole("button", { name: "New cell" }));
     expect(addCell).toHaveBeenCalledWith("code", "");
