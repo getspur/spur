@@ -168,18 +168,31 @@ chmod 0755 /usr/local/bin/sccache-worktree
 cat >/usr/local/bin/sccache-cc <<'WRAPPER'
 #!/bin/bash
 if [[ -n "${OUT_DIR:-}" ]]; then
-    export SCCACHE_BASEDIR="$OUT_DIR"
-    mapped=()
-    while [[ $# -gt 0 ]]; do
-        arg="$1"; shift
-        case "$arg" in
-            "$OUT_DIR"/*) mapped+=("${arg#$OUT_DIR/}") ;;
-            -I"$OUT_DIR"/*) mapped+=("-I${arg#-I$OUT_DIR/}") ;;
-            *) mapped+=("$arg") ;;
-        esac
+    out_dir_scoped=0
+    prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "-c" && "$arg" == "$OUT_DIR"/* ]] ||
+           [[ "$prev" == "-I" && "$arg" == "$OUT_DIR"/* ]] ||
+           [[ "$arg" == -I"$OUT_DIR"/* ]]; then
+            out_dir_scoped=1
+            break
+        fi
+        prev="$arg"
     done
-    cd "$OUT_DIR"
-    exec /usr/local/bin/sccache /usr/bin/cc -fno-working-directory "${mapped[@]}"
+    if [[ "$out_dir_scoped" -eq 1 ]]; then
+        export SCCACHE_BASEDIR="$OUT_DIR"
+        mapped=()
+        while [[ $# -gt 0 ]]; do
+            arg="$1"; shift
+            case "$arg" in
+                "$OUT_DIR"/*) mapped+=("${arg#$OUT_DIR/}") ;;
+                -I"$OUT_DIR"/*) mapped+=("-I${arg#-I$OUT_DIR/}") ;;
+                *) mapped+=("$arg") ;;
+            esac
+        done
+        cd "$OUT_DIR"
+        exec /usr/local/bin/sccache /usr/bin/cc -fno-working-directory "${mapped[@]}"
+    fi
 fi
 export SCCACHE_BASEDIR="$PWD"
 exec /usr/local/bin/sccache /usr/bin/cc -fno-working-directory "$@"
@@ -187,18 +200,31 @@ WRAPPER
 cat >/usr/local/bin/sccache-cxx <<'WRAPPER'
 #!/bin/bash
 if [[ -n "${OUT_DIR:-}" ]]; then
-    export SCCACHE_BASEDIR="$OUT_DIR"
-    mapped=()
-    while [[ $# -gt 0 ]]; do
-        arg="$1"; shift
-        case "$arg" in
-            "$OUT_DIR"/*) mapped+=("${arg#$OUT_DIR/}") ;;
-            -I"$OUT_DIR"/*) mapped+=("-I${arg#-I$OUT_DIR/}") ;;
-            *) mapped+=("$arg") ;;
-        esac
+    out_dir_scoped=0
+    prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "-c" && "$arg" == "$OUT_DIR"/* ]] ||
+           [[ "$prev" == "-I" && "$arg" == "$OUT_DIR"/* ]] ||
+           [[ "$arg" == -I"$OUT_DIR"/* ]]; then
+            out_dir_scoped=1
+            break
+        fi
+        prev="$arg"
     done
-    cd "$OUT_DIR"
-    exec /usr/local/bin/sccache /usr/bin/c++ -fno-working-directory "${mapped[@]}"
+    if [[ "$out_dir_scoped" -eq 1 ]]; then
+        export SCCACHE_BASEDIR="$OUT_DIR"
+        mapped=()
+        while [[ $# -gt 0 ]]; do
+            arg="$1"; shift
+            case "$arg" in
+                "$OUT_DIR"/*) mapped+=("${arg#$OUT_DIR/}") ;;
+                -I"$OUT_DIR"/*) mapped+=("-I${arg#-I$OUT_DIR/}") ;;
+                *) mapped+=("$arg") ;;
+            esac
+        done
+        cd "$OUT_DIR"
+        exec /usr/local/bin/sccache /usr/bin/c++ -fno-working-directory "${mapped[@]}"
+    fi
 fi
 export SCCACHE_BASEDIR="$PWD"
 exec /usr/local/bin/sccache /usr/bin/c++ -fno-working-directory "$@"
