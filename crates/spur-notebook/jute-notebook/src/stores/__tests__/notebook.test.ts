@@ -273,6 +273,56 @@ describe("applyRunCellEvent", () => {
   });
 });
 
+describe("Notebook export", () => {
+  test("preserves root-level notebook metadata", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "start_kernel") {
+        return "kernel-1";
+      }
+      if (command === "kernel_slot_info") {
+        return {
+          kernel_id: "kernel-1",
+          spec_name: "python3",
+          generation: 1,
+          status: "idle",
+          cpu_pct: 0,
+          mem_mb: 0,
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+    const metadata = {
+      spur_app: {
+        schema: "spur.app/v1",
+        name: "x",
+        entry_notebook: "app.ipynb",
+        open_mode: "app",
+        capabilities: {
+          active_output_scripts: true,
+          canvas_capture: false,
+          artifacts_dir: true,
+        },
+      },
+      jute_deck: {
+        version: 1,
+        title: "Deck",
+      },
+    };
+    const notebook: NotebookRoot = {
+      nbformat: 4,
+      nbformat_minor: 5,
+      metadata: metadata as NotebookRoot["metadata"],
+      cells: [],
+    };
+
+    const notebookStore = new Notebook();
+    notebookStore.loadNotebook(notebook);
+    await Promise.resolve();
+
+    expect(notebookStore.export().metadata).toEqual(metadata);
+  });
+});
+
 describe("loadNotebookFromPath", () => {
   afterEach(() => {
     vi.restoreAllMocks();

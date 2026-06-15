@@ -1521,7 +1521,7 @@ export class Notebook {
     return {
       nbformat: 4,
       nbformat_minor: 5,
-      metadata: {}, // TODO: Add metadata.
+      metadata: state.serverState.notebookMetadata ?? {},
       cells,
     };
   }
