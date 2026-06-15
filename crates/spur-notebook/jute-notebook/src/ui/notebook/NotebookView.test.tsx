@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
     | {
         store: StoreApi<any>;
         addCell: ReturnType<typeof vi.fn>;
+        addCellSynced: ReturnType<typeof vi.fn>;
         insertCellAfter: ReturnType<typeof vi.fn>;
+        insertCellAfterSynced: ReturnType<typeof vi.fn>;
         deleteCell: ReturnType<typeof vi.fn>;
         clearResult: ReturnType<typeof vi.fn>;
         setCellType: ReturnType<typeof vi.fn>;
@@ -107,7 +109,7 @@ describe("NotebookView", () => {
       },
     }));
 
-    const addCell = vi.fn((type: "code" | "markdown", source: string) => {
+    const addCellSynced = vi.fn((type: "code" | "markdown", source: string) => {
       const cellId = `cell-${nextCellNumber++}`;
       store.setState((state: any) => ({
         ...state,
@@ -121,7 +123,7 @@ describe("NotebookView", () => {
         },
       }));
     });
-    const insertCellAfter = vi.fn(
+    const insertCellAfterSynced = vi.fn(
       (afterCellId: string, type: "code" | "markdown", source: string) => {
         const cellId = `cell-${nextCellNumber++}`;
         store.setState((state: any) => {
@@ -173,8 +175,10 @@ describe("NotebookView", () => {
 
     mocks.notebook = {
       store,
-      addCell,
-      insertCellAfter,
+      addCell: vi.fn(),
+      addCellSynced,
+      insertCellAfter: vi.fn(),
+      insertCellAfterSynced,
       deleteCell,
       clearResult: vi.fn(),
       setCellType: vi.fn(),
@@ -202,7 +206,9 @@ describe("NotebookView", () => {
         },
       })),
       addCell: vi.fn(),
+      addCellSynced: vi.fn(),
       insertCellAfter: vi.fn(),
+      insertCellAfterSynced: vi.fn(),
       deleteCell: vi.fn(),
       clearResult: vi.fn(),
       setCellType: vi.fn(),
@@ -245,7 +251,11 @@ describe("NotebookView", () => {
     expect(notebook.execute).toHaveBeenCalledWith("cell-1");
 
     fireEvent.click(screen.getByRole("button", { name: "Insert cell below" }));
-    expect(notebook.insertCellAfter).toHaveBeenCalledWith("cell-1", "code", "");
+    expect(notebook.insertCellAfterSynced).toHaveBeenCalledWith(
+      "cell-1",
+      "code",
+      "",
+    );
     expect(
       await screen.findByRole("button", { name: "Select cell-2" }),
     ).toBeInTheDocument();
