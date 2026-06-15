@@ -4629,9 +4629,18 @@ fn supplemental_changed_oids(worktree: &Path, paths: &[String]) -> BTreeMap<Path
         .collect()
 }
 
-async fn run_git_stdout(worktree: &Path, args: &[&str]) -> Option<String> {
+fn git_stdout_command(worktree: &Path, args: &[&str]) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("git");
-    command.args(args).current_dir(worktree).kill_on_drop(true);
+    command
+        .args(args)
+        .current_dir(worktree)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .kill_on_drop(true);
+    command
+}
+
+async fn run_git_stdout(worktree: &Path, args: &[&str]) -> Option<String> {
+    let mut command = git_stdout_command(worktree, args);
     let output = command.output().await.ok()?;
     if !output.status.success() {
         return None;
@@ -5315,6 +5324,8 @@ fn escape_mermaid_label(label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::server::handlers::code_graph::git_stdout_command;
+
     use super::super::*;
     use serde_json::{json, Value};
     use spur_acp::{BrainSessionId, SessionId};
@@ -7453,6 +7464,21 @@ mod tests {
         assert_eq!(
             body["worktree_dirty"], false,
             "untracked-only worktrees must not flip worktree_dirty"
+        );
+    }
+
+    #[test]
+    fn code_graph_git_runner_disables_optional_locks() {
+        let command = git_stdout_command(std::path::Path::new("."), &["status", "--porcelain"]);
+        let envs: std::collections::HashMap<_, _> = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(|value| value.to_owned())))
+            .collect();
+
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("GIT_OPTIONAL_LOCKS")),
+            Some(&Some(std::ffi::OsString::from("0")))
         );
     }
 
