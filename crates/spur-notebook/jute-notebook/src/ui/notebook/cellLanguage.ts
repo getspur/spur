@@ -19,10 +19,11 @@ export const CELL_LANGUAGE_TOKENS: Record<CellLanguageId, CellLanguageToken> = {
   javascript: { id: "javascript", label: "JavaScript", glyph: "JS", kernelspec: "deno",    accent: "#8A6D00", chipText: "#8a6d00", chipBg: "#ffffff", chipBorder: "#ead9a0", glyphBg: "#fcf7e8" },
   rust:       { id: "rust",       label: "Rust",       glyph: "Rs", kernelspec: "evcxr",   accent: "#CE422B", chipText: "#b23a22", chipBg: "#ffffff", chipBorder: "#e8b9ac", glyphBg: "#fbe9e4" },
   go:         { id: "go",         label: "Go",         glyph: "Go", kernelspec: "gonb",    accent: "#00ADD8", chipText: "#0a7e9e", chipBg: "#ffffff", chipBorder: "#a8deec", glyphBg: "#e5f6fb" },
+  sql:        { id: "sql",        label: "DuckDB",     glyph: "SQL", kernelspec: "python3", accent: "#F6BD3B", chipText: "#8a5a00", chipBg: "#ffffff", chipBorder: "#f0d79a", glyphBg: "#fef6e0" },
   spur:       { id: "spur",       label: "AI Agent",   glyph: "✦",  kernelspec: "spur",    accent: "#7C3AED", chipText: "#6d28d9", chipBg: "#f5f3ff", chipBorder: "#ddd6fe", glyphBg: "#ffffff" },
 };
 
-export const CODE_LANGUAGE_ORDER: CellLanguageId[] = ["python", "javascript", "rust", "go", "spur"];
+export const CODE_LANGUAGE_ORDER: CellLanguageId[] = ["python", "javascript", "rust", "go", "sql", "spur"];
 
 interface CellLike {
   codeType?: string;
