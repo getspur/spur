@@ -170,7 +170,7 @@ fn resolve_cell_routing(request: &CellRunRequest) -> Result<CellRouting, EngineE
     // DAG tracks lineage and cascade ordering without manual `dag.consumes`.
     if code_type.as_deref() == Some("sql") {
         for relation in sql_referenced_relations(&request.code) {
-            if !consumed.iter().any(|existing| *existing == relation) {
+            if !consumed.contains(&relation) {
                 consumed.push(relation);
             }
         }
