@@ -24,6 +24,7 @@ import {
   syntaxHighlighting,
 } from "@codemirror/language";
 import { go } from "@codemirror/legacy-modes/mode/go";
+import { pgSQL } from "@codemirror/legacy-modes/mode/sql";
 import { lintKeymap } from "@codemirror/lint";
 import { Compartment, EditorState, Extension, Prec } from "@codemirror/state";
 import {
@@ -85,7 +86,10 @@ const editorTheme = EditorView.theme({
 const language = new Compartment();
 const lineNumbersDynamic = new Compartment();
 
-function extensionForLanguage(type: CellType, codeType?: CodeType): Extension {
+export function extensionForLanguage(
+  type: CellType,
+  codeType?: CodeType,
+): Extension {
   if (type === "markdown") {
     return [markdown(), EditorView.lineWrapping];
   } else if (type !== "code") {
@@ -99,6 +103,8 @@ function extensionForLanguage(type: CellType, codeType?: CodeType): Extension {
       return rust();
     case "go":
       return StreamLanguage.define(go);
+    case "sql":
+      return StreamLanguage.define(pgSQL);
     case "python":
     default:
       return python();
