@@ -32,7 +32,10 @@ use tokio::process::Command;
 use crate::{
     dag::notebook_port_root,
     mcp::ServerDeps,
-    spur_app::{SpurAppManifest, SPUR_APP_MANIFEST, SPUR_APP_SCHEMA},
+    spur_app::{
+        manifest_from_notebook, SpurAppManifest, SPUR_APP_ENTRY_NOTEBOOK, SPUR_APP_MANIFEST,
+        SPUR_APP_SCHEMA,
+    },
 };
 
 const METHOD: &str = "notebook_app_doctor";
@@ -131,36 +134,82 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
     // ── Check 1: manifest + schema + entry_notebook ────────────────────────────
 
     let manifest_path = app_root.join(SPUR_APP_MANIFEST);
-    #[expect(
-        clippy::manual_let_else,
-        reason = "else branch has a side-effect (push to findings) before returning"
-    )]
-    let manifest_raw = match tokio::fs::read_to_string(&manifest_path).await {
-        Ok(s) => s,
-        Err(_) => {
+    let embedded_notebook_path = if input_path.is_file()
+        && input_path.extension().and_then(|e| e.to_str()) == Some("ipynb")
+    {
+        Some(input_path.clone())
+    } else {
+        let default_entry = app_root.join(SPUR_APP_ENTRY_NOTEBOOK);
+        default_entry.is_file().then_some(default_entry)
+    };
+
+    let manifest_source = if let Some((_, manifest)) = embedded_notebook_path
+        .as_deref()
+        .and_then(manifest_from_notebook)
+    {
+        Some((
+            manifest,
+            embedded_notebook_path
+                .as_ref()
+                .expect("embedded notebook path is present")
+                .display()
+                .to_string(),
+        ))
+    } else if manifest_path.is_file() {
+        let manifest_raw = match std::fs::read_to_string(&manifest_path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                findings.push(
+                    Finding::fail("manifest", format!("could not read spur-app.json: {error}"))
+                        .with_location(manifest_path.display().to_string()),
+                );
+                return Ok(ok_result(findings));
+            }
+        };
+        if let Err(error) = serde_json::from_str::<Value>(&manifest_raw) {
             findings.push(
                 Finding::fail(
                     "manifest",
-                    format!("spur-app.json not found at {}", manifest_path.display()),
+                    format!("spur-app.json is not valid JSON: {error}"),
                 )
                 .with_location(manifest_path.display().to_string()),
             );
             return Ok(ok_result(findings));
         }
+        match serde_json::from_str::<SpurAppManifest>(&manifest_raw) {
+            Ok(manifest) => Some((manifest, manifest_path.display().to_string())),
+            Err(error) => {
+                findings.push(
+                    Finding::fail(
+                        "capability:unknown",
+                        format!("unknown capability key: {error}"),
+                    )
+                    .with_location(manifest_path.display().to_string()),
+                );
+                return Ok(ok_result(findings));
+            }
+        }
+    } else {
+        None
     };
 
-    // First deserialize leniently to check schema/entry before deny_unknown
-    // on capabilities.
-    let manifest_value: Value = match serde_json::from_str(&manifest_raw) {
-        Ok(v) => v,
-        Err(e) => {
-            findings.push(
-                Finding::fail("manifest", format!("spur-app.json is not valid JSON: {e}"))
-                    .with_location(manifest_path.display().to_string()),
-            );
-            return Ok(ok_result(findings));
-        }
+    let Some((manifest, manifest_location)) = manifest_source else {
+        findings.push(
+            Finding::fail(
+                "manifest",
+                format!("spur-app.json not found at {}", manifest_path.display()),
+            )
+            .with_location(manifest_path.display().to_string()),
+        );
+        return Ok(ok_result(findings));
     };
+
+    let manifest_value = serde_json::to_value(&manifest).map_err(|error| {
+        McpError::internal_error(
+            "notebook_app_doctor failed to encode manifest",
+            Some(json!({ "error": error.to_string() })),
+        )
+    })?;
 
     // Check schema field
     let schema = manifest_value["schema"].as_str().unwrap_or("");
@@ -170,7 +219,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
                 "manifest",
                 format!("schema is {:?}, expected {:?}", schema, SPUR_APP_SCHEMA),
             )
-            .with_location(manifest_path.display().to_string()),
+            .with_location(manifest_location.clone()),
         );
         return Ok(ok_result(findings));
     }
@@ -180,7 +229,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
     if entry_notebook.is_empty() {
         findings.push(
             Finding::fail("manifest", "entry_notebook is missing or empty")
-                .with_location(manifest_path.display().to_string()),
+                .with_location(manifest_location.clone()),
         );
         return Ok(ok_result(findings));
     }
@@ -202,83 +251,66 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
 
     findings.push(Finding::pass(
         "manifest",
-        "spur-app.json is valid, schema matches, entry_notebook exists",
+        "Spur App manifest is valid, schema matches, entry_notebook exists",
     ));
 
     // ── Check 2: capabilities deserialization (deny_unknown_fields) ───────────
 
-    // Try to deserialize the full manifest including capability validation.
-    let cap_check_result: Result<SpurAppManifest, _> = serde_json::from_str(&manifest_raw);
-    match cap_check_result {
-        Err(e) => {
-            let message = e.to_string();
-            // serde's deny_unknown_fields error message contains the field name
-            findings.push(
-                Finding::fail(
-                    "capability:unknown",
-                    format!("unknown capability key: {message}"),
-                )
-                .with_location(manifest_path.display().to_string()),
-            );
-        }
-        Ok(manifest) => {
-            // Emit a pass finding for each declared capability
-            let caps = &manifest.capabilities;
-            if caps.active_output_scripts {
-                findings.push(Finding::pass(
-                    "capability:active_output_scripts",
-                    "active_output_scripts is a known grantable capability",
-                ));
-            }
-            if caps.canvas_capture {
-                findings.push(Finding::pass(
-                    "capability:canvas_capture",
-                    "canvas_capture is a known grantable capability",
-                ));
-            }
-            if caps.artifacts_dir {
-                findings.push(Finding::pass(
-                    "capability:artifacts_dir",
-                    "artifacts_dir is a known grantable capability",
-                ));
-            }
-            if caps.ports.is_some() {
-                findings.push(Finding::pass(
-                    "capability:ports",
-                    "ports is a known grantable capability",
-                ));
-            }
+    // Emit a pass finding for each declared capability.
+    let caps = &manifest.capabilities;
+    if caps.active_output_scripts {
+        findings.push(Finding::pass(
+            "capability:active_output_scripts",
+            "active_output_scripts is a known grantable capability",
+        ));
+    }
+    if caps.canvas_capture {
+        findings.push(Finding::pass(
+            "capability:canvas_capture",
+            "canvas_capture is a known grantable capability",
+        ));
+    }
+    if caps.artifacts_dir {
+        findings.push(Finding::pass(
+            "capability:artifacts_dir",
+            "artifacts_dir is a known grantable capability",
+        ));
+    }
+    if caps.ports.is_some() {
+        findings.push(Finding::pass(
+            "capability:ports",
+            "ports is a known grantable capability",
+        ));
+    }
 
-            // ── Check 3: ports.read names exist as DAG sources ───────────────
+    // ── Check 3: ports.read names exist as DAG sources ───────────────
 
-            if let Some(ports) = &caps.ports {
-                check_ports(&app_root, &entry_path, &ports.read, &mut findings).await;
-            }
+    if let Some(ports) = &caps.ports {
+        check_ports(&app_root, &entry_path, &ports.read, &mut findings).await;
+    }
 
-            // ── Check 8: declared vendored SDK directories ───────────────────
+    // ── Check 8: declared vendored SDK directories ───────────────────
 
-            check_sdk(&app_root, &manifest_value, &mut findings);
+    check_sdk(&app_root, &manifest_value, &mut findings);
 
-            // ── Check 6: port store reachable ────────────────────────────────
+    // ── Check 6: port store reachable ────────────────────────────────
 
-            check_port_store(&entry_path, &mut findings);
+    check_port_store(&entry_path, &mut findings);
 
-            // ── Check 4 + 5: plugin spawn + skill ───────────────────────────
+    // ── Check 4 + 5: plugin spawn + skill ───────────────────────────
 
-            check_plugin_and_skill(&app_root, &manifest, _deps, &mut findings).await;
+    check_plugin_and_skill(&app_root, &manifest, _deps, &mut findings).await;
 
-            // ── Check 7: runtime.features deprecation ────────────────────────
+    // ── Check 7: runtime.features deprecation ────────────────────────
 
-            if !manifest.runtime.features.is_empty() {
-                findings.push(Finding::warn(
-                    "runtime_features",
-                    format!(
-                        "runtime.features is deprecated (present: {:?}). Use capabilities instead.",
-                        manifest.runtime.features
-                    ),
-                ));
-            }
-        }
+    if !manifest.runtime.features.is_empty() {
+        findings.push(Finding::warn(
+            "runtime_features",
+            format!(
+                "runtime.features is deprecated (present: {:?}). Use capabilities instead.",
+                manifest.runtime.features
+            ),
+        ));
     }
 
     Ok(ok_result(findings))
@@ -727,7 +759,16 @@ fn ok_result(findings: Vec<Finding>) -> CallToolResult {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::mcp::bridge::{AgentBridge, TauriBridgeRequester};
+
+    fn deps() -> ServerDeps {
+        ServerDeps::from_bridge(Arc::new(TauriBridgeRequester::without_app(Arc::new(
+            AgentBridge::new(),
+        ))))
+    }
 
     #[test]
     fn plugin_tool_prefixes_derive_from_tools_list() {
@@ -745,5 +786,49 @@ mod tests {
         assert!(is_checkable_gate_name("notebook_run_cell", &prefixes));
         assert!(!is_checkable_gate_name("spur.put", &prefixes));
         assert!(!is_checkable_gate_name("SPUR_PORTS_ROOT", &prefixes));
+    }
+
+    #[tokio::test]
+    async fn doctor_accepts_notebook_embedded_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("surface");
+        std::fs::create_dir_all(root.join("skill")).expect("mkdirs");
+        std::fs::write(
+            root.join("app.ipynb"),
+            r#"{
+              "cells": [],
+              "metadata": {
+                "spur_app": {
+                  "schema": "spur.app/v1",
+                  "name": "Surface",
+                  "open_mode": "app",
+                  "runtime": { "jute_min": "0.1.0" },
+                  "skill": "skill/SKILL.md"
+                }
+              },
+              "nbformat": 4,
+              "nbformat_minor": 5
+            }"#,
+        )
+        .expect("write notebook");
+        std::fs::write(
+            root.join("skill/SKILL.md"),
+            "<HARD-GATE>\nUse `notebook_run_cell`.\n</HARD-GATE>\n",
+        )
+        .expect("write skill");
+
+        let result = call(
+            &deps(),
+            json!({ "path": root.join("app.ipynb").to_string_lossy() }),
+        )
+        .await
+        .expect("doctor runs");
+        let body = result.structured_content.expect("structured content");
+
+        assert_eq!(
+            body["ok"], true,
+            "embedded manifest should be doctor-green, findings: {}",
+            body["findings"]
+        );
     }
 }

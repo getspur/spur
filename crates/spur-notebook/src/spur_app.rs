@@ -4,6 +4,8 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
+use jute::backend::notebook::NotebookRoot;
+
 pub mod archive;
 pub mod scaffold;
 
@@ -11,6 +13,7 @@ pub const SPUR_APP_EXTENSION: &str = "spurapp";
 pub const SPUR_APP_MANIFEST: &str = "spur-app.json";
 pub const SPUR_APP_ENTRY_NOTEBOOK: &str = "app.ipynb";
 pub const SPUR_APP_SCHEMA: &str = "spur.app/v1";
+pub const SPUR_APP_METADATA_KEY: &str = "spur_app";
 
 const DEPENDENCY_LOCK_FILES: &[&str] = &[
     "uv.lock",
@@ -29,6 +32,7 @@ const DEFAULT_SKILL_PATH: &str = "skill/SKILL.md";
 pub struct SpurAppManifest {
     pub schema: String,
     pub name: String,
+    #[serde(default)]
     pub entry_notebook: String,
     pub open_mode: String,
     pub runtime: SpurAppRuntime,
@@ -209,6 +213,49 @@ impl SpurAppManifest {
     }
 }
 
+pub fn manifest_from_notebook(notebook_path: &Path) -> Option<(PathBuf, SpurAppManifest)> {
+    let raw = fs::read_to_string(notebook_path).ok()?;
+    let root: NotebookRoot = match serde_json::from_str(&raw) {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %notebook_path.display(),
+                "failed to parse notebook while reading embedded Spur App manifest"
+            );
+            return None;
+        }
+    };
+    let Some(value) = root.metadata.other.get(SPUR_APP_METADATA_KEY) else {
+        return None;
+    };
+
+    let mut manifest: SpurAppManifest = match serde_json::from_value(value.clone()) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %notebook_path.display(),
+                "invalid notebook metadata.spur_app manifest"
+            );
+            return None;
+        }
+    };
+    if manifest.entry_notebook.is_empty() {
+        manifest.entry_notebook = notebook_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(SPUR_APP_ENTRY_NOTEBOOK)
+            .to_string();
+    }
+
+    let app_root = notebook_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Some((app_root, manifest))
+}
+
 pub fn export_spur_app(
     options: SpurAppExportOptions,
 ) -> Result<SpurAppExported, archive::SpurAppArchiveError> {
@@ -222,19 +269,28 @@ pub fn export_spur_app(
     let authored_manifest_path = app_root.join(SPUR_APP_MANIFEST);
     let has_authored_manifest = authored_manifest_path.is_file();
 
-    let mut manifest = if has_authored_manifest {
-        let raw = fs::read(&authored_manifest_path)?;
-        serde_json::from_slice::<SpurAppManifest>(&raw)
-            .map_err(archive::SpurAppArchiveError::InvalidManifestJson)?
-    } else {
-        SpurAppManifest::minimal(
-            options
-                .name
-                .clone()
-                .unwrap_or_else(|| default_app_name(&options.notebook_path)),
-            SPUR_APP_ENTRY_NOTEBOOK,
-        )
-    };
+    let (mut manifest, collect_authored_files) =
+        if let Some((_, manifest)) = manifest_from_notebook(&options.notebook_path) {
+            (manifest, true)
+        } else if has_authored_manifest {
+            let raw = fs::read(&authored_manifest_path)?;
+            (
+                serde_json::from_slice::<SpurAppManifest>(&raw)
+                    .map_err(archive::SpurAppArchiveError::InvalidManifestJson)?,
+                true,
+            )
+        } else {
+            (
+                SpurAppManifest::minimal(
+                    options
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| default_app_name(&options.notebook_path)),
+                    SPUR_APP_ENTRY_NOTEBOOK,
+                ),
+                false,
+            )
+        };
     if let Some(name) = options.name {
         manifest.name = name;
     }
@@ -253,7 +309,7 @@ pub fn export_spur_app(
         )?;
     }
 
-    if has_authored_manifest {
+    if collect_authored_files {
         collect_app_files(&app_root, &manifest, &mut entries)?;
     }
 
@@ -691,6 +747,45 @@ fn blake3_hex(contents: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn embedded_notebook(manifest: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "cells": [],
+            "metadata": {
+                "spur_app": manifest
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        }))
+        .expect("notebook serializes")
+    }
+
+    #[test]
+    fn manifest_from_notebook_reads_spur_app_metadata_and_app_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("embedded-app");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let notebook_path = root.join("dashboard.ipynb");
+        std::fs::write(
+            &notebook_path,
+            embedded_notebook(serde_json::json!({
+                "schema": "spur.app/v1",
+                "name": "Embedded Dashboard",
+                "open_mode": "app",
+                "runtime": {
+                    "jute_min": "0.1.0"
+                }
+            })),
+        )
+        .expect("write notebook");
+
+        let (app_root, manifest) =
+            manifest_from_notebook(&notebook_path).expect("embedded manifest");
+
+        assert_eq!(app_root, root);
+        assert_eq!(manifest.name, "Embedded Dashboard");
+        assert_eq!(manifest.entry_notebook, "dashboard.ipynb");
+    }
+
     #[test]
     fn export_bundles_authored_manifest_server_skill_and_sdk() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -754,6 +849,45 @@ mod tests {
                 "missing {expected}: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn export_bundles_embedded_manifest_as_archive_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("embedded-app");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let notebook_path = root.join("surface.ipynb");
+        std::fs::write(
+            &notebook_path,
+            embedded_notebook(serde_json::json!({
+                "schema": "spur.app/v1",
+                "name": "Embedded Surface",
+                "open_mode": "app",
+                "runtime": {
+                    "jute_min": "0.1.0"
+                }
+            })),
+        )
+        .expect("write notebook");
+
+        let out = tmp.path().join("embedded.spurapp");
+        export_spur_app(SpurAppExportOptions {
+            notebook_path,
+            output_path: out.clone(),
+            name: None,
+            widget_assets: vec![],
+            include_port_snapshots: false,
+            dependency_roots: vec![],
+        })
+        .expect("export");
+
+        let read = archive::read_manifest(std::fs::File::open(&out).unwrap()).expect("manifest");
+        assert_eq!(read.name, "Embedded Surface");
+        assert_eq!(read.entry_notebook, "surface.ipynb");
+
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).expect("zip");
+        zip.by_name(SPUR_APP_MANIFEST)
+            .expect("archive contains spur-app.json entry");
     }
 
     #[test]

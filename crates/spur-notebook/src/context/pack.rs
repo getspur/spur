@@ -13,7 +13,7 @@ use crate::{
     context::{catalog::catalog_layer1, refs::Ref},
     dag::{notebook_port_root, NotebookDag, PortStore},
     sidebar_chat::scope::find_manifest_dir,
-    spur_app::{SpurAppManifest, SPUR_APP_SCHEMA},
+    spur_app::{manifest_from_notebook, SpurAppManifest, SPUR_APP_SCHEMA},
 };
 
 const DEFAULT_SKILL_PATH: &str = "skill/SKILL.md";
@@ -71,8 +71,10 @@ fn read_skill(app_root: &Path, skill_path: Option<&str>) -> anyhow::Result<Optio
 
 fn app_section(notebook_path: &Path, notebook_version: u64) -> Option<Value> {
     let notebook_dir = notebook_path.parent().unwrap_or_else(|| Path::new("."));
-    let (app_root, manifest_path) = find_manifest_dir(notebook_dir)?;
-    let manifest = read_manifest(&manifest_path)?;
+    let (app_root, manifest) = manifest_from_notebook(notebook_path).or_else(|| {
+        let (app_root, manifest_path) = find_manifest_dir(notebook_dir)?;
+        Some((app_root, read_manifest(&manifest_path)?))
+    })?;
     if manifest.schema != SPUR_APP_SCHEMA {
         return None;
     }

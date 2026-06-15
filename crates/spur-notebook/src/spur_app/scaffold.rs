@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::{
-    SpurAppManifest, SpurAppMcpServer, SpurAppSdk, SPUR_APP_ENTRY_NOTEBOOK, SPUR_APP_MANIFEST,
+    SpurAppManifest, SpurAppMcpServer, SpurAppSdk, SPUR_APP_ENTRY_NOTEBOOK, SPUR_APP_METADATA_KEY,
 };
 
 /// Canonical vendorable TypeScript SDK modules. Only `call_tool.ts` and
@@ -86,7 +86,8 @@ pub fn templates() -> &'static [TemplateInfo] {
         TemplateInfo {
             name: "frontend-only",
             description: "No MCP server: markdown + HTML-output frontend cell and skill. \
-                          Fastest doctor path; add a server later by editing spur-app.json.",
+                          Fastest doctor path; add a server later by editing \
+                          notebook metadata.spur_app.",
         },
     ]
 }
@@ -110,13 +111,10 @@ pub fn scaffold_app(options: ScaffoldOptions) -> Result<ScaffoldedApp, ScaffoldE
     let spur_app_requirement = python_sdk_requirement(&options.app_root);
 
     let manifest = manifest_for_template(&options.name, &options.template);
-    let manifest_json = serde_json::to_vec_pretty(&manifest)?;
-
-    let mut entries: Vec<(String, Vec<u8>)> = vec![(SPUR_APP_MANIFEST.to_string(), manifest_json)];
-    entries.push((
+    let mut entries: Vec<(String, Vec<u8>)> = vec![(
         SPUR_APP_ENTRY_NOTEBOOK.to_string(),
-        notebook_for_template(&options.name, &options.template, &tool_prefix),
-    ));
+        notebook_for_template(&options.name, &options.template, &tool_prefix, &manifest)?,
+    )];
     for (path, template_body) in template_text_files(&options.template) {
         let body = template_body
             .replace(PLACEHOLDER_APP_NAME, &options.name)
@@ -209,7 +207,7 @@ fn python_sdk_requirement(app_root: &Path) -> String {
 
 /// Text file table per template (app-root-relative path, body with
 /// `__APP_NAME__` / `__TOOL_PREFIX__` / `__SPUR_APP_REQUIREMENT__`
-/// placeholders). `spur-app.json` and `app.ipynb` are generated separately.
+/// placeholders). `app.ipynb` is generated separately.
 fn template_text_files(template: &str) -> Vec<(&'static str, &'static str)> {
     match template {
         "minimal" => vec![
@@ -227,7 +225,12 @@ fn template_text_files(template: &str) -> Vec<(&'static str, &'static str)> {
 }
 
 /// Generate the entry notebook (nbformat 4.5: every cell carries an `id`).
-fn notebook_for_template(name: &str, template: &str, tool_prefix: &str) -> Vec<u8> {
+fn notebook_for_template(
+    name: &str,
+    template: &str,
+    tool_prefix: &str,
+    manifest: &SpurAppManifest,
+) -> Result<Vec<u8>, serde_json::Error> {
     let intro = serde_json::json!({
         "cell_type": "markdown",
         "id": "intro",
@@ -237,8 +240,9 @@ fn notebook_for_template(name: &str, template: &str, tool_prefix: &str) -> Vec<u
              1. `notebook_app_doctor` — must be green before packing.\n\
              2. Open this notebook in app mode to spawn the plugin and grant capabilities.\n\
              3. Pack with `notebook_export_spur_app` (never hand-roll a `.spurapp`).\n\n\
-             Edit `spur-app.json` to declare capabilities before reading any \
-             `SPUR_*` env var — the host only injects what the manifest declares."
+             Edit notebook `metadata.spur_app` to declare capabilities before \
+             reading any `SPUR_*` env var — the host only injects what the \
+             manifest declares."
         )),
     });
 
@@ -251,7 +255,7 @@ fn notebook_for_template(name: &str, template: &str, tool_prefix: &str) -> Vec<u
             "outputs": [],
             "source": code_source(&format!(
                 "// TODO(U7): replace with `import {{ callTool }} from \"jsr:@spur/app\"` once published to JSR.\n\
-                 // The SDK is vendored into the app root (see spur-app.json \"sdk\"); the kernel\n\
+                 // The SDK is vendored into the app root (see metadata.spur_app \"sdk\"); the kernel\n\
                  // starts in the notebook's directory, so Deno.cwd() is the app root.\n\
                  const {{ callTool }} = await import(`file://${{Deno.cwd()}}/sdk/call_tool.ts`);\n\
                  const result = await callTool(\"{tool_prefix}_hello\", {{ name: \"Spur\" }});\n\
@@ -272,15 +276,20 @@ fn notebook_for_template(name: &str, template: &str, tool_prefix: &str) -> Vec<u
         })
     };
 
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        SPUR_APP_METADATA_KEY.to_string(),
+        serde_json::to_value(manifest)?,
+    );
     let notebook = serde_json::json!({
         "cells": [intro, code_cell],
-        "metadata": {},
+        "metadata": metadata,
         "nbformat": 4,
         "nbformat_minor": 5
     });
-    let mut bytes = serde_json::to_vec_pretty(&notebook).expect("static notebook value serializes");
+    let mut bytes = serde_json::to_vec_pretty(&notebook)?;
     bytes.push(b'\n');
-    bytes
+    Ok(bytes)
 }
 
 /// Split into nbformat `source` line arrays (each line keeps its trailing
@@ -311,7 +320,7 @@ app = App("__APP_NAME__")
 def __TOOL_PREFIX___hello(name: str) -> str:
     """Example tool: greet *name*.
 
-    Declare capabilities in spur-app.json before using app.ports or
+    Declare capabilities in notebook metadata.spur_app before using app.ports or
     app.artifacts — the host only injects what the manifest declares.
     """
     return f"Hello from __APP_NAME__, {name}!"
@@ -342,8 +351,8 @@ Never ask the user to paste code or open files.
 
 ## The loop
 
-1. Open `app.ipynb` in app mode — the host reads `spur-app.json`, grants the
-   declared capabilities, and spawns the MCP server plugin.
+1. Open `app.ipynb` in app mode — the host reads notebook `metadata.spur_app`,
+   grants the declared capabilities, and spawns the MCP server plugin.
 2. Call `__TOOL_PREFIX___hello` to verify the plugin surface is live.
 3. Build the app: server tools in `server/main.py` (the `spur_app` SDK),
    frontend cells on the vendored TypeScript SDK (`sdk/call_tool.ts`).
@@ -398,6 +407,7 @@ def test_port_store_round_trip():
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spur_app::SPUR_APP_MANIFEST;
 
     fn options(root: &Path, name: &str, template: &str) -> ScaffoldOptions {
         ScaffoldOptions {
@@ -429,14 +439,17 @@ mod tests {
                 "server/main.py",
                 "server/requirements.txt",
                 "skill/SKILL.md",
-                "spur-app.json",
                 "tests/test_app.py",
             ]
         );
 
-        let manifest_raw = fs::read_to_string(root.join("spur-app.json")).expect("manifest");
+        assert!(!root.join(SPUR_APP_MANIFEST).exists());
+        let notebook: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("app.ipynb")).expect("notebook"))
+                .expect("notebook is valid JSON");
         let manifest: SpurAppManifest =
-            serde_json::from_str(&manifest_raw).expect("manifest parses through the model");
+            serde_json::from_value(notebook["metadata"]["spur_app"].clone())
+                .expect("embedded manifest parses through the model");
         assert_eq!(manifest.name, "my-app");
         assert!(
             manifest.runtime.features.is_empty(),
@@ -453,9 +466,6 @@ mod tests {
         );
         assert_eq!(manifest.skill.as_deref(), Some("skill/SKILL.md"));
 
-        let notebook: serde_json::Value =
-            serde_json::from_slice(&fs::read(root.join("app.ipynb")).expect("notebook"))
-                .expect("notebook is valid JSON");
         assert_eq!(notebook["nbformat"], 4);
         for cell in notebook["cells"].as_array().expect("cells") {
             assert!(cell["id"].is_string(), "nbformat 4.5 cells carry ids");
@@ -539,14 +549,14 @@ mod tests {
         let scaffolded =
             scaffold_app(options(&root, "surface", "frontend-only")).expect("scaffold");
 
-        assert_eq!(
-            scaffolded.files,
-            vec!["app.ipynb", "skill/SKILL.md", "spur-app.json"]
-        );
-        let manifest: SpurAppManifest = serde_json::from_str(
-            &fs::read_to_string(root.join("spur-app.json")).expect("manifest"),
-        )
-        .expect("manifest parses");
+        assert_eq!(scaffolded.files, vec!["app.ipynb", "skill/SKILL.md"]);
+        assert!(!root.join(SPUR_APP_MANIFEST).exists());
+        let notebook: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("app.ipynb")).expect("notebook"))
+                .expect("notebook is valid JSON");
+        let manifest: SpurAppManifest =
+            serde_json::from_value(notebook["metadata"]["spur_app"].clone())
+                .expect("embedded manifest parses");
         assert!(manifest.mcp_server.is_none());
         assert!(manifest.sdk.is_none());
     }
@@ -556,13 +566,14 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("taken");
         fs::create_dir_all(&root).expect("mkdir");
-        fs::write(root.join(SPUR_APP_MANIFEST), "{}").expect("preexisting manifest");
+        fs::write(root.join(SPUR_APP_ENTRY_NOTEBOOK), "{}").expect("preexisting notebook");
 
         let error =
             scaffold_app(options(&root, "taken", "minimal")).expect_err("must refuse to overwrite");
         assert!(matches!(error, ScaffoldError::AppRootNotEmpty(_)));
         // Nothing else was written.
-        assert!(!root.join("app.ipynb").exists());
+        assert!(!root.join("server/main.py").exists());
+        assert!(!root.join("skill/SKILL.md").exists());
     }
 
     #[test]
