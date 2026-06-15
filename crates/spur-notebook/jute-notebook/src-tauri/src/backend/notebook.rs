@@ -297,6 +297,8 @@ pub enum CodeType {
     Rust,
     /// Go code routed to the `gonb` kernelspec.
     Go,
+    /// DuckDB SQL transpiled to a `duckdb` call on the shared `python3` kernel.
+    Sql,
 }
 
 /// Return the kernelspec name for a per-cell code type.
@@ -306,11 +308,14 @@ pub fn kernelspec_for(code_type: CodeType) -> &'static str {
         CodeType::Javascript => "deno",
         CodeType::Rust => "evcxr",
         CodeType::Go => "gonb",
+        CodeType::Sql => "python3",
     }
 }
 
 /// Return the per-cell code type for a kernelspec name.
 pub fn code_type_for_spec(spec_name: &str) -> Option<CodeType> {
+    // NOTE: "python3" maps back to Python only. A SQL cell also runs on python3
+    // but is distinguished solely by its explicit `code_type` metadata.
     match spec_name {
         "python3" => Some(CodeType::Python),
         "deno" => Some(CodeType::Javascript),
@@ -977,6 +982,16 @@ mod tests {
         assert_eq!(spec_name, "gonb");
         assert_eq!(code_type_for_spec(spec_name), Some(CodeType::Go));
         assert_eq!(serde_json::to_value(CodeType::Go).unwrap(), "go");
+    }
+
+    #[test]
+    fn sql_code_type_routes_to_python3_and_serdes_lowercase() {
+        assert_eq!(kernelspec_for(CodeType::Sql), "python3");
+        assert_eq!(serde_json::to_string(&CodeType::Sql).unwrap(), "\"sql\"");
+        assert_eq!(
+            serde_json::from_str::<CodeType>("\"sql\"").unwrap(),
+            CodeType::Sql
+        );
     }
 
     #[test]
