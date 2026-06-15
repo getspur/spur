@@ -26,6 +26,7 @@ import { type NotebookStoreState, useNotebook } from "@/stores/notebook";
 
 import { ScheduleSection } from "../dag/ScheduleSection";
 import { scheduleLabel } from "../dag/scheduleApi";
+import ConfirmModal from "../shared/ConfirmModal";
 import CellInputFallback from "./CellInputFallback";
 import CellLanguageMenu from "./CellLanguageMenu";
 import type { AfmPortBindingSnapshot } from "./JuteAppOutput";
@@ -79,6 +80,7 @@ const CellActionButton = ({
 
 function CellInputToolbar({ cellId }: { cellId: string }) {
   const notebook = useNotebook();
+  const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false);
   const type = useStore(
     notebook.store,
     (state) => state.serverState.cells[cellId].type,
@@ -103,65 +105,81 @@ function CellInputToolbar({ cellId }: { cellId: string }) {
   };
 
   return (
-    <div className="flex min-h-8 items-center gap-1 pr-[18px] pt-2">
-      <div className="flex items-center gap-1 rounded border border-gray-200 bg-white px-1 py-0.5 shadow-sm">
-        {lastEditedBy && (
-          <span
-            aria-label={`Agent-edited cell. Last edited by ${lastEditedBy}`}
-            className="inline-flex items-center rounded p-1 text-gray-500"
-            title={`last-edited-by: ${lastEditedBy}`}
-          >
-            <BotIcon size={16} />
-          </span>
-        )}
-        {type === "code" ? (
+    <>
+      <div className="flex min-h-8 items-center gap-1 pr-[18px] pt-2">
+        <div className="flex items-center gap-1 rounded border border-gray-200 bg-white px-1 py-0.5 shadow-sm">
+          {lastEditedBy && (
+            <span
+              aria-label={`Agent-edited cell. Last edited by ${lastEditedBy}`}
+              className="inline-flex items-center rounded p-1 text-gray-500"
+              title={`last-edited-by: ${lastEditedBy}`}
+            >
+              <BotIcon size={16} />
+            </span>
+          )}
+          {type === "code" ? (
+            <CellActionButton
+              label="Run cell"
+              Icon={PlayIcon}
+              onClick={() => {
+                void notebook.execute(cellId);
+              }}
+            />
+          ) : null}
           <CellActionButton
-            label="Run cell"
-            Icon={PlayIcon}
+            label={
+              type === "code"
+                ? "Convert cell to markdown"
+                : "Convert cell to code"
+            }
+            Icon={type === "code" ? Code2Icon : LetterTextIcon}
             onClick={() => {
-              void notebook.execute(cellId);
+              notebook.setCellType(cellId, type === "code" ? "markdown" : "code");
             }}
           />
-        ) : null}
-        <CellActionButton
-          label={
-            type === "code" ? "Convert cell to markdown" : "Convert cell to code"
-          }
-          Icon={type === "code" ? Code2Icon : LetterTextIcon}
-          onClick={() => {
-            notebook.setCellType(cellId, type === "code" ? "markdown" : "code");
-          }}
-        />
-        <CellActionButton
-          label="Insert cell below"
-          Icon={PlusIcon}
-          onClick={() => {
-            notebook.insertCellAfter(cellId, "code", "");
-          }}
-        />
-        <CellActionButton
-          label="Delete cell"
-          Icon={Trash2Icon}
-          onClick={() => {
-            notebook.deleteCell(cellId);
-          }}
-        />
-      </div>
-      {output?.timings?.finishedAt ? (
-        <div className="mt-0.5 flex items-center">
-          {output.status === "success" ? (
-            <CheckIcon size={16} className="mr-1 text-green-500" />
-          ) : (
-            <XIcon size={16} className="mr-1 text-red-500" />
-          )}
-          <p className="text-sm text-gray-400">
-            {formatExecutionDuration(
-              output?.timings.finishedAt - output?.timings.startedAt,
-            )}
-          </p>
+          <CellActionButton
+            label="Insert cell below"
+            Icon={PlusIcon}
+            onClick={() => {
+              notebook.insertCellAfter(cellId, "code", "");
+            }}
+          />
+          <CellActionButton
+            label="Delete cell"
+            Icon={Trash2Icon}
+            onClick={() => {
+              setDeleteConfirmationOpen(true);
+            }}
+          />
         </div>
-      ) : null}
-    </div>
+        {output?.timings?.finishedAt ? (
+          <div className="mt-0.5 flex items-center">
+            {output.status === "success" ? (
+              <CheckIcon size={16} className="mr-1 text-green-500" />
+            ) : (
+              <XIcon size={16} className="mr-1 text-red-500" />
+            )}
+            <p className="text-sm text-gray-400">
+              {formatExecutionDuration(
+                output?.timings.finishedAt - output?.timings.startedAt,
+              )}
+            </p>
+          </div>
+        ) : null}
+      </div>
+      <ConfirmModal
+        body="This will permanently delete the cell."
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setDeleteConfirmationOpen(false)}
+        onConfirm={() => {
+          setDeleteConfirmationOpen(false);
+          notebook.deleteCell(cellId);
+        }}
+        open={deleteConfirmationOpen}
+        title="Delete cell?"
+      />
+    </>
   );
 }
 
