@@ -7,6 +7,7 @@ import {
   LetterTextIcon,
   LucideIcon,
   PlusIcon,
+  Trash2Icon,
   XIcon,
   XSquareIcon,
 } from "lucide-react";
@@ -61,15 +62,20 @@ const Aside = ({ children }: { children: ReactNode }) => (
 );
 
 const AsideIconButton = ({
+  label,
   Icon,
   onClick,
 }: {
+  label: string;
   Icon: LucideIcon;
   onClick?: () => void;
 }) => (
   <button
+    aria-label={label}
     className="rounded p-1 text-gray-500 transition-all hover:bg-gray-200 hover:text-black active:scale-110"
     onClick={onClick}
+    title={label}
+    type="button"
   >
     <Icon size={16} />
   </button>
@@ -113,9 +119,24 @@ function CellInputAside({ cellId }: { cellId: string }) {
           </span>
         )}
         <AsideIconButton
+          label={type === "code" ? "Convert cell to markdown" : "Convert cell to code"}
           Icon={type === "code" ? Code2Icon : LetterTextIcon}
           onClick={() => {
             notebook.setCellType(cellId, type === "code" ? "markdown" : "code");
+          }}
+        />
+        <AsideIconButton
+          label="Insert cell below"
+          Icon={PlusIcon}
+          onClick={() => {
+            notebook.insertCellAfter(cellId, "code", "");
+          }}
+        />
+        <AsideIconButton
+          label="Delete cell"
+          Icon={Trash2Icon}
+          onClick={() => {
+            notebook.deleteCell(cellId);
           }}
         />
       </div>
@@ -457,6 +478,7 @@ export default function NotebookCells() {
               <Aside>
                 <div className="mt-1 flex gap-0.5">
                   <AsideIconButton
+                    label="Clear cell output"
                     Icon={XSquareIcon}
                     onClick={() => notebook.clearResult(id)}
                   />
