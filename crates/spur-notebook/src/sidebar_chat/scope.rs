@@ -4,7 +4,9 @@ use agent_client_protocol::schema::{EnvVariable, McpServer, McpServerStdio};
 use anyhow::{anyhow, Context as _, Result};
 
 use super::types::AppScope;
-use crate::spur_app::{SpurAppManifest, SpurAppMcpServer, SPUR_APP_MANIFEST, SPUR_APP_SCHEMA};
+use crate::spur_app::{
+    manifest_from_notebook, SpurAppManifest, SpurAppMcpServer, SPUR_APP_MANIFEST, SPUR_APP_SCHEMA,
+};
 
 const DEFAULT_NOTEBOOK_APP_KEY: &str = "notebook";
 const DEFAULT_NOTEBOOK_LABEL: &str = "Notebook";
@@ -15,18 +17,32 @@ pub fn resolve_app_scope(notebook_path: &Path, notebook_mcp_socket: &Path) -> Re
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let Some((app_root, manifest_path)) = find_manifest_dir(&notebook_dir) else {
+    let manifest_source = if let Some((app_root, manifest)) = manifest_from_notebook(notebook_path)
+    {
+        Some((app_root, manifest, notebook_path.to_path_buf()))
+    } else {
+        let Some((app_root, manifest_path)) = find_manifest_dir(&notebook_dir) else {
+            return Ok(default_notebook_scope(
+                notebook_path,
+                notebook_dir,
+                notebook_mcp_socket,
+            ));
+        };
+
+        let manifest_bytes = std::fs::read(&manifest_path)
+            .with_context(|| format!("failed to read app manifest {}", manifest_path.display()))?;
+        let manifest: SpurAppManifest = serde_json::from_slice(&manifest_bytes)
+            .with_context(|| format!("failed to parse app manifest {}", manifest_path.display()))?;
+        Some((app_root, manifest, manifest_path))
+    };
+
+    let Some((app_root, manifest, manifest_path)) = manifest_source else {
         return Ok(default_notebook_scope(
             notebook_path,
             notebook_dir,
             notebook_mcp_socket,
         ));
     };
-
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .with_context(|| format!("failed to read app manifest {}", manifest_path.display()))?;
-    let manifest: SpurAppManifest = serde_json::from_slice(&manifest_bytes)
-        .with_context(|| format!("failed to parse app manifest {}", manifest_path.display()))?;
 
     if manifest.schema != SPUR_APP_SCHEMA {
         return Err(anyhow!(
@@ -248,6 +264,49 @@ mod tests {
             }
             other => panic!("expected stdio MCP server, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn embedded_manifest_takes_precedence_over_sibling_spur_app_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("spur-app.json"),
+            r#"{
+              "schema": "spur.app/v1",
+              "name": "Legacy Disk App",
+              "entry_notebook": "legacy.ipynb",
+              "open_mode": "app",
+              "runtime": { "jute_min": "0.1.0" }
+            }"#,
+        )
+        .unwrap();
+        let nb = dir.path().join("embedded.ipynb");
+        std::fs::write(
+            &nb,
+            r#"{
+              "cells": [],
+              "metadata": {
+                "spur_app": {
+                  "schema": "spur.app/v1",
+                  "name": "Embedded App",
+                  "open_mode": "app",
+                  "runtime": { "jute_min": "0.1.0" }
+                }
+              },
+              "nbformat": 4,
+              "nbformat_minor": 5
+            }"#,
+        )
+        .unwrap();
+
+        let socket = notebook_socket();
+        let scope = resolve_app_scope(&nb, &socket).unwrap();
+
+        assert_eq!(scope.cwd, dir.path());
+        assert_eq!(scope.label, "Embedded App");
+        assert_eq!(scope.app_key, dir.path().display().to_string());
+        assert_eq!(scope.mcp_servers.len(), 1);
+        assert_notebook_mcp(&scope.mcp_servers[0]);
     }
 
     #[test]

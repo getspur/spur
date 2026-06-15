@@ -216,11 +216,11 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert!(files.contains(&"spur-app.json"));
+        assert!(!files.contains(&"spur-app.json"));
         assert!(files.contains(&"server/main.py"));
         assert!(files.contains(&"sdk/call_tool.ts"));
         assert!(!body["next_steps"].as_array().expect("steps").is_empty());
-        assert!(root.join("spur-app.json").is_file());
+        assert!(!root.join("spur-app.json").exists());
     }
 
     #[tokio::test]
