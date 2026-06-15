@@ -1869,18 +1869,6 @@ pub async fn get_notebook(path: &str) -> Result<NotebookRoot, Error> {
     Ok(serde_json::from_str(&contents)?)
 }
 
-#[derive(Deserialize)]
-struct AppModeManifest {
-    open_mode: String,
-    entry_notebook: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    capabilities: AppModeCapabilities,
-    #[serde(default)]
-    skill: Option<String>,
-}
-
 /// Capability subset needed for the frontend grant prompt (additive, all
 /// fields default to off so old manifests without a `capabilities` block
 /// still deserialise unchanged).
@@ -1920,18 +1908,17 @@ pub struct NotebookOpenInfo {
 /// notebook has no manifest, the manifest does not match, or the manifest
 /// cannot be parsed (graceful degradation, keeps notebooks opening normally).
 #[tauri::command]
-pub async fn notebook_open_mode(path: String) -> Result<Option<NotebookOpenInfo>, Error> {
+pub fn notebook_open_mode(path: String) -> Result<Option<NotebookOpenInfo>, Error> {
     let notebook_path = Path::new(&path);
-    let Some(dir) = notebook_path.parent() else {
+    let Some((app_root, manifest, _source)) =
+        spur_notebook::spur_app::resolve_app_manifest(notebook_path)
+    else {
         return Ok(None);
     };
-    let Ok(manifest_contents) = tokio::fs::read_to_string(dir.join("spur-app.json")).await else {
+
+    if manifest.open_mode != "app" {
         return Ok(None);
-    };
-    let manifest: AppModeManifest = match serde_json::from_str(&manifest_contents) {
-        Ok(manifest) => manifest,
-        Err(_) => return Ok(None),
-    };
+    }
 
     if notebook_path.file_name().and_then(|name| name.to_str())
         != Some(manifest.entry_notebook.as_str())
@@ -1939,17 +1926,31 @@ pub async fn notebook_open_mode(path: String) -> Result<Option<NotebookOpenInfo>
         return Ok(None);
     }
 
-    let app_name = manifest.name.unwrap_or_else(|| "App".to_owned());
-    let app_root = dir.to_string_lossy().into_owned();
+    let app_name = if manifest.name.is_empty() {
+        "App".to_owned()
+    } else {
+        manifest.name
+    };
+    let app_root = app_root.to_string_lossy().into_owned();
+    let capabilities = AppModeCapabilities {
+        active_output_scripts: manifest.capabilities.active_output_scripts,
+        canvas_capture: manifest.capabilities.canvas_capture,
+        artifacts_dir: manifest.capabilities.artifacts_dir,
+        ports: manifest
+            .capabilities
+            .ports
+            .as_ref()
+            .and_then(|ports| serde_json::to_value(ports).ok()),
+    };
     let skill = manifest
         .skill
         .unwrap_or_else(|| "skill/SKILL.md".to_owned());
 
     Ok(Some(NotebookOpenInfo {
-        open_mode: manifest.open_mode,
+        open_mode: "app".to_owned(),
         app_name,
         app_root,
-        capabilities: manifest.capabilities,
+        capabilities,
         skill,
     }))
 }
@@ -2481,30 +2482,105 @@ mod tests {
         let _command = daemon_control;
     }
 
-    #[tokio::test]
-    async fn notebook_open_mode_entry_returns_app() {
+    fn app_manifest_json(name: &str, entry_notebook: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "spur.app/v1",
+            "name": name,
+            "entry_notebook": entry_notebook,
+            "open_mode": "app",
+            "runtime": { "jute_min": "0.1.0" }
+        })
+    }
+
+    fn embedded_app_notebook(manifest: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "cells": [],
+            "metadata": {
+                "spur_app": manifest
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        }))
+        .expect("notebook serializes")
+    }
+
+    #[test]
+    fn notebook_open_mode_embedded_only_entry_returns_app_with_absolute_root_and_capabilities() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entry = dir.path().join("app.ipynb");
+        std::fs::write(
+            &entry,
+            embedded_app_notebook(serde_json::json!({
+                "schema": "spur.app/v1",
+                "name": "Embedded Cap App",
+                "entry_notebook": "app.ipynb",
+                "open_mode": "app",
+                "runtime": { "jute_min": "0.1.0" },
+                "capabilities": {
+                    "ports": {
+                        "read": ["scoreboard"],
+                        "write": ["selection"]
+                    },
+                    "active_output_scripts": true,
+                    "canvas_capture": true,
+                    "artifacts_dir": true
+                },
+                "skill": "skill/WC.md"
+            })),
+        )
+        .expect("write embedded notebook");
+
+        let info = notebook_open_mode(entry.to_string_lossy().into_owned())
+            .expect("notebook_open_mode embedded")
+            .expect("embedded entry notebook returns open info");
+
+        assert_eq!(info.open_mode, "app");
+        assert_eq!(info.app_name, "Embedded Cap App");
+        assert_eq!(
+            info.app_root,
+            dir.path().canonicalize().unwrap().display().to_string()
+        );
+        assert!(Path::new(&info.app_root).is_absolute());
+        assert!(info.capabilities.active_output_scripts);
+        assert!(info.capabilities.canvas_capture);
+        assert!(info.capabilities.artifacts_dir);
+        assert_eq!(
+            info.capabilities.ports,
+            Some(serde_json::json!({
+                "read": ["scoreboard"],
+                "write": ["selection"]
+            }))
+        );
+        assert_eq!(info.skill, "skill/WC.md");
+    }
+
+    #[test]
+    fn notebook_open_mode_entry_returns_app() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("spur-app.json"),
-            r#"{"open_mode":"app","entry_notebook":"app.ipynb","name":"My App"}"#,
+            serde_json::to_vec_pretty(&app_manifest_json("My App", "app.ipynb"))
+                .expect("manifest serializes"),
         )
         .expect("write manifest");
         let entry = dir.path().join("app.ipynb");
         std::fs::write(&entry, "{}").expect("write notebook");
 
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
-            .await
             .expect("notebook_open_mode entry");
         let info = result.expect("entry notebook returns open info");
         assert_eq!(info.open_mode, "app");
         assert_eq!(info.app_name, "My App");
-        assert_eq!(info.app_root, dir.path().to_string_lossy().as_ref());
+        assert_eq!(
+            info.app_root,
+            dir.path().canonicalize().unwrap().display().to_string()
+        );
+        assert!(Path::new(&info.app_root).is_absolute());
         assert!(!info.capabilities.active_output_scripts);
 
         let other = dir.path().join("other.ipynb");
         std::fs::write(&other, "{}").expect("write other notebook");
         let other_result = notebook_open_mode(other.to_string_lossy().into_owned())
-            .await
             .expect("notebook_open_mode other");
         assert!(
             other_result.is_none(),
@@ -2512,15 +2588,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn notebook_open_mode_returns_capabilities_and_skill() {
+    #[test]
+    fn notebook_open_mode_returns_capabilities_and_skill() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("spur-app.json"),
             r#"{
+                "schema": "spur.app/v1",
                 "open_mode": "app",
                 "entry_notebook": "app.ipynb",
                 "name": "Cap App",
+                "runtime": { "jute_min": "0.1.0" },
                 "capabilities": {
                     "active_output_scripts": true,
                     "canvas_capture": true
@@ -2533,7 +2611,6 @@ mod tests {
         std::fs::write(&entry, "{}").expect("write notebook");
 
         let info = notebook_open_mode(entry.to_string_lossy().into_owned())
-            .await
             .expect("notebook_open_mode capabilities")
             .expect("entry notebook returns open info");
         assert!(info.capabilities.active_output_scripts);
@@ -2542,20 +2619,19 @@ mod tests {
         assert_eq!(info.skill, "skill/MY_SKILL.md");
     }
 
-    #[tokio::test]
-    async fn notebook_open_mode_no_manifest_returns_none() {
+    #[test]
+    fn notebook_open_mode_no_manifest_returns_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         let entry = dir.path().join("app.ipynb");
         std::fs::write(&entry, "{}").expect("write notebook");
 
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
-            .await
             .expect("notebook_open_mode no manifest");
         assert!(result.is_none());
     }
 
-    #[tokio::test]
-    async fn notebook_open_mode_invalid_manifest_reports_error() {
+    #[test]
+    fn notebook_open_mode_invalid_manifest_reports_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("spur-app.json"), r#"{invalid}"#)
             .expect("write invalid manifest");
@@ -2563,7 +2639,6 @@ mod tests {
         std::fs::write(&entry, "{}").expect("write notebook");
 
         let result = notebook_open_mode(entry.to_string_lossy().into_owned())
-            .await
             .expect("notebook_open_mode invalid manifest");
         assert!(result.is_none(), "invalid manifest must not enter app mode");
     }

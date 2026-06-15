@@ -33,8 +33,8 @@ use crate::{
     dag::notebook_port_root,
     mcp::ServerDeps,
     spur_app::{
-        manifest_from_notebook, SpurAppManifest, SPUR_APP_ENTRY_NOTEBOOK, SPUR_APP_MANIFEST,
-        SPUR_APP_SCHEMA,
+        resolve_app_manifest, ManifestSource, SpurAppManifest, SPUR_APP_ENTRY_NOTEBOOK,
+        SPUR_APP_MANIFEST, SPUR_APP_SCHEMA,
     },
 };
 
@@ -134,27 +134,22 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
     // ── Check 1: manifest + schema + entry_notebook ────────────────────────────
 
     let manifest_path = app_root.join(SPUR_APP_MANIFEST);
-    let embedded_notebook_path = if input_path.is_file()
+    let candidate_notebook_path = if input_path.is_file()
         && input_path.extension().and_then(|e| e.to_str()) == Some("ipynb")
     {
-        Some(input_path.clone())
+        input_path.clone()
     } else {
-        let default_entry = app_root.join(SPUR_APP_ENTRY_NOTEBOOK);
-        default_entry.is_file().then_some(default_entry)
+        app_root.join(SPUR_APP_ENTRY_NOTEBOOK)
     };
 
-    let manifest_source = if let Some((_, manifest)) = embedded_notebook_path
-        .as_deref()
-        .and_then(manifest_from_notebook)
+    let (app_root, manifest, manifest_location) = if let Some((app_root, manifest, source)) =
+        resolve_app_manifest(&candidate_notebook_path)
     {
-        Some((
-            manifest,
-            embedded_notebook_path
-                .as_ref()
-                .expect("embedded notebook path is present")
-                .display()
-                .to_string(),
-        ))
+        let manifest_location = match source {
+            ManifestSource::Embedded => candidate_notebook_path.display().to_string(),
+            ManifestSource::SiblingJson(path) => path.display().to_string(),
+        };
+        (app_root, manifest, manifest_location)
     } else if manifest_path.is_file() {
         let manifest_raw = match std::fs::read_to_string(&manifest_path) {
             Ok(raw) => raw,
@@ -177,7 +172,7 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
             return Ok(ok_result(findings));
         }
         match serde_json::from_str::<SpurAppManifest>(&manifest_raw) {
-            Ok(manifest) => Some((manifest, manifest_path.display().to_string())),
+            Ok(manifest) => (app_root, manifest, manifest_path.display().to_string()),
             Err(error) => {
                 findings.push(
                     Finding::fail(
@@ -190,10 +185,6 @@ pub async fn call(_deps: &ServerDeps, arguments: Value) -> Result<CallToolResult
             }
         }
     } else {
-        None
-    };
-
-    let Some((manifest, manifest_location)) = manifest_source else {
         findings.push(
             Finding::fail(
                 "manifest",

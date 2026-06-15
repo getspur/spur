@@ -187,6 +187,12 @@ pub struct SpurAppPreflight {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestSource {
+    Embedded,
+    SiblingJson(PathBuf),
+}
+
 impl SpurAppManifest {
     pub fn minimal(name: impl Into<String>, entry_notebook: impl Into<String>) -> Self {
         Self {
@@ -213,8 +219,23 @@ impl SpurAppManifest {
     }
 }
 
+fn absolute_notebook_path(notebook_path: &Path) -> PathBuf {
+    if let Ok(path) = std::fs::canonicalize(notebook_path) {
+        return path;
+    }
+
+    if notebook_path.is_absolute() {
+        return notebook_path.to_path_buf();
+    }
+
+    std::env::current_dir()
+        .map(|cwd| cwd.join(notebook_path))
+        .unwrap_or_else(|_| notebook_path.to_path_buf())
+}
+
 pub fn manifest_from_notebook(notebook_path: &Path) -> Option<(PathBuf, SpurAppManifest)> {
-    let raw = fs::read_to_string(notebook_path).ok()?;
+    let notebook_path = absolute_notebook_path(notebook_path);
+    let raw = fs::read_to_string(&notebook_path).ok()?;
     let root: NotebookRoot = match serde_json::from_str(&raw) {
         Ok(root) => root,
         Err(error) => {
@@ -226,9 +247,7 @@ pub fn manifest_from_notebook(notebook_path: &Path) -> Option<(PathBuf, SpurAppM
             return None;
         }
     };
-    let Some(value) = root.metadata.other.get(SPUR_APP_METADATA_KEY) else {
-        return None;
-    };
+    let value = root.metadata.other.get(SPUR_APP_METADATA_KEY)?;
 
     let mut manifest: SpurAppManifest = match serde_json::from_value(value.clone()) {
         Ok(manifest) => manifest,
@@ -246,7 +265,7 @@ pub fn manifest_from_notebook(notebook_path: &Path) -> Option<(PathBuf, SpurAppM
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(SPUR_APP_ENTRY_NOTEBOOK)
-            .to_string();
+            .to_owned();
     }
 
     let app_root = notebook_path
@@ -256,29 +275,61 @@ pub fn manifest_from_notebook(notebook_path: &Path) -> Option<(PathBuf, SpurAppM
     Some((app_root, manifest))
 }
 
+pub fn resolve_app_manifest(
+    notebook_path: &Path,
+) -> Option<(PathBuf, SpurAppManifest, ManifestSource)> {
+    let notebook_path = absolute_notebook_path(notebook_path);
+    let app_root = notebook_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".")
+        });
+
+    if let Some((app_root, manifest)) = manifest_from_notebook(&notebook_path) {
+        return Some((app_root, manifest, ManifestSource::Embedded));
+    }
+
+    let manifest_path = app_root.join(SPUR_APP_MANIFEST);
+    let raw = fs::read(&manifest_path).ok()?;
+    let manifest = match serde_json::from_slice::<SpurAppManifest>(&raw) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %manifest_path.display(),
+                "invalid sibling spur-app.json manifest"
+            );
+            return None;
+        }
+    };
+
+    Some((
+        app_root,
+        manifest,
+        ManifestSource::SiblingJson(manifest_path),
+    ))
+}
+
 pub fn export_spur_app(
     options: SpurAppExportOptions,
 ) -> Result<SpurAppExported, archive::SpurAppArchiveError> {
     let notebook_contents = fs::read(&options.notebook_path)?;
     let mut preflight = SpurAppPreflight::default();
-    let app_root = options
+    let mut app_root = options
         .notebook_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let authored_manifest_path = app_root.join(SPUR_APP_MANIFEST);
-    let has_authored_manifest = authored_manifest_path.is_file();
 
     let (mut manifest, collect_authored_files) =
-        if let Some((_, manifest)) = manifest_from_notebook(&options.notebook_path) {
+        if let Some((resolved_app_root, manifest, _source)) =
+            resolve_app_manifest(&options.notebook_path)
+        {
+            app_root = resolved_app_root;
             (manifest, true)
-        } else if has_authored_manifest {
-            let raw = fs::read(&authored_manifest_path)?;
-            (
-                serde_json::from_slice::<SpurAppManifest>(&raw)
-                    .map_err(archive::SpurAppArchiveError::InvalidManifestJson)?,
-                true,
-            )
         } else {
             (
                 SpurAppManifest::minimal(
@@ -784,6 +835,102 @@ mod tests {
         assert_eq!(app_root, root);
         assert_eq!(manifest.name, "Embedded Dashboard");
         assert_eq!(manifest.entry_notebook, "dashboard.ipynb");
+    }
+
+    #[test]
+    fn resolve_app_manifest_embedded_only_uses_absolute_app_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("embedded-only");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let notebook_path = root.join("dashboard.ipynb");
+        std::fs::write(
+            &notebook_path,
+            embedded_notebook(serde_json::json!({
+                "schema": "spur.app/v1",
+                "name": "Embedded Only",
+                "open_mode": "app",
+                "runtime": {
+                    "jute_min": "0.1.0"
+                }
+            })),
+        )
+        .expect("write notebook");
+
+        let (app_root, manifest, source) =
+            resolve_app_manifest(&notebook_path).expect("embedded manifest resolves");
+
+        assert!(app_root.is_absolute());
+        assert_eq!(app_root, root.canonicalize().expect("canonical root"));
+        assert_eq!(manifest.name, "Embedded Only");
+        assert_eq!(manifest.entry_notebook, "dashboard.ipynb");
+        assert_eq!(source, ManifestSource::Embedded);
+    }
+
+    #[test]
+    fn resolve_app_manifest_relative_notebook_path_yields_absolute_root() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let tmp = tempfile::tempdir_in(&cwd).expect("tempdir in cwd");
+        let root = tmp.path().join("relative-app");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let notebook_path = root.join("app.ipynb");
+        std::fs::write(
+            &notebook_path,
+            embedded_notebook(serde_json::json!({
+                "schema": "spur.app/v1",
+                "name": "Relative App",
+                "entry_notebook": "app.ipynb",
+                "open_mode": "app",
+                "runtime": {
+                    "jute_min": "0.1.0"
+                }
+            })),
+        )
+        .expect("write notebook");
+        let relative = notebook_path
+            .strip_prefix(&cwd)
+            .expect("notebook path is under cwd");
+
+        let (app_root, manifest, source) =
+            resolve_app_manifest(relative).expect("relative embedded manifest resolves");
+
+        assert!(app_root.is_absolute());
+        assert_eq!(app_root, root.canonicalize().expect("canonical root"));
+        assert_eq!(manifest.name, "Relative App");
+        assert_eq!(source, ManifestSource::Embedded);
+    }
+
+    #[test]
+    fn resolve_app_manifest_falls_back_to_sibling_spur_app_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("sibling-app");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let notebook_path = root.join("app.ipynb");
+        std::fs::write(
+            &notebook_path,
+            b"{\"cells\":[],\"metadata\":{},\"nbformat\":4,\"nbformat_minor\":5}",
+        )
+        .expect("write notebook");
+        std::fs::write(
+            root.join(SPUR_APP_MANIFEST),
+            r#"{
+              "schema": "spur.app/v1",
+              "name": "Sibling App",
+              "entry_notebook": "app.ipynb",
+              "open_mode": "app",
+              "runtime": { "jute_min": "0.1.0" }
+            }"#,
+        )
+        .expect("write manifest");
+
+        let (app_root, manifest, source) =
+            resolve_app_manifest(&notebook_path).expect("sibling manifest resolves");
+
+        assert!(app_root.is_absolute());
+        assert_eq!(manifest.name, "Sibling App");
+        assert_eq!(
+            source,
+            ManifestSource::SiblingJson(app_root.join(SPUR_APP_MANIFEST))
+        );
     }
 
     #[test]
