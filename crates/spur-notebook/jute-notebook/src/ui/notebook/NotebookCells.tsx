@@ -237,6 +237,43 @@ function CellExecutionMarker({ cellId }: { cellId: string }) {
   );
 }
 
+/**
+ * SQL-cell chrome: a pill signalling the shared kernel DuckDB session, and an
+ * inline-editable output relation name. Naming the relation publishes a DAG
+ * Arrow port; an empty name leaves the result as an anonymous preview.
+ * Presentational only — the parent wires `onRelationChange` to the store.
+ */
+export function SqlCellHeader({
+  relation,
+  onRelationChange,
+}: {
+  relation: string;
+  onRelationChange: (next: string) => void;
+}) {
+  return (
+    <>
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-px font-mono text-[9px] font-semibold text-amber-700"
+        title="Reuses the kernel's shared DuckDB session (views and temp tables persist across SQL cells)"
+      >
+        <span aria-hidden="true">⛁</span> kernel session
+      </span>
+      <label className="inline-flex items-center gap-1 font-mono text-[10px] text-gray-500">
+        <span aria-hidden="true">→</span>
+        <span className="sr-only">relation</span>
+        <input
+          aria-label="relation"
+          className="w-28 rounded bg-amber-100 px-1.5 py-px font-mono text-[10px] font-semibold text-amber-900 placeholder:font-normal placeholder:text-amber-700/50"
+          onChange={(event) => onRelationChange(event.target.value)}
+          placeholder="relation"
+          spellCheck={false}
+          value={relation}
+        />
+      </label>
+    </>
+  );
+}
+
 function CellLanguageHeader({ cellId }: { cellId: string }) {
   const notebook = useNotebook();
   const cell = useStore(notebook.store, (s) => s.serverState.cells[cellId]);
@@ -289,6 +326,14 @@ function CellLanguageHeader({ cellId }: { cellId: string }) {
           />
         )}
       </div>
+      {languageId === "sql" && (
+        <SqlCellHeader
+          relation={cell.dagMetadata?.produces?.[0]?.port ?? ""}
+          onRelationChange={(next) => {
+            void notebook.setCellProducedPort(cellId, next);
+          }}
+        />
+      )}
       {isAi && (
         <span
           className={clsx(

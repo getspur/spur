@@ -1674,6 +1674,47 @@ export class Notebook {
     await reconcileNotebookDelta(this, response.result.data as NotebookDelta);
   }
 
+  /**
+   * Set (or clear) the single Arrow port a SQL cell publishes. An empty name
+   * clears `dag.produces` (anonymous preview). Mirrors `setCellCodeType`'s
+   * optimistic-snapshot + delta-reconcile protocol.
+   */
+  async setCellProducedPort(cellId: string, port: string) {
+    const cell = selectCell(this.state, cellId);
+    if (!cell || cell.type !== "code") return;
+    const trimmed = port.trim();
+    const current = cell.dagMetadata?.produces?.[0]?.port ?? "";
+    if (trimmed === current) return;
+    const nextDag: CellDagMetadata = {
+      produces: trimmed ? [{ port: trimmed, repr: "arrow" }] : [],
+      consumes: cell.dagMetadata?.consumes ?? [],
+      ...(cell.dagMetadata?.source ? { source: cell.dagMetadata.source } : {}),
+    };
+    const expectedVersion = cell.version;
+    this.applyLocalCellSnapshot(cellId, {
+      ...cell,
+      dagMetadata: nextDag,
+      version: expectedVersion + 1,
+    });
+
+    const response = await daemonControl({
+      command: "set_cell_metadata",
+      id: cellId,
+      patch: { spur: { dag: nextDag } },
+      expected_version: expectedVersion,
+    });
+    if (!response.ok) {
+      throw new Error(
+        response.error?.message ?? "Failed to update produced port metadata",
+      );
+    }
+    if (response.result?.type !== "delta") {
+      throw new Error("daemon set_cell_metadata did not return a delta");
+    }
+
+    await reconcileNotebookDelta(this, response.result.data as NotebookDelta);
+  }
+
   setSelectedCell(cellId: string) {
     this.state.viewStateActions.setSelectedCell(cellId);
   }
