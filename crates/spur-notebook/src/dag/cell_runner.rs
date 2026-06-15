@@ -54,6 +54,7 @@ where
         Box::pin(async move {
             let routing = resolve_cell_routing(&request)?;
             if routing.kernelspec != "spur" {
+                let request = prepare_cell_source(request, &routing);
                 return self.inner.run_cell(request).await;
             }
 
@@ -116,6 +117,7 @@ impl From<AiError> for EngineError {
 
 struct CellRouting {
     kernelspec: String,
+    code_type: Option<String>,
     consumed: Vec<String>,
     produced: Option<String>,
 }
@@ -144,15 +146,15 @@ fn resolve_cell_routing(request: &CellRunRequest) -> Result<CellRouting, EngineE
     let metadata = cell.get("metadata").unwrap_or(&Value::Null);
     let spur = metadata.get("spur").unwrap_or(&Value::Null);
     let dag = spur.get("dag").unwrap_or(&Value::Null);
+    let code_type = spur
+        .get("code_type")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let kernelspec = metadata
         .get("kernelspec")
         .and_then(kernelspec_name)
         .or_else(|| spur.get("kernelspec").and_then(kernelspec_name))
-        .or_else(|| {
-            spur.get("code_type")
-                .and_then(Value::as_str)
-                .and_then(code_type_kernelspec)
-        })
+        .or_else(|| code_type.as_deref().and_then(code_type_kernelspec))
         .or(root_kernelspec)
         .unwrap_or_else(|| "python3".to_owned());
     let consumed = dag
@@ -172,6 +174,7 @@ fn resolve_cell_routing(request: &CellRunRequest) -> Result<CellRouting, EngineE
 
     Ok(CellRouting {
         kernelspec,
+        code_type,
         consumed,
         produced,
     })
@@ -194,8 +197,30 @@ fn code_type_kernelspec(code_type: &str) -> Option<String> {
         "javascript" => Some(jute_kernelspec_for(CodeType::Javascript).to_owned()),
         "rust" => Some(jute_kernelspec_for(CodeType::Rust).to_owned()),
         "go" => Some(jute_kernelspec_for(CodeType::Go).to_owned()),
+        "sql" => Some(jute_kernelspec_for(CodeType::Sql).to_owned()),
         "spur" => Some("spur".to_owned()),
         _ => None,
+    }
+}
+
+fn prepare_cell_source(mut request: CellRunRequest, routing: &CellRouting) -> CellRunRequest {
+    if routing.code_type.as_deref() == Some("sql") {
+        request.code = transpile_sql_cell(&request.code, routing.produced.as_deref());
+    }
+    request
+}
+
+/// Wrap a DuckDB SQL cell into Python executed on the shared default connection.
+/// When `produced` is set, the Arrow result binds to that kernel global so the
+/// existing produced-port capture publishes it. Otherwise the query runs for its
+/// side effects / preview only.
+fn transpile_sql_cell(sql: &str, produced: Option<&str>) -> String {
+    let literal = sql.replace("\"\"\"", "\\\"\\\"\\\"");
+    match produced {
+        Some(name) => {
+            format!("import duckdb\n{name} = duckdb.sql(r\"\"\"{literal}\"\"\").arrow()\n{name}")
+        }
+        None => format!("import duckdb\nduckdb.sql(r\"\"\"{literal}\"\"\")"),
     }
 }
 
@@ -363,6 +388,68 @@ mod tests {
 
         assert_eq!(outcome.status, CellRunStatus::Succeeded);
         assert_eq!(requests.lock().expect("requests").len(), 1);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn code_type_kernelspec_maps_sql_to_python3() {
+        assert_eq!(code_type_kernelspec("sql").as_deref(), Some("python3"));
+    }
+
+    #[test]
+    fn transpile_sql_binds_produced_relation_as_arrow() {
+        let py = transpile_sql_cell("SELECT 1 AS x", Some("answer"));
+        assert!(py.contains("import duckdb"));
+        assert!(py.contains("answer ="));
+        assert!(py.contains(".arrow()"));
+        assert!(py.contains("SELECT 1 AS x"));
+    }
+
+    #[test]
+    fn transpile_sql_runs_anonymously_without_produced() {
+        let py = transpile_sql_cell("SELECT 1", None);
+        assert!(py.contains("duckdb.sql("));
+        assert!(!py.contains(" = duckdb.sql"));
+    }
+
+    #[tokio::test]
+    async fn sql_cell_delegates_transpiled_source_to_inner_runner() {
+        let temp = TempDir::new().expect("temp dir");
+        let notebook_path = temp.path().join("sql.ipynb");
+        let mut sql = cell(
+            "sql",
+            "python3",
+            "SELECT 1 AS x",
+            vec!["answer"],
+            Vec::new(),
+        );
+        let Cell::Code(code) = &mut sql else {
+            panic!("expected code cell");
+        };
+        code.metadata
+            .spur
+            .as_mut()
+            .expect("spur metadata")
+            .code_type = Some(CodeType::Sql);
+        write_notebook(&notebook_path, vec![sql]);
+
+        let backend = Arc::new(FakeAiBackend::default());
+        let inner = FakeInnerRunner::default();
+        let requests = inner.requests.clone();
+        let runner = NotebookCellRunner::new_with_inner(inner, backend.clone());
+
+        let outcome = runner
+            .run_cell(request(&notebook_path, "sql", "SELECT 1 AS x"))
+            .await
+            .expect("delegated run");
+
+        assert_eq!(outcome.status, CellRunStatus::Succeeded);
+        let requests = requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].code.contains("answer ="));
+        assert!(requests[0].code.contains("duckdb.sql("));
+        assert!(requests[0].code.contains(".arrow()"));
+        assert!(requests[0].code.contains("SELECT 1 AS x"));
         assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
     }
 

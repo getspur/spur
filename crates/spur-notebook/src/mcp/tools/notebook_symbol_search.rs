@@ -278,6 +278,7 @@ fn code_type_name(code_type: CodeType) -> &'static str {
         CodeType::Javascript => "javascript",
         CodeType::Rust => "rust",
         CodeType::Go => "go",
+        CodeType::Sql => "sql",
     }
 }
 
