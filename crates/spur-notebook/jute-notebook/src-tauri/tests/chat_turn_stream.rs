@@ -6,8 +6,8 @@ use agent_client_protocol::schema::{
     ContentBlock, ContentChunk, InitializeRequest, InitializeResponse, ListSessionsRequest,
     ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionResponse, PermissionOption,
     PermissionOptionKind, PromptRequest, ProtocolVersion, RequestPermissionRequest, SessionId,
-    SessionInfo, SessionNotification, SessionUpdate, TextContent, ToolCallUpdate,
-    ToolCallUpdateFields,
+    SessionInfo, SessionModeId, SessionNotification, SessionUpdate, SetSessionModeRequest,
+    SetSessionModeResponse, TextContent, ToolCallUpdate, ToolCallUpdateFields,
 };
 use async_trait::async_trait;
 use futures::{stream, Stream};
@@ -25,6 +25,8 @@ struct FakeState {
     prompt_requests: Vec<PromptRequest>,
     prompt_chunks: Vec<String>,
     broadcast_chunks: Vec<String>,
+    advertised_session_modes: Option<Vec<SessionModeId>>,
+    set_session_modes: Vec<(String, String)>,
     next_session: usize,
     notification_tx: Option<broadcast::Sender<SessionNotification>>,
 }
@@ -85,6 +87,21 @@ impl AgentConnection for FakeConn {
 
     fn health(&self) -> AgentHealth {
         AgentHealth::Ready
+    }
+
+    fn advertised_session_modes(&self, _: &SessionId) -> Option<Vec<SessionModeId>> {
+        self.state.lock().unwrap().advertised_session_modes.clone()
+    }
+
+    async fn set_session_mode(
+        &mut self,
+        request: SetSessionModeRequest,
+    ) -> anyhow::Result<SetSessionModeResponse> {
+        self.state.lock().unwrap().set_session_modes.push((
+            request.session_id.0.to_string(),
+            request.mode_id.0.to_string(),
+        ));
+        Ok(SetSessionModeResponse::new())
     }
 
     async fn load_session(
@@ -244,4 +261,45 @@ async fn permission_response_resolves_pending_manager_request() {
 
     assert_eq!(reply_rx.await.unwrap().option_id, "allow");
     assert_eq!(chat.pending_permission_count().await, 0);
+}
+
+#[tokio::test]
+async fn advertised_session_modes_return_cached_modes_for_scope() {
+    let (chat, state) = chat_with_fake();
+    state.lock().unwrap().advertised_session_modes = Some(vec![
+        SessionModeId::new("default"),
+        SessionModeId::new("acceptEdits"),
+        SessionModeId::new("bypassPermissions"),
+    ]);
+    let session_id = chat.ensure_session(&scope()).await.unwrap();
+
+    let modes = chat.advertised_session_modes(&scope()).await.unwrap();
+
+    assert_eq!(session_id.0.as_ref(), "session-1");
+    assert_eq!(
+        modes,
+        Some(vec![
+            SessionModeId::new("default"),
+            SessionModeId::new("acceptEdits"),
+            SessionModeId::new("bypassPermissions")
+        ])
+    );
+    assert_eq!(state.lock().unwrap().next_session, 1);
+}
+
+#[tokio::test]
+async fn set_session_mode_targets_the_cached_scope_session() {
+    let (chat, state) = chat_with_fake();
+    let session_id = chat.ensure_session(&scope()).await.unwrap();
+
+    chat.set_session_mode(&scope(), "bypassPermissions".to_string())
+        .await
+        .unwrap();
+
+    assert_eq!(session_id.0.as_ref(), "session-1");
+    assert_eq!(
+        state.lock().unwrap().set_session_modes,
+        vec![("session-1".into(), "bypassPermissions".into())]
+    );
+    assert_eq!(state.lock().unwrap().next_session, 1);
 }
