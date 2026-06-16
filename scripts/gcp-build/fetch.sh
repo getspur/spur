@@ -8,7 +8,7 @@
 #   ./fetch.sh target/release/spur                  # → ./target/release/spur (relative to worktree)
 #   ./fetch.sh target/debug/deps/foo-abc            # any path under target/
 #   ./fetch.sh --to /tmp/spur target/release/spur   # explicit local dest
-#   ./fetch.sh --bins                               # → ${CARGO_HOME:-$HOME/.cargo}/bin/{spur,spur-notebook}
+#   ./fetch.sh --bins                               # → ${CARGO_HOME:-$HOME/.cargo}/bin/spur
 #   ./fetch.sh --bins --to /tmp/bin                 # explicit local bin dir
 set -euo pipefail
 
@@ -94,7 +94,7 @@ if [[ $FETCH_BINS -eq 1 ]]; then
     BIN_DEST="${LOCAL_DEST:-${CARGO_HOME:-$HOME/.cargo}/bin}"
     mkdir -p "$BIN_DEST"
 
-    for bin in spur spur-notebook; do
+    for bin in spur; do
         fetch_one "target/release/$bin" "$BIN_DEST/$bin"
         chmod 0755 "$BIN_DEST/$bin"
     done
