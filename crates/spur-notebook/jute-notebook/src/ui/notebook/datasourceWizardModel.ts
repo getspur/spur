@@ -21,6 +21,8 @@ export type DatasourceSourceFamily = {
   duckDbMechanism: string;
   setupRequirements: readonly string[];
   defaultExampleInput: string;
+  attachable: boolean;
+  attachUnavailableReason?: string;
 };
 
 export type DatasourceWizardStep = {
@@ -55,6 +57,7 @@ export const DATASOURCE_SOURCE_FAMILIES = [
     duckDbMechanism: "Native file scans and read_csv/read_json/read_parquet",
     setupRequirements: ["Readable local path"],
     defaultExampleInput: "/Users/me/data/orders.parquet",
+    attachable: true,
   },
   {
     key: "cloud_object_storage",
@@ -63,6 +66,9 @@ export const DATASOURCE_SOURCE_FAMILIES = [
     duckDbMechanism: "httpfs extension with object-store secrets",
     setupRequirements: ["Bucket URL", "Cloud credentials or signed URL"],
     defaultExampleInput: "s3://company-lake/events/*.parquet",
+    attachable: false,
+    attachUnavailableReason:
+      "Unavailable until a backend attach contract exists for object storage.",
   },
   {
     key: "lakehouse",
@@ -71,6 +77,9 @@ export const DATASOURCE_SOURCE_FAMILIES = [
     duckDbMechanism: "DuckDB lakehouse extensions and parquet metadata scans",
     setupRequirements: ["Table root or catalog URI", "Catalog credentials"],
     defaultExampleInput: "s3://warehouse/tables/orders_delta",
+    attachable: false,
+    attachUnavailableReason:
+      "Unavailable until a backend attach contract exists for lakehouse tables.",
   },
   {
     key: "database",
@@ -79,6 +88,9 @@ export const DATASOURCE_SOURCE_FAMILIES = [
     duckDbMechanism: "DuckDB database scanner extensions and ATTACH",
     setupRequirements: ["Connection string", "Database credentials"],
     defaultExampleInput: "postgres://user@localhost:5432/app",
+    attachable: false,
+    attachUnavailableReason:
+      "Unavailable until a backend attach contract exists for external databases.",
   },
   {
     key: "rest_api",
@@ -87,6 +99,7 @@ export const DATASOURCE_SOURCE_FAMILIES = [
     duckDbMechanism: "httpfs plus generated table-functions over API responses",
     setupRequirements: ["Base URL or provider", "API credentials or token"],
     defaultExampleInput: "https://api.example.com/openapi.json",
+    attachable: true,
   },
   {
     key: "rss",
@@ -99,6 +112,7 @@ export const DATASOURCE_SOURCE_FAMILIES = [
       "Query feeds with rss_feed(url) or rss_entries(url)",
     ],
     defaultExampleInput: "rsshub://youtube/video/UC123",
+    attachable: true,
   },
   {
     key: "advanced_sql",
@@ -107,6 +121,9 @@ export const DATASOURCE_SOURCE_FAMILIES = [
     duckDbMechanism: "User-authored DuckDB SQL, views, macros, and extensions",
     setupRequirements: ["SQL statement or script", "Referenced attachments"],
     defaultExampleInput: "select * from read_parquet('/data/*.parquet')",
+    attachable: false,
+    attachUnavailableReason:
+      "Unavailable until a backend attach contract exists for advanced SQL attachments.",
   },
 ] as const satisfies readonly DatasourceSourceFamily[];
 

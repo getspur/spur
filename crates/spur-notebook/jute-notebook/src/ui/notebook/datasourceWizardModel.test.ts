@@ -33,6 +33,30 @@ describe("datasourceWizardModel", () => {
     expect(datasourceFamilyByKey.rss.defaultExampleInput).toContain("rsshub://");
   });
 
+  test("marks only attachable schema-backed families as attachable", () => {
+    expect(
+      DATASOURCE_SOURCE_FAMILIES.filter((family) => family.attachable).map(
+        (family) => family.key,
+      ),
+    ).toEqual(["file", "rest_api", "rss"]);
+    expect(
+      DATASOURCE_SOURCE_FAMILIES.filter((family) => !family.attachable).map(
+        (family) => family.key,
+      ),
+    ).toEqual([
+      "cloud_object_storage",
+      "lakehouse",
+      "database",
+      "advanced_sql",
+    ]);
+
+    for (const family of DATASOURCE_SOURCE_FAMILIES.filter(
+      (family) => !family.attachable,
+    )) {
+      expect(family.attachUnavailableReason).toMatch(/attach contract/i);
+    }
+  });
+
   test("defines generalized wizard steps and a REST-compatible subset", () => {
     expect(DATASOURCE_WIZARD_STEPS.map((step) => step.key)).toEqual([
       "source",

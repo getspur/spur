@@ -258,6 +258,26 @@ function tablePreviewResponse() {
   };
 }
 
+function githubTablePreviewResponse() {
+  return {
+    ok: true,
+    result: {
+      type: "openApiTablePreview" as const,
+      data: {
+        tables: [
+          {
+            name: "repositories",
+            method: "GET",
+            path: "/user/repos",
+            responsePath: null,
+            columns: [{ name: "name", ty: "Utf8", json: "$.name" }],
+          },
+        ],
+      },
+    },
+  };
+}
+
 function datasourceResponse() {
   return {
     ok: true,
@@ -611,17 +631,24 @@ describe("AddRestApiWizard", () => {
     expect(
       screen.getByRole("heading", { name: "Add RSS / RSSHub" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Datasource name")).toHaveValue("rss");
-    expect(screen.getAllByText("rss_routes").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("rss_feed").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("rss_entries").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Schema name")).toHaveValue("rss");
+    fireEvent.change(screen.getByLabelText("Schema name"), {
+      target: { value: "rss_work" },
+    });
+    expect(screen.getAllByText("rss_work.rss_routes").length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getAllByText("rss_work.rss_feed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("rss_work.rss_entries").length).toBeGreaterThan(
+      0,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
 
     await waitFor(() =>
       expect(daemonControlMock).toHaveBeenCalledWith({
         command: "add_api_datasource",
-        name: "rss",
+        name: "rss_work",
         source: "rss",
       }),
     );
@@ -868,7 +895,10 @@ describe("AddRestApiWizard", () => {
     expect(screen.getByLabelText("File or folder path")).toHaveValue(
       "/Users/me/data/orders.parquet",
     );
-    expect(screen.getByText(/read_csv_auto/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Local file attach uses the notebook file callback/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Generated SQL")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(
@@ -886,10 +916,10 @@ describe("AddRestApiWizard", () => {
     expect(
       screen.getByRole("heading", { name: "Attach file or folder" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Generated SQL")).toBeInTheDocument();
     expect(
-      screen.getByText(/create or replace view orders/i),
+      screen.getByText(/The selected local path will be attached directly/i),
     ).toBeInTheDocument();
+    expect(screen.queryByText("Generated SQL")).not.toBeInTheDocument();
   });
 
   test("file_family_can_pick_local_file_and_attach_through_callbacks", async () => {
@@ -924,6 +954,25 @@ describe("AddRestApiWizard", () => {
       expect(onAttachLocalFile).toHaveBeenCalledWith("/tmp/inventory.parquet"),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  test("generic_non_attachable_families_cannot_progress_to_attach_cta", () => {
+    for (const familyName of [
+      /URL or object storage/i,
+      /Lakehouse table/i,
+      /External database/i,
+      /Advanced SQL attach/i,
+    ]) {
+      cleanup();
+      renderWizard();
+
+      fireEvent.click(screen.getByRole("button", { name: familyName }));
+
+      expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "Attach datasource" }))
+        .not.toBeInTheDocument();
+      expect(screen.getByText(/backend attach contract/i)).toBeInTheDocument();
+    }
   });
 
   test("picking_a_catalog_provider_advances_to_resolved_connect_fields", async () => {
@@ -1236,7 +1285,7 @@ describe("AddRestApiWizard", () => {
     expect(
       await screen.findByRole("heading", { name: "Connect to Stripe" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Datasource name")).toHaveValue(
+    expect(screen.getByLabelText("Schema name")).toHaveValue(
       "stripe_reporting",
     );
     expect(
@@ -1356,7 +1405,7 @@ describe("AddRestApiWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    fireEvent.change(screen.getByLabelText("Datasource name"), {
+    fireEvent.change(screen.getByLabelText("Schema name"), {
       target: { value: "stripe_reporting" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -1381,7 +1430,7 @@ describe("AddRestApiWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    fireEvent.change(screen.getByLabelText("Datasource name"), {
+    fireEvent.change(screen.getByLabelText("Schema name"), {
       target: { value: "custom_api" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -1399,12 +1448,61 @@ describe("AddRestApiWizard", () => {
     ).toBeDisabled();
   });
 
+  test("rest_review_shows_schema_qualified_tables_and_preserves_name_payload", async () => {
+    const onClose = vi.fn();
+
+    daemonControlMock.mockImplementation((command: { command: string }) => {
+      if (command.command === "preview_open_api_tables") {
+        return Promise.resolve(githubTablePreviewResponse());
+      }
+      if (command.command === "add_api_datasource_from_import") {
+        return Promise.resolve(datasourceResponse());
+      }
+      return Promise.resolve({
+        ok: true,
+        result: { type: "empty" },
+      });
+    });
+
+    renderWizard(onClose);
+
+    fireEvent.click(screen.getByRole("button", { name: /OpenAPI spec/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("Schema name"), {
+      target: { value: "github_work" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(screen.getByLabelText("OpenAPI spec text or URL"), {
+      target: { value: SPEC_TEXT },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Preview tables" }));
+
+    expect(await screen.findByText("repositories")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByText("github_work.repositories")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "add_api_datasource_from_import",
+        name: "github_work",
+        provider: null,
+        spec_text: SPEC_TEXT,
+        credentials: [],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
   test("review_adds_datasource_from_import_with_candidate_spec_and_credentials", async () => {
     const onClose = renderWizard();
 
     await chooseAsanaProvider();
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    fireEvent.change(await screen.findByLabelText("Datasource name"), {
+    fireEvent.change(await screen.findByLabelText("Schema name"), {
       target: { value: "asana_reporting" },
     });
     fireEvent.change(screen.getByLabelText("ASANA_TOKEN"), {

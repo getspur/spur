@@ -1049,14 +1049,28 @@ fn spur_rest_extension_path() -> PathBuf {
 
 #[cfg(feature = "datasource-introspect")]
 fn datasource_setup_statements(entry: &jute::commands::DatasourceEntry) -> Vec<String> {
+    let schema = datasource_schema_name(entry);
+
     if entry.kind == jute::commands::DatasourceKind::ApiTables {
-        return Vec::new();
+        let mut statements = vec![create_schema_statement(schema)];
+        statements.extend(entry.tables.iter().map(|table| {
+            create_schema_view_statement(
+                schema,
+                &table.name,
+                format!(
+                    "{}()",
+                    sql_identifier(&api_backing_table_function(entry, &table.name))
+                ),
+            )
+        }));
+        return statements;
     }
 
     if matches!(
         entry.kind,
         jute::commands::DatasourceKind::DuckDb | jute::commands::DatasourceKind::Sqlite
     ) {
+        let raw_alias = attached_datasource_raw_alias(entry);
         let attach_options = match entry.kind {
             jute::commands::DatasourceKind::DuckDb => "READ_ONLY",
             jute::commands::DatasourceKind::Sqlite => "TYPE sqlite, READ_ONLY",
@@ -1065,25 +1079,81 @@ fn datasource_setup_statements(entry: &jute::commands::DatasourceEntry) -> Vec<S
         let mut statements = vec![format!(
             "ATTACH IF NOT EXISTS {} AS {} ({attach_options})",
             sql_string_literal(&entry.path),
-            sql_identifier(&entry.name)
+            sql_identifier(&raw_alias)
         )];
-        statements.extend(entry.tables.iter().map(|table| {
-            format!(
-                "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}.{}.{}",
-                sql_identifier(&format!("{}__{}", entry.name, table.name)),
-                sql_identifier(&entry.name),
+        statements.push(create_schema_statement(schema));
+        for table in &entry.tables {
+            let select_from = format!(
+                "{}.{}.{}",
+                sql_identifier(&raw_alias),
                 sql_identifier("main"),
                 sql_identifier(&table.name)
-            )
-        }));
+            );
+            statements.push(create_schema_view_statement(
+                schema,
+                &table.name,
+                select_from.clone(),
+            ));
+            // Backward-compatible legacy alias. Canonical queries should use
+            // the schema-qualified view above.
+            statements.push(create_flat_view_statement(
+                &format!("{}__{}", entry.name, table.name),
+                select_from,
+            ));
+        }
         return statements;
     }
 
-    vec![format!(
+    let select_from = datasource_scan_expression(entry);
+    vec![
+        create_schema_statement(schema),
+        create_schema_view_statement(schema, "main", select_from.clone()),
+        create_flat_view_statement(&entry.name, select_from),
+    ]
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn datasource_schema_name(entry: &jute::commands::DatasourceEntry) -> &str {
+    entry.name.as_str()
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn attached_datasource_raw_alias(entry: &jute::commands::DatasourceEntry) -> String {
+    format!("__spur_raw_{}", entry.name)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn api_backing_table_function(entry: &jute::commands::DatasourceEntry, table_name: &str) -> String {
+    let prefix = format!("{}_", entry.path);
+    if table_name.starts_with(&prefix) {
+        table_name.to_string()
+    } else {
+        format!("{prefix}{table_name}")
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn create_schema_statement(schema: &str) -> String {
+    format!("CREATE SCHEMA IF NOT EXISTS {}", sql_identifier(schema))
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn create_schema_view_statement(schema: &str, table: &str, select_from: String) -> String {
+    format!(
+        "CREATE OR REPLACE VIEW {}.{} AS SELECT * FROM {}",
+        sql_identifier(schema),
+        sql_identifier(table),
+        select_from
+    )
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn create_flat_view_statement(name: &str, select_from: String) -> String {
+    format!(
         "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
-        sql_identifier(&entry.name),
-        datasource_scan_expression(entry)
-    )]
+        sql_identifier(name),
+        select_from
+    )
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -1895,11 +1965,11 @@ fn normalize_api_datasource_source(source: &str) -> Result<String, BridgeError> 
 
 #[cfg(feature = "datasource-introspect")]
 fn api_datasource_table(
-    adapter_name: &str,
+    _adapter_name: &str,
     table: spur_rest_table_gateway::adapter::TableDef,
 ) -> jute::commands::Table {
     jute::commands::Table {
-        name: format!("{}_{}", adapter_name, table.name),
+        name: table.name,
         columns: table
             .schema
             .fields()
@@ -4550,8 +4620,25 @@ mod tests {
 
         let tables = datasource_tables_from_catalog("svc", vec![read, action]);
 
-        assert!(tables.iter().any(|table| table.name == "svc_markets"));
+        assert!(tables.iter().any(|table| table.name == "markets"));
         assert!(!tables.iter().any(|table| table.name == "svc_create"));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn api_datasource_table_keeps_display_name_unprefixed() {
+        use arrow_schema::Schema;
+        use spur_rest_table_gateway::adapter::{TableDef, TableKind};
+
+        let table_def = TableDef {
+            name: "repositories".to_string(),
+            schema: Arc::new(Schema::empty()),
+            kind: TableKind::Table,
+        };
+
+        let table = api_datasource_table("github", table_def);
+
+        assert_eq!(table.name, "repositories");
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -4648,10 +4735,7 @@ score = { json = "$.score", type = "Int64" }
         assert_eq!(template.group.as_deref(), Some(API_DATASOURCE_GROUP));
         assert_eq!(template.manifest_toml, manifest_toml);
         assert!(template.credential_env_vars.is_empty());
-        assert!(template
-            .tables
-            .iter()
-            .any(|table| table.name == "manifest_scores"));
+        assert!(template.tables.iter().any(|table| table.name == "scores"));
 
         let temp_dir = tempfile::Builder::new()
             .prefix("spur-save-api-connection-template-")
@@ -5189,7 +5273,7 @@ score = { json = "$.score", type = "Int64" }
 
     #[cfg(feature = "datasource-introspect")]
     #[test]
-    fn setup_cell_emits_attach_and_views() {
+    fn attached_database_datasource_setup_exposes_schema_views() {
         let entry = jute::commands::DatasourceEntry {
             name: "warehouse".to_string(),
             path: "/tmp/warehouse.duckdb".to_string(),
@@ -5211,19 +5295,70 @@ score = { json = "$.score", type = "Int64" }
             ],
         };
 
-        let source = datasource_setup_source(&[entry]);
-        let sql = duckdb_sql_calls(&source);
+        let statements = datasource_setup_statements(&entry);
 
-        assert!(source.contains("import duckdb"));
         assert_eq!(
-            sql[0],
-            "ATTACH IF NOT EXISTS '/tmp/warehouse.duckdb' AS \"warehouse\" (READ_ONLY)"
-        );
-        assert_eq!(
-            &sql[1..],
+            statements,
             [
-                "CREATE OR REPLACE VIEW \"warehouse__inventory\" AS SELECT * FROM \"warehouse\".\"main\".\"inventory\"",
-                "CREATE OR REPLACE VIEW \"warehouse__sales\" AS SELECT * FROM \"warehouse\".\"main\".\"sales\""
+                "ATTACH IF NOT EXISTS '/tmp/warehouse.duckdb' AS \"__spur_raw_warehouse\" (READ_ONLY)",
+                "CREATE SCHEMA IF NOT EXISTS \"warehouse\"",
+                "CREATE OR REPLACE VIEW \"warehouse\".\"inventory\" AS SELECT * FROM \"__spur_raw_warehouse\".\"main\".\"inventory\"",
+                "CREATE OR REPLACE VIEW \"warehouse__inventory\" AS SELECT * FROM \"__spur_raw_warehouse\".\"main\".\"inventory\"",
+                "CREATE OR REPLACE VIEW \"warehouse\".\"sales\" AS SELECT * FROM \"__spur_raw_warehouse\".\"main\".\"sales\"",
+                "CREATE OR REPLACE VIEW \"warehouse__sales\" AS SELECT * FROM \"__spur_raw_warehouse\".\"main\".\"sales\""
+            ]
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn api_datasource_setup_creates_schema_qualified_views() {
+        let entry = jute::commands::DatasourceEntry {
+            name: "github_work".to_string(),
+            path: "github".to_string(),
+            kind: jute::commands::DatasourceKind::ApiTables,
+            group: Some("API".to_string()),
+            columns: Vec::new(),
+            row_count: None,
+            tables: vec![jute::commands::Table {
+                name: "repositories".to_string(),
+                columns: Vec::new(),
+                row_count: None,
+            }],
+        };
+
+        let statements = datasource_setup_statements(&entry);
+
+        assert_eq!(
+            statements,
+            [
+                "CREATE SCHEMA IF NOT EXISTS \"github_work\"",
+                "CREATE OR REPLACE VIEW \"github_work\".\"repositories\" AS SELECT * FROM \"github_repositories\"()"
+            ]
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn file_datasource_setup_exposes_main_table_under_schema() {
+        let entry = jute::commands::DatasourceEntry {
+            name: "orders_file".to_string(),
+            path: "/tmp/orders.parquet".to_string(),
+            kind: jute::commands::DatasourceKind::Parquet,
+            group: None,
+            columns: Vec::new(),
+            row_count: None,
+            tables: Vec::new(),
+        };
+
+        let statements = datasource_setup_statements(&entry);
+
+        assert_eq!(
+            statements,
+            [
+                "CREATE SCHEMA IF NOT EXISTS \"orders_file\"",
+                "CREATE OR REPLACE VIEW \"orders_file\".\"main\" AS SELECT * FROM read_parquet('/tmp/orders.parquet')",
+                "CREATE OR REPLACE VIEW \"orders_file\" AS SELECT * FROM read_parquet('/tmp/orders.parquet')"
             ]
         );
     }
@@ -5285,6 +5420,7 @@ score = { json = "$.score", type = "Int64" }
         let entry = api_datasource_entry("polymarket");
 
         let source = datasource_setup_source(&[entry]);
+        let sql = duckdb_sql_calls(&source);
 
         assert!(source.contains(
             "_SPUR_DUCKDB_CONNECTION = duckdb.connect(\n        database=\":memory:\",\n        config={\"allow_unsigned_extensions\": \"true\"},\n    )"
@@ -5295,7 +5431,13 @@ score = { json = "$.score", type = "Int64" }
         assert!(source.contains("duckdb.sql(f\"LOAD '{_SPUR_DUCKDB_EXTENSION_SQL}'\")"));
         assert_eq!(source.matches("duckdb.sql(f\"LOAD").count(), 1);
         assert!(!source.contains("ATTACH"));
-        assert!(!source.contains("CREATE OR REPLACE VIEW"));
+        assert_eq!(
+            sql,
+            [
+                "CREATE SCHEMA IF NOT EXISTS \"polymarket\"",
+                "CREATE OR REPLACE VIEW \"polymarket\".\"markets\" AS SELECT * FROM \"polymarket_markets\"()"
+            ]
+        );
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -5333,7 +5475,7 @@ score = { json = "$.score", type = "Int64" }
             entry.tables,
             vec![
                 jute::commands::Table {
-                    name: "polymarket_markets".to_string(),
+                    name: "markets".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "id".to_string(),
@@ -5355,7 +5497,7 @@ score = { json = "$.score", type = "Int64" }
                     row_count: None,
                 },
                 jute::commands::Table {
-                    name: "polymarket_orderbook".to_string(),
+                    name: "orderbook".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "price".to_string(),
@@ -5408,7 +5550,7 @@ score = { json = "$.score", type = "Int64" }
             entry.tables,
             vec![
                 jute::commands::Table {
-                    name: "rss_routes".to_string(),
+                    name: "routes".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "source_key".to_string(),
@@ -5470,7 +5612,7 @@ score = { json = "$.score", type = "Int64" }
                     row_count: None,
                 },
                 jute::commands::Table {
-                    name: "rss_feed".to_string(),
+                    name: "feed".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "url".to_string(),
@@ -5492,7 +5634,7 @@ score = { json = "$.score", type = "Int64" }
                     row_count: None,
                 },
                 jute::commands::Table {
-                    name: "rss_entries".to_string(),
+                    name: "entries".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "feed_url".to_string(),
@@ -5601,7 +5743,7 @@ paths:
         assert!(entry.columns.is_empty());
         assert_eq!(entry.row_count, None);
         let charges_table = jute::commands::Table {
-            name: "stripe_charges".to_string(),
+            name: "charges".to_string(),
             columns: vec![
                 jute::commands::Column {
                     name: "id".to_string(),
@@ -6656,7 +6798,7 @@ paths:
             .as_array()
             .expect("tables array")
             .iter()
-            .any(|table| table["name"] == "polymarket_markets"));
+            .any(|table| table["name"] == "markets"));
         assert_eq!(jute_state.datasource_catalog.lock().list().len(), 1);
 
         client.cancel().await.expect("client closes");
@@ -6696,7 +6838,7 @@ paths:
                         "rowCount": null,
                         "tables": [
                             {
-                                "name": "polymarket_markets",
+                                "name": "markets",
                                 "columns": [
                                     {
                                         "name": "id",
@@ -7149,7 +7291,7 @@ paths:
             columns: Vec::new(),
             row_count: None,
             tables: vec![jute::commands::Table {
-                name: "polymarket_markets".to_string(),
+                name: "markets".to_string(),
                 columns: vec![jute::commands::Column {
                     name: "id".to_string(),
                     sql_type: "VARCHAR".to_string(),
