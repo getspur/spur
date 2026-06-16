@@ -1242,4 +1242,55 @@ describe("DatasourcePanel", () => {
       ),
     );
   });
+
+  test("api_tables_entry_normalizes_legacy_provider_prefixed_table_relations", async () => {
+    render(<DatasourcePanel />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [
+          datasourceEntry({
+            name: "github",
+            path: "github",
+            kind: "api_tables",
+            group: "API",
+            columns: [],
+            rowCount: null,
+            tables: [
+              {
+                name: "github_user_followers",
+                columns: [{ name: "login", sqlType: "VARCHAR" }],
+                rowCount: null,
+              },
+            ],
+          }),
+        ],
+      });
+    });
+
+    expect(await screen.findByText("github.user_followers")).toBeInTheDocument();
+    expect(
+      screen.queryByText("github.github_user_followers"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Schedule query github.user_followers",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "insert_cell",
+        kind: "code",
+        after_id: null,
+        source: "SELECT * FROM github.user_followers LIMIT 100;\n",
+        last_edited_by: "datasource",
+        code_type: "sql",
+      });
+    });
+  });
 });
