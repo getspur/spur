@@ -226,12 +226,41 @@ fn prepare_cell_source(mut request: CellRunRequest, routing: &CellRouting) -> Ce
 /// side effects / preview only.
 fn transpile_sql_cell(sql: &str, produced: Option<&str>) -> String {
     let literal = sql.replace("\"\"\"", "\\\"\\\"\\\"");
+    let bootstrap = sql_cell_duckdb_bootstrap();
     match produced {
         Some(name) => {
-            format!("import duckdb\n{name} = duckdb.sql(r\"\"\"{literal}\"\"\").arrow()\n{name}")
+            format!("{bootstrap}{name} = duckdb.sql(r\"\"\"{literal}\"\"\").arrow()\n{name}")
         }
-        None => format!("import duckdb\nduckdb.sql(r\"\"\"{literal}\"\"\")"),
+        None => format!("{bootstrap}duckdb.sql(r\"\"\"{literal}\"\"\")"),
     }
+}
+
+fn sql_cell_duckdb_bootstrap() -> String {
+    let extension_path = crate::extension_install::extension_install_dir()
+        .join(crate::extension_install::loaded_extension_filename())
+        .display()
+        .to_string();
+    let extension_path = serde_json::to_string(&extension_path)
+        .unwrap_or_else(|_| "\"~/.spur/extensions/spur_rest.duckdb_extension\"".to_owned());
+
+    format!(
+        r#"import duckdb
+_SPUR_DUCKDB_EXTENSION_PATH = {extension_path}
+_SPUR_DUCKDB_EXTENSION_SQL = _SPUR_DUCKDB_EXTENSION_PATH.replace("'", "''")
+
+if "_SPUR_DUCKDB_CONNECTION" not in globals():
+    _SPUR_DUCKDB_CONNECTION = duckdb.connect(
+        database=":memory:",
+        config={{"allow_unsigned_extensions": "true"}},
+    )
+
+duckdb.set_default_connection(_SPUR_DUCKDB_CONNECTION)
+if not globals().get("_SPUR_REST_EXTENSION_LOADED", False):
+    duckdb.sql(f"LOAD '{{_SPUR_DUCKDB_EXTENSION_SQL}}'")
+    _SPUR_REST_EXTENSION_LOADED = True
+
+"#
+    )
 }
 
 /// Conservative lineage helper: the identifier token immediately after a `FROM`
@@ -453,6 +482,25 @@ mod tests {
         let py = transpile_sql_cell("SELECT 1", None);
         assert!(py.contains("duckdb.sql("));
         assert!(!py.contains(" = duckdb.sql"));
+    }
+
+    #[test]
+    fn transpile_sql_bootstraps_spur_rest_extension_before_query() {
+        let py = transpile_sql_cell("SELECT * FROM polymarket_markets() LIMIT 100", None);
+
+        let bootstrap = py
+            .find("allow_unsigned_extensions")
+            .expect("bootstrap enables unsigned DuckDB extensions");
+        let load = py
+            .find("spur_rest.duckdb_extension")
+            .expect("bootstrap references bundled REST extension");
+        let query = py
+            .find("SELECT * FROM polymarket_markets() LIMIT 100")
+            .expect("query is present");
+
+        assert!(bootstrap < query);
+        assert!(load < query);
+        assert!(py.contains("duckdb.set_default_connection"));
     }
 
     #[test]
