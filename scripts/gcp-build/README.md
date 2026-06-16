@@ -2,19 +2,19 @@
 
 ## Production Builder Shape
 
-The default remote builder is `c4d-standard-16` in `asia-southeast1-a`, running
-as a Spot VM with a persistent 300 GB `hyperdisk-balanced` cache disk. This keeps
-the 16 vCPU footprint of the previous `c4d-highcpu-16` builder while doubling RAM
-to avoid OOM-killed concurrent `rust-lld` link bursts. Hyperdisk Balanced is
-cheaper than the old 300 GB SSD Persistent Disk while still providing enough IOPS
-for the cargo target/cache workload.
+The default remote builder is `c4d-standard-16-lssd` in `asia-southeast1-a`,
+running as a Spot VM with one attached 375 GiB Local SSD. The Local SSD is
+mounted at `/mnt/cargo` and used for cargo target dirs, cargo-home, rustup,
+pnpm stores, temp files, and the local sccache L1. This trades persistent
+target/ reuse for much lower-latency random I/O, while the regional GCS sccache
+bucket remains the durable L2 across Spot deletion and VM recreation.
 
-Remote `sccache` uses a multi-level cache on the builder: a 16 GB tmpfs mounted
-at `/mnt/sccache-ram` is the fast L1 disk backend (`SCCACHE_CACHE_SIZE=15G`),
-and the regional GCS bucket remains the shared L2 backend. GCS hits are
-backfilled into tmpfs by `sccache 0.15.0`, so repeated hot compile artifacts
-avoid the network round trip while preserving cross-VM/worktree reuse through
-the bucket.
+Remote `sccache` uses a multi-level cache on the builder: a 50 GB disk backend
+under `/mnt/cargo/sccache` is the fast Local SSD L1
+(`SCCACHE_CACHE_SIZE=50G`), and the regional GCS bucket remains the shared L2
+backend. GCS hits are backfilled into Local SSD by `sccache 0.15.0`, so repeated
+hot compile artifacts avoid the network round trip while preserving
+cross-VM/worktree reuse through the bucket.
 
 Source sync prefers direct SSH to the VM's external IP on
 `SPUR_DIRECT_SSH_PORT` (default `22`) and falls back to IAP. Fresh VMs keep sshd
@@ -34,11 +34,10 @@ defaults to `/tmp/spur-gcp-build-queue` and can be changed with
 The production resource names intentionally stay stable:
 
 - VM: `spur-builder`
-- cache disk: `spur-cargo-cache`
 - sccache bucket: `wiilearn-spur-sccache-asia`
 
 Use environment overrides only for one-off benchmarks, for example
-`VM_NAME=spur-builder-c4d-bench CACHE_DISK=spur-cargo-cache-c4d-bench`.
+`VM_NAME=spur-builder-c4d-bench VM_MACHINE_TYPE=c4d-standard-32-lssd`.
 
 ## Local macOS GCS sccache
 
