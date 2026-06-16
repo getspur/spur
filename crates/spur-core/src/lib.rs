@@ -87,10 +87,6 @@
     reason = "legacy core code uses match for destructuring branches with nontrivial else bodies"
 )]
 #![expect(
-    clippy::single_option_map,
-    reason = "legacy optional projection helpers keep mapping isolated in helper functions"
-)]
-#![expect(
     clippy::str_to_string,
     reason = "legacy core code has many &str to String conversions pending mechanical cleanup"
 )]
