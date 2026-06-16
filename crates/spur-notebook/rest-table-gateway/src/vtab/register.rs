@@ -7,6 +7,30 @@ use crate::error::{GatewayError, Result};
 use crate::vtab::bridge::IoBridge;
 use crate::vtab::table_fn::{ApiTableExtra, ApiTableVTab};
 
+pub fn api_table_function_name(source: &str, table: &str) -> String {
+    format!("{source}_{table}")
+}
+
+pub fn register_api_relation_view(conn: &Connection, source: &str, table: &str) -> Result<()> {
+    let schema = duckdb_identifier(source);
+    let relation = duckdb_identifier(table);
+    let function = duckdb_identifier(&api_table_function_name(source, table));
+
+    conn.execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"), [])
+        .map_err(|e| GatewayError::Adapter(e.to_string()))?;
+    conn.execute(
+        &format!("CREATE OR REPLACE VIEW {schema}.{relation} AS SELECT * FROM {function}()"),
+        [],
+    )
+    .map_err(|e| GatewayError::Adapter(e.to_string()))?;
+
+    Ok(())
+}
+
+fn duckdb_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
 /// Register every kind=Table entry of `adapter` as a zero-arg DuckDB table
 /// function named `{source}_{table}`.
 pub fn register_tables(
@@ -20,15 +44,17 @@ pub fn register_tables(
             continue;
         }
 
-        let fn_name = format!("{}_{}", adapter.name(), t.name);
+        let table_name = t.name;
+        let fn_name = api_table_function_name(adapter.name(), &table_name);
         let extra = ApiTableExtra {
             bridge: Arc::clone(&bridge),
             adapter: Arc::clone(&adapter),
-            table: t.name,
+            table: table_name.clone(),
             schema: t.schema,
         };
         conn.register_table_function_with_extra_info::<ApiTableVTab, _>(&fn_name, &extra)
             .map_err(|e| GatewayError::Adapter(e.to_string()))?;
+        register_api_relation_view(conn, adapter.name(), &table_name)?;
         n += 1;
     }
 

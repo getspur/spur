@@ -228,6 +228,24 @@ fn assert_typed_action(conn: &Connection) -> duckdb::Result<()> {
     Ok(())
 }
 
+fn assert_schema_relation(conn: &Connection) -> duckdb::Result<()> {
+    let mut stmt =
+        conn.prepare("SELECT email, verified FROM github.user_emails ORDER BY email")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+        })?
+        .collect::<duckdb::Result<Vec<_>>>()?;
+
+    assert_eq!(
+        rows,
+        vec![("dev@example.test".to_string(), true)],
+        "schema-qualified API relation should scan the backing table function"
+    );
+    println!("schema-relation ok");
+    Ok(())
+}
+
 fn main() -> duckdb::Result<()> {
     let extension_path = env::args()
         .nth(1)
@@ -242,6 +260,7 @@ fn main() -> duckdb::Result<()> {
         "gate" => assert_action_missing(&conn)?,
         "dry-run" => assert_dry_run(&conn)?,
         "typed-action" => assert_typed_action(&conn)?,
+        "schema-relation" => assert_schema_relation(&conn)?,
         other => panic!("unknown action harness scenario: {other}"),
     }
 
@@ -672,6 +691,66 @@ score = {{ json = "$.v.score", type = "Int64" }}
         assert_eq!(requests[0].url.path(), "/q");
         let body: serde_json::Value = requests[0].body_json().expect("request body JSON");
         assert_eq!(body["q"], "needle");
+    });
+}
+
+#[test]
+fn load_extension_exposes_manifest_tables_as_schema_relations() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(async {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/user/emails"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "email": "dev@example.test",
+                    "verified": true
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let manifest = write_temp_manifest(
+            "spur-rest-schema-relations",
+            &format!(
+                r#"[source]
+name = "github"
+base_url = "{base}"
+
+[[table]]
+name = "user_emails"
+path = "/user/emails"
+
+[table.columns]
+email = {{ json = "$.email", type = "Utf8" }}
+verified = {{ json = "$.verified", type = "Boolean" }}
+"#,
+                base = server.uri()
+            ),
+        );
+
+        let empty_manifest_dir = unique_temp_dir("spur-rest-empty-manifest-dir");
+        let _gamma = EnvGuard::set("SPUR_POLYMARKET_GAMMA_BASE", server.uri());
+        let _clob = EnvGuard::set("SPUR_POLYMARKET_CLOB_BASE", server.uri());
+        let _manifest = EnvGuard::set("SPUR_REST_MANIFEST", manifest.as_os_str());
+        let _manifest_dir = EnvGuard::set("SPUR_REST_MANIFEST_DIR", empty_manifest_dir.as_os_str());
+        let _allow_writes = EnvGuard::remove("SPUR_REST_ALLOW_WRITES");
+        let _expected = EnvGuard::remove("SPUR_REST_EXPECT_FUNCTION");
+        let _install_dir = EnvGuard::set(
+            "SPUR_EXT_INSTALL_DIR",
+            std::env::temp_dir().join(format!(
+                "spur-rest-table-gateway-ext-install-schema-relations-{}",
+                std::process::id()
+            )),
+        );
+
+        let extension_path = build_extension();
+        let output = run_action_harness(&extension_path, "schema-relation");
+        println!("{output}");
+        assert!(output.contains("schema-relation ok"));
     });
 }
 

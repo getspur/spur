@@ -40,24 +40,38 @@ fn polymarket_markets_table_function_e2e() {
         let bridge = Arc::new(IoBridge::new());
         register_tables(&conn, adapter, bridge).unwrap();
 
-        let rows = tokio::task::spawn_blocking(move || {
+        let (function_rows, relation_rows) = tokio::task::spawn_blocking(move || {
             let mut stmt = conn
                 .prepare("SELECT id, volume FROM polymarket_markets()")
                 .unwrap();
-            let rows = stmt
+            let function_rows = stmt
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, Option<f64>>(1)?))
                 })
                 .unwrap();
 
-            rows.collect::<duckdb::Result<Vec<_>>>().unwrap()
+            let function_rows = function_rows.collect::<duckdb::Result<Vec<_>>>().unwrap();
+
+            let mut stmt = conn
+                .prepare("SELECT id, volume FROM polymarket.markets")
+                .unwrap();
+            let relation_rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<f64>>(1)?))
+                })
+                .unwrap()
+                .collect::<duckdb::Result<Vec<_>>>()
+                .unwrap();
+
+            (function_rows, relation_rows)
         })
         .await
         .unwrap();
 
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].0, "m1");
-        let volume = rows[0].1.expect("volume should be non-null");
+        assert_eq!(function_rows, relation_rows);
+        assert_eq!(function_rows.len(), 2);
+        assert_eq!(function_rows[0].0, "m1");
+        let volume = function_rows[0].1.expect("volume should be non-null");
         assert!((volume - 782_375.55).abs() < 0.000_01);
     });
 }
