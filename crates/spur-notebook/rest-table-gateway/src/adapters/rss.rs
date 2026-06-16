@@ -12,8 +12,17 @@ use crate::error::{GatewayError, Result};
 const DEFAULT_RSSHUB_BASE: &str = "https://rsshub.app";
 const DEFAULT_RSSHUB_ROUTES_URL: &str = "https://docs.rsshub.app/routes.json";
 
-const DEFAULT_RSSHUB_ROUTE_CARDS: &[(&str, &str)] =
-    &[("hackernews_jobs_entries", "rsshub://hackernews/jobs")];
+const DEFAULT_RSSHUB_ROUTE_CARDS: &[DefaultRsshubRouteCard] = &[DefaultRsshubRouteCard {
+    table: "hackernews_jobs_entries",
+    source_url: "rsshub://hackernews/jobs",
+    public_instance_fetch_url: Some("https://hnrss.org/jobs"),
+}];
+
+struct DefaultRsshubRouteCard {
+    table: &'static str,
+    source_url: &'static str,
+    public_instance_fetch_url: Option<&'static str>,
+}
 
 pub struct RssAdapter {
     rsshub_base: String,
@@ -143,6 +152,11 @@ impl RssAdapter {
                 return Err(GatewayError::Adapter(
                     "rsshub:// URL must include a route".to_string(),
                 ));
+            }
+            if self.rsshub_base == DEFAULT_RSSHUB_BASE {
+                if let Some(fetch_url) = public_instance_route_fallback(route) {
+                    return Ok(fetch_url.to_string());
+                }
             }
             return Ok(format!("{}/{}", self.rsshub_base, route));
         }
@@ -428,8 +442,8 @@ impl Adapter for RssAdapter {
         tables.extend(
             DEFAULT_RSSHUB_ROUTE_CARDS
                 .iter()
-                .map(|(table, _)| TableDef {
-                    name: (*table).to_string(),
+                .map(|route_card| TableDef {
+                    name: route_card.table.to_string(),
                     schema: Self::entries_schema(),
                     kind: TableKind::Table,
                 }),
@@ -473,7 +487,19 @@ impl Adapter for RssAdapter {
 fn default_route_card_url(table: &str) -> Option<&'static str> {
     DEFAULT_RSSHUB_ROUTE_CARDS
         .iter()
-        .find_map(|(default_table, url)| (*default_table == table).then_some(*url))
+        .find_map(|route_card| (route_card.table == table).then_some(route_card.source_url))
+}
+
+fn public_instance_route_fallback(route: &str) -> Option<&'static str> {
+    DEFAULT_RSSHUB_ROUTE_CARDS
+        .iter()
+        .find(|route_card| {
+            route_card
+                .source_url
+                .strip_prefix("rsshub://")
+                .is_some_and(|source_route| source_route.trim_start_matches('/') == route)
+        })
+        .and_then(|route_card| route_card.public_instance_fetch_url)
 }
 
 fn record_batch(
@@ -1037,6 +1063,25 @@ mod tests {
         );
         assert_eq!(string_value(&batches[0], 6, 0), "editor@example.test");
         assert_eq!(string_value(&batches[0], 7, 0), "AI,News");
+    }
+
+    #[test]
+    fn public_rsshub_hackernews_jobs_uses_direct_feed_fallback() {
+        let default_adapter = RssAdapter::new();
+        assert_eq!(
+            default_adapter
+                .resolved_fetch_url("rsshub://hackernews/jobs")
+                .expect("default route resolves"),
+            "https://hnrss.org/jobs"
+        );
+
+        let self_hosted_adapter = RssAdapter::with_rsshub_base("https://rsshub.example");
+        assert_eq!(
+            self_hosted_adapter
+                .resolved_fetch_url("rsshub://hackernews/jobs")
+                .expect("self-hosted route resolves"),
+            "https://rsshub.example/hackernews/jobs"
+        );
     }
 
     #[tokio::test]
