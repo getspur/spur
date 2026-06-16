@@ -267,6 +267,24 @@ fn assert_rss_subscription_relation(conn: &Connection) -> duckdb::Result<()> {
     Ok(())
 }
 
+fn assert_rss_default_route_card_relation(conn: &Connection) -> duckdb::Result<()> {
+    let mut stmt =
+        conn.prepare("SELECT feed_url, guid FROM rss.hackernews_jobs_entries ORDER BY guid")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<duckdb::Result<Vec<_>>>()?;
+
+    assert_eq!(
+        rows,
+        vec![("rsshub://hackernews/jobs".to_string(), "job-1".to_string())],
+        "default RSSHub route card should scan as a schema-qualified relation"
+    );
+    println!("rss-default-route-card-relation ok");
+    Ok(())
+}
+
 fn main() -> duckdb::Result<()> {
     let extension_path = env::args()
         .nth(1)
@@ -283,6 +301,7 @@ fn main() -> duckdb::Result<()> {
         "typed-action" => assert_typed_action(&conn)?,
         "schema-relation" => assert_schema_relation(&conn)?,
         "rss-subscription-relation" => assert_rss_subscription_relation(&conn)?,
+        "rss-default-route-card-relation" => assert_rss_default_route_card_relation(&conn)?,
         other => panic!("unknown action harness scenario: {other}"),
     }
 
@@ -830,6 +849,60 @@ fn load_extension_exposes_rsshub_subscriptions_as_schema_relations() {
         let output = run_action_harness(&extension_path, "rss-subscription-relation");
         println!("{output}");
         assert!(output.contains("rss-subscription-relation ok"));
+    });
+}
+
+#[test]
+fn load_extension_exposes_default_rsshub_route_cards_as_schema_relations() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(async {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/hackernews/jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Hacker News Jobs</title>
+    <item>
+      <title>Data systems engineer</title>
+      <link>https://news.ycombinator.com/item?id=1</link>
+      <guid>job-1</guid>
+    </item>
+  </channel>
+</rss>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let empty_manifest_dir = unique_temp_dir("spur-rest-empty-manifest-dir");
+        let _gamma = EnvGuard::set("SPUR_POLYMARKET_GAMMA_BASE", server.uri());
+        let _clob = EnvGuard::set("SPUR_POLYMARKET_CLOB_BASE", server.uri());
+        let _rsshub_base = EnvGuard::set("SPUR_RSSHUB_BASE", server.uri());
+        let _rsshub_routes = EnvGuard::set(
+            "SPUR_RSSHUB_ROUTES_URL",
+            format!("{}/routes.json", server.uri()),
+        );
+        let _rss_subscriptions = EnvGuard::remove("SPUR_RSS_SUBSCRIPTIONS");
+        let _manifest = EnvGuard::remove("SPUR_REST_MANIFEST");
+        let _manifest_dir = EnvGuard::set("SPUR_REST_MANIFEST_DIR", empty_manifest_dir.as_os_str());
+        let _allow_writes = EnvGuard::remove("SPUR_REST_ALLOW_WRITES");
+        let _expected = EnvGuard::remove("SPUR_REST_EXPECT_FUNCTION");
+        let _install_dir = EnvGuard::set(
+            "SPUR_EXT_INSTALL_DIR",
+            std::env::temp_dir().join(format!(
+                "spur-rest-table-gateway-ext-install-rss-default-route-card-{}",
+                std::process::id()
+            )),
+        );
+
+        let extension_path = build_extension();
+        let output = run_action_harness(&extension_path, "rss-default-route-card-relation");
+        println!("{output}");
+        assert!(output.contains("rss-default-route-card-relation ok"));
     });
 }
 
