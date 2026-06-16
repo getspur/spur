@@ -5,6 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ENV = ROOT / "scripts" / "gcp-build" / "config.env"
+INIT_SH = ROOT / "scripts" / "gcp-build" / "init.sh"
+SPIN_SH = ROOT / "scripts" / "gcp-build" / "spin.sh"
 STARTUP_SH = ROOT / "scripts" / "gcp-build" / "startup.sh"
 
 
@@ -15,10 +17,28 @@ def extract_wrapper(startup: str, name: str) -> str:
     return startup[start:end] + "\n"
 
 
-def test_builder_defaults_to_standard_16_for_linker_memory_headroom():
+def test_builder_defaults_to_standard_16_lssd_for_local_cargo_cache():
     config = CONFIG_ENV.read_text()
 
-    assert ': "${VM_MACHINE_TYPE:=c4d-standard-16}"' in config
+    assert ': "${VM_MACHINE_TYPE:=c4d-standard-16-lssd}"' in config
+    assert "CACHE_DISK_SIZE_GB" not in config
+    assert "CACHE_DISK_TYPE" not in config
+
+
+def test_init_only_provisions_durable_gcs_sccache_state():
+    init = INIT_SH.read_text()
+
+    assert "Ensuring GCS sccache bucket" in init
+    assert "gcloud compute disks create" not in init
+    assert "Ensuring cache disk" not in init
+
+
+def test_spin_creates_lssd_vm_without_persistent_cache_disk_attachment():
+    spin = SPIN_SH.read_text()
+
+    assert '--machine-type="$VM_MACHINE_TYPE"' in spin
+    assert '--disk="name=$CACHE_DISK,device-name=cargo-cache,mode=rw,boot=no,auto-delete=no"' not in spin
+    assert "cache disk stays attached" not in spin
 
 
 def test_autoshutdown_defaults_to_30_minutes_and_tracks_linkers():
@@ -28,15 +48,35 @@ def test_autoshutdown_defaults_to_30_minutes_and_tracks_linkers():
     assert "pgrep -x rust-lld" in startup
 
 
-def test_sccache_uses_ram_l1_before_gcs_l2():
+def test_startup_mounts_local_ssd_as_cargo_cache():
     startup = STARTUP_SH.read_text()
 
-    assert "SCCACHE_RAM_MNT=/mnt/sccache-ram" in startup
-    assert "mount -t tmpfs -o size=16G,mode=1777 tmpfs \"$SCCACHE_RAM_MNT\"" in startup
+    assert "CACHE_MNT=/mnt/cargo" in startup
+    assert "CACHE_LABEL=cargo-cache" in startup
+    assert "google-local-nvme-ssd-*" in startup
+    assert 'mkfs.ext4 -F -L "$CACHE_LABEL" "$CACHE_DEV"' in startup
+    assert "mount \"$CACHE_DEV\" \"$CACHE_MNT\"" in startup
+
+
+def test_startup_makes_local_ssd_cache_writable_before_rustup_bootstrap():
+    startup = STARTUP_SH.read_text()
+
+    mount_idx = startup.index('mountpoint -q "$CACHE_MNT" || mount "$CACHE_DEV" "$CACHE_MNT"')
+    chmod_idx = startup.index('chmod 1777 "$CACHE_MNT"')
+    rustup_idx = startup.index('if [[ ! -x "$CACHE_MNT/cargo-home/bin/rustup" ]]')
+
+    assert mount_idx < chmod_idx < rustup_idx
+
+
+def test_sccache_uses_local_ssd_l1_before_gcs_l2():
+    startup = STARTUP_SH.read_text()
+
     assert "export SCCACHE_MULTILEVEL_CHAIN=disk,gcs" in startup
     assert "export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0" in startup
-    assert "export SCCACHE_DIR=$SCCACHE_RAM_MNT/\\${USER:-builder}" in startup
-    assert "export SCCACHE_CACHE_SIZE=15G" in startup
+    assert "export SCCACHE_DIR=$CACHE_MNT/sccache/\\${USER:-builder}" in startup
+    assert "export SCCACHE_CACHE_SIZE=50G" in startup
+    assert "SCCACHE_RAM_MNT" not in startup
+    assert "mount -t tmpfs" not in startup
 
 
 def test_c_wrappers_disable_working_directory_linemarkers_for_stable_sccache_keys():
