@@ -207,6 +207,17 @@ fn table_by_name<'a>(tables: &'a [jute::commands::Table], name: &str) -> &'a jut
         .unwrap_or_else(|| panic!("{name} table is present"))
 }
 
+fn assert_env_vars(actual: &[String], expected: &[&str]) {
+    let mut actual = actual.to_vec();
+    actual.sort();
+    let mut expected = expected
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
 fn manifest_for_stripe_scores_import() -> Manifest {
     let providers = parse_providers(NANGO_PROVIDERS_SNAPSHOT).expect("providers yaml parses");
     let provider = providers.get("stripe").expect("stripe provider is present");
@@ -338,9 +349,9 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
     assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
     assert_eq!(entry.group.as_deref(), Some("API"));
     assert_eq!(
-        table_by_name(&entry.tables, "stripe_scores"),
+        table_by_name(&entry.tables, "scores"),
         &jute::commands::Table {
-            name: "stripe_scores".to_string(),
+            name: "scores".to_string(),
             columns: vec![
                 jute::commands::Column {
                     name: "id".to_string(),
@@ -364,12 +375,9 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
     assert_eq!(saved.provider.as_deref(), Some("stripe"));
     assert_eq!(saved.group.as_deref(), Some("API"));
     assert_eq!(saved.tables, entry.tables);
-    assert_eq!(
-        saved.credential_env_vars,
-        vec![
-            "STRIPE_API_KEY".to_string(),
-            "SPUR_CONN_stripe_base_url".to_string()
-        ]
+    assert_env_vars(
+        &saved.credential_env_vars,
+        &["STRIPE_API_KEY", "SPUR_CONN_stripe_base_url"],
     );
     let serialized = serde_json::to_string(saved).expect("saved template serializes");
     assert!(serialized.contains("STRIPE_API_KEY"));
@@ -551,7 +559,7 @@ score = { json = "$.score", type = "Int64" }
     assert_eq!(
         entry.tables,
         vec![jute::commands::Table {
-            name: "manifest_scores".to_string(),
+            name: "scores".to_string(),
             columns: vec![
                 jute::commands::Column {
                     name: "id".to_string(),
@@ -570,9 +578,9 @@ score = { json = "$.score", type = "Int64" }
     assert_eq!(saved.provider, None);
     assert_eq!(saved.group.as_deref(), Some("API"));
     assert_eq!(saved.tables, entry.tables);
-    assert_eq!(
-        saved.credential_env_vars,
-        vec![api_token_env_var.to_string(), base_url_env_var.to_string()]
+    assert_env_vars(
+        &saved.credential_env_vars,
+        &[api_token_env_var, base_url_env_var],
     );
     let serialized = serde_json::to_string(&saved).expect("saved template serializes");
     assert!(serialized.contains(api_token_env_var));
@@ -777,12 +785,12 @@ async fn saved_connection_list_attach_delete_roundtrip_reports_missing_env() {
     assert_eq!(payload["missing_env_vars"], json!([missing_env_var]));
     assert_eq!(payload["entry"]["name"], name);
     assert_eq!(payload["entry"]["path"], "saved");
-    assert_eq!(payload["entry"]["tables"][0]["name"], "saved_scores");
+    assert_eq!(payload["entry"]["tables"][0]["name"], "scores");
 
     let catalog = jute_state.datasource_catalog.lock().list();
     assert_eq!(catalog.len(), 1);
     assert_eq!(catalog[0].name, name);
-    assert_eq!(catalog[0].tables[0].name, "saved_scores");
+    assert_eq!(catalog[0].tables[0].name, "scores");
     assert_eq!(windows.connections_changed_count(), 1);
 
     let delete_response = control
@@ -838,7 +846,7 @@ async fn update_saved_connection_preserves_manifest_and_tables_without_spec() {
         .as_array()
         .expect("entry tables are an array")
         .iter()
-        .any(|table| table["name"] == "stripe_scores"));
+        .any(|table| table["name"] == "scores"));
     assert_eq!(update_result["data"]["missing_env_vars"], json!([]));
 
     let updated = saved_template(&name).await;
@@ -918,13 +926,13 @@ async fn update_saved_connection_regenerates_manifest_and_tables_with_spec() {
         .as_array()
         .expect("entry tables are an array")
         .iter()
-        .any(|table| table["name"] == "stripe_charges"));
+        .any(|table| table["name"] == "charges"));
     assert_eq!(update_result["data"]["missing_env_vars"], json!([]));
 
     let updated = saved_template(&name).await;
     assert_ne!(updated.manifest_toml, original.manifest_toml);
     assert_ne!(updated.tables, original.tables);
-    table_by_name(&updated.tables, "stripe_charges");
+    table_by_name(&updated.tables, "charges");
     assert_eq!(updated.credential_env_vars, vec![updated_env_var.clone()]);
     assert_eq!(updated.created_at, original.created_at);
     assert!(updated.updated_at > original.updated_at);

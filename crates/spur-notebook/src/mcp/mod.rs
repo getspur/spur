@@ -1958,11 +1958,11 @@ fn normalize_api_datasource_source(source: &str) -> Result<String, BridgeError> 
 
 #[cfg(feature = "datasource-introspect")]
 fn api_datasource_table(
-    adapter_name: &str,
+    _adapter_name: &str,
     table: spur_rest_table_gateway::adapter::TableDef,
 ) -> jute::commands::Table {
     jute::commands::Table {
-        name: format!("{}_{}", adapter_name, table.name),
+        name: table.name,
         columns: table
             .schema
             .fields()
@@ -4613,8 +4613,25 @@ mod tests {
 
         let tables = datasource_tables_from_catalog("svc", vec![read, action]);
 
-        assert!(tables.iter().any(|table| table.name == "svc_markets"));
+        assert!(tables.iter().any(|table| table.name == "markets"));
         assert!(!tables.iter().any(|table| table.name == "svc_create"));
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn api_datasource_table_keeps_display_name_unprefixed() {
+        use arrow_schema::Schema;
+        use spur_rest_table_gateway::adapter::{TableDef, TableKind};
+
+        let table_def = TableDef {
+            name: "repositories".to_string(),
+            schema: Arc::new(Schema::empty()),
+            kind: TableKind::Table,
+        };
+
+        let table = api_datasource_table("github", table_def);
+
+        assert_eq!(table.name, "repositories");
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -4711,10 +4728,7 @@ score = { json = "$.score", type = "Int64" }
         assert_eq!(template.group.as_deref(), Some(API_DATASOURCE_GROUP));
         assert_eq!(template.manifest_toml, manifest_toml);
         assert!(template.credential_env_vars.is_empty());
-        assert!(template
-            .tables
-            .iter()
-            .any(|table| table.name == "manifest_scores"));
+        assert!(template.tables.iter().any(|table| table.name == "scores"));
 
         let temp_dir = tempfile::Builder::new()
             .prefix("spur-save-api-connection-template-")
@@ -5414,7 +5428,7 @@ score = { json = "$.score", type = "Int64" }
             sql,
             [
                 "CREATE SCHEMA IF NOT EXISTS \"polymarket\"",
-                "CREATE OR REPLACE VIEW \"polymarket\".\"polymarket_markets\" AS SELECT * FROM \"polymarket_markets\"()"
+                "CREATE OR REPLACE VIEW \"polymarket\".\"markets\" AS SELECT * FROM \"polymarket_markets\"()"
             ]
         );
     }
@@ -5454,7 +5468,7 @@ score = { json = "$.score", type = "Int64" }
             entry.tables,
             vec![
                 jute::commands::Table {
-                    name: "polymarket_markets".to_string(),
+                    name: "markets".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "id".to_string(),
@@ -5476,7 +5490,7 @@ score = { json = "$.score", type = "Int64" }
                     row_count: None,
                 },
                 jute::commands::Table {
-                    name: "polymarket_orderbook".to_string(),
+                    name: "orderbook".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "price".to_string(),
@@ -5529,7 +5543,7 @@ score = { json = "$.score", type = "Int64" }
             entry.tables,
             vec![
                 jute::commands::Table {
-                    name: "rss_routes".to_string(),
+                    name: "routes".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "source_key".to_string(),
@@ -5591,7 +5605,7 @@ score = { json = "$.score", type = "Int64" }
                     row_count: None,
                 },
                 jute::commands::Table {
-                    name: "rss_feed".to_string(),
+                    name: "feed".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "url".to_string(),
@@ -5613,7 +5627,7 @@ score = { json = "$.score", type = "Int64" }
                     row_count: None,
                 },
                 jute::commands::Table {
-                    name: "rss_entries".to_string(),
+                    name: "entries".to_string(),
                     columns: vec![
                         jute::commands::Column {
                             name: "feed_url".to_string(),
@@ -5722,7 +5736,7 @@ paths:
         assert!(entry.columns.is_empty());
         assert_eq!(entry.row_count, None);
         let charges_table = jute::commands::Table {
-            name: "stripe_charges".to_string(),
+            name: "charges".to_string(),
             columns: vec![
                 jute::commands::Column {
                     name: "id".to_string(),
@@ -6777,7 +6791,7 @@ paths:
             .as_array()
             .expect("tables array")
             .iter()
-            .any(|table| table["name"] == "polymarket_markets"));
+            .any(|table| table["name"] == "markets"));
         assert_eq!(jute_state.datasource_catalog.lock().list().len(), 1);
 
         client.cancel().await.expect("client closes");
@@ -6817,7 +6831,7 @@ paths:
                         "rowCount": null,
                         "tables": [
                             {
-                                "name": "polymarket_markets",
+                                "name": "markets",
                                 "columns": [
                                     {
                                         "name": "id",
@@ -7270,7 +7284,7 @@ paths:
             columns: Vec::new(),
             row_count: None,
             tables: vec![jute::commands::Table {
-                name: "polymarket_markets".to_string(),
+                name: "markets".to_string(),
                 columns: vec![jute::commands::Column {
                     name: "id".to_string(),
                     sql_type: "VARCHAR".to_string(),
