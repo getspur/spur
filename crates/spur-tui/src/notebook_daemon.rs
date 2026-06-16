@@ -287,6 +287,15 @@ fn should_retry_connect_error(error: &io::Error) -> bool {
     )
 }
 
+pub fn notebook_launch_report(selection: &spur_core::notebook::NotebookLaunchSelection) -> String {
+    format!(
+        "channel={} path={} reason={}",
+        selection.channel,
+        selection.path.display(),
+        selection.reason
+    )
+}
+
 fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -303,7 +312,17 @@ fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
 
-    let mut command = std::process::Command::new(spur_core::notebook::notebook_binary_path());
+    let selection =
+        spur_core::notebook::notebook_launch_selection().map_err(notebook_resolver_io_error)?;
+    tracing::info!(
+        channel = %selection.channel,
+        path = %selection.path.display(),
+        reason = %selection.reason,
+        "notebook daemon launch selection: {}",
+        notebook_launch_report(&selection)
+    );
+
+    let mut command = std::process::Command::new(&selection.path);
     command
         .arg("--socket")
         .arg(socket_path)
@@ -316,6 +335,18 @@ fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
         command.process_group(0);
     }
     command.spawn().map(|_| ())
+}
+
+fn notebook_resolver_io_error(error: spur_core::notebook::NotebookResolverError) -> io::Error {
+    let kind = match &error {
+        spur_core::notebook::NotebookResolverError::InvalidChannel { .. } => {
+            io::ErrorKind::InvalidInput
+        }
+        spur_core::notebook::NotebookResolverError::GreenUnavailable { .. } => {
+            io::ErrorKind::NotFound
+        }
+    };
+    io::Error::new(kind, error)
 }
 
 async fn wait_for_launched_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
