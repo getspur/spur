@@ -23,6 +23,7 @@ use spur_rest_table_gateway::{
     adapters::{polymarket::PolymarketAdapter, rss::RssAdapter},
     vtab::{
         bridge::IoBridge,
+        register::{api_table_function_name, register_api_relation_view},
         table_fn::{ApiTableExtra, ApiTableVTab},
     },
 };
@@ -51,8 +52,8 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
         env::var("SPUR_POLYMARKET_CLOB_BASE").unwrap_or_else(|_| DEFAULT_CLOB_BASE.to_string());
     let rsshub_base =
         env::var("SPUR_RSSHUB_BASE").unwrap_or_else(|_| DEFAULT_RSSHUB_BASE.to_string());
-    let rsshub_routes_url =
-        env::var("SPUR_RSSHUB_ROUTES_URL").unwrap_or_else(|_| DEFAULT_RSSHUB_ROUTES_URL.to_string());
+    let rsshub_routes_url = env::var("SPUR_RSSHUB_ROUTES_URL")
+        .unwrap_or_else(|_| DEFAULT_RSSHUB_ROUTES_URL.to_string());
 
     let adapter: Arc<dyn Adapter> = Arc::new(PolymarketAdapter::new(&gamma_base, &clob_base)?);
     let bridge = Arc::new(IoBridge::new());
@@ -195,23 +196,25 @@ fn register_adapter(
 ) -> Result<usize, Box<dyn Error>> {
     let mut registered = 0;
     for table in adapter.catalog() {
-        let fn_name = format!("{}_{}", adapter.name(), table.name);
+        let table_name = table.name;
+        let fn_name = api_table_function_name(adapter.name(), &table_name);
         match table.kind {
             TableKind::Table => {
                 let extra = ApiTableExtra {
                     bridge: Arc::clone(&bridge),
                     adapter: Arc::clone(&adapter),
-                    table: table.name,
+                    table: table_name.clone(),
                     schema: table.schema,
                 };
                 con.register_table_function_with_extra_info::<ApiTableVTab, _>(&fn_name, &extra)?;
+                register_api_relation_view(con, adapter.name(), &table_name)?;
                 registered += 1;
             }
             TableKind::TableFunction { arg_names } => {
                 let extra = ApiFunctionExtra {
                     bridge: Arc::clone(&bridge),
                     adapter: Arc::clone(&adapter),
-                    table: table.name,
+                    table: table_name,
                     schema: table.schema,
                     arg_names,
                 };
@@ -228,7 +231,7 @@ fn register_adapter(
                 let extra = ApiActionExtra {
                     bridge: Arc::clone(&bridge),
                     adapter: Arc::clone(&adapter),
-                    action: table.name,
+                    action: table_name,
                     method,
                     action_path: path,
                     schema: table.schema,
