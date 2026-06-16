@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Delete the build VM. Cache disk and GCS bucket are preserved.
+# Delete the build VM. The GCS sccache bucket is preserved.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -11,11 +11,10 @@ if ! gcloud compute instances describe "$VM_NAME" --project="$GCP_PROJECT" --zon
     exit 0
 fi
 
-echo "[teardown] Deleting VM $VM_NAME (cache disk $CACHE_DISK is preserved)..."
+echo "[teardown] Deleting VM $VM_NAME..."
 gcloud compute instances delete "$VM_NAME" \
     --project="$GCP_PROJECT" \
     --zone="$GCP_ZONE" \
-    --quiet \
-    --keep-disks=data
+    --quiet
 
 echo "[teardown] Done."
