@@ -1976,7 +1976,18 @@ pub async fn run_cell_events(
     cell_id: &str,
     state: Arc<State>,
 ) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
-    let dispatch = resolve_run_cell_dispatch(notebook_path, kernel_id, cell_id, &state)?;
+    run_cell_events_with_source(notebook_path, kernel_id, cell_id, None, state).await
+}
+
+async fn run_cell_events_with_source(
+    notebook_path: &str,
+    kernel_id: Option<&str>,
+    cell_id: &str,
+    source_override: Option<&str>,
+    state: Arc<State>,
+) -> Result<async_channel::Receiver<RunCellEvent>, Error> {
+    let dispatch =
+        resolve_run_cell_dispatch(notebook_path, kernel_id, cell_id, source_override, &state)?;
     ensure_kernel_slot_live(
         &state,
         notebook_path,
@@ -2153,11 +2164,15 @@ fn resolve_run_cell_dispatch(
     notebook_path: &str,
     supplied_kernel_id: Option<&str>,
     cell_id: &str,
+    source_override: Option<&str>,
     state: &State,
 ) -> Result<RunCellDispatch, Error> {
     let (root, _version) = state.notebook_for_path(notebook_path).snapshot();
     let code_type = resolve_cell_code_type(&root, cell_id)?;
-    let source = resolve_cell_source(&root, cell_id)?;
+    let source = match source_override {
+        Some(source) => source.to_owned(),
+        None => resolve_cell_source(&root, cell_id)?,
+    };
     let spec_name = kernelspec_for(code_type).to_owned();
     let slot_id = slot_id_for(notebook_path, code_type);
 
@@ -2327,14 +2342,15 @@ pub async fn run_cell(
     notebook_path: &str,
     kernel_id: Option<String>,
     cell_id: &str,
-    _code: &str,
+    code: &str,
     on_event: Channel<RunCellEvent>,
     state: tauri::State<'_, std::sync::Arc<State>>,
 ) -> Result<(), Error> {
-    let rx = run_cell_events(
+    let rx = run_cell_events_with_source(
         notebook_path,
         kernel_id.as_deref(),
         cell_id,
+        Some(code),
         Arc::clone(state.inner()),
     )
     .await?;
@@ -2765,10 +2781,11 @@ mod tests {
     }
 
     #[test]
-    fn run_cell_chokepoint_uses_stored_source() {
+    fn run_cell_chokepoint_prefers_supplied_editor_source() {
         let notebook_path = "/tmp/demo-notebook.ipynb";
         let state = State::new();
-        let stored_source = "spur.put('sales', [1, 2])";
+        let stored_source = "";
+        let editor_source = "print('hello world')";
         state
             .get_notebook()
             .load(notebook_path, notebook_with_source(stored_source, 1));
@@ -2777,11 +2794,12 @@ mod tests {
             notebook_path,
             None,
             "550e8400-e29b-41d4-a716-446655440000",
+            Some(editor_source),
             &state,
         )
         .unwrap();
 
-        assert_eq!(dispatch.wrapped_code, stored_source);
+        assert_eq!(dispatch.wrapped_code, editor_source);
         assert!(!dispatch.wrapped_code.contains("class _Spur"));
     }
 
@@ -2881,6 +2899,7 @@ mod tests {
             notebook_path,
             Some(&supplied_python_slot),
             "550e8400-e29b-41d4-a716-446655440000",
+            None,
             &state,
         )
         .unwrap();
@@ -2916,6 +2935,7 @@ mod tests {
             notebook_path,
             Some(&supplied_python_slot),
             "550e8400-e29b-41d4-a716-446655440000",
+            None,
             &state,
         )
         .unwrap();
