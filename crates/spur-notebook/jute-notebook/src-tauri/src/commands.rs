@@ -2204,7 +2204,15 @@ fn prepare_run_cell_source(code_type: CodeType, source: &str) -> String {
 fn transpile_sql_cell(sql: &str) -> String {
     let literal = sql.replace("\"\"\"", "\\\"\\\"\\\"");
     format!(
-        "{}duckdb.sql(r\"\"\"{}\"\"\")",
+        "{}from IPython.display import HTML, display\n\
+_SPUR_SQL_RESULT = duckdb.sql(r\"\"\"{}\"\"\")\n\
+display(HTML(\"\"\"\n\
+<style>\n\
+.jute-sql-result {{ border-collapse: collapse; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px; }}\n\
+.jute-sql-result th, .jute-sql-result td {{ border: 1px solid #d4d4d8; padding: 4px 8px; text-align: left; vertical-align: top; }}\n\
+.jute-sql-result th {{ background: #f4f4f5; font-weight: 600; }}\n\
+</style>\n\
+\"\"\" + _SPUR_SQL_RESULT.df().to_html(index=False, border=0, classes=\"jute-sql-result\")))",
         sql_cell_duckdb_bootstrap(),
         literal
     )
@@ -2878,6 +2886,10 @@ mod tests {
         assert_eq!(dispatch.code_type, CodeType::Sql);
         assert_eq!(dispatch.spec_name, "python3");
         assert!(dispatch.wrapped_code.contains("duckdb.sql("));
+        assert!(dispatch
+            .wrapped_code
+            .contains("from IPython.display import HTML, display"));
+        assert!(dispatch.wrapped_code.contains(".df().to_html("));
         assert!(dispatch.wrapped_code.contains("allow_unsigned_extensions"));
         assert!(dispatch.wrapped_code.contains("spur_rest.duckdb_extension"));
         assert!(dispatch.wrapped_code.contains(sql_source));
