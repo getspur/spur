@@ -1,6 +1,102 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use agent_client_protocol::schema::{McpServer, McpServerHttp, McpServerStdio};
+
+const SPUR_NOTEBOOK_BIN_ENV: &str = "SPUR_NOTEBOOK_BIN";
+const SPUR_NOTEBOOK_CHANNEL_ENV: &str = "SPUR_NOTEBOOK_CHANNEL";
+const NOTEBOOK_BINARY_NAME: &str = "spur-notebook";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotebookChannel {
+    Auto,
+    Blue,
+    Green,
+}
+
+impl NotebookChannel {
+    pub fn parse_env_value(value: &str) -> Result<Self, NotebookResolverError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Self::Auto),
+            "blue" => Ok(Self::Blue),
+            "green" => Ok(Self::Green),
+            _ => Err(NotebookResolverError::InvalidChannel {
+                value: value.to_string(),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for NotebookChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Blue => f.write_str("blue"),
+            Self::Green => f.write_str("green"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotebookLaunchSelection {
+    pub channel: NotebookChannel,
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotebookResolverError {
+    InvalidChannel { value: String },
+    GreenUnavailable { searched_paths: Vec<PathBuf> },
+}
+
+impl std::fmt::Display for NotebookResolverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidChannel { value } => write!(
+                f,
+                "invalid {SPUR_NOTEBOOK_CHANNEL_ENV}={value:?}; expected auto, blue, or green"
+            ),
+            Self::GreenUnavailable { searched_paths } => write!(
+                f,
+                "{SPUR_NOTEBOOK_CHANNEL_ENV}=green but no external notebook install was found; \
+                 install getspur/spur-notebook or set {SPUR_NOTEBOOK_BIN_ENV} (searched: {})",
+                format_searched_paths(searched_paths)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NotebookResolverError {}
+
+#[derive(Debug, Clone)]
+struct NotebookResolverContext {
+    spur_notebook_bin: Option<OsString>,
+    spur_notebook_channel: Option<OsString>,
+    current_exe: Option<PathBuf>,
+    home: Option<PathBuf>,
+    cargo_home: Option<PathBuf>,
+    path: Option<OsString>,
+    #[cfg(target_os = "macos")]
+    system_applications_dir: PathBuf,
+}
+
+impl NotebookResolverContext {
+    fn from_process() -> Self {
+        Self {
+            spur_notebook_bin: std::env::var_os(SPUR_NOTEBOOK_BIN_ENV),
+            spur_notebook_channel: std::env::var_os(SPUR_NOTEBOOK_CHANNEL_ENV),
+            current_exe: std::env::current_exe().ok(),
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            cargo_home: std::env::var_os("CARGO_HOME").map(PathBuf::from),
+            path: std::env::var_os("PATH"),
+            #[cfg(target_os = "macos")]
+            system_applications_dir: PathBuf::from("/Applications"),
+        }
+    }
+}
 
 pub fn control_socket_path(socket_nonce: &str) -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -35,78 +131,210 @@ pub fn stable_notebook_nonce(repo_root: &Path) -> String {
     format!("ws-{hex}")
 }
 
-pub fn notebook_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("SPUR_NOTEBOOK_BIN") {
-        return PathBuf::from(path);
+pub fn notebook_launch_selection() -> Result<NotebookLaunchSelection, NotebookResolverError> {
+    notebook_launch_selection_with_context(&NotebookResolverContext::from_process())
+}
+
+fn notebook_launch_selection_with_context(
+    context: &NotebookResolverContext,
+) -> Result<NotebookLaunchSelection, NotebookResolverError> {
+    if let Some(path) = &context.spur_notebook_bin {
+        return Ok(NotebookLaunchSelection {
+            channel: requested_notebook_channel(context).unwrap_or(NotebookChannel::Auto),
+            path: PathBuf::from(path),
+            reason: format!("{SPUR_NOTEBOOK_BIN_ENV} explicit binary override"),
+        });
     }
 
-    if let Ok(current_exe) = std::env::current_exe() {
+    let requested_channel = requested_notebook_channel(context)?;
+    match requested_channel {
+        NotebookChannel::Green => resolve_green_notebook(context),
+        NotebookChannel::Auto | NotebookChannel::Blue => Ok(resolve_blue_or_auto_notebook(context)),
+    }
+}
+
+/// Legacy binary-path helper for MCP server setup.
+///
+/// This preserves the historical `spur-notebook` PATH fallback on resolver
+/// errors. Call `notebook_launch_selection()` when a caller needs checked
+/// blue/green channel errors and launch diagnostics.
+pub fn notebook_binary_path() -> PathBuf {
+    notebook_launch_selection()
+        .map(|selection| selection.path)
+        .unwrap_or_else(|_| PathBuf::from(NOTEBOOK_BINARY_NAME))
+}
+
+fn requested_notebook_channel(
+    context: &NotebookResolverContext,
+) -> Result<NotebookChannel, NotebookResolverError> {
+    context
+        .spur_notebook_channel
+        .as_ref()
+        .map(|value| NotebookChannel::parse_env_value(&value.to_string_lossy()))
+        .transpose()
+        .map(|channel| channel.unwrap_or(NotebookChannel::Auto))
+}
+
+fn resolve_blue_or_auto_notebook(context: &NotebookResolverContext) -> NotebookLaunchSelection {
+    if let Some(current_exe) = &context.current_exe {
         if let Some(dir) = current_exe.parent() {
-            let sibling = dir.join("spur-notebook");
-            if sibling.exists() && should_use_sibling_notebook_binary(&sibling) {
-                return sibling;
+            let sibling = dir.join(NOTEBOOK_BINARY_NAME);
+            if sibling.exists() && should_use_sibling_notebook_binary(&sibling, context) {
+                return NotebookLaunchSelection {
+                    channel: NotebookChannel::Blue,
+                    path: sibling,
+                    reason: "blue sibling spur-notebook next to current executable".to_string(),
+                };
             }
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        for candidate in macos_jute_bundle_candidates() {
+        for candidate in macos_jute_bundle_candidates(context) {
             if candidate.exists() {
-                return candidate;
-            }
-        }
-
-        if let Some(cargo_home_bin) = cargo_home_bin() {
-            let legacy = cargo_home_bin.join("spur-notebook");
-            if legacy.exists() {
-                return legacy;
+                return NotebookLaunchSelection {
+                    channel: NotebookChannel::Blue,
+                    path: candidate,
+                    reason: "blue legacy macOS Jute.app bundle".to_string(),
+                };
             }
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    if let Some(candidate) = cargo_home_notebook_binary(context) {
+        if candidate.exists() {
+            return NotebookLaunchSelection {
+                channel: NotebookChannel::Blue,
+                path: candidate,
+                reason: "blue legacy cargo-installed spur-notebook".to_string(),
+            };
+        }
+    }
+
+    NotebookLaunchSelection {
+        channel: NotebookChannel::Blue,
+        path: PathBuf::from(NOTEBOOK_BINARY_NAME),
+        reason: "blue legacy fallback to spur-notebook on PATH".to_string(),
+    }
+}
+
+fn resolve_green_notebook(
+    context: &NotebookResolverContext,
+) -> Result<NotebookLaunchSelection, NotebookResolverError> {
+    let candidates = green_notebook_candidates(context);
+    for (path, reason) in &candidates {
+        if path.exists() {
+            return Ok(NotebookLaunchSelection {
+                channel: NotebookChannel::Green,
+                path: path.clone(),
+                reason: reason.clone(),
+            });
+        }
+    }
+
+    Err(NotebookResolverError::GreenUnavailable {
+        searched_paths: candidates.into_iter().map(|(path, _)| path).collect(),
+    })
+}
+
+fn green_notebook_candidates(context: &NotebookResolverContext) -> Vec<(PathBuf, String)> {
+    let mut candidates = Vec::new();
+
+    #[cfg(target_os = "macos")]
     {
-        let cargo_bin = std::env::var_os("CARGO_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
-            .map(|root| root.join("bin").join("spur-notebook"));
-        if let Some(path) = cargo_bin {
-            if path.exists() {
-                return path;
-            }
-        }
+        candidates.extend(
+            macos_jute_bundle_candidates(context)
+                .into_iter()
+                .map(|path| (path, "external macOS Jute.app bundle".to_string())),
+        );
     }
 
-    PathBuf::from("spur-notebook")
+    if let Some(path) = cargo_home_notebook_binary(context) {
+        candidates.push((path, "external cargo-installed spur-notebook".to_string()));
+    }
+
+    candidates.extend(path_notebook_candidates(context).into_iter().map(|path| {
+        (
+            path,
+            "external spur-notebook discovered on PATH".to_string(),
+        )
+    }));
+
+    candidates
+}
+
+fn cargo_home_notebook_binary(context: &NotebookResolverContext) -> Option<PathBuf> {
+    context
+        .cargo_home
+        .clone()
+        .or_else(|| context.home.as_ref().map(|home| home.join(".cargo")))
+        .map(|cargo_home| cargo_home.join("bin").join(NOTEBOOK_BINARY_NAME))
+}
+
+fn path_notebook_candidates(context: &NotebookResolverContext) -> Vec<PathBuf> {
+    let Some(path) = &context.path else {
+        return Vec::new();
+    };
+    if path.is_empty() {
+        return Vec::new();
+    }
+
+    std::env::split_paths(path)
+        .map(|dir| dir.join(NOTEBOOK_BINARY_NAME))
+        .collect()
+}
+
+fn format_searched_paths(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "none".to_string();
+    }
+
+    let mut rendered = String::new();
+    for (index, path) in paths.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&path.display().to_string());
+    }
+    rendered
 }
 
 #[cfg(target_os = "macos")]
-fn should_use_sibling_notebook_binary(sibling: &std::path::Path) -> bool {
+fn should_use_sibling_notebook_binary(
+    sibling: &std::path::Path,
+    context: &NotebookResolverContext,
+) -> bool {
     // A cargo-installed `spur` lives in $CARGO_HOME/bin. Treat that sibling
     // `spur-notebook` as the legacy fallback so old raw installs do not
     // preempt the bundled Jute.app path.
-    cargo_home_bin()
+    cargo_home_bin(context)
         .map(|bin| sibling != bin.join("spur-notebook"))
         .unwrap_or(true)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn should_use_sibling_notebook_binary(_sibling: &std::path::Path) -> bool {
+fn should_use_sibling_notebook_binary(
+    _sibling: &std::path::Path,
+    _context: &NotebookResolverContext,
+) -> bool {
     true
 }
 
 #[cfg(target_os = "macos")]
-fn macos_jute_bundle_candidates() -> Vec<PathBuf> {
+fn macos_jute_bundle_candidates(context: &NotebookResolverContext) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = &context.home {
         candidates.push(
-            PathBuf::from(home)
-                .join("Applications")
+            home.join("Applications")
                 .join(jute_bundle_binary_relative_path()),
         );
     }
-    candidates.push(PathBuf::from("/Applications").join(jute_bundle_binary_relative_path()));
+    candidates.push(
+        context
+            .system_applications_dir
+            .join(jute_bundle_binary_relative_path()),
+    );
     candidates
 }
 
@@ -119,10 +347,11 @@ fn jute_bundle_binary_relative_path() -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn cargo_home_bin() -> Option<PathBuf> {
-    std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+fn cargo_home_bin(context: &NotebookResolverContext) -> Option<PathBuf> {
+    context
+        .cargo_home
+        .clone()
+        .or_else(|| context.home.as_ref().map(|home| home.join(".cargo")))
         .map(|cargo_home| cargo_home.join("bin"))
 }
 
@@ -142,45 +371,184 @@ pub fn brain_mcp_servers(spur_mcp_url: &str, socket_nonce: &str) -> Vec<McpServe
     ]
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::*;
 
-    struct EnvGuard {
-        home: Option<std::ffi::OsString>,
-        spur_notebook_bin: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home_without_notebook_bin(home: &std::path::Path) -> Self {
-            let guard = Self {
-                home: std::env::var_os("HOME"),
-                spur_notebook_bin: std::env::var_os("SPUR_NOTEBOOK_BIN"),
-            };
-            std::env::set_var("HOME", home);
-            std::env::remove_var("SPUR_NOTEBOOK_BIN");
-            guard
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.home {
-                Some(home) => std::env::set_var("HOME", home),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.spur_notebook_bin {
-                Some(path) => std::env::set_var("SPUR_NOTEBOOK_BIN", path),
-                None => std::env::remove_var("SPUR_NOTEBOOK_BIN"),
-            }
+    fn test_context() -> NotebookResolverContext {
+        NotebookResolverContext {
+            spur_notebook_bin: None,
+            spur_notebook_channel: None,
+            current_exe: None,
+            home: None,
+            cargo_home: None,
+            path: Some(OsString::new()),
+            #[cfg(target_os = "macos")]
+            system_applications_dir: PathBuf::from("/definitely/missing/applications"),
         }
     }
 
     #[test]
-    fn notebook_binary_path_prefers_user_app_bundle_on_macos() {
-        let _lock = ENV_LOCK.lock().unwrap();
+    fn notebook_binary_path_accepts_channel_values() {
+        assert_eq!(
+            NotebookChannel::parse_env_value("auto").expect("auto channel"),
+            NotebookChannel::Auto
+        );
+        assert_eq!(
+            NotebookChannel::parse_env_value("blue").expect("blue channel"),
+            NotebookChannel::Blue
+        );
+        assert_eq!(
+            NotebookChannel::parse_env_value("green").expect("green channel"),
+            NotebookChannel::Green
+        );
+    }
+
+    #[test]
+    fn notebook_binary_path_rejects_invalid_channel_value() {
+        let error = NotebookChannel::parse_env_value("purple").expect_err("invalid channel");
+
+        assert!(error.to_string().contains("SPUR_NOTEBOOK_CHANNEL"));
+        assert!(error.to_string().contains("auto"));
+        assert!(error.to_string().contains("blue"));
+        assert!(error.to_string().contains("green"));
+    }
+
+    #[test]
+    fn notebook_binary_path_prefers_spur_notebook_bin_before_green_lookup() {
+        let mut context = test_context();
+        let override_path = PathBuf::from("/tmp/pinned-spur-notebook");
+        context.spur_notebook_bin = Some(override_path.clone().into_os_string());
+        context.spur_notebook_channel = Some(OsString::from("green"));
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("bin override selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Green);
+        assert_eq!(selection.path, override_path);
+        assert!(selection.reason.contains("SPUR_NOTEBOOK_BIN"));
+    }
+
+    #[test]
+    fn notebook_binary_path_prefers_spur_notebook_bin_before_invalid_channel() {
+        let mut context = test_context();
+        let override_path = PathBuf::from("/tmp/pinned-spur-notebook");
+        context.spur_notebook_bin = Some(override_path.clone().into_os_string());
+        context.spur_notebook_channel = Some(OsString::from("purple"));
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("bin override selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Auto);
+        assert_eq!(selection.path, override_path);
+        assert!(selection.reason.contains("SPUR_NOTEBOOK_BIN"));
+    }
+
+    #[test]
+    fn notebook_binary_path_green_resolves_external_cargo_install() {
+        let install_root = tempfile::tempdir().expect("install root");
+        let installed = install_root.path().join("bin").join("spur-notebook");
+        std::fs::create_dir_all(installed.parent().unwrap()).expect("install bin dir");
+        std::fs::write(&installed, "").expect("installed notebook binary");
+
+        let mut context = test_context();
+        context.spur_notebook_channel = Some(OsString::from("green"));
+        context.cargo_home = Some(install_root.path().to_path_buf());
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("green cargo selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Green);
+        assert_eq!(selection.path, installed);
+        assert!(selection.reason.contains("external"));
+    }
+
+    #[test]
+    fn notebook_binary_path_auto_reports_cargo_home_install_as_blue() {
+        let install_root = tempfile::tempdir().expect("install root");
+        let installed = install_root.path().join("bin").join("spur-notebook");
+        std::fs::create_dir_all(installed.parent().unwrap()).expect("install bin dir");
+        std::fs::write(&installed, "").expect("installed notebook binary");
+
+        let mut context = test_context();
+        context.cargo_home = Some(install_root.path().to_path_buf());
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("auto cargo selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Blue);
+        assert_eq!(selection.path, installed);
+        assert!(selection.reason.contains("cargo-installed"));
+    }
+
+    #[test]
+    fn notebook_binary_path_blue_reports_cargo_home_install_as_blue() {
+        let install_root = tempfile::tempdir().expect("install root");
+        let installed = install_root.path().join("bin").join("spur-notebook");
+        std::fs::create_dir_all(installed.parent().unwrap()).expect("install bin dir");
+        std::fs::write(&installed, "").expect("installed notebook binary");
+
+        let mut context = test_context();
+        context.spur_notebook_channel = Some(OsString::from("blue"));
+        context.cargo_home = Some(install_root.path().to_path_buf());
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("blue cargo selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Blue);
+        assert_eq!(selection.path, installed);
+        assert!(selection.reason.contains("cargo-installed"));
+    }
+
+    #[test]
+    fn notebook_binary_path_green_missing_returns_install_error() {
+        let mut context = test_context();
+        context.spur_notebook_channel = Some(OsString::from("green"));
+
+        let error =
+            notebook_launch_selection_with_context(&context).expect_err("green should be missing");
+
+        assert!(matches!(
+            error,
+            NotebookResolverError::GreenUnavailable { .. }
+        ));
+        assert!(error.to_string().contains("SPUR_NOTEBOOK_CHANNEL=green"));
+        assert!(error.to_string().contains("SPUR_NOTEBOOK_BIN"));
+    }
+
+    #[test]
+    fn notebook_binary_path_auto_keeps_sibling_blue_before_external_green() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current_exe = temp.path().join("bin").join("spur");
+        let sibling = temp.path().join("bin").join("spur-notebook");
+        let cargo_home = temp.path().join("cargo-home");
+        let external = cargo_home.join("bin").join("spur-notebook");
+        std::fs::create_dir_all(current_exe.parent().unwrap()).expect("bin dir");
+        std::fs::create_dir_all(external.parent().unwrap()).expect("cargo bin dir");
+        std::fs::write(&current_exe, "").expect("spur binary");
+        std::fs::write(&sibling, "").expect("sibling notebook binary");
+        std::fs::write(&external, "").expect("external notebook binary");
+
+        let mut context = test_context();
+        context.current_exe = Some(current_exe);
+        context.cargo_home = Some(cargo_home);
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("auto sibling selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Blue);
+        assert_eq!(selection.path, sibling);
+        assert!(selection.reason.contains("sibling"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notebook_binary_path_green_resolves_user_app_bundle_on_macos() {
         let home = tempfile::tempdir().expect("temp home");
         let bundle_binary = home
             .path()
@@ -188,8 +556,79 @@ mod tests {
         std::fs::create_dir_all(bundle_binary.parent().unwrap()).expect("app bundle dir");
         std::fs::write(&bundle_binary, "").expect("bundle binary");
 
-        let _env = EnvGuard::set_home_without_notebook_bin(home.path());
+        let mut context = test_context();
+        context.spur_notebook_channel = Some(OsString::from("green"));
+        context.home = Some(home.path().to_path_buf());
 
-        assert_eq!(super::notebook_binary_path(), bundle_binary);
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("user app bundle selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Green);
+        assert_eq!(selection.path, bundle_binary);
+        assert!(selection.reason.contains("app bundle"));
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notebook_binary_path_auto_reports_user_app_bundle_as_blue_on_macos() {
+        let home = tempfile::tempdir().expect("temp home");
+        let bundle_binary = home
+            .path()
+            .join("Applications/Jute.app/Contents/MacOS/Jute");
+        std::fs::create_dir_all(bundle_binary.parent().unwrap()).expect("app bundle dir");
+        std::fs::write(&bundle_binary, "").expect("bundle binary");
+
+        let mut context = test_context();
+        context.home = Some(home.path().to_path_buf());
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("user app bundle selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Blue);
+        assert_eq!(selection.path, bundle_binary);
+        assert!(selection.reason.contains("app bundle"));
+    }
+
+    #[test]
+    fn notebook_binary_path_legacy_path_helper_returns_selected_path() {
+        let override_path = PathBuf::from("/tmp/pinned-spur-notebook");
+        let _env = EnvGuard::set_notebook_bin_and_channel(&override_path, "green");
+
+        assert_eq!(notebook_binary_path(), override_path);
+    }
+
+    struct EnvGuard {
+        previous_bin: Option<OsString>,
+        previous_channel: Option<OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set_notebook_bin_and_channel(path: &Path, channel: &str) -> Self {
+            let lock = ENV_LOCK.lock().expect("env lock");
+            let guard = Self {
+                previous_bin: std::env::var_os("SPUR_NOTEBOOK_BIN"),
+                previous_channel: std::env::var_os("SPUR_NOTEBOOK_CHANNEL"),
+                _lock: lock,
+            };
+            std::env::set_var("SPUR_NOTEBOOK_BIN", path);
+            std::env::set_var("SPUR_NOTEBOOK_CHANNEL", channel);
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous_bin {
+                Some(value) => std::env::set_var("SPUR_NOTEBOOK_BIN", value),
+                None => std::env::remove_var("SPUR_NOTEBOOK_BIN"),
+            }
+            match &self.previous_channel {
+                Some(value) => std::env::set_var("SPUR_NOTEBOOK_CHANNEL", value),
+                None => std::env::remove_var("SPUR_NOTEBOOK_CHANNEL"),
+            }
+        }
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
