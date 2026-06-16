@@ -18,5 +18,24 @@ jobs:
       - name: INV-C2 — only TUI translation constructs InteractiveInput::Message
         run: ./scripts/lint_message_construction_sites.sh
 
+      - name: Check standalone notebook checkout token
+        env:
+          SPUR_NOTEBOOK_CHECKOUT_TOKEN: ${{ secrets.SPUR_NOTEBOOK_CHECKOUT_TOKEN }}
+        run: |
+          if [ -z "$SPUR_NOTEBOOK_CHECKOUT_TOKEN" ]; then
+            echo "::error title=Missing SPUR_NOTEBOOK_CHECKOUT_TOKEN::The lint-invariants workflow needs a secret token with read access to the private getspur/spur-notebook repository."
+            exit 1
+          fi
+
+      - name: Checkout standalone notebook fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: getspur/spur-notebook
+          path: .ci/spur-notebook
+          fetch-depth: 1
+          token: ${{ secrets.SPUR_NOTEBOOK_CHECKOUT_TOKEN }}
+
       - name: INV-SDK-F1 — sdk/fixtures/port-store in lockstep with Rust PortStore golden fixtures
+        env:
+          SPUR_NOTEBOOK_REPO: ${{ github.workspace }}/.ci/spur-notebook
         run: ./scripts/check-sdk-fixture-lockstep.sh

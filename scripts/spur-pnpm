@@ -1,62 +1,34 @@
 #!/usr/bin/env bash
-# spur-pnpm — project-standard pnpm wrapper.
+# spur-pnpm — compatibility wrapper after the notebook repo split.
 #
-# Remote is the DEFAULT for notebook frontend pnpm commands: dispatch to the
-# GCP build VM (scripts/gcp-build/build.sh) with a shared pnpm store and
-# per-worktree node_modules on /mnt/cargo, falling back to local pnpm only if
-# the VM is unreachable.
-#
-# Local execution runs pnpm in crates/spur-notebook/jute-notebook.
-#
-# Per-invocation overrides:
-#   SPUR_REMOTE=0   → force local
-#   SPUR_REMOTE=1   → force remote
-#
-# See: scripts/gcp-build/ — remote build pipeline
+# Notebook frontend ownership moved to https://github.com/getspur/spur-notebook.
+# Set SPUR_NOTEBOOK_REPO to a local standalone checkout if you want this wrapper
+# to forward pnpm commands there.
 set -euo pipefail
 
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-SCRIPT_DIR="${SCRIPT_PATH%/*}"
-[[ "$SCRIPT_DIR" == "$SCRIPT_PATH" ]] && SCRIPT_DIR="."
-SCRIPT_DIR=$(cd "$SCRIPT_DIR" && pwd -P)
-REMOTE_BUILD_SH="$SCRIPT_DIR/gcp-build/build.sh"
-FRONTEND_DIR="$SCRIPT_DIR/../crates/spur-notebook/jute-notebook"
-
-# Accept the same optional separator users pass to build.sh/spur-cargo, while
-# still forwarding the actual pnpm command unchanged.
 PNPM_ARGS=("$@")
 if [[ "${PNPM_ARGS[0]:-}" == "--" ]]; then
     PNPM_ARGS=("${PNPM_ARGS[@]:1}")
 fi
 
-# ---- routing ---------------------------------------------------------------
-# Remote is the default for pnpm commands. An explicit SPUR_REMOTE=0 forces
-# local execution; SPUR_REMOTE=1 is accepted for symmetry with spur-cargo.
-REMOTE_CAPABLE=1
-if [[ "${SPUR_REMOTE:-}" == "0" ]]; then
-    REMOTE_CAPABLE=0
+if [[ -n "${SPUR_NOTEBOOK_REPO:-}" ]]; then
+    FRONTEND_DIR="$SPUR_NOTEBOOK_REPO/jute-notebook"
+    if [[ ! -d "$FRONTEND_DIR" ]]; then
+        echo "[spur-pnpm] SPUR_NOTEBOOK_REPO does not contain jute-notebook: $SPUR_NOTEBOOK_REPO" >&2
+        exit 2
+    fi
+    exec pnpm --dir "$FRONTEND_DIR" "${PNPM_ARGS[@]}"
 fi
 
-# ---- remote dispatch -------------------------------------------------------
-# build.sh exits with INFRA_UNAVAILABLE (200) only when the VM itself is
-# unreachable; pnpm's own non-zero exits pass through unchanged. We fall back
-# to local pnpm ONLY for 200 — a genuine test/typecheck failure must propagate.
-INFRA_UNAVAILABLE=200
-if [[ $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
-    echo "[spur-pnpm] remote (${PNPM_ARGS[0]:-pnpm}) → GCP VM" >&2
-    set +e
-    "$REMOTE_BUILD_SH" --auto-spin --pnpm -- "${PNPM_ARGS[@]}"
-    REMOTE_EXIT=$?
-    set -e
-    if [[ $REMOTE_EXIT -eq 0 ]]; then
-        exit 0
-    fi
-    if [[ $REMOTE_EXIT -ne $INFRA_UNAVAILABLE ]]; then
-        echo "[spur-pnpm] remote pnpm exited $REMOTE_EXIT — propagating (not a VM-availability issue)" >&2
-        exit $REMOTE_EXIT
-    fi
-    echo "[spur-pnpm] remote VM unavailable (exit $REMOTE_EXIT) — falling back to local pnpm" >&2
-fi
+cat >&2 <<'EOF'
+[spur-pnpm] Notebook frontend commands now live in getspur/spur-notebook.
 
-# ---- local fallback --------------------------------------------------------
-exec pnpm --dir "$FRONTEND_DIR" "${PNPM_ARGS[@]}"
+Use a standalone checkout:
+  git clone https://github.com/getspur/spur-notebook
+  cd spur-notebook
+  pnpm --dir jute-notebook <command>
+
+Or forward this wrapper:
+  SPUR_NOTEBOOK_REPO=/path/to/spur-notebook scripts/spur-pnpm <command>
+EOF
+exit 2

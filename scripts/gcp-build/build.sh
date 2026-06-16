@@ -33,14 +33,10 @@ INFRA_UNAVAILABLE=200
 
 # Flags may appear in any order before the optional `--` cargo-args separator.
 #   --auto-spin       create/start the VM if it is not already RUNNING
-#   --frontend-test   skip cargo; run the notebook frontend (vitest) suite on
-#                     the VM instead. vitest is a per-project devDependency, so
-#                     this installs node_modules (when stale) then runs the
-#                     `test` npm script. Override the script via
-#                     SPUR_FRONTEND_TEST_CMD (default: `npm test` -> vitest run).
-#   --pnpm            skip cargo; run pnpm in the notebook frontend on the VM
-#                     with a shared pnpm store and per-worktree node_modules on
-#                     /mnt/cargo so installs can hard-link from the store.
+#   --frontend-test   disabled after the notebook repo split; run frontend tests
+#                     from getspur/spur-notebook.
+#   --pnpm            disabled after the notebook repo split; run pnpm from
+#                     getspur/spur-notebook.
 AUTO_SPIN=0
 FRONTEND_TEST=0
 PNPM=0
@@ -63,27 +59,6 @@ RUN_SYNC_BACK=0
 if [[ "${CARGO_ARGS%% *}" == "run" && "${SPUR_RUN_SYNC_BACK:-1}" != "0" ]]; then
     RUN_SYNC_BACK=1
 fi
-PNPM_ARGS=("$@")
-if [[ $PNPM -eq 1 && "${PNPM_ARGS[0]:-}" == "--" ]]; then
-    PNPM_ARGS=("${PNPM_ARGS[@]:1}")
-fi
-PNPM_ARGS_ESCAPED=""
-if [[ ${#PNPM_ARGS[@]} -gt 0 ]]; then
-    PNPM_ARGS_ESCAPED="$(printf ' %q' "${PNPM_ARGS[@]}")"
-fi
-NOTEBOOK_FRONTEND_DIR="crates/spur-notebook/jute-notebook"
-NOTEBOOK_FRONTEND_INSTALL_CMD="npm ci"
-NOTEBOOK_FRONTEND_BUILD_CMD="npm run build"
-NOTEBOOK_FRONTEND_TEST_CMD="${SPUR_FRONTEND_TEST_CMD:-npm test}"
-NOTEBOOK_FRONTEND_PNPM_STORE="/mnt/cargo/pnpm-store"
-PNPM_VERSION="${SPUR_PNPM_VERSION:-10.28.2}"
-PNPM_VERSION_ESCAPED="$(printf '%q' "$PNPM_VERSION")"
-
-is_notebook_production_build() {
-    local args="$1"
-    [[ "$args" == *spur-notebook* && "$args" == *custom-protocol* ]]
-}
-
 # ---- worktree detection ----------------------------------------------------
 # Resolve toplevel from the *current* directory so workers invoking us from
 # .spur/worktrees/<uuid>/ pick up that worktree's path.
@@ -112,13 +87,7 @@ REMOTE_RUN_CHANGED="/tmp/spur-run-changed.$WORKTREE_FILE_KEY"
 # files a CONCURRENT build wrote into the shared tree. Unique per build.sh process
 # ($$ + epoch); the shared compile cache is reused via a target/ symlink.
 REMOTE_RUN_DIR="/mnt/cargo/spur-runs/$WORKTREE_FILE_KEY.$$.$(date +%s)"
-REMOTE_PNPM_VIRTUAL_STORE="/mnt/cargo/pnpm-vstore/$WORKTREE_KEY/.pnpm"
 JOBS="${SPUR_BUILD_JOBS:-8}"
-NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=0
-if [[ -f "$GIT_TOPLEVEL/$NOTEBOOK_FRONTEND_DIR/pnpm-lock.yaml" ]]; then
-    NOTEBOOK_FRONTEND_HAS_PNPM_LOCK=1
-fi
-
 log "Worktree: $WORKTREE_KEY  (local=$GIT_TOPLEVEL)"
 log "Remote:   ~/$REMOTE_DIR   target=$REMOTE_TARGET   -j$JOBS"
 
@@ -534,96 +503,15 @@ sync_workspace() {
 # Returns the remote command's exit code (without aborting the script) so the
 # orchestrator can distinguish a genuine build/test failure from a preemption.
 run_payload() {
-    # ---- run pnpm in the notebook frontend on the VM ----------------------
-    # pnpm hard-links package contents from its content-addressable store into
-    # the virtual store. Hard-links only work within one filesystem, so both the
-    # shared store and this worktree's virtual store live under /mnt/cargo. The
-    # source node_modules stays a real lightweight directory so pnpm can create
-    # .bin shims and command resolution works normally.
     if [[ $PNPM -eq 1 ]]; then
-        log "Running pnpm on VM: $NOTEBOOK_FRONTEND_DIR (pnpm$PNPM_ARGS_ESCAPED)"
-        remote_ssh \
-            --command="bash -lc '
-                set -e
-                cd ~/$REMOTE_DIR
-                source /etc/profile.d/spur-build.sh 2>/dev/null || true
-                frontend_dir=\"\$HOME/$REMOTE_DIR/$NOTEBOOK_FRONTEND_DIR\"
-                pnpm_store=\"$NOTEBOOK_FRONTEND_PNPM_STORE\"
-                pnpm_virtual_store=\"$REMOTE_PNPM_VIRTUAL_STORE\"
-                pnpm_state_dir=\"\$(dirname \"\$pnpm_virtual_store\")\"
-                mkdir -p \"\$pnpm_store\" \"\$pnpm_state_dir\"
-                cd \"\$frontend_dir\"
-                store_dev=\$(stat -Lc %d \"\$pnpm_store\")
-                virtual_store_dev=\$(stat -Lc %d \"\$pnpm_state_dir\")
-                if [ \"\$store_dev\" != \"\$virtual_store_dev\" ]; then
-                    echo \"[build] pnpm store and virtual store are on different filesystems\" >&2
-                    exit 1
-                fi
-                pnpm_version=$PNPM_VERSION_ESCAPED
-                corepack prepare pnpm@\"\$pnpm_version\" --activate
-                lockfile=\"\"
-                install_flags=(--prefer-offline)
-                version_marker=\"\$pnpm_state_dir/.spur-pnpm-version\"
-                if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 0 ]]; then
-                    rm -f pnpm-lock.yaml
-                fi
-                if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 1 && -f pnpm-lock.yaml ]]; then
-                    lockfile=\"pnpm-lock.yaml\"
-                    install_flags+=(--frozen-lockfile)
-                elif [ -f package-lock.json ]; then
-                    lockfile=\"package-lock.json\"
-                fi
-                lock_hash=\"\"
-                if [ -n \"\$lockfile\" ]; then
-                    lock_hash=\$(sha256sum \"\$lockfile\" | awk \"{ print \\\$1 }\")
-                fi
-                expected_marker=\"\$pnpm_version \$lockfile \$lock_hash\"
-                if [ ! -d \"\$frontend_dir/node_modules/.bin\" ] || [ ! -d \"\$pnpm_virtual_store\" ] || [ ! -f \"\$version_marker\" ] || [ \"\$(cat \"\$version_marker\")\" != \"\$expected_marker\" ]; then
-                    echo \"[build] Installing frontend deps: pnpm install \${install_flags[*]}\"
-                    rm -rf \"\$frontend_dir/node_modules\"
-                    rm -rf \"\$pnpm_state_dir\"
-                    mkdir -p \"\$pnpm_state_dir\"
-                    pnpm --dir \"\$frontend_dir\" --store-dir \"\$pnpm_store\" --virtual-store-dir \"\$pnpm_virtual_store\" install \"\${install_flags[@]}\"
-                    if [[ $NOTEBOOK_FRONTEND_HAS_PNPM_LOCK -eq 0 ]]; then
-                        rm -f pnpm-lock.yaml
-                    fi
-                    printf \"%s\n\" \"\$expected_marker\" >\"\$version_marker\"
-                    touch \"\$pnpm_state_dir\"
-                else
-                    echo \"[build] node_modules current; skipping install\"
-                fi
-                export SPUR_REMOTE_PNPM_VIRTUAL_STORE=1
-                echo \"[build] pnpm --dir $NOTEBOOK_FRONTEND_DIR$PNPM_ARGS_ESCAPED\"
-                pnpm --dir \"\$frontend_dir\"$PNPM_ARGS_ESCAPED
-            '" || return $?
-        log "pnpm done."
-        return 0
+        log "--pnpm is disabled in getspur/spur after the notebook repo split."
+        log "Run pnpm from a getspur/spur-notebook checkout instead."
+        return 2
     fi
-
-    # ---- run notebook frontend (vitest) tests on the VM --------------------
-    # vitest is not a system tool — it lives in the worktree's node_modules, which
-    # is gitignored and therefore never synced. We install it on the VM (npm ci),
-    # reusing the just-synced sources, then run the project's test script. Install
-    # is skipped when node_modules is already present and no newer than the lockfile
-    # (node_modules persists on the VM across syncs, so repeat TDD runs are fast).
     if [[ $FRONTEND_TEST -eq 1 ]]; then
-        log "Running notebook frontend tests on VM: $NOTEBOOK_FRONTEND_DIR ($NOTEBOOK_FRONTEND_TEST_CMD)"
-        remote_ssh \
-            --command="bash -lc '
-                set -e
-                cd ~/$REMOTE_DIR/$NOTEBOOK_FRONTEND_DIR
-                source /etc/profile.d/spur-build.sh 2>/dev/null || true
-                if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
-                    echo \"[build] Installing frontend deps: $NOTEBOOK_FRONTEND_INSTALL_CMD\"
-                    $NOTEBOOK_FRONTEND_INSTALL_CMD
-                else
-                    echo \"[build] node_modules current; skipping install\"
-                fi
-                echo \"[build] $NOTEBOOK_FRONTEND_TEST_CMD\"
-                $NOTEBOOK_FRONTEND_TEST_CMD
-            '" || return $?
-        log "Frontend tests done."
-        return 0
+        log "--frontend-test is disabled in getspur/spur after the notebook repo split."
+        log "Run frontend tests from a getspur/spur-notebook checkout instead."
+        return 2
     fi
 
     # ---- run cargo on the VM ----------------------------------------------
@@ -645,11 +533,6 @@ run_payload() {
         remote_rustflags_export="export RUSTFLAGS=$(printf '%q' "$RUSTFLAGS")"
     fi
     log "Running: cargo $CARGO_ARGS  -j$JOBS${RUSTFLAGS:+  RUSTFLAGS=$RUSTFLAGS}"
-    local notebook_production_build=0
-    if is_notebook_production_build "$CARGO_ARGS"; then
-        notebook_production_build=1
-        log "Notebook production build detected; will run frontend build on VM first."
-    fi
     local capture_cargo_output=0
     if [[ "${SPUR_CAPTURE_FRESH_CARGO_OUTPUT:-1}" != "0" && "${SYNC_TRANSFER_COUNT:-0}" == "0" ]]; then
         capture_cargo_output=1
@@ -701,10 +584,6 @@ run_payload() {
             export CARGO_BUILD_JOBS=$JOBS
             $remote_rustflags_export
             sccache --start-server >/dev/null 2>&1 || true
-            if [[ $notebook_production_build -eq 1 ]]; then
-                echo \"[build] Building notebook frontend: $NOTEBOOK_FRONTEND_DIR\"
-                (cd $NOTEBOOK_FRONTEND_DIR && $NOTEBOOK_FRONTEND_INSTALL_CMD && $NOTEBOOK_FRONTEND_BUILD_CMD)
-            fi
             cargo_log=/tmp/spur-cargo-output.$WORKTREE_FILE_KEY.log
             $run_setup_cmd
             $run_marker_cmd
