@@ -12,6 +12,9 @@ use crate::error::{GatewayError, Result};
 const DEFAULT_RSSHUB_BASE: &str = "https://rsshub.app";
 const DEFAULT_RSSHUB_ROUTES_URL: &str = "https://docs.rsshub.app/routes.json";
 
+const DEFAULT_RSSHUB_ROUTE_CARDS: &[(&str, &str)] =
+    &[("hackernews_jobs_entries", "rsshub://hackernews/jobs")];
+
 pub struct RssAdapter {
     rsshub_base: String,
     routes_url: String,
@@ -80,6 +83,7 @@ impl RssAdapter {
             .iter()
             .find(|subscription| subscription.table == table)
             .map(|subscription| subscription.url.clone())
+            .or_else(|| default_route_card_url(table).map(str::to_string))
     }
 
     fn feed_schema() -> Arc<Schema> {
@@ -421,11 +425,26 @@ impl Adapter for RssAdapter {
             },
         ];
 
-        tables.extend(self.subscriptions.iter().map(|subscription| TableDef {
-            name: subscription.table.clone(),
-            schema: Self::entries_schema(),
-            kind: TableKind::Table,
-        }));
+        tables.extend(
+            DEFAULT_RSSHUB_ROUTE_CARDS
+                .iter()
+                .map(|(table, _)| TableDef {
+                    name: (*table).to_string(),
+                    schema: Self::entries_schema(),
+                    kind: TableKind::Table,
+                }),
+        );
+
+        tables.extend(
+            self.subscriptions
+                .iter()
+                .filter(|subscription| default_route_card_url(&subscription.table).is_none())
+                .map(|subscription| TableDef {
+                    name: subscription.table.clone(),
+                    schema: Self::entries_schema(),
+                    kind: TableKind::Table,
+                }),
+        );
 
         tables
     }
@@ -449,6 +468,12 @@ impl Adapter for RssAdapter {
             }
         }
     }
+}
+
+fn default_route_card_url(table: &str) -> Option<&'static str> {
+    DEFAULT_RSSHUB_ROUTE_CARDS
+        .iter()
+        .find_map(|(default_table, url)| (*default_table == table).then_some(*url))
 }
 
 fn record_batch(
@@ -741,10 +766,13 @@ mod tests {
         let adapter = RssAdapter::new();
         let catalog = adapter.catalog();
 
-        assert_eq!(catalog.len(), 3);
+        assert_eq!(catalog.len(), 4);
         assert!(catalog
             .iter()
             .any(|table| table.name == "routes" && matches!(table.kind, TableKind::Table)));
+        assert!(catalog.iter().any(|table| {
+            table.name == "hackernews_jobs_entries" && matches!(table.kind, TableKind::Table)
+        }));
         assert!(catalog.iter().any(|table| {
             table.name == "feed"
                 && matches!(
@@ -808,6 +836,46 @@ mod tests {
         );
         assert_eq!(string_value(&batches[0], 1, 0), "video-1");
         assert_eq!(string_value(&batches[0], 2, 0), "First video");
+    }
+
+    #[tokio::test]
+    async fn rss_default_route_card_table_scans_hackernews_jobs_entries() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/hackernews/jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Hacker News Jobs</title>
+    <item>
+      <title>Data systems engineer</title>
+      <link>https://news.ycombinator.com/item?id=1</link>
+      <guid>job-1</guid>
+    </item>
+  </channel>
+</rss>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let adapter = RssAdapter::with_config(&server.uri(), "https://example.test/routes.json");
+        let catalog = adapter.catalog();
+
+        assert!(catalog.iter().any(|table| {
+            table.name == "hackernews_jobs_entries" && matches!(table.kind, TableKind::Table)
+        }));
+
+        let batches = adapter
+            .scan(scan_request_with_args("hackernews_jobs_entries", vec![]))
+            .await
+            .expect("default route-card scan succeeds");
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(string_value(&batches[0], 0, 0), "rsshub://hackernews/jobs");
+        assert_eq!(string_value(&batches[0], 1, 0), "job-1");
+        assert_eq!(string_value(&batches[0], 2, 0), "Data systems engineer");
     }
 
     #[tokio::test]

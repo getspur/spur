@@ -139,3 +139,57 @@ fn rss_subscription_registers_schema_relation_e2e() {
         );
     });
 }
+
+#[test]
+fn rss_default_route_card_registers_schema_relation_e2e() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(async {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/hackernews/jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Hacker News Jobs</title>
+    <item>
+      <title>Data systems engineer</title>
+      <link>https://news.ycombinator.com/item?id=1</link>
+      <guid>job-1</guid>
+    </item>
+  </channel>
+</rss>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let adapter = Arc::new(RssAdapter::with_config(
+            &server.uri(),
+            "https://example.test/routes.json",
+        ));
+        let conn = Connection::open_in_memory().unwrap();
+        let bridge = Arc::new(IoBridge::new());
+        register_tables(&conn, adapter, bridge).unwrap();
+
+        let rows = tokio::task::spawn_blocking(move || {
+            let mut stmt = conn
+                .prepare("SELECT feed_url, guid FROM rss.hackernews_jobs_entries")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<duckdb::Result<Vec<_>>>()
+            .unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![("rsshub://hackernews/jobs".to_string(), "job-1".to_string())]
+        );
+    });
+}
