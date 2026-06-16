@@ -898,9 +898,7 @@ impl SessionPickerView {
         // and the actual rendering agree on how many rows are available.
         let needs_footer_row = self.rename_state.is_some() || self.confirm_switch.is_some();
         let preview_height = if self.preview_visible {
-            (area.height / 2)
-                .max(PREVIEW_MIN_LINES)
-                .min(PREVIEW_MAX_LINES_TALL)
+            (area.height / 2).clamp(PREVIEW_MIN_LINES, PREVIEW_MAX_LINES_TALL)
         } else {
             0
         };
@@ -1541,6 +1539,10 @@ impl SessionPickerView {
 ///
 /// `pane_height` is the *inner* height available for content (border already
 /// subtracted by the caller).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "preview builder mirrors existing session picker render inputs"
+)]
 pub(crate) fn build_preview_rows(
     synopsis: Option<&spur_core::SessionSynopsis>,
     draft: &str,

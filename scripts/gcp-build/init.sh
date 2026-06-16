@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup: GCS bucket, persistent cache disk, build service account.
+# One-time setup: GCS bucket and build service account.
 # Idempotent — re-running is safe.
 set -euo pipefail
 
@@ -54,30 +54,6 @@ gcloud storage buckets add-iam-policy-binding "gs://$SCCACHE_BUCKET" \
     --member="serviceAccount:$BUILD_SA_EMAIL" \
     --role="roles/storage.objectUser" >/dev/null
 
-log "Ensuring cache disk: $CACHE_DISK ($CACHE_DISK_SIZE_GB GB, $CACHE_DISK_TYPE) in $GCP_ZONE"
-if ! gcloud compute disks describe "$CACHE_DISK" --zone="$GCP_ZONE" >/dev/null 2>&1; then
-    gcloud compute disks create "$CACHE_DISK" \
-        --zone="$GCP_ZONE" \
-        --size="${CACHE_DISK_SIZE_GB}GB" \
-        --type="$CACHE_DISK_TYPE"
-else
-    read -r actual_size actual_type < <(
-        gcloud compute disks describe "$CACHE_DISK" \
-            --zone="$GCP_ZONE" \
-            --format='value(sizeGb,type.basename())'
-    )
-    if [[ "$actual_type" != "$CACHE_DISK_TYPE" ]]; then
-        log "  exists, but type is $actual_type; expected $CACHE_DISK_TYPE"
-        log "  disk type is immutable for this workflow. Replace the disk or use CACHE_DISK=<new-name>."
-        exit 1
-    fi
-    if (( actual_size < CACHE_DISK_SIZE_GB )); then
-        log "  exists, but size is ${actual_size}GB; expected at least ${CACHE_DISK_SIZE_GB}GB"
-        log "  resize with: gcloud compute disks resize $CACHE_DISK --size=$CACHE_DISK_SIZE_GB --zone=$GCP_ZONE"
-        log "  then on the VM run: sudo resize2fs /dev/sdb"
-        exit 1
-    fi
-    log "  exists ($actual_size GB, $actual_type)"
-fi
+log "Cache storage is the Local SSD included with $VM_MACHINE_TYPE; no persistent cache disk is provisioned."
 
 log "Done. Next: ./spin.sh"

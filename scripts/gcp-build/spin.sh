@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create the spot build VM with the cache disk attached.
+# Create the spot build VM with Local SSD cache storage.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -24,7 +24,7 @@ case "$VM_STATUS" in
         exit 0
         ;;
     TERMINATED|STOPPED|SUSPENDED|STOPPING|SUSPENDING)
-        log "VM $VM_NAME is $VM_STATUS — starting (cache disk stays attached)..."
+        log "VM $VM_NAME is $VM_STATUS — starting..."
         if ! gcloud compute instances start "$VM_NAME" \
             --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet; then
             VM_STATUS=$(vm_status)
@@ -66,7 +66,6 @@ if ! gcloud compute instances create "$VM_NAME" \
     --image-project="$VM_IMAGE_PROJECT" \
     --boot-disk-size="${VM_BOOT_DISK_SIZE_GB}GB" \
     --boot-disk-type="$VM_BOOT_DISK_TYPE" \
-    --disk="name=$CACHE_DISK,device-name=cargo-cache,mode=rw,boot=no,auto-delete=no" \
     --service-account="$BUILD_SA_EMAIL" \
     --scopes=cloud-platform \
     --metadata="sccache-bucket=$SCCACHE_BUCKET,enable-oslogin=TRUE,direct-ssh-port=$SPUR_DIRECT_SSH_PORT" \

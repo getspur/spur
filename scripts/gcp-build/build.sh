@@ -266,9 +266,9 @@ vm_status() {
 
 # Bring the VM to RUNNING, honoring AUTO_SPIN. On any unrecoverable condition
 # this exits INFRA_UNAVAILABLE so spur-cargo falls back to local cargo. A fresh
-# spin.sh re-attaches the persistent cache disk, so target/, the cargo registry,
-# the rustup toolchain, and the GCS sccache all survive a preemption — only the
-# boot disk (and thus the synced source tree under ~/spur) is lost and re-synced.
+# spin.sh recreates an ephemeral Local SSD cache, while GCS sccache is the
+# durable compile cache across Spot preemption. The boot disk (and synced source
+# tree under ~/spur) is lost and re-synced.
 ensure_vm_up() {
     local status
     vm_lifecycle_lock
@@ -489,8 +489,8 @@ sync_workspace() {
     # tests). We ship the current manifest and let a VM-side helper delete exactly
     # (previous manifest - current manifest): only ever rsync-managed source that is
     # now gone, never VM-generated artifacts (node_modules/, dist/, target/) which
-    # were never in any manifest. The baseline manifest persists on the cache disk
-    # (/mnt/cargo) keyed by worktree, so it survives across builds and VM restarts.
+    # were never in any manifest. The baseline manifest persists under /mnt/cargo
+    # keyed by worktree for the lifetime of the current Local SSD VM.
     local remote_manifest_cur="/tmp/spur-sync-manifest.$WORKTREE_FILE_KEY"
     local stored_manifest="/mnt/cargo/sync-manifests/$WORKTREE_KEY.manifest"
     log "Reconciling remote workspace (pruning locally-deleted files)..."
@@ -651,10 +651,10 @@ sync_back_workspace() {
 # agents NOT to re-run a "real" red remotely).
 #
 # So after any nonzero step we re-check the VM's state:
-#   * vanished (not RUNNING) -> spot preemption. The persistent cache disk and
-#     GCS sccache survived, so we re-spin (fresh boot disk -> source tree gone),
-#     re-sync, and run once more. The retry is warm: cargo re-fingerprints
-#     everything dirty but sccache serves the objects from GCS. A second vanish,
+#   * vanished (not RUNNING) -> spot preemption. GCS sccache survived, so we
+#     re-spin (fresh boot disk and Local SSD -> source tree/cache gone), re-sync,
+#     and run once more. The retry is warm at the compile-object layer because
+#     sccache serves objects from GCS. A second vanish,
 #     or a VM we can't bring up, yields INFRA_UNAVAILABLE so spur-cargo falls
 #     back to local cargo.
 #   * still RUNNING -> a genuine build/test failure; propagate the exit code
