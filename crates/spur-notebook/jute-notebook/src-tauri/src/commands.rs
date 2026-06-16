@@ -2173,6 +2173,7 @@ fn resolve_run_cell_dispatch(
         Some(source) => source.to_owned(),
         None => resolve_cell_source(&root, cell_id)?,
     };
+    let wrapped_code = prepare_run_cell_source(code_type, &source);
     let spec_name = kernelspec_for(code_type).to_owned();
     let slot_id = slot_id_for(notebook_path, code_type);
 
@@ -2189,8 +2190,58 @@ fn resolve_run_cell_dispatch(
         slot_id,
         spec_name: spec_name.clone(),
         code_type,
-        wrapped_code: source,
+        wrapped_code,
     })
+}
+
+fn prepare_run_cell_source(code_type: CodeType, source: &str) -> String {
+    if code_type == CodeType::Sql {
+        return transpile_sql_cell(source);
+    }
+    source.to_owned()
+}
+
+fn transpile_sql_cell(sql: &str) -> String {
+    let literal = sql.replace("\"\"\"", "\\\"\\\"\\\"");
+    format!(
+        "{}duckdb.sql(r\"\"\"{}\"\"\")",
+        sql_cell_duckdb_bootstrap(),
+        literal
+    )
+}
+
+fn sql_cell_duckdb_bootstrap() -> String {
+    let extension_path = directories::BaseDirs::new()
+        .map(|base_dirs| base_dirs.home_dir().join(".spur").join("extensions"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".spur").join("extensions"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".spur").join("extensions"))
+        .join("spur_rest.duckdb_extension")
+        .display()
+        .to_string();
+    let extension_path = serde_json::to_string(&extension_path)
+        .unwrap_or_else(|_| "\"~/.spur/extensions/spur_rest.duckdb_extension\"".to_owned());
+
+    format!(
+        r#"import duckdb
+_SPUR_DUCKDB_EXTENSION_PATH = {extension_path}
+_SPUR_DUCKDB_EXTENSION_SQL = _SPUR_DUCKDB_EXTENSION_PATH.replace("'", "''")
+
+if "_SPUR_DUCKDB_CONNECTION" not in globals():
+    _SPUR_DUCKDB_CONNECTION = duckdb.connect(
+        database=":memory:",
+        config={{"allow_unsigned_extensions": "true"}},
+    )
+
+duckdb.set_default_connection(_SPUR_DUCKDB_CONNECTION)
+if not globals().get("_SPUR_REST_EXTENSION_LOADED", False):
+    duckdb.sql(f"LOAD '{{_SPUR_DUCKDB_EXTENSION_SQL}}'")
+    _SPUR_REST_EXTENSION_LOADED = True
+
+"#
+    )
 }
 
 fn resolve_cell_source(root: &NotebookRoot, cell_id: &str) -> Result<String, Error> {
@@ -2801,6 +2852,36 @@ mod tests {
 
         assert_eq!(dispatch.wrapped_code, editor_source);
         assert!(!dispatch.wrapped_code.contains("class _Spur"));
+    }
+
+    #[test]
+    fn run_cell_chokepoint_transpiles_sql_editor_source() {
+        let notebook_path = "/tmp/demo-notebook.ipynb";
+        let state = State::new();
+        let sql_source = "SELECT * FROM stripe_getaccounts() LIMIT 100;";
+        let mut notebook = notebook_with_source("", 1);
+        let Cell::Code(cell) = &mut notebook.cells[0] else {
+            panic!("expected code cell");
+        };
+        cell.metadata.spur.as_mut().unwrap().code_type = Some(CodeType::Sql);
+        state.get_notebook().load(notebook_path, notebook);
+
+        let dispatch = resolve_run_cell_dispatch(
+            notebook_path,
+            None,
+            "550e8400-e29b-41d4-a716-446655440000",
+            Some(sql_source),
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(dispatch.code_type, CodeType::Sql);
+        assert_eq!(dispatch.spec_name, "python3");
+        assert!(dispatch.wrapped_code.contains("duckdb.sql("));
+        assert!(dispatch.wrapped_code.contains("allow_unsigned_extensions"));
+        assert!(dispatch.wrapped_code.contains("spur_rest.duckdb_extension"));
+        assert!(dispatch.wrapped_code.contains(sql_source));
+        assert_ne!(dispatch.wrapped_code, sql_source);
     }
 
     #[test]
