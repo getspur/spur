@@ -58,6 +58,16 @@ def test_startup_mounts_local_ssd_as_cargo_cache():
     assert "mount \"$CACHE_DEV\" \"$CACHE_MNT\"" in startup
 
 
+def test_startup_makes_local_ssd_cache_writable_before_rustup_bootstrap():
+    startup = STARTUP_SH.read_text()
+
+    mount_idx = startup.index('mountpoint -q "$CACHE_MNT" || mount "$CACHE_DEV" "$CACHE_MNT"')
+    chmod_idx = startup.index('chmod 1777 "$CACHE_MNT"')
+    rustup_idx = startup.index('if [[ ! -x "$CACHE_MNT/cargo-home/bin/rustup" ]]')
+
+    assert mount_idx < chmod_idx < rustup_idx
+
+
 def test_sccache_uses_local_ssd_l1_before_gcs_l2():
     startup = STARTUP_SH.read_text()
 
