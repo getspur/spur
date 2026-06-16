@@ -355,20 +355,24 @@ fn cargo_home_bin(context: &NotebookResolverContext) -> Option<PathBuf> {
         .map(|cargo_home| cargo_home.join("bin"))
 }
 
-pub fn notebook_mcp_server(socket_nonce: &str) -> McpServer {
-    McpServer::Stdio(
-        McpServerStdio::new("notebook", notebook_binary_path()).args(vec![
+pub fn notebook_mcp_server(socket_nonce: &str) -> Result<McpServer, NotebookResolverError> {
+    let selection = notebook_launch_selection()?;
+    Ok(McpServer::Stdio(
+        McpServerStdio::new("notebook", selection.path).args(vec![
             "--mcp-proxy".to_string(),
             control_socket_path(socket_nonce).display().to_string(),
         ]),
-    )
+    ))
 }
 
-pub fn brain_mcp_servers(spur_mcp_url: &str, socket_nonce: &str) -> Vec<McpServer> {
-    vec![
+pub fn brain_mcp_servers(
+    spur_mcp_url: &str,
+    socket_nonce: &str,
+) -> Result<Vec<McpServer>, NotebookResolverError> {
+    Ok(vec![
         McpServer::Http(McpServerHttp::new("spur-mcp", spur_mcp_url)),
-        notebook_mcp_server(socket_nonce),
-    ]
+        notebook_mcp_server(socket_nonce)?,
+    ])
 }
 
 #[cfg(test)]
@@ -469,6 +473,38 @@ mod tests {
     }
 
     #[test]
+    fn notebook_binary_path_green_resolves_external_path_install_without_source_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path_dir = temp.path().join("green-bin");
+        let installed = path_dir.join("spur-notebook");
+        let source_debug_dir = temp.path().join("crates/spur-notebook/target/debug");
+        let current_exe = source_debug_dir.join("spur");
+        let blue_sibling = source_debug_dir.join("spur-notebook");
+        std::fs::create_dir_all(&path_dir).expect("path dir");
+        std::fs::create_dir_all(&source_debug_dir).expect("blue source dir");
+        std::fs::write(&installed, "").expect("installed notebook binary");
+        std::fs::write(&current_exe, "").expect("spur binary");
+        std::fs::write(&blue_sibling, "").expect("blue source notebook binary");
+
+        let mut context = test_context();
+        context.spur_notebook_channel = Some(OsString::from("green"));
+        context.current_exe = Some(current_exe);
+        context.path = Some(std::env::join_paths([path_dir]).expect("join PATH"));
+
+        let selection =
+            notebook_launch_selection_with_context(&context).expect("green PATH selection");
+
+        assert_eq!(selection.channel, NotebookChannel::Green);
+        assert_eq!(selection.path, installed);
+        assert!(selection.reason.contains("PATH"));
+        assert!(!selection
+            .path
+            .display()
+            .to_string()
+            .contains("crates/spur-notebook"));
+    }
+
+    #[test]
     fn notebook_binary_path_auto_reports_cargo_home_install_as_blue() {
         let install_root = tempfile::tempdir().expect("install root");
         let installed = install_root.path().join("bin").join("spur-notebook");
@@ -519,6 +555,29 @@ mod tests {
         ));
         assert!(error.to_string().contains("SPUR_NOTEBOOK_CHANNEL=green"));
         assert!(error.to_string().contains("SPUR_NOTEBOOK_BIN"));
+    }
+
+    #[test]
+    fn notebook_binary_path_green_missing_error_lists_attempted_external_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cargo_home = temp.path().join("missing-cargo-home");
+        let path_dir = temp.path().join("missing-path-bin");
+        let cargo_candidate = cargo_home.join("bin").join("spur-notebook");
+        let path_candidate = path_dir.join("spur-notebook");
+
+        let mut context = test_context();
+        context.spur_notebook_channel = Some(OsString::from("green"));
+        context.cargo_home = Some(cargo_home);
+        context.path = Some(std::env::join_paths([path_dir]).expect("join PATH"));
+
+        let error =
+            notebook_launch_selection_with_context(&context).expect_err("green should be missing");
+        let message = error.to_string();
+
+        assert!(message.contains("SPUR_NOTEBOOK_CHANNEL=green"));
+        assert!(message.contains("install getspur/spur-notebook"));
+        assert!(message.contains(&cargo_candidate.display().to_string()));
+        assert!(message.contains(&path_candidate.display().to_string()));
     }
 
     #[test]
@@ -597,9 +656,47 @@ mod tests {
         assert_eq!(notebook_binary_path(), override_path);
     }
 
+    #[test]
+    fn notebook_mcp_server_uses_green_resolver_selected_binary() {
+        let install_root = tempfile::tempdir().expect("install root");
+        let installed = install_root.path().join("bin").join("spur-notebook");
+        std::fs::create_dir_all(installed.parent().unwrap()).expect("install bin dir");
+        std::fs::write(&installed, "").expect("installed notebook binary");
+        let _env = EnvGuard::set_green_cargo_home(install_root.path());
+
+        let server = notebook_mcp_server("green-mcp-nonce").expect("notebook MCP server");
+        let McpServer::Stdio(stdio) = server else {
+            panic!("notebook MCP server should use stdio");
+        };
+
+        assert_eq!(stdio.command, installed);
+        assert_eq!(stdio.args[0], "--mcp-proxy");
+        assert!(stdio.args[1].ends_with("/green-mcp-nonce.sock"));
+    }
+
+    #[test]
+    fn notebook_mcp_server_returns_missing_green_resolver_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cargo_home = temp.path().join("missing-cargo-home");
+        let path_dir = temp.path().join("missing-path-bin");
+        let cargo_candidate = cargo_home.join("bin").join("spur-notebook");
+        let path_candidate = path_dir.join("spur-notebook");
+        let _env = EnvGuard::set_green_missing_paths(&cargo_home, &path_dir);
+
+        let error = notebook_mcp_server("green-mcp-nonce").expect_err("green should be missing");
+        let message = error.to_string();
+
+        assert!(message.contains("SPUR_NOTEBOOK_CHANNEL=green"));
+        assert!(message.contains(&cargo_candidate.display().to_string()));
+        assert!(message.contains(&path_candidate.display().to_string()));
+    }
+
     struct EnvGuard {
         previous_bin: Option<OsString>,
         previous_channel: Option<OsString>,
+        previous_home: Option<OsString>,
+        previous_cargo_home: Option<OsString>,
+        previous_path: Option<OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -609,11 +706,46 @@ mod tests {
             let guard = Self {
                 previous_bin: std::env::var_os("SPUR_NOTEBOOK_BIN"),
                 previous_channel: std::env::var_os("SPUR_NOTEBOOK_CHANNEL"),
+                previous_home: std::env::var_os("HOME"),
+                previous_cargo_home: std::env::var_os("CARGO_HOME"),
+                previous_path: std::env::var_os("PATH"),
                 _lock: lock,
             };
             std::env::set_var("SPUR_NOTEBOOK_BIN", path);
             std::env::set_var("SPUR_NOTEBOOK_CHANNEL", channel);
             guard
+        }
+
+        fn set_green_cargo_home(cargo_home: &Path) -> Self {
+            let guard = Self::capture();
+            std::env::remove_var("SPUR_NOTEBOOK_BIN");
+            std::env::set_var("SPUR_NOTEBOOK_CHANNEL", "green");
+            std::env::set_var("HOME", cargo_home);
+            std::env::set_var("CARGO_HOME", cargo_home);
+            std::env::set_var("PATH", "");
+            guard
+        }
+
+        fn set_green_missing_paths(cargo_home: &Path, path_dir: &Path) -> Self {
+            let guard = Self::capture();
+            std::env::remove_var("SPUR_NOTEBOOK_BIN");
+            std::env::set_var("SPUR_NOTEBOOK_CHANNEL", "green");
+            std::env::set_var("HOME", cargo_home);
+            std::env::set_var("CARGO_HOME", cargo_home);
+            std::env::set_var("PATH", std::env::join_paths([path_dir]).expect("join PATH"));
+            guard
+        }
+
+        fn capture() -> Self {
+            let lock = ENV_LOCK.lock().expect("env lock");
+            Self {
+                previous_bin: std::env::var_os("SPUR_NOTEBOOK_BIN"),
+                previous_channel: std::env::var_os("SPUR_NOTEBOOK_CHANNEL"),
+                previous_home: std::env::var_os("HOME"),
+                previous_cargo_home: std::env::var_os("CARGO_HOME"),
+                previous_path: std::env::var_os("PATH"),
+                _lock: lock,
+            }
         }
     }
 
@@ -626,6 +758,18 @@ mod tests {
             match &self.previous_channel {
                 Some(value) => std::env::set_var("SPUR_NOTEBOOK_CHANNEL", value),
                 None => std::env::remove_var("SPUR_NOTEBOOK_CHANNEL"),
+            }
+            match &self.previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.previous_cargo_home {
+                Some(value) => std::env::set_var("CARGO_HOME", value),
+                None => std::env::remove_var("CARGO_HOME"),
+            }
+            match &self.previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
             }
         }
     }
