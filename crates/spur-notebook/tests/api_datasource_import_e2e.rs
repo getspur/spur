@@ -143,6 +143,86 @@ impl BridgeRequester for ClosedNotebookBridge {
 }
 
 #[derive(Default)]
+struct RecordingNotebookBridge {
+    sources: StdMutex<Vec<String>>,
+}
+
+impl RecordingNotebookBridge {
+    fn latest_source(&self) -> String {
+        self.sources
+            .lock()
+            .expect("recorded setup sources lock")
+            .last()
+            .cloned()
+            .expect("setup source was recorded")
+    }
+
+    fn record_source(&self, params: &Value) {
+        let source = params
+            .get("source")
+            .and_then(Value::as_str)
+            .expect("setup bridge request includes source")
+            .to_string();
+        self.sources
+            .lock()
+            .expect("recorded setup sources lock")
+            .push(source);
+    }
+}
+
+impl BridgeRequester for RecordingNotebookBridge {
+    fn listener_registered(&self) -> bool {
+        true
+    }
+
+    fn window_alive(&self) -> bool {
+        true
+    }
+
+    fn notebook_open(&self) -> bool {
+        true
+    }
+
+    fn request<'a>(
+        &'a self,
+        method: &'static str,
+        params: Value,
+        _timeout: Duration,
+    ) -> BridgeRequestFuture<'a> {
+        Box::pin(async move {
+            match method {
+                "notebook.snapshot" => Ok(json!([])),
+                "notebook.insert_cell" => {
+                    self.record_source(&params);
+                    Ok(json!({ "id": "datasource-setup-cell", "version": 1 }))
+                }
+                "notebook.write_cell" => {
+                    self.record_source(&params);
+                    let version = params
+                        .get("expected_version")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1)
+                        + 1;
+                    Ok(json!({ "version": version }))
+                }
+                "notebook.set_cell_metadata" => {
+                    let version = params
+                        .get("expected_version")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1)
+                        + 1;
+                    Ok(json!({ "version": version }))
+                }
+                _ => Err(BridgeError::Handler {
+                    code: "unexpected_bridge_request".to_string(),
+                    message: format!("unexpected notebook bridge request: {method}"),
+                }),
+            }
+        })
+    }
+}
+
+#[derive(Default)]
 struct RecordingWindowOps {
     connections_changed: StdMutex<Vec<Value>>,
 }
@@ -207,6 +287,23 @@ fn table_by_name<'a>(tables: &'a [jute::commands::Table], name: &str) -> &'a jut
         .unwrap_or_else(|| panic!("{name} table is present"))
 }
 
+fn repositories_table() -> jute::commands::Table {
+    jute::commands::Table {
+        name: "repositories".to_string(),
+        columns: vec![
+            jute::commands::Column {
+                name: "id".to_string(),
+                sql_type: "VARCHAR".to_string(),
+            },
+            jute::commands::Column {
+                name: "name".to_string(),
+                sql_type: "VARCHAR".to_string(),
+            },
+        ],
+        row_count: None,
+    }
+}
+
 fn assert_env_vars(actual: &[String], expected: &[&str]) {
     let mut actual = actual.to_vec();
     actual.sort();
@@ -218,6 +315,50 @@ fn assert_env_vars(actual: &[String], expected: &[&str]) {
     assert_eq!(actual, expected);
 }
 
+fn setup_sql_statements(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let literal = line.trim().strip_prefix("duckdb.sql(")?.strip_suffix(')')?;
+            if !literal.starts_with('"') {
+                return None;
+            }
+            serde_json::from_str::<String>(literal).ok()
+        })
+        .collect()
+}
+
+fn assert_setup_relation(source: &str, schema: &str, table: &str, backing_function: &str) {
+    let statements = setup_sql_statements(source);
+    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\"");
+    let create_view = format!(
+        "CREATE OR REPLACE VIEW \"{schema}\".\"{table}\" AS SELECT * FROM \"{backing_function}\"()"
+    );
+
+    assert!(
+        statements.iter().any(|sql| sql == &create_schema),
+        "setup source should contain {create_schema}; statements={statements:?}"
+    );
+    assert!(
+        statements.iter().any(|sql| sql == &create_view),
+        "setup source should contain {create_view}; statements={statements:?}"
+    );
+}
+
+fn run_setup_statements(
+    conn: &Connection,
+    source: &str,
+    should_run: impl Fn(&str) -> bool,
+) -> duckdb::Result<()> {
+    for sql in setup_sql_statements(source)
+        .into_iter()
+        .filter(|sql| should_run(sql))
+    {
+        conn.execute_batch(&sql)?;
+    }
+    Ok(())
+}
+
 fn manifest_for_stripe_scores_import() -> Manifest {
     let providers = parse_providers(NANGO_PROVIDERS_SNAPSHOT).expect("providers yaml parses");
     let provider = providers.get("stripe").expect("stripe provider is present");
@@ -227,6 +368,25 @@ fn manifest_for_stripe_scores_import() -> Manifest {
     let tables = openapi::spec_to_tables(&spec);
     manifest_toml.push_str(&openapi::tables_to_toml(&tables));
     Manifest::from_toml(&manifest_toml).expect("imported manifest parses")
+}
+
+fn github_repositories_manifest_toml(base_url: &str) -> String {
+    format!(
+        r#"
+[source]
+name = "github"
+base_url = "{base_url}"
+
+[[table]]
+name = "repositories"
+path = "/user/repos"
+response_path = "$.data"
+
+[table.columns]
+id = {{ json = "$.id", type = "Utf8" }}
+name = {{ json = "$.name", type = "Utf8" }}
+"#
+    )
 }
 
 fn saved_connection_manifest_toml(missing_env_var: &str) -> String {
@@ -265,6 +425,25 @@ fn test_control() -> (NotebookDaemonControl, Arc<State>, Arc<RecordingWindowOps>
     (control, jute_state, windows)
 }
 
+fn test_control_with_open_notebook() -> (
+    NotebookDaemonControl,
+    Arc<State>,
+    Arc<RecordingWindowOps>,
+    Arc<RecordingNotebookBridge>,
+) {
+    let jute_state = Arc::new(State::new());
+    let requester = Arc::new(RecordingNotebookBridge::default());
+    let windows = Arc::new(RecordingWindowOps::default());
+    let control = NotebookDaemonControl::new_with_parts_for_test(
+        Arc::new(AgentBridge::new()),
+        requester.clone(),
+        Arc::clone(&jute_state),
+        windows.clone(),
+        None,
+    );
+    (control, jute_state, windows, requester)
+}
+
 async fn import_scores_connection(
     control: &NotebookDaemonControl,
     name: &str,
@@ -293,6 +472,251 @@ async fn saved_template(name: &str) -> ConnectionTemplate {
         .into_iter()
         .find(|template| template.name == name)
         .expect("saved connection exists")
+}
+
+#[tokio::test]
+async fn api_datasource_openapi_schema_relation_is_queryable() {
+    let server = MockServer::start().await;
+    let name = "github_work";
+    let _cleanup = connection_store::remove(name).await;
+
+    Mock::given(method("GET"))
+        .and(path("/user/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "repo-1", "name": "spur" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let (control, jute_state, _windows, notebook) = test_control_with_open_notebook();
+    let manifest_toml = github_repositories_manifest_toml(&server.uri());
+    let response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "add_api_datasource_from_manifest",
+                "name": name,
+                "manifest_toml": manifest_toml,
+                "credentials": [],
+            })),
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let entry = datasource_entry_from_response(&response);
+    assert_eq!(entry.name, name);
+    assert_eq!(entry.path, "github");
+    assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
+    assert_eq!(entry.tables, vec![repositories_table()]);
+    assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+
+    let setup_source = notebook.latest_source();
+    assert_setup_relation(
+        &setup_source,
+        "github_work",
+        "repositories",
+        "github_repositories",
+    );
+
+    let saved = saved_template(name).await;
+    let adapter: Arc<dyn Adapter> = Arc::new(ManifestAdapter::new(
+        Manifest::from_toml(&saved.manifest_toml).expect("saved github manifest parses"),
+    ));
+    let conn = Connection::open_in_memory().expect("duckdb opens in memory");
+    let bridge = Arc::new(IoBridge::new());
+    assert_eq!(
+        register_tables(&conn, adapter, bridge).expect("github table function registers"),
+        1
+    );
+    run_setup_statements(&conn, &setup_source, |sql| sql.contains("github_work"))
+        .expect("github schema setup statements execute");
+
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut stmt = conn
+            .prepare("SELECT id, name FROM github_work.repositories LIMIT 1")
+            .expect("schema-qualified github query prepares");
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("schema-qualified github query maps rows");
+
+        rows.collect::<duckdb::Result<Vec<_>>>()
+            .expect("schema-qualified github rows collect")
+    })
+    .await
+    .expect("blocking github duckdb query joins");
+
+    assert_eq!(rows, vec![("repo-1".to_string(), "spur".to_string())]);
+
+    connection_store::remove(name)
+        .await
+        .expect("github_work saved template cleans up");
+}
+
+#[tokio::test]
+async fn api_datasource_rss_attaches_schema_with_unprefixed_tables() {
+    let (control, jute_state, _windows, notebook) = test_control_with_open_notebook();
+    let response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "add_api_datasource",
+                "name": "rss_news",
+                "source": "rss",
+            })),
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let entry = datasource_entry_from_response(&response);
+    assert_eq!(entry.name, "rss_news");
+    assert_eq!(entry.path, "rss");
+    assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
+    let table_names = entry
+        .tables
+        .iter()
+        .map(|table| table.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(table_names, vec!["routes", "feed", "entries"]);
+    assert!(
+        table_names.iter().all(|name| !name.starts_with("rss_")),
+        "RSS datasource table names should not carry provider prefixes: {table_names:?}"
+    );
+    assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+
+    let setup_source = notebook.latest_source();
+    assert_setup_relation(&setup_source, "rss_news", "routes", "rss_routes");
+    assert_setup_relation(&setup_source, "rss_news", "feed", "rss_feed");
+    assert_setup_relation(&setup_source, "rss_news", "entries", "rss_entries");
+
+    let adapter: Arc<dyn Adapter> =
+        Arc::new(spur_rest_table_gateway::adapters::rss::RssAdapter::new());
+    let conn = Connection::open_in_memory().expect("duckdb opens in memory");
+    let bridge = Arc::new(IoBridge::new());
+    assert_eq!(
+        register_tables(&conn, adapter, bridge).expect("rss table functions register"),
+        1,
+        "only the no-arg RSS routes table is directly queryable in this harness"
+    );
+    run_setup_statements(&conn, &setup_source, |sql| {
+        sql == "CREATE SCHEMA IF NOT EXISTS \"rss_news\"" || sql.contains("\"rss_news\".\"routes\"")
+    })
+    .expect("rss schema setup statements execute");
+
+    let route_count = tokio::task::spawn_blocking(move || {
+        conn.query_row("SELECT count(*) FROM rss_news.routes", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("schema-qualified rss routes query returns count")
+    })
+    .await
+    .expect("blocking rss duckdb query joins");
+
+    assert!(
+        route_count > 0,
+        "rss_news.routes should expose catalog rows"
+    );
+}
+
+#[tokio::test]
+async fn api_datasource_saved_connection_attach_schema_relation_is_queryable() {
+    let server = MockServer::start().await;
+    let name = format!("saved_github_{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = connection_store::remove(&name).await;
+
+    Mock::given(method("GET"))
+        .and(path("/user/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "repo-2", "name": "codex" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let manifest_toml = github_repositories_manifest_toml(&server.uri());
+    connection_store::upsert(ConnectionTemplate {
+        name: name.clone(),
+        provider: Some("github".to_string()),
+        group: Some("API".to_string()),
+        manifest_toml: manifest_toml.clone(),
+        tables: vec![repositories_table()],
+        credential_env_vars: Vec::new(),
+        credential_ref: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    })
+    .await
+    .expect("saved github connection template writes");
+
+    let (control, jute_state, windows, notebook) = test_control_with_open_notebook();
+    let response = control
+        .handle(DaemonControlRequest {
+            id: None,
+            request: daemon_request(json!({
+                "daemon": "notebook.v1",
+                "command": "attach_saved_connection",
+                "name": name,
+            })),
+        })
+        .await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let result = response.result.expect("saved attach result");
+    assert_eq!(result["type"], "attachedSavedConnection");
+    assert_eq!(result["data"]["missing_env_vars"], json!([]));
+    assert_eq!(result["data"]["entry"]["name"], name);
+    assert_eq!(result["data"]["entry"]["path"], "github");
+    assert_eq!(result["data"]["entry"]["tables"][0]["name"], "repositories");
+
+    let catalog = jute_state.datasource_catalog.lock().list();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].name, name);
+    assert_eq!(catalog[0].tables, vec![repositories_table()]);
+    assert_eq!(windows.connections_changed_count(), 1);
+
+    let setup_source = notebook.latest_source();
+    assert_setup_relation(&setup_source, &name, "repositories", "github_repositories");
+
+    let adapter: Arc<dyn Adapter> = Arc::new(ManifestAdapter::new(
+        Manifest::from_toml(&manifest_toml).expect("saved github manifest parses"),
+    ));
+    let conn = Connection::open_in_memory().expect("duckdb opens in memory");
+    let bridge = Arc::new(IoBridge::new());
+    assert_eq!(
+        register_tables(&conn, adapter, bridge).expect("saved github table function registers"),
+        1
+    );
+    run_setup_statements(&conn, &setup_source, |sql| sql.contains(&name))
+        .expect("saved github schema setup statements execute");
+
+    let query = format!("SELECT id, name FROM {name}.repositories LIMIT 1");
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut stmt = conn
+            .prepare(&query)
+            .expect("schema-qualified saved github query prepares");
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("schema-qualified saved github query maps rows");
+
+        rows.collect::<duckdb::Result<Vec<_>>>()
+            .expect("schema-qualified saved github rows collect")
+    })
+    .await
+    .expect("blocking saved github duckdb query joins");
+
+    assert_eq!(rows, vec![("repo-2".to_string(), "codex".to_string())]);
+
+    connection_store::remove(&name)
+        .await
+        .expect("saved github template cleans up");
 }
 
 #[tokio::test]
