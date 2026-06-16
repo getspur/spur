@@ -1,28 +1,43 @@
 #!/usr/bin/env bash
 # VM startup script. Runs as root on every boot.
-# - Mounts persistent cache disk
+# - Formats/mounts the VM's Local SSD as the ephemeral cargo cache
 # - Installs build deps, rustup, sccache
-# - Writes per-user cargo config pointing target/ to cache disk + sccache->GCS
+# - Writes per-user cargo config pointing target/ to Local SSD + sccache->GCS
 set -euo pipefail
 
 LOG=/var/log/spur-startup.log
 exec >>"$LOG" 2>&1
 echo "=== spur-startup $(date -u +%FT%TZ) ==="
 
-CACHE_DEV=/dev/disk/by-id/google-cargo-cache
+CACHE_DEV=""
+CACHE_LABEL=cargo-cache
 CACHE_MNT=/mnt/cargo
-SCCACHE_RAM_MNT=/mnt/sccache-ram
 
-# Format on first attach only.
+# Prefer the labeled filesystem when a VM reboot preserves Local SSD contents;
+# otherwise select the first Google Local SSD exposed by the -lssd machine type.
+if CACHE_DEV_BY_LABEL=$(blkid -L "$CACHE_LABEL" 2>/dev/null); then
+    CACHE_DEV="$CACHE_DEV_BY_LABEL"
+else
+    for candidate in /dev/disk/by-id/google-local-nvme-ssd-* /dev/disk/by-id/google-local-ssd-*; do
+        if [[ -b "$candidate" ]]; then
+            CACHE_DEV="$candidate"
+            break
+        fi
+    done
+fi
+if [[ -z "$CACHE_DEV" ]]; then
+    echo "No Local SSD cache device found. Available disks:" >&2
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,LABEL >&2 || true
+    exit 1
+fi
+
+# Format on first boot of each Local SSD lifecycle only.
 if ! blkid "$CACHE_DEV" >/dev/null 2>&1; then
-    echo "Formatting fresh cache disk..."
-    mkfs.ext4 -F -L cargo-cache "$CACHE_DEV"
+    echo "Formatting fresh Local SSD cache disk..."
+    mkfs.ext4 -F -L "$CACHE_LABEL" "$CACHE_DEV"
 fi
 mkdir -p "$CACHE_MNT"
 mountpoint -q "$CACHE_MNT" || mount "$CACHE_DEV" "$CACHE_MNT"
-mkdir -p "$SCCACHE_RAM_MNT"
-mountpoint -q "$SCCACHE_RAM_MNT" || mount -t tmpfs -o size=16G,mode=1777 tmpfs "$SCCACHE_RAM_MNT"
-chmod 1777 "$SCCACHE_RAM_MNT"
 
 # Default OS Login user is created on first ssh; chown lazily there.
 
@@ -83,10 +98,10 @@ if [[ "$INSTALLED" != "$SCCACHE_VERSION" ]]; then
     install -m 0755 "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
 fi
 
-# rustup + stable toolchain on the cache disk. Survives across boots; only
-# installs on a fresh disk (i.e. after `spin.sh` provisions a new pd or after
-# a disk swap). Workers' `rust-toolchain.toml` pins fetch additional toolchains
-# lazily, so we only bootstrap stable here.
+# rustup + stable toolchain on the Local SSD cache. This is intentionally
+# ephemeral across Spot VM deletion; GCS sccache is the durable compile cache.
+# Workers' `rust-toolchain.toml` pins fetch additional toolchains lazily, so we
+# only bootstrap stable here.
 if [[ ! -x "$CACHE_MNT/cargo-home/bin/rustup" ]]; then
     echo "Installing rustup + stable toolchain..."
     BUILD_USER=$(stat -c %U "$CACHE_MNT") # the user owning /mnt/cargo
@@ -243,9 +258,9 @@ export CC=/usr/local/bin/sccache-cc
 export CXX=/usr/local/bin/sccache-cxx
 export SCCACHE_MULTILEVEL_CHAIN=disk,gcs
 export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0
-export SCCACHE_DIR=$SCCACHE_RAM_MNT/\${USER:-builder}
+export SCCACHE_DIR=$CACHE_MNT/sccache/\${USER:-builder}
 mkdir -p "\$SCCACHE_DIR" 2>/dev/null || true
-export SCCACHE_CACHE_SIZE=15G
+export SCCACHE_CACHE_SIZE=50G
 export SCCACHE_GCS_BUCKET=${SCCACHE_GCS_BUCKET}
 export SCCACHE_GCS_RW_MODE=READ_WRITE
 export SCCACHE_GCS_KEY_PATH=
@@ -263,7 +278,8 @@ chmod 1777 "$CACHE_MNT"
 # ---------------------------------------------------------------------------
 # Idle auto-shutdown: terminate the VM after 30 min with no build / ssh / target
 # activity. Spot VMs created with --instance-termination-action=DELETE convert
-# `shutdown -h` into instance deletion; the persistent cache disk survives.
+# `shutdown -h` into instance deletion; the Local SSD cache is ephemeral and
+# GCS sccache remains the durable L2.
 # Override the threshold by passing instance metadata `idle-shutdown-minutes`.
 # ---------------------------------------------------------------------------
 IDLE_MINUTES=$(curl -fsS -H "Metadata-Flavor: Google" \
