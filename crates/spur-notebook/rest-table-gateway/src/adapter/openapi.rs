@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 use openapiv3::{
@@ -721,6 +721,12 @@ fn array_item_schema<'a>(spec: &'a OpenAPI, schema: &'a Schema) -> Option<&'a Sc
     }
 }
 
+struct GeneratedTable {
+    table: TableCfg,
+    base_name: String,
+    tag_prefix: Option<String>,
+}
+
 pub fn spec_to_tables(spec: &OpenAPI) -> Vec<TableCfg> {
     let mut tables = Vec::new();
     for (path, path_item) in &spec.paths.paths {
@@ -754,17 +760,73 @@ pub fn spec_to_tables(spec: &OpenAPI) -> Vec<TableCfg> {
             })
             .collect();
 
-        tables.push(TableCfg {
-            name: table_name(operation, path),
-            path: path.clone(),
-            response_path,
-            columns,
-            filters: query_filters(spec, operation),
-            graphql: None,
+        let base_name = table_name(operation, path);
+        tables.push(GeneratedTable {
+            table: TableCfg {
+                name: base_name.clone(),
+                path: path.clone(),
+                response_path,
+                columns,
+                filters: query_filters(spec, operation),
+                graphql: None,
+            },
+            base_name,
+            tag_prefix: first_tag_prefix(operation),
         });
     }
 
+    resolve_table_name_collisions(&mut tables);
     tables
+        .into_iter()
+        .map(|generated| generated.table)
+        .collect()
+}
+
+fn first_tag_prefix(operation: &Operation) -> Option<String> {
+    operation.tags.first().map(|tag| sanitize_name(tag))
+}
+
+fn resolve_table_name_collisions(tables: &mut [GeneratedTable]) {
+    let mut base_counts = HashMap::new();
+    for generated in tables.iter() {
+        *base_counts
+            .entry(generated.base_name.clone())
+            .or_insert(0usize) += 1;
+    }
+
+    let mut used_names = HashSet::new();
+    for generated in tables.iter_mut() {
+        let base_collision = base_counts
+            .get(&generated.base_name)
+            .copied()
+            .unwrap_or_default()
+            > 1;
+        let candidate = if base_collision {
+            generated
+                .tag_prefix
+                .as_ref()
+                .map(|tag| sanitize_name(&format!("{}_{}", tag, generated.base_name)))
+                .unwrap_or_else(|| generated.base_name.clone())
+        } else {
+            generated.base_name.clone()
+        };
+        generated.table.name = unique_table_name(candidate, &mut used_names);
+    }
+}
+
+fn unique_table_name(candidate: String, used_names: &mut HashSet<String>) -> String {
+    if used_names.insert(candidate.clone()) {
+        return candidate;
+    }
+
+    for suffix in 2usize.. {
+        let suffixed = format!("{candidate}_{suffix}");
+        if used_names.insert(suffixed.clone()) {
+            return suffixed;
+        }
+    }
+
+    unreachable!("unbounded suffix search must return")
 }
 
 fn resolve_path_item<'a>(
@@ -1039,6 +1101,130 @@ mod tests {
 
         assert_eq!(tables.len(), 1);
         assert_eq!("things", tables[0].name);
+    }
+
+    #[test]
+    fn untagged_openapi_table_uses_operation_or_path_without_schema_prefix() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.0.0
+info: { title: Demo, version: "1" }
+paths:
+  /repositories:
+    get:
+      operationId: listRepositories
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+  /orgs/{org}/projects:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+"#,
+        )
+        .expect("spec should parse");
+
+        let mut names = spec_to_tables(&spec)
+            .into_iter()
+            .map(|table| table.name)
+            .collect::<Vec<_>>();
+        names.sort();
+
+        assert_eq!(names, vec!["listrepositories", "projects"]);
+    }
+
+    #[test]
+    fn openapi_table_name_collision_uses_tag_prefix_or_suffix() {
+        let spec = parse_spec(
+            r#"
+openapi: 3.0.0
+info: { title: Demo, version: "1" }
+paths:
+  /billing/items:
+    get:
+      tags: [Billing]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+  /crm/items:
+    get:
+      tags: [CRM]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+  /alpha/things:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+  /beta/things:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+"#,
+        )
+        .expect("spec should parse");
+
+        let mut names = spec_to_tables(&spec)
+            .into_iter()
+            .map(|table| table.name)
+            .collect::<Vec<_>>();
+        names.sort();
+
+        assert_eq!(
+            names,
+            vec!["billing_items", "crm_items", "things", "things_2"]
+        );
     }
 
     #[test]

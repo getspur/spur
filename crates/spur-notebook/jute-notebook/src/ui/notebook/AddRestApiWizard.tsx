@@ -862,7 +862,7 @@ export default function AddRestApiWizard({
   const handleAddRssDatasource = async () => {
     const name = datasourceName.trim();
     if (name.length === 0) {
-      setError("Datasource name is required.");
+      setError("Schema name is required.");
       return;
     }
 
@@ -1436,6 +1436,8 @@ function SourceStep({
   sourceFamily: SourceFamily;
   sourceMode: SourceMode | null;
 }) {
+  const selectedFamily = datasourceFamilyByKey[sourceFamily];
+
   return (
     <div>
       <h3 className="text-base font-semibold text-gray-950">
@@ -1459,6 +1461,13 @@ function SourceStep({
           />
         ))}
       </div>
+
+      {!selectedFamily.attachable && selectedFamily.attachUnavailableReason && (
+        <div className="mt-4 flex gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <AlertCircleIcon className="mt-0.5 shrink-0" size={15} />
+          <p>{selectedFamily.attachUnavailableReason}</p>
+        </div>
+      )}
 
       {sourceFamily === "rest_api" && (
         <section className="mt-4 border-t border-gray-200 pt-4">
@@ -1623,6 +1632,7 @@ function sourceFamilyIcon(family: SourceFamily): React.ReactNode {
 }
 
 function sourceFamilyMeta(family: DatasourceSourceFamily) {
+  if (!family.attachable) return "Unavailable";
   if (family.key === "rest_api") return "preserved";
   if (family.key === "rss") return "RSSHub";
   if (family.key === "file") return "local";
@@ -1794,7 +1804,19 @@ function GenericLocateStep({
             ))}
           </ul>
         </section>
-        <SqlPreview sql={generatedSqlForFamily(family, location)} />
+        {family.key === "file" ? (
+          <section className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+            <h4 className="text-xs font-medium text-gray-950">
+              Local file attach
+            </h4>
+            <p className="mt-2 text-xs leading-5 text-gray-600">
+              Local file attach uses the notebook file callback. The selected
+              path is passed through directly instead of becoming a SQL recipe.
+            </p>
+          </section>
+        ) : (
+          <SqlPreview sql={generatedSqlForFamily(family, location)} />
+        )}
       </div>
     </div>
   );
@@ -1873,6 +1895,42 @@ function GenericAttachStep({
   family: DatasourceSourceFamily;
   location: string;
 }) {
+  if (family.key === "file") {
+    return (
+      <div>
+        <h3 className="text-base font-semibold text-gray-950">
+          Attach {family.label.toLowerCase()}
+        </h3>
+        <p className="mt-1 text-sm text-gray-500">
+          The selected local path will be attached directly through the notebook
+          file callback.
+        </p>
+        <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50">
+          <SummaryRow label="Family">{family.label}</SummaryRow>
+          <SummaryRow label="Location">{location}</SummaryRow>
+          <SummaryRow label="Object">
+            {previewObjectNameForFamily(family)}
+          </SummaryRow>
+        </div>
+        {error && <ErrorBanner message={error} />}
+      </div>
+    );
+  }
+
+  if (!family.attachable) {
+    return (
+      <div>
+        <h3 className="text-base font-semibold text-gray-950">
+          {family.label} unavailable
+        </h3>
+        <p className="mt-1 text-sm text-gray-500">
+          {family.attachUnavailableReason}
+        </p>
+        {error && <ErrorBanner message={error} />}
+      </div>
+    );
+  }
+
   return (
     <div>
       <h3 className="text-base font-semibold text-gray-950">
@@ -2290,10 +2348,10 @@ function ConnectStep({
       <div className="mt-4 space-y-3">
         <label className="block">
           <span className="text-xs font-medium text-gray-600">
-            Datasource name
+            Schema name
           </span>
           <input
-            aria-label="Datasource name"
+            aria-label="Schema name"
             className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600 disabled:bg-gray-50 disabled:text-gray-500"
             disabled={nameReadOnly}
             onChange={(event) =>
@@ -2642,7 +2700,7 @@ function ReviewStep({
       </p>
 
       <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50">
-        <SummaryRow label="Name">{datasourceName.trim()}</SummaryRow>
+        <SummaryRow label="Schema">{datasourceName.trim()}</SummaryRow>
         <SummaryRow label="Provider">
           {selectedProvider?.displayName ?? "Custom REST API"}
         </SummaryRow>
@@ -2687,7 +2745,7 @@ function ReviewStep({
               key={`review:${table.name}`}
             >
               <span className="truncate font-mono text-xs text-gray-950">
-                {table.name}
+                {schemaQualifiedRelationName(datasourceName, table.name)}
               </span>
               <span className="shrink-0 text-xs text-gray-400">
                 {table.columns.length} cols
@@ -2794,6 +2852,7 @@ function RssAttachStep({
       sql: entriesQuery,
     },
   ];
+  const schemaName = datasourceName.trim() || "rss";
 
   const selectMode = (mode: RssSourceMode) => {
     setSourceMode(mode);
@@ -2837,10 +2896,10 @@ function RssAttachStep({
         </div>
         <label className="w-full sm:w-56">
           <span className="text-xs font-medium text-gray-600">
-            Datasource name
+            Schema name
           </span>
           <input
-            aria-label="Datasource name"
+            aria-label="Schema name"
             className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
             onChange={(event) =>
               onDatasourceNameChange(event.currentTarget.value)
@@ -3107,6 +3166,7 @@ function RssAttachStep({
             </h4>
           </div>
           <SummaryRow label="Feed">{selectedRoute.previewTitle}</SummaryRow>
+          <SummaryRow label="Schema">{schemaName}</SummaryRow>
           <SummaryRow label="Source">{classification.label}</SummaryRow>
           <SummaryRow label="Friendly view name">{entriesViewName}</SummaryRow>
           <SummaryRow label="Entry function">rss_entries(url)</SummaryRow>
@@ -3172,15 +3232,15 @@ function RssAttachStep({
         <div className="divide-y divide-gray-200">
           <RssTableFunctionRow
             detail="Browse RSSHub predefined sources, routes, categories, examples, and generated feed URLs."
-            name="rss_routes"
+            name={schemaQualifiedRelationName(schemaName, "rss_routes")}
           />
           <RssTableFunctionRow
             detail="Fetch channel-level metadata for a direct RSS URL or an rsshub:// route."
-            name="rss_feed"
+            name={schemaQualifiedRelationName(schemaName, "rss_feed")}
           />
           <RssTableFunctionRow
             detail="Fetch feed entries from a direct RSS URL or an rsshub:// route."
-            name="rss_entries"
+            name={schemaQualifiedRelationName(schemaName, "rss_entries")}
           />
         </div>
       </section>
@@ -3326,6 +3386,11 @@ function RssTableFunctionRow({
       </div>
     </div>
   );
+}
+
+function schemaQualifiedRelationName(schemaName: string, tableName: string) {
+  const schema = schemaName.trim();
+  return schema ? `${schema}.${tableName}` : tableName;
 }
 
 function SummaryRow({
@@ -3475,6 +3540,8 @@ function canContinueFromStep({
   tablePreview: OpenApiTablePreview | null;
   editMode: boolean;
 }) {
+  if (!datasourceFamilyByKey[sourceFamily].attachable) return false;
+
   if (stepIndex === 0) {
     if (sourceFamily !== "rest_api") return true;
 
