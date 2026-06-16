@@ -271,6 +271,39 @@ describe("ChatPanel", () => {
     expect(useChat.getState().pendingPermission).toBeNull();
   });
 
+  test("renders streaming assistant markdown as formatted content", () => {
+    const s = useChat.getState();
+    s.setScope("notebook:/tmp/revenue.ipynb", "revenue.ipynb");
+    s.applyEvent({
+      type: "messageChunk",
+      text: "### Streaming plan\n\n- Add markdown renderer",
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.getByRole("heading", { level: 3, name: "Streaming plan" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Add markdown renderer").tagName).toBe("LI");
+  });
+
+  test("renders completed assistant markdown as formatted content", () => {
+    const s = useChat.getState();
+    s.setScope("notebook:/tmp/revenue.ipynb", "revenue.ipynb");
+    s.applyEvent({
+      type: "messageChunk",
+      text: "### Completed plan\n\n- Keep markdown renderer",
+    });
+    s.applyEvent({ type: "done" });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.getByRole("heading", { level: 3, name: "Completed plan" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Keep markdown renderer").tagName).toBe("LI");
+  });
+
   test("ensures a session for path without loading it and streams chat_turn events", async () => {
     selectedCellId = "cell-42";
 
