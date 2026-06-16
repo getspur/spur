@@ -1,4 +1,6 @@
 use serde_json::json;
+use spur_core::notebook::{NotebookChannel, NotebookLaunchSelection};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -20,6 +22,21 @@ async fn write_frame(stream: &mut tokio::net::UnixStream, bytes: &[u8]) {
         .expect("write frame length");
     stream.write_all(bytes).await.expect("write frame body");
     stream.flush().await.expect("flush frame");
+}
+
+#[test]
+fn notebook_launch_report_includes_channel_path_and_reason_before_spawn() {
+    let selection = NotebookLaunchSelection {
+        channel: NotebookChannel::Green,
+        path: PathBuf::from("/opt/spur-notebook/bin/spur-notebook"),
+        reason: "external test install".to_string(),
+    };
+
+    let report = spur_tui::notebook_daemon::notebook_launch_report(&selection);
+
+    assert!(report.contains("channel=green"));
+    assert!(report.contains("path=/opt/spur-notebook/bin/spur-notebook"));
+    assert!(report.contains("reason=external test install"));
 }
 
 #[tokio::test]
