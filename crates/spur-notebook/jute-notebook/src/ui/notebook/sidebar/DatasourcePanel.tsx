@@ -3,6 +3,7 @@ import { type DragDropEvent, getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import {
+  CalendarClockIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FileUpIcon,
@@ -320,6 +321,30 @@ export default function DatasourcePanel() {
       }
     },
     [attachPath],
+  );
+
+  const handleInsertTableQuery = useCallback(
+    async (schemaName: string, tableName: string) => {
+      setError(null);
+      try {
+        const response = await daemonControl({
+          command: "insert_cell",
+          kind: "code",
+          after_id: null,
+          source: tableRelationQuerySource(schemaName, tableName),
+          last_edited_by: "datasource",
+          code_type: "sql",
+        });
+        if (!response.ok) {
+          throw new Error(
+            response.error?.message ?? "Failed to create query cell",
+          );
+        }
+      } catch (caught) {
+        setError(errorMessage(caught));
+      }
+    },
+    [],
   );
 
   const handleScheduleTableRelation = useCallback(
@@ -642,6 +667,7 @@ export default function DatasourcePanel() {
                         <DatasourceListItem
                           entry={entry}
                           key={entry.name}
+                          onInsertTableQuery={handleInsertTableQuery}
                           onScheduleTableRelation={handleScheduleTableRelation}
                           onRemove={handleDetachDatasource}
                         />
@@ -975,10 +1001,12 @@ function SavedConnectionRow({
 
 function DatasourceListItem({
   entry,
+  onInsertTableQuery,
   onScheduleTableRelation,
   onRemove,
 }: {
   entry: DatasourceEntry;
+  onInsertTableQuery: (schemaName: string, tableName: string) => void;
   onScheduleTableRelation: (schemaName: string, tableName: string) => void;
   onRemove: (name: string) => void;
 }) {
@@ -1052,11 +1080,28 @@ function DatasourceListItem({
                   >
                     {relationName}
                   </span>
-                  {isApiTables ? (
-                    <div className="flex shrink-0 items-center gap-1">
+                  <div className="flex shrink-0 items-center gap-1">
+                    {isApiTables ? (
                       <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
                         table
                       </span>
+                    ) : (
+                      table.rowCount !== null && (
+                        <span className="shrink-0 text-gray-400">
+                          {table.rowCount.toLocaleString()} rows
+                        </span>
+                      )
+                    )}
+                    <button
+                      aria-label={`Query ${relationName}`}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-200 bg-white text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-900"
+                      onClick={() => onInsertTableQuery(entry.name, tableName)}
+                      title={`Create query for ${relationName}`}
+                      type="button"
+                    >
+                      <PlayIcon size={12} strokeWidth={1.8} />
+                    </button>
+                    {isApiTables && (
                       <button
                         aria-label={`Schedule query ${relationName}`}
                         className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-200 bg-white text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-900"
@@ -1066,16 +1111,10 @@ function DatasourceListItem({
                         title={`Create scheduled query for ${relationName}`}
                         type="button"
                       >
-                        <PlayIcon size={12} strokeWidth={1.8} />
+                        <CalendarClockIcon size={12} strokeWidth={1.8} />
                       </button>
-                    </div>
-                  ) : (
-                    table.rowCount !== null && (
-                      <span className="shrink-0 text-gray-400">
-                        {table.rowCount.toLocaleString()} rows
-                      </span>
-                    )
-                  )}
+                    )}
+                  </div>
                 </div>
                 {isApiTables && table.columns.length > 0 && (
                   <p className="text-[10px] uppercase text-gray-400">
@@ -1091,6 +1130,23 @@ function DatasourceListItem({
         </div>
       ) : (
         <div className="mt-3 space-y-1">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <span
+              className="truncate font-medium text-gray-700"
+              title={tableRelationName(entry.name, "main")}
+            >
+              {tableRelationName(entry.name, "main")}
+            </span>
+            <button
+              aria-label={`Query ${tableRelationName(entry.name, "main")}`}
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-gray-200 bg-white text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-900"
+              onClick={() => onInsertTableQuery(entry.name, "main")}
+              title={`Create query for ${tableRelationName(entry.name, "main")}`}
+              type="button"
+            >
+              <PlayIcon size={12} strokeWidth={1.8} />
+            </button>
+          </div>
           {entry.columns.map((column) => (
             <DatasourceColumnRow column={column} key={column.name} />
           ))}

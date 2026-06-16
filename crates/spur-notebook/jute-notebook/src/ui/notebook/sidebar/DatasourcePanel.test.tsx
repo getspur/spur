@@ -1112,6 +1112,97 @@ describe("DatasourcePanel", () => {
     expect(screen.getByText("3 rows")).toBeInTheDocument();
   });
 
+  test("multi_table_entry_query_button_inserts_sql_cell_without_schedule", async () => {
+    render(<DatasourcePanel />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [
+          datasourceEntry({
+            name: "warehouse",
+            path: "/tmp/warehouse.duckdb",
+            kind: "duck_db",
+            columns: [],
+            rowCount: null,
+            tables: [
+              {
+                name: "orders",
+                columns: [{ name: "order_id", sqlType: "BIGINT" }],
+                rowCount: 12,
+              },
+            ],
+          }),
+        ],
+      });
+    });
+
+    const queryButton = await screen.findByRole("button", {
+      name: "Query warehouse.orders",
+    });
+
+    daemonControlMock.mockClear();
+    setCellScheduleMock.mockClear();
+    fireEvent.click(queryButton);
+
+    await waitFor(() => expect(daemonControlMock).toHaveBeenCalledTimes(1));
+    expect(daemonControlMock).toHaveBeenCalledWith({
+      command: "insert_cell",
+      kind: "code",
+      after_id: null,
+      source: "SELECT * FROM warehouse.orders LIMIT 100;\n",
+      last_edited_by: "datasource",
+      code_type: "sql",
+    });
+    expect(
+      daemonControlMock.mock.calls.filter(
+        ([command]) =>
+          (command as DaemonControlCommand).command === "set_cell_metadata",
+      ),
+    ).toHaveLength(0);
+    expect(setCellScheduleMock).not.toHaveBeenCalled();
+  });
+
+  test("single_relation_csv_query_button_inserts_main_relation_sql_cell", async () => {
+    render(<DatasourcePanel />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [datasourceEntry({ name: "sales", path: "/tmp/sales.csv" })],
+      });
+    });
+
+    const queryButton = await screen.findByRole("button", {
+      name: "Query sales.main",
+    });
+
+    daemonControlMock.mockClear();
+    setCellScheduleMock.mockClear();
+    fireEvent.click(queryButton);
+
+    await waitFor(() => expect(daemonControlMock).toHaveBeenCalledTimes(1));
+    expect(daemonControlMock).toHaveBeenCalledWith({
+      command: "insert_cell",
+      kind: "code",
+      after_id: null,
+      source: "SELECT * FROM sales.main LIMIT 100;\n",
+      last_edited_by: "datasource",
+      code_type: "sql",
+    });
+    expect(
+      daemonControlMock.mock.calls.filter(
+        ([command]) =>
+          (command as DaemonControlCommand).command === "set_cell_metadata",
+      ),
+    ).toHaveLength(0);
+    expect(setCellScheduleMock).not.toHaveBeenCalled();
+  });
+
   test("api_tables_entry_renders_queryable_relations", async () => {
     render(<DatasourcePanel />);
 
@@ -1153,6 +1244,102 @@ describe("DatasourcePanel", () => {
     expect(screen.getByText("repo_id")).toBeInTheDocument();
     expect(screen.getByText("github_work.issues")).toBeInTheDocument();
     expect(screen.getByText("title")).toBeInTheDocument();
+  });
+
+  test("api_tables_entry_has_distinct_query_and_schedule_buttons", async () => {
+    render(<DatasourcePanel />);
+
+    await waitFor(() =>
+      expect(eventCallbacks.has("datasources://changed")).toBe(true),
+    );
+    await act(async () => {
+      eventCallbacks.get("datasources://changed")?.({
+        payload: [
+          datasourceEntry({
+            name: "github_work",
+            path: "api://github",
+            kind: "api_tables",
+            group: null,
+            columns: [],
+            rowCount: null,
+            tables: [
+              {
+                name: "repositories",
+                columns: [{ name: "repo_id", sqlType: "VARCHAR" }],
+                rowCount: null,
+              },
+            ],
+          }),
+        ],
+      });
+    });
+
+    const queryButton = await screen.findByRole("button", {
+      name: "Query github_work.repositories",
+    });
+    const scheduleButton = screen.getByRole("button", {
+      name: "Schedule query github_work.repositories",
+    });
+
+    daemonControlMock.mockClear();
+    setCellScheduleMock.mockClear();
+    fireEvent.click(queryButton);
+
+    await waitFor(() => expect(daemonControlMock).toHaveBeenCalledTimes(1));
+    expect(daemonControlMock).toHaveBeenCalledWith({
+      command: "insert_cell",
+      kind: "code",
+      after_id: null,
+      source: "SELECT * FROM github_work.repositories LIMIT 100;\n",
+      last_edited_by: "datasource",
+      code_type: "sql",
+    });
+    expect(
+      daemonControlMock.mock.calls.filter(
+        ([command]) =>
+          (command as DaemonControlCommand).command === "set_cell_metadata",
+      ),
+    ).toHaveLength(0);
+    expect(setCellScheduleMock).not.toHaveBeenCalled();
+
+    daemonControlMock.mockClear();
+    setCellScheduleMock.mockClear();
+    fireEvent.click(scheduleButton);
+
+    await waitFor(() => {
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "set_cell_metadata",
+        id: "scheduled-query-cell",
+        patch: {
+          spur: {
+            dag: {
+              produces: [],
+              consumes: [],
+              source: {
+                kind: "api_tables",
+                port: "repositories",
+                class: "dataframe",
+              },
+            },
+          },
+        },
+        expected_version: 1,
+      });
+    });
+    await waitFor(() =>
+      expect(setCellScheduleMock).toHaveBeenCalledWith(
+        "scheduled-query-cell",
+        {
+          enabled: true,
+          cron: "*/15 * * * *",
+          timezone: "UTC",
+          run_target: "cascade",
+          skip_if_running: true,
+          catch_up: false,
+        },
+        2,
+      ),
+    );
   });
 
   test("schedule_query_button_creates_schema_relation_sql_cell_with_cron", async () => {
