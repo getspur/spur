@@ -141,6 +141,20 @@ function userMessage(text: string): ChatMessage {
   };
 }
 
+function flushStreaming(conversation: ChatConversation): ChatConversation {
+  if (!conversation.streamingText) {
+    return conversation;
+  }
+  return {
+    ...conversation,
+    messages: [
+      ...conversation.messages,
+      assistantMessage(conversation.streamingText),
+    ],
+    streamingText: "",
+  };
+}
+
 function reduceConversation(
   conversation: ChatConversation,
   event: ChatEvent,
@@ -153,17 +167,9 @@ function reduceConversation(
         streamingText: conversation.streamingText + event.text,
       };
     case "done":
-      if (!conversation.streamingText) {
-        return { ...conversation, streaming: false };
-      }
       return {
-        ...conversation,
-        messages: [
-          ...conversation.messages,
-          assistantMessage(conversation.streamingText),
-        ],
+        ...flushStreaming(conversation),
         streaming: false,
-        streamingText: "",
       };
     case "permissionRequest":
       return {
@@ -177,11 +183,12 @@ function reduceConversation(
           })),
         },
       };
-    case "toolCall":
+    case "toolCall": {
+      const nextConversation = flushStreaming(conversation);
       return {
-        ...conversation,
+        ...nextConversation,
         messages: [
-          ...conversation.messages,
+          ...nextConversation.messages,
           {
             id: nextMessageId(),
             kind: "toolCall",
@@ -193,11 +200,13 @@ function reduceConversation(
           },
         ],
       };
-    case "toolResult":
+    }
+    case "toolResult": {
+      const nextConversation = flushStreaming(conversation);
       return {
-        ...conversation,
+        ...nextConversation,
         messages: [
-          ...conversation.messages,
+          ...nextConversation.messages,
           {
             id: nextMessageId(),
             kind: "toolResult",
@@ -205,11 +214,13 @@ function reduceConversation(
           },
         ],
       };
-    case "error":
+    }
+    case "error": {
+      const nextConversation = flushStreaming(conversation);
       return {
-        ...conversation,
+        ...nextConversation,
         messages: [
-          ...conversation.messages,
+          ...nextConversation.messages,
           {
             id: nextMessageId(),
             kind: "error",
@@ -218,6 +229,7 @@ function reduceConversation(
         ],
         streaming: false,
       };
+    }
     case "usage":
       return conversation;
   }
