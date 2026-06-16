@@ -1041,7 +1041,8 @@ function DatasourceListItem({
       {hasTables ? (
         <div className="mt-3 space-y-3">
           {entry.tables.map((table) => {
-            const relationName = tableRelationName(entry.name, table.name);
+            const tableName = relationTableName(entry, table.name);
+            const relationName = tableRelationName(entry.name, tableName);
             return (
               <div className="space-y-1" key={table.name}>
                 <div className="flex items-center justify-between gap-2 text-xs">
@@ -1060,7 +1061,7 @@ function DatasourceListItem({
                         aria-label={`Schedule query ${relationName}`}
                         className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-200 bg-white text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-900"
                         onClick={() =>
-                          onScheduleTableRelation(entry.name, table.name)
+                          onScheduleTableRelation(entry.name, tableName)
                         }
                         title={`Create scheduled query for ${relationName}`}
                         type="button"
@@ -1163,6 +1164,26 @@ function upsertDatasourceEntry(
 
 function tableRelationName(schemaName: string, tableName: string): string {
   return `${schemaName}.${tableName}`;
+}
+
+function relationTableName(entry: DatasourceEntry, tableName: string): string {
+  if (entry.kind !== "api_tables") return tableName;
+
+  const provider = apiProviderKey(entry.path);
+  if (entry.name !== provider) return tableName;
+
+  const prefix = `${provider}_`;
+  return tableName.startsWith(prefix) ? tableName.slice(prefix.length) : tableName;
+}
+
+function apiProviderKey(path: string): string {
+  const normalized = path.trim().replaceAll("\\", "/");
+  return (
+    normalized
+      .split("/")
+      .reverse()
+      .find((segment) => segment.length > 0 && segment !== "api:") ?? normalized
+  );
 }
 
 function tableRelationQuerySource(

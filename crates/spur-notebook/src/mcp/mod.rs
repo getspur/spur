@@ -511,7 +511,7 @@ async fn load_last_notebook_at(record_path: &Path) -> Result<Option<PathBuf>> {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", record_path.display()))
+            return Err(error).with_context(|| format!("failed to read {}", record_path.display()));
         }
     };
     let record: LastNotebookRecord = serde_json::from_slice(&bytes)
@@ -3960,6 +3960,9 @@ impl NotebookDaemonControl {
     #[cfg(feature = "datasource-introspect")]
     async fn reconcile_open_datasource_catalog(&self) -> Result<(), BridgeError> {
         let entries = self.jute_state.datasource_catalog.lock().list();
+        let has_api_tables = entries
+            .iter()
+            .any(|entry| entry.kind == jute::commands::DatasourceKind::ApiTables);
         let mut reconciled = Vec::new();
 
         for mut entry in entries {
@@ -3999,6 +4002,9 @@ impl NotebookDaemonControl {
 
         if !reconciled.is_empty() {
             self.jute_state.attach_datasources(reconciled);
+            self.refresh_datasource_setup_cell().await?;
+            self.persist_catalog_to_current_notebook().await?;
+        } else if has_api_tables {
             self.refresh_datasource_setup_cell().await?;
             self.persist_catalog_to_current_notebook().await?;
         }
@@ -4243,7 +4249,7 @@ async fn create_untitled_notebook_in_dir(dir: &Path) -> anyhow::Result<PathBuf> 
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(error).with_context(|| format!("failed to create {}", path.display()))
+                return Err(error).with_context(|| format!("failed to create {}", path.display()));
             }
         };
         file.write_all(&contents)
@@ -7188,6 +7194,97 @@ paths:
             })
             .expect("datasource setup cell is persisted");
         assert!(setup_source.contains("analyst__nodes"));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn open_refreshes_api_datasource_setup_cell_from_metadata() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let notebook_path = tempdir.path().join("analysis.ipynb");
+        let mut notebook = empty_notebook();
+        notebook["metadata"]["spur"]["datasources"] = json!({
+            "schema_version": 1,
+            "entries": [
+                {
+                    "name": "github",
+                    "path": "/Volumes/Projects/spur/github",
+                    "kind": "api_tables",
+                    "group": "API",
+                    "columns": [],
+                    "rowCount": null,
+                    "tables": [
+                        {
+                            "name": "github_user_followers",
+                            "columns": [],
+                            "rowCount": null
+                        }
+                    ],
+                    "workspaceRelativePath": "github"
+                }
+            ],
+        });
+        tokio::fs::write(
+            &notebook_path,
+            serde_json::to_vec_pretty(&notebook).expect("notebook serializes"),
+        )
+        .await?;
+
+        let jute_state = Arc::new(State::new());
+        let socket_path = tempdir.path().join("notebook.sock");
+        let requester: Arc<dyn BridgeRequester> =
+            Arc::new(LoopbackDaemonRequester::new(socket_path.clone()));
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            Arc::clone(&requester),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let deps = Arc::new(ServerDeps {
+            bridge: requester,
+            state: Some(Arc::clone(&jute_state)),
+            app: None,
+            daemon: Some(control.clone()),
+            plugins: None,
+            symbol_index: None,
+        });
+        let _server = start_multiplexed_server(&socket_path, deps, control.clone()).await?;
+
+        let response = control
+            .handle(daemon_request(jute::commands::DaemonControlCommand::Open {
+                path: notebook_path.display().to_string(),
+                activate: Some(true),
+            }))
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entries = jute_state.datasource_catalog.lock().list();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "github");
+        assert_eq!(entries[0].path, "github");
+        assert_eq!(entries[0].tables[0].name, "user_followers");
+
+        let persisted: Value = serde_json::from_slice(&tokio::fs::read(&notebook_path).await?)?;
+        assert_eq!(
+            persisted["metadata"]["spur"]["datasources"]["entries"][0]["path"],
+            json!("github")
+        );
+        let setup_source = persisted["cells"]
+            .as_array()
+            .expect("cells array")
+            .iter()
+            .find_map(|cell| {
+                cell["source"]
+                    .as_str()
+                    .filter(|source| source.contains("# SPUR datasource setup cell v1"))
+            })
+            .expect("datasource setup cell is persisted");
+        assert!(setup_source.contains("CREATE SCHEMA IF NOT EXISTS \\\"github\\\""));
+        assert!(setup_source.contains(
+            "CREATE OR REPLACE VIEW \\\"github\\\".\\\"user_followers\\\" AS SELECT * FROM \\\"github_user_followers\\\"()"
+        ));
 
         Ok(())
     }

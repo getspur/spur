@@ -95,15 +95,23 @@ impl DatasourceCatalog {
             .iter()
             .map(|entry| {
                 let mut entry = entry.clone();
-                let absolute_path =
-                    normalize_path_for_storage(Path::new(&entry.path), &workspace_root);
-                entry.path = path_to_string(&absolute_path);
-                StoredDatasourceEntry {
-                    workspace_relative_path: workspace_relative_path(
-                        &absolute_path,
-                        &workspace_root,
-                    ),
-                    entry,
+                if entry.kind == crate::commands::DatasourceKind::ApiTables {
+                    normalize_api_datasource_entry(&mut entry, None);
+                    StoredDatasourceEntry {
+                        workspace_relative_path: None,
+                        entry,
+                    }
+                } else {
+                    let absolute_path =
+                        normalize_path_for_storage(Path::new(&entry.path), &workspace_root);
+                    entry.path = path_to_string(&absolute_path);
+                    StoredDatasourceEntry {
+                        workspace_relative_path: workspace_relative_path(
+                            &absolute_path,
+                            &workspace_root,
+                        ),
+                        entry,
+                    }
                 }
             })
             .collect();
@@ -156,11 +164,18 @@ impl DatasourceCatalog {
             .into_iter()
             .map(|stored| {
                 let mut entry = stored.entry;
-                entry.path = resolve_stored_path(
-                    &entry.path,
-                    stored.workspace_relative_path.as_deref(),
-                    &workspace_root,
-                );
+                if entry.kind == crate::commands::DatasourceKind::ApiTables {
+                    normalize_api_datasource_entry(
+                        &mut entry,
+                        stored.workspace_relative_path.as_deref(),
+                    );
+                } else {
+                    entry.path = resolve_stored_path(
+                        &entry.path,
+                        stored.workspace_relative_path.as_deref(),
+                        &workspace_root,
+                    );
+                }
                 entry
             })
             .collect();
@@ -238,6 +253,35 @@ fn resolve_stored_path(
     } else {
         path_to_string(&absolute)
     }
+}
+
+fn normalize_api_datasource_entry(
+    entry: &mut DatasourceEntry,
+    workspace_relative_path: Option<&str>,
+) {
+    entry.path = api_provider_key(&entry.path, workspace_relative_path);
+    if entry.name == entry.path {
+        let prefix = format!("{}_", entry.path);
+        for table in &mut entry.tables {
+            if let Some(table_name) = table.name.strip_prefix(&prefix) {
+                table.name = table_name.to_string();
+            }
+        }
+    }
+}
+
+fn api_provider_key(path: &str, workspace_relative_path: Option<&str>) -> String {
+    let candidate = workspace_relative_path
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(path)
+        .trim();
+    let normalized = candidate.replace('\\', "/");
+    normalized
+        .split('/')
+        .rev()
+        .find(|segment| !segment.is_empty() && *segment != "api:")
+        .unwrap_or(candidate)
+        .to_string()
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -786,6 +830,7 @@ mod tests {
         backend::notebook::{
             Cell, CellMetadata, CodeCell, MultilineString, NotebookRoot, Output, SpurCellMetadata,
         },
+        commands::{DatasourceKind, Table},
         identity::NotebookId,
         notebook_store::{DeltaKind, NotebookOp},
         ports,
@@ -1184,5 +1229,74 @@ mod tests {
         assert_eq!(catalog.entries.len(), 1);
         assert_eq!(catalog.entries[0].name, "sales");
         assert!(catalog.entries[0].tables.is_empty());
+    }
+
+    #[test]
+    fn api_datasource_metadata_preserves_provider_key_path() {
+        let mut metadata: NotebookMetadata =
+            serde_json::from_value(json!({})).expect("metadata fixture decodes");
+        let catalog = DatasourceCatalog {
+            schema_version: DATASOURCE_CATALOG_SCHEMA_VERSION,
+            entries: vec![DatasourceEntry {
+                name: "github".to_string(),
+                path: "github".to_string(),
+                kind: DatasourceKind::ApiTables,
+                group: Some("API".to_string()),
+                columns: Vec::new(),
+                row_count: None,
+                tables: vec![Table {
+                    name: "user_followers".to_string(),
+                    columns: Vec::new(),
+                    row_count: None,
+                }],
+            }],
+        };
+
+        catalog.persist_to_metadata(&mut metadata, None);
+
+        let stored = &metadata.other["spur"]["datasources"]["entries"][0];
+        assert_eq!(stored["path"], json!("github"));
+        assert!(stored.get("workspaceRelativePath").is_none());
+
+        let hydrated = DatasourceCatalog::hydrate_from_metadata(&metadata, None);
+        assert_eq!(hydrated.entries[0].path, "github");
+        assert_eq!(hydrated.entries[0].tables[0].name, "user_followers");
+    }
+
+    #[test]
+    fn api_datasource_metadata_hydrates_legacy_provider_path() {
+        let metadata: NotebookMetadata = serde_json::from_value(json!({
+            "spur": {
+                "datasources": {
+                    "schema_version": 1,
+                    "entries": [
+                        {
+                            "name": "github",
+                            "path": "/Volumes/Projects/spur/github",
+                            "kind": "api_tables",
+                            "group": "API",
+                            "columns": [],
+                            "rowCount": null,
+                            "tables": [
+                                {
+                                    "name": "github_user_followers",
+                                    "columns": [],
+                                    "rowCount": null
+                                }
+                            ],
+                            "workspaceRelativePath": "github"
+                        }
+                    ]
+                }
+            }
+        }))
+        .expect("legacy API datasource metadata decodes");
+
+        let catalog = DatasourceCatalog::hydrate_from_metadata(&metadata, None);
+
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].name, "github");
+        assert_eq!(catalog.entries[0].path, "github");
+        assert_eq!(catalog.entries[0].tables[0].name, "user_followers");
     }
 }
