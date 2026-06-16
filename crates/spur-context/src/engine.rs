@@ -51,7 +51,7 @@ const LIVE_SNAPSHOT_SQL: &str = include_str!("sql/live_session_snapshot.sql");
 /// The pricing table is small (O(100) rows), so the correlated LATERAL
 /// scan is effectively free; DuckDB runs it once per distinct model.
 #[cfg(feature = "duckdb")]
-const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
+const ALL_EVENTS_WITH_COST_VIEW: &str = r"
     CREATE OR REPLACE VIEW all_events_with_cost AS
     SELECT
         e.*,
@@ -82,7 +82,7 @@ const ALL_EVENTS_WITH_COST_VIEW: &str = r#"
         ORDER BY length(pp.model) DESC, pp.model ASC
         LIMIT 1
     ) p ON TRUE;
-"#;
+";
 
 #[cfg(feature = "duckdb")]
 const EVENTS_CACHE_COLUMNS: &[(&str, &str)] = &[
@@ -327,7 +327,7 @@ impl AnalyticsEngine {
         // may have rebound to `events_cache` itself, producing a
         // self-wipe).
         self.conn.execute_batch(
-            r#"
+            r"
             DELETE FROM events_cache;
             INSERT INTO events_cache (
                 timestamp, session_id, agent, model, project,
@@ -339,7 +339,7 @@ impl AnalyticsEngine {
                      cache_creation_tokens, cost_usd
               FROM all_events_raw;
             DELETE FROM scan_manifest;
-            "#,
+            ",
         )?;
         let total: i64 = self
             .conn
@@ -374,13 +374,13 @@ impl AnalyticsEngine {
     /// often `use_cached_events` is called.
     pub fn use_cached_events(&self) -> Result<()> {
         self.conn.execute_batch(
-            r#"
+            r"
             CREATE OR REPLACE VIEW all_events AS
             SELECT timestamp, session_id, agent, model, project,
                    input_tokens, output_tokens, cache_read_tokens,
                    cache_creation_tokens, cost_usd
             FROM events_cache;
-            "#,
+            ",
         )?;
         // Rebuild all_events_with_cost so its underlying reference
         // resolves to the cache-backed view. The longest-prefix lateral
@@ -673,7 +673,7 @@ impl AnalyticsEngine {
             dir.to_string_lossy().replace('\\', "/").replace('\'', "''")
         );
         let sql = format!(
-            r#"CREATE OR REPLACE VIEW claude_raw AS
+            r"CREATE OR REPLACE VIEW claude_raw AS
              SELECT
                 rtrim(line, chr(13)) AS line,
                 filename
@@ -715,7 +715,7 @@ impl AnalyticsEngine {
                 WHERE json_valid(line)
                   AND json_extract_string(line, '$.type') = 'assistant'
              )
-             WHERE _dedup_rn = 1;"#,
+             WHERE _dedup_rn = 1;",
             pattern
         );
         self.conn
@@ -730,7 +730,7 @@ impl AnalyticsEngine {
             dir.to_string_lossy().replace('\\', "/").replace('\'', "''")
         );
         let sql = format!(
-            r#"CREATE OR REPLACE VIEW codex_raw AS
+            r"CREATE OR REPLACE VIEW codex_raw AS
              SELECT
                 rtrim(line, chr(13)) AS line,
                 filename
@@ -818,7 +818,7 @@ impl AnalyticsEngine {
                 0::BIGINT AS cache_creation_tokens,
                 NULL::DOUBLE AS cost_usd
              FROM with_delta
-             WHERE input_delta > 0 OR output_delta > 0 OR cached_delta > 0;"#,
+             WHERE input_delta > 0 OR output_delta > 0 OR cached_delta > 0;",
             pattern
         );
         self.conn
@@ -920,7 +920,7 @@ impl AnalyticsEngine {
         // column. The exposed view casts it back to a proper TIMESTAMP so the
         // UNION in `all_events` stays type-compatible.
         self.conn.execute_batch(
-            r#"
+            r"
             DROP TABLE IF EXISTS opencode_events_table;
             CREATE TABLE opencode_events_table (
                 timestamp_ms          BIGINT,
@@ -934,7 +934,7 @@ impl AnalyticsEngine {
                 cache_creation_tokens BIGINT,
                 cost_usd              DOUBLE
             );
-            "#,
+            ",
         )?;
 
         let rows = Self::extract_opencode_rows(db_path)
@@ -969,7 +969,7 @@ impl AnalyticsEngine {
         // Expose as a view with an explicit TIMESTAMP cast so the UNION in
         // `all_events` is type-compatible with the other agents.
         self.conn.execute_batch(
-            r#"
+            r"
             CREATE OR REPLACE VIEW opencode_events AS
             SELECT
                 epoch_ms(timestamp_ms) AS timestamp,
@@ -983,7 +983,7 @@ impl AnalyticsEngine {
                 cache_creation_tokens,
                 cost_usd
             FROM opencode_events_table;
-            "#,
+            ",
         )?;
 
         tracing::debug!(
@@ -1003,7 +1003,7 @@ impl AnalyticsEngine {
     /// ordering is preserved.
     fn create_kimi_view(&self, sessions_root: &Path) -> Result<()> {
         self.conn.execute_batch(
-            r#"
+            r"
             DROP TABLE IF EXISTS kimi_events_table;
             CREATE TABLE kimi_events_table (
                 timestamp_ms          BIGINT,
@@ -1017,7 +1017,7 @@ impl AnalyticsEngine {
                 cache_creation_tokens BIGINT,
                 cost_usd              DOUBLE
             );
-            "#,
+            ",
         )?;
 
         let rows = Self::extract_kimi_rows(sessions_root).with_context(|| {
@@ -1052,7 +1052,7 @@ impl AnalyticsEngine {
         }
 
         self.conn.execute_batch(
-            r#"
+            r"
             CREATE OR REPLACE VIEW kimi_events AS
             SELECT
                 epoch_ms(timestamp_ms) AS timestamp,
@@ -1066,7 +1066,7 @@ impl AnalyticsEngine {
                 cache_creation_tokens,
                 cost_usd
             FROM kimi_events_table;
-            "#,
+            ",
         )?;
 
         tracing::debug!(
@@ -1080,7 +1080,7 @@ impl AnalyticsEngine {
     /// Populate `gemini_events` from Gemini CLI session JSON files.
     fn create_gemini_view(&self, tmp_root: &Path) -> Result<()> {
         self.conn.execute_batch(
-            r#"
+            r"
             DROP TABLE IF EXISTS gemini_events_table;
             CREATE TABLE gemini_events_table (
                 timestamp_ms          BIGINT,
@@ -1094,7 +1094,7 @@ impl AnalyticsEngine {
                 cache_creation_tokens BIGINT,
                 cost_usd              DOUBLE
             );
-            "#,
+            ",
         )?;
 
         let rows = crate::extractors::gemini::extract(tmp_root).with_context(|| {
@@ -1131,7 +1131,7 @@ impl AnalyticsEngine {
         }
 
         self.conn.execute_batch(
-            r#"
+            r"
             CREATE OR REPLACE VIEW gemini_events AS
             SELECT
                 epoch_ms(timestamp_ms) AS timestamp,
@@ -1145,7 +1145,7 @@ impl AnalyticsEngine {
                 cache_creation_tokens,
                 cost_usd
             FROM gemini_events_table;
-            "#,
+            ",
         )?;
         Ok(())
     }
@@ -1174,7 +1174,7 @@ impl AnalyticsEngine {
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown")
-                    .to_string();
+                    .to_owned();
                 let mtime_ms = std::fs::metadata(&ctx)
                     .and_then(|m| m.modified())
                     .ok()
@@ -1272,13 +1272,13 @@ impl AnalyticsEngine {
         )?;
 
         let mut stmt = conn.prepare(
-            r#"
+            r"
             SELECT m.time_created, m.session_id, p.worktree, m.data
             FROM message m
             JOIN session s ON s.id = m.session_id
             JOIN project p ON p.id = s.project_id
             WHERE json_extract(m.data, '$.role') = 'assistant'
-            "#,
+            ",
         )?;
 
         let raw: Vec<(i64, String, String, String)> = stmt
@@ -1320,12 +1320,12 @@ impl AnalyticsEngine {
             let model = data
                 .get("modelID")
                 .and_then(|v| v.as_str())
-                .map(|s| strip_provider_prefix(s).to_string());
+                .map(|s| strip_provider_prefix(s).to_owned());
             let cost = data.get("cost").and_then(|v| v.as_f64());
             let project = std::path::Path::new(&worktree)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .map(|s| s.to_string());
+                .map(|s| s.to_owned());
 
             out.push(OpenCodeRow {
                 timestamp_ms: ts_ms,
@@ -1383,7 +1383,7 @@ impl AnalyticsEngine {
     /// name had been rebound to `events_cache`.
     fn rebuild_unified_views(&self) -> Result<()> {
         let sql = format!(
-            r#"
+            r"
             CREATE OR REPLACE VIEW all_events_raw AS
             SELECT * FROM claude_events
             UNION ALL
@@ -1400,7 +1400,7 @@ impl AnalyticsEngine {
             CREATE OR REPLACE VIEW all_events AS SELECT * FROM all_events_raw;
 
             {}
-            "#,
+            ",
             ALL_EVENTS_WITH_COST_VIEW
         );
         self.conn
@@ -1476,7 +1476,7 @@ impl AnalyticsEngine {
 
     /// Daily cost report for the last N days.
     pub fn daily_report(&self, days: u32) -> Result<Vec<DailyRow>> {
-        let sql = r#"
+        let sql = r"
             SELECT
                 strftime(timestamp, '%Y-%m-%d') AS day,
                 agent,
@@ -1491,7 +1491,7 @@ impl AnalyticsEngine {
             WHERE timestamp >= current_date - CAST(? || ' days' AS INTERVAL)
             GROUP BY day, agent
             ORDER BY day DESC, cost_usd DESC
-        "#;
+        ";
 
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([days], |row| {
@@ -1514,7 +1514,7 @@ impl AnalyticsEngine {
 
     /// Weekly cost report for the last N weeks.
     pub fn weekly_report(&self, weeks: u32) -> Result<Vec<WeeklyRow>> {
-        let sql = r#"
+        let sql = r"
             SELECT
                 strftime(date_trunc('week', timestamp), '%Y-%m-%d') AS week,
                 agent,
@@ -1529,7 +1529,7 @@ impl AnalyticsEngine {
             WHERE timestamp >= current_date - CAST(? || ' weeks' AS INTERVAL)
             GROUP BY week, agent
             ORDER BY week DESC, cost_usd DESC
-        "#;
+        ";
 
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([weeks], |row| {
@@ -1552,7 +1552,7 @@ impl AnalyticsEngine {
 
     /// Monthly cost report for the last N months.
     pub fn monthly_report(&self, months: u32) -> Result<Vec<MonthlyRow>> {
-        let sql = r#"
+        let sql = r"
             SELECT
                 strftime(timestamp, '%Y-%m') AS month,
                 agent,
@@ -1567,7 +1567,7 @@ impl AnalyticsEngine {
             WHERE timestamp >= current_date - CAST(? || ' months' AS INTERVAL)
             GROUP BY month, agent
             ORDER BY month DESC, cost_usd DESC
-        "#;
+        ";
 
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([months], |row| {
@@ -1663,7 +1663,7 @@ impl AnalyticsEngine {
 
     /// Live recent sessions within the last N minutes.
     pub fn live_recent_sessions(&self, minutes: u32) -> Result<Vec<LiveBlockRow>> {
-        let sql = r#"
+        let sql = r"
             SELECT
                 session_id,
                 any_value(agent) AS agent,
@@ -1680,7 +1680,7 @@ impl AnalyticsEngine {
             WHERE timestamp >= (now() AT TIME ZONE 'UTC') - CAST(? || ' minutes' AS INTERVAL)
             GROUP BY session_id
             ORDER BY cost_usd DESC
-        "#;
+        ";
 
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([minutes], |row| {
@@ -1802,10 +1802,7 @@ impl AnalyticsEngine {
         let mut stmt = self.conn.prepare(sql)?;
         let column_count = stmt.column_count();
         let column_names: Vec<String> = (0..column_count)
-            .map(|i| {
-                stmt.column_name(i)
-                    .map_or("?".to_string(), |s| s.to_string())
-            })
+            .map(|i| stmt.column_name(i).map_or("?".to_owned(), |s| s.clone()))
             .collect();
 
         let rows = stmt.query_map([], |row| {

@@ -131,10 +131,6 @@
     reason = "legacy TUI input matching keeps separate key alternatives for readability"
 )]
 #![expect(
-    clippy::unused_async,
-    reason = "legacy TUI async APIs preserve call-site compatibility"
-)]
-#![expect(
     clippy::unused_trait_names,
     reason = "legacy TUI modules import extension traits by name"
 )]

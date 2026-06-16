@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quick status: VM, disk, bucket, recent sccache stats.
+# Quick status: VM and durable sccache bucket.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -11,10 +11,6 @@ echo
 echo "-- VM --"
 gcloud compute instances list --project="$GCP_PROJECT" --filter="name=$VM_NAME" \
     --format='table(name,zone.basename(),status,machineType.basename(),scheduling.provisioningModel)' 2>/dev/null || true
-echo
-echo "-- Cache disk --"
-gcloud compute disks list --project="$GCP_PROJECT" --filter="name=$CACHE_DISK" \
-    --format='table(name,zone.basename(),sizeGb,type.basename(),provisionedIops,provisionedThroughputGbps,status,users)' 2>/dev/null || true
 echo
 echo "-- sccache bucket --"
 gcloud storage buckets describe "gs://$SCCACHE_BUCKET" --format='value(name,location,storageClass)' 2>/dev/null || echo "(not created)"

@@ -262,10 +262,16 @@ fn render_header(
 }
 
 fn header_subtitle(kpis: &Kpis) -> String {
-    match (
-        top_kpi_half("Top agent", &kpis.top_agent),
-        top_kpi_half("Top model", &kpis.top_model),
-    ) {
+    let top_agent = kpis
+        .top_agent
+        .as_ref()
+        .map(|value| top_kpi_half("Top agent", value));
+    let top_model = kpis
+        .top_model
+        .as_ref()
+        .map(|value| top_kpi_half("Top model", value));
+
+    match (top_agent, top_model) {
         (Some(agent), Some(model)) => format!(" {agent} · {model}"),
         (Some(agent), None) => format!(" {agent}"),
         (None, Some(model)) => format!(" {model}"),
@@ -273,10 +279,8 @@ fn header_subtitle(kpis: &Kpis) -> String {
     }
 }
 
-fn top_kpi_half(label: &str, value: &Option<(String, f64)>) -> Option<String> {
-    value
-        .as_ref()
-        .map(|(name, cost)| format!("{label}: {} (${cost:.2})", truncate_kpi_name(name)))
+fn top_kpi_half(label: &str, (name, cost): &(String, f64)) -> String {
+    format!("{label}: {} (${cost:.2})", truncate_kpi_name(name))
 }
 
 fn truncate_kpi_name(name: &str) -> String {
