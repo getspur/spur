@@ -2,6 +2,6 @@
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
- * Represents the CodeMirror mode, which could be a string or a nested object.
+ * Represents the `CodeMirror` mode, which could be a string or a nested object.
  */
 export type CodeMirrorMode = string | { [key in string]?: JsonValue };

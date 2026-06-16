@@ -480,7 +480,7 @@ describe("DagView", () => {
         };
       }
       if (command === "daemon_control") {
-        return { ok: true, result: { type: "empty", data: {} } };
+        return { ok: true, result: { type: "empty" } };
       }
       if (command === "notebook_run_cell")
         return { cell_id: "consumer-cell", status: "fresh" };

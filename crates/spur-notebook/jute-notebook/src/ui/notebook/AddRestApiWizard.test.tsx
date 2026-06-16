@@ -322,10 +322,21 @@ function savedConnectionsResponse() {
             },
           ],
           credentialEnvVars: ["STRIPE_API_KEY", "STRIPE_ACCOUNT"],
+          credentialRef: null,
           createdAt: "2026-06-01T12:00:00Z",
           updatedAt: "2026-06-01T12:00:00Z",
         },
       ],
+    },
+  };
+}
+
+function credentialProfilesResponse() {
+  return {
+    ok: true,
+    result: {
+      type: "credentialProfiles" as const,
+      data: [],
     },
   };
 }
@@ -431,6 +442,9 @@ describe("AddRestApiWizard", () => {
         if (command.command === "list_saved_connections") {
           return Promise.resolve(savedConnectionsResponse());
         }
+        if (command.command === "list_credential_profiles") {
+          return Promise.resolve(credentialProfilesResponse());
+        }
         if (command.command === "attach_saved_connection") {
           return Promise.resolve(
             attachedSavedConnectionResponse(
@@ -440,7 +454,7 @@ describe("AddRestApiWizard", () => {
         }
         return Promise.resolve({
           ok: true,
-          result: { type: "empty", data: {} },
+          result: { type: "empty" },
         });
       },
     );
@@ -1188,7 +1202,7 @@ describe("AddRestApiWizard", () => {
       }
       return Promise.resolve({
         ok: true,
-        result: { type: "empty", data: {} },
+        result: { type: "empty" },
       });
     });
 
@@ -1468,6 +1482,65 @@ describe("AddRestApiWizard", () => {
         command: "attach_saved_connection",
         name: "stripe_reporting",
         credentials: [["STRIPE_API_KEY", "sk_test_saved"]],
+      }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  test("saved_connection_can_attach_with_provider_credential_profile", async () => {
+    const onClose = vi.fn();
+
+    daemonControlMock.mockImplementation(
+      (command: { command: string; credentials?: [string, string][] }) => {
+        if (command.command === "list_saved_connections") {
+          return Promise.resolve(savedConnectionsResponse());
+        }
+        if (command.command === "list_credential_profiles") {
+          return Promise.resolve({
+            ok: true,
+            result: {
+              type: "credentialProfiles" as const,
+              data: [
+                {
+                  id: "stripe-live",
+                  provider: "stripe",
+                  label: "Stripe Live",
+                  keys: ["STRIPE_API_KEY"],
+                  createdAt: "2026-06-01T12:00:00Z",
+                  updatedAt: "2026-06-01T12:00:00Z",
+                },
+              ],
+            },
+          });
+        }
+        if (command.command === "attach_saved_connection") {
+          return Promise.resolve(attachedSavedConnectionResponse([]));
+        }
+        return Promise.resolve({
+          ok: true,
+          result: { type: "empty" },
+        });
+      },
+    );
+
+    renderWizard(onClose);
+
+    fireEvent.click(screen.getByRole("button", { name: /Saved connections/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /stripe_reporting/i }),
+    );
+
+    fireEvent.change(await screen.findByLabelText("Credential profile"), {
+      target: { value: "stripe-live" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Use connection" }));
+
+    await waitFor(() =>
+      expect(daemonControlMock).toHaveBeenCalledWith({
+        command: "attach_saved_connection",
+        name: "stripe_reporting",
+        credentials: [],
+        credential_ref: "stripe-live",
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));

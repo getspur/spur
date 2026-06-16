@@ -12,11 +12,13 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncWriteExt as _, sync::Mutex};
 
 const CREDENTIALS_FILE_NAME: &str = "credentials.json";
+const CREDENTIAL_PROFILE_VERSION: u32 = 1;
 
 static CREDENTIALS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -43,6 +45,41 @@ struct SecretsFile {
 
 pub struct FileCredentialSink {
     path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewCredentialProfile {
+    pub id: Option<String>,
+    pub provider: String,
+    pub label: String,
+    pub values: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialProfileSummary {
+    pub id: String,
+    pub provider: String,
+    pub label: String,
+    pub keys: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialProfileFile {
+    version: u32,
+    id: String,
+    provider: String,
+    label: String,
+    values: BTreeMap<String, String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+pub struct FileCredentialProfileStore {
+    root: PathBuf,
 }
 
 impl FileCredentialSink {
@@ -104,6 +141,168 @@ impl FileCredentialSink {
     }
 }
 
+impl CredentialProfileFile {
+    fn summary(&self) -> CredentialProfileSummary {
+        CredentialProfileSummary {
+            id: self.id.clone(),
+            provider: self.provider.clone(),
+            label: self.label.clone(),
+            keys: self.values.keys().cloned().collect(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+impl FileCredentialProfileStore {
+    pub fn at(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    pub fn from_home_dir() -> Result<Self> {
+        let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
+        Ok(Self::at(
+            base_dirs
+                .home_dir()
+                .join(".spur")
+                .join("gateway")
+                .join("credential"),
+        ))
+    }
+
+    pub fn profile_path(&self, id: &str) -> PathBuf {
+        self.root.join(format!("{}.json", safe_profile_id(id)))
+    }
+
+    pub async fn upsert_profile(
+        &self,
+        profile: NewCredentialProfile,
+    ) -> Result<CredentialProfileSummary> {
+        let _guard = CREDENTIALS_LOCK.lock().await;
+        let id = profile
+            .id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| default_profile_id(&profile.provider, &profile.label));
+        let path = self.profile_path(&id);
+        let now = Utc::now();
+        let created_at = match self.read_profile_at(&path).await? {
+            Some(existing) => existing.created_at,
+            None => now,
+        };
+        let record = CredentialProfileFile {
+            version: CREDENTIAL_PROFILE_VERSION,
+            id,
+            provider: profile.provider,
+            label: profile.label,
+            values: profile.values,
+            created_at,
+            updated_at: now,
+        };
+        self.write_profile(&path, &record).await?;
+        Ok(record.summary())
+    }
+
+    pub async fn list_summaries(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<Vec<CredentialProfileSummary>> {
+        let _guard = CREDENTIALS_LOCK.lock().await;
+        let mut entries = match tokio::fs::read_dir(&self.root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read {}", self.root.display()));
+            }
+        };
+
+        let mut summaries = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .with_context(|| format!("failed to read {}", self.root.display()))?
+        {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(profile) = self.read_profile_at(&entry.path()).await? else {
+                continue;
+            };
+            if provider.is_some_and(|provider| profile.provider != provider) {
+                continue;
+            }
+            summaries.push(profile.summary());
+        }
+        summaries.sort_by(|left, right| {
+            left.provider
+                .cmp(&right.provider)
+                .then(left.label.cmp(&right.label))
+                .then(left.id.cmp(&right.id))
+        });
+        Ok(summaries)
+    }
+
+    pub async fn load_values(&self, id: &str) -> Result<Option<BTreeMap<String, String>>> {
+        let _guard = CREDENTIALS_LOCK.lock().await;
+        Ok(self
+            .read_profile_at(&self.profile_path(id))
+            .await?
+            .map(|profile| profile.values))
+    }
+
+    async fn read_profile_at(&self, path: &Path) -> Result<Option<CredentialProfileFile>> {
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .with_context(|| format!("failed to decode {}", path.display()))
+    }
+
+    async fn write_profile(&self, path: &Path, record: &CredentialProfileFile) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .await
+                    .with_context(|| format!("failed to chmod {}", parent.display()))?;
+            }
+        }
+
+        let bytes = serde_json::to_vec_pretty(record)?;
+        let temp_path = path.with_file_name(format!(
+            ".{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("credential.json"),
+            uuid::Uuid::new_v4()
+        ));
+        write_secret_file(&temp_path, &bytes).await?;
+        if let Err(error) = tokio::fs::rename(&temp_path, path).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error).with_context(|| format!("failed to rename {}", path.display()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .await
+                .with_context(|| format!("failed to chmod {}", path.display()))?;
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl CredentialSink for FileCredentialSink {
     async fn store(&self, key: &str, value: &str) -> Result<()> {
@@ -123,12 +322,70 @@ pub async fn load_secrets_into_env() -> Result<usize> {
     FileCredentialSink::from_home_dir()?.load_into_env().await
 }
 
+pub async fn list_credential_profiles(
+    provider: Option<&str>,
+) -> Result<Vec<CredentialProfileSummary>> {
+    FileCredentialProfileStore::from_home_dir()?
+        .list_summaries(provider)
+        .await
+}
+
 fn credentials_record_path() -> Result<PathBuf> {
     let base_dirs = BaseDirs::new().context("could not resolve home directory")?;
     Ok(base_dirs
         .home_dir()
         .join(".spur")
         .join(CREDENTIALS_FILE_NAME))
+}
+
+fn default_profile_id(provider: &str, label: &str) -> String {
+    let provider = slug_component(provider);
+    let label = slug_component(label);
+    match (provider.is_empty(), label.is_empty()) {
+        (true, true) => format!("credential-{}", uuid::Uuid::new_v4()),
+        (false, true) => provider,
+        (true, false) => label,
+        (false, false) => format!("{provider}-{label}"),
+    }
+}
+
+fn safe_profile_id(id: &str) -> String {
+    let slug = slug_component(id);
+    if slug.is_empty() {
+        "credential".to_owned()
+    } else {
+        slug
+    }
+}
+
+fn slug_component(value: &str) -> String {
+    let mut slug = String::with_capacity(value.len());
+    let mut last_was_dash = false;
+    for ch in value.trim().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if matches!(ch, '-' | '_' | ' ' | '.') {
+            Some('-')
+        } else {
+            None
+        };
+        let Some(ch) = mapped else {
+            continue;
+        };
+        if ch == '-' {
+            if last_was_dash || slug.is_empty() {
+                continue;
+            }
+            last_was_dash = true;
+        } else {
+            last_was_dash = false;
+        }
+        slug.push(ch);
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
 }
 
 #[cfg(unix)]
@@ -211,5 +468,93 @@ mod tests {
             std::env::var("SPUR_TEST_SECRET_X").ok().as_deref(),
             Some("yes")
         );
+    }
+
+    #[tokio::test]
+    async fn credential_profile_store_round_trips_provider_profile() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = FileCredentialProfileStore::at(dir.path().join("gateway").join("credential"));
+        let mut values = BTreeMap::new();
+        values.insert("STRIPE_API_KEY".to_string(), "sk_test_123".to_string());
+
+        let summary = store
+            .upsert_profile(NewCredentialProfile {
+                id: None,
+                provider: "stripe".to_string(),
+                label: "Stripe test".to_string(),
+                values,
+            })
+            .await
+            .expect("profile stores");
+
+        assert_eq!(summary.provider, "stripe");
+        assert_eq!(summary.label, "Stripe test");
+        assert_eq!(summary.keys, ["STRIPE_API_KEY"]);
+        assert!(!serde_json::to_value(&summary)
+            .expect("summary serializes")
+            .to_string()
+            .contains("sk_test_123"));
+
+        let loaded = store
+            .load_values(&summary.id)
+            .await
+            .expect("profile loads")
+            .expect("profile exists");
+        assert_eq!(
+            loaded.get("STRIPE_API_KEY").map(String::as_str),
+            Some("sk_test_123")
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_profiles_are_filtered_by_provider() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = FileCredentialProfileStore::at(dir.path().join("gateway").join("credential"));
+
+        for (provider, label, key, value) in [
+            ("stripe", "Stripe live", "STRIPE_API_KEY", "sk_live"),
+            ("github", "GitHub work", "GITHUB_TOKEN", "ghp_work"),
+        ] {
+            store
+                .upsert_profile(NewCredentialProfile {
+                    id: None,
+                    provider: provider.to_string(),
+                    label: label.to_string(),
+                    values: BTreeMap::from([(key.to_string(), value.to_string())]),
+                })
+                .await
+                .expect("profile stores");
+        }
+
+        let stripe_profiles = store
+            .list_summaries(Some("stripe"))
+            .await
+            .expect("profiles list");
+        assert_eq!(stripe_profiles.len(), 1);
+        assert_eq!(stripe_profiles[0].label, "Stripe live");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn credential_profile_files_are_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = FileCredentialProfileStore::at(dir.path().join("gateway").join("credential"));
+        let summary = store
+            .upsert_profile(NewCredentialProfile {
+                id: None,
+                provider: "stripe".to_string(),
+                label: "Stripe live".to_string(),
+                values: BTreeMap::from([("STRIPE_API_KEY".to_string(), "sk_live".to_string())]),
+            })
+            .await
+            .expect("profile stores");
+
+        let mode = std::fs::metadata(store.profile_path(&summary.id))
+            .expect("profile metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

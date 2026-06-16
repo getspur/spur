@@ -24,6 +24,9 @@ pub struct ConnectionTemplate {
     pub manifest_toml: String,
     pub tables: Vec<jute::commands::Table>,
     pub credential_env_vars: Vec<String>,
+    #[serde(default)]
+    #[ts(type = "string | null")]
+    pub credential_ref: Option<String>,
     #[ts(type = "string")]
     pub created_at: DateTime<Utc>,
     #[ts(type = "string")]
@@ -170,6 +173,7 @@ mod tests {
                 row_count: Some(12),
             }],
             credential_env_vars,
+            credential_ref: None,
             created_at: now - ChronoDuration::hours(1),
             updated_at: now,
         }
@@ -206,8 +210,24 @@ mod tests {
         assert!(persisted.contains("\"provider\": null"));
         assert!(persisted.contains("\"manifestToml\""));
         assert!(persisted.contains("\"credentialEnvVars\""));
+        assert!(persisted.contains("\"credentialRef\""));
         assert!(persisted.contains("\"createdAt\""));
         assert!(persisted.contains("\"updatedAt\""));
+    }
+
+    #[tokio::test]
+    async fn upsert_persists_selected_credential_ref() {
+        let temp_dir = tempdir("spur-connections-credential-ref-");
+        let record_path = temp_dir.path().join("connections.json");
+        let mut expected = template("stripe_reporting", Some("stripe"));
+        expected.credential_ref = Some("stripe-live".to_string());
+
+        upsert_at(&record_path, expected.clone())
+            .await
+            .expect("connection upserts");
+
+        let templates = list_at(&record_path).await.expect("connections list reads");
+        assert_eq!(templates, vec![expected]);
     }
 
     #[tokio::test]

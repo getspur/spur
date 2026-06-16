@@ -4,9 +4,11 @@ import {
   addApiDatasourceCommand,
   attachSavedConnectionCommand,
   attachedSavedConnectionFromDaemonControlResponse,
+  credentialProfilesFromDaemonControlResponse,
   daemonControl,
   datasourceEntryFromDaemonControlResponse,
   deleteSavedConnectionCommand,
+  listCredentialProfilesCommand,
   listNangoProvidersCommand,
   listSavedConnectionsCommand,
   nangoProvidersFromDaemonControlResponse,
@@ -141,6 +143,10 @@ describe("daemon control adapter", () => {
     expect(listSavedConnectionsCommand()).toEqual({
       command: "list_saved_connections",
     });
+    expect(listCredentialProfilesCommand("stripe")).toEqual({
+      command: "list_credential_profiles",
+      provider: "stripe",
+    });
     expect(
       attachSavedConnectionCommand({
         name: "stripe_reporting",
@@ -154,12 +160,14 @@ describe("daemon control adapter", () => {
       attachSavedConnectionCommand({
         name: "stripe_reporting",
         credentials: [["STRIPE_API_KEY", "sk_test_123"]],
+        credential_ref: "stripe-live",
         tables: ["stripe_charges", "stripe_customers"],
       }),
     ).toEqual({
       command: "attach_saved_connection",
       name: "stripe_reporting",
       credentials: [["STRIPE_API_KEY", "sk_test_123"]],
+      credential_ref: "stripe-live",
       tables: ["stripe_charges", "stripe_customers"],
     });
     expect(
@@ -178,12 +186,14 @@ describe("daemon control adapter", () => {
         name: "scores",
         spec_text: null,
         credentials: [["SCORES_API_KEY", "x"]],
+        credential_ref: "scores-live",
       }),
     ).toEqual({
       command: "update_saved_connection",
       name: "scores",
       spec_text: null,
       credentials: [["SCORES_API_KEY", "x"]],
+      credential_ref: "scores-live",
     });
   });
 
@@ -215,6 +225,7 @@ describe("daemon control adapter", () => {
               manifestToml: "name = 'stripe'",
               tables: [],
               credentialEnvVars: ["STRIPE_API_KEY"],
+              credentialRef: null,
               createdAt: "2026-06-01T12:00:00Z",
               updatedAt: "2026-06-01T12:00:00Z",
             },
@@ -229,6 +240,37 @@ describe("daemon control adapter", () => {
         manifestToml: "name = 'stripe'",
         tables: [],
         credentialEnvVars: ["STRIPE_API_KEY"],
+        credentialRef: null,
+        createdAt: "2026-06-01T12:00:00Z",
+        updatedAt: "2026-06-01T12:00:00Z",
+      },
+    ]);
+  });
+
+  test("unwraps credential profile list results", () => {
+    expect(
+      credentialProfilesFromDaemonControlResponse({
+        ok: true,
+        result: {
+          type: "credentialProfiles",
+          data: [
+            {
+              id: "stripe-live",
+              provider: "stripe",
+              label: "Stripe Live",
+              keys: ["STRIPE_API_KEY"],
+              createdAt: "2026-06-01T12:00:00Z",
+              updatedAt: "2026-06-01T12:00:00Z",
+            },
+          ],
+        },
+      }),
+    ).toEqual([
+      {
+        id: "stripe-live",
+        provider: "stripe",
+        label: "Stripe Live",
+        keys: ["STRIPE_API_KEY"],
         createdAt: "2026-06-01T12:00:00Z",
         updatedAt: "2026-06-01T12:00:00Z",
       },
@@ -338,6 +380,7 @@ describe("daemon control adapter", () => {
               rowCount: null,
               tables: [],
             },
+            credential_ref: "stripe-live",
             missing_env_vars: ["STRIPE_API_KEY"],
           },
         },
@@ -352,6 +395,7 @@ describe("daemon control adapter", () => {
         rowCount: null,
         tables: [],
       },
+      credentialRef: "stripe-live",
       missingEnvVars: ["STRIPE_API_KEY"],
     });
   });

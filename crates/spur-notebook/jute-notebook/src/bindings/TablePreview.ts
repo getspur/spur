@@ -18,7 +18,7 @@ export type TablePreview = {
    */
   path: string;
   /**
-   * JSONPath to the response array when detected.
+   * `JSONPath` to the response array when detected.
    */
   responsePath: string | null;
   /**

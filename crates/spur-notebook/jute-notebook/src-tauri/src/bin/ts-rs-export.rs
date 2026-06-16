@@ -8,10 +8,11 @@ use std::{
 use jute::{
     backend::{commands::RunCellEvent, local::KernelUsageInfo, notebook::NotebookRoot},
     commands::{
-        Column, DaemonCell, DaemonControlCommand, DaemonControlError, DaemonControlRequest,
-        DaemonControlResponse, DaemonControlResult, DaemonNotebookSnapshot, DaemonRecentEntry,
-        DatasourceEntry, DatasourceKind, OpenApiTablePreview, ProviderSummary, RecentNotebookEntry,
-        RecentsChangedEvent, Table, TablePreview, TablePreviewColumn,
+        Column, ConnectionTemplate, CredentialProfileSummary, DaemonCell, DaemonControlCommand,
+        DaemonControlError, DaemonControlRequest, DaemonControlResponse, DaemonControlResult,
+        DaemonNotebookSnapshot, DaemonRecentEntry, DatasourceEntry, DatasourceKind,
+        OpenApiTablePreview, ProviderSummary, RecentNotebookEntry, RecentsChangedEvent, Table,
+        TablePreview, TablePreviewColumn,
     },
     notebook_store::{CellKind, DeltaKind, NotebookDelta},
 };
@@ -52,8 +53,10 @@ fn main() {
     DatasourceKind::export_all_to(&export_path).unwrap();
     Column::export_all_to(&export_path).unwrap();
     Table::export_all_to(&export_path).unwrap();
+    ConnectionTemplate::export_all_to(&export_path).unwrap();
     DatasourceEntry::export_all_to(&export_path).unwrap();
     ProviderSummary::export_all_to(&export_path).unwrap();
+    CredentialProfileSummary::export_all_to(&export_path).unwrap();
     TablePreviewColumn::export_all_to(&export_path).unwrap();
     TablePreview::export_all_to(&export_path).unwrap();
     OpenApiTablePreview::export_all_to(&export_path).unwrap();

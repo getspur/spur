@@ -17,6 +17,7 @@ import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
 import type {
   ConnectionTemplate,
+  CredentialProfileSummary,
   OpenApiTablePreview,
   ProviderSummary,
   TablePreview,
@@ -27,8 +28,10 @@ import {
   addApiDatasourceFromManifestCommand,
   attachSavedConnectionCommand,
   attachedSavedConnectionFromDaemonControlResponse,
+  credentialProfilesFromDaemonControlResponse,
   daemonControl,
   importedApiDatasourceFromDaemonControlResponse,
+  listCredentialProfilesCommand,
   listNangoProvidersCommand,
   listSavedConnectionsCommand,
   nangoProvidersFromDaemonControlResponse,
@@ -276,6 +279,14 @@ export default function AddRestApiWizard({
   >([]);
   const [savedConnectionLoadState, setSavedConnectionLoadState] =
     useState<ProviderLoadState>("idle");
+  const [credentialProfiles, setCredentialProfiles] = useState<
+    CredentialProfileSummary[]
+  >([]);
+  const [credentialProfileLoadState, setCredentialProfileLoadState] =
+    useState<ProviderLoadState>("idle");
+  const [selectedCredentialRef, setSelectedCredentialRef] = useState<
+    string | null
+  >(null);
   const [providerSearch, setProviderSearch] = useState("");
   const [providerCategory, setProviderCategory] = useState("All");
   const [selectedProvider, setSelectedProvider] =
@@ -345,6 +356,9 @@ export default function AddRestApiWizard({
       setProviderCategory("All");
       setSelectedProvider(null);
       setSelectedSavedConnection(editConnection);
+      setCredentialProfiles([]);
+      setCredentialProfileLoadState("idle");
+      setSelectedCredentialRef(editConnection.credentialRef ?? null);
       setSelectedSavedConnectionTableNames([]);
       setDatasourceName(editConnection.name);
       setCredentials({});
@@ -379,6 +393,11 @@ export default function AddRestApiWizard({
       setProviderCategory("All");
       setSelectedProvider(null);
       setSelectedSavedConnection(initialSavedConnectionRecovery.connection);
+      setCredentialProfiles([]);
+      setCredentialProfileLoadState("idle");
+      setSelectedCredentialRef(
+        initialSavedConnectionRecovery.connection.credentialRef ?? null,
+      );
       setSelectedSavedConnectionTableNames(
         initialSavedConnectionRecovery.tableNames ?? [],
       );
@@ -411,6 +430,9 @@ export default function AddRestApiWizard({
         prefill.provider ? providerSummaryFromPrefill(prefill.provider) : null,
       );
       setSelectedSavedConnection(null);
+      setCredentialProfiles([]);
+      setCredentialProfileLoadState("idle");
+      setSelectedCredentialRef(null);
       setSelectedSavedConnectionTableNames([]);
       setDatasourceName(prefill.name);
       setCredentials({});
@@ -440,6 +462,9 @@ export default function AddRestApiWizard({
     setProviderCategory("All");
     setSelectedProvider(null);
     setSelectedSavedConnection(null);
+    setCredentialProfiles([]);
+    setCredentialProfileLoadState("idle");
+    setSelectedCredentialRef(null);
     setSelectedSavedConnectionTableNames([]);
     setDatasourceName("");
     setCredentials({});
@@ -518,6 +543,9 @@ export default function AddRestApiWizard({
       setSavedConnectionCredentials({});
       setPrefillCredentialKeys([]);
       setPrefillManifestToml(null);
+      setCredentialProfiles([]);
+      setCredentialProfileLoadState("idle");
+      setSelectedCredentialRef(null);
 
       if (mode === "catalog") {
         setSelectedSavedConnection(null);
@@ -560,6 +588,9 @@ export default function AddRestApiWizard({
       setSavedConnectionCredentials({});
       setPrefillCredentialKeys([]);
       setPrefillManifestToml(null);
+      setCredentialProfiles([]);
+      setCredentialProfileLoadState("idle");
+      setSelectedCredentialRef(null);
       setGenericLocation(datasourceFamilyByKey[family].defaultExampleInput);
 
       if (family === "rest_api") {
@@ -586,6 +617,9 @@ export default function AddRestApiWizard({
       setSelectedProvider(provider);
       setSelectedSavedConnection(null);
       setSelectedSavedConnectionTableNames([]);
+      setCredentialProfiles([]);
+      setCredentialProfileLoadState("idle");
+      setSelectedCredentialRef(null);
       setDatasourceName((currentName) =>
         !currentName || currentName === "rest_api" ? defaultName : currentName,
       );
@@ -606,6 +640,9 @@ export default function AddRestApiWizard({
       setSelectedSavedConnection(connection);
       setSelectedSavedConnectionTableNames([]);
       setSelectedProvider(null);
+      setCredentialProfiles([]);
+      setCredentialProfileLoadState("idle");
+      setSelectedCredentialRef(connection.credentialRef ?? null);
       setMissingSavedCredentialKeys([]);
       setSavedConnectionCredentials({});
       setPrefillCredentialKeys([]);
@@ -614,6 +651,51 @@ export default function AddRestApiWizard({
     },
     [markDirty, selectedSavedConnection?.name],
   );
+
+  const activeCredentialProvider = useMemo(() => {
+    if (sourceFamily !== "rest_api") return null;
+    if (selectedProvider?.providerKey) return selectedProvider.providerKey;
+    if (selectedSavedConnection?.provider) return selectedSavedConnection.provider;
+    if (editConnection?.provider) return editConnection.provider;
+    if (prefill?.provider) return prefill.provider;
+    return null;
+  }, [
+    editConnection?.provider,
+    prefill?.provider,
+    selectedProvider?.providerKey,
+    selectedSavedConnection?.provider,
+    sourceFamily,
+  ]);
+
+  useEffect(() => {
+    if (!open || !activeCredentialProvider) {
+      setCredentialProfiles([]);
+      setCredentialProfileLoadState("idle");
+      return;
+    }
+
+    let cancelled = false;
+    setCredentialProfileLoadState("loading");
+
+    void daemonControl(listCredentialProfilesCommand(activeCredentialProvider))
+      .then((response) => {
+        if (cancelled) return;
+        setCredentialProfiles(
+          credentialProfilesFromDaemonControlResponse(response),
+        );
+        setCredentialProfileLoadState("loaded");
+      })
+      .catch((caught) => {
+        if (cancelled) return;
+        setCredentialProfiles([]);
+        setCredentialProfileLoadState("idle");
+        setError(errorMessage(caught));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCredentialProvider, open]);
 
   const providerCategories = useMemo(() => {
     return [
@@ -662,6 +744,12 @@ export default function AddRestApiWizard({
           : credentialFieldsForProvider(selectedProvider),
     [editConnection, prefillCredentialKeys, selectedProvider],
   );
+  const selectedCredentialProfile = useMemo(
+    () =>
+      credentialProfiles.find((profile) => profile.id === selectedCredentialRef) ??
+      null,
+    [credentialProfiles, selectedCredentialRef],
+  );
   const canContinue = canContinueFromStep({
     connectionOnly,
     credentialFields,
@@ -670,6 +758,7 @@ export default function AddRestApiWizard({
     genericLocation,
     missingSavedCredentialKeys,
     savedConnectionCredentials,
+    selectedCredentialRef,
     selectedProvider,
     selectedSavedConnection,
     sourceFamily,
@@ -812,6 +901,9 @@ export default function AddRestApiWizard({
             name: datasourceName.trim(),
             manifest_toml: prefillManifestToml,
             credentials: credentialPairs,
+            ...(selectedCredentialRef
+              ? { credential_ref: selectedCredentialRef }
+              : {}),
           }),
         );
         importedApiDatasourceFromDaemonControlResponse(response);
@@ -826,6 +918,9 @@ export default function AddRestApiWizard({
           spec_text:
             connectionOnly || trimmedSpec.length === 0 ? null : trimmedSpec,
           credentials: credentialPairs,
+          ...(selectedCredentialRef
+            ? { credential_ref: selectedCredentialRef }
+            : {}),
         }),
       );
       importedApiDatasourceFromDaemonControlResponse(response);
@@ -857,6 +952,9 @@ export default function AddRestApiWizard({
           name: editConnection.name,
           spec_text: trimmedSpec.length === 0 ? null : trimmedSpec,
           credentials: credentialPairs,
+          ...(selectedCredentialRef
+            ? { credential_ref: selectedCredentialRef }
+            : {}),
         }),
       );
       attachedSavedConnectionFromDaemonControlResponse(response);
@@ -878,7 +976,10 @@ export default function AddRestApiWizard({
       ],
     );
 
-    if (credentialPairs.some(([, value]) => value.length === 0)) {
+    if (
+      !selectedCredentialRef &&
+      credentialPairs.some(([, value]) => value.length === 0)
+    ) {
       setError("Fill the missing credentials before using this connection.");
       return;
     }
@@ -890,8 +991,11 @@ export default function AddRestApiWizard({
       const response = await daemonControl(
         attachSavedConnectionCommand({
           name: selectedSavedConnection.name,
-          ...(credentialPairs.length > 0
+          ...(!selectedCredentialRef && credentialPairs.length > 0
             ? { credentials: credentialPairs }
+            : {}),
+          ...(selectedCredentialRef
+            ? { credential_ref: selectedCredentialRef }
             : {}),
           ...(selectedSavedConnectionTableNames.length > 0
             ? { tables: selectedSavedConnectionTableNames }
@@ -1044,6 +1148,8 @@ export default function AddRestApiWizard({
             {step === "source" && (
               <SourceStep
                 error={error}
+                credentialProfileLoadState={credentialProfileLoadState}
+                credentialProfiles={credentialProfiles}
                 filteredProviders={filteredProviders}
                 onCategoryChange={setProviderCategory}
                 onProviderSearch={setProviderSearch}
@@ -1060,6 +1166,10 @@ export default function AddRestApiWizard({
                     [key]: value,
                   }));
                 }}
+                onSelectCredentialRef={(credentialRef) => {
+                  if (selectedCredentialRef !== credentialRef) markDirty();
+                  setSelectedCredentialRef(credentialRef);
+                }}
                 providerCategories={providerCategories}
                 providerCategory={providerCategory}
                 providerLoadState={providerLoadState}
@@ -1068,6 +1178,7 @@ export default function AddRestApiWizard({
                 savedConnectionLoadState={savedConnectionLoadState}
                 savedConnections={savedConnections}
                 selectedProvider={selectedProvider}
+                selectedCredentialRef={selectedCredentialRef}
                 selectedSavedConnection={selectedSavedConnection}
                 missingSavedCredentialKeys={missingSavedCredentialKeys}
                 sourceFamily={sourceFamily}
@@ -1094,6 +1205,8 @@ export default function AddRestApiWizard({
             {step === "auth" &&
               (restFamilySelected ? (
                 <ConnectStep
+                  credentialProfileLoadState={credentialProfileLoadState}
+                  credentialProfiles={credentialProfiles}
                   credentials={credentials}
                   datasourceName={datasourceName}
                   fields={credentialFields}
@@ -1109,7 +1222,12 @@ export default function AddRestApiWizard({
                     if (datasourceName !== value) markDirty();
                     setDatasourceName(value);
                   }}
+                  onSelectCredentialRef={(credentialRef) => {
+                    if (selectedCredentialRef !== credentialRef) markDirty();
+                    setSelectedCredentialRef(credentialRef);
+                  }}
                   assistantPrefillMode={manifestPrefillMode}
+                  selectedCredentialRef={selectedCredentialRef}
                   selectedProvider={selectedProvider}
                   selectedSavedConnection={selectedSavedConnection}
                   sourceMode={sourceMode}
@@ -1153,6 +1271,7 @@ export default function AddRestApiWizard({
                 <ReviewStep
                   connectionOnly={connectionOnly}
                   credentialFields={credentialFields}
+                  credentialProfile={selectedCredentialProfile}
                   credentials={credentials}
                   datasourceName={datasourceName}
                   error={error}
@@ -1266,12 +1385,15 @@ export default function AddRestApiWizard({
 
 function SourceStep({
   error,
+  credentialProfileLoadState,
+  credentialProfiles,
   filteredProviders,
   onCategoryChange,
   onSelectFamily,
   onProviderSearch,
   onSelectProvider,
   onSelectSavedConnection,
+  onSelectCredentialRef,
   onSelectSourceMode,
   onSavedCredentialChange,
   providerCategories,
@@ -1281,6 +1403,7 @@ function SourceStep({
   savedConnectionCredentials,
   savedConnectionLoadState,
   savedConnections,
+  selectedCredentialRef,
   selectedProvider,
   selectedSavedConnection,
   missingSavedCredentialKeys,
@@ -1288,12 +1411,15 @@ function SourceStep({
   sourceMode,
 }: {
   error: string | null;
+  credentialProfileLoadState: ProviderLoadState;
+  credentialProfiles: CredentialProfileSummary[];
   filteredProviders: ProviderSummary[];
   onCategoryChange: (category: string) => void;
   onSelectFamily: (family: SourceFamily) => void;
   onProviderSearch: (value: string) => void;
   onSelectProvider: (provider: ProviderSummary) => void;
   onSelectSavedConnection: (connection: ConnectionTemplate) => void;
+  onSelectCredentialRef: (credentialRef: string | null) => void;
   onSelectSourceMode: (mode: SourceMode) => void;
   onSavedCredentialChange: (key: string, value: string) => void;
   providerCategories: string[];
@@ -1303,6 +1429,7 @@ function SourceStep({
   savedConnectionCredentials: Record<string, string>;
   savedConnectionLoadState: ProviderLoadState;
   savedConnections: ConnectionTemplate[];
+  selectedCredentialRef: string | null;
   selectedProvider: ProviderSummary | null;
   selectedSavedConnection: ConnectionTemplate | null;
   missingSavedCredentialKeys: string[];
@@ -1453,7 +1580,21 @@ function SourceStep({
               )}
           </div>
 
-          {missingSavedCredentialKeys.length > 0 && (
+          {selectedSavedConnection && (
+            <CredentialProfileSelector
+              loadState={credentialProfileLoadState}
+              onCredentialRefChange={onSelectCredentialRef}
+              profiles={credentialProfiles}
+              providerLabel={
+                selectedSavedConnection.provider
+                  ? displayNameFromProvider(selectedSavedConnection.provider)
+                  : selectedSavedConnection.name
+              }
+              selectedCredentialRef={selectedCredentialRef}
+            />
+          )}
+
+          {missingSavedCredentialKeys.length > 0 && !selectedCredentialRef && (
             <SavedCredentialPrompt
               credentials={savedConnectionCredentials}
               credentialKeys={missingSavedCredentialKeys}
@@ -1927,6 +2068,71 @@ function SavedCredentialPrompt({
   );
 }
 
+function CredentialProfileSelector({
+  loadState,
+  onCredentialRefChange,
+  profiles,
+  providerLabel,
+  selectedCredentialRef,
+}: {
+  loadState: ProviderLoadState;
+  onCredentialRefChange: (credentialRef: string | null) => void;
+  profiles: CredentialProfileSummary[];
+  providerLabel: string;
+  selectedCredentialRef: string | null;
+}) {
+  if (loadState !== "loading" && profiles.length === 0 && !selectedCredentialRef) {
+    return null;
+  }
+
+  const selectedProfileKnown =
+    selectedCredentialRef !== null &&
+    profiles.some((profile) => profile.id === selectedCredentialRef);
+
+  return (
+    <section className="mt-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+      <label className="block">
+        <span className="text-xs font-medium text-gray-600">
+          Credential profile
+        </span>
+        <select
+          aria-label="Credential profile"
+          className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none transition-colors focus:border-indigo-600"
+          disabled={loadState === "loading"}
+          onChange={(event) =>
+            onCredentialRefChange(event.currentTarget.value || null)
+          }
+          value={selectedCredentialRef ?? ""}
+        >
+          <option value="">
+            {profiles.length > 0
+              ? "Use manual credentials"
+              : `No saved ${providerLabel} credentials`}
+          </option>
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.label} ({profile.keys.length} key
+              {profile.keys.length === 1 ? "" : "s"})
+            </option>
+          ))}
+          {selectedCredentialRef && !selectedProfileKnown && (
+            <option value={selectedCredentialRef}>
+              {selectedCredentialRef} (saved connection)
+            </option>
+          )}
+        </select>
+      </label>
+      <p className="mt-2 text-xs text-gray-500">
+        {loadState === "loading"
+          ? "Loading credential profiles."
+          : selectedCredentialRef
+            ? "The daemon will load this profile from the global credential pool."
+            : "Manual values entered below will be saved to the provider credential pool."}
+      </p>
+    </section>
+  );
+}
+
 function CredentialFieldInputs({
   credentials,
   fields,
@@ -1964,23 +2170,31 @@ function CredentialFieldInputs({
 
 function ConnectStep({
   assistantPrefillMode,
+  credentialProfileLoadState,
+  credentialProfiles,
   credentials,
   datasourceName,
   fields,
   nameReadOnly,
   onCredentialChange,
   onDatasourceNameChange,
+  onSelectCredentialRef,
+  selectedCredentialRef,
   selectedProvider,
   selectedSavedConnection,
   sourceMode,
 }: {
   assistantPrefillMode: boolean;
+  credentialProfileLoadState: ProviderLoadState;
+  credentialProfiles: CredentialProfileSummary[];
   credentials: Record<string, string>;
   datasourceName: string;
   fields: CredentialField[];
   nameReadOnly: boolean;
   onCredentialChange: (key: string, value: string) => void;
   onDatasourceNameChange: (value: string) => void;
+  onSelectCredentialRef: (credentialRef: string | null) => void;
+  selectedCredentialRef: string | null;
   selectedProvider: ProviderSummary | null;
   selectedSavedConnection: ConnectionTemplate | null;
   sourceMode: SourceMode | null;
@@ -2000,6 +2214,11 @@ function ConnectStep({
     : selectedSavedConnection?.provider
       ? `Connect to ${displayNameFromProvider(selectedSavedConnection.provider)}`
       : "Connect a custom REST API";
+  const profileProviderLabel =
+    selectedProvider?.displayName ??
+    (selectedSavedConnection?.provider
+      ? displayNameFromProvider(selectedSavedConnection.provider)
+      : "provider");
 
   return (
     <div>
@@ -2084,6 +2303,14 @@ function ConnectStep({
             value={datasourceName}
           />
         </label>
+
+        <CredentialProfileSelector
+          loadState={credentialProfileLoadState}
+          onCredentialRefChange={onSelectCredentialRef}
+          profiles={credentialProfiles}
+          providerLabel={profileProviderLabel}
+          selectedCredentialRef={selectedCredentialRef}
+        />
 
         {fields.length > 0 ? (
           <CredentialFieldInputs
@@ -2379,6 +2606,7 @@ function FlattenPreview({ table }: { table: TablePreview | null }) {
 function ReviewStep({
   connectionOnly,
   credentialFields,
+  credentialProfile,
   credentials,
   datasourceName,
   error,
@@ -2388,6 +2616,7 @@ function ReviewStep({
 }: {
   connectionOnly: boolean;
   credentialFields: CredentialField[];
+  credentialProfile: CredentialProfileSummary | null;
   credentials: Record<string, string>;
   datasourceName: string;
   error: string | null;
@@ -2418,10 +2647,14 @@ function ReviewStep({
           {selectedProvider?.displayName ?? "Custom REST API"}
         </SummaryRow>
         <SummaryRow label="Credentials">
-          {credentialCount === 0
-            ? "none"
-            : credentialFields
-                .filter(
+          {credentialProfile
+            ? `${credentialProfile.label} (${credentialProfile.keys.length} key${
+                credentialProfile.keys.length === 1 ? "" : "s"
+              })`
+            : credentialCount === 0
+              ? "none"
+              : credentialFields
+                  .filter(
                   (field) => (credentials[field.key]?.trim() ?? "").length > 0,
                 )
                 .map((field) => `env ${field.key}`)
@@ -3217,6 +3450,7 @@ function canContinueFromStep({
   genericLocation,
   missingSavedCredentialKeys,
   savedConnectionCredentials,
+  selectedCredentialRef,
   selectedProvider,
   selectedSavedConnection,
   sourceFamily,
@@ -3232,6 +3466,7 @@ function canContinueFromStep({
   genericLocation: string;
   missingSavedCredentialKeys: string[];
   savedConnectionCredentials: Record<string, string>;
+  selectedCredentialRef: string | null;
   selectedProvider: ProviderSummary | null;
   selectedSavedConnection: ConnectionTemplate | null;
   sourceFamily: SourceFamily;
@@ -3246,9 +3481,11 @@ function canContinueFromStep({
     if (sourceMode === "saved") {
       return (
         Boolean(selectedSavedConnection) &&
-        missingSavedCredentialKeys.every(
-          (key) => (savedConnectionCredentials[key]?.trim() ?? "").length > 0,
-        )
+        (Boolean(selectedCredentialRef) ||
+          missingSavedCredentialKeys.every(
+            (key) =>
+              (savedConnectionCredentials[key]?.trim() ?? "").length > 0,
+          ))
       );
     }
 
@@ -3275,6 +3512,7 @@ function canContinueFromStep({
     const hasName = datasourceName.trim().length > 0;
     const credentialsSatisfied =
       editMode ||
+      Boolean(selectedCredentialRef) ||
       credentialFields.length === 0 ||
       credentialFields.every(
         (field) => (credentials[field.key]?.trim() ?? "").length > 0,

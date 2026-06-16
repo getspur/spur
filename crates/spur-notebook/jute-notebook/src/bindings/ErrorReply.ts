@@ -5,11 +5,11 @@
  */
 export type ErrorReply = {
   /**
-   * The error name, such as 'NameError'.
+   * The error name, such as '`NameError`'.
    */
   ename: string;
   /**
-   * The error message, such as 'NameError: name 'x' is not defined'.
+   * The error message, such as '`NameError`: name 'x' is not defined'.
    */
   evalue: string;
   /**

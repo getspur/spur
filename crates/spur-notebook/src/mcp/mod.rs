@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -1617,6 +1618,100 @@ fn oauth_connect_registration_credentials(
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn credential_profile_summary(
+    summary: crate::connection_secrets::CredentialProfileSummary,
+) -> jute::commands::CredentialProfileSummary {
+    jute::commands::CredentialProfileSummary {
+        id: summary.id,
+        provider: summary.provider,
+        label: summary.label,
+        keys: summary.keys,
+        created_at: summary.created_at.to_rfc3339(),
+        updated_at: summary.updated_at.to_rfc3339(),
+    }
+}
+
+#[cfg(feature = "datasource-introspect")]
+struct AppliedCredentialProfile {
+    env_vars: Vec<String>,
+    credential_ref: Option<String>,
+}
+
+#[cfg(feature = "datasource-introspect")]
+async fn apply_credential_profile(
+    connection_name: &str,
+    provider: &str,
+    existing_ref: Option<String>,
+    requested_ref: Option<String>,
+    credentials: Vec<(String, String)>,
+) -> Result<AppliedCredentialProfile, BridgeError> {
+    let values = credentials
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .collect::<BTreeMap<_, _>>();
+
+    if !values.is_empty() {
+        for (key, value) in &values {
+            std::env::set_var(key, value);
+        }
+        let store = crate::connection_secrets::FileCredentialProfileStore::from_home_dir()
+            .map_err(|error| BridgeError::Handler {
+                code: "credential_profile_store_unavailable".to_string(),
+                message: error.to_string(),
+            })?;
+        let summary = store
+            .upsert_profile(crate::connection_secrets::NewCredentialProfile {
+                id: requested_ref.or(existing_ref),
+                provider: provider.to_string(),
+                label: connection_name.to_string(),
+                values,
+            })
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "credential_profile_store_failed".to_string(),
+                message: error.to_string(),
+            })?;
+        return Ok(AppliedCredentialProfile {
+            env_vars: summary.keys,
+            credential_ref: Some(summary.id),
+        });
+    }
+
+    let Some(credential_ref) = requested_ref.or(existing_ref) else {
+        return Ok(AppliedCredentialProfile {
+            env_vars: Vec::new(),
+            credential_ref: None,
+        });
+    };
+
+    let store = crate::connection_secrets::FileCredentialProfileStore::from_home_dir().map_err(
+        |error| BridgeError::Handler {
+            code: "credential_profile_store_unavailable".to_string(),
+            message: error.to_string(),
+        },
+    )?;
+    let values = store
+        .load_values(&credential_ref)
+        .await
+        .map_err(|error| BridgeError::Handler {
+            code: "credential_profile_load_failed".to_string(),
+            message: error.to_string(),
+        })?
+        .ok_or_else(|| BridgeError::Handler {
+            code: "credential_profile_not_found".to_string(),
+            message: format!("no credential profile named {credential_ref}"),
+        })?;
+    let env_vars = values.keys().cloned().collect::<Vec<_>>();
+    for (key, value) in values {
+        std::env::set_var(key, value);
+    }
+    Ok(AppliedCredentialProfile {
+        env_vars,
+        credential_ref: Some(credential_ref),
+    })
+}
+
+#[cfg(feature = "datasource-introspect")]
 async fn complete_oauth_connect(
     client: &reqwest::Client,
     token_url: &str,
@@ -1894,6 +1989,7 @@ fn pending_connection_template(
         manifest_toml,
         tables,
         credential_env_vars: Vec::new(),
+        credential_ref: None,
         created_at: now,
         updated_at: now,
     })
@@ -2213,17 +2309,30 @@ impl NotebookDaemonControl {
                     provider,
                     spec_text,
                     credentials,
+                    credential_ref,
                 } => {
-                    self.add_api_datasource_from_import(name, provider, spec_text, credentials)
-                        .await
+                    self.add_api_datasource_from_import(
+                        name,
+                        provider,
+                        spec_text,
+                        credentials,
+                        credential_ref,
+                    )
+                    .await
                 }
                 DaemonControlCommand::AddApiDatasourceFromManifest {
                     name,
                     manifest_toml,
                     credentials,
+                    credential_ref,
                 } => {
-                    self.add_api_datasource_from_manifest(name, manifest_toml, credentials)
-                        .await
+                    self.add_api_datasource_from_manifest(
+                        name,
+                        manifest_toml,
+                        credentials,
+                        credential_ref,
+                    )
+                    .await
                 }
                 DaemonControlCommand::SaveApiConnectionTemplate {
                     name,
@@ -2256,13 +2365,22 @@ impl NotebookDaemonControl {
                 DaemonControlCommand::ListSavedConnections {} => {
                     self.list_saved_connections().await
                 }
+                DaemonControlCommand::ListCredentialProfiles { provider } => {
+                    self.list_credential_profiles(provider).await
+                }
                 DaemonControlCommand::AttachSavedConnection {
                     name,
                     credentials,
+                    credential_ref,
                     tables,
                 } => {
-                    self.attach_saved_connection(name, credentials, tables.unwrap_or_default())
-                        .await
+                    self.attach_saved_connection(
+                        name,
+                        credentials,
+                        credential_ref,
+                        tables.unwrap_or_default(),
+                    )
+                    .await
                 }
                 DaemonControlCommand::DeleteSavedConnection { name } => {
                     self.delete_saved_connection(name).await
@@ -2271,8 +2389,9 @@ impl NotebookDaemonControl {
                     name,
                     spec_text,
                     credentials,
+                    credential_ref,
                 } => {
-                    self.update_saved_connection(name, spec_text, credentials)
+                    self.update_saved_connection(name, spec_text, credentials, credential_ref)
                         .await
                 }
                 DaemonControlCommand::ListRecents {} => self
@@ -2469,6 +2588,7 @@ impl NotebookDaemonControl {
         &self,
         name: String,
         credentials: Vec<(String, String)>,
+        credential_ref: Option<String>,
         tables: Vec<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         use spur_rest_table_gateway::adapter::Adapter as _;
@@ -2486,14 +2606,21 @@ impl NotebookDaemonControl {
                 message: format!("no saved connection named {name}"),
             })?;
 
-        for (key, value) in &credentials {
-            if !value.is_empty() {
-                std::env::set_var(key, value);
-            }
-        }
+        let applied_credentials = apply_credential_profile(
+            &template.name,
+            template.provider.as_deref().unwrap_or(&template.name),
+            template.credential_ref.clone(),
+            credential_ref,
+            credentials,
+        )
+        .await?;
+        let credential_env_vars = if template.credential_env_vars.is_empty() {
+            applied_credentials.env_vars.clone()
+        } else {
+            template.credential_env_vars.clone()
+        };
 
-        let missing_env_vars = template
-            .credential_env_vars
+        let missing_env_vars = credential_env_vars
             .iter()
             .filter(|env_var| std::env::var_os(env_var).is_none())
             .cloned()
@@ -2516,13 +2643,23 @@ impl NotebookDaemonControl {
         )?;
 
         let entry = self
-            .register_api_datasource_entry_inner(template.name, adapter_name, tables)
+            .register_api_datasource_entry_inner(template.name.clone(), adapter_name, tables)
             .await?;
+        if applied_credentials.credential_ref != template.credential_ref {
+            let mut updated = template;
+            updated.credential_ref = applied_credentials.credential_ref.clone();
+            updated.credential_env_vars = credential_env_vars;
+            updated.updated_at = chrono::Utc::now();
+            if let Err(error) = crate::connection_store::upsert(updated).await {
+                warn!(%error, "failed to persist saved API connection credential profile");
+            }
+        }
         self.emit_connections_changed().await;
 
         let payload = json!({
             "entry": entry,
             "missing_env_vars": missing_env_vars,
+            "credential_ref": applied_credentials.credential_ref,
         });
         saved_connection_result(
             jute::commands::DaemonControlResult::AttachedSavedConnection(payload),
@@ -2531,11 +2668,36 @@ impl NotebookDaemonControl {
     }
 
     #[cfg(feature = "datasource-introspect")]
+    async fn list_credential_profiles(
+        &self,
+        provider: Option<String>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        let profiles = crate::connection_secrets::list_credential_profiles(provider.as_deref())
+            .await
+            .map_err(|error| BridgeError::Handler {
+                code: "credential_profiles_list_failed".to_string(),
+                message: error.to_string(),
+            })?
+            .into_iter()
+            .map(credential_profile_summary)
+            .collect::<Vec<_>>();
+        let result = serde_json::to_value(jute::commands::DaemonControlResult::CredentialProfiles(
+            profiles,
+        ))
+        .map_err(|error| BridgeError::Handler {
+            code: "credential_profiles_encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+        Ok(DaemonControlSuccess::result(result))
+    }
+
+    #[cfg(feature = "datasource-introspect")]
     async fn update_saved_connection(
         &self,
         name: String,
         spec_text: Option<String>,
         credentials: Vec<(String, String)>,
+        credential_ref: Option<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         use spur_rest_table_gateway::adapter::Adapter as _;
 
@@ -2551,16 +2713,6 @@ impl NotebookDaemonControl {
                 code: "saved_connection_not_found".to_string(),
                 message: format!("no saved connection named {name}"),
             })?;
-
-        let supplied_env_vars = credentials
-            .iter()
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for (key, value) in &credentials {
-            if !value.is_empty() {
-                std::env::set_var(key, value);
-            }
-        }
 
         let manifest_toml = match spec_text {
             Some(spec_text) if !spec_text.trim().is_empty() => {
@@ -2581,12 +2733,20 @@ impl NotebookDaemonControl {
         let adapter =
             spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
         let adapter_name = adapter.name().to_string();
+        let applied_credentials = apply_credential_profile(
+            &name,
+            existing.provider.as_deref().unwrap_or(&adapter_name),
+            existing.credential_ref.clone(),
+            credential_ref,
+            credentials,
+        )
+        .await?;
         let tables = datasource_tables_from_catalog(&adapter_name, adapter.catalog());
 
-        let credential_env_vars = if supplied_env_vars.is_empty() {
+        let credential_env_vars = if applied_credentials.env_vars.is_empty() {
             existing.credential_env_vars.clone()
         } else {
-            supplied_env_vars
+            applied_credentials.env_vars.clone()
         };
         let missing_env_vars = credential_env_vars
             .iter()
@@ -2605,6 +2765,7 @@ impl NotebookDaemonControl {
             manifest_toml,
             tables,
             credential_env_vars,
+            credential_ref: applied_credentials.credential_ref.clone(),
             created_at: existing.created_at,
             updated_at: chrono::Utc::now(),
         };
@@ -2616,6 +2777,7 @@ impl NotebookDaemonControl {
         let payload = json!({
             "entry": entry,
             "missing_env_vars": missing_env_vars,
+            "credential_ref": applied_credentials.credential_ref,
         });
         saved_connection_result(
             jute::commands::DaemonControlResult::AttachedSavedConnection(payload),
@@ -2699,6 +2861,7 @@ impl NotebookDaemonControl {
         provider: Option<String>,
         spec_text: Option<String>,
         credentials: Vec<(String, String)>,
+        credential_ref: Option<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         let provider_for_template = provider.clone();
         let spec_text = match spec_text {
@@ -2714,6 +2877,7 @@ impl NotebookDaemonControl {
             provider_for_template,
             manifest_toml,
             credentials,
+            credential_ref,
         )
         .await
     }
@@ -2724,9 +2888,16 @@ impl NotebookDaemonControl {
         name: String,
         manifest_toml: String,
         credentials: Vec<(String, String)>,
+        credential_ref: Option<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
-        self.persist_and_register_manifest_api_datasource(name, None, manifest_toml, credentials)
-            .await
+        self.persist_and_register_manifest_api_datasource(
+            name,
+            None,
+            manifest_toml,
+            credentials,
+            credential_ref,
+        )
+        .await
     }
 
     #[cfg(feature = "datasource-introspect")]
@@ -2890,6 +3061,7 @@ impl NotebookDaemonControl {
             template.provider,
             manifest_toml,
             credentials,
+            template.credential_ref,
         )
         .await
     }
@@ -2901,19 +3073,9 @@ impl NotebookDaemonControl {
         provider: Option<String>,
         manifest_toml: String,
         credentials: Vec<(String, String)>,
+        credential_ref: Option<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         use spur_rest_table_gateway::adapter::Adapter as _;
-
-        let credential_env_vars = credentials
-            .iter()
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        // ManifestAdapter resolves auth and connection_config from environment
-        // at scan time. This session-scoped injection is process-global, and
-        // secrets are intentionally not persisted to the notebook catalog.
-        for (key, value) in credentials {
-            std::env::set_var(key, value);
-        }
 
         let manifest =
             spur_rest_table_gateway::adapter::manifest::Manifest::from_toml(&manifest_toml)
@@ -2921,9 +3083,21 @@ impl NotebookDaemonControl {
                     code: "api_manifest_parse_failed".to_string(),
                     message: format!("failed to parse API datasource manifest: {error}"),
                 })?;
+        let adapter_name = manifest.source.name.clone();
+        let applied_credentials = apply_credential_profile(
+            &name,
+            provider.as_deref().unwrap_or(&adapter_name),
+            None,
+            credential_ref,
+            credentials,
+        )
+        .await?;
+        let credential_env_vars = applied_credentials.env_vars.clone();
+        // ManifestAdapter resolves auth and connection_config from environment
+        // at scan time. The selected global profile has already been loaded into
+        // this process before catalog/scan registration.
         let adapter =
             spur_rest_table_gateway::adapter::manifest_adapter::ManifestAdapter::new(manifest);
-        let adapter_name = adapter.name().to_string();
         let tables = datasource_tables_from_catalog(&adapter_name, adapter.catalog());
 
         let result = self
@@ -2938,6 +3112,7 @@ impl NotebookDaemonControl {
             manifest_toml,
             tables,
             credential_env_vars,
+            credential_ref: applied_credentials.credential_ref,
             created_at: now,
             updated_at: now,
         };
@@ -3177,6 +3352,7 @@ impl NotebookDaemonControl {
         _provider: Option<String>,
         _spec_text: Option<String>,
         _credentials: Vec<(String, String)>,
+        _credential_ref: Option<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
@@ -3190,6 +3366,7 @@ impl NotebookDaemonControl {
         _name: String,
         _manifest_toml: String,
         _credentials: Vec<(String, String)>,
+        _credential_ref: Option<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
@@ -3219,10 +3396,22 @@ impl NotebookDaemonControl {
     }
 
     #[cfg(not(feature = "datasource-introspect"))]
+    async fn list_credential_profiles(
+        &self,
+        _provider: Option<String>,
+    ) -> Result<DaemonControlSuccess, BridgeError> {
+        Err(BridgeError::Handler {
+            code: "datasource_introspect_unavailable".to_string(),
+            message: "datasource introspection is disabled".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "datasource-introspect"))]
     async fn attach_saved_connection(
         &self,
         _name: String,
         _credentials: Vec<(String, String)>,
+        _credential_ref: Option<String>,
         _tables: Vec<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
@@ -3248,6 +3437,7 @@ impl NotebookDaemonControl {
         _name: String,
         _spec_text: Option<String>,
         _credentials: Vec<(String, String)>,
+        _credential_ref: Option<String>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
