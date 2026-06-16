@@ -7,7 +7,7 @@ import { dispatchAgentRequest } from "../handlers";
 import { AgentHandlerError } from "../types";
 
 describe("dispatchAgentRequest notebook.insert_cell", () => {
-  test.each(["python", "go"] satisfies CodeType[])(
+  test.each(["python", "go", "sql"] satisfies CodeType[])(
     "accepts code_type %s",
     async (codeType) => {
       const notebook = createNotebook();
