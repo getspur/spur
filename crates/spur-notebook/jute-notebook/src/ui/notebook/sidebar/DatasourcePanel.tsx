@@ -331,7 +331,7 @@ export default function DatasourcePanel() {
         after_id: null,
         source: tableFunctionQuerySource(tableName),
         last_edited_by: "datasource",
-        code_type: "python",
+        code_type: "sql",
       });
       if (!response.ok) {
         throw new Error(
@@ -1152,24 +1152,7 @@ function upsertDatasourceEntry(
 
 function tableFunctionQuerySource(tableName: string): string {
   const relation = `${duckDbIdentifier(tableName)}()`;
-  const query = `SELECT * FROM ${relation} LIMIT 100`;
-  return `from pathlib import Path
-import duckdb
-
-_SPUR_DUCKDB_EXTENSION_PATH = str(Path.home() / ".spur" / "extensions" / "spur_rest.duckdb_extension")
-_SPUR_DUCKDB_EXTENSION_SQL = _SPUR_DUCKDB_EXTENSION_PATH.replace("'", "''")
-
-if "_SPUR_DUCKDB_CONNECTION" not in globals():
-    _SPUR_DUCKDB_CONNECTION = duckdb.connect(
-        database=":memory:",
-        config={"allow_unsigned_extensions": "true"},
-    )
-
-duckdb.set_default_connection(_SPUR_DUCKDB_CONNECTION)
-duckdb.sql(f"LOAD '{_SPUR_DUCKDB_EXTENSION_SQL}'")
-
-duckdb.sql(${pythonStringLiteral(query)}).df()
-`;
+  return `SELECT * FROM ${relation} LIMIT 100;\n`;
 }
 
 async function setCellDagMetadata(
@@ -1214,10 +1197,6 @@ function duckDbIdentifier(value: string): string {
     return value;
   }
   return `"${value.replaceAll('"', '""')}"`;
-}
-
-function pythonStringLiteral(value: string): string {
-  return JSON.stringify(value);
 }
 
 function datasourceNameFromPath(path: string): string {

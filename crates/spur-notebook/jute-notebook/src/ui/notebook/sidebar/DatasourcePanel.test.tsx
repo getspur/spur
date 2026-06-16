@@ -1127,7 +1127,7 @@ describe("DatasourcePanel", () => {
     expect(screen.getByText("price")).toBeInTheDocument();
   });
 
-  test("schedule_query_button_creates_python_table_function_cell_with_cron", async () => {
+  test("schedule_query_button_creates_sql_table_function_cell_with_cron", async () => {
     render(<DatasourcePanel />);
 
     await waitFor(() =>
@@ -1166,11 +1166,9 @@ describe("DatasourcePanel", () => {
         command: "insert_cell",
         kind: "code",
         after_id: null,
-        source: expect.stringContaining(
-          'duckdb.sql("SELECT * FROM polymarket_markets() LIMIT 100").df()',
-        ),
+        source: "SELECT * FROM polymarket_markets() LIMIT 100;\n",
         last_edited_by: "datasource",
-        code_type: "python",
+        code_type: "sql",
       });
     });
     expect(
@@ -1179,7 +1177,7 @@ describe("DatasourcePanel", () => {
           (command as DaemonControlCommand).command === "insert_cell",
       )?.[0],
     ).toMatchObject({
-      source: expect.stringContaining("spur_rest.duckdb_extension"),
+      source: expect.not.stringContaining("spur_rest.duckdb_extension"),
     });
     await waitFor(() =>
       expect(daemonControlMock).toHaveBeenCalledWith({

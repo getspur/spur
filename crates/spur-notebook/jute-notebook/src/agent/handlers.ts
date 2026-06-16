@@ -294,7 +294,8 @@ function readOptionalCodeTypeParam(params: unknown): CodeType | undefined {
     value === "python" ||
     value === "javascript" ||
     value === "rust" ||
-    value === "go"
+    value === "go" ||
+    value === "sql"
   ) {
     return value;
   }
