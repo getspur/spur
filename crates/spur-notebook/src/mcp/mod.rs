@@ -1645,10 +1645,17 @@ async fn apply_credential_profile(
     requested_ref: Option<String>,
     credentials: Vec<(String, String)>,
 ) -> Result<AppliedCredentialProfile, BridgeError> {
-    let values = credentials
-        .into_iter()
-        .filter(|(_, value)| !value.is_empty())
-        .collect::<BTreeMap<_, _>>();
+    let mut values = BTreeMap::new();
+    let mut env_vars = Vec::new();
+    for (key, value) in credentials {
+        if value.is_empty() {
+            continue;
+        }
+        if !values.contains_key(&key) {
+            env_vars.push(key.clone());
+        }
+        values.insert(key, value);
+    }
 
     if !values.is_empty() {
         for (key, value) in &values {
@@ -1672,7 +1679,7 @@ async fn apply_credential_profile(
                 message: error.to_string(),
             })?;
         return Ok(AppliedCredentialProfile {
-            env_vars: summary.keys,
+            env_vars,
             credential_ref: Some(summary.id),
         });
     }

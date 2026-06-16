@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use tauri::Emitter;
 use tracing::warn;
 
-use crate::mcp::ServerDeps;
+use crate::{commands::load_saved_credential_profiles_for_kernel, mcp::ServerDeps};
 
 const METHOD: &str = "notebook.run_cell";
 const RUN_CELL_EVENT_NAME: &str = "notebook://run_cell_event";
@@ -82,6 +82,14 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
     ensure_code_cell(&store, &params.cell_id)?;
     let kernel_id = resolve_kernel_id(deps, params.kernel_id.as_deref()).await?;
 
+    load_saved_credential_profiles_for_kernel()
+        .await
+        .map_err(|error| {
+            McpError::internal_error(
+                "notebook.run_cell failed to load credential profiles",
+                Some(json!({ "error": error.to_string() })),
+            )
+        })?;
     let rx = run_cell_events(
         &params.notebook_path,
         Some(&kernel_id),

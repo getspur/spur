@@ -250,6 +250,57 @@ impl FileCredentialProfileStore {
             .map(|profile| profile.values))
     }
 
+    pub async fn load_all_values(&self) -> Result<BTreeMap<String, String>> {
+        let _guard = CREDENTIALS_LOCK.lock().await;
+        let mut entries = match tokio::fs::read_dir(&self.root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read {}", self.root.display()));
+            }
+        };
+
+        let mut profiles = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .with_context(|| format!("failed to read {}", self.root.display()))?
+        {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(profile) = self.read_profile_at(&entry.path()).await? {
+                profiles.push(profile);
+            }
+        }
+
+        profiles.sort_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then(left.provider.cmp(&right.provider))
+                .then(left.label.cmp(&right.label))
+                .then(left.id.cmp(&right.id))
+        });
+
+        let mut values = BTreeMap::new();
+        for profile in profiles {
+            values.extend(profile.values);
+        }
+        Ok(values)
+    }
+
+    pub async fn load_into_env(&self) -> Result<usize> {
+        let values = self.load_all_values().await?;
+        let count = values.len();
+        for (key, value) in values {
+            std::env::set_var(key, value);
+        }
+        Ok(count)
+    }
+
     async fn read_profile_at(&self, path: &Path) -> Result<Option<CredentialProfileFile>> {
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
@@ -320,6 +371,12 @@ impl CredentialSink for FileCredentialSink {
 
 pub async fn load_secrets_into_env() -> Result<usize> {
     FileCredentialSink::from_home_dir()?.load_into_env().await
+}
+
+pub async fn load_credential_profiles_into_env() -> Result<usize> {
+    FileCredentialProfileStore::from_home_dir()?
+        .load_into_env()
+        .await
 }
 
 pub async fn list_credential_profiles(
@@ -504,6 +561,61 @@ mod tests {
             loaded.get("STRIPE_API_KEY").map(String::as_str),
             Some("sk_test_123")
         );
+    }
+
+    #[tokio::test]
+    async fn credential_profile_store_loads_saved_values_into_process_env() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = FileCredentialProfileStore::at(dir.path().join("gateway").join("credential"));
+        let token_key = format!(
+            "SPUR_TEST_GITHUB_TOKEN_{}",
+            uuid::Uuid::new_v4().to_string().replace('-', "_")
+        );
+        let token_value = "ghp_saved_profile_token";
+
+        let summary = store
+            .upsert_profile(NewCredentialProfile {
+                id: None,
+                provider: "github".to_string(),
+                label: "GitHub saved".to_string(),
+                values: BTreeMap::from([(token_key.clone(), token_value.to_string())]),
+            })
+            .await
+            .expect("profile stores");
+
+        assert!(!serde_json::to_value(&summary)
+            .expect("summary serializes")
+            .to_string()
+            .contains(token_value));
+
+        let loaded = store
+            .load_into_env()
+            .await
+            .expect("profile values load into process env");
+
+        assert_eq!(loaded, 1);
+        assert_eq!(std::env::var(&token_key).ok().as_deref(), Some(token_value));
+
+        let output_path = dir.path().join("kernel-child-env.txt");
+        let script = format!("printf '%s' \"${{{token_key}}}\" > \"$1\"");
+        let status = tokio::process::Command::new("sh")
+            .args([
+                "-c",
+                script.as_str(),
+                "kernel-env-probe",
+                output_path.to_string_lossy().as_ref(),
+            ])
+            .status()
+            .await
+            .expect("spawn child env probe");
+        assert!(status.success());
+        assert_eq!(
+            tokio::fs::read_to_string(&output_path)
+                .await
+                .expect("read child env output"),
+            token_value
+        );
+        std::env::remove_var(token_key);
     }
 
     #[tokio::test]
