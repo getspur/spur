@@ -6,7 +6,7 @@ import type { TablePreview } from "./TablePreview";
  */
 export type OpenApiTablePreview = {
   /**
-   * Tables detected from the OpenAPI document.
+   * Tables detected from the `OpenAPI` document.
    */
   tables: Array<TablePreview>;
 };

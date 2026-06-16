@@ -13,11 +13,11 @@ export type CellCronTrigger = {
    */
   enabled: boolean;
   /**
-   * 5-field Unix cron expression, such as every 15 minutes.
+   * 5-field `Unix` cron expression, such as every 15 minutes.
    */
   cron: string;
   /**
-   * IANA timezone name, e.g. "America/Los_Angeles".
+   * `IANA` timezone name, for example `America/Los_Angeles`.
    */
   timezone: string;
   /**
@@ -29,7 +29,7 @@ export type CellCronTrigger = {
    */
   skip_if_running: boolean;
   /**
-   * Back-fill a window that elapsed while SPUR was closed. Defaults false.
+   * Back-fill a window that elapsed while `SPUR` was closed. Defaults false.
    */
   catch_up: boolean;
 };

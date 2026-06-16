@@ -726,6 +726,7 @@ async fn saved_connection_list_attach_delete_roundtrip_reports_missing_env() {
         manifest_toml: saved_connection_manifest_toml(missing_env_var),
         tables: Vec::new(),
         credential_env_vars: vec![missing_env_var.to_string()],
+        credential_ref: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     })

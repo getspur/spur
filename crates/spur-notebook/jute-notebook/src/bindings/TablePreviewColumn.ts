@@ -13,7 +13,7 @@ export type TablePreviewColumn = {
    */
   ty: string;
   /**
-   * JSONPath used to extract the column value.
+   * `JSONPath` used to extract the column value.
    */
   json: string;
 };

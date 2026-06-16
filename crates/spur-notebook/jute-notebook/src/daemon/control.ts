@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   ConnectionTemplate,
+  CredentialProfileSummary,
   DaemonControlCommand,
   DaemonControlResponse,
   DaemonNotebookSnapshot,
@@ -49,6 +50,10 @@ export type ListSavedConnectionsCommand = Extract<
   DaemonControlCommand,
   { command: "list_saved_connections" }
 >;
+export type ListCredentialProfilesCommand = Extract<
+  DaemonControlCommand,
+  { command: "list_credential_profiles" }
+>;
 export type AttachSavedConnectionCommand = Extract<
   DaemonControlCommand,
   { command: "attach_saved_connection" }
@@ -90,6 +95,7 @@ export type UpdateSavedConnectionInput = Omit<
 };
 export type AttachedSavedConnection = {
   entry: DatasourceEntry;
+  credentialRef?: string;
   missingEnvVars: string[];
 };
 type EnrichedRecentEntry = NonNullable<
@@ -149,6 +155,7 @@ export function addApiDatasourceFromImportCommand(
     provider: input.provider,
     spec_text: input.spec_text,
     credentials: input.credentials,
+    ...(input.credential_ref ? { credential_ref: input.credential_ref } : {}),
   };
 }
 
@@ -160,6 +167,7 @@ export function addApiDatasourceFromManifestCommand(
     name: input.name,
     manifest_toml: input.manifest_toml,
     credentials: input.credentials,
+    ...(input.credential_ref ? { credential_ref: input.credential_ref } : {}),
   };
 }
 
@@ -184,6 +192,15 @@ export function listSavedConnectionsCommand(): ListSavedConnectionsCommand {
   };
 }
 
+export function listCredentialProfilesCommand(
+  provider?: string | null,
+): ListCredentialProfilesCommand {
+  return {
+    command: "list_credential_profiles",
+    ...(provider ? { provider } : {}),
+  };
+}
+
 export function attachSavedConnectionCommand(
   input: AttachSavedConnectionInput,
 ): AttachSavedConnectionCommand {
@@ -191,6 +208,7 @@ export function attachSavedConnectionCommand(
     command: "attach_saved_connection",
     name: input.name,
     credentials: input.credentials ?? [],
+    ...(input.credential_ref ? { credential_ref: input.credential_ref } : {}),
     ...(input.tables && input.tables.length > 0
       ? { tables: input.tables }
       : {}),
@@ -214,6 +232,7 @@ export function updateSavedConnectionCommand(
     name: input.name,
     spec_text: input.spec_text,
     credentials: input.credentials ?? [],
+    ...(input.credential_ref ? { credential_ref: input.credential_ref } : {}),
   };
 }
 
@@ -313,6 +332,24 @@ export function savedConnectionsFromDaemonControlResponse(
   );
 }
 
+export function credentialProfilesFromDaemonControlResponse(
+  response: DaemonControlResponse,
+): CredentialProfileSummary[] {
+  if (
+    response.ok &&
+    response.result?.type === "credentialProfiles" &&
+    credentialProfileSummariesFromUnknown(response.result.data)
+  ) {
+    return response.result.data;
+  }
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  throw new Error(
+    "daemon list_credential_profiles response did not include credential profiles",
+  );
+}
+
 export function attachedSavedConnectionFromDaemonControlResponse(
   response: DaemonControlResponse,
 ): AttachedSavedConnection {
@@ -323,6 +360,7 @@ export function attachedSavedConnectionFromDaemonControlResponse(
   ) {
     return {
       entry: response.result.data.entry,
+      credentialRef: response.result.data.credential_ref ?? undefined,
       missingEnvVars: response.result.data.missing_env_vars,
     };
   }
@@ -446,6 +484,9 @@ function isConnectionTemplate(value: unknown): value is ConnectionTemplate {
     Array.isArray(candidate.tables) &&
     Array.isArray(candidate.credentialEnvVars) &&
     candidate.credentialEnvVars.every((envVar) => typeof envVar === "string") &&
+    (candidate.credentialRef === undefined ||
+      candidate.credentialRef === null ||
+      typeof candidate.credentialRef === "string") &&
     typeof candidate.createdAt === "string" &&
     typeof candidate.updatedAt === "string"
   );
@@ -453,18 +494,46 @@ function isConnectionTemplate(value: unknown): value is ConnectionTemplate {
 
 function isAttachedSavedConnectionPayload(value: unknown): value is {
   entry: DatasourceEntry;
+  credential_ref?: string | null;
   missing_env_vars: string[];
 } {
   if (typeof value !== "object" || value === null) return false;
 
   const candidate = value as {
     entry?: unknown;
+    credential_ref?: unknown;
     missing_env_vars?: unknown;
   };
   return (
     isDatasourceEntry(candidate.entry) &&
+    (candidate.credential_ref === undefined ||
+      candidate.credential_ref === null ||
+      typeof candidate.credential_ref === "string") &&
     Array.isArray(candidate.missing_env_vars) &&
     candidate.missing_env_vars.every((envVar) => typeof envVar === "string")
+  );
+}
+
+function credentialProfileSummariesFromUnknown(
+  value: unknown,
+): value is CredentialProfileSummary[] {
+  return Array.isArray(value) && value.every(isCredentialProfileSummary);
+}
+
+function isCredentialProfileSummary(
+  value: unknown,
+): value is CredentialProfileSummary {
+  if (typeof value !== "object" || value === null) return false;
+
+  const candidate = value as Partial<CredentialProfileSummary>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.provider === "string" &&
+    typeof candidate.label === "string" &&
+    Array.isArray(candidate.keys) &&
+    candidate.keys.every((key) => typeof key === "string") &&
+    typeof candidate.createdAt === "string" &&
+    typeof candidate.updatedAt === "string"
   );
 }
 

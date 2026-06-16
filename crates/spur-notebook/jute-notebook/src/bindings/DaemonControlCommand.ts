@@ -31,12 +31,14 @@ export type DaemonControlCommand =
       provider: string | null;
       spec_text: string | null;
       credentials: [string, string][];
+      credential_ref?: string;
     }
   | {
       command: "add_api_datasource_from_manifest";
       name: string;
       manifest_toml: string;
       credentials: [string, string][];
+      credential_ref?: string;
     }
   | {
       command: "save_api_connection_template";
@@ -48,10 +50,12 @@ export type DaemonControlCommand =
   | { command: "detach_datasource"; name: string }
   | { command: "list_datasources"; notebook_id?: string }
   | { command: "list_saved_connections" }
+  | { command: "list_credential_profiles"; provider?: string }
   | {
       command: "attach_saved_connection";
       name: string;
       credentials: [string, string][];
+      credential_ref?: string;
       tables?: Array<string>;
     }
   | { command: "delete_saved_connection"; name: string }
@@ -60,6 +64,7 @@ export type DaemonControlCommand =
       name: string;
       spec_text: string | null;
       credentials: [string, string][];
+      credential_ref?: string;
     }
   | { command: "list_recents" }
   | { command: "remove_from_recents"; path: string }

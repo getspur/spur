@@ -117,6 +117,7 @@ function savedConnectionTemplate(
       },
     ],
     credentialEnvVars: ["STRIPE_API_KEY"],
+    credentialRef: null,
     createdAt: "2026-06-01T12:00:00Z",
     updatedAt: "2026-06-01T12:00:00Z",
     ...overrides,
@@ -132,6 +133,10 @@ function defaultDaemonResponse(
 
   if (command.command === "list_saved_connections") {
     return { ok: true, result: { type: "savedConnections", data: [] } };
+  }
+
+  if (command.command === "list_credential_profiles") {
+    return { ok: true, result: { type: "credentialProfiles", data: [] } };
   }
 
   if (command.command === "attach_datasource") {
@@ -246,10 +251,10 @@ function defaultDaemonResponse(
     command.command === "detach_datasource" ||
     command.command === "delete_saved_connection"
   ) {
-    return { ok: true, result: { type: "empty", data: {} } };
+    return { ok: true, result: { type: "empty" } };
   }
 
-  return { ok: true, result: { type: "empty", data: {} } };
+  return { ok: true, result: { type: "empty" } };
 }
 
 describe("DatasourcePanel", () => {

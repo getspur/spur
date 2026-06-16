@@ -11,7 +11,7 @@ export type CellMetadata = {
    */
   spur?: SpurCellMetadata;
   /**
-   * jute-deck per-cell metadata (layout, hidden, speaker_notes, ...).
+   * jute-deck per-cell metadata (layout, hidden, `speaker_notes`, ...).
    */
   jute_deck?: JuteDeckCellMetadata;
 };

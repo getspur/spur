@@ -171,6 +171,34 @@ pub struct Table {
     pub row_count: Option<u64>,
 }
 
+/// Saved API connection template metadata. Secret values are never included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ConnectionTemplate {
+    /// Saved connection name.
+    pub name: String,
+    /// Provider key when the connection came from the provider catalog.
+    #[ts(type = "string | null")]
+    pub provider: Option<String>,
+    /// Optional UI grouping key.
+    #[ts(type = "string | null")]
+    pub group: Option<String>,
+    /// Table manifest TOML used to reconstruct the connection.
+    pub manifest_toml: String,
+    /// Tables exposed by this connection.
+    pub tables: Vec<Table>,
+    /// Environment variable keys required by this connection.
+    pub credential_env_vars: Vec<String>,
+    /// Global credential profile selected for this connection.
+    #[ts(type = "string | null")]
+    pub credential_ref: Option<String>,
+    /// Template creation timestamp.
+    pub created_at: String,
+    /// Template update timestamp.
+    pub updated_at: String,
+}
+
 /// Catalog entry describing one datasource attached to a notebook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -239,6 +267,25 @@ pub struct ProviderSummary {
     /// Action previews available from a supported bundled manifest.
     #[serde(default)]
     pub actions: Vec<TablePreview>,
+}
+
+/// Saved credential profile metadata. Secret values are never included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct CredentialProfileSummary {
+    /// Stable profile identifier used by saved API connections.
+    pub id: String,
+    /// Provider key this profile can satisfy.
+    pub provider: String,
+    /// Human-readable profile label.
+    pub label: String,
+    /// Credential keys present in the profile.
+    pub keys: Vec<String>,
+    /// Profile creation timestamp.
+    pub created_at: String,
+    /// Profile update timestamp.
+    pub updated_at: String,
 }
 
 /// Column metadata returned when previewing OpenAPI-generated API tables.
@@ -365,6 +412,9 @@ pub enum DaemonControlCommand {
         spec_text: Option<String>,
         #[ts(type = "[string, string][]")]
         credentials: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        credential_ref: Option<String>,
     },
     /// Attach and save an API datasource from a table manifest.
     AddApiDatasourceFromManifest {
@@ -372,6 +422,9 @@ pub enum DaemonControlCommand {
         manifest_toml: String,
         #[ts(type = "[string, string][]")]
         credentials: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        credential_ref: Option<String>,
     },
     /// Persist a saved API connection template without registering a datasource.
     SaveApiConnectionTemplate {
@@ -392,12 +445,21 @@ pub enum DaemonControlCommand {
     },
     /// List globally saved API connection templates.
     ListSavedConnections,
+    /// List globally saved credential profiles, optionally filtered by provider.
+    ListCredentialProfiles {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        provider: Option<String>,
+    },
     /// Re-attach a saved connection template into the current notebook.
     AttachSavedConnection {
         name: String,
         #[serde(default)]
         #[ts(type = "[string, string][]")]
         credentials: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        credential_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         tables: Option<Vec<String>>,
@@ -411,6 +473,9 @@ pub enum DaemonControlCommand {
         #[serde(default)]
         #[ts(type = "[string, string][]")]
         credentials: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        credential_ref: Option<String>,
     },
     /// List daemon recents.
     ListRecents,
@@ -580,6 +645,8 @@ pub enum DaemonControlResult {
     OpenApiTablePreview(OpenApiTablePreview),
     /// Globally saved API connection templates.
     SavedConnections(serde_json::Value),
+    /// Globally saved credential profile summaries.
+    CredentialProfiles(Vec<CredentialProfileSummary>),
     /// Saved connection attach payload.
     AttachedSavedConnection(serde_json::Value),
     /// Saved connection delete payload.
@@ -3423,10 +3490,12 @@ mod tests {
             DaemonControlCommand::AttachSavedConnection {
                 name,
                 credentials,
+                credential_ref,
                 tables,
             } => {
                 assert_eq!(name, "stripe_reporting");
                 assert!(credentials.is_empty());
+                assert!(credential_ref.is_none());
                 assert!(tables.is_none());
             }
             command => panic!("unexpected command: {command:?}"),
@@ -3435,6 +3504,7 @@ mod tests {
         let request = DaemonControlRequest::new(DaemonControlCommand::AttachSavedConnection {
             name: "stripe_reporting".to_string(),
             credentials: vec![("STRIPE_API_KEY".to_string(), "sk_test_123".to_string())],
+            credential_ref: Some("stripe-live".to_string()),
             tables: Some(vec![
                 "stripe_charges".to_string(),
                 "stripe_customers".to_string(),
@@ -3449,9 +3519,36 @@ mod tests {
                 "command": "attach_saved_connection",
                 "name": "stripe_reporting",
                 "credentials": [["STRIPE_API_KEY", "sk_test_123"]],
+                "credential_ref": "stripe-live",
                 "tables": ["stripe_charges", "stripe_customers"]
             })
         );
+    }
+
+    #[test]
+    fn list_credential_profiles_command_round_trips_provider_filter() {
+        let request = DaemonControlRequest::new(DaemonControlCommand::ListCredentialProfiles {
+            provider: Some("stripe".to_string()),
+        });
+
+        let value = serde_json::to_value(&request).expect("profile list serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "list_credential_profiles",
+                "provider": "stripe"
+            })
+        );
+
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(value).expect("profile list deserializes");
+        match decoded.command {
+            DaemonControlCommand::ListCredentialProfiles { provider } => {
+                assert_eq!(provider.as_deref(), Some("stripe"));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
     }
 
     #[test]
@@ -3461,6 +3558,7 @@ mod tests {
             "name": "stripe_reporting",
             "spec_text": null,
             "credentials": [["STRIPE_API_KEY", "sk_live_x"]],
+            "credential_ref": "stripe-live",
         });
         let cmd: DaemonControlCommand = serde_json::from_value(json.clone()).expect("deserializes");
         assert_eq!(serde_json::to_value(&cmd).expect("serializes"), json);
@@ -3469,10 +3567,12 @@ mod tests {
                 name,
                 spec_text,
                 credentials,
+                credential_ref,
             } => {
                 assert_eq!(name, "stripe_reporting");
                 assert!(spec_text.is_none());
                 assert_eq!(credentials.len(), 1);
+                assert_eq!(credential_ref.as_deref(), Some("stripe-live"));
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -3485,7 +3585,8 @@ mod tests {
         .expect("deserializes without credentials");
         assert!(matches!(
             minimal,
-            DaemonControlCommand::UpdateSavedConnection { ref credentials, .. } if credentials.is_empty()
+            DaemonControlCommand::UpdateSavedConnection { ref credentials, ref credential_ref, .. }
+                if credentials.is_empty() && credential_ref.is_none()
         ));
     }
 

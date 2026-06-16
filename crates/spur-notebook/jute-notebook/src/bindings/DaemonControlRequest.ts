@@ -20,6 +20,7 @@ export type DaemonControlRequest = {
   | { command: "new_at"; path: string; activate?: boolean }
   | { command: "reopen"; activate?: boolean }
   | { command: "close" }
+  | { command: "close_notebook"; notebook_id: string }
   | {
       command: "attach_datasource";
       name: string;
@@ -35,12 +36,14 @@ export type DaemonControlRequest = {
       provider: string | null;
       spec_text: string | null;
       credentials: [string, string][];
+      credential_ref?: string;
     }
   | {
       command: "add_api_datasource_from_manifest";
       name: string;
       manifest_toml: string;
       credentials: [string, string][];
+      credential_ref?: string;
     }
   | {
       command: "save_api_connection_template";
@@ -52,10 +55,12 @@ export type DaemonControlRequest = {
   | { command: "detach_datasource"; name: string }
   | { command: "list_datasources"; notebook_id?: string }
   | { command: "list_saved_connections" }
+  | { command: "list_credential_profiles"; provider?: string }
   | {
       command: "attach_saved_connection";
       name: string;
       credentials: [string, string][];
+      credential_ref?: string;
       tables?: Array<string>;
     }
   | { command: "delete_saved_connection"; name: string }
@@ -64,6 +69,7 @@ export type DaemonControlRequest = {
       name: string;
       spec_text: string | null;
       credentials: [string, string][];
+      credential_ref?: string;
     }
   | { command: "list_recents" }
   | { command: "remove_from_recents"; path: string }

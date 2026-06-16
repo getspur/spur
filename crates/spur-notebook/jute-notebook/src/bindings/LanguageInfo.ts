@@ -10,7 +10,7 @@ export type LanguageInfo = {
    */
   name: string;
   /**
-   * CodeMirror mode to use for the language.
+   * `CodeMirror` mode to use for the language.
    */
   codemirror_mode?: CodeMirrorMode;
   /**

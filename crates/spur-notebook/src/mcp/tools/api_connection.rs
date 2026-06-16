@@ -259,6 +259,7 @@ pub async fn call_add_api_connection(
                 name: params.name,
                 manifest_toml: prepared.manifest_toml,
                 credentials: Vec::new(),
+                credential_ref: None,
             },
         ))
         .await;
@@ -813,6 +814,7 @@ id = { json = "$.id", type = "Utf8" }
                 row_count: None,
             }],
             credential_env_vars: vec!["STRIPE_API_KEY".to_string()],
+            credential_ref: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
