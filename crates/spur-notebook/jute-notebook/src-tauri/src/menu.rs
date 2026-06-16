@@ -80,7 +80,7 @@ pub fn setup_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             MenuEvent::ReportIssue => {
                 _ = app
                     .opener()
-                    .open_url("https://github.com/ekzhang/jute/issues", None::<&str>);
+                    .open_url("https://github.com/getspur/spur/issues", None::<&str>);
             }
         }
     });
@@ -93,8 +93,10 @@ pub fn setup_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         copyright: config.bundle.copyright.clone(),
         authors: config.bundle.publisher.clone().map(|p| vec![p]),
         icon: app.default_window_icon().cloned(),
-        website: Some("https://github.com/ekzhang/jute".into()),
-        website_label: Some("github.com/ekzhang/jute".into()),
+        website: Some(
+            "https://github.com/getspur/spur/tree/main/crates/spur-notebook/jute-notebook".into(),
+        ),
+        website_label: Some("github.com/getspur/spur".into()),
         ..Default::default()
     };
 

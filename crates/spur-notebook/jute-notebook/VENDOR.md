@@ -1,6 +1,8 @@
-# Vendored: ekzhang/jute
+# SPUR Subcrate: Jute Notebook
 
-This directory is a vendored copy of [ekzhang/jute](https://github.com/ekzhang/jute), imported via `git subtree --squash`. It powers the SPUR Notebook frontend (see `docs/superpowers/plans/spur-notebook-v0.4-build-plan.md`).
+This directory is the Jute-derived frontend subcrate for `spur-notebook`, tracked in the [getspur/spur](https://github.com/getspur/spur) repository at `crates/spur-notebook/jute-notebook/`. It powers the SPUR Notebook frontend (see `docs/superpowers/plans/spur-notebook-v0.4-build-plan.md`).
+
+The initial source came from [ekzhang/jute](https://github.com/ekzhang/jute). Keep the upstream remote available as `jute` for provenance, but SPUR-local development, issues, and package metadata belong to `getspur/spur`.
 
 ## Pin
 
@@ -8,7 +10,7 @@ This directory is a vendored copy of [ekzhang/jute](https://github.com/ekzhang/j
 |---|---|
 | Upstream commit | `18723a036b843d9efc1d07b326bda5614b2020e7` |
 | Imported at | 2026-05-22 |
-| SPUR commit  | recorded by the `Squashed 'crates/spur-notebook/jute-notebook/' content from commit 18723a03` parent in `git log` |
+| SPUR history | initial prefixed subtree merge plus a history-only merge from `jute/main`, so upstream Jute commits are reachable from SPUR history |
 | License      | MIT (preserved in-tree at `LICENSE`) |
 
 ## Initial import command
@@ -22,18 +24,24 @@ git fetch jute
 git worktree add --detach /tmp/spur-jute-subtree HEAD
 ( cd /tmp/spur-jute-subtree
   git switch -c subtree-add-jute
-  git subtree add --prefix=crates/spur-notebook/jute-notebook jute main --squash
+  git subtree add --prefix=crates/spur-notebook/jute-notebook jute main
 )
 git merge --ff-only subtree-add-jute
 git worktree remove /tmp/spur-jute-subtree
 git branch -D subtree-add-jute
 ```
 
+The historical import used a squash subtree first, then joined the upstream commit graph with a history-only merge. Verify that join with:
+
+```sh
+git merge-base --is-ancestor jute/main HEAD
+```
+
 ## Updating from upstream
 
 ```sh
 git fetch jute
-git subtree pull --prefix=crates/spur-notebook/jute-notebook jute main --squash
+git subtree pull --prefix=crates/spur-notebook/jute-notebook jute main
 # Same dirty-worktree caveat — use a worktree if needed (see above).
 ```
 
@@ -42,7 +50,7 @@ Update this file's pin (commit SHA + date) on every successful pull. Conflicts a
 ## Caveats
 
 - **Nested layout (Amendment B).** This crate lives at `crates/spur-notebook/jute-notebook/` rather than the conventional flat `crates/jute-notebook/`. If the nested layout causes Cargo/Vite/Tailwind/Tauri tooling friction at any point in M1, fall back to the flat top-level layout (`crates/jute-notebook/`, peer of `crates/spur-notebook/`) and update the workspace `members` + this file's prefix.
-- **No SPUR dependencies.** This crate must not depend on any `spur-*` crate. Dependency direction is one-way: `spur-notebook` depends on `jute-notebook`, never the reverse.
+- **Nested subcrate layout.** `src-tauri` is the Rust `jute` package and is a workspace member; the React package at this directory is tracked as the frontend package for `spur-notebook`.
 - **CI exclusions.** Jute's upstream `.github/` workflows are vendored along with the source. Treat them as documentation; they are not run in SPUR CI.
 - **The `experiment/` subdirectory** is upstream Python scratch (uv-managed venv for Jupyter wire-protocol R&D). Not built or run by SPUR CI; left in-tree for parity with upstream.
 

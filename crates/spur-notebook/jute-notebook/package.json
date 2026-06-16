@@ -3,6 +3,14 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/getspur/spur.git",
+    "directory": "crates/spur-notebook/jute-notebook"
+  },
+  "bugs": {
+    "url": "https://github.com/getspur/spur/issues"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

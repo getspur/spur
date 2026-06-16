@@ -15,7 +15,7 @@ export function UnhandledError({ error, onReturn }: Props) {
         It looks like there was an unhandled issue. Please{" "}
         <a
           target="_blank"
-          href="https://github.com/ekzhang/jute/issues"
+          href="https://github.com/getspur/spur/issues"
           className="underline"
         >
           file an issue

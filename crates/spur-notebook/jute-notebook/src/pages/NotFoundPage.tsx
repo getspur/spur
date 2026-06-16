@@ -10,7 +10,7 @@ export default function NotFoundPage() {
         It looks we've made a mistake! Please{" "}
         <a
           target="_blank"
-          href="https://github.com/ekzhang/jute/issues"
+          href="https://github.com/getspur/spur/issues"
           className="underline"
         >
           file an issue
