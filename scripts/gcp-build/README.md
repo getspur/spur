@@ -74,60 +74,54 @@ Run this from any SPUR worktree to build the Linux release binaries on the GCP
 builder VM and install them into `${CARGO_HOME:-$HOME/.cargo}/bin` locally:
 
 ```sh
-cargo xtask install --remote
+scripts/spur-cargo run -p xtask -- install --remote --notebook-channel green
 ```
 
 The xtask command is a thin wrapper around the existing shell transport:
 
-1. `scripts/gcp-build/build.sh --auto-spin -- build --release -p spur-cli -p spur-notebook --features spur-notebook/custom-protocol --locked`
-2. `scripts/gcp-build/fetch.sh --bins`
+1. `scripts/gcp-build/build.sh --auto-spin -- build --release -p spur-cli --locked`
+2. `scripts/gcp-build/fetch.sh --to <dest>/spur target/release/spur`
 
-`build.sh` syncs the current worktree, builds `crates/spur-notebook/jute-notebook`
-frontend assets on the VM when the notebook production feature is present, then
-runs the locked release cargo build. `fetch.sh --bins` copies
-`target/release/spur` and `target/release/spur-notebook` from the VM's
-per-worktree target directory to the local cargo bin directory.
+`build.sh` syncs the current worktree and runs the locked release cargo build.
+`fetch.sh` copies `target/release/spur` from the VM's per-worktree target
+directory to the requested local destination.
 
-`cargo xtask install` without `--remote` stays local. On macOS, local install
-still builds `spur` and installs `Jute.app`; `cargo xtask install --remote`
-instead fetches the Linux `spur` and `spur-notebook` binaries only and does not
-build or install a `.app` bundle.
+`cargo xtask install` without `--remote` stays local and installs `spur` only.
+Notebook binaries and `Jute.app` are owned by the standalone
+`getspur/spur-notebook` repository after the green cutover.
 
 ## Remote Frontend (vitest) Tests
 
-`vitest` is a per-project devDependency under
-`crates/spur-notebook/jute-notebook/node_modules` — it is gitignored and never
-synced, so a bare `vitest` is not on the VM's PATH. Run the suite on the VM
-(reusing the same worktree sync as the build) with:
+Notebook frontend tests moved to the standalone `getspur/spur-notebook`
+repository. Run vitest from that checkout; this repo's `build.sh
+--frontend-test` path is intentionally disabled after the green cutover.
+
+## CI Fixture Lockstep Auth
+
+The monorepo `lint-invariants` workflow checks `sdk/fixtures/port-store`
+against golden fixtures from the standalone notebook repository. Because
+`getspur/spur-notebook` is private, repository settings must define
+`SPUR_NOTEBOOK_CHECKOUT_TOKEN` with read access to the private
+`getspur/spur-notebook` repository. The workflow preflights that secret before
+the cross-repo checkout and passes it explicitly to `actions/checkout`.
+
+## Post-Split pnpm Wrapper
+
+Notebook frontend pnpm commands moved to the standalone
+`getspur/spur-notebook` repository. From this repo, `scripts/spur-pnpm` is now a
+compatibility wrapper that prints migration guidance unless `SPUR_NOTEBOOK_REPO`
+points at a local standalone checkout:
 
 ```sh
-scripts/gcp-build/build.sh --auto-spin --frontend-test
+SPUR_NOTEBOOK_REPO=/path/to/spur-notebook scripts/spur-pnpm test -- src/ui/notebook/NotebookCells.test.tsx
+SPUR_NOTEBOOK_REPO=/path/to/spur-notebook scripts/spur-pnpm run typecheck
 ```
 
-This syncs the current worktree, runs `npm ci` on the VM only when
-`node_modules` is missing or older than `package-lock.json`, then runs the
-`test` npm script (`vitest run`). Override the command via
-`SPUR_FRONTEND_TEST_CMD` (e.g. `SPUR_FRONTEND_TEST_CMD='npx vitest run src/foo'`).
-
-## Remote pnpm Commands
-
-Run notebook frontend pnpm commands through the same remote sync path with:
-
-```sh
-scripts/spur-pnpm test -- src/ui/notebook/NotebookCells.test.tsx
-scripts/spur-pnpm run typecheck
-```
-
-`scripts/spur-pnpm` dispatches to `build.sh --pnpm` by default and falls back to
-local pnpm only when the VM is unavailable. On the VM, pnpm uses the shared
-store at `/mnt/cargo/pnpm-store`, while each worktree's frontend
-`node_modules` is a symlink to `/mnt/cargo/pnpm-nm/<worktree-key>`. Keeping both
-paths on `/mnt/cargo` lets pnpm hard-link packages from the content-addressable
-store instead of copying them across filesystems. Override the activated pnpm
-version with `SPUR_PNPM_VERSION`.
+The wrapper forwards to `pnpm --dir "$SPUR_NOTEBOOK_REPO/jute-notebook" ...`.
+Run remote pnpm workflows from the standalone repo's own tooling.
 
 `deno` is provisioned system-wide by `startup.sh` (pinned, `/usr/local/bin/deno`)
-so the spur-notebook Deno Jupyter kernel tests run on the VM instead of skipping.
+for standalone notebook kernel tests and auxiliary builder workflows.
 
 ## Runtime Constraints
 
@@ -136,6 +130,6 @@ the fetched Linux binaries require a compatible glibc ABI on the machine where
 they run. They are suitable for matching developer Linux environments, not broad
 binary distribution.
 
-`spur-notebook` also depends on the Tauri Linux runtime stack. The target Linux
-host still needs WebKit/GTK runtime libraries installed; fetching the binary
-does not vendor those shared system dependencies.
+The standalone `spur-notebook` Linux binary still depends on the Tauri runtime
+stack. Its target Linux host needs WebKit/GTK runtime libraries installed; that
+artifact is built and distributed from `getspur/spur-notebook`.
