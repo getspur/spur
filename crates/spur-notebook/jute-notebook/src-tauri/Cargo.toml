@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "A native app for interactive computing in Jupyter Notebooks"
 authors = ["Eric Zhang <ekzhang1@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/ekzhang/jute.git"
+repository = "https://github.com/getspur/spur"
 edition = "2021"
 autobins = false
 
