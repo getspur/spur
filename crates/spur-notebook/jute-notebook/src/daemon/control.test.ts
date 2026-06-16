@@ -134,6 +134,28 @@ describe("daemon control adapter", () => {
       name: "prediction",
       source: "polymarket",
     });
+    expect(
+      addApiDatasourceCommand({
+        name: "rss_work",
+        source: "rss",
+        rss_subscriptions: [
+          {
+            table: "youtube_channel_entries",
+            url: "rsshub://youtube/channel/UC123",
+          },
+        ],
+      }),
+    ).toEqual({
+      command: "add_api_datasource",
+      name: "rss_work",
+      source: "rss",
+      rss_subscriptions: [
+        {
+          table: "youtube_channel_entries",
+          url: "rsshub://youtube/channel/UC123",
+        },
+      ],
+    });
   });
 
   test("builds saved connection commands", () => {

@@ -170,6 +170,7 @@ mod tests {
             tables: vec![Table {
                 name: "orders".to_string(),
                 columns: Vec::new(),
+                source_url: None,
                 row_count: Some(12),
             }],
             credential_env_vars,

@@ -20,7 +20,10 @@ use spur_rest_table_gateway::{
         manifest::Manifest, manifest_adapter::ManifestAdapter, ActionRequest, Adapter, ArgLocation,
         ArgSpec, ResolvedAuth, ScalarValue, ScanRequest, TableKind,
     },
-    adapters::{polymarket::PolymarketAdapter, rss::RssAdapter},
+    adapters::{
+        polymarket::PolymarketAdapter,
+        rss::{RssAdapter, RssSubscription},
+    },
     vtab::{
         bridge::IoBridge,
         register::{api_table_function_name, register_api_relation_view},
@@ -60,7 +63,10 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     register_adapter(&con, adapter, Arc::clone(&bridge))?;
     register_adapter(
         &con,
-        Arc::new(RssAdapter::with_config(&rsshub_base, &rsshub_routes_url)),
+        Arc::new(
+            RssAdapter::with_config(&rsshub_base, &rsshub_routes_url)
+                .with_subscriptions(rss_subscriptions_from_env()?),
+        ),
         Arc::clone(&bridge),
     )?;
 
@@ -74,6 +80,16 @@ pub fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     register_saved_connections(&con, &bridge);
 
     Ok(())
+}
+
+fn rss_subscriptions_from_env() -> Result<Vec<RssSubscription>, Box<dyn Error>> {
+    let Ok(text) = env::var("SPUR_RSS_SUBSCRIPTIONS") else {
+        return Ok(Vec::new());
+    };
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(RssSubscription::from_json(&text)?)
 }
 
 fn register_saved_connections(con: &Connection, bridge: &Arc<IoBridge>) {

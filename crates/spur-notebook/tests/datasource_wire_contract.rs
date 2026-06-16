@@ -89,6 +89,7 @@ fn populated_jute_entry(kind: JuteDatasourceKind, index: usize) -> JuteDatasourc
                 name: format!("table_amount_{index}"),
                 sql_type: "BIGINT".to_string(),
             }],
+            source_url: None,
             row_count: Some(30_000 + index as u64),
         }],
     }

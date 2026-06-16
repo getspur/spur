@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use duckdb::Connection;
-use spur_rest_table_gateway::adapters::polymarket::PolymarketAdapter;
+use spur_rest_table_gateway::adapters::{
+    polymarket::PolymarketAdapter,
+    rss::{RssAdapter, RssSubscription},
+};
 use spur_rest_table_gateway::vtab::bridge::IoBridge;
 use spur_rest_table_gateway::vtab::register::register_tables;
 use wiremock::matchers::{method, path, query_param};
@@ -73,5 +76,66 @@ fn polymarket_markets_table_function_e2e() {
         assert_eq!(function_rows[0].0, "m1");
         let volume = function_rows[0].1.expect("volume should be non-null");
         assert!((volume - 782_375.55).abs() < 0.000_01);
+    });
+}
+
+#[test]
+fn rss_subscription_registers_schema_relation_e2e() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(async {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/youtube/channel/UC123"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Example Channel</title>
+    <item>
+      <title>First video</title>
+      <link>https://example.test/first</link>
+      <guid>video-1</guid>
+    </item>
+  </channel>
+</rss>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let adapter = Arc::new(
+            RssAdapter::with_config(&server.uri(), "https://example.test/routes.json")
+                .with_subscriptions(vec![RssSubscription::new(
+                    "youtube_channel_entries",
+                    "rsshub://youtube/channel/UC123",
+                )
+                .unwrap()]),
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        let bridge = Arc::new(IoBridge::new());
+        register_tables(&conn, adapter, bridge).unwrap();
+
+        let rows = tokio::task::spawn_blocking(move || {
+            let mut stmt = conn
+                .prepare("SELECT feed_url, guid FROM rss.youtube_channel_entries")
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<duckdb::Result<Vec<_>>>()
+            .unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![(
+                "rsshub://youtube/channel/UC123".to_string(),
+                "video-1".to_string()
+            )]
+        );
     });
 }

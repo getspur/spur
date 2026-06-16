@@ -1247,6 +1247,7 @@ mod tests {
                 tables: vec![Table {
                     name: "user_followers".to_string(),
                     columns: Vec::new(),
+                    source_url: None,
                     row_count: None,
                 }],
             }],

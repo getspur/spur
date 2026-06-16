@@ -55,6 +55,7 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
             jute::commands::DaemonControlCommand::AddApiDatasource {
                 name: params.name,
                 source: params.source,
+                rss_subscriptions: None,
             },
         ))
         .await;

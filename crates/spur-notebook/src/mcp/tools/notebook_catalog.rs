@@ -341,6 +341,7 @@ mod tests {
                     name: "market_id".to_string(),
                     sql_type: "TEXT".to_string(),
                 }],
+                source_url: None,
                 row_count: Some(3200),
             }],
         }

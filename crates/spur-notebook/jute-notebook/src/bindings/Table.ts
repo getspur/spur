@@ -14,6 +14,10 @@ export type Table = {
    */
   columns: Array<Column>;
   /**
+   * Source URL used by virtual tables that bind a fixed remote feed.
+   */
+  sourceUrl?: string;
+  /**
    * Row count when known.
    */
   rowCount: number | null;
