@@ -9,6 +9,7 @@ use agent_client_protocol::schema::{
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
 };
 use futures::{Stream, StreamExt as _};
+use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
 use spur_acp::types::{PermissionRequest, PermissionResponse};
 use tokio::sync::broadcast::error::RecvError;
@@ -22,15 +23,17 @@ const TOOL_SUMMARY_MAX_CHARS: usize = 160;
 /// Owns sidebar chat ACP sessions keyed by notebook/app scope.
 pub struct SidebarChat {
     conn: Arc<Mutex<dyn AgentConnection>>,
+    cfg: AgentConfig,
     initialized: Mutex<bool>,
     sessions: Mutex<HashMap<String, SessionId>>,
     pending_permissions: Mutex<HashMap<String, oneshot::Sender<PermissionResponse>>>,
 }
 
 impl SidebarChat {
-    pub fn new(conn: Arc<Mutex<dyn AgentConnection>>) -> Self {
+    pub fn new(conn: Arc<Mutex<dyn AgentConnection>>, cfg: AgentConfig) -> Self {
         Self {
             conn,
+            cfg,
             initialized: Mutex::new(false),
             sessions: Mutex::new(HashMap::new()),
             pending_permissions: Mutex::new(HashMap::new()),
@@ -49,9 +52,13 @@ impl SidebarChat {
             return Ok(session_id);
         }
 
-        let response = conn
-            .new_session(scope.cwd.clone(), scope.mcp_servers.clone())
-            .await?;
+        let response = spur_core::skip_perm::new_session_with_bypass(
+            &mut *conn,
+            &self.cfg,
+            scope.cwd.clone(),
+            scope.mcp_servers.clone(),
+        )
+        .await?;
         let session_id = response.session_id;
 
         self.sessions
@@ -423,12 +430,14 @@ mod turn {
     use crate::sidebar_chat::types::{ChatLens, ChatTurnContext, NotebookViewMode};
     use agent_client_protocol::schema::{
         ContentChunk, InitializeResponse, ListSessionsResponse, McpServer, NewSessionResponse,
-        PermissionOption, PermissionOptionKind, RequestPermissionRequest, ToolCall, ToolCallUpdate,
+        PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionModeId,
+        SetSessionModeRequest, SetSessionModeResponse, ToolCall, ToolCallUpdate,
         ToolCallUpdateFields,
     };
     use async_trait::async_trait;
     use futures::stream;
     use serde_json::json;
+    use spur_acp::config::AgentConfig;
     use spur_acp::types::AgentHealth;
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
@@ -446,6 +455,8 @@ mod turn {
         broadcast_chunks: Vec<String>,
         prompt_never_finishes: bool,
         cancel_sessions: Vec<String>,
+        advertised_session_modes: Option<Vec<SessionModeId>>,
+        set_session_modes: Vec<(String, String)>,
         next_session: usize,
         notification_tx: Option<broadcast::Sender<SessionNotification>>,
     }
@@ -526,6 +537,21 @@ mod turn {
             AgentHealth::Ready
         }
 
+        fn advertised_session_modes(&self, _session_id: &SessionId) -> Option<Vec<SessionModeId>> {
+            self.state.lock().unwrap().advertised_session_modes.clone()
+        }
+
+        async fn set_session_mode(
+            &mut self,
+            request: SetSessionModeRequest,
+        ) -> anyhow::Result<SetSessionModeResponse> {
+            self.state.lock().unwrap().set_session_modes.push((
+                request.session_id.0.to_string(),
+                request.mode_id.0.to_string(),
+            ));
+            Ok(SetSessionModeResponse::new())
+        }
+
         async fn load_session(
             &mut self,
             request: LoadSessionRequest,
@@ -571,10 +597,21 @@ mod turn {
     }
 
     fn chat_with_fake() -> (SidebarChat, Arc<StdMutex<FakeState>>) {
+        chat_with_fake_config(AgentConfig::with_defaults("mock"))
+    }
+
+    fn chat_with_fake_config(cfg: AgentConfig) -> (SidebarChat, Arc<StdMutex<FakeState>>) {
         let conn = FakeConn::default();
         let state = conn.state.clone();
-        let chat = SidebarChat::new(Arc::new(Mutex::new(conn)));
+        let chat = SidebarChat::new(Arc::new(Mutex::new(conn)), cfg);
         (chat, state)
+    }
+
+    fn bypass_config(mode: &str) -> AgentConfig {
+        let mut cfg = AgentConfig::with_defaults("mock");
+        cfg.skip_permissions = true;
+        cfg.skip_permissions_session_mode = Some(mode.to_string());
+        cfg
     }
 
     fn message_notification(session_id: SessionId, text: impl Into<String>) -> SessionNotification {
@@ -634,6 +671,36 @@ mod turn {
         assert_eq!(state.new_sessions.len(), 2);
         assert_eq!(state.new_sessions[0].0, first.cwd);
         assert_eq!(state.new_sessions[1].0, other.cwd);
+    }
+
+    #[tokio::test]
+    async fn ensure_session_applies_configured_bypass_session_mode() {
+        let (chat, state) = chat_with_fake_config(bypass_config("bypassPermissions"));
+        state.lock().unwrap().advertised_session_modes = Some(vec![
+            SessionModeId::new("default"),
+            SessionModeId::new("bypassPermissions"),
+        ]);
+        let scope = scope("app-a", "/workspace/app-a");
+
+        let session_id = chat.ensure_session(&scope).await.unwrap();
+
+        assert_eq!(session_id.0.as_ref(), "session-1");
+        assert_eq!(
+            state.lock().unwrap().set_session_modes,
+            vec![("session-1".into(), "bypassPermissions".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_session_keeps_default_config_prompting() {
+        let (chat, state) = chat_with_fake();
+        state.lock().unwrap().advertised_session_modes =
+            Some(vec![SessionModeId::new("bypassPermissions")]);
+        let scope = scope("app-a", "/workspace/app-a");
+
+        chat.ensure_session(&scope).await.unwrap();
+
+        assert!(state.lock().unwrap().set_session_modes.is_empty());
     }
 
     #[tokio::test]

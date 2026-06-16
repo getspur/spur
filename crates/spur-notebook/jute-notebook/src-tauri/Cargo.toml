@@ -35,6 +35,7 @@ serde_urlencoded = "0.7.1"
 serde_with = "3.12.0"
 sha2 = "0.10.8"
 spur-acp = { workspace = true }
+spur-core = { workspace = true }
 strum = { version = "0.26.3", features = ["derive"] }
 sysinfo = "0.30.3"
 tauri = { version = "2.0.4", features = ["devtools", "macos-private-api"] }

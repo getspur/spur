@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 use agent_client_protocol::schema::{
-    LoadSessionRequest, McpServer, NewSessionResponse, SessionId, SessionModeId, SessionModeState,
+    LoadSessionRequest, McpServer, NewSessionResponse, SessionId, SessionModeId,
     SessionNotification, SetSessionModeRequest,
 };
 use futures::Stream;
@@ -101,15 +101,9 @@ pub async fn new_session_with_bypass(
     mcp_servers: Vec<McpServer>,
 ) -> anyhow::Result<NewSessionResponse> {
     let resp = conn.new_session(cwd, mcp_servers).await?;
-    let advertised_modes = advertised_mode_ids(resp.modes.as_ref());
-    apply_bypass_session_mode(
-        conn,
-        cfg,
-        resp.session_id.clone(),
-        advertised_modes,
-        "new_session",
-    )
-    .await;
+    let session_id = resp.session_id.clone();
+    let advertised_modes = conn.advertised_session_modes(&session_id);
+    apply_bypass_session_mode(conn, cfg, session_id, advertised_modes, "new_session").await;
     Ok(resp)
 }
 
@@ -135,33 +129,22 @@ pub async fn load_session_with_bypass(
     Ok(stream)
 }
 
-fn advertised_mode_ids(modes: Option<&SessionModeState>) -> Option<Vec<SessionModeId>> {
-    modes.map(|modes| {
-        modes
-            .available_modes
-            .iter()
-            .map(|mode| mode.id.clone())
-            .collect()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use agent_client_protocol::schema::{
-        InitializeRequest, InitializeResponse, PromptRequest, SessionMode, SessionModeId,
-        SessionModeState, SetSessionModeResponse,
+        InitializeRequest, InitializeResponse, PromptRequest, SessionModeId, SetSessionModeResponse,
     };
     use async_trait::async_trait;
-    use spur_acp::types::{AgentHealth, AgentKind, AgentRole, CostTier, TransportKind};
+    use spur_acp::types::AgentHealth;
 
     use super::*;
 
     #[derive(Default)]
     struct MockConn {
         calls: Arc<Mutex<Vec<(String, String)>>>,
-        new_session_modes: Option<SessionModeState>,
+        advertised_modes: Option<Vec<SessionModeId>>,
     }
 
     #[async_trait]
@@ -182,11 +165,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(("new_session".into(), cwd.display().to_string()));
-            let mut response = NewSessionResponse::new(SessionId::new("mock-session"));
-            if let Some(modes) = self.new_session_modes.clone() {
-                response = response.modes(modes);
-            }
-            Ok(response)
+            Ok(NewSessionResponse::new(SessionId::new("mock-session")))
         }
 
         async fn prompt(
@@ -208,6 +187,14 @@ mod tests {
             AgentHealth::Ready
         }
 
+        fn advertised_session_modes(&self, session_id: &SessionId) -> Option<Vec<SessionModeId>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("advertised_session_modes".into(), session_id.0.to_string()));
+            self.advertised_modes.clone()
+        }
+
         async fn set_session_mode(
             &mut self,
             request: SetSessionModeRequest,
@@ -220,94 +207,24 @@ mod tests {
         }
     }
 
-    fn cfg(mode: &str) -> AgentConfig {
-        AgentConfig {
-            name: "mock".into(),
-            command: "mock".into(),
-            args: vec![],
-            transport: TransportKind::Acp,
-            kind: AgentKind::Generic,
-            role: AgentRole::Both,
-            capabilities: vec![],
-            cost_tier: CostTier::Medium,
-            rate_limit_window: None,
-            review: Default::default(),
-            display: Default::default(),
-            commands: Default::default(),
-            permissions: Default::default(),
-            skip_permissions: true,
-            skip_permissions_args: vec![],
-            skip_permissions_session_mode: Some(mode.into()),
-            delegation: Default::default(),
-        }
-    }
-
-    fn modes(ids: &[&str]) -> SessionModeState {
-        let current = ids.first().copied().unwrap_or("default");
-        SessionModeState::new(
-            SessionModeId::new(current),
-            ids.iter()
-                .map(|id| SessionMode::new(SessionModeId::new(*id), *id))
-                .collect(),
-        )
+    fn cfg(skip: bool, mode: Option<&str>) -> AgentConfig {
+        let mut cfg = AgentConfig::with_defaults("mock");
+        cfg.skip_permissions = skip;
+        cfg.skip_permissions_session_mode = mode.map(str::to_owned);
+        cfg
     }
 
     #[tokio::test]
     async fn skips_set_session_mode_when_requested_mode_not_advertised() {
         let mut conn = MockConn {
             calls: Arc::default(),
-            new_session_modes: Some(modes(&["default"])),
+            advertised_modes: Some(vec![SessionModeId::new("default")]),
         };
         let calls = conn.calls.clone();
 
         new_session_with_bypass(
             &mut conn,
-            &cfg("bypassPermissions"),
-            PathBuf::from("/cwd"),
-            vec![],
-        )
-        .await
-        .expect("new_session should succeed");
-
-        let recorded = calls.lock().unwrap().clone();
-        assert_eq!(recorded, vec![("new_session".into(), "/cwd".into())]);
-    }
-
-    #[tokio::test]
-    async fn skips_set_session_mode_when_no_advertisement() {
-        // Agent did not advertise any session modes (NewSessionResponse.modes
-        // is None). Conservative gate must skip dispatch — sending a mode the
-        // agent never advertised produces a -32602 Invalid params error.
-        let mut conn = MockConn {
-            calls: Arc::default(),
-            new_session_modes: None,
-        };
-        let calls = conn.calls.clone();
-
-        new_session_with_bypass(
-            &mut conn,
-            &cfg("bypassPermissions"),
-            PathBuf::from("/cwd"),
-            vec![],
-        )
-        .await
-        .expect("new_session should succeed");
-
-        let recorded = calls.lock().unwrap().clone();
-        assert_eq!(recorded, vec![("new_session".into(), "/cwd".into())]);
-    }
-
-    #[tokio::test]
-    async fn applies_set_session_mode_when_requested_mode_advertised() {
-        let mut conn = MockConn {
-            calls: Arc::default(),
-            new_session_modes: Some(modes(&["default", "bypassPermissions"])),
-        };
-        let calls = conn.calls.clone();
-
-        new_session_with_bypass(
-            &mut conn,
-            &cfg("bypassPermissions"),
+            &cfg(true, Some("bypassPermissions")),
             PathBuf::from("/cwd"),
             vec![],
         )
@@ -319,6 +236,91 @@ mod tests {
             recorded,
             vec![
                 ("new_session".into(), "/cwd".into()),
+                ("advertised_session_modes".into(), "mock-session".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_set_session_mode_when_no_advertisement() {
+        let mut conn = MockConn {
+            calls: Arc::default(),
+            advertised_modes: None,
+        };
+        let calls = conn.calls.clone();
+
+        new_session_with_bypass(
+            &mut conn,
+            &cfg(true, Some("bypassPermissions")),
+            PathBuf::from("/cwd"),
+            vec![],
+        )
+        .await
+        .expect("new_session should succeed");
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![
+                ("new_session".into(), "/cwd".into()),
+                ("advertised_session_modes".into(), "mock-session".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_set_session_mode_when_skip_permissions_false() {
+        let mut conn = MockConn {
+            calls: Arc::default(),
+            advertised_modes: Some(vec![SessionModeId::new("bypassPermissions")]),
+        };
+        let calls = conn.calls.clone();
+
+        new_session_with_bypass(
+            &mut conn,
+            &cfg(false, Some("bypassPermissions")),
+            PathBuf::from("/cwd"),
+            vec![],
+        )
+        .await
+        .expect("new_session should succeed");
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![
+                ("new_session".into(), "/cwd".into()),
+                ("advertised_session_modes".into(), "mock-session".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn applies_set_session_mode_when_requested_mode_advertised() {
+        let mut conn = MockConn {
+            calls: Arc::default(),
+            advertised_modes: Some(vec![
+                SessionModeId::new("default"),
+                SessionModeId::new("bypassPermissions"),
+            ]),
+        };
+        let calls = conn.calls.clone();
+
+        new_session_with_bypass(
+            &mut conn,
+            &cfg(true, Some("bypassPermissions")),
+            PathBuf::from("/cwd"),
+            vec![],
+        )
+        .await
+        .expect("new_session should succeed");
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![
+                ("new_session".into(), "/cwd".into()),
+                ("advertised_session_modes".into(), "mock-session".into()),
                 ("set_session_mode".into(), "bypassPermissions".into()),
             ]
         );
