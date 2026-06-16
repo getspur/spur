@@ -21,8 +21,21 @@ import {
   defaultLensFor,
   mapViewMode,
 } from "./lens";
+import MarkdownRenderer from "../MarkdownRenderer";
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
+const CHAT_MARKDOWN_CLASS_NAME = clsx(
+  "min-w-0 break-words",
+  "[&>:first-child]:mt-0 [&>:last-child]:mb-0",
+  "[&_a]:text-[#f54e00] [&_a]:underline [&_a]:underline-offset-2",
+  "[&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-[#bfc1b7] [&_blockquote]:pl-3 [&_blockquote]:text-[#65675e]",
+  "[&_code]:rounded [&_code]:bg-[#eeefe9] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[12px]",
+  "[&_h1]:mb-2 [&_h1]:text-base [&_h1]:font-semibold",
+  "[&_h2]:mb-2 [&_h2]:text-sm [&_h2]:font-semibold",
+  "[&_h3]:mb-1.5 [&_h3]:text-sm [&_h3]:font-semibold",
+  "[&_li]:my-1 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5",
+  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-[#1e1f23] [&_pre]:p-2 [&_pre]:text-[#fdfdf8]",
+);
 
 type SessionInfo = {
   id: string;
@@ -519,9 +532,16 @@ export default function ChatPanel() {
                 className={messageClassName(message.kind)}
                 key={message.id}
               >
-                <div className="whitespace-pre-wrap break-words">
-                  {message.text}
-                </div>
+                {message.kind === "assistant" ? (
+                  <MarkdownRenderer
+                    className={CHAT_MARKDOWN_CLASS_NAME}
+                    source={message.text}
+                  />
+                ) : (
+                  <div className="whitespace-pre-wrap break-words">
+                    {message.text}
+                  </div>
+                )}
               </article>
             ),
           )
@@ -532,9 +552,10 @@ export default function ChatPanel() {
             <div className="mb-1 text-[10px] font-medium uppercase text-[#65675e]">
               Streaming
             </div>
-            <div className="whitespace-pre-wrap break-words">
-              {streamingText}
-            </div>
+            <MarkdownRenderer
+              className={CHAT_MARKDOWN_CLASS_NAME}
+              source={streamingText}
+            />
           </article>
         )}
 
