@@ -1086,14 +1086,7 @@ fn datasource_setup_statements(entry: &jute::commands::DatasourceEntry) -> Vec<S
     if entry.kind == jute::commands::DatasourceKind::ApiTables {
         let mut statements = vec![create_schema_statement(schema)];
         statements.extend(entry.tables.iter().map(|table| {
-            create_schema_view_statement(
-                schema,
-                &table.name,
-                format!(
-                    "{}()",
-                    sql_identifier(&api_backing_table_function(entry, &table.name))
-                ),
-            )
+            create_schema_view_statement(schema, &table.name, api_table_select_from(entry, table))
         }));
         return statements;
     }
@@ -1162,6 +1155,27 @@ fn api_backing_table_function(entry: &jute::commands::DatasourceEntry, table_nam
     } else {
         format!("{prefix}{table_name}")
     }
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn api_table_select_from(
+    entry: &jute::commands::DatasourceEntry,
+    table: &jute::commands::Table,
+) -> String {
+    if entry.path == RSS_SOURCE {
+        if let Some(source_url) = table.source_url.as_deref() {
+            return format!(
+                "{}({})",
+                sql_identifier("rss_entries"),
+                sql_string_literal(source_url)
+            );
+        }
+    }
+
+    format!(
+        "{}()",
+        sql_identifier(&api_backing_table_function(entry, &table.name))
+    )
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -5591,6 +5605,29 @@ score = { json = "$.score", type = "Int64" }
         assert!(
             env_index < load_index,
             "RSS subscriptions must be visible before extension load"
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn rss_subscription_setup_view_uses_stable_entries_function() {
+        let mut entry = api_datasource_entry("rss");
+        entry.path = "rss".to_string();
+        entry.tables = vec![jute::commands::Table {
+            name: "hackernews_jobs_entries".to_string(),
+            columns: Vec::new(),
+            source_url: Some("rsshub://hackernews/jobs".to_string()),
+            row_count: None,
+        }];
+
+        let statements = datasource_setup_statements(&entry);
+
+        assert_eq!(
+            statements,
+            [
+                "CREATE SCHEMA IF NOT EXISTS \"rss\"",
+                "CREATE OR REPLACE VIEW \"rss\".\"hackernews_jobs_entries\" AS SELECT * FROM \"rss_entries\"('rsshub://hackernews/jobs')"
+            ]
         );
     }
 
