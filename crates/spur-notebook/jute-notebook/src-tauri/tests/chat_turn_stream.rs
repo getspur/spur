@@ -14,6 +14,7 @@ use futures::{stream, Stream};
 use jute::chat_commands::chat_permission_respond;
 use jute::sidebar_chat::manager::SidebarChat;
 use jute::sidebar_chat::types::{AppScope, ChatEvent};
+use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
 use spur_acp::types::{AgentHealth, PermissionRequest};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
@@ -118,7 +119,10 @@ impl AgentConnection for FakeConn {
 fn chat_with_fake() -> (SidebarChat, Arc<StdMutex<FakeState>>) {
     let conn = FakeConn::default();
     let state = Arc::clone(&conn.state);
-    let chat = SidebarChat::new(Arc::new(Mutex::new(conn)));
+    let chat = SidebarChat::new(
+        Arc::new(Mutex::new(conn)),
+        AgentConfig::with_defaults("mock"),
+    );
     (chat, state)
 }
 

@@ -108,7 +108,7 @@ impl SidebarChatState {
         let permission_tx = self.permission_tx.clone();
 
         let connection = build_agent_connection(&agent, &repo_root, Some(permission_tx));
-        let manager = Arc::new(SidebarChatManager::new(connection));
+        let manager = Arc::new(SidebarChatManager::new(connection, agent.clone()));
         self.chats
             .lock()
             .await
