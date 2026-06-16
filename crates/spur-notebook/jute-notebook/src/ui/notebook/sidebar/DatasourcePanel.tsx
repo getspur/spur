@@ -322,40 +322,43 @@ export default function DatasourcePanel() {
     [attachPath],
   );
 
-  const handleScheduleTableFunction = useCallback(async (tableName: string) => {
-    setError(null);
-    try {
-      const response = await daemonControl({
-        command: "insert_cell",
-        kind: "code",
-        after_id: null,
-        source: tableFunctionQuerySource(tableName),
-        last_edited_by: "datasource",
-        code_type: "sql",
-      });
-      if (!response.ok) {
-        throw new Error(
-          response.error?.message ?? "Failed to create query cell",
-        );
-      }
-      if (
-        response.result?.type !== "delta" ||
-        response.result.data.kind.type !== "cellInserted"
-      ) {
-        throw new Error("daemon insert_cell did not return an inserted cell");
-      }
+  const handleScheduleTableRelation = useCallback(
+    async (schemaName: string, tableName: string) => {
+      setError(null);
+      try {
+        const response = await daemonControl({
+          command: "insert_cell",
+          kind: "code",
+          after_id: null,
+          source: tableRelationQuerySource(schemaName, tableName),
+          last_edited_by: "datasource",
+          code_type: "sql",
+        });
+        if (!response.ok) {
+          throw new Error(
+            response.error?.message ?? "Failed to create query cell",
+          );
+        }
+        if (
+          response.result?.type !== "delta" ||
+          response.result.data.kind.type !== "cellInserted"
+        ) {
+          throw new Error("daemon insert_cell did not return an inserted cell");
+        }
 
-      const cell = response.result.data.kind.cell;
-      const version = await setCellDagMetadata(
-        cell.id,
-        tableFunctionDagMetadata(tableName),
-        cell.version,
-      );
-      await setCellSchedule(cell.id, DEFAULT_TABLE_QUERY_TRIGGER, version);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
-  }, []);
+        const cell = response.result.data.kind.cell;
+        const version = await setCellDagMetadata(
+          cell.id,
+          tableFunctionDagMetadata(tableName),
+          cell.version,
+        );
+        await setCellSchedule(cell.id, DEFAULT_TABLE_QUERY_TRIGGER, version);
+      } catch (caught) {
+        setError(errorMessage(caught));
+      }
+    },
+    [],
+  );
 
   const handleDrop = useCallback(
     (event: DragEvent<HTMLElement>) => {
@@ -639,7 +642,7 @@ export default function DatasourcePanel() {
                         <DatasourceListItem
                           entry={entry}
                           key={entry.name}
-                          onScheduleTableFunction={handleScheduleTableFunction}
+                          onScheduleTableRelation={handleScheduleTableRelation}
                           onRemove={handleDetachDatasource}
                         />
                       ))}
@@ -972,11 +975,11 @@ function SavedConnectionRow({
 
 function DatasourceListItem({
   entry,
-  onScheduleTableFunction,
+  onScheduleTableRelation,
   onRemove,
 }: {
   entry: DatasourceEntry;
-  onScheduleTableFunction: (tableName: string) => void;
+  onScheduleTableRelation: (schemaName: string, tableName: string) => void;
   onRemove: (name: string) => void;
 }) {
   const [confirmingRemove, setConfirmingRemove] = useState(false);
@@ -1037,45 +1040,53 @@ function DatasourceListItem({
 
       {hasTables ? (
         <div className="mt-3 space-y-3">
-          {entry.tables.map((table) => (
-            <div className="space-y-1" key={table.name}>
-              <div className="flex items-center justify-between gap-2 text-xs">
-                <span className="truncate font-medium text-gray-700">
-                  {table.name}
-                </span>
-                {isApiTables ? (
-                  <div className="flex shrink-0 items-center gap-1">
-                    <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
-                      function
-                    </span>
-                    <button
-                      aria-label={`Schedule query ${table.name}`}
-                      className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-200 bg-white text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-900"
-                      onClick={() => onScheduleTableFunction(table.name)}
-                      title={`Create scheduled query for ${table.name}`}
-                      type="button"
-                    >
-                      <PlayIcon size={12} strokeWidth={1.8} />
-                    </button>
-                  </div>
-                ) : (
-                  table.rowCount !== null && (
-                    <span className="shrink-0 text-gray-400">
-                      {table.rowCount.toLocaleString()} rows
-                    </span>
-                  )
+          {entry.tables.map((table) => {
+            const relationName = tableRelationName(entry.name, table.name);
+            return (
+              <div className="space-y-1" key={table.name}>
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span
+                    className="truncate font-medium text-gray-700"
+                    title={relationName}
+                  >
+                    {relationName}
+                  </span>
+                  {isApiTables ? (
+                    <div className="flex shrink-0 items-center gap-1">
+                      <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">
+                        table
+                      </span>
+                      <button
+                        aria-label={`Schedule query ${relationName}`}
+                        className="inline-flex h-6 w-6 items-center justify-center rounded border border-gray-200 bg-white text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-50 hover:text-gray-900"
+                        onClick={() =>
+                          onScheduleTableRelation(entry.name, table.name)
+                        }
+                        title={`Create scheduled query for ${relationName}`}
+                        type="button"
+                      >
+                        <PlayIcon size={12} strokeWidth={1.8} />
+                      </button>
+                    </div>
+                  ) : (
+                    table.rowCount !== null && (
+                      <span className="shrink-0 text-gray-400">
+                        {table.rowCount.toLocaleString()} rows
+                      </span>
+                    )
+                  )}
+                </div>
+                {isApiTables && table.columns.length > 0 && (
+                  <p className="text-[10px] uppercase text-gray-400">
+                    Output schema
+                  </p>
                 )}
+                {table.columns.map((column) => (
+                  <DatasourceColumnRow column={column} key={column.name} />
+                ))}
               </div>
-              {isApiTables && table.columns.length > 0 && (
-                <p className="text-[10px] uppercase text-gray-400">
-                  Output schema
-                </p>
-              )}
-              {table.columns.map((column) => (
-                <DatasourceColumnRow column={column} key={column.name} />
-              ))}
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <div className="mt-3 space-y-1">
@@ -1150,8 +1161,15 @@ function upsertDatasourceEntry(
   return next;
 }
 
-function tableFunctionQuerySource(tableName: string): string {
-  const relation = `${duckDbIdentifier(tableName)}()`;
+function tableRelationName(schemaName: string, tableName: string): string {
+  return `${schemaName}.${tableName}`;
+}
+
+function tableRelationQuerySource(
+  schemaName: string,
+  tableName: string,
+): string {
+  const relation = `${duckDbIdentifier(schemaName)}.${duckDbIdentifier(tableName)}`;
   return `SELECT * FROM ${relation} LIMIT 100;\n`;
 }
 

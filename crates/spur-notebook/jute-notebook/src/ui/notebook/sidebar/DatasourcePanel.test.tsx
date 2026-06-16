@@ -546,7 +546,9 @@ describe("DatasourcePanel", () => {
       });
     });
 
-    expect(await screen.findByText("stripe_charges")).toBeInTheDocument();
+    expect(
+      await screen.findByText("prediction.stripe_charges"),
+    ).toBeInTheDocument();
   });
 
   test("mount_fetch_populates_list_without_datasources_changed_event", async () => {
@@ -1009,8 +1011,12 @@ describe("DatasourcePanel", () => {
       credentials: [],
       tables: ["github_issues"],
     });
-    expect(await screen.findAllByText("stripe_charges")).not.toHaveLength(0);
-    expect(await screen.findAllByText("github_issues")).not.toHaveLength(0);
+    expect(
+      await screen.findByText("stripe_reporting.stripe_charges"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("github_reporting.github_issues"),
+    ).toBeInTheDocument();
   });
 
   test("saved_connection_details_wrap_long_tokens_in_compact_sidebar", async () => {
@@ -1078,18 +1084,35 @@ describe("DatasourcePanel", () => {
               },
             ],
           }),
+          datasourceEntry({
+            name: "orders_file",
+            path: "/tmp/orders.parquet",
+            kind: "parquet",
+            columns: [],
+            rowCount: null,
+            tables: [
+              {
+                name: "main",
+                columns: [{ name: "order_total", sqlType: "DOUBLE" }],
+                rowCount: 3,
+              },
+            ],
+          }),
         ],
       });
     });
 
-    expect(await screen.findByText("orders")).toBeInTheDocument();
+    expect(await screen.findByText("warehouse.orders")).toBeInTheDocument();
     expect(screen.getByText("order_id")).toBeInTheDocument();
     expect(screen.getByText("12 rows")).toBeInTheDocument();
-    expect(screen.getByText("customers")).toBeInTheDocument();
+    expect(screen.getByText("warehouse.customers")).toBeInTheDocument();
     expect(screen.getByText("customer_name")).toBeInTheDocument();
+    expect(screen.getByText("orders_file.main")).toBeInTheDocument();
+    expect(screen.getByText("order_total")).toBeInTheDocument();
+    expect(screen.getByText("3 rows")).toBeInTheDocument();
   });
 
-  test("api_tables_entry_renders_table_functions", async () => {
+  test("api_tables_entry_renders_queryable_relations", async () => {
     render(<DatasourcePanel />);
 
     await waitFor(() =>
@@ -1099,24 +1122,24 @@ describe("DatasourcePanel", () => {
       eventCallbacks.get("datasources://changed")?.({
         payload: [
           datasourceEntry({
-            name: "polymarket",
-            path: "api://polymarket",
+            name: "github_work",
+            path: "api://github",
             kind: "api_tables",
             group: null,
             columns: [],
             rowCount: null,
             tables: [
               {
-                name: "polymarket_markets",
+                name: "repositories",
                 columns: [
-                  { name: "market_id", sqlType: "VARCHAR" },
-                  { name: "question", sqlType: "VARCHAR" },
+                  { name: "repo_id", sqlType: "VARCHAR" },
+                  { name: "name", sqlType: "VARCHAR" },
                 ],
                 rowCount: null,
               },
               {
-                name: "polymarket_trades",
-                columns: [{ name: "price", sqlType: "DOUBLE" }],
+                name: "issues",
+                columns: [{ name: "title", sqlType: "VARCHAR" }],
                 rowCount: null,
               },
             ],
@@ -1126,13 +1149,13 @@ describe("DatasourcePanel", () => {
     });
 
     expect(await screen.findAllByText("API")).toHaveLength(1);
-    expect(screen.getByText("polymarket_markets")).toBeInTheDocument();
-    expect(screen.getByText("market_id")).toBeInTheDocument();
-    expect(screen.getByText("polymarket_trades")).toBeInTheDocument();
-    expect(screen.getByText("price")).toBeInTheDocument();
+    expect(screen.getByText("github_work.repositories")).toBeInTheDocument();
+    expect(screen.getByText("repo_id")).toBeInTheDocument();
+    expect(screen.getByText("github_work.issues")).toBeInTheDocument();
+    expect(screen.getByText("title")).toBeInTheDocument();
   });
 
-  test("schedule_query_button_creates_sql_table_function_cell_with_cron", async () => {
+  test("schedule_query_button_creates_schema_relation_sql_cell_with_cron", async () => {
     render(<DatasourcePanel />);
 
     await waitFor(() =>
@@ -1142,16 +1165,16 @@ describe("DatasourcePanel", () => {
       eventCallbacks.get("datasources://changed")?.({
         payload: [
           datasourceEntry({
-            name: "polymarket",
-            path: "api://polymarket",
+            name: "github_work",
+            path: "api://github",
             kind: "api_tables",
             group: null,
             columns: [],
             rowCount: null,
             tables: [
               {
-                name: "polymarket_markets",
-                columns: [{ name: "market_id", sqlType: "VARCHAR" }],
+                name: "repositories",
+                columns: [{ name: "repo_id", sqlType: "VARCHAR" }],
                 rowCount: null,
               },
             ],
@@ -1162,7 +1185,7 @@ describe("DatasourcePanel", () => {
 
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "Schedule query polymarket_markets",
+        name: "Schedule query github_work.repositories",
       }),
     );
 
@@ -1171,7 +1194,7 @@ describe("DatasourcePanel", () => {
         command: "insert_cell",
         kind: "code",
         after_id: null,
-        source: "SELECT * FROM polymarket_markets() LIMIT 100;\n",
+        source: "SELECT * FROM github_work.repositories LIMIT 100;\n",
         last_edited_by: "datasource",
         code_type: "sql",
       });
@@ -1195,7 +1218,7 @@ describe("DatasourcePanel", () => {
               consumes: [],
               source: {
                 kind: "api_tables",
-                port: "polymarket_markets",
+                port: "repositories",
                 class: "dataframe",
               },
             },
