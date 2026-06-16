@@ -61,9 +61,8 @@ if ! command -v cc >/dev/null 2>&1; then
         libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev
 fi
 
-# Node.js LTS (system-wide). Needed for production spur-notebook builds where
-# Tauri embeds the Vite-built frontend. Corepack is enabled now so a future
-# pnpm switch does not require re-provisioning the VM.
+# Node.js LTS (system-wide). Kept for JS tooling used by auxiliary workflows
+# and standalone notebook checkouts that reuse the builder image.
 if ! command -v node >/dev/null 2>&1; then
     echo "Installing Node.js LTS..."
     curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
@@ -114,13 +113,9 @@ if ! command -v duckdb >/dev/null 2>&1; then
     rm -f /tmp/duckdb_cli.zip /tmp/duckdb
 fi
 
-# Deno (system-wide). The spur-notebook Deno Jupyter kernel provisions a
-# kernelspec whose argv is `deno jupyter --kernel --conn {connection_file}`
-# (crates/spur-notebook/.../kernel_provision.rs). Without `deno` on PATH the
-# kernel-provisioning + deno-kernel integration tests silently skip on the VM
-# (deno_binary_for_test() returns None). Pinned for reproducible reprovisions;
-# installed to /usr/local/bin so every OS Login user — and find_binary_on_path —
-# resolves it.
+# Deno (system-wide). Kept for standalone notebook kernel tests and related
+# auxiliary workflows that reuse the builder image. Pinned for reproducible
+# reprovisions; installed to /usr/local/bin so every OS Login user resolves it.
 DENO_VERSION=v2.8.1
 INSTALLED_DENO=$(deno --version 2>/dev/null | awk 'NR==1 {print "v"$2}' || echo "")
 if [[ "$INSTALLED_DENO" != "$DENO_VERSION" ]]; then

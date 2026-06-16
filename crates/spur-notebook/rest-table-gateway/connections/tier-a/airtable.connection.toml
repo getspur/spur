@@ -1,7 +1,0 @@
-# Generated from Nango providers.yaml (Elastic License 2.0). Modified/derived file. See THIRD_PARTY_NOTICES.
-# TODO: add [[table]] blocks (path/columns/filters)
-
-[source]
-name = "airtable"
-base_url = "https://api.airtable.com/v0"
-auth = { scheme = "header", name = "authorization", env = "AIRTABLE_API_KEY" }
