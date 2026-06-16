@@ -20,6 +20,36 @@ describe("useChat", () => {
     expect(state.streamingText).toBe("");
   });
 
+  test("commits streaming text around tool call and result messages", () => {
+    const s = useChat.getState();
+
+    s.applyEvent({ type: "messageChunk", text: "Let me check " });
+    s.applyEvent({
+      type: "toolCall",
+      name: "search_files",
+      argsSummary: "query=report",
+    });
+    s.applyEvent({ type: "toolResult", summary: "Found report.md" });
+    s.applyEvent({ type: "messageChunk", text: "here it is" });
+    s.applyEvent({ type: "done" });
+
+    const state = useChat.getState();
+    expect(state.messages.map((message) => message.kind)).toEqual([
+      "assistant",
+      "toolCall",
+      "toolResult",
+      "assistant",
+    ]);
+    expect(state.messages.map((message) => message.text)).toEqual([
+      "Let me check ",
+      "search_files: query=report",
+      "Found report.md",
+      "here it is",
+    ]);
+    expect(state.streaming).toBe(false);
+    expect(state.streamingText).toBe("");
+  });
+
   test("appends user messages to the active conversation", () => {
     const s = useChat.getState();
 
