@@ -38,6 +38,7 @@ if ! blkid "$CACHE_DEV" >/dev/null 2>&1; then
 fi
 mkdir -p "$CACHE_MNT"
 mountpoint -q "$CACHE_MNT" || mount "$CACHE_DEV" "$CACHE_MNT"
+chmod 1777 "$CACHE_MNT"
 
 # Default OS Login user is created on first ssh; chown lazily there.
 
@@ -272,8 +273,7 @@ export PATH="\$CARGO_HOME/bin:\$PATH"
 EOF
 chmod 0644 /etc/profile.d/spur-build.sh
 
-# Permissive ownership on cache (multi-user OS Login).
-chmod 1777 "$CACHE_MNT"
+# Permissive ownership on cache is set immediately after mounting.
 
 # ---------------------------------------------------------------------------
 # Idle auto-shutdown: terminate the VM after 30 min with no build / ssh / target
