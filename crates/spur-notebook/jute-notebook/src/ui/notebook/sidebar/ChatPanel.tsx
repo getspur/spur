@@ -49,6 +49,11 @@ type AgentInfo = {
   selected: boolean;
 };
 
+type SessionModesResponse = {
+  modes: string[];
+  current?: string | null;
+};
+
 function messageClassName(kind: ChatMessage["kind"]) {
   return clsx(
     "max-w-[92%] rounded-md border px-3 py-2 text-[13px]",
@@ -106,6 +111,15 @@ function sessionsWithSelectedSession(
   return [{ id: selectedSessionId }, ...sessions];
 }
 
+function resolvedSessionModes(response: SessionModesResponse | null | undefined) {
+  const modes = response?.modes ?? [];
+  const current =
+    response?.current && modes.includes(response.current)
+      ? response.current
+      : (modes[0] ?? "");
+  return { modes, current };
+}
+
 export default function ChatPanel() {
   const notebook = useNotebook();
   const [notebookPath, appOpenInfo, viewMode, selectedCellId] = useStore(
@@ -120,6 +134,8 @@ export default function ChatPanel() {
   const [prompt, setPrompt] = useState("");
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [sessionModes, setSessionModes] = useState<string[]>([]);
+  const [selectedSessionMode, setSelectedSessionMode] = useState("");
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [agentsLoaded, setAgentsLoaded] = useState(false);
   const [selectedAgentName, setSelectedAgentName] = useState("");
@@ -217,6 +233,8 @@ export default function ChatPanel() {
   useEffect(() => {
     setSessions([]);
     setSelectedSessionId("");
+    setSessionModes([]);
+    setSelectedSessionMode("");
 
     if (!notebookPath || !selectedAgentName) return;
 
@@ -261,6 +279,27 @@ export default function ChatPanel() {
       }
     };
 
+    const refreshSessionModes = async () => {
+      try {
+        const response = await invoke<SessionModesResponse | null>(
+          "chat_session_modes_list",
+          {
+            agentName,
+            notebookPath,
+          },
+        );
+        if (disposed) return;
+        const { modes, current } = resolvedSessionModes(response);
+        setSessionModes(modes);
+        setSelectedSessionMode(current);
+      } catch (error) {
+        if (disposed) return;
+        setSessionModes([]);
+        setSelectedSessionMode("");
+        reportScopedError(error);
+      }
+    };
+
     void (async () => {
       const initialListLoaded = await refreshSessions();
       const sessionId = await invoke<string>("chat_new_session", {
@@ -274,6 +313,7 @@ export default function ChatPanel() {
       } else {
         setSessions([{ id: sessionId }]);
       }
+      await refreshSessionModes();
     })().catch((error) => {
       reportScopedError(error);
     });
@@ -293,6 +333,8 @@ export default function ChatPanel() {
     const sessionScopeKey = chatScopeKey;
     const sessionAgentName = selectedAgentName;
     setSelectedSessionId(sessionId);
+    setSessionModes([]);
+    setSelectedSessionMode("");
     if (!sessionNotebookPath || !sessionAgentName || !sessionId) return;
 
     try {
@@ -301,8 +343,42 @@ export default function ChatPanel() {
         notebookPath: sessionNotebookPath,
         sessionId,
       });
+      const response = await invoke<SessionModesResponse | null>(
+        "chat_session_modes_list",
+        {
+          agentName: sessionAgentName,
+          notebookPath: sessionNotebookPath,
+        },
+      );
+      const { modes, current } = resolvedSessionModes(response);
+      setSessionModes(modes);
+      setSelectedSessionMode(current);
     } catch (error) {
       applyEventForScope(sessionScopeKey, {
+        type: "error",
+        message: errorMessage(error),
+      });
+    }
+  };
+
+  const switchSessionMode = async (event: ChangeEvent<HTMLSelectElement>) => {
+    const modeId = event.currentTarget.value;
+    const previousModeId = selectedSessionMode;
+    const modeNotebookPath = notebookPath;
+    const modeScopeKey = chatScopeKey;
+    const modeAgentName = selectedAgentName;
+    setSelectedSessionMode(modeId);
+    if (!modeNotebookPath || !modeAgentName || !modeId) return;
+
+    try {
+      await invoke("chat_set_session_mode", {
+        agentName: modeAgentName,
+        notebookPath: modeNotebookPath,
+        modeId,
+      });
+    } catch (error) {
+      setSelectedSessionMode(previousModeId);
+      applyEventForScope(modeScopeKey, {
         type: "error",
         message: errorMessage(error),
       });
@@ -456,6 +532,24 @@ export default function ChatPanel() {
                 {sessions.map((session) => (
                   <option key={session.id} value={session.id}>
                     {session.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {sessionModes.length > 0 && (
+            <label className="min-w-0">
+              <span className="sr-only">Mode</span>
+              <select
+                aria-label="Agent mode"
+                className="h-8 w-full rounded-md border border-[#bfc1b7] bg-[#fdfdf8] px-2 text-xs text-[#23251d] outline-none transition-colors hover:border-[#f54e00] focus:border-[#1e1f23] disabled:cursor-not-allowed disabled:bg-[#eeefe9] disabled:text-[#65675e]"
+                disabled={!notebookPath || !selectedAgentName}
+                onChange={switchSessionMode}
+                value={selectedSessionMode}
+              >
+                {sessionModes.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {mode}
                   </option>
                 ))}
               </select>

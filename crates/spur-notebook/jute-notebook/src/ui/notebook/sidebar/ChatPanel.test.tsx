@@ -79,6 +79,9 @@ describe("ChatPanel", () => {
       }
       if (command === "chat_sessions_list") return Promise.resolve([]);
       if (command === "chat_new_session") return Promise.resolve("session-1");
+      if (command === "chat_session_modes_list") {
+        return Promise.resolve({ modes: [], current: null });
+      }
       return Promise.resolve(undefined);
     });
     notebookPath = "/tmp/revenue.ipynb";
@@ -466,6 +469,50 @@ describe("ChatPanel", () => {
         sessionId: "session-old",
       });
     });
+  });
+
+  test("lists advertised session modes and switches the active mode", async () => {
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "chat_agents_list") {
+        return Promise.resolve([
+          { name: "claude-code", label: "Claude Code", selected: true },
+        ]);
+      }
+      if (command === "chat_sessions_list") return Promise.resolve([]);
+      if (command === "chat_new_session") return Promise.resolve("session-1");
+      if (command === "chat_session_modes_list") {
+        return Promise.resolve({
+          modes: ["default", "acceptEdits", "bypassPermissions"],
+          current: "acceptEdits",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<ChatPanel />);
+
+    const modePicker = await screen.findByRole("combobox", {
+      name: "Agent mode",
+    });
+    expect(modePicker).toHaveValue("acceptEdits");
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("chat_session_modes_list", {
+      agentName: "claude-code",
+      notebookPath: "/tmp/revenue.ipynb",
+    });
+
+    fireEvent.change(modePicker, { target: { value: "bypassPermissions" } });
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith(
+        "chat_set_session_mode",
+        {
+          agentName: "claude-code",
+          notebookPath: "/tmp/revenue.ipynb",
+          modeId: "bypassPermissions",
+        },
+      );
+    });
+    expect(modePicker).toHaveValue("bypassPermissions");
   });
 
   test("renders session-list failures as scoped chat errors", async () => {

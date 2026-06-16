@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, ListSessionsRequest, LoadSessionRequest, PromptRequest,
-    ProtocolVersion, SessionId, SessionInfo, SessionNotification, SessionUpdate, TextContent,
-    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    ProtocolVersion, SessionId, SessionInfo, SessionModeId, SessionNotification, SessionUpdate,
+    SetSessionModeRequest, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
 };
 use futures::{Stream, StreamExt as _};
 use spur_acp::config::AgentConfig;
@@ -95,6 +95,27 @@ impl SidebarChat {
             .list_sessions(ListSessionsRequest::new().cwd(scope.cwd.clone()))
             .await?;
         Ok(response.sessions)
+    }
+
+    pub async fn advertised_session_modes(
+        &self,
+        scope: &AppScope,
+    ) -> anyhow::Result<Option<Vec<SessionModeId>>> {
+        let session_id = self.ensure_session(scope).await?;
+        let conn = self.conn.lock().await;
+        Ok(conn.advertised_session_modes(&session_id))
+    }
+
+    pub fn configured_session_mode(&self) -> Option<String> {
+        self.cfg.effective_permissions().session_mode
+    }
+
+    pub async fn set_session_mode(&self, scope: &AppScope, mode_id: String) -> anyhow::Result<()> {
+        let session_id = self.ensure_session(scope).await?;
+        let mut conn = self.conn.lock().await;
+        conn.set_session_mode(SetSessionModeRequest::new(session_id, mode_id))
+            .await?;
+        Ok(())
     }
 
     pub async fn pending_permission_count(&self) -> usize {
@@ -734,6 +755,47 @@ mod turn {
             state.list_requests[0].cwd.as_deref(),
             Some(scope.cwd.as_path())
         );
+    }
+
+    #[tokio::test]
+    async fn advertised_session_modes_uses_cached_scope_session() {
+        let (chat, state) = chat_with_fake();
+        state.lock().unwrap().advertised_session_modes = Some(vec![
+            SessionModeId::new("default"),
+            SessionModeId::new("bypassPermissions"),
+        ]);
+        let scope = scope("app-a", "/workspace/app-a");
+        let session_id = chat.ensure_session(&scope).await.unwrap();
+
+        let modes = chat.advertised_session_modes(&scope).await.unwrap();
+
+        assert_eq!(session_id.0.as_ref(), "session-1");
+        assert_eq!(
+            modes,
+            Some(vec![
+                SessionModeId::new("default"),
+                SessionModeId::new("bypassPermissions")
+            ])
+        );
+        assert_eq!(state.lock().unwrap().new_sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_session_mode_targets_cached_scope_session() {
+        let (chat, state) = chat_with_fake();
+        let scope = scope("app-a", "/workspace/app-a");
+        let session_id = chat.ensure_session(&scope).await.unwrap();
+
+        chat.set_session_mode(&scope, "acceptEdits".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(session_id.0.as_ref(), "session-1");
+        assert_eq!(
+            state.lock().unwrap().set_session_modes,
+            vec![("session-1".into(), "acceptEdits".into())]
+        );
+        assert_eq!(state.lock().unwrap().new_sessions.len(), 1);
     }
 
     #[tokio::test]

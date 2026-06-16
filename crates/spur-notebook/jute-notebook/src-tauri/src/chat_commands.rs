@@ -3,6 +3,7 @@
 use std::{path::Path, sync::Arc};
 
 use agent_client_protocol::schema::{SessionId, SessionInfo};
+use serde::Serialize;
 use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
@@ -16,6 +17,14 @@ use spur_notebook::sidebar_chat::{
     scope::resolve_app_scope,
     types::{ChatEvent, ChatTurnContext},
 };
+
+/// Advertised ACP session modes for the current sidebar chat session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionModes {
+    modes: Vec<String>,
+    current: Option<String>,
+}
 
 /// List agents configured for sidebar chat.
 #[tauri::command]
@@ -128,6 +137,32 @@ pub async fn chat_sessions_list(
     chat.list_sessions(&scope).await.map_err(command_error)
 }
 
+/// List ACP session modes advertised for the current chat session.
+#[tauri::command]
+pub async fn chat_session_modes_list(
+    notebook_path: &str,
+    agent_name: Option<String>,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<ChatSessionModes, Error> {
+    let scope = resolve_chat_scope(notebook_path)?;
+    let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
+        .await
+        .map_err(command_error)?;
+    let modes = chat
+        .advertised_session_modes(&scope)
+        .await
+        .map_err(command_error)?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mode| mode.0.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let current = chat
+        .configured_session_mode()
+        .filter(|mode| modes.iter().any(|advertised| advertised == mode))
+        .or_else(|| modes.first().cloned());
+    Ok(ChatSessionModes { modes, current })
+}
+
 /// Switch the current notebook or Spur App scope to an existing agent session.
 #[tauri::command]
 pub async fn chat_switch_session(
@@ -160,6 +195,23 @@ pub async fn chat_new_session(
         .map_err(command_error)?;
     let session_id = chat.ensure_session(&scope).await.map_err(command_error)?;
     Ok(session_id.0.as_ref().to_owned())
+}
+
+/// Set the ACP session mode for the current notebook or Spur App scope.
+#[tauri::command]
+pub async fn chat_set_session_mode(
+    notebook_path: &str,
+    mode_id: &str,
+    agent_name: Option<String>,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<(), Error> {
+    let scope = resolve_chat_scope(notebook_path)?;
+    let chat = get_or_init_sidebar_chat_for_agent(&state, selected_agent(agent_name.as_deref()))
+        .await
+        .map_err(command_error)?;
+    chat.set_session_mode(&scope, mode_id.to_owned())
+        .await
+        .map_err(command_error)
 }
 
 /// Cancel an active agent session by ACP session id.
@@ -222,5 +274,15 @@ mod tests {
     #[test]
     fn chat_agents_list_has_command_signature() {
         let _command = super::chat_agents_list;
+    }
+
+    #[test]
+    fn chat_session_modes_list_has_command_signature() {
+        let _command = super::chat_session_modes_list;
+    }
+
+    #[test]
+    fn chat_set_session_mode_has_command_signature() {
+        let _command = super::chat_set_session_mode;
     }
 }
