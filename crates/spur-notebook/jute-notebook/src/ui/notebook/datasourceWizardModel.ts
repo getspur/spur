@@ -108,8 +108,8 @@ export const DATASOURCE_SOURCE_FAMILIES = [
     duckDbMechanism: "spur_rest extension table-functions over RSSHub and RSS",
     setupRequirements: [
       "No credentials required",
-      "Browse routes with rss_routes()",
-      "Query feeds with rss_feed(url) or rss_entries(url)",
+      "Browse routes with rss.routes",
+      "Attach a route card as a zero-argument subscription table",
     ],
     defaultExampleInput: "rsshub://youtube/video/UC123",
     attachable: true,

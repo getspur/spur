@@ -166,9 +166,24 @@ pub struct Table {
     pub name: String,
     /// Columns discovered for the table.
     pub columns: Vec<Column>,
+    /// Source URL used by virtual tables that bind a fixed remote feed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_url: Option<String>,
     /// Row count when known.
     #[ts(type = "number | null")]
     pub row_count: Option<u64>,
+}
+
+/// RSSHub subscription table requested by the datasource wizard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct RssSubscriptionRequest {
+    /// Zero-argument table to expose for this feed.
+    pub table: String,
+    /// RSS/Atom URL or RSSHub route URL fetched by the table.
+    pub url: String,
 }
 
 /// Saved API connection template metadata. Secret values are never included.
@@ -400,7 +415,13 @@ pub enum DaemonControlCommand {
         group: Option<String>,
     },
     /// Add an API-backed table-function datasource to the current notebook.
-    AddApiDatasource { name: String, source: String },
+    AddApiDatasource {
+        name: String,
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        rss_subscriptions: Option<Vec<RssSubscriptionRequest>>,
+    },
     /// List Nango providers available to the API datasource import wizard.
     ListNangoProviders,
     /// Preview table definitions generated from an `OpenAPI` document.
@@ -3229,6 +3250,53 @@ mod tests {
         };
         assert_eq!(entry.kind, DatasourceKind::Csv);
         assert_eq!(entry.columns[0].sql_type, "DOUBLE");
+    }
+
+    #[test]
+    fn add_api_datasource_command_round_trips_rss_subscriptions() {
+        let request = DaemonControlRequest::new(DaemonControlCommand::AddApiDatasource {
+            name: "rss_work".to_string(),
+            source: "rss".to_string(),
+            rss_subscriptions: Some(vec![RssSubscriptionRequest {
+                table: "youtube_channel_entries".to_string(),
+                url: "rsshub://youtube/channel/UC123".to_string(),
+            }]),
+        });
+
+        let value = serde_json::to_value(&request).expect("add api datasource serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "daemon": "notebook.v1",
+                "command": "add_api_datasource",
+                "name": "rss_work",
+                "source": "rss",
+                "rss_subscriptions": [
+                    {
+                        "table": "youtube_channel_entries",
+                        "url": "rsshub://youtube/channel/UC123"
+                    }
+                ]
+            })
+        );
+
+        let decoded: DaemonControlRequest =
+            serde_json::from_value(value).expect("add api datasource decodes");
+        match decoded.command {
+            DaemonControlCommand::AddApiDatasource {
+                name,
+                source,
+                rss_subscriptions,
+            } => {
+                assert_eq!(name, "rss_work");
+                assert_eq!(source, "rss");
+                let rss_subscriptions = rss_subscriptions.expect("rss subscriptions present");
+                assert_eq!(rss_subscriptions.len(), 1);
+                assert_eq!(rss_subscriptions[0].table, "youtube_channel_entries");
+                assert_eq!(rss_subscriptions[0].url, "rsshub://youtube/channel/UC123");
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
     }
 
     #[test]

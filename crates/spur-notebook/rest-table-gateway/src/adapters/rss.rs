@@ -4,6 +4,7 @@ use arrow_array::{ArrayRef, BooleanArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use reqwest::Client;
+use serde::Deserialize;
 
 use crate::adapter::{Adapter, ScalarValue, ScanRequest, TableDef, TableKind};
 use crate::error::{GatewayError, Result};
@@ -14,7 +15,22 @@ const DEFAULT_RSSHUB_ROUTES_URL: &str = "https://docs.rsshub.app/routes.json";
 pub struct RssAdapter {
     rsshub_base: String,
     routes_url: String,
+    subscriptions: Vec<RssSubscription>,
     client: Client,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RssSubscription {
+    table: String,
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RssSubscriptionConfig {
+    table: Option<String>,
+    name: Option<String>,
+    url: Option<String>,
+    feed_url: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -49,8 +65,21 @@ impl RssAdapter {
         Self {
             rsshub_base: rsshub_base.trim_end_matches('/').to_string(),
             routes_url: routes_url.to_string(),
+            subscriptions: Vec::new(),
             client: crate::adapter::default_http_client(),
         }
+    }
+
+    pub fn with_subscriptions(mut self, subscriptions: Vec<RssSubscription>) -> Self {
+        self.subscriptions = subscriptions;
+        self
+    }
+
+    fn subscription_feed_url(&self, table: &str) -> Option<String> {
+        self.subscriptions
+            .iter()
+            .find(|subscription| subscription.table == table)
+            .map(|subscription| subscription.url.clone())
     }
 
     fn feed_schema() -> Arc<Schema> {
@@ -281,6 +310,82 @@ impl RssAdapter {
     }
 }
 
+impl RssSubscription {
+    pub fn new(table: impl AsRef<str>, url: impl AsRef<str>) -> Result<Self> {
+        let table = normalize_subscription_table(table.as_ref())?;
+        let url = url.as_ref().trim().to_string();
+        validate_feed_url(&url)?;
+
+        Ok(Self { table, url })
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn from_json(text: &str) -> Result<Vec<Self>> {
+        let configs = serde_json::from_str::<Vec<RssSubscriptionConfig>>(text)
+            .map_err(|error| GatewayError::Adapter(error.to_string()))?;
+        configs
+            .into_iter()
+            .map(|config| {
+                let table = config.table.or(config.name).ok_or_else(|| {
+                    GatewayError::Adapter(
+                        "RSS subscription requires a table or name field".to_string(),
+                    )
+                })?;
+                let url = config.url.or(config.feed_url).ok_or_else(|| {
+                    GatewayError::Adapter(
+                        "RSS subscription requires a url or feed_url field".to_string(),
+                    )
+                })?;
+                Self::new(table, url)
+            })
+            .collect()
+    }
+}
+
+fn normalize_subscription_table(value: &str) -> Result<String> {
+    let table = value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+
+    if table.is_empty() {
+        return Err(GatewayError::Adapter(
+            "RSS subscription table name must not be empty".to_string(),
+        ));
+    }
+
+    if matches!(table.as_str(), "routes" | "feed" | "entries") {
+        return Err(GatewayError::Adapter(format!(
+            "RSS subscription table name '{table}' is reserved"
+        )));
+    }
+
+    Ok(table)
+}
+
+fn validate_feed_url(url: &str) -> Result<()> {
+    if url.starts_with("rsshub://") || url.starts_with("http://") || url.starts_with("https://") {
+        return Ok(());
+    }
+
+    Err(GatewayError::Adapter(format!(
+        "RSS subscription URL must start with http://, https://, or rsshub://: {url}"
+    )))
+}
+
 impl Default for RssAdapter {
     fn default() -> Self {
         Self::new()
@@ -294,7 +399,7 @@ impl Adapter for RssAdapter {
     }
 
     fn catalog(&self) -> Vec<TableDef> {
-        vec![
+        let mut tables = vec![
             TableDef {
                 name: "routes".to_string(),
                 schema: Self::routes_schema(),
@@ -314,7 +419,15 @@ impl Adapter for RssAdapter {
                     arg_names: vec!["url".to_string()],
                 },
             },
-        ]
+        ];
+
+        tables.extend(self.subscriptions.iter().map(|subscription| TableDef {
+            name: subscription.table.clone(),
+            schema: Self::entries_schema(),
+            kind: TableKind::Table,
+        }));
+
+        tables
     }
 
     async fn scan(&self, req: ScanRequest) -> Result<Vec<RecordBatch>> {
@@ -328,7 +441,12 @@ impl Adapter for RssAdapter {
                 self.scan_entries(Self::feed_url_arg(&req.tvf_args, "entries")?)
                     .await
             }
-            _ => Err(GatewayError::UnknownTable(req.table)),
+            table => {
+                if let Some(url) = self.subscription_feed_url(table) {
+                    return self.scan_entries(url).await;
+                }
+                Err(GatewayError::UnknownTable(req.table))
+            }
         }
     }
 }
@@ -573,7 +691,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::RssAdapter;
+    use super::{RssAdapter, RssSubscription};
     use crate::adapter::{Adapter, ResolvedAuth, ScalarValue, ScanRequest, TableKind};
 
     fn scan_request_with_args(table: &str, tvf_args: Vec<ScalarValue>) -> ScanRequest {
@@ -641,6 +759,55 @@ mod tests {
                     TableKind::TableFunction { ref arg_names } if arg_names == &["url".to_string()]
                 )
         }));
+    }
+
+    #[tokio::test]
+    async fn rss_subscription_table_scans_fixed_rsshub_route_entries() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/youtube/channel/UC123"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Example Channel</title>
+    <item>
+      <title>First video</title>
+      <link>https://example.test/first</link>
+      <guid>video-1</guid>
+      <pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let adapter = RssAdapter::with_config(&server.uri(), "https://example.test/routes.json")
+            .with_subscriptions(vec![RssSubscription::new(
+                "youtube_channel_entries",
+                "rsshub://youtube/channel/UC123",
+            )
+            .expect("subscription should be valid")]);
+        let catalog = adapter.catalog();
+
+        assert!(catalog.iter().any(|table| {
+            table.name == "youtube_channel_entries" && matches!(table.kind, TableKind::Table)
+        }));
+
+        let batches = adapter
+            .scan(scan_request_with_args("youtube_channel_entries", vec![]))
+            .await
+            .expect("subscription scan succeeds");
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(
+            string_value(&batches[0], 0, 0),
+            "rsshub://youtube/channel/UC123"
+        );
+        assert_eq!(string_value(&batches[0], 1, 0), "video-1");
+        assert_eq!(string_value(&batches[0], 2, 0), "First video");
     }
 
     #[tokio::test]

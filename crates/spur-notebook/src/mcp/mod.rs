@@ -1011,7 +1011,7 @@ fn datasource_setup_bootstrap_preamble(entries: &[jute::commands::DatasourceEntr
 
     let mut source = String::new();
     if needs_api_tables {
-        source.push_str(&api_tables_setup_bootstrap_preamble());
+        source.push_str(&api_tables_setup_bootstrap_preamble(entries));
     }
     if needs_sqlite {
         source.push_str("# sqlite_scanner is core/signed; first run may need network access.\n");
@@ -1022,9 +1022,15 @@ fn datasource_setup_bootstrap_preamble(entries: &[jute::commands::DatasourceEntr
 }
 
 #[cfg(feature = "datasource-introspect")]
-fn api_tables_setup_bootstrap_preamble() -> String {
+fn api_tables_setup_bootstrap_preamble(entries: &[jute::commands::DatasourceEntry]) -> String {
     let extension_path = spur_rest_extension_path().display().to_string();
     let mut source = String::new();
+    if let Some(subscriptions_json) = rss_subscriptions_json(entries) {
+        source.push_str("import os\n");
+        source.push_str("os.environ[\"SPUR_RSS_SUBSCRIPTIONS\"] = ");
+        source.push_str(&python_string_literal(&subscriptions_json));
+        source.push_str("\n\n");
+    }
     source.push_str("_SPUR_DUCKDB_EXTENSION_PATH = ");
     source.push_str(&python_string_literal(&extension_path));
     source.push('\n');
@@ -1039,6 +1045,32 @@ fn api_tables_setup_bootstrap_preamble() -> String {
     source.push_str("duckdb.set_default_connection(_SPUR_DUCKDB_CONNECTION)\n");
     source.push_str("duckdb.sql(f\"LOAD '{_SPUR_DUCKDB_EXTENSION_SQL}'\")\n\n");
     source
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn rss_subscriptions_json(entries: &[jute::commands::DatasourceEntry]) -> Option<String> {
+    let subscriptions = entries
+        .iter()
+        .filter(|entry| {
+            entry.kind == jute::commands::DatasourceKind::ApiTables && entry.path == RSS_SOURCE
+        })
+        .flat_map(|entry| {
+            entry.tables.iter().filter_map(|table| {
+                table.source_url.as_ref().map(|url| {
+                    json!({
+                        "table": table.name,
+                        "url": url,
+                    })
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if subscriptions.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&subscriptions).expect("RSS subscriptions serialize"))
+    }
 }
 
 #[cfg(feature = "datasource-introspect")]
@@ -1952,6 +1984,66 @@ fn api_datasource_tables(source: &str) -> Result<Vec<jute::commands::Table>, Bri
 }
 
 #[cfg(feature = "datasource-introspect")]
+fn api_datasource_tables_for_command(
+    source: &str,
+    rss_subscriptions: Option<Vec<jute::commands::RssSubscriptionRequest>>,
+) -> Result<Vec<jute::commands::Table>, BridgeError> {
+    let rss_subscriptions = rss_subscriptions.unwrap_or_default();
+    if rss_subscriptions.is_empty() {
+        return api_datasource_tables(source);
+    }
+
+    if source != RSS_SOURCE {
+        return Err(BridgeError::Handler {
+            code: "unsupported_api_datasource_subscription".to_string(),
+            message: format!("API datasource source {source} does not support RSS subscriptions"),
+        });
+    }
+
+    rss_subscription_tables(rss_subscriptions)
+}
+
+#[cfg(feature = "datasource-introspect")]
+fn rss_subscription_tables(
+    requests: Vec<jute::commands::RssSubscriptionRequest>,
+) -> Result<Vec<jute::commands::Table>, BridgeError> {
+    use spur_rest_table_gateway::adapter::Adapter as _;
+
+    let subscriptions = requests
+        .into_iter()
+        .map(|request| {
+            spur_rest_table_gateway::adapters::rss::RssSubscription::new(request.table, request.url)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| BridgeError::Handler {
+            code: "invalid_rss_subscription".to_string(),
+            message: error.to_string(),
+        })?;
+    let subscription_urls = subscriptions
+        .iter()
+        .map(|subscription| {
+            (
+                subscription.table().to_string(),
+                subscription.url().to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let adapter =
+        spur_rest_table_gateway::adapters::rss::RssAdapter::new().with_subscriptions(subscriptions);
+    let adapter_name = adapter.name().to_string();
+    let mut tables = datasource_tables_from_catalog(&adapter_name, adapter.catalog())
+        .into_iter()
+        .filter(|table| subscription_urls.contains_key(&table.name))
+        .collect::<Vec<_>>();
+
+    for table in &mut tables {
+        table.source_url = subscription_urls.get(&table.name).cloned();
+    }
+
+    Ok(tables)
+}
+
+#[cfg(feature = "datasource-introspect")]
 fn normalize_api_datasource_source(source: &str) -> Result<String, BridgeError> {
     let source = source.trim().to_ascii_lowercase();
     if source.is_empty() {
@@ -1979,6 +2071,7 @@ fn api_datasource_table(
                 sql_type: arrow_type_to_sql(field.data_type()).to_string(),
             })
             .collect(),
+        source_url: None,
         row_count: None,
     }
 }
@@ -2374,8 +2467,13 @@ impl NotebookDaemonControl {
                 DaemonControlCommand::AttachDatasource { name, path, group } => {
                     self.attach_datasource(name, path, group).await
                 }
-                DaemonControlCommand::AddApiDatasource { name, source } => {
-                    self.add_api_datasource(name, source).await
+                DaemonControlCommand::AddApiDatasource {
+                    name,
+                    source,
+                    rss_subscriptions,
+                } => {
+                    self.add_api_datasource(name, source, rss_subscriptions)
+                        .await
                 }
                 DaemonControlCommand::ListNangoProviders {} => self.list_nango_providers().await,
                 DaemonControlCommand::PreviewOpenApiTables { spec_text } => {
@@ -2627,6 +2725,7 @@ impl NotebookDaemonControl {
         &self,
         name: String,
         source: String,
+        rss_subscriptions: Option<Vec<jute::commands::RssSubscriptionRequest>>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         if name.trim().is_empty() {
             return Err(BridgeError::Handler {
@@ -2636,7 +2735,7 @@ impl NotebookDaemonControl {
         }
 
         let source = normalize_api_datasource_source(&source)?;
-        let tables = api_datasource_tables(&source)?;
+        let tables = api_datasource_tables_for_command(&source, rss_subscriptions)?;
         self.register_api_datasource_entry(name, source, tables)
             .await
     }
@@ -3396,6 +3495,7 @@ impl NotebookDaemonControl {
         &self,
         _name: String,
         _source: String,
+        _rss_subscriptions: Option<Vec<jute::commands::RssSubscriptionRequest>>,
     ) -> Result<DaemonControlSuccess, BridgeError> {
         Err(BridgeError::Handler {
             code: "datasource_introspect_unavailable".to_string(),
@@ -4657,6 +4757,7 @@ mod tests {
                     name: "id".to_string(),
                     sql_type: "VARCHAR".to_string(),
                 }],
+                source_url: None,
                 row_count: None,
             },
             jute::commands::Table {
@@ -4665,6 +4766,7 @@ mod tests {
                     name: "customer_id".to_string(),
                     sql_type: "VARCHAR".to_string(),
                 }],
+                source_url: None,
                 row_count: None,
             },
         ];
@@ -4691,6 +4793,7 @@ mod tests {
         let tables = vec![jute::commands::Table {
             name: "stripe_charges".to_string(),
             columns: Vec::new(),
+            source_url: None,
             row_count: None,
         }];
 
@@ -5291,11 +5394,13 @@ score = { json = "$.score", type = "Int64" }
                 jute::commands::Table {
                     name: "inventory".to_string(),
                     columns: Vec::new(),
+                    source_url: None,
                     row_count: None,
                 },
                 jute::commands::Table {
                     name: "sales".to_string(),
                     columns: Vec::new(),
+                    source_url: None,
                     row_count: None,
                 },
             ],
@@ -5329,6 +5434,7 @@ score = { json = "$.score", type = "Int64" }
             tables: vec![jute::commands::Table {
                 name: "repositories".to_string(),
                 columns: Vec::new(),
+                source_url: None,
                 row_count: None,
             }],
         };
@@ -5447,6 +5553,48 @@ score = { json = "$.score", type = "Int64" }
     }
 
     #[cfg(feature = "datasource-introspect")]
+    #[test]
+    fn setup_cell_exports_rss_subscriptions_before_loading_extension() {
+        let mut entry = api_datasource_entry("rss");
+        entry.path = "rss".to_string();
+        entry.tables = vec![jute::commands::Table {
+            name: "youtube_channel_entries".to_string(),
+            columns: Vec::new(),
+            source_url: Some("rsshub://youtube/channel/UC123".to_string()),
+            row_count: None,
+        }];
+
+        let source = datasource_setup_source(&[entry]);
+
+        assert!(source.contains("import os"));
+        let subscription_literal = source
+            .lines()
+            .find_map(|line| line.strip_prefix("os.environ[\"SPUR_RSS_SUBSCRIPTIONS\"] = "))
+            .expect("subscription env assignment should be emitted");
+        let subscriptions_json: String =
+            serde_json::from_str(subscription_literal).expect("env assignment should be a string");
+        assert_eq!(
+            serde_json::from_str::<Value>(&subscriptions_json).expect("subscription JSON parses"),
+            json!([
+                {
+                    "table": "youtube_channel_entries",
+                    "url": "rsshub://youtube/channel/UC123"
+                }
+            ])
+        );
+        let env_index = source
+            .find("SPUR_RSS_SUBSCRIPTIONS")
+            .expect("subscription env should be exported");
+        let load_index = source
+            .find("duckdb.sql(f\"LOAD")
+            .expect("extension should be loaded");
+        assert!(
+            env_index < load_index,
+            "RSS subscriptions must be visible before extension load"
+        );
+    }
+
+    #[cfg(feature = "datasource-introspect")]
     #[tokio::test]
     async fn add_api_datasource_command_builds_polymarket_catalog_entry() {
         let jute_state = Arc::new(State::new());
@@ -5500,6 +5648,7 @@ score = { json = "$.score", type = "Int64" }
                             sql_type: "DOUBLE".to_string(),
                         },
                     ],
+                    source_url: None,
                     row_count: None,
                 },
                 jute::commands::Table {
@@ -5514,6 +5663,7 @@ score = { json = "$.score", type = "Int64" }
                             sql_type: "DOUBLE".to_string(),
                         },
                     ],
+                    source_url: None,
                     row_count: None,
                 },
             ]
@@ -5615,6 +5765,7 @@ score = { json = "$.score", type = "Int64" }
                             sql_type: "VARCHAR".to_string(),
                         },
                     ],
+                    source_url: None,
                     row_count: None,
                 },
                 jute::commands::Table {
@@ -5637,6 +5788,7 @@ score = { json = "$.score", type = "Int64" }
                             sql_type: "VARCHAR".to_string(),
                         },
                     ],
+                    source_url: None,
                     row_count: None,
                 },
                 jute::commands::Table {
@@ -5675,9 +5827,89 @@ score = { json = "$.score", type = "Int64" }
                             sql_type: "VARCHAR".to_string(),
                         },
                     ],
+                    source_url: None,
                     row_count: None,
                 },
             ]
+        );
+        assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
+    }
+
+    #[cfg(feature = "datasource-introspect")]
+    #[tokio::test]
+    async fn add_api_datasource_command_registers_rss_subscription_table() {
+        let jute_state = Arc::new(State::new());
+        let control = NotebookDaemonControl::new_for_test(
+            Arc::new(AgentBridge::new()),
+            test_bridge_requester(),
+            Arc::clone(&jute_state),
+            Arc::new(RecordingWindowOps::default()),
+            None,
+        );
+        let request = serde_json::from_value::<jute::commands::DaemonControlRequest>(json!({
+            "daemon": "notebook.v1",
+            "command": "add_api_datasource",
+            "name": "rss_work",
+            "source": "rss",
+            "rss_subscriptions": [
+                {
+                    "table": "youtube_channel_entries",
+                    "url": "rsshub://youtube/channel/UC123"
+                }
+            ]
+        }))
+        .expect("RSS add_api_datasource command deserializes");
+
+        let response = control
+            .handle(DaemonControlRequest { id: None, request })
+            .await;
+
+        assert!(response.ok, "{:?}", response.error);
+        let entry = datasource_entry_from_response(&response);
+        assert_eq!(entry.name, "rss_work");
+        assert_eq!(entry.path, "rss");
+        assert_eq!(entry.kind, jute::commands::DatasourceKind::ApiTables);
+        assert_eq!(
+            entry.tables,
+            vec![jute::commands::Table {
+                name: "youtube_channel_entries".to_string(),
+                columns: vec![
+                    jute::commands::Column {
+                        name: "feed_url".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "guid".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "title".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "url".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "description".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "published_at".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "author".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                    jute::commands::Column {
+                        name: "categories".to_string(),
+                        sql_type: "VARCHAR".to_string(),
+                    },
+                ],
+                source_url: Some("rsshub://youtube/channel/UC123".to_string()),
+                row_count: None,
+            }]
         );
         assert_eq!(jute_state.datasource_catalog.lock().list(), vec![entry]);
     }
@@ -5764,6 +5996,7 @@ paths:
                     sql_type: "BOOLEAN".to_string(),
                 },
             ],
+            source_url: None,
             row_count: None,
         };
         assert!(
@@ -6301,6 +6534,7 @@ paths:
             tables: vec![jute::commands::Table {
                 name: "sales".to_string(),
                 columns: Vec::new(),
+                source_url: None,
                 row_count: Some(1),
             }],
         };
@@ -7393,6 +7627,7 @@ paths:
                     name: "id".to_string(),
                     sql_type: "VARCHAR".to_string(),
                 }],
+                source_url: None,
                 row_count: None,
             }],
         }

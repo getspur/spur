@@ -85,6 +85,10 @@ type RssHubRoute = {
   previewDescription: string;
   examples: RssRouteExample[];
 };
+type RssSubscriptionDraft = {
+  table: string;
+  url: string;
+};
 
 export type AddRestApiWizardPrefill = {
   name: string;
@@ -172,7 +176,7 @@ const RSSHUB_EXAMPLE_ROUTES: readonly RssHubRoute[] = [
     ],
     previewTitle: "3Blue1Brown uploads",
     previewDescription:
-      "Validated through RSSHub. Latest entries are fetched with rss_entries(url) before subscription persistence is added.",
+      "Validated through RSSHub. Latest entries attach as a notebook subscription table.",
     examples: [
       {
         title: "But what is a convolution?",
@@ -198,7 +202,7 @@ const RSSHUB_EXAMPLE_ROUTES: readonly RssHubRoute[] = [
     ],
     previewTitle: "GitHub Issues radar",
     previewDescription:
-      "Issues are exposed as feed entries, with links and timestamps available through rss_entries(url).",
+      "Issues attach as feed-entry rows with links and timestamps.",
     examples: [
       {
         title: "Add RSSHub subscription onboarding",
@@ -221,7 +225,7 @@ const RSSHUB_EXAMPLE_ROUTES: readonly RssHubRoute[] = [
     parameters: [{ key: "name", label: "Subreddit", defaultValue: "rust" }],
     previewTitle: "r/rust posts",
     previewDescription:
-      "Community posts are fetched through RSSHub and normalized into rss_entries(url).",
+      "Community posts are fetched through RSSHub and attached as entry rows.",
     examples: [
       {
         title: "Rust 2026 roadmap discussion",
@@ -244,7 +248,7 @@ const RSSHUB_EXAMPLE_ROUTES: readonly RssHubRoute[] = [
     parameters: [],
     previewTitle: "Hacker News jobs",
     previewDescription:
-      "A no-parameter route that can be previewed directly through rss_feed(url).",
+      "A no-parameter route that can be attached directly as a table.",
     examples: [
       {
         title: "Backend engineer, data systems",
@@ -322,6 +326,8 @@ export default function AddRestApiWizard({
   const [pendingLocalFilePick, setPendingLocalFilePick] = useState(false);
   const [pendingPreview, setPendingPreview] = useState(false);
   const [pendingAdd, setPendingAdd] = useState(false);
+  const [rssSubscription, setRssSubscription] =
+    useState<RssSubscriptionDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hasUserChanges, setHasUserChanges] = useState(false);
   const [confirmingClose, setConfirmingClose] = useState(false);
@@ -373,6 +379,7 @@ export default function AddRestApiWizard({
       setPendingLocalFilePick(false);
       setPendingPreview(false);
       setPendingAdd(false);
+      setRssSubscription(null);
       setError(null);
       return;
     }
@@ -416,6 +423,7 @@ export default function AddRestApiWizard({
       setPendingLocalFilePick(false);
       setPendingPreview(false);
       setPendingAdd(false);
+      setRssSubscription(null);
       setError(null);
       return;
     }
@@ -451,6 +459,7 @@ export default function AddRestApiWizard({
       setPendingLocalFilePick(false);
       setPendingPreview(false);
       setPendingAdd(false);
+      setRssSubscription(null);
       setError(null);
       return;
     }
@@ -479,6 +488,7 @@ export default function AddRestApiWizard({
     setPendingLocalFilePick(false);
     setPendingPreview(false);
     setPendingAdd(false);
+    setRssSubscription(null);
     setError(null);
   }, [editConnection, initialSavedConnectionRecovery, open, prefill]);
 
@@ -871,7 +881,13 @@ export default function AddRestApiWizard({
 
     try {
       const response = await daemonControl(
-        addApiDatasourceCommand({ name, source: "rss" }),
+        addApiDatasourceCommand({
+          name,
+          source: "rss",
+          ...(rssSubscription
+            ? { rss_subscriptions: [rssSubscription] }
+            : {}),
+        }),
       );
       importedApiDatasourceFromDaemonControlResponse(response);
       onClose();
@@ -1287,6 +1303,7 @@ export default function AddRestApiWizard({
                     if (datasourceName !== value) markDirty();
                     setDatasourceName(value);
                   }}
+                  onSubscriptionChange={setRssSubscription}
                 />
               ) : (
                 <GenericAttachStep
@@ -2764,10 +2781,12 @@ function RssAttachStep({
   datasourceName,
   error,
   onDatasourceNameChange,
+  onSubscriptionChange,
 }: {
   datasourceName: string;
   error: string | null;
   onDatasourceNameChange: (value: string) => void;
+  onSubscriptionChange: (subscription: RssSubscriptionDraft) => void;
 }) {
   const [sourceMode, setSourceMode] = useState<RssSourceMode>("rsshub");
   const [sourceInput, setSourceInput] = useState(
@@ -2808,40 +2827,38 @@ function RssAttachStep({
     sourceMode === "keyword"
       ? "Searches seeded RSSHub routes for the MVP. Live rss_routes browsing can replace this list later."
       : sourceMode === "direct"
-        ? "Direct URLs map straight into rss_feed(url) and rss_entries(url)."
+        ? "Direct URLs attach as zero-argument RSS subscription tables."
         : "Route parameters generate a canonical rsshub:// URL.";
   const queryUrl =
     classification.mode === "direct" || classification.mode === "rsshub"
       ? sourceInput.trim()
       : generatedRssHubUrl;
-  const queryUrlLiteral = sqlStringLiteral(queryUrl || generatedRssHubUrl);
+  const subscriptionUrl = queryUrl || generatedRssHubUrl;
+  const queryUrlLiteral = sqlStringLiteral(subscriptionUrl);
+  const schemaName = datasourceName.trim() || "rss";
+  const subscriptionTableName = `${sourceHandle}_entries`;
+  const subscriptionRelationName = schemaQualifiedRelationName(
+    schemaName,
+    subscriptionTableName,
+  );
   const feedQuery = `select * from rss_feed(${queryUrlLiteral});`;
   const entriesQuery = `select * from rss_entries(${queryUrlLiteral});`;
-  const entriesViewName = `${sourceHandle}_entries`;
-  const createEntriesViewSql = [
-    `create or replace view ${entriesViewName} as`,
-    `select * from rss_entries(${queryUrlLiteral});`,
-  ].join("\n");
-  const friendlyEntriesQuery = [
-    `select * from ${entriesViewName}`,
+  const subscriptionTableQuery = [
+    `select * from ${subscriptionRelationName}`,
     "order by published_at desc;",
   ].join("\n");
   const queryTemplates = [
     {
-      label: "Friendly entries query",
-      sql: friendlyEntriesQuery,
+      label: "Subscription table",
+      sql: subscriptionTableQuery,
     },
     {
-      label: "Generated DuckDB view over rss_entries(url)",
-      sql: createEntriesViewSql,
-    },
-    {
-      label: "Raw backend mapping",
+      label: "Raw table-function preview",
       sql: entriesQuery,
     },
     {
-      label: "Routes",
-      sql: "select * from rss_routes();",
+      label: "RSSHub route catalog",
+      sql: "select * from rss.routes;",
     },
     {
       label: "Feed metadata",
@@ -2852,7 +2869,17 @@ function RssAttachStep({
       sql: entriesQuery,
     },
   ];
-  const schemaName = datasourceName.trim() || "rss";
+
+  useEffect(() => {
+    onSubscriptionChange({
+      table: subscriptionTableName,
+      url: subscriptionUrl,
+    });
+  }, [
+    onSubscriptionChange,
+    subscriptionUrl,
+    subscriptionTableName,
+  ]);
 
   const selectMode = (mode: RssSourceMode) => {
     setSourceMode(mode);
@@ -2958,10 +2985,10 @@ function RssAttachStep({
 
         <label className="mt-3 block">
           <span className="text-xs font-medium text-gray-600">
-            Friendly view name
+            Subscription table name
           </span>
           <input
-            aria-label="Friendly view name"
+            aria-label="Subscription table name"
             className="mt-1 h-9 w-full rounded border border-gray-300 bg-white px-2 font-mono text-sm text-gray-900 outline-none transition-colors placeholder:text-gray-400 focus:border-indigo-600"
             onChange={(event) =>
               setSourceHandleOverride(
@@ -2971,8 +2998,7 @@ function RssAttachStep({
             value={sourceHandle}
           />
           <span className="mt-1 block text-[11px] leading-4 text-gray-500">
-            Used only to name the generated DuckDB view; it does not register a
-            dynamic backend table-function.
+            The adapter exposes this feed as a zero-argument table after attach.
           </span>
         </label>
 
@@ -3168,12 +3194,12 @@ function RssAttachStep({
           <SummaryRow label="Feed">{selectedRoute.previewTitle}</SummaryRow>
           <SummaryRow label="Schema">{schemaName}</SummaryRow>
           <SummaryRow label="Source">{classification.label}</SummaryRow>
-          <SummaryRow label="Friendly view name">{entriesViewName}</SummaryRow>
-          <SummaryRow label="Entry function">rss_entries(url)</SummaryRow>
-          <SummaryRow label="Entry query">{friendlyEntriesQuery}</SummaryRow>
+          <SummaryRow label="Table">{subscriptionTableName}</SummaryRow>
+          <SummaryRow label="Relation">{subscriptionRelationName}</SummaryRow>
+          <SummaryRow label="Entry query">{subscriptionTableQuery}</SummaryRow>
           <SummaryRow label="View">{selectedRoute.view}</SummaryRow>
           <SummaryRow label="Folder">{selectedRoute.category}</SummaryRow>
-          <SummaryRow label="Next action">create view, then query entries</SummaryRow>
+          <SummaryRow label="Next action">attach, then query table</SummaryRow>
         </section>
 
         <section className="rounded-lg border border-gray-200 bg-gray-50">
@@ -3182,14 +3208,15 @@ function RssAttachStep({
               Raw backend mapping
             </h4>
           </div>
-          <SummaryRow label="Attach">add_api_datasource source = rss</SummaryRow>
-          <SummaryRow label="Discovery">rss_routes</SummaryRow>
+          <SummaryRow label="Attach">
+            add_api_datasource source = rss with rss_subscriptions
+          </SummaryRow>
+          <SummaryRow label="Subscription URL">{subscriptionUrl}</SummaryRow>
+          <SummaryRow label="Discovery">rss.routes</SummaryRow>
           <SummaryRow label="Preview">rss_feed(url)</SummaryRow>
           <SummaryRow label="Entries">rss_entries(url)</SummaryRow>
           <SummaryRow label="Mapping">{entriesQuery}</SummaryRow>
-          <SummaryRow label="Persist">
-            backend subscription tables and user state are out of scope here
-          </SummaryRow>
+          <SummaryRow label="Persist">stored in the datasource catalog</SummaryRow>
         </section>
       </div>
 
@@ -3199,8 +3226,8 @@ function RssAttachStep({
             Notebook query handoff
           </h4>
           <p className="mt-1 text-xs text-gray-500">
-            Query the friendly entries view after creating the generated DuckDB
-            view over rss_entries(url).
+            Query the subscription table directly after the datasource is
+            attached.
           </p>
         </div>
         <div className="divide-y divide-gray-200">
@@ -3217,30 +3244,26 @@ function RssAttachStep({
             </div>
           ))}
         </div>
-        <p className="border-t border-gray-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-          This registers the RSS table-functions only; it does not create a
-          durable shared feed subscription.
+        <p className="border-t border-gray-200 bg-green-50 px-3 py-2 text-xs leading-5 text-green-800">
+          The route card registers a durable RSSHub subscription table for this
+          notebook.
         </p>
       </section>
 
       <section className="mt-4 overflow-hidden rounded-lg border border-gray-200">
         <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
           <h4 className="text-xs font-medium text-gray-950">
-            Available table-functions
+            Available relations
           </h4>
         </div>
         <div className="divide-y divide-gray-200">
           <RssTableFunctionRow
-            detail="Browse RSSHub predefined sources, routes, categories, examples, and generated feed URLs."
-            name={schemaQualifiedRelationName(schemaName, "rss_routes")}
+            detail="Subscribed feed entries exposed as a zero-argument table."
+            name={subscriptionRelationName}
           />
           <RssTableFunctionRow
-            detail="Fetch channel-level metadata for a direct RSS URL or an rsshub:// route."
-            name={schemaQualifiedRelationName(schemaName, "rss_feed")}
-          />
-          <RssTableFunctionRow
-            detail="Fetch feed entries from a direct RSS URL or an rsshub:// route."
-            name={schemaQualifiedRelationName(schemaName, "rss_entries")}
+            detail="Global RSSHub route catalog exposed by the extension."
+            name="rss.routes"
           />
         </div>
       </section>

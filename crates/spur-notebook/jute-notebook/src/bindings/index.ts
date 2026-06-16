@@ -37,6 +37,7 @@ export * from "./OutputError";
 export * from "./CodeCell";
 export * from "./TablePreviewColumn";
 export * from "./CredentialProfileSummary";
+export * from "./RssSubscriptionRequest";
 export * from "./Table";
 export * from "./OutputDisplayData";
 export * from "./RawCell";

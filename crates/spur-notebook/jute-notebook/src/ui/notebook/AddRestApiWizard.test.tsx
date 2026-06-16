@@ -635,13 +635,12 @@ describe("AddRestApiWizard", () => {
     fireEvent.change(screen.getByLabelText("Schema name"), {
       target: { value: "rss_work" },
     });
-    expect(screen.getAllByText("rss_work.rss_routes").length).toBeGreaterThan(
-      0,
-    );
-    expect(screen.getAllByText("rss_work.rss_feed").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("rss_work.rss_entries").length).toBeGreaterThan(
-      0,
-    );
+    expect(
+      screen.getAllByText(
+        "rss_work.youtube_channel_ucyo_jab_esufrv4b17ajtaw_entries",
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByText("rss.routes").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Add datasource" }));
 
@@ -650,6 +649,12 @@ describe("AddRestApiWizard", () => {
         command: "add_api_datasource",
         name: "rss_work",
         source: "rss",
+        rss_subscriptions: [
+          {
+            table: "youtube_channel_ucyo_jab_esufrv4b17ajtaw_entries",
+            url: "rsshub://youtube/channel/UCYO_jab_esuFRV4b17AJtAw",
+          },
+        ],
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
@@ -680,7 +685,7 @@ describe("AddRestApiWizard", () => {
       target: { value: "https://example.com/feed.xml" },
     });
 
-    expect(screen.getByLabelText("Friendly view name")).toHaveValue(
+    expect(screen.getByLabelText("Subscription table name")).toHaveValue(
       "direct_example_feed_xml",
     );
     expect(screen.getByText("Detected: Direct RSS URL")).toBeInTheDocument();
@@ -693,7 +698,7 @@ describe("AddRestApiWizard", () => {
       target: { value: "rust async release notes" },
     });
 
-    expect(screen.getByLabelText("Friendly view name")).toHaveValue(
+    expect(screen.getByLabelText("Subscription table name")).toHaveValue(
       "rust_async_release_notes",
     );
     expect(screen.getByText("Detected: Keyword discovery")).toBeInTheDocument();
@@ -708,7 +713,7 @@ describe("AddRestApiWizard", () => {
       target: { value: "!!!" },
     });
 
-    expect(screen.getByLabelText("Friendly view name")).toHaveValue(
+    expect(screen.getByLabelText("Subscription table name")).toHaveValue(
       "rss_source",
     );
   });
@@ -723,34 +728,35 @@ describe("AddRestApiWizard", () => {
 
     expect(screen.getByLabelText("Parameter: owner")).toHaveValue("spur-dev");
     expect(screen.getByLabelText("Parameter: repo")).toHaveValue("spur");
-    expect(screen.getByLabelText("Friendly view name")).toHaveValue(
+    expect(screen.getByLabelText("Subscription table name")).toHaveValue(
       "github_issues_spur_dev_spur",
     );
     expect(
-      screen.getByText("rsshub://github/issue/spur-dev/spur"),
-    ).toBeInTheDocument();
+      screen.getAllByText("rsshub://github/issue/spur-dev/spur").length,
+    ).toBeGreaterThan(0);
     fireEvent.change(screen.getByLabelText("Parameter: owner"), {
       target: { value: "openai" },
     });
     fireEvent.change(screen.getByLabelText("Parameter: repo"), {
       target: { value: "codex" },
     });
-    expect(screen.getByLabelText("Friendly view name")).toHaveValue(
+    expect(screen.getByLabelText("Subscription table name")).toHaveValue(
       "github_issues_openai_codex",
     );
     expect(screen.getByText("Feed status")).toBeInTheDocument();
     expect(screen.getAllByText("GitHub Issues radar").length).toBeGreaterThan(
       0,
     );
-    expect(screen.getAllByText("rss_routes").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("rss.routes").length).toBeGreaterThan(0);
     expect(screen.getAllByText("rss_feed(url)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("rss_entries(url)").length).toBeGreaterThan(0);
     expect(screen.getByText("Source registration")).toBeInTheDocument();
-    expect(screen.getByText("Entry function")).toBeInTheDocument();
-    expect(screen.getAllByText("rss_entries(url)").length).toBeGreaterThan(1);
     expect(
       screen.getByText("github_issues_openai_codex_entries"),
     ).toBeInTheDocument();
+    expect(
+      screen.getAllByText("rss.github_issues_openai_codex_entries").length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText("Entry query")).toBeInTheDocument();
     expect(screen.getAllByText("Programming").length).toBeGreaterThan(0);
   });
@@ -765,25 +771,20 @@ describe("AddRestApiWizard", () => {
       target: { value: "https://example.com/feed.xml" },
     });
 
-    expect(screen.getByLabelText("Friendly view name")).toHaveValue(
+    expect(screen.getByLabelText("Subscription table name")).toHaveValue(
       "direct_example_feed_xml",
     );
     expect(screen.getByText("Notebook query handoff")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Query the friendly entries view after creating the generated DuckDB view over rss_entries(url).",
+        "Query the subscription table directly after the datasource is attached.",
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByText("select * from rss_feed('https://example.com/feed.xml');"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "create or replace view direct_example_feed_xml_entries as",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("select * from direct_example_feed_xml_entries"),
+      screen.getByText("select * from rss.direct_example_feed_xml_entries"),
     ).toBeInTheDocument();
     expect(screen.getByText("order by published_at desc;")).toBeInTheDocument();
     expect(
@@ -791,7 +792,7 @@ describe("AddRestApiWizard", () => {
         "select * from rss_entries('https://example.com/feed.xml');",
       ).length,
     ).toBeGreaterThan(0);
-    expect(screen.getByText("select * from rss_routes();")).toBeInTheDocument();
+    expect(screen.getByText("select * from rss.routes;")).toBeInTheDocument();
   });
 
   test("rss_workflow_shows_rsshub_route_query_templates", () => {
@@ -808,19 +809,21 @@ describe("AddRestApiWizard", () => {
     });
 
     expect(
-      screen.getByText("rsshub://github/issue/openai/codex"),
-    ).toBeInTheDocument();
+      screen.getAllByText("rsshub://github/issue/openai/codex").length,
+    ).toBeGreaterThan(0);
     expect(
       screen.getByText(
-        "This registers the RSS table-functions only; it does not create a durable shared feed subscription.",
+        "The route card registers a durable RSSHub subscription table for this notebook.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getAllByText("Friendly view name").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("Subscription table name").length,
+    ).toBeGreaterThan(0);
     expect(screen.getAllByText("Raw backend mapping").length).toBeGreaterThan(
       0,
     );
     expect(
-      screen.getByText("Generated DuckDB view over rss_entries(url)"),
+      screen.getByText("Subscription table"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -828,12 +831,7 @@ describe("AddRestApiWizard", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "create or replace view github_issues_openai_codex_entries as",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("select * from github_issues_openai_codex_entries"),
+      screen.getByText("select * from rss.github_issues_openai_codex_entries"),
     ).toBeInTheDocument();
     expect(screen.getByText("order by published_at desc;")).toBeInTheDocument();
     expect(
@@ -841,7 +839,7 @@ describe("AddRestApiWizard", () => {
         "select * from rss_entries('rsshub://github/issue/openai/codex');",
       ).length,
     ).toBeGreaterThan(0);
-    expect(screen.getByText("select * from rss_routes();")).toBeInTheDocument();
+    expect(screen.getByText("select * from rss.routes;")).toBeInTheDocument();
   });
 
   test("rss_workflow_custom_handle_updates_friendly_view_without_changing_source_url", () => {
@@ -857,21 +855,18 @@ describe("AddRestApiWizard", () => {
       target: { value: "codex" },
     });
 
-    fireEvent.change(screen.getByLabelText("Friendly view name"), {
+    fireEvent.change(screen.getByLabelText("Subscription table name"), {
       target: { value: "codex_issue_feed" },
     });
 
-    expect(screen.getByLabelText("Friendly view name")).toHaveValue(
+    expect(screen.getByLabelText("Subscription table name")).toHaveValue(
       "codex_issue_feed",
     );
     expect(
       screen.getAllByText("codex_issue_feed_entries").length,
     ).toBeGreaterThan(0);
     expect(
-      screen.getByText("create or replace view codex_issue_feed_entries as"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("select * from codex_issue_feed_entries"),
+      screen.getByText("select * from rss.codex_issue_feed_entries"),
     ).toBeInTheDocument();
     expect(
       screen.getAllByText(

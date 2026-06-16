@@ -95,6 +95,7 @@ fn introspect_attached_database(path: &str, kind: DatasourceKind) -> Result<Data
         tables.push(Table {
             name: table_name,
             columns: describe_columns(&conn, &table_ref, path)?,
+            source_url: None,
             row_count: row_count(&conn, &table_ref),
         });
     }
@@ -204,6 +205,7 @@ mod tests {
                             sql_type: "INTEGER".to_string(),
                         },
                     ],
+                    source_url: None,
                     row_count: Some(1),
                 },
                 jute::commands::Table {
@@ -218,6 +220,7 @@ mod tests {
                             sql_type: "DOUBLE".to_string(),
                         },
                     ],
+                    source_url: None,
                     row_count: Some(2),
                 },
             ]

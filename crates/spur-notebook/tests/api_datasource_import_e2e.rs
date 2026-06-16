@@ -300,6 +300,7 @@ fn repositories_table() -> jute::commands::Table {
                 sql_type: "VARCHAR".to_string(),
             },
         ],
+        source_url: None,
         row_count: None,
     }
 }
@@ -786,6 +787,7 @@ async fn imported_api_datasource_registers_and_scans_typed_rows() {
                     sql_type: "BIGINT".to_string(),
                 },
             ],
+            source_url: None,
             row_count: None,
         }
     );
@@ -994,6 +996,7 @@ score = { json = "$.score", type = "Int64" }
                     sql_type: "BIGINT".to_string(),
                 },
             ],
+            source_url: None,
             row_count: None,
         }]
     );

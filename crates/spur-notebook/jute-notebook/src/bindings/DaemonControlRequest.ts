@@ -2,6 +2,7 @@
 import type { CellKind } from "./CellKind";
 import type { CodeType } from "./CodeType";
 import type { NotebookRoot } from "./NotebookRoot";
+import type { RssSubscriptionRequest } from "./RssSubscriptionRequest";
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
@@ -27,7 +28,12 @@ export type DaemonControlRequest = {
       path: string;
       group: string | null;
     }
-  | { command: "add_api_datasource"; name: string; source: string }
+  | {
+      command: "add_api_datasource";
+      name: string;
+      source: string;
+      rss_subscriptions?: Array<RssSubscriptionRequest>;
+    }
   | { command: "list_nango_providers" }
   | { command: "preview_open_api_tables"; spec_text: string }
   | {

@@ -26,6 +26,7 @@ export type AddApiDatasourceCommand = Extract<
   DaemonControlCommand,
   { command: "add_api_datasource" }
 >;
+export type AddApiDatasourceInput = Omit<AddApiDatasourceCommand, "command">;
 export type ListNangoProvidersCommand = Extract<
   DaemonControlCommand,
   { command: "list_nango_providers" }
@@ -120,14 +121,16 @@ export function attachDatasourceCommand(
   };
 }
 
-export function addApiDatasourceCommand(input: {
-  name: string;
-  source: string;
-}): AddApiDatasourceCommand {
+export function addApiDatasourceCommand(
+  input: AddApiDatasourceInput,
+): AddApiDatasourceCommand {
   return {
     command: "add_api_datasource" as const,
     name: input.name,
     source: input.source,
+    ...(input.rss_subscriptions && input.rss_subscriptions.length > 0
+      ? { rss_subscriptions: input.rss_subscriptions }
+      : {}),
   };
 }
 

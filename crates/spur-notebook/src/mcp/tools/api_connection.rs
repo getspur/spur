@@ -811,6 +811,7 @@ id = { json = "$.id", type = "Utf8" }
             tables: vec![jute::commands::Table {
                 name: "stripe_charges".to_string(),
                 columns: Vec::new(),
+                source_url: None,
                 row_count: None,
             }],
             credential_env_vars: vec!["STRIPE_API_KEY".to_string()],
