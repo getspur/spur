@@ -142,8 +142,6 @@ fn install(extra: Vec<String>) -> ExitCode {
             eprintln!("xtask: {err}");
             return ExitCode::FAILURE;
         }
-        print_green_notebook_install_guidance();
-        ExitCode::SUCCESS
     } else {
         if let Err(err) = install_linux_binaries(
             &workspace_root,
@@ -154,9 +152,9 @@ fn install(extra: Vec<String>) -> ExitCode {
             eprintln!("xtask: {err}");
             return ExitCode::FAILURE;
         }
-        print_green_notebook_install_guidance();
-        ExitCode::SUCCESS
     }
+    print_green_notebook_install_guidance();
+    ExitCode::SUCCESS
 }
 
 fn install_macos_cli(workspace_root: &Path, debug: bool, extra: &[String]) -> Result<(), String> {
@@ -279,7 +277,6 @@ fn report_remote_install(
         eprintln!();
         eprintln!("this is a Linux ELF binary and will not run on this host. Copy it");
         eprintln!("to a Linux box, or re-run with --force to overwrite $CARGO_HOME/bin.");
-        print_green_notebook_install_guidance();
     } else {
         if !host_is_linux {
             eprintln!();
@@ -287,8 +284,8 @@ fn report_remote_install(
             eprintln!("warning: non-Linux host; they will not run here. Re-run `cargo xtask");
             eprintln!("warning: install` (no --remote) to restore the native binaries.");
         }
-        print_green_notebook_install_guidance();
     }
+    print_green_notebook_install_guidance();
 }
 
 fn cargo_build_command(

@@ -6447,6 +6447,7 @@ dependencies = [
  "serde_with",
  "sha2",
  "spur-acp",
+ "spur-core",
  "strum 0.26.3",
  "sysinfo",
  "tauri",
