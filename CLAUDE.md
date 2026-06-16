@@ -1,13 +1,15 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-SPUR is a Rust workspace with eight crates under `crates/`. Keep changes scoped to one crate unless a cross-crate refactor is clearly necessary.
+SPUR is a Rust workspace with 18 crates under `crates/` plus `xtask/`. Keep changes scoped to one crate unless a cross-crate refactor is clearly necessary.
 
 - `crates/spur-acp`: ACP client, transport, event types
 - `crates/spur-core`: orchestration, review loop, lineage
 - `crates/spur-tui`: `ratatui` interface, views, components
 - `crates/spur-cli`: binary entry point
 - `crates/spur-mcp`, `spur-pm`, `spur-worktree`, `spur-cost`: integrations and support services
+
+The Jupyter-style notebook UI, `jute-notebook`, and `rest-table-gateway` source now live in the standalone `getspur/spur-notebook` repository. This workspace consumes the green standalone notebook as an external artifact.
 
 Source lives in each crate’s `src/`. Integration tests are primarily in `crates/spur-acp/tests`, `crates/spur-core/tests`, `crates/spur-tui/tests`, and `crates/spur-cli/tests`. Specs and implementation plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
@@ -46,17 +48,18 @@ In local mode (fallback, or when remote is disabled) the wrapper also keeps scca
 - `scripts/sccache-worktree.sh`: sccache rustc-wrapper that dynamically normalizes paths per worktree
 - `scripts/sccache-sync-basedirs.sh`: legacy sync script (superseded by `sccache-worktree.sh`)
 
-**For the notebook frontend, build and test through `scripts/spur-pnpm`, never plain `pnpm`.** The notebook UI lives in `crates/spur-notebook/jute-notebook`; `spur-pnpm` is the pnpm analog of `spur-cargo`. It dispatches the command to the GCP build VM through the same sync path (`build.sh --pnpm`), where pnpm uses a **shared content-addressable store** at `/mnt/cargo/pnpm-store` and a **per-worktree `node_modules`** symlinked to `/mnt/cargo/pnpm-nm/<worktree-key>` (both on `/mnt/cargo` so packages hard-link from the store instead of re-downloading). The first worktree populates the store; every worktree after that installs link-only in seconds — **no per-worktree `pnpm install` from scratch.** It follows the same fallback contract as `spur-cargo`: falls back to local pnpm **only** when the VM is unreachable (exit `200`); a genuine test/typecheck failure propagates unchanged. `SPUR_REMOTE=0` forces local; pin the activated pnpm with `SPUR_PNPM_VERSION` (default `10.28.2`). Lockfile handling is automatic — a tracked `pnpm-lock.yaml` triggers `--frozen-lockfile`, otherwise pnpm imports the existing `package-lock.json`.
+**Notebook frontend source now lives in `getspur/spur-notebook`.** `scripts/spur-pnpm` is only a post-split compatibility wrapper in this repo. Without `SPUR_NOTEBOOK_REPO`, it exits with migration guidance. With `SPUR_NOTEBOOK_REPO=/path/to/spur-notebook`, it forwards locally to `pnpm --dir "$SPUR_NOTEBOOK_REPO/jute-notebook" ...`; it no longer dispatches through `build.sh --pnpm`.
 
-- `scripts/spur-pnpm test -- src/ui/notebook/NotebookCells.test.tsx`: run one notebook frontend test file on the VM
-- `scripts/spur-pnpm run typecheck`: typecheck the notebook frontend remotely
-- `SPUR_REMOTE=0 scripts/spur-pnpm test ...`: force local pnpm (no VM)
+- `SPUR_NOTEBOOK_REPO=/path/to/spur-notebook scripts/spur-pnpm test -- src/ui/notebook/NotebookCells.test.tsx`: forward one notebook frontend test to a standalone checkout
+- `SPUR_NOTEBOOK_REPO=/path/to/spur-notebook scripts/spur-pnpm run typecheck`: forward typecheck to a standalone checkout
+- Run remote notebook frontend workflows from the standalone repo's own tooling.
+- The monorepo `lint-invariants` workflow checks SDK fixtures against the private standalone repo and requires a `SPUR_NOTEBOOK_CHECKOUT_TOKEN` repository secret with read access to `getspur/spur-notebook`.
 
 ## Coding Style & Naming Conventions
 Use Rust 2021 idioms with `cargo fmt` formatting. Follow existing naming: modules and functions in `snake_case`, types and traits in `CamelCase`, constants in `SCREAMING_SNAKE_CASE`. Prefer small, crate-local changes over broad rewrites. Avoid introducing new crate dependencies without explicit justification.
 
 ## Testing Guidelines
-Bug fixes should follow TDD cadence: add a failing `test(...)` commit first, then the `fix(...)` commit. New ACP event variants or envelope fields require round-trip serialization tests modeled on `crates/spur-acp/tests/executor_events_roundtrip.rs`. When changing config validation, run `cargo test -p spur-acp`.
+Bug fixes should follow TDD cadence: add a failing `test(...)` commit first, then the `fix(...)` commit. New ACP event variants or envelope fields require round-trip serialization tests modeled on `crates/spur-acp/tests/executor_events_roundtrip.rs`. When changing config validation, run `scripts/spur-cargo test -p spur-acp`.
 
 ## Commit & Pull Request Guidelines
 Commit format is:
