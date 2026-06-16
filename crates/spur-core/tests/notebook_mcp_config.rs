@@ -79,7 +79,8 @@ fn stable_notebook_nonce_differs_across_repos() {
 #[test]
 fn brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket() {
     let servers =
-        spur_core::notebook::brain_mcp_servers("http://127.0.0.1:3939/mcp", "fixture-nonce");
+        spur_core::notebook::brain_mcp_servers("http://127.0.0.1:3939/mcp", "fixture-nonce")
+            .expect("brain MCP servers");
 
     assert!(servers.iter().any(|server| match server {
         McpServer::Http(http) => http.name == "spur-mcp",
