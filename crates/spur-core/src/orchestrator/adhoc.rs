@@ -107,7 +107,7 @@ impl Orchestrator {
 
             // MCP callback server is now HTTP — pass URL directly.
             let socket_nonce = self.notebook_socket_nonce.clone();
-            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url, &socket_nonce);
+            let mcp_servers = crate::notebook::brain_mcp_servers(&mcp_url, &socket_nonce)?;
 
             let session_response = crate::skip_perm::new_session_with_bypass(
                 &mut *connection,

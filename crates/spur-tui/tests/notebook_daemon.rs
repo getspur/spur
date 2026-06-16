@@ -1,10 +1,14 @@
 use serde_json::json;
 use spur_core::notebook::{NotebookChannel, NotebookLaunchSelection};
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::time::{sleep, timeout};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 async fn read_frame(stream: &mut tokio::net::UnixStream) -> Vec<u8> {
     let mut len = [0_u8; 4];
@@ -176,4 +180,79 @@ async fn send_notebook_command_does_not_retry_protocol_error_after_connect() {
         "protocol error after connect should not trigger a second connection"
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn send_notebook_command_missing_green_returns_actionable_launch_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("control.sock");
+    let cargo_home = temp.path().join("missing-cargo-home");
+    let path_dir = temp.path().join("missing-path-bin");
+    let cargo_candidate = cargo_home.join("bin").join("spur-notebook");
+    let path_candidate = path_dir.join("spur-notebook");
+    let _env = EnvGuard::set_green_missing_paths(&cargo_home, &path_dir);
+
+    let error = spur_tui::notebook_daemon::send_notebook_command("new", &socket_path)
+        .await
+        .expect_err("green launch should fail before spawning notebook");
+    let message = error.to_string();
+
+    assert!(message.contains("SPUR_NOTEBOOK_CHANNEL=green"));
+    assert!(message.contains("install getspur/spur-notebook"));
+    assert!(message.contains(&cargo_candidate.display().to_string()));
+    assert!(message.contains(&path_candidate.display().to_string()));
+}
+
+struct EnvGuard {
+    previous_bin: Option<OsString>,
+    previous_channel: Option<OsString>,
+    previous_home: Option<OsString>,
+    previous_cargo_home: Option<OsString>,
+    previous_path: Option<OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl EnvGuard {
+    fn set_green_missing_paths(cargo_home: &std::path::Path, path_dir: &std::path::Path) -> Self {
+        let lock = ENV_LOCK.lock().expect("env lock");
+        let guard = Self {
+            previous_bin: std::env::var_os("SPUR_NOTEBOOK_BIN"),
+            previous_channel: std::env::var_os("SPUR_NOTEBOOK_CHANNEL"),
+            previous_home: std::env::var_os("HOME"),
+            previous_cargo_home: std::env::var_os("CARGO_HOME"),
+            previous_path: std::env::var_os("PATH"),
+            _lock: lock,
+        };
+        std::env::remove_var("SPUR_NOTEBOOK_BIN");
+        std::env::set_var("SPUR_NOTEBOOK_CHANNEL", "green");
+        std::env::set_var("HOME", cargo_home);
+        std::env::set_var("CARGO_HOME", cargo_home);
+        std::env::set_var("PATH", std::env::join_paths([path_dir]).expect("join PATH"));
+        guard
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.previous_bin {
+            Some(value) => std::env::set_var("SPUR_NOTEBOOK_BIN", value),
+            None => std::env::remove_var("SPUR_NOTEBOOK_BIN"),
+        }
+        match &self.previous_channel {
+            Some(value) => std::env::set_var("SPUR_NOTEBOOK_CHANNEL", value),
+            None => std::env::remove_var("SPUR_NOTEBOOK_CHANNEL"),
+        }
+        match &self.previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match &self.previous_cargo_home {
+            Some(value) => std::env::set_var("CARGO_HOME", value),
+            None => std::env::remove_var("CARGO_HOME"),
+        }
+        match &self.previous_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
 }
