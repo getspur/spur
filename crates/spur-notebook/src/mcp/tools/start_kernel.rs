@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::dag::notebook_port_root;
 use crate::mcp::ServerDeps;
+use crate::{commands::load_saved_credential_profiles_for_kernel, dag::notebook_port_root};
 
 const METHOD: &str = "notebook.start_kernel";
 
@@ -91,6 +91,14 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         resolve_notebook_path(deps, params.slot_id.as_deref(), &params.spec_name).await;
     let port_root = notebook_path.as_deref().map(notebook_port_root);
     let working_dir = notebook_path.as_deref().and_then(|p| p.parent());
+    load_saved_credential_profiles_for_kernel()
+        .await
+        .map_err(|error| {
+            McpError::internal_error(
+                "notebook.start_kernel failed to load credential profiles",
+                Some(json!({ "error": error.to_string() })),
+            )
+        })?;
     let mut kernel = start_local_kernel(&params.spec_name, port_root.as_deref(), working_dir)
         .await
         .map_err(|error| {

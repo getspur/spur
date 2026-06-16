@@ -43,6 +43,16 @@ pub struct NotebookDaemonRuntime {
     handle: tokio::sync::Mutex<crate::mcp::NotebookMcpServerHandle>,
 }
 
+pub async fn load_saved_credential_profiles_for_kernel() -> Result<usize, jute::Error> {
+    crate::connection_secrets::load_credential_profiles_into_env()
+        .await
+        .map_err(|error| {
+            jute::Error::NotebookDaemon(format!(
+                "failed to load credential profiles for kernel launch: {error}"
+            ))
+        })
+}
+
 impl NotebookDaemonRuntime {
     pub fn new(
         control: crate::mcp::NotebookDaemonControl,
@@ -904,6 +914,43 @@ pub async fn notebook_dag_status(
     notebook_dag_status_for_state(&state)
 }
 
+/// Start a new Jupyter kernel after loading saved API credentials into env.
+#[tauri::command]
+pub async fn start_kernel(
+    app: tauri::AppHandle,
+    spec_name: &str,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<jute::state::State>>,
+) -> Result<String, jute::Error> {
+    load_saved_credential_profiles_for_kernel().await?;
+    jute::commands::start_kernel(app, spec_name, window, state).await
+}
+
+/// Restart a Jupyter kernel after refreshing saved API credentials in env.
+#[tauri::command]
+pub async fn restart_kernel(
+    slot_id: &str,
+    spec_name: Option<String>,
+    state: tauri::State<'_, Arc<jute::state::State>>,
+) -> Result<String, jute::Error> {
+    load_saved_credential_profiles_for_kernel().await?;
+    jute::commands::restart_kernel(slot_id, spec_name, state).await
+}
+
+/// Run a code cell after refreshing saved API credentials for lazy kernel starts.
+#[tauri::command]
+pub async fn run_cell(
+    notebook_path: &str,
+    kernel_id: Option<String>,
+    cell_id: &str,
+    code: &str,
+    on_event: tauri::ipc::Channel<jute::backend::commands::RunCellEvent>,
+    state: tauri::State<'_, Arc<jute::state::State>>,
+) -> Result<(), jute::Error> {
+    load_saved_credential_profiles_for_kernel().await?;
+    jute::commands::run_cell(notebook_path, kernel_id, cell_id, code, on_event, state).await
+}
+
 /// Run a notebook cell through the reactive DAG engine and cascade downstream cells.
 #[tauri::command]
 pub async fn notebook_run_cascade(
@@ -916,6 +963,7 @@ pub async fn notebook_run_cascade(
     let path = notebook.path().ok_or_else(|| {
         jute::Error::NotebookDaemon("notebook_run_cascade requires an open notebook".to_string())
     })?;
+    load_saved_credential_profiles_for_kernel().await?;
     let mut context = notebook_run_context(
         &path,
         Arc::clone(state.inner()),
@@ -956,6 +1004,7 @@ pub async fn notebook_run_cell(
     let path = notebook.path().ok_or_else(|| {
         jute::Error::NotebookDaemon("notebook_run_cell requires an open notebook".to_string())
     })?;
+    load_saved_credential_profiles_for_kernel().await?;
     let mut context = notebook_run_context(
         &path,
         Arc::clone(state.inner()),

@@ -6,7 +6,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::mcp::ServerDeps;
+use crate::{commands::load_saved_credential_profiles_for_kernel, mcp::ServerDeps};
 
 const METHOD: &str = "notebook.restart_kernel";
 
@@ -63,6 +63,14 @@ pub async fn call(deps: &ServerDeps, arguments: Value) -> Result<CallToolResult,
         })?,
     };
 
+    load_saved_credential_profiles_for_kernel()
+        .await
+        .map_err(|error| {
+            McpError::internal_error(
+                "notebook.restart_kernel failed to load credential profiles",
+                Some(json!({ "error": error.to_string() })),
+            )
+        })?;
     let generation = restart_kernel_in_slot(state, &params.slot_id, &spec_name)
         .await
         .map_err(|error| {
