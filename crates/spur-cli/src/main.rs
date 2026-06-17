@@ -518,6 +518,8 @@ enum WorkflowCommands {
 
 #[derive(Subcommand)]
 enum ConfigCommands {
+    /// Show the merged effective config with origin annotations.
+    Show,
     /// Validate that every [agents.entries] block has a coherent configuration.
     Check,
     /// Set a configuration value (e.g., `tui.edit_mode vim`).
@@ -1018,6 +1020,10 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Commands::Config { command } => match command {
+            ConfigCommands::Show => {
+                commands::config_show::run(&repo_root)?;
+                Ok(())
+            }
             ConfigCommands::Check => {
                 let exit = commands::config_check::run(&repo_root)?;
                 requested_exit(exit)
