@@ -3,6 +3,7 @@
 //! output.
 
 use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 
 fn spur_binary() -> std::path::PathBuf {
@@ -16,6 +17,16 @@ fn write_config(contents: &str) -> tempfile::TempDir {
     let mut f = std::fs::File::create(spur_dir.join("config.toml")).expect("create toml");
     f.write_all(contents.as_bytes()).expect("write");
     dir
+}
+
+fn run_config_check(repo_root: &Path, home: &Path) -> std::process::Output {
+    Command::new(spur_binary())
+        .current_dir(repo_root)
+        .env("HOME", home)
+        .env_remove("SPUR_TELEGRAM_BOT_TOKEN")
+        .args(["config", "check"])
+        .output()
+        .expect("spawn")
 }
 
 #[test]
@@ -32,11 +43,52 @@ transport = "acp"
 dispatch = "prompt_text"
 "#,
     );
-    let out = Command::new(spur_binary())
-        .current_dir(dir.path())
-        .args(["config", "check"])
-        .output()
-        .expect("spawn");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let out = run_config_check(dir.path(), home.path());
+    assert!(
+        out.status.success(),
+        "expected 0 exit; stderr = {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn config_check_passes_with_user_only_config() {
+    let home = write_config(
+        r#"
+[[agents.entries]]
+name = "user-only-claude-code-acp"
+command = "npx"
+args = ["--yes", "@agentclientprotocol/claude-agent-acp@0.26.0"]
+transport = "acp"
+
+[agents.entries.commands]
+dispatch = "prompt_text"
+"#,
+    );
+    let repo = tempfile::tempdir().expect("repo tempdir");
+
+    let out = run_config_check(repo.path(), home.path());
+
+    assert!(
+        out.status.success(),
+        "expected 0 exit; stderr = {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("user-only-claude-code-acp"),
+        "expected user-layer agent in stdout; got: {stdout}"
+    );
+}
+
+#[test]
+fn config_check_passes_with_defaults_only() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let repo = tempfile::tempdir().expect("repo tempdir");
+
+    let out = run_config_check(repo.path(), home.path());
+
     assert!(
         out.status.success(),
         "expected 0 exit; stderr = {}",
@@ -57,11 +109,8 @@ transport = "acp"
 dispatch = "vendor_exec"
 "#,
     );
-    let out = Command::new(spur_binary())
-        .current_dir(dir.path())
-        .args(["config", "check"])
-        .output()
-        .expect("spawn");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let out = run_config_check(dir.path(), home.path());
     assert!(
         !out.status.success(),
         "expected non-zero exit; stdout = {}",
@@ -94,12 +143,9 @@ enabled = true
 bot_token = "123:ABC"
 "#,
     );
+    let home = tempfile::tempdir().expect("home tempdir");
 
-    let out = Command::new(spur_binary())
-        .current_dir(dir.path())
-        .args(["config", "check"])
-        .output()
-        .expect("spawn");
+    let out = run_config_check(dir.path(), home.path());
 
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("operator_user_id"));
