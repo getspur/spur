@@ -205,6 +205,11 @@ enum Commands {
         /// adapter dir regardless of which agents are installed.
         #[arg(long)]
         with_skills: bool,
+        /// Accept all install prompts (config, PM tracker, skills) without
+        /// asking. Non-interactive runs (no TTY) already assume yes; this
+        /// gives the same one-shot behavior from a terminal.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Install SpurPower skills into adapter directories
     Skills {
@@ -784,9 +789,13 @@ async fn run() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Init { force, with_skills } => {
+        Commands::Init {
+            force,
+            with_skills,
+            yes,
+        } => {
             require_cli_gate(spur_license::FeatureKey::CLI_CORE_INIT)?;
-            commands::init::run(repo_root, force, with_skills).await
+            commands::init::run(repo_root, force, with_skills, yes).await
         }
         Commands::Skills { command } => match command {
             SkillsCommands::Init => commands::init::run_skills_init(&repo_root),
