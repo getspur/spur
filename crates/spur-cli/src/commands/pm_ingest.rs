@@ -20,7 +20,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use spur_acp::config::SpurConfig;
 use spur_pm::ingest::{IngestOptions, IngestReport};
 use spur_pm::sync::{ExternalPmSync, SyncError};
 use spur_pm::PmService;
@@ -216,31 +215,11 @@ pub async fn run_with_sync(
     exit_code_for(&result, args.json)
 }
 
-/// Load `.spur/config.toml` from `repo_root` (or fall back to the user
-/// global config, or defaults). Matches the precedence used by
-/// `spur-cli`'s `load_config_for_repo` so the ingest subcommand reads the
-/// same `[pm.*]` blocks as the rest of the CLI.
-fn load_config_for_repo(repo_root: &Path) -> Result<SpurConfig> {
-    let project_config = repo_root.join(".spur").join("config.toml");
-    let user_config = directories::BaseDirs::new()
-        .map(|d| d.home_dir().join(".spur/config.toml"))
-        .unwrap_or_default();
-    if project_config.exists() {
-        let content = std::fs::read_to_string(&project_config)?;
-        Ok(toml::from_str(&content)?)
-    } else if user_config.exists() {
-        let content = std::fs::read_to_string(&user_config)?;
-        Ok(toml::from_str(&content)?)
-    } else {
-        Ok(SpurConfig::default())
-    }
-}
-
 /// Top-level CLI entry. Constructs `PmService`, resolves the sync target,
 /// and dispatches to [`run_with_sync`]. Exits the process via the returned
 /// `i32`.
 pub async fn run(repo_root: &Path, args: IngestGitHubArgs) -> Result<i32> {
-    let config = load_config_for_repo(repo_root)?;
+    let config = spur_acp::config::load_layered(repo_root)?;
 
     let configured_repo = args.repo.clone().or_else(|| {
         config
