@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use spur_acp::{validate_agent_config, SpurConfig};
+use spur_acp::{config::load_layered, validate_agent_config};
 #[cfg(feature = "telegram-bot")]
 use spur_bot::telegram::config::{
     resolve_from_env as resolve_telegram_env, validate as validate_telegram_config,
@@ -19,9 +19,9 @@ pub fn run(repo_root: &Path) -> anyhow::Result<i32> {
     // The Telegram path is the only mutator of `cfg`; bind without `mut`
     // when the bot feature is compiled out so `-D warnings` stays clean.
     #[cfg(feature = "telegram-bot")]
-    let mut cfg = load_spur_config(repo_root)?;
+    let mut cfg = load_layered(repo_root)?;
     #[cfg(not(feature = "telegram-bot"))]
-    let cfg = load_spur_config(repo_root)?;
+    let cfg = load_layered(repo_root)?;
     #[cfg(feature = "telegram-bot")]
     resolve_telegram_env(&mut cfg.bot.telegram);
 
@@ -67,13 +67,4 @@ pub fn run(repo_root: &Path) -> anyhow::Result<i32> {
         }
         Ok(0)
     }
-}
-
-fn load_spur_config(repo_root: &Path) -> anyhow::Result<SpurConfig> {
-    let path = repo_root.join(".spur").join("config.toml");
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-    let cfg: SpurConfig = toml::from_str(&contents)
-        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
-    Ok(cfg)
 }
