@@ -93,6 +93,22 @@ fn controlled_path(dir: &std::path::Path) -> String {
     dir.display().to_string()
 }
 
+fn seed_agent_commands() -> Vec<String> {
+    let mut commands = Vec::new();
+    for agent in spur_acp::config::load_seed_template().entries {
+        if !commands.contains(&agent.command) {
+            commands.push(agent.command);
+        }
+    }
+    commands
+}
+
+fn stub_seed_agent_commands(dir: &std::path::Path) {
+    for command in seed_agent_commands() {
+        stub_binary(dir, &command);
+    }
+}
+
 fn spur() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_spur"));
     // Strip both debug-only env vars that can perturb the resolved
@@ -270,5 +286,103 @@ fn init_prefers_claude_code_as_default_brain() {
     assert!(
         after.contains(r#"    "kiro","#),
         "kiro should become a fallback brain; got:\n{after}"
+    );
+}
+
+#[test]
+fn project_init_with_user_layer_writes_sparse_overlay() {
+    let _g = LOCK.lock().unwrap();
+    let home = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let path_dir = TempDir::new().unwrap();
+    stub_which(path_dir.path());
+    stub_seed_agent_commands(path_dir.path());
+    fs::create_dir_all(repo.path().join(".beads")).unwrap();
+
+    let mut user_config = spur_acp::config::SpurConfig::default();
+    user_config.agents = spur_acp::config::load_seed_template();
+    let user_path = home.path().join(".spur/config.toml");
+    fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+    fs::write(&user_path, toml::to_string_pretty(&user_config).unwrap()).unwrap();
+
+    let status = spur()
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("PATH", controlled_path(path_dir.path()))
+        .arg("init")
+        .status()
+        .expect("spawn spur init");
+
+    assert!(status.success(), "project init should exit 0");
+
+    let project_path = repo.path().join(".spur/config.toml");
+    let raw = fs::read_to_string(&project_path).unwrap();
+    let table = toml::from_str::<toml::Value>(&raw)
+        .unwrap()
+        .as_table()
+        .cloned()
+        .unwrap();
+
+    assert!(
+        !table.contains_key("worktree"),
+        "project layer must not re-expand default worktree settings:\n{raw}"
+    );
+    assert!(
+        !table.contains_key("cost"),
+        "project layer must not re-expand default cost settings:\n{raw}"
+    );
+    assert!(
+        !table.contains_key("agents"),
+        "project layer must not duplicate user-layer agents:\n{raw}"
+    );
+
+    let original_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+    let effective = spur_acp::config::load_layered(repo.path()).unwrap();
+    match original_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    assert_eq!(
+        effective.agents.entries.len(),
+        spur_acp::config::load_seed_template().entries.len(),
+        "layered load should recover user-layer agents"
+    );
+}
+
+#[test]
+fn init_global_writes_home_config_not_project_config() {
+    let _g = LOCK.lock().unwrap();
+    let home = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let path_dir = TempDir::new().unwrap();
+    stub_which(path_dir.path());
+    stub_binary(path_dir.path(), "npx");
+    fs::create_dir_all(repo.path().join(".beads")).unwrap();
+
+    let status = spur()
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("PATH", controlled_path(path_dir.path()))
+        .args(["init", "--global"])
+        .status()
+        .expect("spawn spur init --global");
+
+    assert!(status.success(), "global init should exit 0");
+
+    let global_path = home.path().join(".spur/config.toml");
+    assert!(
+        global_path.exists(),
+        "global init should write {}",
+        global_path.display()
+    );
+    assert!(
+        !repo.path().join(".spur/config.toml").exists(),
+        "global init must not write the project config"
+    );
+    let raw = fs::read_to_string(global_path).unwrap();
+    assert!(
+        raw.contains(r#"name = "claude-code""#),
+        "global config should include discovered agents:\n{raw}"
     );
 }
