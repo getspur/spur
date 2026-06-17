@@ -326,6 +326,7 @@ enum Commands {
         cmd: GcCmd,
     },
     /// Bot frontend commands
+    #[cfg(feature = "telegram-bot")]
     Bot {
         #[command(subcommand)]
         command: BotCommands,
@@ -623,6 +624,7 @@ fn parse_duration_days(s: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
+#[cfg(feature = "telegram-bot")]
 #[derive(Subcommand)]
 enum BotCommands {
     /// Launch the Telegram bot frontend.
@@ -739,13 +741,18 @@ fn is_tty_or_forced() -> bool {
 }
 
 fn command_initializes_orchestrator(command: &Commands) -> bool {
+    // `Commands::Bot` only exists with the `telegram-bot` feature; check it
+    // separately so the or-pattern below stays valid when it's compiled out.
+    #[cfg(feature = "telegram-bot")]
+    if matches!(command, Commands::Bot { .. }) {
+        return true;
+    }
     matches!(
         command,
         Commands::Agents { .. }
             | Commands::Run { .. }
             | Commands::Exec { .. }
             | Commands::Sessions { .. }
-            | Commands::Bot { .. }
     )
 }
 
@@ -1076,6 +1083,7 @@ async fn run() -> Result<()> {
                     namespace,
                 },
         } => run_gc_outcomes(dry_run, older_than, namespace).await,
+        #[cfg(feature = "telegram-bot")]
         Commands::Bot {
             command: BotCommands::Telegram { brain },
         } => {
@@ -1655,6 +1663,11 @@ fn load_config_for_repo(repo_root: &Path) -> Result<SpurConfig> {
     }
 }
 
+// Only the `spur bot telegram` arm builds an interactive host today; under
+// the default (no `telegram-bot`) feature set it has no caller. Keep it
+// compiled — its `PmService` helpers are shared with the TUI path — and just
+// silence the unused warning rather than cfg-removing it.
+#[cfg_attr(not(feature = "telegram-bot"), allow(dead_code))]
 async fn build_interactive_host(
     repo_root: PathBuf,
     config: SpurConfig,
