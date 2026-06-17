@@ -74,6 +74,8 @@ dispatch = "vendor_exec"
     );
 }
 
+// Telegram validation only runs when the bot feature is compiled in.
+#[cfg(feature = "telegram-bot")]
 #[test]
 fn config_check_fails_when_bot_enabled_without_operator_user() {
     let dir = write_config(
