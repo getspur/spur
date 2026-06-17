@@ -21,6 +21,11 @@ dist = true
 default = []
 duckdb = ["spur-context/duckdb"]
 test-seam = []
+# Telegram bot frontend. Off by default: the `spur bot` command, the
+# `spur init` Telegram prompt, and the `spur-bot` crate are all compiled
+# out unless this feature is enabled. Re-enable with
+# `cargo build --features telegram-bot`.
+telegram-bot = ["dep:spur-bot"]
 
 [dependencies]
 spur-acp = { workspace = true }
@@ -33,7 +38,7 @@ spur-pm = { workspace = true }
 spur-license = { workspace = true }
 spur-tui = { workspace = true }
 spur-interactive = { workspace = true }
-spur-bot = { workspace = true }
+spur-bot = { workspace = true, optional = true }
 spur-worktree = { workspace = true }
 spur-telemetry = { path = "../spur-telemetry" }
 tokio = { workspace = true }
