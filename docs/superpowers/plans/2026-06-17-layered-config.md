@@ -50,8 +50,11 @@ task-2-sparse-and-write-helpers
   -> task-6-config-set-value-rmw
 
 task-3-unify-loader, task-5-config-show
-  -> task-7-init-global-and-sparse-writes
+  -> task-7-init-global-sparse
 ```
+
+> Note: beads caps `spur:plan-task-id:<id>` labels at 50 chars
+> (prefix is 18), so task ids stay ≤ 32 chars.
 
 `task-1` is the foundation; everything depends on it. `main.rs` is touched by
 task-3, task-5, task-7 — the DAG serializes them (3 → 5 → 7) so parallel workers
@@ -690,7 +693,7 @@ git commit -m "feat(spur-cli): task-6 config set mutates at toml::Value level"
 
 ### Task 7: `spur init --global` + sparse writes
 
-**Task ID:** `task-7-init-global-and-sparse-writes`
+**Task ID:** `task-7-init-global-sparse`
 
 **Files:**
 - Modify: `crates/spur-cli/src/commands/init.rs`
