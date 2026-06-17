@@ -85,7 +85,7 @@ fn write_table_atomic(path: &Path, table: Table) -> Result<()> {
     if let Err(err) = tmp
         .write_all(serialized.as_bytes())
         .context("write serialized config to tempfile")
-        .and_then(|_| tmp.sync_all().context("fsync tempfile before rename"))
+        .and_then(|()| tmp.sync_all().context("fsync tempfile before rename"))
     {
         drop(tmp);
         let _ = std::fs::remove_file(&tmp_path);
@@ -123,7 +123,7 @@ fn create_temp_file(dir: &Path, target: &Path) -> Result<(PathBuf, std::fs::File
             .open(&path)
         {
             Ok(file) => return Ok((path, file)),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => {
                 return Err(err).with_context(|| format!("create tempfile in {}", dir.display()));
             }

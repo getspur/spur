@@ -56,13 +56,26 @@ pub fn install_hint(name: &str) -> &'static str {
 ///
 /// `--force` resets the agent list to discovered-only (drops manually-added
 /// agents) while still preserving non-agent sections.
+#[allow(clippy::fn_params_excessive_bools)]
 pub async fn run(
     repo_root: PathBuf,
+    global: bool,
     force: bool,
     with_skills: bool,
     assume_yes: bool,
 ) -> Result<()> {
-    let config_path = repo_root.join(".spur").join("config.toml");
+    let config_path = if global {
+        directories::BaseDirs::new()
+            .map(|dirs| dirs.home_dir().join(".spur").join("config.toml"))
+            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for --global"))?
+    } else {
+        repo_root.join(".spur").join("config.toml")
+    };
+    let config_label = if global {
+        "~/.spur/config.toml"
+    } else {
+        ".spur/config.toml"
+    };
 
     // ── Phase 1: Environment discovery ─────────────────────────────────
     println!("[spur] Scanning agents on $PATH...");
@@ -118,7 +131,7 @@ pub async fn run(
     // when the user opts to write the config.
     let agent_count = config.agents.entries.len();
     let config_written = if confirm(
-        &format!("Write .spur/config.toml with {agent_count} detected agent(s)?"),
+        &format!("Write {config_label} with {agent_count} detected agent(s)?"),
         assume_yes,
     ) {
         // Brain selection (interactive only in TTY).
@@ -151,11 +164,18 @@ pub async fn run(
         }
 
         // Atomic persist.
+        let baseline = if global {
+            toml::Value::try_from(SpurConfig::default())?
+        } else {
+            spur_acp::config::layered::default_user_baseline(&repo_root)?
+        };
+        let full = toml::Value::try_from(&config)?;
+        let sparse = spur_acp::config::layered::sparse_diff(&full, &baseline);
         std::fs::create_dir_all(config_path.parent().unwrap())?;
-        std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
+        std::fs::write(&config_path, toml::to_string_pretty(&sparse)?)?;
         true
     } else {
-        println!("[spur] skipped writing .spur/config.toml.");
+        println!("[spur] skipped writing {config_label}.");
         false
     };
 
@@ -192,7 +212,7 @@ pub async fn run(
     }
 
     // ── Summary ────────────────────────────────────────────────────────
-    print_summary(&config, config_written);
+    print_summary(&config, config_written, config_label);
 
     Ok(())
 }
@@ -460,7 +480,7 @@ fn validate_all_agents(config: &SpurConfig) -> Result<()> {
     }
 }
 
-fn print_summary(config: &SpurConfig, config_written: bool) {
+fn print_summary(config: &SpurConfig, config_written: bool, config_label: &str) {
     let any_bypass = config
         .agents
         .entries
@@ -479,13 +499,13 @@ fn print_summary(config: &SpurConfig, config_written: bool) {
 
     println!();
     if config_written {
-        println!("Config written to .spur/config.toml.");
+        println!("Config written to {config_label}.");
         println!(
             "Brain: {} (fallback: {}). Bypass: {}.",
             config.brain.default, fallback_str, bypass_str
         );
     } else {
-        println!("Config: left unchanged (you declined to write .spur/config.toml).");
+        println!("Config: left unchanged (you declined to write {config_label}).");
     }
 
     #[cfg(feature = "telegram-bot")]
