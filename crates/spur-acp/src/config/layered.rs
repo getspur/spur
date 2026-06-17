@@ -91,6 +91,94 @@ pub fn load_layered(repo_root: &Path) -> Result<SpurConfig> {
     load_layered_from_paths(repo_root, user_path.as_deref())
 }
 
+/// Produce a table holding only what `config` adds or changes over `baseline`.
+pub fn sparse_diff(config: &Value, baseline: &Value) -> Value {
+    sparse_diff_at(config, baseline, &[])
+}
+
+fn sparse_diff_at(config: &Value, baseline: &Value, path: &[&str]) -> Value {
+    match (config, baseline) {
+        (Value::Table(config_table), Value::Table(baseline_table)) => {
+            let mut out = Table::new();
+            for (key, config_value) in config_table {
+                let is_agents_entries = path == ["agents"] && key == "entries";
+                match baseline_table.get(key) {
+                    Some(baseline_value) if baseline_value == config_value => {}
+                    Some(baseline_value @ Value::Table(_)) if config_value.is_table() => {
+                        let mut child_path = path.to_vec();
+                        child_path.push(key.as_str());
+                        let diff = sparse_diff_at(config_value, baseline_value, &child_path);
+                        if !diff.as_table().map(Table::is_empty).unwrap_or(false) {
+                            out.insert(key.clone(), diff);
+                        }
+                    }
+                    Some(Value::Array(baseline_array))
+                        if is_agents_entries && config_value.is_array() =>
+                    {
+                        let kept = sparse_agents(config_value.as_array().unwrap(), baseline_array);
+                        if !kept.is_empty() {
+                            out.insert(key.clone(), Value::Array(kept));
+                        }
+                    }
+                    _ => {
+                        out.insert(key.clone(), config_value.clone());
+                    }
+                }
+            }
+            Value::Table(out)
+        }
+        _ => config.clone(),
+    }
+}
+
+fn sparse_agents(config: &[Value], baseline: &[Value]) -> Vec<Value> {
+    config
+        .iter()
+        .filter(|config_value| {
+            let name = config_value.get("name").and_then(Value::as_str);
+            match baseline
+                .iter()
+                .find(|baseline_value| baseline_value.get("name").and_then(Value::as_str) == name)
+            {
+                Some(baseline_value) => baseline_value != *config_value,
+                None => true,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Set a nested key path, creating intermediate tables and preserving siblings.
+pub fn set_key_path(table: &mut Table, path: &[&str], value: Value) {
+    let Some((last, parents)) = path.split_last() else {
+        return;
+    };
+    let mut current = table;
+    for parent in parents {
+        let entry = current
+            .entry((*parent).to_string())
+            .or_insert_with(|| Value::Table(Table::new()));
+        if !entry.is_table() {
+            *entry = Value::Table(Table::new());
+        }
+        current = entry.as_table_mut().unwrap();
+    }
+    current.insert((*last).to_string(), value);
+}
+
+/// Build the sparse-write baseline for a project layer: defaults plus user config.
+pub fn default_user_baseline() -> Result<Value> {
+    let mut base = match Value::try_from(SpurConfig::default())? {
+        Value::Table(table) => table,
+        _ => Table::new(),
+    };
+    let user_path = BaseDirs::new().map(|dirs| dirs.home_dir().join(".spur/config.toml"));
+    if let Some(user_path) = user_path.as_ref().filter(|path| path.exists()) {
+        merge_tables(&mut base, read_table(user_path)?);
+    }
+    Ok(Value::Table(base))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::SpurConfig;
@@ -205,5 +293,60 @@ mod tests {
         let err = load_layered_from_paths(repo.path(), Some(&user_path)).unwrap_err();
 
         assert!(err.to_string().contains(&user_path.display().to_string()));
+    }
+
+    #[test]
+    fn sparse_diff_omits_equal_keeps_changed() {
+        let base = toml::Value::try_from(SpurConfig::default()).unwrap();
+        let mut config = base.clone();
+        config
+            .as_table_mut()
+            .unwrap()
+            .entry("brain")
+            .or_insert(Value::Table(Table::new()))
+            .as_table_mut()
+            .unwrap()
+            .insert("default".into(), Value::String("codex".into()));
+
+        let diff = sparse_diff(&config, &base);
+        let diff_table = diff.as_table().unwrap();
+
+        assert!(diff_table.contains_key("brain"));
+        assert!(!diff_table.contains_key("worktree"));
+        assert_eq!(diff_table["brain"]["default"].as_str(), Some("codex"));
+    }
+
+    #[test]
+    fn sparse_diff_identical_is_empty() {
+        let base = toml::Value::try_from(SpurConfig::default()).unwrap();
+
+        assert!(sparse_diff(&base, &base).as_table().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sparse_diff_agents_entries_drops_equal_keeps_changed_whole() {
+        let base = Value::Table(t("[[agents.entries]]\nname='codex'\ncommand='codex'\n\
+             [[agents.entries]]\nname='claude-code'\ncommand='claude'\n"));
+        let config = Value::Table(t("[[agents.entries]]\nname='codex'\ncommand='codex'\n\
+             [[agents.entries]]\nname='claude-code'\ncommand='claude-code'\n\
+             [[agents.entries]]\nname='gemini'\ncommand='gemini'\n"));
+
+        let diff = sparse_diff(&config, &base);
+        let entries = diff["agents"]["entries"].as_array().unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"].as_str(), Some("claude-code"));
+        assert_eq!(entries[0]["command"].as_str(), Some("claude-code"));
+        assert_eq!(entries[1]["name"].as_str(), Some("gemini"));
+    }
+
+    #[test]
+    fn set_key_path_creates_nested_and_preserves_siblings() {
+        let mut table = t("[tui]\ndensity='compact'\n");
+
+        set_key_path(&mut table, &["tui", "theme"], Value::String("light".into()));
+
+        assert_eq!(table["tui"]["theme"].as_str(), Some("light"));
+        assert_eq!(table["tui"]["density"].as_str(), Some("compact"));
     }
 }
