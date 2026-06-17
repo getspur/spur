@@ -196,6 +196,10 @@ struct Cli {
 enum Commands {
     /// Initialize SPUR: detect agents, create config
     Init {
+        /// Write the user-level config at ~/.spur/config.toml instead of this
+        /// repo's .spur/config.toml.
+        #[arg(long)]
+        global: bool,
         /// Overwrite existing .spur/config.toml.
         #[arg(long)]
         force: bool,
@@ -457,6 +461,13 @@ mod cli_parse_tests {
                 "2",
             ])
             .expect("graph build --with-temporal should parse");
+    }
+
+    #[test]
+    fn cli_accepts_init_global_flag() {
+        Cli::command()
+            .try_get_matches_from(["spur", "init", "--global"])
+            .expect("init --global should parse");
     }
 }
 
@@ -792,12 +803,13 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Init {
+            global,
             force,
             with_skills,
             yes,
         } => {
             require_cli_gate(spur_license::FeatureKey::CLI_CORE_INIT)?;
-            commands::init::run(repo_root, force, with_skills, yes).await
+            commands::init::run(repo_root, global, force, with_skills, yes).await
         }
         Commands::Skills { command } => match command {
             SkillsCommands::Init => commands::init::run_skills_init(&repo_root),
