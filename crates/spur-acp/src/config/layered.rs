@@ -6,6 +6,10 @@ use std::path::Path;
 use toml::value::Table;
 use toml::Value;
 
+pub type SectionOrigins = BTreeMap<String, &'static str>;
+pub type AgentOrigins = BTreeMap<String, &'static str>;
+pub type EffectiveConfigWithOrigins = (SpurConfig, SectionOrigins, AgentOrigins);
+
 /// Deep-merge `over` onto `base`.
 ///
 /// Tables recurse, scalars and plain arrays from `over` replace, and
@@ -93,13 +97,7 @@ pub fn load_layered(repo_root: &Path) -> Result<SpurConfig> {
 }
 
 /// (merged config, per-top-level-section origin, per-agent-name origin).
-pub fn effective_with_origins(
-    repo_root: &Path,
-) -> Result<(
-    SpurConfig,
-    BTreeMap<String, &'static str>,
-    BTreeMap<String, &'static str>,
-)> {
+pub fn effective_with_origins(repo_root: &Path) -> Result<EffectiveConfigWithOrigins> {
     let user_t = BaseDirs::new()
         .map(|dirs| dirs.home_dir().join(".spur/config.toml"))
         .filter(|path| path.exists())
@@ -247,7 +245,7 @@ pub fn set_key_path(table: &mut Table, path: &[&str], value: Value) {
 }
 
 /// Build the sparse-write baseline for a project layer: defaults plus user config.
-pub fn default_user_baseline() -> Result<Value> {
+pub fn default_user_baseline(_repo_root: &Path) -> Result<Value> {
     let mut base = match Value::try_from(SpurConfig::default())? {
         Value::Table(table) => table,
         _ => Table::new(),
