@@ -101,6 +101,9 @@ pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
     }
 
     // ── Phase 8: Bot setup (interactive only in TTY) ───────────────────
+    // Compiled out unless the `telegram-bot` feature is enabled, so a
+    // default `spur init` never mentions Telegram.
+    #[cfg(feature = "telegram-bot")]
     if std::io::stdin().is_terminal() {
         if let Err(e) = maybe_prompt_bot_setup(&mut config) {
             eprintln!("[spur] bot setup prompt failed: {e}; continuing");
@@ -312,6 +315,7 @@ fn prompt_default_brain_selection(config: &mut SpurConfig) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "telegram-bot")]
 fn maybe_prompt_bot_setup(config: &mut SpurConfig) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Ok(());
@@ -432,6 +436,7 @@ fn print_summary(config: &SpurConfig) {
         config.brain.default, fallback_str, bypass_str
     );
 
+    #[cfg(feature = "telegram-bot")]
     if config.bot.telegram.enabled {
         println!(
             "Telegram bot: enabled (operator_user_id = {:?})",
@@ -453,6 +458,7 @@ fn print_summary(config: &SpurConfig) {
     println!("  spur run \"describe the repo in 3 bullets\"    # one-shot");
     println!("  spur tui                                     # interactive TUI");
     println!("  spur config check                            # validate your setup");
+    #[cfg(feature = "telegram-bot")]
     if config.bot.telegram.enabled {
         println!("  spur bot telegram                            # start Telegram bot");
     }
