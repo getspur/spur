@@ -1,6 +1,7 @@
 use crate::config::SpurConfig;
 use anyhow::{anyhow, Result};
 use directories::BaseDirs;
+use std::collections::BTreeMap;
 use std::path::Path;
 use toml::value::Table;
 use toml::Value;
@@ -89,6 +90,85 @@ fn load_layered_from_paths(repo_root: &Path, user_path: Option<&Path>) -> Result
 pub fn load_layered(repo_root: &Path) -> Result<SpurConfig> {
     let user_path = BaseDirs::new().map(|dirs| dirs.home_dir().join(".spur/config.toml"));
     load_layered_from_paths(repo_root, user_path.as_deref())
+}
+
+/// (merged config, per-top-level-section origin, per-agent-name origin).
+pub fn effective_with_origins(
+    repo_root: &Path,
+) -> Result<(
+    SpurConfig,
+    BTreeMap<String, &'static str>,
+    BTreeMap<String, &'static str>,
+)> {
+    let user_t = BaseDirs::new()
+        .map(|dirs| dirs.home_dir().join(".spur/config.toml"))
+        .filter(|path| path.exists())
+        .map(|path| read_table(&path))
+        .transpose()?;
+    let project_path = repo_root.join(".spur").join("config.toml");
+    let project_t = project_path
+        .exists()
+        .then(|| read_table(&project_path))
+        .transpose()?;
+
+    let cfg = load_layered(repo_root)?;
+
+    let origin = |key: &str| -> &'static str {
+        if project_t
+            .as_ref()
+            .map(|table| table.contains_key(key))
+            .unwrap_or(false)
+        {
+            "project"
+        } else if user_t
+            .as_ref()
+            .map(|table| table.contains_key(key))
+            .unwrap_or(false)
+        {
+            "user"
+        } else {
+            "default"
+        }
+    };
+    let merged_t = match Value::try_from(&cfg)? {
+        Value::Table(table) => table,
+        _ => Table::new(),
+    };
+    let sections = merged_t
+        .keys()
+        .map(|key| (key.clone(), origin(key)))
+        .collect();
+
+    let agent_origin = |name: &str, table: &Option<Table>| -> bool {
+        table
+            .as_ref()
+            .and_then(|table| table.get("agents"))
+            .and_then(|agents| agents.get("entries"))
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+            })
+            .unwrap_or(false)
+    };
+    let agents = cfg
+        .agents
+        .entries
+        .iter()
+        .map(|agent| {
+            let origin = if agent_origin(&agent.name, &project_t) {
+                "project"
+            } else if agent_origin(&agent.name, &user_t) {
+                "user"
+            } else {
+                "default"
+            };
+            (agent.name.clone(), origin)
+        })
+        .collect();
+
+    Ok((cfg, sections, agents))
 }
 
 /// Produce a table holding only what `config` adds or changes over `baseline`.
