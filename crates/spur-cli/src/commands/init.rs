@@ -46,12 +46,22 @@ pub fn install_hint(name: &str) -> &'static str {
 /// - Preserves user customizations (capabilities, review policy, delegation).
 /// - Preserves all non-agent config (bot, pm, project, cost, worktree, …).
 /// - Recomputes brain / fallback based on the merged agent list.
-/// - Optionally guides through Telegram bot setup when running in a TTY.
+/// - Walks an interactive human through three yes/no install steps —
+///   config, PM tracker, skills — defaulting each to Yes.
 /// - Validates before persisting.
+///
+/// Non-interactive runs (no TTY, e.g. CI or `git clone → spur init`) and
+/// `--yes` assume Yes for all three steps, preserving the auto-everything
+/// behavior automation depends on.
 ///
 /// `--force` resets the agent list to discovered-only (drops manually-added
 /// agents) while still preserving non-agent sections.
-pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
+pub async fn run(
+    repo_root: PathBuf,
+    force: bool,
+    with_skills: bool,
+    assume_yes: bool,
+) -> Result<()> {
     let config_path = repo_root.join(".spur").join("config.toml");
 
     // ── Phase 1: Environment discovery ─────────────────────────────────
@@ -93,83 +103,121 @@ pub async fn run(repo_root: PathBuf, force: bool, skills: bool) -> Result<()> {
         }
     }
 
-    // ── Phase 7: Brain selection (interactive only in TTY) ─────────────
-    if std::io::stdin().is_terminal() {
-        if let Err(e) = prompt_default_brain_selection(&mut config) {
-            eprintln!("[spur] default brain prompt failed: {e}; continuing");
-        }
-    }
-
-    // ── Phase 8: Bot setup (interactive only in TTY) ───────────────────
-    // Compiled out unless the `telegram-bot` feature is enabled, so a
-    // default `spur init` never mentions Telegram.
-    #[cfg(feature = "telegram-bot")]
-    if std::io::stdin().is_terminal() {
-        if let Err(e) = maybe_prompt_bot_setup(&mut config) {
-            eprintln!("[spur] bot setup prompt failed: {e}; continuing");
-        }
-    }
-
-    // ── Phase 9: Validate before write ─────────────────────────────────
-    if let Err(e) = validate_all_agents(&config) {
-        eprintln!("[spur] config validation failed: {e}");
-        return Err(e);
-    }
-
-    // ── Phase 10: Early exit if no agents and no prior config ──────────
+    // ── Phase 6: No-agent early exit ───────────────────────────────────
+    // Nothing to configure and no prior config to converge — point the user
+    // at the install hints and stop before any prompts.
     if config.agents.entries.is_empty() && !existed_before {
         println!();
         println!("No agents found. Install one of the above and re-run `spur init`.");
         return Ok(());
     }
 
-    // ── Phase 11: Permission-bypass safety prompt (TTY only) ───────────
-    if std::io::stdin().is_terminal() {
-        if let Err(e) = prompt_permission_bypass(&mut config) {
-            eprintln!("[spur] permission bypass prompt failed: {e}; continuing");
+    // ── Step 1 of 3: Config ────────────────────────────────────────────
+    // Each step asks an interactive human; a non-TTY run or `--yes` assumes
+    // Yes (see `confirm`). The brain / bot / permission sub-prompts only run
+    // when the user opts to write the config.
+    let agent_count = config.agents.entries.len();
+    let config_written = if confirm(
+        &format!("Write .spur/config.toml with {agent_count} detected agent(s)?"),
+        assume_yes,
+    ) {
+        // Brain selection (interactive only in TTY).
+        if std::io::stdin().is_terminal() {
+            if let Err(e) = prompt_default_brain_selection(&mut config) {
+                eprintln!("[spur] default brain prompt failed: {e}; continuing");
+            }
         }
-    }
 
-    // ── Phase 12: Atomic persist ───────────────────────────────────────
-    std::fs::create_dir_all(config_path.parent().unwrap())?;
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
+        // Telegram bot setup (interactive only in TTY). Compiled out unless
+        // the `telegram-bot` feature is enabled.
+        #[cfg(feature = "telegram-bot")]
+        if std::io::stdin().is_terminal() {
+            if let Err(e) = maybe_prompt_bot_setup(&mut config) {
+                eprintln!("[spur] bot setup prompt failed: {e}; continuing");
+            }
+        }
 
-    // ── Phase 12.5: First-time beads bootstrap ─────────────────────────
-    // Run `pm init` automatically when `.beads/` is absent. This makes the
-    // golden-path "git clone → spur init" produce a working tracker without
-    // a second command. Idempotent: subsequent `spur init` runs see the
-    // directory present and skip this phase.
-    if !repo_root.join(".beads").exists() {
+        // Validate before write.
+        if let Err(e) = validate_all_agents(&config) {
+            eprintln!("[spur] config validation failed: {e}");
+            return Err(e);
+        }
+
+        // Permission-bypass safety prompt (interactive only in TTY).
+        if std::io::stdin().is_terminal() {
+            if let Err(e) = prompt_permission_bypass(&mut config) {
+                eprintln!("[spur] permission bypass prompt failed: {e}; continuing");
+            }
+        }
+
+        // Atomic persist.
+        std::fs::create_dir_all(config_path.parent().unwrap())?;
+        std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
+        true
+    } else {
+        println!("[spur] skipped writing .spur/config.toml.");
+        false
+    };
+
+    // ── Step 2 of 3: PM tracker ────────────────────────────────────────
+    // Idempotent: an existing `.beads/` needs no work, so we don't prompt.
+    // Bootstrapping here makes the golden-path "git clone → spur init"
+    // produce a working tracker without a second command.
+    if !repo_root.join(".beads").exists()
+        && confirm("Bootstrap the beads issue tracker (.beads/)?", assume_yes)
+    {
         println!();
-        println!("[spur] no .beads/ found — bootstrapping tracker...");
+        println!("[spur] bootstrapping tracker...");
         if let Err(e) = run_pm_init(repo_root.clone()).await {
             eprintln!("[spur] warning: pm init failed: {e}");
-            // Do not return Err — `spur init`'s primary contract (write
-            // .spur/config.toml) is already met. The user can re-run
-            // `spur pm init` directly.
+            // Do not return Err — config (init's primary contract) is handled
+            // separately above. The user can re-run `spur pm init` directly.
         }
     }
 
-    // ── Phase 13: Skills install ────────────────────────────────────────
-    // Default-on, but filtered: only fan out to adapters whose agent was
-    // discovered on `$PATH` (plus `SpurHermetic` for brain prompt injection).
-    // `--with-skills` forces the legacy full fanout (all 8 adapters) for
-    // users who explicitly want every adapter dir materialized.
-    if skills {
+    // ── Step 3 of 3: Skills install ────────────────────────────────────
+    // `--with-skills` forces the full fanout (all adapters) and implies Yes.
+    // The default path is filtered: only adapters whose agent was discovered
+    // on `$PATH` (plus `SpurHermetic` for brain prompt injection).
+    if with_skills {
         if let Err(e) = run_skills_init(&repo_root) {
             eprintln!("[spur] warning: skills install failed: {e}");
         }
-    } else if !config.agents.entries.is_empty() {
+    } else if !config.agents.entries.is_empty() && confirm("Install SpurPower skills?", assume_yes)
+    {
         let allowed = adapters_for_discovered_agents(&discovered_names);
         if let Err(e) = run_skills_init_filtered(&repo_root, &allowed) {
             eprintln!("[spur] warning: skills install failed: {e}");
         }
     }
 
-    // ── Phase 14: Summary ──────────────────────────────────────────────
-    print_summary(&config);
+    // ── Summary ────────────────────────────────────────────────────────
+    print_summary(&config, config_written);
 
     Ok(())
+}
+
+/// Ask a yes/no question, defaulting to Yes. Returns Yes without prompting
+/// when `assume_yes` (`--yes`) is set or stdin is not a TTY (CI, piped
+/// input, `git clone → spur init`), so non-interactive runs keep performing
+/// all of init's setup automatically.
+fn confirm(question: &str, assume_yes: bool) -> bool {
+    if assume_yes || !std::io::stdin().is_terminal() {
+        return true;
+    }
+    print!("{question} [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => true, // EOF / read error → default Yes
+        Ok(_) => interpret_yes_no(&line),
+    }
+}
+
+/// Interpret a yes/no answer with Yes as the default: empty input is Yes, and
+/// only an explicit "n" / "no" (case-insensitive) is No.
+fn interpret_yes_no(input: &str) -> bool {
+    !matches!(input.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
 // ------------------------------------------------------------------
@@ -412,7 +460,7 @@ fn validate_all_agents(config: &SpurConfig) -> Result<()> {
     }
 }
 
-fn print_summary(config: &SpurConfig) {
+fn print_summary(config: &SpurConfig, config_written: bool) {
     let any_bypass = config
         .agents
         .entries
@@ -430,11 +478,15 @@ fn print_summary(config: &SpurConfig) {
     };
 
     println!();
-    println!("Config written to .spur/config.toml.");
-    println!(
-        "Brain: {} (fallback: {}). Bypass: {}.",
-        config.brain.default, fallback_str, bypass_str
-    );
+    if config_written {
+        println!("Config written to .spur/config.toml.");
+        println!(
+            "Brain: {} (fallback: {}). Bypass: {}.",
+            config.brain.default, fallback_str, bypass_str
+        );
+    } else {
+        println!("Config: left unchanged (you declined to write .spur/config.toml).");
+    }
 
     #[cfg(feature = "telegram-bot")]
     if config.bot.telegram.enabled {
@@ -735,5 +787,31 @@ fn print_gitattributes_advisory_if_needed(repo_root: &std::path::Path) {
         println!("Tip: add `*.md text eol=lf` to .gitattributes for cross-platform");
         println!("     teammates. SpurPower marker files may thrash across CRLF/LF");
         println!("     systems otherwise.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interpret_yes_no;
+
+    #[test]
+    fn empty_input_defaults_to_yes() {
+        assert!(interpret_yes_no(""));
+        assert!(interpret_yes_no("\n"));
+        assert!(interpret_yes_no("   \n"));
+    }
+
+    #[test]
+    fn explicit_no_is_no() {
+        for input in ["n", "N", "no", "No", "NO", " no \n"] {
+            assert!(!interpret_yes_no(input), "{input:?} should be No");
+        }
+    }
+
+    #[test]
+    fn yes_and_anything_else_is_yes() {
+        for input in ["y", "Y", "yes", "Yes", "yep", "sure", "1"] {
+            assert!(interpret_yes_no(input), "{input:?} should be Yes");
+        }
     }
 }
