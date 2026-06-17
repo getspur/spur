@@ -1,5 +1,6 @@
 pub mod entries;
 pub mod hooks;
+pub mod layered;
 pub mod validator;
 
 pub use entries::{
@@ -9,6 +10,7 @@ pub use entries::{
 pub use hooks::{
     ArgsTemplateKind, DispatchKind, IngestParserKind, ItemSchemaKind, ResponseRenderKind,
 };
+pub use layered::{load_layered, merge_tables};
 pub use validator::{validate_agent_config, ConfigError};
 
 use crate::domain::delegation::TimeoutFallback;
