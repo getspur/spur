@@ -196,6 +196,10 @@ struct Cli {
 enum Commands {
     /// Initialize SPUR: detect agents, create config
     Init {
+        /// Write the user-level config at ~/.spur/config.toml instead of this
+        /// repo's .spur/config.toml.
+        #[arg(long)]
+        global: bool,
         /// Overwrite existing .spur/config.toml.
         #[arg(long)]
         force: bool,
@@ -458,6 +462,13 @@ mod cli_parse_tests {
             ])
             .expect("graph build --with-temporal should parse");
     }
+
+    #[test]
+    fn cli_accepts_init_global_flag() {
+        Cli::command()
+            .try_get_matches_from(["spur", "init", "--global"])
+            .expect("init --global should parse");
+    }
 }
 
 #[derive(Subcommand)]
@@ -518,6 +529,8 @@ enum WorkflowCommands {
 
 #[derive(Subcommand)]
 enum ConfigCommands {
+    /// Show the merged effective config with origin annotations.
+    Show,
     /// Validate that every [agents.entries] block has a coherent configuration.
     Check,
     /// Set a configuration value (e.g., `tui.edit_mode vim`).
@@ -790,12 +803,13 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Init {
+            global,
             force,
             with_skills,
             yes,
         } => {
             require_cli_gate(spur_license::FeatureKey::CLI_CORE_INIT)?;
-            commands::init::run(repo_root, force, with_skills, yes).await
+            commands::init::run(repo_root, global, force, with_skills, yes).await
         }
         Commands::Skills { command } => match command {
             SkillsCommands::Init => commands::init::run_skills_init(&repo_root),
@@ -1018,6 +1032,10 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Commands::Config { command } => match command {
+            ConfigCommands::Show => {
+                commands::config_show::run(&repo_root)?;
+                Ok(())
+            }
             ConfigCommands::Check => {
                 let exit = commands::config_check::run(&repo_root)?;
                 requested_exit(exit)
@@ -1655,21 +1673,7 @@ fn load_config() -> Result<SpurConfig> {
 }
 
 fn load_config_for_repo(repo_root: &Path) -> Result<SpurConfig> {
-    // Try project config first, then user config.
-    let project_config = repo_root.join(".spur").join("config.toml");
-    let user_config = directories::BaseDirs::new()
-        .map(|d| d.home_dir().join(".spur/config.toml"))
-        .unwrap_or_default();
-
-    if project_config.exists() {
-        let content = std::fs::read_to_string(&project_config)?;
-        Ok(toml::from_str(&content)?)
-    } else if user_config.exists() {
-        let content = std::fs::read_to_string(&user_config)?;
-        Ok(toml::from_str(&content)?)
-    } else {
-        Ok(SpurConfig::default())
-    }
+    spur_acp::config::load_layered(repo_root)
 }
 
 // Only the `spur bot telegram` arm builds an interactive host today; under
