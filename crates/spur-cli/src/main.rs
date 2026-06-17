@@ -1655,21 +1655,7 @@ fn load_config() -> Result<SpurConfig> {
 }
 
 fn load_config_for_repo(repo_root: &Path) -> Result<SpurConfig> {
-    // Try project config first, then user config.
-    let project_config = repo_root.join(".spur").join("config.toml");
-    let user_config = directories::BaseDirs::new()
-        .map(|d| d.home_dir().join(".spur/config.toml"))
-        .unwrap_or_default();
-
-    if project_config.exists() {
-        let content = std::fs::read_to_string(&project_config)?;
-        Ok(toml::from_str(&content)?)
-    } else if user_config.exists() {
-        let content = std::fs::read_to_string(&user_config)?;
-        Ok(toml::from_str(&content)?)
-    } else {
-        Ok(SpurConfig::default())
-    }
+    spur_acp::config::load_layered(repo_root)
 }
 
 // Only the `spur bot telegram` arm builds an interactive host today; under
