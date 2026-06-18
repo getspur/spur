@@ -76,3 +76,25 @@ fn rust_supertrait_emits_extends_edge() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn rust_trait_without_supertrait_emits_no_extends_edge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("lib.rs"), "trait Lonely { fn x(&self); }\n")
+        .expect("write fixture");
+
+    let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+
+    assert!(
+        !facts
+            .edges
+            .iter()
+            .any(|e| e.relation == RelationKind::Extends),
+        "trait without supertrait must not emit extends edges; got {:?}",
+        facts
+            .edges
+            .iter()
+            .map(|e| (e.relation, e.target_label.clone()))
+            .collect::<Vec<_>>()
+    );
+}

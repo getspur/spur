@@ -74,3 +74,28 @@ fn rust_impl_emits_implements_edge() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn rust_inherent_impl_emits_no_implements_edge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "struct Button;\nimpl Button { fn new() -> Self { Button } }\n",
+    )
+    .expect("write fixture");
+
+    let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+
+    assert!(
+        !facts
+            .edges
+            .iter()
+            .any(|e| e.relation == RelationKind::Implements),
+        "inherent impl must not emit implements edges; got {:?}",
+        facts
+            .edges
+            .iter()
+            .map(|e| (e.relation, e.target_label.clone()))
+            .collect::<Vec<_>>()
+    );
+}

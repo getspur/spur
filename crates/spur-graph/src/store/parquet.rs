@@ -1098,6 +1098,8 @@ mod edge_rows_test {
             target_stable_symbol_id: target.map(str::to_string),
             target_label: target.map(|_| "target".to_owned()),
             import_path: None,
+            receiver_text: None,
+            scope_text: None,
             relation: RelationKind::Calls,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
@@ -1225,6 +1227,8 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
           optional binary edge_kind (STRING);
           optional binary bind_method (STRING);
           optional binary import_path (STRING);
+          optional binary receiver_text (STRING);
+          optional binary scope_text (STRING);
         }
         ",
         &[
@@ -1236,6 +1240,8 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
             "edge_kind",
             "bind_method",
             "import_path",
+            "receiver_text",
+            "scope_text",
         ],
         &["source_stable_id", "target_stable_id"],
         vec![
@@ -1295,6 +1301,14 @@ fn write_edges(path: &Path, rows: &[ResolvedEdgeRow]) -> anyhow::Result<()> {
                     .map(|row| row.edge.import_path.clone())
                     .collect(),
             ),
+            ColumnData::OptionalString(
+                rows.iter()
+                    .map(|row| row.edge.receiver_text.clone())
+                    .collect(),
+            ),
+            ColumnData::OptionalString(
+                rows.iter().map(|row| row.edge.scope_text.clone()).collect(),
+            ),
         ],
     )
 }
@@ -1313,6 +1327,8 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
           optional binary edge_kind (STRING);
           optional binary bind_method (STRING);
           optional binary import_path (STRING);
+          optional binary receiver_text (STRING);
+          optional binary scope_text (STRING);
         }
         ",
         &[
@@ -1323,6 +1339,8 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
             "edge_kind",
             "bind_method",
             "import_path",
+            "receiver_text",
+            "scope_text",
         ],
         &["source_stable_id", "target_label"],
         vec![
@@ -1366,6 +1384,14 @@ fn write_unresolved_edges(path: &Path, rows: &[UnresolvedEdgeRow]) -> anyhow::Re
                 rows.iter()
                     .map(|row| row.edge.import_path.clone())
                     .collect(),
+            ),
+            ColumnData::OptionalString(
+                rows.iter()
+                    .map(|row| row.edge.receiver_text.clone())
+                    .collect(),
+            ),
+            ColumnData::OptionalString(
+                rows.iter().map(|row| row.edge.scope_text.clone()).collect(),
             ),
         ],
     )
@@ -1988,6 +2014,8 @@ fn read_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphEdgeArti
         let edge_kind = string_array(&batch, 8, "edge_kind")?;
         let bind_method = optional_string_array_by_name(&batch, "bind_method")?;
         let import_path = optional_string_array_by_name(&batch, "import_path")?;
+        let receiver_text = optional_string_array_by_name(&batch, "receiver_text")?;
+        let scope_text = optional_string_array_by_name(&batch, "scope_text")?;
 
         for row in 0..batch.num_rows() {
             edges.push(GraphEdgeArtifact {
@@ -2003,6 +2031,8 @@ fn read_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<GraphEdgeArti
                 )?),
                 target_label: optional_string_value(target_label, row),
                 import_path: import_path.and_then(|values| optional_string_value(values, row)),
+                receiver_text: receiver_text.and_then(|values| optional_string_value(values, row)),
+                scope_text: scope_text.and_then(|values| optional_string_value(values, row)),
                 relation: relation_from_str(&required_string_value(relation, row, "relation")?)?,
                 confidence: confidence_from_str(&required_string_value(
                     confidence,
@@ -2033,6 +2063,8 @@ fn read_unresolved_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<Gr
         let edge_kind = string_array(&batch, 6, "edge_kind")?;
         let bind_method = optional_string_array_by_name(&batch, "bind_method")?;
         let import_path = optional_string_array_by_name(&batch, "import_path")?;
+        let receiver_text = optional_string_array_by_name(&batch, "receiver_text")?;
+        let scope_text = optional_string_array_by_name(&batch, "scope_text")?;
 
         for row in 0..batch.num_rows() {
             edges.push(GraphEdgeArtifact {
@@ -2044,6 +2076,8 @@ fn read_unresolved_edges(path: &Path, row_count: usize) -> anyhow::Result<Vec<Gr
                 target_stable_symbol_id: None,
                 target_label: optional_string_value(target_label, row),
                 import_path: import_path.and_then(|values| optional_string_value(values, row)),
+                receiver_text: receiver_text.and_then(|values| optional_string_value(values, row)),
+                scope_text: scope_text.and_then(|values| optional_string_value(values, row)),
                 relation: relation_from_str(&required_string_value(relation, row, "relation")?)?,
                 confidence: confidence_from_str(&required_string_value(
                     confidence,
@@ -4080,6 +4114,8 @@ mod parquet_temporal_test {
             target_stable_symbol_id: Some("sym-a".to_owned()),
             target_label: Some("alpha".to_owned()),
             import_path: None,
+            receiver_text: None,
+            scope_text: None,
             relation: RelationKind::Calls,
             confidence: Confidence::SyntaxExact,
             confidence_score: 1.0,
