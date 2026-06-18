@@ -580,6 +580,8 @@ fn edge(
         target_stable_symbol_id: target_stable_symbol_id.map(str::to_owned),
         target_label: target_label.map(str::to_owned),
         import_path: None,
+        receiver_text: None,
+        scope_text: None,
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
