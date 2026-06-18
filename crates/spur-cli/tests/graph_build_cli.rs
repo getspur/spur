@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use spur_graph::store::lance_sections::{SECTIONS_DATASET_DIR, SECTIONS_TABLE};
-use spur_graph::{read_artifact_parquet, read_current_pointer};
+use spur_graph::{read_artifact_header_parquet, read_artifact_parquet, read_current_pointer};
 
 fn spur_binary() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_spur"))
@@ -43,6 +43,19 @@ fn fixture_tree_with_markdown_sections() -> tempfile::TempDir {
         "# Guide\n\nIntro body.\n\n## One\n\nBody one.\n\n## Two\n\nBody two.\n\n## Three\n\nBody three.\n\n## Four\n\nBody four.\n\n## Five\n\nBody five.\n",
     )
     .expect("write guide");
+    dir
+}
+
+fn fixture_git_repo_with_markdown_sections() -> tempfile::TempDir {
+    let dir = fixture_git_repo();
+    std::fs::create_dir_all(dir.path().join("docs")).expect("mkdir docs");
+    std::fs::write(
+        dir.path().join("docs/guide.md"),
+        "# Guide\n\nIntro body.\n\n## One\n\nBody one.\n\n## Two\n\nBody two.\n",
+    )
+    .expect("write guide");
+    run_git(dir.path(), &["add", "docs/guide.md"]);
+    run_git(dir.path(), &["commit", "-m", "add docs"]);
     dir
 }
 
@@ -348,6 +361,43 @@ async fn graph_build_section_sidecar_streaming_writes_all_rows() {
     assert_eq!(
         table.count_rows(None).await.expect("count rows"),
         expected_rows
+    );
+}
+
+#[test]
+fn graph_build_temporal_stamps_section_sidecar_complete() {
+    let dir = fixture_git_repo_with_markdown_sections();
+
+    let output = Command::new(spur_binary())
+        .current_dir(dir.path())
+        .args([
+            "graph",
+            "build",
+            "--workspace",
+            "--no-analyst",
+            "--quiet",
+            "--with-temporal",
+        ])
+        .env_remove("SPUR_CODE_GRAPH_INDEX")
+        .env("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1")
+        .output()
+        .expect("spawn spur graph build");
+
+    assert!(
+        output.status.success(),
+        "expected success; stderr = {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact_path = read_current_pointer(dir.path()).expect("read CURRENT");
+    let manifest = read_artifact_header_parquet(&artifact_path).expect("read manifest");
+    assert!(
+        manifest.sidecar_complete,
+        "temporal graph build should stamp a complete sidecar"
+    );
+    assert!(
+        manifest.sidecar_row_counts.section_bodies > 0,
+        "temporal graph build should stamp section sidecar row counts"
     );
 }
 
