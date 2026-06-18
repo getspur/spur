@@ -34,20 +34,24 @@
 ;
 ; Every call_expression. The @call.name capture extracts the trailing
 ; identifier; the resolver maps it to a node by name within the file's
-; visible scope. Qualified calls (`Catalog::GetEntry(...)`) keep only the
-; rightmost name to match the resolver's name index — fully-qualified
-; resolution would need scope/visibility analysis which is out of scope
-; for syntax-only extraction.
+; visible scope. Qualified calls (`Catalog::GetEntry(...)`) keep the
+; rightmost name as the target to match the resolver's name index, while
+; @call.scope preserves the syntactic qualifier as evidence. That evidence is
+; not full C++ semantic resolution: using directives, aliases, overload sets,
+; templates, and visibility still need compiler-grade analysis that is out of
+; scope for syntax-only extraction.
 
 (call_expression
   function: (identifier) @call.name) @call
 
 (call_expression
   function: (field_expression
+    argument: (_) @call.receiver
     field: (field_identifier) @call.name)) @call
 
 (call_expression
   function: (qualified_identifier
+    scope: (_) @call.scope
     name: (identifier) @call.name)) @call
 
 ; Pointer-to-member function call: `(obj->*pmf)(args)`.
