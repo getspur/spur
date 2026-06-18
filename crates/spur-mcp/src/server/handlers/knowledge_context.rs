@@ -8,8 +8,10 @@ use std::{
 use futures::future::join_all;
 use serde_json::{json, Value};
 use spur_analyst::{
-    query_context_candidates, query_graph_candidates, KnowledgeCandidate, KnowledgeQueryIntent,
-    KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope,
+    query_context_candidates, query_context_paths, query_graph_candidates,
+    query_symbol_risk_community, KnowledgeCandidate, KnowledgePathOptions, KnowledgeQueryIntent,
+    KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope, SymbolEvidenceCaveat,
+    SymbolEvidenceStatus, SymbolRiskScorecardRow, MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
 };
 use spur_graph::{
     resolve_worktree_root_from, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
@@ -57,6 +59,27 @@ impl McpCallbackServer {
             Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
         }
     }
+
+    pub(crate) async fn handle_knowledge_context_pack_2(
+        &self,
+        id: Value,
+        args: Value,
+    ) -> JsonRpcResponse {
+        match knowledge_context_pack_2(&args).await {
+            Ok(result) => {
+                let text =
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+                JsonRpcResponse::success(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }] }),
+                )
+            }
+            Err(McpHandlerError::InvalidParams(error)) => {
+                JsonRpcResponse::invalid_params(id, error)
+            }
+            Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
+        }
+    }
 }
 
 pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
@@ -66,10 +89,39 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
         return Ok(unavailable_pack(&request, &db_path));
     }
 
+    let query_result =
+        query_candidates_for_request(&request, &db_path, "knowledge_context_pack").await?;
+
+    let exact_context = exact_graph_context_for_result(&request, &query_result).await;
+    Ok(pack_query_result_with_exact_context(&request, query_result, exact_context).await)
+}
+
+pub(crate) async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerError> {
+    let request = KnowledgeContextPackV2Request::parse(args)?;
+    let db_path = analyst_db_path()?;
+    if !db_path.exists() {
+        return Ok(unavailable_pack_v2(&request, &db_path));
+    }
+
+    let query_result =
+        query_candidates_for_request(&request.base, &db_path, "knowledge_context_pack_2").await?;
+
+    let exact_context = exact_graph_context_for_result(&request.base, &query_result).await;
+    Ok(
+        pack_query_result_v2_with_graph_reasoning(&request, query_result, exact_context, &db_path)
+            .await,
+    )
+}
+
+async fn query_candidates_for_request(
+    request: &KnowledgeContextPackRequest,
+    db_path: &Path,
+    tool_name: &str,
+) -> Result<KnowledgeQueryResult, McpHandlerError> {
     let query_vec = embed_query(&request.query).await.map(Vec::from);
     let analyst_intent = request.intent.as_analyst_intent();
     let mut query_result = query_context_candidates(
-        &db_path,
+        db_path,
         &request.query,
         request.scope.as_analyst_scope(),
         KnowledgeQueryOptions {
@@ -80,14 +132,14 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
     )
     .map_err(|error| {
         McpHandlerError::Internal(format!(
-            "knowledge_context_pack failed to query analyst DB at {}: {error}",
+            "{tool_name} failed to query analyst DB at {}: {error}",
             db_path.display()
         ))
     })?;
 
     if request.should_query_graph_candidates() {
         match query_graph_candidates(
-            &db_path,
+            db_path,
             &request.query,
             KnowledgeQueryOptions {
                 limit: request.limit as usize,
@@ -99,13 +151,13 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
             Err(error) => tracing::warn!(
                 db_path = %db_path.display(),
                 error = %error,
-                "knowledge_context_pack failed to query graph candidates; continuing with context candidates"
+                tool = tool_name,
+                "knowledge context pack failed to query graph candidates; continuing with context candidates"
             ),
         }
     }
 
-    let exact_context = exact_graph_context_for_result(&request, &query_result).await;
-    Ok(pack_query_result_with_exact_context(&request, query_result, exact_context).await)
+    Ok(query_result)
 }
 
 struct KnowledgeContextPackRequest {
@@ -173,6 +225,92 @@ impl KnowledgeContextPackRequest {
                     self.intent,
                     KnowledgeIntent::Debug | KnowledgeIntent::Change
                 ))
+    }
+}
+
+struct KnowledgeContextPackV2Request {
+    base: KnowledgeContextPackRequest,
+    graph_reasoning: GraphReasoningOptions,
+}
+
+impl KnowledgeContextPackV2Request {
+    fn parse(args: &Value) -> Result<Self, McpHandlerError> {
+        let base = KnowledgeContextPackRequest::parse(args)?;
+        let graph_reasoning = GraphReasoningOptions::parse(args, base.intent, base.scope)?;
+        Ok(Self {
+            base,
+            graph_reasoning,
+        })
+    }
+}
+
+struct GraphReasoningOptions {
+    paths: bool,
+    communities: bool,
+    communities_explicit: bool,
+    risk: bool,
+    max_path_hops: usize,
+    max_paths: usize,
+    anchors: Vec<String>,
+}
+
+impl GraphReasoningOptions {
+    fn parse(
+        args: &Value,
+        intent: KnowledgeIntent,
+        scope: KnowledgeScope,
+    ) -> Result<Self, McpHandlerError> {
+        let paths_default = matches!(
+            intent,
+            KnowledgeIntent::Change | KnowledgeIntent::Review | KnowledgeIntent::Debug
+        );
+        let risk_default = !matches!(scope, KnowledgeScope::Docs);
+        let Some(value) = args.get("graph_reasoning") else {
+            return Ok(Self {
+                paths: paths_default,
+                communities: true,
+                communities_explicit: false,
+                risk: risk_default,
+                max_path_hops: KnowledgePathOptions::default().max_hops,
+                max_paths: KnowledgePathOptions::default().max_paths,
+                anchors: Vec::new(),
+            });
+        };
+        let object = value.as_object().ok_or_else(|| {
+            McpHandlerError::InvalidParams(
+                "knowledge_context_pack_2 field 'graph_reasoning' must be an object".into(),
+            )
+        })?;
+        let communities = parse_optional_bool_v2(object, "communities")?;
+
+        Ok(Self {
+            paths: parse_optional_bool_v2(object, "paths")?.unwrap_or(paths_default),
+            communities: communities.unwrap_or(true),
+            communities_explicit: communities.is_some(),
+            risk: parse_optional_bool_v2(object, "risk")?.unwrap_or(risk_default),
+            max_path_hops: parse_clamped_usize_v2(
+                object,
+                "max_path_hops",
+                KnowledgePathOptions::default().max_hops,
+                1,
+                MAX_CONTEXT_PATH_HOPS,
+            )?,
+            max_paths: parse_clamped_usize_v2(
+                object,
+                "max_paths",
+                KnowledgePathOptions::default().max_paths,
+                1,
+                MAX_CONTEXT_PATHS,
+            )?,
+            anchors: parse_anchor_array_v2(object)?,
+        })
+    }
+
+    fn should_query_communities(&self, code_symbol_count: usize) -> bool {
+        if !self.communities {
+            return false;
+        }
+        self.communities_explicit || code_symbol_count >= 2
     }
 }
 
@@ -618,6 +756,67 @@ fn parse_u64(
     }
 }
 
+fn parse_optional_bool_v2(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<bool>, McpHandlerError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    value.as_bool().map(Some).ok_or_else(|| {
+        McpHandlerError::InvalidParams(format!(
+            "knowledge_context_pack_2 graph_reasoning field '{field}' must be a boolean"
+        ))
+    })
+}
+
+fn parse_clamped_usize_v2(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, McpHandlerError> {
+    let Some(value) = object.get(field) else {
+        return Ok(default);
+    };
+    let value = value.as_i64().ok_or_else(|| {
+        McpHandlerError::InvalidParams(format!(
+            "knowledge_context_pack_2 graph_reasoning field '{field}' must be an integer"
+        ))
+    })?;
+    Ok(value.clamp(min as i64, max as i64) as usize)
+}
+
+fn parse_anchor_array_v2(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Vec<String>, McpHandlerError> {
+    let Some(value) = object.get("anchors") else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| {
+        McpHandlerError::InvalidParams(
+            "knowledge_context_pack_2 graph_reasoning field 'anchors' must be an array".into(),
+        )
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|anchor| !anchor.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    McpHandlerError::InvalidParams(
+                        "knowledge_context_pack_2 graph_reasoning field 'anchors' must contain non-empty strings"
+                            .into(),
+                    )
+                })
+        })
+        .collect()
+}
+
 fn analyst_db_path() -> Result<PathBuf, McpHandlerError> {
     Ok(current_repo_root()?.join(".spur").join("analyst.duckdb"))
 }
@@ -771,12 +970,13 @@ fn top_n_code_selectors(
 }
 
 fn normalized_code_selector(stable_symbol_id: &str) -> String {
-    format!(
-        "graph://symbol/{}",
-        stable_symbol_id
-            .strip_prefix("graph://symbol/")
-            .unwrap_or(stable_symbol_id)
-    )
+    format!("graph://symbol/{}", raw_stable_symbol_id(stable_symbol_id))
+}
+
+fn raw_stable_symbol_id(stable_symbol_id: &str) -> &str {
+    stable_symbol_id
+        .strip_prefix("graph://symbol/")
+        .unwrap_or(stable_symbol_id)
 }
 
 async fn pack_query_result_with_exact_context(
@@ -893,6 +1093,350 @@ async fn pack_query_result_with_exact_context(
         );
     }
     pack
+}
+
+async fn pack_query_result_v2_with_graph_reasoning(
+    request: &KnowledgeContextPackV2Request,
+    result: KnowledgeQueryResult,
+    exact_context: ExactGraphContext,
+    db_path: &Path,
+) -> Value {
+    let graph_sections = graph_reasoning_sections(request, &result, db_path);
+    let mut pack = pack_query_result_with_exact_context(&request.base, result, exact_context).await;
+    insert_v2_sections(&mut pack, graph_sections);
+    pack
+}
+
+fn unavailable_pack_v2(request: &KnowledgeContextPackV2Request, db_path: &Path) -> Value {
+    let mut pack = unavailable_pack(&request.base, db_path);
+    insert_v2_sections(
+        &mut pack,
+        GraphReasoningSections {
+            caveats: vec![caveat_value(
+                "analyst_unavailable",
+                format!("analyst DB not found at {}", db_path.display()),
+                None,
+            )],
+            ..GraphReasoningSections::default()
+        },
+    );
+    pack
+}
+
+#[derive(Default)]
+struct GraphReasoningSections {
+    graph_paths: Vec<Value>,
+    risk_scorecard: Vec<Value>,
+    community_context: Vec<Value>,
+    temporal_context: Vec<Value>,
+    caveats: Vec<Value>,
+}
+
+fn graph_reasoning_sections(
+    request: &KnowledgeContextPackV2Request,
+    result: &KnowledgeQueryResult,
+    db_path: &Path,
+) -> GraphReasoningSections {
+    let code_symbol_ids = graph_reasoning_code_symbol_ids(&result.candidates, &request.base);
+    let mut sections = GraphReasoningSections::default();
+    let wants_communities = request
+        .graph_reasoning
+        .should_query_communities(code_symbol_ids.len());
+    let wants_symbol_enrichment = request.graph_reasoning.risk || wants_communities;
+
+    if code_symbol_ids.is_empty() {
+        if request.graph_reasoning.paths || wants_symbol_enrichment {
+            sections.caveats.push(caveat_value(
+                "graph_reasoning_no_code_candidates",
+                "graph reasoning sections require grounded code candidates",
+                None,
+            ));
+        }
+        return sections;
+    }
+
+    if request.graph_reasoning.paths {
+        collect_graph_paths(db_path, request, &code_symbol_ids, &mut sections);
+    }
+
+    if wants_symbol_enrichment {
+        match query_symbol_risk_community(db_path, &code_symbol_ids) {
+            Ok(result) => {
+                let risk_rows = result.risk_scorecard;
+                let community_rows = result.community_context;
+                if request.graph_reasoning.risk {
+                    sections.temporal_context = temporal_context_from_risk_rows(&risk_rows);
+                    sections.risk_scorecard = risk_rows
+                        .iter()
+                        .filter_map(to_json_value)
+                        .collect::<Vec<_>>();
+                } else {
+                    sections.temporal_context = Vec::new();
+                }
+                if wants_communities {
+                    sections.community_context = community_rows
+                        .iter()
+                        .filter_map(to_json_value)
+                        .collect::<Vec<_>>();
+                }
+                sections
+                    .caveats
+                    .extend(result.caveats.iter().map(symbol_caveat_value));
+                sections.caveats.extend(risk_rows.iter().flat_map(|row| {
+                    row.caveats
+                        .iter()
+                        .map(symbol_caveat_value)
+                        .collect::<Vec<_>>()
+                }));
+                sections
+                    .caveats
+                    .extend(community_rows.iter().flat_map(|row| {
+                        row.caveats
+                            .iter()
+                            .map(symbol_caveat_value)
+                            .collect::<Vec<_>>()
+                    }));
+            }
+            Err(error) => sections.caveats.push(caveat_value(
+                "symbol_enrichment_unavailable",
+                format!("symbol graph enrichment unavailable: {error:#}"),
+                None,
+            )),
+        }
+    }
+
+    sections
+}
+
+fn graph_reasoning_code_symbol_ids(
+    candidates: &[KnowledgeCandidate],
+    request: &KnowledgeContextPackRequest,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    for candidate in candidates {
+        if ids.len() >= request.limit as usize {
+            break;
+        }
+        if !request.include_tests && is_test_file(&candidate.file_path) {
+            continue;
+        }
+        if candidate.kind != "code" && candidate.kind != "symbol" {
+            continue;
+        }
+        let Some(stable_symbol_id) = candidate.stable_symbol_id.as_deref() else {
+            continue;
+        };
+        let id = raw_stable_symbol_id(stable_symbol_id).to_string();
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+fn collect_graph_paths(
+    db_path: &Path,
+    request: &KnowledgeContextPackV2Request,
+    code_symbol_ids: &[String],
+    sections: &mut GraphReasoningSections,
+) {
+    let Some(source) = code_symbol_ids.first() else {
+        return;
+    };
+    let mut targets = code_symbol_ids.iter().skip(1).cloned().collect::<Vec<_>>();
+    targets.extend(resolve_anchor_targets(
+        source,
+        &request.graph_reasoning.anchors,
+        sections,
+    ));
+    dedupe_preserving_order(&mut targets);
+
+    if targets.is_empty() {
+        sections.caveats.push(caveat_value(
+            "graph_paths_insufficient_targets",
+            "graph path reasoning requires at least two grounded code candidates or a graph://symbol anchor",
+            Some(source.clone()),
+        ));
+        return;
+    }
+
+    let mut groups_remaining = request.graph_reasoning.max_paths;
+    for target in targets {
+        if groups_remaining == 0 {
+            break;
+        }
+        match query_context_paths(
+            db_path,
+            source,
+            &target,
+            KnowledgePathOptions {
+                max_hops: request.graph_reasoning.max_path_hops,
+                max_paths: groups_remaining,
+            },
+        ) {
+            Ok(path_result) => {
+                if let Some(caveat) = path_result.caveat.as_deref() {
+                    sections.caveats.push(caveat_value(
+                        "graph_path_unavailable",
+                        caveat,
+                        Some(source.clone()),
+                    ));
+                }
+                sections.graph_paths.push(json!({
+                    "source_stable_id": source,
+                    "target_stable_id": target,
+                    "graph_content_hash": path_result.graph_content_hash,
+                    "max_hops": path_result.max_hops,
+                    "max_paths": path_result.max_paths,
+                    "engine": path_result.engine,
+                    "status": path_result.status,
+                    "caveat": path_result.caveat,
+                    "rows": path_result.rows,
+                }));
+            }
+            Err(error) => {
+                sections.caveats.push(caveat_value(
+                    "graph_path_unavailable",
+                    format!("context path search unavailable: {error:#}"),
+                    Some(source.clone()),
+                ));
+                sections.graph_paths.push(json!({
+                    "source_stable_id": source,
+                    "target_stable_id": target,
+                    "graph_content_hash": null,
+                    "max_hops": request.graph_reasoning.max_path_hops,
+                    "max_paths": groups_remaining,
+                    "engine": "unavailable",
+                    "status": "unavailable",
+                    "caveat": format!("context path search unavailable: {error:#}"),
+                    "rows": [],
+                }));
+            }
+        }
+        groups_remaining = groups_remaining.saturating_sub(1);
+    }
+}
+
+fn resolve_anchor_targets(
+    source: &str,
+    anchors: &[String],
+    sections: &mut GraphReasoningSections,
+) -> Vec<String> {
+    anchors
+        .iter()
+        .filter_map(|anchor| {
+            let trimmed = anchor.trim();
+            let Some(target) = stable_symbol_anchor(trimmed) else {
+                sections.caveats.push(caveat_value(
+                    "graph_anchor_unresolved",
+                    format!(
+                        "anchor {trimmed:?} is not a graph://symbol selector or bare stable symbol id"
+                    ),
+                    None,
+                ));
+                return None;
+            };
+            if target == source {
+                sections.caveats.push(caveat_value(
+                    "graph_anchor_same_as_source",
+                    format!("anchor {trimmed:?} resolves to the source symbol"),
+                    Some(source.to_string()),
+                ));
+                return None;
+            }
+            Some(target.to_string())
+        })
+        .collect()
+}
+
+fn stable_symbol_anchor(anchor: &str) -> Option<&str> {
+    if let Some(id) = anchor.strip_prefix("graph://symbol/") {
+        return (!id.is_empty()).then_some(id);
+    }
+    let looks_like_stable_id = anchor.len() >= 8
+        && anchor
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
+    looks_like_stable_id.then_some(anchor)
+}
+
+fn dedupe_preserving_order(values: &mut Vec<String>) {
+    let mut deduped = Vec::with_capacity(values.len());
+    for value in values.drain(..) {
+        if !deduped.contains(&value) {
+            deduped.push(value);
+        }
+    }
+    *values = deduped;
+}
+
+fn temporal_context_from_risk_rows(rows: &[SymbolRiskScorecardRow]) -> Vec<Value> {
+    rows.iter()
+        .filter(|row| row.status == SymbolEvidenceStatus::Available)
+        .filter(|row| row.churn_90d.is_some() || row.last_touched.is_some())
+        .map(|row| {
+            json!({
+                "input_index": row.input_index,
+                "stable_symbol_id": row.stable_symbol_id,
+                "file_path": row.file_path,
+                "churn_90d": row.churn_90d,
+                "last_touched": row.last_touched,
+                "posture": row.posture,
+            })
+        })
+        .collect()
+}
+
+fn insert_v2_sections(pack: &mut Value, sections: GraphReasoningSections) {
+    if let Some(object) = pack.as_object_mut() {
+        object.insert("graph_paths".into(), Value::Array(sections.graph_paths));
+        object.insert(
+            "risk_scorecard".into(),
+            Value::Array(sections.risk_scorecard),
+        );
+        object.insert(
+            "community_context".into(),
+            Value::Array(sections.community_context),
+        );
+        object.insert(
+            "temporal_context".into(),
+            Value::Array(sections.temporal_context),
+        );
+        object.insert("caveats".into(), Value::Array(sections.caveats));
+        object.entry("candidates").or_insert_with(|| {
+            json!({
+                "total": 0,
+                "returned_primary": 0,
+                "returned_supporting_docs": 0,
+                "total_code": 0,
+                "total_docs": 0,
+            })
+        });
+    }
+}
+
+fn to_json_value<T: serde::Serialize>(value: &T) -> Option<Value> {
+    serde_json::to_value(value).ok()
+}
+
+fn symbol_caveat_value(caveat: &SymbolEvidenceCaveat) -> Value {
+    caveat_value(
+        caveat.code.clone(),
+        caveat.message.clone(),
+        caveat.stable_symbol_id.clone(),
+    )
+}
+
+fn caveat_value(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    stable_symbol_id: Option<String>,
+) -> Value {
+    json!({
+        "code": code.into(),
+        "message": message.into(),
+        "stable_symbol_id": stable_symbol_id,
+    })
 }
 
 fn confidence_score_thresholds(grounding: Option<&str>) -> (f64, f64) {
@@ -1371,6 +1915,101 @@ mod tests {
         }
     }
 
+    fn doc_candidate(
+        stable_symbol_id: Option<&str>,
+        title: &str,
+        score: f64,
+    ) -> KnowledgeCandidate {
+        KnowledgeCandidate {
+            kind: "doc".into(),
+            title: title.into(),
+            file_path: "docs/context.md".into(),
+            stable_symbol_id: stable_symbol_id.map(str::to_string),
+            symbol_kind: Some("section".into()),
+            score,
+            signal: None,
+            neighbor_kind: None,
+            edge_bind_method: None,
+            grounding: "test-doc".into(),
+        }
+    }
+
+    fn minimal_analyst_db_with_meta() -> (tempfile::TempDir, PathBuf) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("analyst.duckdb");
+        let conn = Connection::open(&db_path).expect("open fixture db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE _meta (graph_content_hash VARCHAR);
+            INSERT INTO _meta VALUES ('fixture-hash');
+            "#,
+        )
+        .expect("create fixture meta");
+        drop(conn);
+        (temp_dir, db_path)
+    }
+
+    fn analyst_db_with_graph_reasoning_views() -> (tempfile::TempDir, PathBuf) {
+        let (temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let conn = Connection::open(&db_path).expect("open fixture db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE v_symbol_scorecard (
+                stable_symbol_id VARCHAR,
+                entity_name VARCHAR,
+                qualified_name VARCHAR,
+                symbol_kind VARCHAR,
+                file_path VARCHAR,
+                pagerank DOUBLE,
+                in_degree BIGINT,
+                out_degree BIGINT,
+                callers BIGINT,
+                importers BIGINT,
+                inbound_total BIGINT,
+                churn_90d BIGINT,
+                last_touched TIMESTAMP,
+                blast_radius_score DOUBLE,
+                posture VARCHAR
+            );
+            INSERT INTO v_symbol_scorecard VALUES
+                ('sym-one', 'symbol_one', 'fixture::symbol_one', 'function', 'src/one.rs',
+                 0.42, 7, 3, 5, 1, 6, 9, TIMESTAMP '2026-06-17 12:00:00', 0.91, 'active'),
+                ('sym-two', 'symbol_two', 'fixture::symbol_two', 'function', 'src/two.rs',
+                 0.21, 2, 1, 1, 0, 1, 0, NULL, 0.12, 'stable');
+
+            CREATE TABLE v_symbol_component (
+                stable_symbol_id VARCHAR,
+                component_id BIGINT,
+                component_size BIGINT
+            );
+            INSERT INTO v_symbol_component VALUES
+                ('sym-one', 10, 4),
+                ('sym-two', 10, 4);
+
+            CREATE TABLE v_symbol_community (
+                stable_symbol_id VARCHAR,
+                community_id BIGINT
+            );
+            INSERT INTO v_symbol_community VALUES
+                ('sym-one', 20),
+                ('sym-two', 20);
+
+            CREATE TABLE v_graph_metrics (
+                calls_edges BIGINT,
+                connected_nodes BIGINT,
+                components BIGINT,
+                largest_component BIGINT,
+                communities BIGINT,
+                density DOUBLE
+            );
+            INSERT INTO v_graph_metrics VALUES (12, 6, 1, 6, 2, 0.18);
+            "#,
+        )
+        .expect("create graph reasoning fixture views");
+        drop(conn);
+        (temp_dir, db_path)
+    }
+
     fn context_candidate_macro_sql() -> String {
         INIT_SEARCH_SQL
             .split("CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS TABLE")
@@ -1731,6 +2370,306 @@ pub fn lexical_signal_anchor() {
                 "scope={scope} intent={intent}"
             );
         }
+    }
+
+    #[test]
+    fn knowledge_context_pack_2_parser_clamps_graph_reasoning_budgets() {
+        let high = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "graph_reasoning": {
+                "paths": true,
+                "communities": true,
+                "risk": true,
+                "max_path_hops": 999,
+                "max_paths": 999,
+                "anchors": ["graph://symbol/anchor-one"]
+            }
+        }))
+        .expect("high budget request");
+
+        assert_eq!(high.base.intent.as_str(), "review");
+        assert!(high.graph_reasoning.paths);
+        assert!(high.graph_reasoning.communities);
+        assert!(high.graph_reasoning.risk);
+        assert_eq!(
+            high.graph_reasoning.max_path_hops,
+            spur_analyst::MAX_CONTEXT_PATH_HOPS
+        );
+        assert_eq!(
+            high.graph_reasoning.max_paths,
+            spur_analyst::MAX_CONTEXT_PATHS
+        );
+        assert_eq!(
+            high.graph_reasoning.anchors,
+            vec!["graph://symbol/anchor-one".to_string()]
+        );
+
+        let low = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "graph_reasoning": {
+                "max_path_hops": 0,
+                "max_paths": 0
+            }
+        }))
+        .expect("low budget request");
+        assert_eq!(low.graph_reasoning.max_path_hops, 1);
+        assert_eq!(low.graph_reasoning.max_paths, 1);
+    }
+
+    #[test]
+    fn knowledge_context_pack_2_parser_defaults_graph_reasoning_by_intent_and_scope() {
+        let change = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "change"
+        }))
+        .expect("change request");
+        assert!(change.graph_reasoning.paths);
+        assert!(change.graph_reasoning.risk);
+
+        let explain_docs = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "explain",
+            "scope": "docs"
+        }))
+        .expect("docs request");
+        assert!(!explain_docs.graph_reasoning.paths);
+        assert!(!explain_docs.graph_reasoning.risk);
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_v1_response_omits_v2_sections() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "semantic search"
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![candidate(Some("sym-one"), "symbol_one", 7.0)],
+        };
+
+        let pack = pack_query_result(&request, result).await;
+
+        assert!(pack.get("graph_paths").is_none());
+        assert!(pack.get("risk_scorecard").is_none());
+        assert!(pack.get("community_context").is_none());
+        assert!(pack.get("temporal_context").is_none());
+        assert!(pack.get("caveats").is_none());
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_preserves_v1_fields_and_adds_empty_v2_sections_when_disabled()
+    {
+        let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "change",
+            "scope": "code",
+            "limit": 4,
+            "include_tests": false,
+            "max_symbol_bodies": 0,
+            "graph_reasoning": {
+                "paths": false,
+                "communities": false,
+                "risk": false
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-one"), "symbol_one", 7.5),
+                doc_candidate(Some("doc-one"), "Context Doc", 3.0),
+            ],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext {
+                graph_content_hash: Some("fixture-hash".into()),
+                response_file_oids_match: Some(true),
+                impacts: Vec::new(),
+            },
+            &db_path,
+        )
+        .await;
+
+        assert_eq!(pack["query"], "semantic search");
+        assert_eq!(pack["intent"], "change");
+        assert_eq!(pack["scope"], "code");
+        assert_eq!(pack["graph_content_hash"], "fixture-hash");
+        assert_eq!(
+            pack["staleness"]["analyst_graph_content_hash"],
+            "fixture-hash"
+        );
+        assert_eq!(pack["candidates"]["total"], 2);
+        assert_eq!(pack["candidates"]["returned_primary"], 1);
+        assert_eq!(pack["candidates"]["returned_supporting_docs"], 1);
+        assert_eq!(
+            pack["primary_evidence"][0]["stable_symbol_id"],
+            "graph://symbol/sym-one"
+        );
+        assert_eq!(pack["supporting_docs"][0]["stable_symbol_id"], "doc-one");
+        assert_eq!(
+            pack["recommended_next_tools"][0]["selector"],
+            "graph://symbol/sym-one"
+        );
+        assert_eq!(pack["graph_paths"], json!([]));
+        assert_eq!(pack["risk_scorecard"], json!([]));
+        assert_eq!(pack["community_context"], json!([]));
+        assert_eq!(pack["temporal_context"], json!([]));
+        assert_eq!(pack["caveats"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_missing_graph_views_return_caveats_not_error() {
+        let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "scope": "code",
+            "limit": 2,
+            "graph_reasoning": {
+                "paths": true,
+                "communities": true,
+                "risk": true,
+                "max_path_hops": 2,
+                "max_paths": 1
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-one"), "symbol_one", 8.0),
+                candidate(Some("sym-two"), "symbol_two", 7.0),
+            ],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext::default(),
+            &db_path,
+        )
+        .await;
+
+        assert!(pack.get("error").is_none(), "v2 graph failures are caveats");
+        let caveat_codes = pack["caveats"]
+            .as_array()
+            .expect("caveats")
+            .iter()
+            .filter_map(|caveat| caveat["code"].as_str())
+            .collect::<Vec<_>>();
+        assert!(caveat_codes.contains(&"scorecard_unavailable"));
+        assert!(caveat_codes.contains(&"community_unavailable"));
+        assert!(caveat_codes.contains(&"graph_metrics_unavailable"));
+        assert!(caveat_codes.contains(&"graph_path_unavailable"));
+        assert_eq!(pack["risk_scorecard"][0]["status"], "unavailable");
+        assert_eq!(pack["community_context"][0]["status"], "unavailable");
+        assert_eq!(pack["graph_paths"][0]["status"], "unavailable");
+        assert_eq!(pack["graph_paths"][0]["rows"][0]["status"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_returns_temporal_context_from_scorecard_when_available() {
+        let (_temp_dir, db_path) = analyst_db_with_graph_reasoning_views();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "scope": "code",
+            "limit": 2,
+            "graph_reasoning": {
+                "paths": false,
+                "communities": true,
+                "risk": true
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-one"), "symbol_one", 8.0),
+                candidate(Some("sym-two"), "symbol_two", 7.0),
+            ],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext::default(),
+            &db_path,
+        )
+        .await;
+
+        assert_eq!(pack["risk_scorecard"][0]["status"], "available");
+        assert_eq!(pack["risk_scorecard"][0]["churn_90d"], 9);
+        assert_eq!(pack["community_context"][0]["status"], "available");
+        assert_eq!(pack["community_context"][0]["component_id"], 10);
+        assert_eq!(pack["temporal_context"][0]["stable_symbol_id"], "sym-one");
+        assert_eq!(pack["temporal_context"][0]["churn_90d"], 9);
+        assert!(pack["temporal_context"][0]["last_touched"]
+            .as_str()
+            .expect("last touched")
+            .contains("2026-06-17"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_bounds_path_and_risk_output() {
+        let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "scope": "code",
+            "limit": 3,
+            "graph_reasoning": {
+                "paths": true,
+                "communities": false,
+                "risk": true,
+                "max_path_hops": 2,
+                "max_paths": 1
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-one"), "symbol_one", 9.0),
+                candidate(Some("sym-two"), "symbol_two", 8.0),
+                candidate(Some("sym-three"), "symbol_three", 7.0),
+                candidate(Some("sym-four"), "symbol_four", 6.0),
+                candidate(Some("sym-five"), "symbol_five", 5.0),
+            ],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext::default(),
+            &db_path,
+        )
+        .await;
+
+        assert!(
+            pack["risk_scorecard"].as_array().expect("risk").len() <= 3,
+            "risk rows should be bounded by the request limit"
+        );
+        let path_rows = pack["graph_paths"]
+            .as_array()
+            .expect("graph paths")
+            .iter()
+            .map(|path| path["rows"].as_array().map_or(0, Vec::len))
+            .sum::<usize>();
+        assert!(
+            path_rows <= 1,
+            "path rows should be bounded by graph_reasoning.max_paths"
+        );
     }
 
     #[test]
