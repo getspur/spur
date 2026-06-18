@@ -5,9 +5,10 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use spur_analyst::{
-    query_context_candidates, query_context_paths, query_graph_candidates, KnowledgePathEngine,
-    KnowledgePathOptions, KnowledgePathStatus, KnowledgeQueryOptions, KnowledgeSearchScope,
-    MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
+    query_context_candidates, query_context_paths, query_graph_candidates,
+    query_symbol_risk_community, KnowledgePathEngine, KnowledgePathOptions, KnowledgePathStatus,
+    KnowledgeQueryOptions, KnowledgeSearchScope, SymbolEvidenceStatus, MAX_CONTEXT_PATHS,
+    MAX_CONTEXT_PATH_HOPS,
 };
 use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
 use spur_graph::{artifact_from_facts, build_facts, EMBEDDING_VECTOR_DIMENSIONS};
@@ -451,6 +452,175 @@ fn graph_candidates_return_primary_and_neighbor_rows() {
 }
 
 #[test]
+fn symbol_risk_community_reads_materialized_views() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_symbol_risk_fixture(&conn);
+    drop(conn);
+
+    let result =
+        query_symbol_risk_community(&db_path, &["sym-b", "sym-a"]).expect("query enrichment");
+
+    assert_eq!(
+        result.graph_content_hash.as_deref(),
+        Some("risk-fixture-hash")
+    );
+    assert_eq!(result.max_symbols, 40);
+    assert!(!result.truncated);
+    assert!(result.caveats.is_empty(), "{:#?}", result.caveats);
+    assert_eq!(result.risk_scorecard.len(), 2);
+    assert_eq!(result.community_context.len(), 2);
+
+    let risk_b = &result.risk_scorecard[0];
+    assert_eq!(risk_b.input_index, 0);
+    assert_eq!(risk_b.stable_symbol_id, "sym-b");
+    assert_eq!(risk_b.status, SymbolEvidenceStatus::Available);
+    assert_eq!(risk_b.entity_name.as_deref(), Some("beta"));
+    assert_eq!(risk_b.qualified_name.as_deref(), Some("fixture::beta"));
+    assert_eq!(risk_b.file_path.as_deref(), Some("src/b.rs"));
+    assert_eq!(risk_b.symbol_kind.as_deref(), Some("function"));
+    assert_eq!(risk_b.pagerank, Some(0.42));
+    assert_eq!(risk_b.in_degree, Some(7));
+    assert_eq!(risk_b.out_degree, Some(3));
+    assert_eq!(risk_b.callers, Some(11));
+    assert_eq!(risk_b.importers, Some(5));
+    assert_eq!(risk_b.inbound_total, Some(19));
+    assert_eq!(risk_b.churn_90d, Some(13));
+    assert_eq!(risk_b.last_touched.as_deref(), Some("2026-06-15 12:00:00"));
+    assert_eq!(risk_b.blast_radius_score, Some(8.5));
+    assert_eq!(risk_b.posture.as_deref(), Some("hot-central"));
+    assert!(risk_b.caveats.is_empty(), "{risk_b:#?}");
+
+    let community_b = &result.community_context[0];
+    assert_eq!(community_b.input_index, 0);
+    assert_eq!(community_b.stable_symbol_id, "sym-b");
+    assert_eq!(community_b.status, SymbolEvidenceStatus::Available);
+    assert_eq!(community_b.component_id, Some(2));
+    assert_eq!(community_b.component_size, Some(9));
+    assert_eq!(community_b.community_id, Some(20));
+    assert!(community_b.caveats.is_empty(), "{community_b:#?}");
+
+    let metrics = result.graph_metrics.expect("graph metrics");
+    assert_eq!(metrics.calls_edges, Some(100));
+    assert_eq!(metrics.connected_nodes, Some(80));
+    assert_eq!(metrics.components, Some(4));
+    assert_eq!(metrics.largest_component, Some(25));
+    assert_eq!(metrics.communities, Some(6));
+    assert_eq!(metrics.density, Some(0.125));
+}
+
+#[test]
+fn symbol_risk_community_returns_caveats_when_views_are_missing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('missing-views-hash');
+        "#,
+    )
+    .expect("create incomplete fixture schema");
+    drop(conn);
+
+    let result =
+        query_symbol_risk_community(&db_path, &["sym-a"]).expect("query missing-view enrichment");
+
+    assert_eq!(
+        result.graph_content_hash.as_deref(),
+        Some("missing-views-hash")
+    );
+    assert_eq!(result.risk_scorecard.len(), 1);
+    assert_eq!(
+        result.risk_scorecard[0].status,
+        SymbolEvidenceStatus::Unavailable
+    );
+    assert!(result.risk_scorecard[0].caveats.iter().any(|caveat| {
+        caveat.code == "scorecard_unavailable" && caveat.message.contains("v_symbol_scorecard")
+    }));
+    assert_eq!(result.community_context.len(), 1);
+    assert_eq!(
+        result.community_context[0].status,
+        SymbolEvidenceStatus::Unavailable
+    );
+    assert!(result.community_context[0].caveats.iter().any(|caveat| {
+        caveat.code == "community_unavailable" && caveat.message.contains("v_symbol_component")
+    }));
+    assert!(result.graph_metrics.is_none());
+    assert!(result
+        .caveats
+        .iter()
+        .any(|caveat| caveat.code == "graph_metrics_unavailable"));
+}
+
+#[test]
+fn symbol_risk_community_accepts_empty_candidate_list() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('empty-fixture-hash');
+        "#,
+    )
+    .expect("create empty fixture schema");
+    drop(conn);
+
+    let result = query_symbol_risk_community::<&str>(&db_path, &[]).expect("query empty list");
+
+    assert_eq!(
+        result.graph_content_hash.as_deref(),
+        Some("empty-fixture-hash")
+    );
+    assert!(result.risk_scorecard.is_empty());
+    assert!(result.community_context.is_empty());
+    assert!(result.caveats.is_empty(), "{:#?}", result.caveats);
+    assert!(result.graph_metrics.is_none());
+}
+
+#[test]
+fn symbol_risk_community_preserves_caller_order_deterministically() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_symbol_risk_fixture(&conn);
+    drop(conn);
+
+    let result = query_symbol_risk_community(&db_path, &["sym-c", "sym-a", "sym-b", "sym-a"])
+        .expect("query ordered enrichment");
+
+    let risk_order = result
+        .risk_scorecard
+        .iter()
+        .map(|row| (row.input_index, row.stable_symbol_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        risk_order,
+        vec![(0, "sym-c"), (1, "sym-a"), (2, "sym-b"), (3, "sym-a")]
+    );
+
+    let community_order = result
+        .community_context
+        .iter()
+        .map(|row| (row.input_index, row.stable_symbol_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        community_order,
+        vec![(0, "sym-c"), (1, "sym-a"), (2, "sym-b"), (3, "sym-a")]
+    );
+    assert_eq!(
+        result.community_context[0].status,
+        SymbolEvidenceStatus::MissingSymbol
+    );
+    assert!(result.community_context[0]
+        .caveats
+        .iter()
+        .any(|caveat| caveat.code == "community_missing_symbol"));
+}
+
+#[test]
 fn context_paths_return_bounded_shortest_path_rows_via_sql_fallback() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
@@ -671,6 +841,68 @@ fn graph_candidate_macro_sql() -> String {
             format!("{start}{body}")
         })
         .expect("graph candidate macro should be present in init_search.sql")
+}
+
+fn create_symbol_risk_fixture(conn: &duckdb::Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('risk-fixture-hash');
+
+        CREATE TABLE v_symbol_scorecard (
+            stable_symbol_id VARCHAR,
+            entity_name VARCHAR,
+            qualified_name VARCHAR,
+            symbol_kind VARCHAR,
+            file_path VARCHAR,
+            pagerank DOUBLE,
+            in_degree BIGINT,
+            out_degree BIGINT,
+            callers BIGINT,
+            importers BIGINT,
+            inbound_total BIGINT,
+            churn_90d BIGINT,
+            last_touched TIMESTAMP,
+            blast_radius_score DOUBLE,
+            posture VARCHAR
+        );
+        INSERT INTO v_symbol_scorecard VALUES
+            ('sym-b', 'beta', 'fixture::beta', 'function', 'src/b.rs',
+             0.42, 7, 3, 11, 5, 19, 13, TIMESTAMP '2026-06-15 12:00:00', 8.5, 'hot-central'),
+            ('sym-a', 'alpha', 'fixture::alpha', 'function', 'src/a.rs',
+             0.12, 2, 1, 4, 1, 6, 0, NULL, 1.25, 'load-bearing wall');
+
+        CREATE TABLE v_symbol_component (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT,
+            component_id BIGINT,
+            component_size BIGINT
+        );
+        INSERT INTO v_symbol_component VALUES
+            ('sym-a', 1, 1, 3),
+            ('sym-b', 2, 2, 9);
+
+        CREATE TABLE v_symbol_community (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT,
+            community_id BIGINT
+        );
+        INSERT INTO v_symbol_community VALUES
+            ('sym-a', 1, 10),
+            ('sym-b', 2, 20);
+
+        CREATE TABLE v_graph_metrics (
+            calls_edges BIGINT,
+            connected_nodes BIGINT,
+            components BIGINT,
+            largest_component BIGINT,
+            communities BIGINT,
+            density DOUBLE
+        );
+        INSERT INTO v_graph_metrics VALUES (100, 80, 4, 25, 6, 0.125);
+        "#,
+    )
+    .expect("create symbol risk fixture schema");
 }
 
 fn create_path_fixture(conn: &duckdb::Connection) {
