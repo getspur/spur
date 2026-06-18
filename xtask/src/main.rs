@@ -44,7 +44,7 @@ fn print_help() {
             "             on a non-Linux host the Linux binaries are staged under target/remote-linux-bin"
         );
         eprintln!(
-            "             instead of $CARGO_HOME/bin; they do not run here. macOS does not build Jute.app"
+            "             instead of $CARGO_HOME/bin; they do not run here. macOS does not build SpurLab.app"
         );
     }
     eprintln!("  --force    with --remote on a non-Linux host, overwrite $CARGO_HOME/bin anyway");
@@ -324,7 +324,7 @@ fn green_notebook_install_guidance() -> String {
         "notebook channel green selected; notebook source is owned by getspur/spur-notebook.",
         "Install the standalone notebook from https://github.com/getspur/spur-notebook.",
         "Linux expects $CARGO_HOME/bin/spur-notebook or another spur-notebook on PATH.",
-        "macOS expects ~/Applications/Jute.app/Contents/MacOS/Jute.",
+        "macOS expects ~/Applications/SpurLab.app/Contents/MacOS/SpurLab.",
         "Set SPUR_NOTEBOOK_CHANNEL=green and, if needed, SPUR_NOTEBOOK_BIN=/path/to/spur-notebook.",
     ]
     .join("\n")
@@ -684,7 +684,7 @@ mod tests {
         assert!(guidance.contains("SPUR_NOTEBOOK_CHANNEL=green"));
         assert!(guidance.contains("SPUR_NOTEBOOK_BIN"));
         assert!(guidance.contains("getspur/spur-notebook"));
-        assert!(guidance.contains("Jute.app"));
+        assert!(guidance.contains("SpurLab.app"));
         assert!(guidance.contains("$CARGO_HOME/bin/spur-notebook"));
     }
 
