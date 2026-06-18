@@ -5,6 +5,11 @@ tree-sitter captures into SPUR graph nodes and edges. Each supported language is
 wired through `src/extract/languages.rs` with a registry entry, a
 `LanguageConfig`, and a `definition_kind_map`.
 
+For ontology expansion policy, see the focused maturity roadmap:
+[`docs/superpowers/specs/2026-06-18-code-graph-ontology-maturity-roadmap.md`](../../../docs/superpowers/specs/2026-06-18-code-graph-ontology-maturity-roadmap.md).
+It defines when syntax captures should remain labels/metadata versus being
+promoted to first-class `NodeKind` or `RelationKind` variants.
+
 ## Definition Capture Vocabulary
 
 Definition queries follow the tree-sitter tags convention:
