@@ -468,6 +468,7 @@ async fn invoke_knowledge_context_for_worker(
     deps: Arc<DispatcherDeps>,
     worker_ctx: WorkerCallContext,
     args: Value,
+    v2: bool,
 ) -> Result<Value, McpHandlerError> {
     let worker_root = {
         deps.delegation_worktree_roots
@@ -476,7 +477,13 @@ async fn invoke_knowledge_context_for_worker(
             .cloned()
     };
     let root = select_knowledge_context_root(worker_root, deps.repo_root.clone());
-    let future = crate::server::handlers::knowledge_context::knowledge_context_pack(&args);
+    let future = async move {
+        if v2 {
+            crate::server::handlers::knowledge_context::knowledge_context_pack_2(&args).await
+        } else {
+            crate::server::handlers::knowledge_context::knowledge_context_pack(&args).await
+        }
+    };
     if let Some(root) = root {
         crate::server::handlers::code_graph::with_worktree_root_for_request(root, future).await
     } else {
@@ -737,6 +744,46 @@ struct KnowledgeContextPackParams {
     /// Maximum number of symbol bodies to include. Clamped by the handler to 0..=5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_symbol_bodies: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+struct KnowledgeContextPackV2Params {
+    /// Natural-language query to orient code or docs exploration.
+    query: String,
+    /// Retrieval intent. Defaults to explain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    intent: Option<KnowledgeIntentParam>,
+    /// Retrieval scope. Defaults to all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<KnowledgeScopeParam>,
+    /// Result limit. Clamped by the handler to 1..=20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
+    /// Include test symbols in code evidence. Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_tests: Option<bool>,
+    /// Maximum number of symbol bodies to include. Clamped by the handler to 0..=5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_symbol_bodies: Option<u64>,
+    /// Optional graph reasoning controls for v2 evidence sections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graph_reasoning: Option<KnowledgeGraphReasoningParams>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema, Serialize)]
+struct KnowledgeGraphReasoningParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paths: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    communities: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    risk: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_path_hops: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_paths: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anchors: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -1266,7 +1313,30 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_knowledge_context_for_worker(deps, worker_ctx, args).await
+                invoke_knowledge_context_for_worker(deps, worker_ctx, args, false).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        name = "knowledge_context_pack_2",
+        description = "experimental v2 evidence pack that preserves knowledge_context_pack retrieval and exact grounding while adding graph_paths, risk_scorecard, community_context, temporal_context, and caveats for graph reasoning.",
+        input_schema = crate::tool_schemas::schema_object::<KnowledgeContextPackV2Params>()
+    )]
+    async fn knowledge_context_pack_2_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "knowledge_context_pack_2",
+            context,
+            Some(None),
+            move |worker_ctx| async move {
+                invoke_knowledge_context_for_worker(deps, worker_ctx, args, true).await
             },
         )
         .await
