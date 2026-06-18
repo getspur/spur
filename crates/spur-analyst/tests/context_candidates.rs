@@ -555,6 +555,70 @@ fn symbol_risk_community_returns_caveats_when_views_are_missing() {
 }
 
 #[test]
+fn symbol_risk_community_enriches_scorecard_with_timestamptz_arithmetic() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    // The real v_symbol_scorecard view chain (via v_symbol_churn_90d) filters on
+    // `now() - INTERVAL '90 day'`. now() is TIMESTAMP WITH TIME ZONE, so this
+    // subtraction only binds when DuckDB's ICU extension is loaded. Load it here
+    // so CREATE VIEW succeeds; the read-only query path under test must load it
+    // too, or scorecard enrichment fails with a binder error.
+    conn.execute_batch("LOAD icu;")
+        .expect("load icu for fixture view creation");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('tz-fixture-hash');
+
+        CREATE OR REPLACE VIEW v_symbol_scorecard AS
+        SELECT
+            'sym-a' AS stable_symbol_id,
+            'alpha' AS entity_name,
+            'fixture::alpha' AS qualified_name,
+            'function' AS symbol_kind,
+            'src/a.rs' AS file_path,
+            0.12 AS pagerank,
+            CAST(2 AS BIGINT) AS in_degree,
+            CAST(1 AS BIGINT) AS out_degree,
+            CAST(4 AS BIGINT) AS callers,
+            CAST(1 AS BIGINT) AS importers,
+            CAST(6 AS BIGINT) AS inbound_total,
+            CAST(13 AS BIGINT) AS churn_90d,
+            -- TIMESTAMPTZ - INTERVAL: only binds when ICU is loaded.
+            now() - INTERVAL '90 day' AS last_touched,
+            1.25 AS blast_radius_score,
+            'load-bearing wall' AS posture;
+        "#,
+    )
+    .expect("create timestamptz scorecard fixture");
+    drop(conn);
+
+    let result = query_symbol_risk_community(&db_path, &["sym-a"]).expect("query enrichment");
+
+    assert_eq!(result.risk_scorecard.len(), 1);
+    let row = &result.risk_scorecard[0];
+    assert_eq!(
+        row.status,
+        SymbolEvidenceStatus::Available,
+        "scorecard enrichment must load ICU for TIMESTAMPTZ arithmetic; caveats: {:#?}",
+        result.caveats
+    );
+    assert!(
+        !result
+            .caveats
+            .iter()
+            .chain(row.caveats.iter())
+            .any(|caveat| caveat.code == "scorecard_unavailable"),
+        "unexpected scorecard_unavailable caveat: {:#?}",
+        result.caveats
+    );
+    assert_eq!(row.churn_90d, Some(13));
+    assert_eq!(row.entity_name.as_deref(), Some("alpha"));
+    assert!(row.last_touched.is_some());
+}
+
+#[test]
 fn symbol_risk_community_accepts_empty_candidate_list() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
