@@ -102,9 +102,21 @@ fn artifact() -> GraphIndexArtifact {
         symbols,
         symbol_node_ids,
         edges: vec![
-            edge("caller", Some("target"), Some("target")),
+            edge_with_evidence(
+                "caller",
+                Some("target"),
+                Some("target"),
+                Some("catalog"),
+                Some("Catalog"),
+            ),
             edge("unresolved-caller", None, Some("target")),
-            edge("root", Some("callee"), Some("callee")),
+            edge_with_evidence(
+                "root",
+                Some("callee"),
+                Some("callee"),
+                Some("service"),
+                Some("Service"),
+            ),
             edge("root", None, Some("external_call")),
         ],
         tombstones: Vec::new(),
@@ -168,11 +180,23 @@ fn symbol(
 }
 
 fn edge(source: &str, target: Option<&str>, target_label: Option<&str>) -> GraphEdgeArtifact {
+    edge_with_evidence(source, target, target_label, None, None)
+}
+
+fn edge_with_evidence(
+    source: &str,
+    target: Option<&str>,
+    target_label: Option<&str>,
+    receiver_text: Option<&str>,
+    scope_text: Option<&str>,
+) -> GraphEdgeArtifact {
     GraphEdgeArtifact {
         source_stable_symbol_id: source.to_owned(),
         target_stable_symbol_id: target.map(str::to_string),
         target_label: target_label.map(str::to_string),
         import_path: None,
+        receiver_text: receiver_text.map(str::to_string),
+        scope_text: scope_text.map(str::to_string),
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
@@ -337,6 +361,18 @@ fn parquet_client_find_caller_edges_matches_in_memory_client() {
     let actual = caller_records(parquet.find_caller_edges("target"));
 
     assert_eq!(actual, expected);
+    assert!(
+        actual.iter().any(|record| record
+            == &(
+                "caller".to_owned(),
+                "caller".to_owned(),
+                true,
+                Some("target".to_owned()),
+                Some("catalog".to_owned()),
+                Some("Catalog".to_owned()),
+            )),
+        "Parquet caller query should return non-empty receiver/scope evidence"
+    );
 }
 
 #[test]
@@ -357,6 +393,18 @@ fn parquet_client_find_callee_edges_matches_in_memory_client() {
     let actual = callee_records(parquet.find_callee_edges("root"));
 
     assert_eq!(actual, expected);
+    assert!(
+        actual.iter().any(|record| record
+            == &(
+                "callee".to_owned(),
+                "root".to_owned(),
+                true,
+                Some("callee".to_owned()),
+                Some("service".to_owned()),
+                Some("Service".to_owned()),
+            )),
+        "Parquet callee query should return non-empty receiver/scope evidence"
+    );
 }
 
 #[test]
@@ -475,7 +523,16 @@ fn parquet_client_temporal_index_matches_in_memory_client() {
     );
 }
 
-fn caller_records(records: Vec<OwnedCallerRecord>) -> Vec<(String, String, bool, Option<String>)> {
+fn caller_records(
+    records: Vec<OwnedCallerRecord>,
+) -> Vec<(
+    String,
+    String,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
     records
         .into_iter()
         .map(|record| match record {
@@ -484,6 +541,8 @@ fn caller_records(records: Vec<OwnedCallerRecord>) -> Vec<(String, String, bool,
                 edge.source_stable_symbol_id.clone(),
                 true,
                 edge.target_label.clone(),
+                edge.receiver_text.clone(),
+                edge.scope_text.clone(),
             ),
             OwnedCallerRecord::Unresolved {
                 caller,
@@ -494,12 +553,23 @@ fn caller_records(records: Vec<OwnedCallerRecord>) -> Vec<(String, String, bool,
                 edge.source_stable_symbol_id.clone(),
                 false,
                 Some(target_label),
+                edge.receiver_text.clone(),
+                edge.scope_text.clone(),
             ),
         })
         .collect()
 }
 
-fn callee_records(records: Vec<OwnedCalleeRecord>) -> Vec<(String, String, bool, Option<String>)> {
+fn callee_records(
+    records: Vec<OwnedCalleeRecord>,
+) -> Vec<(
+    String,
+    String,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
     records
         .into_iter()
         .map(|record| match record {
@@ -508,12 +578,16 @@ fn callee_records(records: Vec<OwnedCalleeRecord>) -> Vec<(String, String, bool,
                 edge.source_stable_symbol_id.clone(),
                 true,
                 edge.target_label.clone(),
+                edge.receiver_text.clone(),
+                edge.scope_text.clone(),
             ),
             OwnedCalleeRecord::Unresolved { edge, target_label } => (
                 target_label.clone(),
                 edge.source_stable_symbol_id.clone(),
                 false,
                 Some(target_label),
+                edge.receiver_text.clone(),
+                edge.scope_text.clone(),
             ),
         })
         .collect()

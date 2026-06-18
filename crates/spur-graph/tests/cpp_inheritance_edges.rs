@@ -119,3 +119,35 @@ class Plain {};
         edge_summary()
     );
 }
+
+#[test]
+fn cpp_qualified_and_receiver_calls_expose_call_evidence_captures() {
+    let source = r#"
+namespace demo {
+void helper();
+}
+
+struct Catalog {
+  static void Load();
+  void Touch();
+};
+
+void caller(Catalog* ptr, Catalog catalog) {
+  demo::helper();
+  Catalog::Load();
+  catalog.Touch();
+  ptr->Touch();
+}
+"#;
+
+    let scopes = capture_texts(SPUR_EDGES_QUERY, source, "call.scope");
+    let receivers = capture_texts(SPUR_EDGES_QUERY, source, "call.receiver");
+
+    assert!(scopes.contains(&"demo".to_owned()), "got {scopes:?}");
+    assert!(scopes.contains(&"Catalog".to_owned()), "got {scopes:?}");
+    assert!(
+        receivers.contains(&"catalog".to_owned()),
+        "got {receivers:?}"
+    );
+    assert!(receivers.contains(&"ptr".to_owned()), "got {receivers:?}");
+}
