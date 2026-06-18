@@ -446,6 +446,8 @@ fn fixture_artifact_with_unsorted_resolved_edges() -> GraphIndexArtifact {
         target_stable_symbol_id: Some("sym-a-fn".to_owned()),
         target_label: Some("a_fn".to_owned()),
         import_path: None,
+        receiver_text: None,
+        scope_text: None,
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 0.75,
@@ -531,6 +533,8 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 target_stable_symbol_id: Some("sym-a-fn".to_owned()),
                 target_label: Some("a_fn".to_owned()),
                 import_path: None,
+                receiver_text: None,
+                scope_text: None,
                 relation: RelationKind::Contains,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 1.0,
@@ -544,6 +548,8 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 target_stable_symbol_id: Some("sym-b-fn".to_owned()),
                 target_label: Some("b_fn".to_owned()),
                 import_path: None,
+                receiver_text: Some("catalog".to_owned()),
+                scope_text: Some("Catalog".to_owned()),
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 0.875,
@@ -557,6 +563,8 @@ fn fixture_artifact() -> GraphIndexArtifact {
                 target_stable_symbol_id: None,
                 target_label: Some("missing_fn".to_owned()),
                 import_path: None,
+                receiver_text: None,
+                scope_text: None,
                 relation: RelationKind::Calls,
                 confidence: Confidence::Heuristic,
                 confidence_score: f32::from_bits(0x7fc0_1234),
@@ -740,5 +748,7 @@ fn assert_artifact_eq(actual: &GraphIndexArtifact, expected: &GraphIndexArtifact
         );
         assert_eq!(actual.edge_kind, expected.edge_kind);
         assert_eq!(actual.bind_method, expected.bind_method);
+        assert_eq!(actual.receiver_text, expected.receiver_text);
+        assert_eq!(actual.scope_text, expected.scope_text);
     }
 }

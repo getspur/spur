@@ -1,3 +1,6 @@
+use spur_graph::{
+    artifact_from_facts, build_facts, GraphEdgeKind, GraphIndexArtifact, RelationKind,
+};
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator as _};
 
 const PROPOSED_QUERY: &str = r"
@@ -59,6 +62,21 @@ fn call_names(query_source: &str, source: &str) -> Vec<String> {
     capture_texts(query_source, source, "call.name")
 }
 
+fn artifact_target_label<'a>(
+    artifact: &'a GraphIndexArtifact,
+    edge: &'a spur_graph::GraphEdgeArtifact,
+) -> Option<&'a str> {
+    edge.target_label.as_deref().or_else(|| {
+        edge.target_stable_symbol_id.as_deref().and_then(|id| {
+            artifact
+                .symbols
+                .iter()
+                .find(|symbol| symbol.stable_symbol_id == id)
+                .map(|symbol| symbol.entity_name.as_str())
+        })
+    })
+}
+
 #[test]
 fn proposed_macro_token_tree_query_captures_macro_body_calls() {
     let source = r#"fn caller() { json!({ "x": mermaid_subgraph(&view.nodes, &view.edges), "y": Type::bar(2) }); }"#;
@@ -90,4 +108,66 @@ fn rust_spur_edges_query_marks_macro_body_calls_with_macro_capture_names() {
 
     assert!(names.contains(&"mermaid_subgraph".to_owned()));
     assert!(names.contains(&"bar".to_owned()));
+}
+
+#[test]
+fn rust_graph_artifact_emits_macro_body_calls_without_token_tree_noise() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        r#"
+struct Type;
+impl Type {
+    fn bar(_value: i32) {}
+}
+
+struct Holder {
+    name: &'static str,
+}
+
+enum Action {
+    InspectPlan { plan_id: u32 },
+}
+
+fn mermaid_subgraph(_nodes: &str, _edges: &str) {}
+
+fn caller() {
+    let out = [Holder { name: "node" }];
+    let ok = true;
+    let plan_id = 1;
+    json!({
+        "x": mermaid_subgraph("nodes", "edges"),
+        "y": Type::bar(2),
+        "idx": out[0].name,
+        "kw": if ok { 1 } else { 0 },
+        "variant": Some(Action::InspectPlan { plan_id }),
+    });
+}
+"#,
+    )
+    .expect("write fixture");
+
+    let facts = build_facts(dir.path(), None).expect("build facts").0;
+    let artifact = artifact_from_facts(&facts, dir.path()).expect("artifact");
+    let calls = artifact
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.relation == RelationKind::Calls && edge.edge_kind == Some(GraphEdgeKind::Calls)
+        })
+        .filter_map(|edge| artifact_target_label(&artifact, edge))
+        .collect::<Vec<_>>();
+
+    for target in ["mermaid_subgraph", "bar"] {
+        assert!(
+            calls.contains(&target),
+            "missing macro-body Calls edge to {target}; calls: {calls:?}"
+        );
+    }
+    for target in ["out", "else", "InspectPlan"] {
+        assert!(
+            !calls.contains(&target),
+            "macro token-tree noise produced unexpected Calls edge to {target}; calls: {calls:?}"
+        );
+    }
 }

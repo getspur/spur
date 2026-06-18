@@ -2076,6 +2076,7 @@ mod gate_contract {
                     "constructs",
                     "contains",
                     "defines",
+                    "references",
                     "implements",
                     "extends",
                 ]),
@@ -2088,6 +2089,7 @@ mod gate_contract {
                     "constructs",
                     "contains",
                     "defines",
+                    "references",
                     "implements",
                     "extends",
                 ]),
@@ -2100,6 +2102,7 @@ mod gate_contract {
                     "constructs",
                     "contains",
                     "defines",
+                    "references",
                     "implements",
                     "extends",
                 ]),
@@ -2152,12 +2155,8 @@ mod gate_contract {
         predicates.iter().copied().collect()
     }
 
-    fn allowlisted_relation_gaps(language: Language) -> &'static [&'static str] {
-        match language {
-            // README TODO: TypeScript/TSX do not yet capture HOF references.
-            Language::TypeScript | Language::Tsx | Language::Javascript => &["references"],
-            _ => &[],
-        }
+    fn allowlisted_relation_gaps(_language: Language) -> &'static [&'static str] {
+        &[]
     }
 
     fn query_language_for<'a>(
