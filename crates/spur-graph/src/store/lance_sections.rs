@@ -18,6 +18,7 @@ use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 
 use crate::content_hash::blake3_hex;
 use crate::embedding::openrouter::OpenRouterEmbedder;
+use crate::store::parquet::GraphArtifactSidecarRowCounts;
 use crate::{
     GraphEdgeArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphSymbolArtifact,
     RelationKind,
@@ -262,6 +263,7 @@ pub fn write_sections_dataset(
         artifact_dir,
         SectionSidecarOptions::from_env(),
     )
+    .map(|_| ())
 }
 
 pub fn write_sections_dataset_best_effort(
@@ -316,24 +318,27 @@ pub fn write_sections_dataset_best_effort_with_sidecar_options_and_progress(
     options: SectionSidecarOptions,
     progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) {
-    if let Err(error) = write_sections_dataset_with_sidecar_options_and_progress(
+    match write_sections_dataset_with_sidecar_options_and_progress(
         artifact,
         worktree_root,
         artifact_dir,
         options,
         progress,
     ) {
-        emit_progress(
-            progress,
-            SectionSidecarProgressEvent::Failed {
-                error: error.to_string(),
-            },
-        );
-        tracing::warn!(
-            error = %error,
-            artifact_dir = %artifact_dir.display(),
-            "spur-graph: section sidecar write failed; graph artifact remains usable"
-        );
+        Ok(_) => {}
+        Err(error) => {
+            emit_progress(
+                progress,
+                SectionSidecarProgressEvent::Failed {
+                    error: error.to_string(),
+                },
+            );
+            tracing::warn!(
+                error = %error,
+                artifact_dir = %artifact_dir.display(),
+                "spur-graph: section sidecar write failed; graph artifact remains usable"
+            );
+        }
     }
 }
 
@@ -349,6 +354,7 @@ fn write_sections_dataset_with_options(
         artifact_dir,
         SectionSidecarOptions::from_embedding_options(options),
     )
+    .map(|_| ())
 }
 
 fn write_sections_dataset_with_sidecar_options(
@@ -356,7 +362,7 @@ fn write_sections_dataset_with_sidecar_options(
     worktree_root: &Path,
     artifact_dir: &Path,
     options: SectionSidecarOptions,
-) -> Result<()> {
+) -> Result<GraphArtifactSidecarRowCounts> {
     write_sections_dataset_with_sidecar_options_and_progress(
         artifact,
         worktree_root,
@@ -366,13 +372,13 @@ fn write_sections_dataset_with_sidecar_options(
     )
 }
 
-fn write_sections_dataset_with_sidecar_options_and_progress(
+pub(crate) fn write_sections_dataset_with_sidecar_options_and_progress(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     artifact_dir: &Path,
     options: SectionSidecarOptions,
     progress: Option<&SectionSidecarProgressCallback<'_>>,
-) -> Result<()> {
+) -> Result<GraphArtifactSidecarRowCounts> {
     #[cfg(debug_assertions)]
     if matches!(
         std::env::var(SECTION_SIDECAR_TEST_FAIL_ENV),
@@ -412,7 +418,7 @@ fn write_sections_dataset_without_current_runtime(
     artifact_dir: &Path,
     options: SectionSidecarOptions,
     progress: Option<&SectionSidecarProgressCallback<'_>>,
-) -> Result<()> {
+) -> Result<GraphArtifactSidecarRowCounts> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -432,7 +438,7 @@ async fn write_sections_dataset_async(
     artifact_dir: &Path,
     options: SectionSidecarOptions,
     progress: Option<&SectionSidecarProgressCallback<'_>>,
-) -> Result<()> {
+) -> Result<GraphArtifactSidecarRowCounts> {
     let mut batcher =
         SectionRowBatcher::new(artifact, worktree_root, options.write_batch_size, None);
     let total_rows = batcher.total_rows();
@@ -627,9 +633,19 @@ async fn write_sections_dataset_async(
             phase: SidecarPhase::Sections,
         },
     );
-    write_symbol_rows_dataset_async(artifact, worktree_root, artifact_dir, &options, progress)
-        .await?;
-    Ok(())
+    let section_bodies = table
+        .as_ref()
+        .expect("section table should exist before sidecar completion")
+        .count_rows(None)
+        .await
+        .context("failed to count LanceDB section rows")?;
+    let code_symbols =
+        write_symbol_rows_dataset_async(artifact, worktree_root, artifact_dir, &options, progress)
+            .await?;
+    Ok(GraphArtifactSidecarRowCounts {
+        section_bodies,
+        code_symbols,
+    })
 }
 
 async fn write_symbol_rows_dataset_async(
@@ -638,7 +654,7 @@ async fn write_symbol_rows_dataset_async(
     artifact_dir: &Path,
     options: &SectionSidecarOptions,
     progress: Option<&SectionSidecarProgressCallback<'_>>,
-) -> Result<()> {
+) -> Result<usize> {
     let write_batch_size = options.write_batch_size;
     let embedding_options = options.embedding;
     let mut batcher = SymbolRowBatcher::new(artifact, worktree_root, write_batch_size, None);
@@ -774,10 +790,12 @@ async fn write_symbol_rows_dataset_async(
 
     if table.is_none() {
         let empty_batch = symbol_rows_to_batch(Vec::new(), schema)?;
-        db.create_table(CODE_SYMBOLS_TABLE, empty_batch)
-            .execute()
-            .await
-            .context("failed to create LanceDB code symbols table")?;
+        table = Some(
+            db.create_table(CODE_SYMBOLS_TABLE, empty_batch)
+                .execute()
+                .await
+                .context("failed to create LanceDB code symbols table")?,
+        );
     }
 
     if dataset_changed {
@@ -818,7 +836,12 @@ async fn write_symbol_rows_dataset_async(
         },
     );
 
-    Ok(())
+    table
+        .as_ref()
+        .expect("code symbol table should exist before sidecar completion")
+        .count_rows(None)
+        .await
+        .context("failed to count LanceDB code symbol rows")
 }
 
 fn emit_progress(
