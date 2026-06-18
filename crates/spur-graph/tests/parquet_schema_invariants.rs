@@ -44,6 +44,29 @@ fn read_artifact_header_parquet_returns_counts_and_hash_under_50ms() -> anyhow::
 }
 
 #[test]
+fn manifest_defaults_missing_sidecar_fields() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir().context("create tempdir")?;
+    let artifact = fixture_artifact();
+    let dir = write_fixture(&artifact, tempdir.path())?;
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+    let manifest_object = manifest_json
+        .as_object_mut()
+        .expect("manifest JSON should be an object");
+    manifest_object.remove("sidecar_complete");
+    manifest_object.remove("sidecar_row_counts");
+    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest_json)?)?;
+
+    let manifest = read_artifact_header_parquet(&dir).context("read artifact header")?;
+
+    assert!(!manifest.sidecar_complete);
+    assert_eq!(manifest.sidecar_row_counts.section_bodies, 0);
+    assert_eq!(manifest.sidecar_row_counts.code_symbols, 0);
+    Ok(())
+}
+
+#[test]
 fn family_2_6_endpoint_namespace_consistency() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir().context("create tempdir")?;
     let artifact = fixture_artifact();
