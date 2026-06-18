@@ -2010,6 +2010,152 @@ mod tests {
         (temp_dir, db_path)
     }
 
+    fn kcp2_fixture_repo(include_graph_reasoning_views: bool) -> (tempfile::TempDir, PathBuf) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let repo = temp_dir.path().join("repo");
+        fs::create_dir_all(repo.join(".spur")).expect("create .spur");
+        let db_path = repo.join(".spur").join("analyst.duckdb");
+        let conn = Connection::open(&db_path).expect("open fixture db");
+        conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu;")
+            .expect("load fixture extensions");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE _meta (graph_content_hash VARCHAR);
+            INSERT INTO _meta VALUES ('kcp2-fixture-hash');
+
+            CREATE TABLE sections_search (
+                stable_symbol_id VARCHAR,
+                qualified_name VARCHAR,
+                file_path VARCHAR,
+                heading_level INTEGER,
+                content_hash VARCHAR,
+                body_text VARCHAR
+            );
+            INSERT INTO sections_search VALUES
+                ('doc-dispatch', 'Dispatch Approval Reading Path', 'docs/dispatch.md', 2, 'doc-hash',
+                 'dispatch approval evidence reading path');
+
+            CREATE TABLE symbol_text (
+                stable_symbol_id VARCHAR,
+                entity_name VARCHAR,
+                qualified_name VARCHAR,
+                file_path VARCHAR,
+                symbol_kind VARCHAR,
+                doc_text VARCHAR
+            );
+            INSERT INTO symbol_text VALUES
+                ('sym-dispatch', 'dispatch_plan', 'fixture::dispatch_plan',
+                 'src/dispatch.rs', 'function', 'dispatch approval evidence entry point'),
+                ('sym-review', 'review_approval', 'fixture::review_approval',
+                 'src/review.rs', 'function', 'dispatch approval evidence review path');
+
+            CREATE TABLE v_symbol_scorecard (
+                stable_symbol_id VARCHAR,
+                entity_name VARCHAR,
+                qualified_name VARCHAR,
+                symbol_kind VARCHAR,
+                file_path VARCHAR,
+                pagerank DOUBLE,
+                in_degree BIGINT,
+                out_degree BIGINT,
+                callers BIGINT,
+                importers BIGINT,
+                inbound_total BIGINT,
+                churn_90d BIGINT,
+                last_touched TIMESTAMP,
+                blast_radius_score DOUBLE,
+                posture VARCHAR
+            );
+            INSERT INTO v_symbol_scorecard VALUES
+                ('sym-dispatch', 'dispatch_plan', 'fixture::dispatch_plan', 'function', 'src/dispatch.rs',
+                 0.42, 7, 3, 11, 2, 13, 9, TIMESTAMP '2026-06-17 12:00:00', 0.91, 'load-bearing wall'),
+                ('sym-review', 'review_approval', 'fixture::review_approval', 'function', 'src/review.rs',
+                 0.21, 2, 1, 3, 0, 3, 1, TIMESTAMP '2026-06-16 09:30:00', 0.33, 'stable');
+
+            CREATE TABLE v_symbol_inbound (
+                stable_symbol_id VARCHAR,
+                callers BIGINT
+            );
+            INSERT INTO v_symbol_inbound VALUES
+                ('sym-dispatch', 11),
+                ('sym-review', 3);
+            "#,
+        )
+        .expect("create kcp2 candidate fixture schema");
+        if include_graph_reasoning_views {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE nodes (
+                    stable_symbol_id VARCHAR,
+                    node_id BIGINT,
+                    file_path VARCHAR,
+                    entity_name VARCHAR,
+                    qualified_name VARCHAR,
+                    symbol_kind VARCHAR
+                );
+                INSERT INTO nodes VALUES
+                    ('sym-dispatch', 1, 'src/dispatch.rs', 'dispatch_plan', 'fixture::dispatch_plan', 'function'),
+                    ('sym-review', 2, 'src/review.rs', 'review_approval', 'fixture::review_approval', 'function');
+
+                CREATE TABLE edges (
+                    source_stable_id VARCHAR,
+                    target_stable_id VARCHAR,
+                    src_id BIGINT,
+                    dst_id BIGINT,
+                    target_label VARCHAR,
+                    relation VARCHAR,
+                    confidence VARCHAR,
+                    confidence_score FLOAT,
+                    edge_kind VARCHAR,
+                    bind_method VARCHAR
+                );
+                INSERT INTO edges VALUES
+                    ('sym-dispatch', 'sym-review', 1, 2, 'review_approval', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton');
+
+                CREATE TABLE v_symbol_component (
+                    stable_symbol_id VARCHAR,
+                    component_id BIGINT,
+                    component_size BIGINT
+                );
+                INSERT INTO v_symbol_component VALUES
+                    ('sym-dispatch', 10, 2),
+                    ('sym-review', 10, 2);
+
+                CREATE TABLE v_symbol_community (
+                    stable_symbol_id VARCHAR,
+                    community_id BIGINT
+                );
+                INSERT INTO v_symbol_community VALUES
+                    ('sym-dispatch', 20),
+                    ('sym-review', 20);
+
+                CREATE TABLE v_graph_metrics (
+                    calls_edges BIGINT,
+                    connected_nodes BIGINT,
+                    components BIGINT,
+                    largest_component BIGINT,
+                    communities BIGINT,
+                    density DOUBLE
+                );
+                INSERT INTO v_graph_metrics VALUES (1, 2, 1, 2, 1, 0.5);
+                "#,
+            )
+            .expect("create kcp2 graph reasoning fixture schema");
+        }
+        conn.execute_batch(
+            r#"
+            PRAGMA create_fts_index('main.sections_search', 'stable_symbol_id', 'body_text', overwrite=1, stemmer='porter');
+            PRAGMA create_fts_index('main.symbol_text', 'stable_symbol_id', 'doc_text', overwrite=1);
+            "#,
+        )
+        .expect("create kcp2 fixture fts indexes");
+        let macro_sql = context_candidate_macro_sql();
+        conn.execute_batch(&macro_sql)
+            .expect("define kcp2 fixture context search macro");
+        drop(conn);
+        (temp_dir, repo)
+    }
+
     fn context_candidate_macro_sql() -> String {
         INIT_SEARCH_SQL
             .split("CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS TABLE")
@@ -2670,6 +2816,181 @@ pub fn lexical_signal_anchor() {
             path_rows <= 1,
             "path rows should be bounded by graph_reasoning.max_paths"
         );
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_reads_fixture_db_end_to_end() {
+        let (_temp_dir, repo) = kcp2_fixture_repo(true);
+
+        let pack = super::super::code_graph::with_worktree_root_for_request(repo, async {
+            knowledge_context_pack_2(&json!({
+                "query": "dispatch approval evidence",
+                "intent": "review",
+                "scope": "all",
+                "limit": 5,
+                "graph_reasoning": {
+                    "paths": true,
+                    "communities": true,
+                    "risk": true,
+                    "max_path_hops": 2,
+                    "max_paths": 1
+                }
+            }))
+            .await
+        })
+        .await
+        .expect("kcp2 fixture response");
+
+        assert!(pack.get("error").is_none(), "{pack:#}");
+        assert_eq!(pack["query"], "dispatch approval evidence");
+        assert_eq!(pack["graph_content_hash"], "kcp2-fixture-hash");
+        assert_eq!(pack["answerable"], true);
+        assert!(
+            pack["primary_evidence"]
+                .as_array()
+                .expect("primary evidence")
+                .iter()
+                .any(|evidence| evidence["stable_symbol_id"] == "graph://symbol/sym-dispatch"),
+            "primary_evidence should include the dispatch symbol: {pack:#}"
+        );
+        assert!(
+            pack["supporting_docs"]
+                .as_array()
+                .expect("supporting docs")
+                .iter()
+                .any(|doc| doc["stable_symbol_id"] == "doc-dispatch"),
+            "supporting_docs should include the fixture doc: {pack:#}"
+        );
+        assert_eq!(pack["graph_paths"][0]["source_stable_id"], "sym-dispatch");
+        assert_eq!(pack["graph_paths"][0]["target_stable_id"], "sym-review");
+        assert_eq!(pack["graph_paths"][0]["status"], "path_found");
+        assert_eq!(pack["graph_paths"][0]["engine"], "recursive_sql");
+        assert_eq!(pack["graph_paths"][0]["rows"][0]["relation"], "calls");
+        assert_eq!(pack["risk_scorecard"][0]["status"], "available");
+        assert_eq!(
+            pack["risk_scorecard"][0]["stable_symbol_id"],
+            "sym-dispatch"
+        );
+        assert_eq!(pack["risk_scorecard"][0]["churn_90d"], 9);
+        assert_eq!(pack["community_context"][0]["status"], "available");
+        assert_eq!(
+            pack["community_context"][0]["stable_symbol_id"],
+            "sym-dispatch"
+        );
+        assert_eq!(pack["community_context"][0]["component_id"], 10);
+        assert_eq!(pack["community_context"][0]["community_id"], 20);
+        assert_eq!(
+            pack["recommended_next_tools"][0]["selector"],
+            "graph://symbol/sym-dispatch"
+        );
+        assert!(
+            pack["caveats"].as_array().expect("caveats").is_empty(),
+            "complete fixture should not emit caveats: {pack:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_missing_graph_views_keeps_candidates_and_returns_caveats() {
+        let (_temp_dir, repo) = kcp2_fixture_repo(false);
+
+        let pack = super::super::code_graph::with_worktree_root_for_request(repo, async {
+            knowledge_context_pack_2(&json!({
+                "query": "dispatch approval evidence",
+                "intent": "review",
+                "scope": "all",
+                "limit": 5,
+                "graph_reasoning": {
+                    "paths": true,
+                    "communities": true,
+                    "risk": true,
+                    "max_path_hops": 2,
+                    "max_paths": 1
+                }
+            }))
+            .await
+        })
+        .await
+        .expect("kcp2 missing-view fixture response");
+
+        assert!(pack.get("error").is_none(), "{pack:#}");
+        assert!(
+            !pack["primary_evidence"]
+                .as_array()
+                .expect("primary evidence")
+                .is_empty(),
+            "missing graph views should not suppress retrieved candidates: {pack:#}"
+        );
+        assert!(
+            !pack["recommended_next_tools"]
+                .as_array()
+                .expect("recommended next tools")
+                .is_empty(),
+            "candidate follow-up tools should still be present: {pack:#}"
+        );
+        assert_eq!(pack["risk_scorecard"][0]["status"], "available");
+        assert_eq!(pack["community_context"][0]["status"], "unavailable");
+        assert_eq!(pack["graph_paths"][0]["status"], "unavailable");
+        let caveat_codes = pack["caveats"]
+            .as_array()
+            .expect("caveats")
+            .iter()
+            .filter_map(|caveat| caveat["code"].as_str())
+            .collect::<Vec<_>>();
+        assert!(caveat_codes.contains(&"community_unavailable"));
+        assert!(caveat_codes.contains(&"graph_metrics_unavailable"));
+        assert!(caveat_codes.contains(&"graph_path_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_preserves_popular_sink_impact_boundary() {
+        let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "popular impact",
+            "intent": "change",
+            "scope": "code",
+            "graph_reasoning": {
+                "paths": false,
+                "communities": false,
+                "risk": false
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![candidate(Some("sym-sink"), "sink_symbol", 9.0)],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext {
+                graph_content_hash: Some("fixture-hash".into()),
+                response_file_oids_match: Some(true),
+                impacts: vec![Some(SymbolImpactSummary {
+                    selector: "graph://symbol/sym-sink".into(),
+                    callers_count: POPULAR_SINK_CALLERS_THRESHOLD + 1,
+                    callees_count: 2,
+                    caller_neighbors: vec![json!({ "title": "caller_a" })],
+                    callee_neighbors: vec![json!({ "title": "callee_a" })],
+                })],
+            },
+            &db_path,
+        )
+        .await;
+
+        assert_eq!(pack["impact"]["popular_sink"], true);
+        assert_eq!(
+            pack["impact"]["caller_neighbors"].as_array().unwrap().len(),
+            0
+        );
+        assert_eq!(
+            pack["impact"]["callee_neighbors"].as_array().unwrap().len(),
+            0
+        );
+        assert_eq!(pack["graph_paths"], json!([]));
+        assert_eq!(pack["risk_scorecard"], json!([]));
+        assert_eq!(pack["community_context"], json!([]));
     }
 
     #[test]
