@@ -585,6 +585,8 @@ fn graph_edge(source: &str, target: &str) -> GraphEdgeArtifact {
         target_stable_symbol_id: Some(target.to_string()),
         target_label: None,
         import_path: None,
+        receiver_text: None,
+        scope_text: None,
         relation: RelationKind::Calls,
         confidence: Confidence::SyntaxExact,
         confidence_score: 1.0,
