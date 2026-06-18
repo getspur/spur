@@ -12,13 +12,14 @@ use anyhow::{Context as _, Result};
 use crate::locking::try_lock_exclusive_with_timeout;
 use crate::store::build::BuildStats;
 use crate::store::lance_sections::{
-    write_sections_dataset_best_effort_with_sidecar_options_and_progress, SectionSidecarOptions,
-    SectionSidecarProgressCallback,
+    write_sections_dataset_with_sidecar_options_and_progress, SectionSidecarOptions,
+    SectionSidecarProgressCallback, SectionSidecarProgressEvent, CODE_SYMBOLS_DATASET_DIR,
+    SECTIONS_DATASET_DIR,
 };
 use crate::store::pointer::resolve_artifact_location;
 use crate::store::{
     read_artifact_header_parquet, read_artifact_parquet, write_artifact_parquet,
-    write_current_pointer, ArtifactStagingDir, WriteOptions,
+    write_current_pointer, ArtifactStagingDir, GraphArtifactSidecarStatus, WriteOptions,
 };
 use crate::{git, git::GitCtx, GraphIndexArtifact, GraphIndexPointer, SourceKind};
 
@@ -127,6 +128,12 @@ pub fn write_with_dedup_with_section_sidecar_options(
     }
 
     let write_result = if canonical.join("manifest.json").is_file() {
+        repair_canonical_sidecar_if_incomplete(
+            worktree_root,
+            &canonical,
+            section_sidecar_options,
+            section_sidecar_progress,
+        )?;
         Ok(canonical)
     } else {
         write_canonical_atomically(
@@ -214,7 +221,7 @@ fn write_canonical_atomically(
         Vec::new(),
     )?;
     let final_path = staging.commit()?;
-    write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+    write_sidecar_and_stamp_best_effort(
         artifact,
         worktree_root,
         &final_path,
@@ -222,6 +229,38 @@ fn write_canonical_atomically(
         section_sidecar_progress,
     );
     Ok(final_path)
+}
+
+fn repair_canonical_sidecar_if_incomplete(
+    worktree_root: &Path,
+    canonical: &Path,
+    section_sidecar_options: SectionSidecarOptions,
+    section_sidecar_progress: Option<&SectionSidecarProgressCallback<'_>>,
+) -> Result<()> {
+    let manifest = read_artifact_header_parquet(canonical).with_context(|| {
+        format!(
+            "failed to read canonical manifest `{}`",
+            canonical.display()
+        )
+    })?;
+    if manifest.sidecar_complete {
+        return Ok(());
+    }
+
+    let artifact = read_artifact_parquet(canonical).with_context(|| {
+        format!(
+            "failed to load canonical Parquet artifact for sidecar repair `{}`",
+            canonical.display()
+        )
+    })?;
+    write_sidecar_and_stamp_best_effort(
+        &artifact,
+        worktree_root,
+        canonical,
+        section_sidecar_options,
+        section_sidecar_progress,
+    );
+    Ok(())
 }
 
 fn load_pointer_artifact(
@@ -424,7 +463,7 @@ fn write_artifact_to_worktree(
         Vec::new(),
     )?;
     let final_path = staging.commit()?;
-    write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+    write_sidecar_and_stamp_best_effort(
         artifact,
         worktree_root,
         &final_path,
@@ -432,6 +471,135 @@ fn write_artifact_to_worktree(
         section_sidecar_progress,
     );
     Ok(final_path)
+}
+
+fn write_sidecar_and_stamp_best_effort(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    section_sidecar_options: SectionSidecarOptions,
+    section_sidecar_progress: Option<&SectionSidecarProgressCallback<'_>>,
+) {
+    match write_sidecar_overwriting(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        section_sidecar_options,
+        section_sidecar_progress,
+    ) {
+        Ok(row_counts) => {
+            if let Err(error) = crate::store::stamp_sidecar_status(
+                artifact_dir,
+                GraphArtifactSidecarStatus {
+                    complete: true,
+                    row_counts,
+                },
+            ) {
+                tracing::warn!(
+                    error = %error,
+                    artifact_dir = %artifact_dir.display(),
+                    "spur-graph: section sidecar status stamp failed; graph artifact remains usable"
+                );
+            }
+        }
+        Err(error) => {
+            if let Some(progress) = section_sidecar_progress {
+                progress(SectionSidecarProgressEvent::Failed {
+                    error: error.to_string(),
+                });
+            }
+            tracing::warn!(
+                error = %error,
+                artifact_dir = %artifact_dir.display(),
+                "spur-graph: section sidecar write failed; graph artifact remains usable"
+            );
+        }
+    }
+}
+
+fn write_sidecar_overwriting(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    section_sidecar_options: SectionSidecarOptions,
+    section_sidecar_progress: Option<&SectionSidecarProgressCallback<'_>>,
+) -> Result<crate::store::GraphArtifactSidecarRowCounts> {
+    let staging_dir = temp_path_for(artifact_dir);
+    remove_path_if_exists(&staging_dir)?;
+    fs::create_dir_all(&staging_dir)
+        .with_context(|| format!("failed to create `{}`", staging_dir.display()))?;
+
+    let write_result = write_sections_dataset_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        &staging_dir,
+        section_sidecar_options,
+        section_sidecar_progress,
+    );
+    let row_counts = match write_result {
+        Ok(row_counts) => row_counts,
+        Err(error) => {
+            let _ = remove_path_if_exists(&staging_dir);
+            return Err(error);
+        }
+    };
+
+    replace_sidecar_dir(
+        &staging_dir.join(SECTIONS_DATASET_DIR),
+        &artifact_dir.join(SECTIONS_DATASET_DIR),
+    )?;
+    replace_sidecar_dir(
+        &staging_dir.join(CODE_SYMBOLS_DATASET_DIR),
+        &artifact_dir.join(CODE_SYMBOLS_DATASET_DIR),
+    )?;
+    remove_path_if_exists(&staging_dir)?;
+    fsync_dir(artifact_dir);
+    if let Some(parent) = artifact_dir.parent() {
+        fsync_dir(parent);
+    }
+    Ok(row_counts)
+}
+
+fn replace_sidecar_dir(staged: &Path, final_path: &Path) -> Result<()> {
+    if !staged.is_dir() {
+        anyhow::bail!("sidecar staging dir missing `{}`", staged.display());
+    }
+
+    let backup = temp_path_for(final_path);
+    remove_path_if_exists(&backup)?;
+    let backup_created = if final_path.exists() {
+        fs::rename(final_path, &backup).with_context(|| {
+            format!(
+                "failed to move existing sidecar `{}` to `{}`",
+                final_path.display(),
+                backup.display()
+            )
+        })?;
+        true
+    } else {
+        false
+    };
+
+    match fs::rename(staged, final_path) {
+        Ok(()) => {
+            if backup_created {
+                remove_path_if_exists(&backup)?;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if backup_created {
+                let _ = fs::rename(&backup, final_path);
+            }
+            Err(error).with_context(|| {
+                format!(
+                    "failed to install sidecar `{}` at `{}`",
+                    staged.display(),
+                    final_path.display()
+                )
+            })
+        }
+    }
 }
 
 fn write_pointer(
@@ -484,6 +652,18 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)
+            .with_context(|| format!("failed to remove `{}`", path.display())),
+        Ok(_) => {
+            fs::remove_file(path).with_context(|| format!("failed to remove `{}`", path.display()))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to stat `{}`", path.display())),
+    }
+}
+
 fn temp_path_for(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -515,17 +695,24 @@ fn lock_timeout() -> Duration {
 #[cfg(test)]
 mod tests {
     use std::fs::{self, File};
+    use std::process::Command;
     use std::sync::atomic::Ordering;
 
     use fs2::FileExt as _;
     use tempfile::TempDir;
 
-    use super::{lookup_canonical, write_with_dedup};
+    use super::{
+        lookup_canonical, write_with_dedup, write_with_dedup_with_section_sidecar_options,
+    };
     use crate::git::GitCtx;
-    use crate::store::{read_artifact_parquet, read_current_pointer};
+    use crate::store::lance_sections::{SectionEmbeddingOptions, SectionSidecarOptions};
+    use crate::store::{
+        read_artifact_header_parquet, read_artifact_parquet, read_current_pointer,
+        stamp_sidecar_status, GraphArtifactSidecarRowCounts, GraphArtifactSidecarStatus,
+    };
     use crate::{
         GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader,
-        GraphIndexPointer, NodeId, SourceKind,
+        GraphIndexPointer, GraphSymbolArtifact, NodeId, SourceKind,
     };
 
     #[test]
@@ -633,6 +820,138 @@ mod tests {
         super::LOCK_TIMEOUT_MS_OVERRIDE.store(5_000, Ordering::SeqCst);
     }
 
+    #[test]
+    fn sidecar_success_stamps_manifest_with_row_counts() {
+        let env = CacheEnv::new();
+        let artifact = artifact_with_sidecar_rows("hash-sidecar");
+        write_fixture_sources(env.worktree.path());
+
+        write_with_dedup_with_section_sidecar_options(
+            &artifact,
+            env.worktree.path(),
+            &env.ctx,
+            skip_embedding_sidecar_options(),
+            None,
+        )
+        .unwrap();
+
+        let canonical = lookup_canonical(env.common.path(), "manifest-a", "hash-sidecar")
+            .expect("canonical path");
+        let manifest = read_artifact_header_parquet(&canonical).expect("read manifest");
+        assert!(manifest.sidecar_complete);
+        assert_eq!(
+            manifest.sidecar_row_counts,
+            GraphArtifactSidecarRowCounts {
+                section_bodies: 1,
+                code_symbols: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn incomplete_canonical_sidecar_is_rebuilt_on_next_dedup_write() {
+        let env = CacheEnv::new();
+        let artifact = artifact_with_sidecar_rows("hash-repair");
+        write_fixture_sources(env.worktree.path());
+
+        write_with_dedup_with_section_sidecar_options(
+            &artifact,
+            env.worktree.path(),
+            &env.ctx,
+            skip_embedding_sidecar_options(),
+            None,
+        )
+        .unwrap();
+        let canonical = lookup_canonical(env.common.path(), "manifest-a", "hash-repair").unwrap();
+        fs::remove_dir_all(canonical.join("sections.lancedb")).expect("remove sections sidecar");
+        fs::remove_dir_all(canonical.join("code_symbols.lance")).expect("remove symbols sidecar");
+        stamp_sidecar_status(
+            &canonical,
+            GraphArtifactSidecarStatus {
+                complete: false,
+                row_counts: GraphArtifactSidecarRowCounts::default(),
+            },
+        )
+        .expect("mark sidecar incomplete");
+
+        write_with_dedup_with_section_sidecar_options(
+            &artifact,
+            env.worktree.path(),
+            &env.ctx,
+            skip_embedding_sidecar_options(),
+            None,
+        )
+        .unwrap();
+
+        let manifest = read_artifact_header_parquet(&canonical).expect("read manifest");
+        assert!(manifest.sidecar_complete);
+        assert_eq!(manifest.sidecar_row_counts.section_bodies, 1);
+        assert_eq!(manifest.sidecar_row_counts.code_symbols, 2);
+        assert!(
+            canonical.join("sections.lancedb").is_dir(),
+            "repair should rebuild the section sidecar"
+        );
+        assert!(
+            canonical.join("code_symbols.lance").is_dir(),
+            "repair should rebuild the code-symbol sidecar"
+        );
+    }
+
+    #[test]
+    fn sidecar_failure_keeps_parquet_artifact_and_incomplete_manifest() {
+        let output = Command::new(std::env::current_exe().expect("current test binary"))
+            .args([
+                "--exact",
+                "store::cache::tests::sidecar_failure_child",
+                "--nocapture",
+            ])
+            .env("SPUR_GRAPH_CACHE_FAILURE_CHILD", "1")
+            .env("SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR", "1")
+            .output()
+            .expect("run isolated sidecar failure child test");
+
+        assert!(
+            output.status.success(),
+            "child test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn sidecar_failure_child() {
+        if !matches!(
+            std::env::var("SPUR_GRAPH_CACHE_FAILURE_CHILD"),
+            Ok(value) if value == "1"
+        ) {
+            return;
+        }
+
+        let env = CacheEnv::new();
+        let artifact = artifact_with_sidecar_rows("hash-sidecar-fails");
+        write_fixture_sources(env.worktree.path());
+
+        write_with_dedup_with_section_sidecar_options(
+            &artifact,
+            env.worktree.path(),
+            &env.ctx,
+            skip_embedding_sidecar_options(),
+            None,
+        )
+        .unwrap();
+
+        let canonical = lookup_canonical(env.common.path(), "manifest-a", "hash-sidecar-fails")
+            .expect("canonical path");
+        assert!(canonical.join("manifest.json").is_file());
+        assert!(canonical.join("nodes.parquet").is_file());
+        let manifest = read_artifact_header_parquet(&canonical).expect("read manifest");
+        assert!(!manifest.sidecar_complete);
+        assert_eq!(
+            manifest.sidecar_row_counts,
+            GraphArtifactSidecarRowCounts::default()
+        );
+    }
+
     struct CacheEnv {
         common: TempDir,
         worktree: TempDir,
@@ -684,5 +1003,106 @@ mod tests {
             symbol_snapshots: Vec::new(),
             temporal_edges: Vec::new(),
         }
+    }
+
+    fn skip_embedding_sidecar_options() -> SectionSidecarOptions {
+        SectionSidecarOptions {
+            embedding: SectionEmbeddingOptions {
+                skip_embeddings: true,
+                batch_size: 64,
+            },
+            write_batch_size: 512,
+            previous_artifact_dir: None,
+        }
+    }
+
+    fn write_fixture_sources(worktree: &std::path::Path) {
+        fs::create_dir_all(worktree.join("docs")).unwrap();
+        fs::create_dir_all(worktree.join("src")).unwrap();
+        fs::write(worktree.join("docs/guide.md"), "# Guide\n\nBody text.\n").unwrap();
+        fs::write(worktree.join("src/lib.rs"), code_source()).unwrap();
+    }
+
+    fn code_source() -> &'static str {
+        concat!(
+            "/// Parses the request payload into a normalized command shape.\n",
+            "/// Keeps enough context for downstream handlers to preserve provenance.\n",
+            "fn parse_request() {}\n",
+            "\n",
+            "struct CommandEnvelope;\n",
+            "\n",
+            "fn x() {}\n",
+        )
+    }
+
+    fn artifact_with_sidecar_rows(hash: &str) -> GraphIndexArtifact {
+        let mut artifact = artifact(hash, "docs/guide.md");
+        artifact.file_manifests.push(GraphFileManifestEntry {
+            stable_file_id: "file:src/lib.rs".to_owned(),
+            path: "src/lib.rs".to_owned(),
+            content_oid: "oid-src".to_owned(),
+            node_ids: vec![NodeId(2), NodeId(3)],
+        });
+        artifact.files.push(GraphFileArtifact {
+            stable_file_id: "file:src/lib.rs".to_owned(),
+            file_path: "src/lib.rs".to_owned(),
+        });
+        artifact.file_node_ids.push(NodeId(2));
+        let docs_len = "# Guide\n\nBody text.\n".len();
+        let source = code_source();
+        let parse_start = source.find("fn parse_request").unwrap();
+        let parse_end = parse_start + "fn parse_request() {}".len();
+        let envelope_start = source.find("struct CommandEnvelope").unwrap();
+        let envelope_end = envelope_start + "struct CommandEnvelope;".len();
+        let short_start = source.find("fn x").unwrap();
+        let short_end = short_start + "fn x() {}".len();
+        artifact.symbols = vec![
+            GraphSymbolArtifact {
+                stable_symbol_id: "section-guide".to_owned(),
+                file_path: "docs/guide.md".to_owned(),
+                byte_range: [0, docs_len],
+                line_range: [1, 3],
+                entity_name: "Guide".to_owned(),
+                qualified_name: "Guide".to_owned(),
+                symbol_kind: "section".to_owned(),
+                anchor_hash: "anchor-guide".to_owned(),
+                enclosing_scope: None,
+            },
+            GraphSymbolArtifact {
+                stable_symbol_id: "fn-parse-request".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
+                byte_range: [parse_start, parse_end],
+                line_range: [3, 3],
+                entity_name: "parse_request".to_owned(),
+                qualified_name: "parse_request".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-parse".to_owned(),
+                enclosing_scope: None,
+            },
+            GraphSymbolArtifact {
+                stable_symbol_id: "struct-command-envelope".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
+                byte_range: [envelope_start, envelope_end],
+                line_range: [5, 5],
+                entity_name: "CommandEnvelope".to_owned(),
+                qualified_name: "CommandEnvelope".to_owned(),
+                symbol_kind: "struct".to_owned(),
+                anchor_hash: "anchor-envelope".to_owned(),
+                enclosing_scope: None,
+            },
+            GraphSymbolArtifact {
+                stable_symbol_id: "fn-x".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
+                byte_range: [short_start, short_end],
+                line_range: [7, 7],
+                entity_name: "x".to_owned(),
+                qualified_name: "x".to_owned(),
+                symbol_kind: "function".to_owned(),
+                anchor_hash: "anchor-x".to_owned(),
+                enclosing_scope: None,
+            },
+        ];
+        artifact.symbol_node_ids = vec![NodeId(10), NodeId(11), NodeId(12), NodeId(13)];
+        artifact
     }
 }
