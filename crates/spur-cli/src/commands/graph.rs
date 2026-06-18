@@ -10,8 +10,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
 use spur_graph::store::lance_sections::{
-    write_sections_dataset_best_effort_with_sidecar_options_and_progress, SectionSidecarOptions,
-    SectionSidecarProgressCallback, SectionSidecarProgressEvent, SidecarPhase,
+    SectionSidecarOptions, SectionSidecarProgressCallback, SectionSidecarProgressEvent,
+    SidecarPhase,
 };
 use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
@@ -203,16 +203,16 @@ pub fn build_with_section_embedding_override(
                     temporal_shards,
                 )?;
                 let written_dir = staging.commit()?;
-                if !uses_output_override {
-                    spur_graph::write_current_pointer(&root, &written_dir)?;
-                }
-                write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+                spur_graph::store::cache::write_sidecar_and_stamp_best_effort(
                     &artifact,
                     &root,
                     &written_dir,
                     section_sidecar_options,
                     section_sidecar_progress,
                 );
+                if !uses_output_override {
+                    spur_graph::write_current_pointer(&root, &written_dir)?;
+                }
                 Ok::<_, anyhow::Error>(written_dir)
             })();
             match &result {
@@ -256,7 +256,7 @@ pub fn build_with_section_embedding_override(
                     Vec::new(),
                 )?;
                 let written_dir = staging.commit()?;
-                write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+                spur_graph::store::cache::write_sidecar_and_stamp_best_effort(
                     &artifact,
                     &root,
                     &written_dir,
@@ -349,16 +349,16 @@ pub fn build_with_section_embedding_override(
                     Vec::new(),
                 )?;
                 let written_dir = staging.commit()?;
-                if !uses_output_override {
-                    spur_graph::write_current_pointer(&root, &written_dir)?;
-                }
-                write_sections_dataset_best_effort_with_sidecar_options_and_progress(
+                spur_graph::store::cache::write_sidecar_and_stamp_best_effort(
                     &artifact,
                     &root,
                     &written_dir,
                     section_sidecar_options,
                     section_sidecar_progress,
                 );
+                if !uses_output_override {
+                    spur_graph::write_current_pointer(&root, &written_dir)?;
+                }
                 Ok::<_, anyhow::Error>(written_dir)
             })();
             match &result {

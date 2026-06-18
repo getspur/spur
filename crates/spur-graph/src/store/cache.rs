@@ -473,7 +473,7 @@ fn write_artifact_to_worktree(
     Ok(final_path)
 }
 
-fn write_sidecar_and_stamp_best_effort(
+pub fn write_sidecar_and_stamp_best_effort(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
     artifact_dir: &Path,
