@@ -6,7 +6,8 @@ use std::sync::{Mutex, OnceLock};
 
 use spur_cli::commands::analyst::{self, AnalystBuildOptions};
 use spur_graph::store::lance_sections::{
-    write_sections_dataset_best_effort_with_options, SectionEmbeddingOptions, SECTIONS_DATASET_DIR,
+    write_sections_dataset_best_effort_with_options, SectionEmbeddingOptions,
+    CODE_SYMBOLS_DATASET_DIR, SECTIONS_DATASET_DIR,
 };
 use spur_graph::{
     ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GraphArtifactSidecarRowCounts,
@@ -130,6 +131,22 @@ fn build_analyst_with_fake_duckdb(
     db_path: &Path,
     probe_row_count: usize,
 ) -> String {
+    build_analyst_with_fake_duckdb_probe_counts(
+        root,
+        artifact_dir,
+        db_path,
+        probe_row_count,
+        probe_row_count,
+    )
+}
+
+fn build_analyst_with_fake_duckdb_probe_counts(
+    root: &Path,
+    artifact_dir: &Path,
+    db_path: &Path,
+    section_probe_row_count: usize,
+    code_symbol_probe_row_count: usize,
+) -> String {
     let _guard = fake_duckdb_env_lock().lock().expect("fake duckdb env lock");
     let original_path = std::env::var_os("PATH").unwrap_or_default();
     let real_duckdb = find_duckdb_on_path(&original_path)
@@ -147,7 +164,13 @@ fn build_analyst_with_fake_duckdb(
          case \" $* \" in\n\
            *'{marker}'*)\n\
              case \" $* \" in\n\
-               *' -c '*) printf '{probe_row_count}\\n'; exit 0 ;;\n\
+               *' -c '*)\n\
+                 case \" $* \" in\n\
+                   *'code_symbols'*) printf '{code_symbol_probe_row_count}\\n' ;;\n\
+                   *) printf '{section_probe_row_count}\\n' ;;\n\
+                 esac\n\
+                 exit 0\n\
+                 ;;\n\
                *) cat > '{capture}'; : > \"$1\"; exit 0 ;;\n\
              esac\n\
              ;;\n\
@@ -588,6 +611,56 @@ fn analyst_build_degrades_to_bm25_when_complete_sidecar_dir_is_empty() {
 
     assert!(!sql.contains("ATTACH '"));
     assert!(!sql.contains("lance_ns.section_bodies"));
+    assert!(sql.contains("search_context_candidates"));
+    assert!(!sql.contains("search_context_candidates_hybrid"));
+    assert!(!sql.contains("lance_hybrid_search("));
+}
+
+#[test]
+fn analyst_build_degrades_to_bm25_when_code_symbols_sidecar_missing() {
+    let tempdir = tempfile::Builder::new()
+        .prefix("fake-duckdb-missing-code-symbol-sidecar")
+        .tempdir()
+        .expect("tempdir");
+    write_section_fixture_source(tempdir.path());
+    let artifact = temporal_artifact_with_section("analyst-missing-code-symbol-sidecar");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        tempdir.path(),
+        &artifact_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
+    std::fs::remove_dir_all(artifact_dir.join(CODE_SYMBOLS_DATASET_DIR))
+        .expect("remove stale code_symbols.lance");
+    spur_graph::store::stamp_sidecar_status(
+        &artifact_dir,
+        GraphArtifactSidecarStatus {
+            complete: true,
+            row_counts: GraphArtifactSidecarRowCounts {
+                section_bodies: 1,
+                code_symbols: 0,
+            },
+        },
+    )
+    .expect("stamp sidecar with missing code symbols");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    let sql =
+        build_analyst_with_fake_duckdb_probe_counts(tempdir.path(), &artifact_dir, &db_path, 1, 0);
+
+    assert!(!sql.contains("ATTACH '"));
+    assert!(!sql.contains("lance_ns.section_bodies"));
+    assert!(!sql.contains("code_symbols.lance"));
     assert!(sql.contains("search_context_candidates"));
     assert!(!sql.contains("search_context_candidates_hybrid"));
     assert!(!sql.contains("lance_hybrid_search("));
