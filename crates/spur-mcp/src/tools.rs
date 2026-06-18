@@ -1094,7 +1094,7 @@ fn doc_navigate_def() -> ToolDefinition {
 fn knowledge_context_pack_def() -> ToolDefinition {
     ToolDefinition {
         name: "knowledge_context_pack".into(),
-        description: "Builds a bounded evidence pack by combining analyst BM25 candidates, scorecard signals, and exact graph grounding. Lance ANN is not used by this MVP; use code_read_symbol/code_callers/code_callees for exact follow-up.".into(),
+        description: "Builds a bounded evidence pack from BM25 candidates, scorecard signals, and exact graph grounding. Applies opportunistic Lance hybrid vector re-ranking when query embeddings and the sidecar respond; degrades to BM25-only on timeout or unavailability. Use code_read_symbol/code_callers/code_callees for exact follow-up.".into(),
         input_schema: json!({
             "type": "object",
             "required": ["query"],
@@ -1708,11 +1708,16 @@ mod schema_truthfulness_tests {
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("properties");
+        let stale_ann_boundary = ["Lance ANN is", "not used by this MVP"].join(" ");
 
         assert!(
-            def.description.contains("Lance ANN is not used by this MVP")
+            !def.description.contains(&stale_ann_boundary)
+                && def
+                    .description
+                    .contains("opportunistic Lance hybrid vector re-ranking")
+                && def.description.contains("degrades to BM25-only")
                 && def.description.contains("code_read_symbol/code_callers/code_callees"),
-            "knowledge_context_pack description must state MVP ANN boundary and exact graph follow-ups"
+            "knowledge_context_pack description must state opportunistic Lance fallback and exact graph follow-ups"
         );
         assert_eq!(def.input_schema.get("required"), Some(&json!(["query"])));
         assert_eq!(
