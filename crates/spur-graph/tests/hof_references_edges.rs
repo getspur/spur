@@ -112,10 +112,19 @@ bool lambda_only(int value) {
     return value > 1;
 }
 
+bool outside_std(int value) {
+    return value > 2;
+}
+
 namespace predicates {
 bool accept(int value) {
     return value > 0;
 }
+}
+
+namespace custom {
+template <typename It, typename Fn>
+void for_each(It first, It last, Fn fn) {}
 }
 
 void run(std::vector<int>& values, std::vector<int>& out) {
@@ -128,6 +137,7 @@ void run(std::vector<int>& values, std::vector<int>& out) {
     std::accumulate(values.begin(), values.end(), 0, combine);
     std::for_each(values.begin(), values.end(), [](int value) { return lambda_only(value); });
     std::for_each(values.begin(), values.end(), make_predicate());
+    custom::for_each(values.begin(), values.end(), outside_std);
 }
 "#,
     );
@@ -138,6 +148,7 @@ void run(std::vector<int>& values, std::vector<int>& out) {
     assert_eq!(hof_reference_labels(&facts).len(), 4);
     assert_no_hof_reference(&facts, "lambda_only");
     assert_no_hof_reference(&facts, "make_predicate");
+    assert_no_hof_reference(&facts, "outside_std");
 }
 
 #[test]
