@@ -177,6 +177,13 @@ pub struct GraphEdgeArtifact {
     pub target_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_path: Option<String>,
+    /// Receiver expression text captured at the call site, when syntax exposes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_text: Option<String>,
+    /// Scope evidence for the call, from syntactic qualification or an inferred receiver type.
+    /// This is evidence for syntax-first resolution, not compiler-grade semantic certainty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_text: Option<String>,
     pub relation: RelationKind,
     pub confidence: Confidence,
     pub confidence_score: f32,
@@ -187,9 +194,9 @@ pub struct GraphEdgeArtifact {
     /// Provenance for resolved edge targets.
     ///
     /// Current resolver stamps include `fqn`, `scope_match`, `singleton`,
-    /// `macro_body_singleton`, `relational`, `constructs_type_singleton`,
-    /// `method_crate_singleton`, `import_path`, `import_licensed`, and
-    /// `external`.
+    /// `bare_qualified_singleton`, `macro_body_singleton`, `relational`,
+    /// `constructs_type_singleton`, `method_crate_singleton`, `import_path`,
+    /// `import_licensed`, and `external`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_method: Option<String>,
 }
@@ -216,6 +223,13 @@ pub struct GraphEdge {
     pub target_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_path: Option<String>,
+    /// Receiver expression text captured at the call site, when syntax exposes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_text: Option<String>,
+    /// Scope evidence for the call, from syntactic qualification or an inferred receiver type.
+    /// This is evidence for syntax-first resolution, not compiler-grade semantic certainty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_text: Option<String>,
     pub confidence: Confidence,
     pub confidence_score: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
