@@ -30,9 +30,7 @@ pub(crate) struct PendingEdge {
     pub(crate) relation: RelationKind,
     pub(crate) edge_kind: Option<GraphEdgeKind>,
     pub(crate) origin: CallOrigin,
-    #[allow(dead_code)]
     pub(crate) receiver_text: Option<String>,
-    #[allow(dead_code)]
     pub(crate) scope_text: Option<String>,
 }
 
@@ -135,6 +133,8 @@ type EdgeDedupKey = (
     RelationKind,
     Option<String>,
     Option<GraphEdgeKind>,
+    Option<String>,
+    Option<String>,
 );
 
 #[derive(Debug, Clone)]
@@ -142,6 +142,8 @@ struct EdgeMetadata {
     confidence: Confidence,
     confidence_score: f32,
     import_path: Option<String>,
+    receiver_text: Option<String>,
+    scope_text: Option<String>,
     bind_method: Option<&'static str>,
 }
 
@@ -458,6 +460,8 @@ impl<'a> FactBuilder<'a> {
                 confidence,
                 confidence_score,
                 import_path: None,
+                receiver_text: None,
+                scope_text: None,
                 bind_method: None,
             },
         );
@@ -482,6 +486,8 @@ impl<'a> FactBuilder<'a> {
                 confidence,
                 confidence_score,
                 import_path: None,
+                receiver_text: None,
+                scope_text: None,
                 bind_method: Some(bind_method),
             },
         );
@@ -535,10 +541,15 @@ impl<'a> FactBuilder<'a> {
         edge_kind: Option<GraphEdgeKind>,
         metadata: EdgeMetadata,
     ) {
-        if !self
-            .edge_index
-            .insert((source, target, relation, target_label.clone(), edge_kind))
-        {
+        if !self.edge_index.insert((
+            source,
+            target,
+            relation,
+            target_label.clone(),
+            edge_kind,
+            metadata.receiver_text.clone(),
+            metadata.scope_text.clone(),
+        )) {
             return;
         }
         let edge_id = EdgeId(self.next_edge);
@@ -550,6 +561,8 @@ impl<'a> FactBuilder<'a> {
             relation,
             target_label,
             import_path: metadata.import_path,
+            receiver_text: metadata.receiver_text,
+            scope_text: metadata.scope_text,
             confidence: metadata.confidence,
             confidence_score: metadata.confidence_score,
             edge_kind,
@@ -2989,15 +3002,31 @@ fn metadata_for_pending_edge(
             confidence: Confidence::Heuristic,
             confidence_score: 0.8,
             import_path: edge.import_path.clone(),
+            receiver_text: edge.receiver_text.clone(),
+            scope_text: edge.scope_text.clone(),
             bind_method: Some("macro_body_singleton"),
         };
     }
 
-    let (confidence, confidence_score) = confidence_for_edge(edge.relation, edge.edge_kind);
+    let (mut confidence, mut confidence_score) = confidence_for_edge(edge.relation, edge.edge_kind);
+    let mut bind_method = bind_method;
+    if edge.relation == RelationKind::Calls
+        && edge.scope_text.is_some()
+        && !matches!(bind_method, Some("fqn" | "scope_match"))
+    {
+        confidence = Confidence::Heuristic;
+        confidence_score = 0.8;
+        if target.is_some() && matches!(bind_method, Some("singleton")) {
+            bind_method = Some("bare_qualified_singleton");
+        }
+    }
+
     EdgeMetadata {
         confidence,
         confidence_score,
         import_path: edge.import_path.clone(),
+        receiver_text: edge.receiver_text.clone(),
+        scope_text: edge.scope_text.clone(),
         bind_method,
     }
 }
