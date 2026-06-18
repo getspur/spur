@@ -65,6 +65,10 @@ pub struct GraphArtifactManifest {
     pub extractor_version: String,
     pub complete: bool,
     pub row_counts: GraphArtifactRowCounts,
+    #[serde(default)]
+    pub sidecar_complete: bool,
+    #[serde(default)]
+    pub sidecar_row_counts: GraphArtifactSidecarRowCounts,
     pub parquet_writer: GraphArtifactParquetWriter,
     pub edges_by_dst_present: bool,
     #[serde(default)]
@@ -89,6 +93,21 @@ pub struct GraphArtifactRowCounts {
     pub temporal_edges: usize,
     #[serde(default)]
     pub diagnostics: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphArtifactSidecarRowCounts {
+    #[serde(default)]
+    pub section_bodies: usize,
+    #[serde(default)]
+    pub code_symbols: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphArtifactSidecarStatus {
+    pub complete: bool,
+    pub row_counts: GraphArtifactSidecarRowCounts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -387,6 +406,8 @@ pub fn write_artifact_parquet(
                 .sum(),
             diagnostics: artifact.diagnostics.len(),
         },
+        sidecar_complete: false,
+        sidecar_row_counts: GraphArtifactSidecarRowCounts::default(),
         parquet_writer: GraphArtifactParquetWriter {
             compression: "zstd-3".to_owned(),
             row_group_size: PARQUET_ROW_GROUP_SIZE,
@@ -409,6 +430,22 @@ pub fn read_artifact_header_parquet(dir: &Path) -> anyhow::Result<GraphArtifactM
     let manifest: GraphArtifactManifest = serde_json::from_str(&content)
         .with_context(|| format!("invalid Parquet manifest `{}`", manifest_path.display()))?;
     Ok(manifest)
+}
+
+pub fn stamp_sidecar_status(dir: &Path, status: GraphArtifactSidecarStatus) -> anyhow::Result<()> {
+    let manifest_path = dir.join("manifest.json");
+    let content = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read `{}`", manifest_path.display()))?;
+    let mut manifest: GraphArtifactManifest = serde_json::from_str(&content)
+        .with_context(|| format!("invalid Parquet manifest `{}`", manifest_path.display()))?;
+    manifest.sidecar_complete = status.complete;
+    manifest.sidecar_row_counts = status.row_counts;
+
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .context("failed to encode Parquet manifest with sidecar status")?;
+    write_manifest(dir, &manifest_json)?;
+    fsync_dir(dir)?;
+    Ok(())
 }
 
 fn synthesize_single_temporal_shard(artifact: &GraphIndexArtifact) -> Vec<ShardIndexEntry> {
@@ -1738,12 +1775,21 @@ fn write_table(
 
 fn write_manifest(dir: &Path, manifest_json: &str) -> anyhow::Result<()> {
     let manifest_path = dir.join("manifest.json");
-    let mut file = File::create(&manifest_path)
-        .with_context(|| format!("failed to create `{}`", manifest_path.display()))?;
+    let tmp_path = dir.join("manifest.json.tmp");
+    let mut file = File::create(&tmp_path)
+        .with_context(|| format!("failed to create `{}`", tmp_path.display()))?;
     file.write_all(manifest_json.as_bytes())
-        .with_context(|| format!("failed to write `{}`", manifest_path.display()))?;
+        .with_context(|| format!("failed to write `{}`", tmp_path.display()))?;
     file.sync_all()
-        .with_context(|| format!("failed to fsync `{}`", manifest_path.display()))?;
+        .with_context(|| format!("failed to fsync `{}`", tmp_path.display()))?;
+    drop(file);
+    fs::rename(&tmp_path, &manifest_path).with_context(|| {
+        format!(
+            "failed to atomically rename `{}` to `{}`",
+            tmp_path.display(),
+            manifest_path.display()
+        )
+    })?;
     Ok(())
 }
 
