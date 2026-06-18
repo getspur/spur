@@ -17,8 +17,8 @@ pub use build::{
 };
 pub use canonical_hash::artifact_content_hash_blake3_hex;
 pub use lance_sections::{
-    write_sections_dataset, EMBEDDING_VECTOR_DIMENSIONS, EMBED_MODEL_NAME, SECTIONS_DATASET_DIR,
-    SECTIONS_TABLE,
+    write_sections_dataset, CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE,
+    EMBEDDING_VECTOR_DIMENSIONS, EMBED_MODEL_NAME, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
 };
 pub use parquet::{
     load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,

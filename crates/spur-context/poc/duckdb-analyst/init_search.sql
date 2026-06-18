@@ -216,6 +216,8 @@ CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS
   LIMIT 40;
 
 -- __SPUR_LANCE_HYBRID_START__
+-- The Lance path suffixes below are rendered by analyst.rs from
+-- spur_graph::store::{CODE_SYMBOLS_DATASET_DIR, SECTIONS_DATASET_DIR, SECTIONS_TABLE}.
 CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, intent, query_vec) AS TABLE
   WITH bm25_rows AS (
     SELECT * FROM search_context_candidates(q, requested_scope, intent)
