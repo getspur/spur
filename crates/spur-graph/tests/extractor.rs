@@ -145,10 +145,10 @@ fn find_symbol_json<'a>(
 }
 
 #[test]
-fn graph_store_schema_version_is_v8() {
+fn graph_store_schema_version_is_v9() {
     assert_eq!(
         spur_graph::store::build::SCHEMA_VERSION,
-        "spur-graph-schema-v8"
+        "spur-graph-schema-v9"
     );
 }
 

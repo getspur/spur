@@ -5,6 +5,11 @@ tree-sitter captures into SPUR graph nodes and edges. Each supported language is
 wired through `src/extract/languages.rs` with a registry entry, a
 `LanguageConfig`, and a `definition_kind_map`.
 
+For ontology expansion policy, see the focused maturity roadmap:
+[`docs/superpowers/specs/2026-06-18-code-graph-ontology-maturity-roadmap.md`](../../../docs/superpowers/specs/2026-06-18-code-graph-ontology-maturity-roadmap.md).
+It defines when syntax captures should remain labels/metadata versus being
+promoted to first-class `NodeKind` or `RelationKind` variants.
+
 ## Definition Capture Vocabulary
 
 Definition queries follow the tree-sitter tags convention:
@@ -34,11 +39,11 @@ The shared capture vocabulary is:
 | `@definition.section` | `NodeKind::Section` |
 | `@definition.enum_variant` | `NodeKind::EnumVariant` |
 
-`@definition.constant` is captured for Rust, Python, TypeScript top-level
-non-function `const` bindings, C file-scope `const` variables, and C++
-namespace/file-scope `const` and `constexpr` variables.
-`@definition.enum_variant` is captured for Rust, TypeScript, C, and C++ enum
-members.
+`@definition.constant` is captured for Rust, Python, TypeScript/TSX/JavaScript
+top-level non-function `const` bindings, C file-scope `const` variables, and
+C++ namespace/file-scope `const` and `constexpr` variables.
+`@definition.enum_variant` is captured for Rust, TypeScript/TSX/JavaScript, C,
+and C++ enum members.
 
 ## Coverage Matrix
 
@@ -55,6 +60,7 @@ Legend:
 | Python | - | Y | - | Y | - | - | - | - | - | - | - | - | - | Y | - |
 | TypeScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
 | Tsx | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
+| JavaScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
 | C | - | Y | - | - | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
 | Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
 | Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - |
@@ -67,21 +73,22 @@ Notes:
 - Python methods are captured as `@definition.function` and reclassified by
   the adapter when the function is nested inside a class.
 - Rust captures named struct fields as `@definition.field`; tuple-struct
-  positional fields are intentionally skipped. TypeScript captures class fields
-  with no initializer or a simple non-function initializer. Function-valued
-  class fields are captured as `@definition.function` instead of also being
-  emitted as plain fields. C++ captures simple class data members.
+  positional fields are intentionally skipped. TypeScript/TSX/JavaScript
+  configs capture class fields with no initializer or a simple non-function
+  initializer. Function-valued class fields are captured as
+  `@definition.function` instead of also being emitted as plain fields. C++
+  captures simple class data members.
 - Rust captures `const_item` and `static_item` as `@definition.constant`.
   Python follows the canonical module-level assignment constant pattern.
-  TypeScript captures top-level and exported `const` bindings with non-function
-  initializer forms; direct arrow/function initializer forms are emitted as
-  `@definition.function` only. C captures file-scope `const` variables. C++
-  captures namespace/file-scope `const` and `constexpr` variables; const class
-  members remain fields, and const locals, parameters, and function return
-  types are intentionally skipped.
+  TypeScript/TSX/JavaScript configs capture top-level and exported `const`
+  bindings with non-function initializer forms; direct arrow/function
+  initializer forms are emitted as `@definition.function` only. C captures
+  file-scope `const` variables. C++ captures namespace/file-scope `const` and
+  `constexpr` variables; const class members remain fields, and const locals,
+  parameters, and function return types are intentionally skipped.
 - Rust captures enum members as `@definition.enum_variant` (mapped to
-  `NodeKind::EnumVariant`); TypeScript enum members and C++ `enumerator`s do
-  the same.
+  `NodeKind::EnumVariant`); TypeScript/TSX/JavaScript configs capture enum
+  members and C++ `enumerator`s do the same.
 - Rust `union_item` is captured as `@definition.struct` (folded into the
   `struct` column above), matching how C++ models unions.
 - `python/symbols.scm` used to duplicate `python/tags.scm`. Snapshot extraction
@@ -95,32 +102,34 @@ This table is the relation-level analogue of the Definition Coverage Matrix and 
 seed of the Tier-0 ontology realization contract
 (`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
 
-| Predicate | Rust | Python | TypeScript | Tsx | C | Cpp | Lua | Shell | Markdown | JupyterNotebook |
-|---|---|---|---|---|---|---|---|---|---|---|
-| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y(links) | — |
-| calls | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| constructs | Y | Y | Y | Y | Y | Y | — | — | — | — |
-| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
-| produces | — | — | — | — | — | — | — | — | — | Y |
-| consumes | — | — | — | — | — | — | — | — | — | Y |
-| binds | — | — | — | — | — | — | — | — | — | Y |
-| emits | — | — | — | — | — | — | — | — | — | Y |
-| defines | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| references (HOF/notebook facts) | Y | Y | TODO | TODO | — | Y | — | — | — | Y |
-| links | — | — | — | — | — | — | — | — | Y | — |
-| implements | Y | Y | Y | Y | — | — | — | — | — | — |
-| extends | Y | Y | Y | Y | — | Y | — | — | — | — |
+| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Lua | Shell | Markdown | JupyterNotebook |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y(links) | — |
+| calls | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| constructs | Y | Y | Y | Y | Y | Y | Y | — | — | — | — |
+| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| produces | — | — | — | — | — | — | — | — | — | — | Y |
+| consumes | — | — | — | — | — | — | — | — | — | — | Y |
+| binds | — | — | — | — | — | — | — | — | — | — | Y |
+| emits | — | — | — | — | — | — | — | — | — | — | Y |
+| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| references (HOF/notebook facts) | Y | Y | Y | Y | Y | — | Y | — | — | — | Y |
+| links | — | — | — | — | — | — | — | — | — | Y | — |
+| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — |
+| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — |
 
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
 reclassified to `implements`.
 
-TypeScript/Tsx `imports` includes both direct import declarations and re-export
-statements (`export { ... } from "..."`, `export * from "..."`), both mapped to
-`RelationKind::Imports` through the same resolver path.
+TypeScript/Tsx/JavaScript `imports` includes both direct import declarations
+and re-export statements (`export { ... } from "..."`, `export * from "..."`),
+both mapped to `RelationKind::Imports` through the same resolver path.
 
-HOF references are realized in Rust, Python, and C++ via closed HOF-method
-allowlists in the respective `spur-edges.scm`; TypeScript/Tsx are TODO.
+HOF references are realized in Rust, Python, C++, and TypeScript/Tsx/JavaScript
+via closed HOF-method allowlists in the respective `spur-edges.scm` files.
+TypeScript/Tsx/JavaScript currently capture bare identifier callbacks passed as
+the first argument to recognized array/iterable and Promise-style methods.
 
 ### Notebook Semantic Facts
 
@@ -133,11 +142,12 @@ flow:
 - `emits`: a frontend cell emits UI events or values to a port.
 - `references`: a cell references a datasource such as `ds://...`.
 
-The schema and gate contract recognize these relations before extraction emits
-them. A later task adds `queries/python/spur-notebook-facts.scm` and
-`queries/typescript/spur-notebook-facts.scm`, registered in
-`MANIFEST_QUERY_BYTES`, to detect actual `spur.put`/`spur.get` calls and table
-references from cell source.
+Python and TypeScript notebook-facts queries are present, registered in their
+language configs, and included in `MANIFEST_QUERY_BYTES`. They detect actual
+`spur.put` produces, `spur.get` consumes, dynamic/opaque `spur.put` produce
+markers, and bare table-function references from cell source. Metadata-based
+`binds` and `emits` are emitted from notebook metadata, not from those
+source-level query files.
 
 ## Reference Capture Divergence
 
