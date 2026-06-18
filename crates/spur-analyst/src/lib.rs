@@ -249,6 +249,13 @@ pub fn query_symbol_risk_community<S: AsRef<str>>(
         )
     })?;
 
+    // The risk scorecard view (via v_symbol_churn_90d) does TIMESTAMPTZ arithmetic
+    // (`now() - INTERVAL '90 day'`) whose `-` overload lives in DuckDB's ICU
+    // extension. Without it, scorecard enrichment fails to bind. Keep it
+    // best-effort (mirrors query_context_candidates) and let preparation surface
+    // any genuine failure as a caveat.
+    let _ = conn.execute_batch("LOAD icu;");
+
     let (inputs, mut caveats, truncated) = bounded_symbol_inputs(stable_symbol_ids);
     let mut result = SymbolRiskCommunityResult {
         db_path: db_path.display().to_string(),
