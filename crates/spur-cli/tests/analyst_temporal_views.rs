@@ -1,11 +1,17 @@
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use spur_cli::commands::analyst::{self, AnalystBuildOptions};
+use spur_graph::store::lance_sections::{
+    write_sections_dataset_best_effort_with_options, SectionEmbeddingOptions, SECTIONS_DATASET_DIR,
+};
 use spur_graph::{
-    ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GraphEdgeArtifact, GraphEdgeKind,
-    GraphFileArtifact, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId,
+    ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GraphArtifactSidecarRowCounts,
+    GraphArtifactSidecarStatus, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact, NodeId,
     RelationKind, RenamePrev, SnapshotKey, SymbolSnapshotArtifact, TemporalEdgeArtifact,
     WriteOptions,
 };
@@ -101,6 +107,79 @@ fn build_analyst_or_skip(root: &Path, artifact_dir: &Path, db_path: &Path) -> bo
         return false;
     }
     true
+}
+
+fn fake_duckdb_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn find_duckdb_on_path(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    std::env::split_paths(path)
+        .map(|dir| dir.join("duckdb"))
+        .find(|candidate| candidate.is_file())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+fn build_analyst_with_fake_duckdb(
+    root: &Path,
+    artifact_dir: &Path,
+    db_path: &Path,
+    probe_row_count: usize,
+) -> String {
+    let _guard = fake_duckdb_env_lock().lock().expect("fake duckdb env lock");
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let real_duckdb = find_duckdb_on_path(&original_path)
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let shim_dir = root.join("duckdb-shim");
+    let capture_path = root.join("captured-analyst.sql");
+    std::fs::create_dir_all(&shim_dir).expect("create shim dir");
+    let shim_path = shim_dir.join("duckdb");
+    let marker = shell_single_quote(&root.display().to_string());
+    let capture = shell_single_quote(&capture_path.display().to_string());
+    let real = shell_single_quote(&real_duckdb);
+    let script = format!(
+        "#!/bin/sh\n\
+         case \" $* \" in\n\
+           *'{marker}'*)\n\
+             case \" $* \" in\n\
+               *' -c '*) printf '{probe_row_count}\\n'; exit 0 ;;\n\
+               *) cat > '{capture}'; : > \"$1\"; exit 0 ;;\n\
+             esac\n\
+             ;;\n\
+         esac\n\
+         if [ -n '{real}' ]; then exec '{real}' \"$@\"; fi\n\
+         exit 127\n"
+    );
+    std::fs::write(&shim_path, script).expect("write duckdb shim");
+    std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod duckdb shim");
+    let joined_path = std::env::join_paths(
+        std::iter::once(shim_dir.clone()).chain(std::env::split_paths(&original_path)),
+    )
+    .expect("join PATH");
+    std::env::set_var("PATH", joined_path);
+
+    let build_result = analyst::build(
+        root,
+        AnalystBuildOptions {
+            artifact_dir: Some(artifact_dir.to_path_buf()),
+            db_path: Some(db_path.to_path_buf()),
+            quiet: true,
+        },
+    );
+
+    std::env::set_var("PATH", original_path);
+    build_result.expect("analyst build with fake duckdb");
+    assert!(
+        db_path.is_file(),
+        "fake duckdb should leave a materialized DB placeholder"
+    );
+    std::fs::read_to_string(&capture_path).expect("read captured analyst SQL")
 }
 
 #[test]
@@ -384,6 +463,134 @@ fn analyst_views_map_temporal_churn_by_direct_symbol_ids() {
          WHERE stable_symbol_id = 'struct-target';",
     );
     assert_eq!(blast.trim(), "struct-target,1,1,1,true");
+}
+
+#[test]
+fn analyst_build_uses_complete_lance_sidecar_for_hybrid_search() {
+    let tempdir = tempfile::Builder::new()
+        .prefix("fake-duckdb-complete-sidecar")
+        .tempdir()
+        .expect("tempdir");
+    write_section_fixture_source(tempdir.path());
+    let artifact = temporal_artifact_with_section("analyst-complete-sidecar");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        tempdir.path(),
+        &artifact_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
+    spur_graph::store::stamp_sidecar_status(
+        &artifact_dir,
+        GraphArtifactSidecarStatus {
+            complete: true,
+            row_counts: GraphArtifactSidecarRowCounts {
+                section_bodies: 1,
+                code_symbols: 1,
+            },
+        },
+    )
+    .expect("stamp sidecar complete");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    let sql = build_analyst_with_fake_duckdb(tempdir.path(), &artifact_dir, &db_path, 1);
+
+    assert!(sql.contains("ATTACH '"));
+    assert!(sql.contains("sections.lancedb"));
+    assert!(sql.contains("lance_ns.section_bodies"));
+    assert!(sql.contains("search_context_candidates_hybrid"));
+    assert!(sql.contains("lance_hybrid_search("));
+}
+
+#[test]
+fn analyst_build_degrades_to_bm25_when_sidecar_manifest_incomplete() {
+    let tempdir = tempfile::Builder::new()
+        .prefix("fake-duckdb-incomplete-sidecar")
+        .tempdir()
+        .expect("tempdir");
+    write_section_fixture_source(tempdir.path());
+    let artifact = temporal_artifact_with_section("analyst-incomplete-sidecar");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        tempdir.path(),
+        &artifact_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
+    spur_graph::store::stamp_sidecar_status(
+        &artifact_dir,
+        GraphArtifactSidecarStatus {
+            complete: false,
+            row_counts: GraphArtifactSidecarRowCounts::default(),
+        },
+    )
+    .expect("stamp sidecar incomplete");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    let sql = build_analyst_with_fake_duckdb(tempdir.path(), &artifact_dir, &db_path, 1);
+
+    assert!(!sql.contains("ATTACH '"));
+    assert!(!sql.contains("lance_ns.section_bodies"));
+    assert!(sql.contains("search_context_candidates"));
+    assert!(!sql.contains("search_context_candidates_hybrid"));
+    assert!(!sql.contains("lance_hybrid_search("));
+}
+
+#[test]
+fn analyst_build_degrades_to_bm25_when_complete_sidecar_dir_is_empty() {
+    let tempdir = tempfile::Builder::new()
+        .prefix("fake-duckdb-empty-sidecar")
+        .tempdir()
+        .expect("tempdir");
+    write_section_fixture_source(tempdir.path());
+    let artifact = temporal_artifact_with_section("analyst-empty-sidecar");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    std::fs::create_dir_all(artifact_dir.join(SECTIONS_DATASET_DIR))
+        .expect("create stale empty sections.lancedb");
+    spur_graph::store::stamp_sidecar_status(
+        &artifact_dir,
+        GraphArtifactSidecarStatus {
+            complete: true,
+            row_counts: GraphArtifactSidecarRowCounts {
+                section_bodies: 1,
+                code_symbols: 1,
+            },
+        },
+    )
+    .expect("stamp sidecar complete");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    let sql = build_analyst_with_fake_duckdb(tempdir.path(), &artifact_dir, &db_path, 0);
+
+    assert!(!sql.contains("ATTACH '"));
+    assert!(!sql.contains("lance_ns.section_bodies"));
+    assert!(sql.contains("search_context_candidates"));
+    assert!(!sql.contains("search_context_candidates_hybrid"));
+    assert!(!sql.contains("lance_hybrid_search("));
 }
 
 fn temporal_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
@@ -711,6 +918,53 @@ fn divergent_symbol_id_artifact(graph_content_hash: &str) -> GraphIndexArtifact 
         snapshot.key.stable_symbol_id = format!("snapshot-{}", snapshot.key.stable_symbol_id);
     }
     artifact
+}
+
+fn temporal_artifact_with_section(graph_content_hash: &str) -> GraphIndexArtifact {
+    let mut artifact = temporal_artifact(graph_content_hash);
+    artifact.file_manifests.push(GraphFileManifestEntry {
+        stable_file_id: "file-docs-guide".to_string(),
+        path: "docs/guide.md".to_string(),
+        content_oid: "guide-content".to_string(),
+        node_ids: vec![NodeId(10), NodeId(11)],
+    });
+    artifact.files.push(GraphFileArtifact {
+        stable_file_id: "file-docs-guide".to_string(),
+        file_path: "docs/guide.md".to_string(),
+    });
+    artifact.file_node_ids.push(NodeId(10));
+    artifact.symbols.push(GraphSymbolArtifact {
+        stable_symbol_id: "section-guide".to_string(),
+        file_path: "docs/guide.md".to_string(),
+        byte_range: [0, SECTION_FIXTURE_BODY.len()],
+        line_range: [1, 3],
+        entity_name: "Guide".to_string(),
+        qualified_name: "Guide".to_string(),
+        symbol_kind: "section".to_string(),
+        anchor_hash: "anchor-guide".to_string(),
+        enclosing_scope: None,
+    });
+    artifact.symbol_node_ids.push(NodeId(11));
+    artifact.edges.push(GraphEdgeArtifact {
+        source_stable_symbol_id: "file-docs-guide".to_string(),
+        target_stable_symbol_id: Some("section-guide".to_string()),
+        target_label: None,
+        relation: RelationKind::Contains,
+        confidence: Confidence::SyntaxExact,
+        confidence_score: 1.0,
+        change_kind: None,
+        edge_kind: Some(GraphEdgeKind::ReferencesOther),
+        bind_method: None,
+        import_path: None,
+    });
+    artifact
+}
+
+const SECTION_FIXTURE_BODY: &str = "# Guide\n\nUse the analyst search fixture.\n";
+
+fn write_section_fixture_source(root: &Path) {
+    std::fs::create_dir_all(root.join("docs")).expect("create docs");
+    std::fs::write(root.join("docs/guide.md"), SECTION_FIXTURE_BODY).expect("write guide");
 }
 
 fn structural_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
