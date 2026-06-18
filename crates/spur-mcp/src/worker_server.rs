@@ -1251,7 +1251,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "knowledge_context_pack",
-        description = "Builds a bounded evidence pack by combining analyst BM25 candidates, scorecard signals, and exact graph grounding. Lance ANN is not used by this MVP; use code_read_symbol/code_callers/code_callees for exact follow-up.",
+        description = "Builds a bounded evidence pack from BM25 candidates, scorecard signals, and exact graph grounding. Applies opportunistic Lance hybrid vector re-ranking when query embeddings and the sidecar respond; degrades to BM25-only on timeout or unavailability. Use code_read_symbol/code_callers/code_callees for exact follow-up.",
         input_schema = crate::tool_schemas::schema_object::<KnowledgeContextPackParams>()
     )]
     async fn knowledge_context_pack_tool(
