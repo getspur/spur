@@ -1133,7 +1133,7 @@ fn knowledge_context_pack_def() -> ToolDefinition {
 fn knowledge_context_pack_2_def() -> ToolDefinition {
     ToolDefinition {
         name: "knowledge_context_pack_2".into(),
-        description: "experimental v2 evidence pack that preserves knowledge_context_pack retrieval and exact grounding while adding graph_paths, risk_scorecard, community_context, temporal_context, and caveats for graph reasoning.".into(),
+        description: "experimental v2 structured evidence pack for semantic answers; it does not generate final prose. Preserves knowledge_context_pack retrieval and exact grounding while adding DuckPGQ/Onager-backed graph_paths, risk_scorecard, community_context, temporal_context, and caveats as bounded graph-reasoning evidence.".into(),
         input_schema: json!({
             "type": "object",
             "required": ["query"],
@@ -1884,7 +1884,10 @@ mod schema_truthfulness_tests {
             .expect("properties");
 
         assert!(
-            def.description.contains("experimental")
+            def.description.contains("structured evidence pack")
+                && def.description.contains("semantic answers")
+                && def.description.contains("does not generate final prose")
+                && def.description.contains("DuckPGQ/Onager")
                 && def.description.contains("graph_paths")
                 && def.description.contains("risk_scorecard")
                 && def.description.contains("community_context"),
