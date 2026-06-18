@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use spur_graph::locking::try_lock_exclusive_with_timeout;
-use spur_graph::store::SECTIONS_DATASET_DIR;
+use spur_graph::store::{CODE_SYMBOLS_DATASET_DIR, SECTIONS_DATASET_DIR, SECTIONS_TABLE};
 
 const INIT_SQL: &str = include_str!("../../../spur-context/poc/duckdb-analyst/init.sql");
 const INIT_TEMPORAL_SQL: &str =
@@ -169,11 +169,10 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let tmp_db = db_path.with_extension(format!("duckdb.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp_db);
 
-    let artifact_dir_sql = artifact_dir.display().to_string().replace('\'', "''");
     let lance_attach_sql = if lance_available {
         format!(
             "INSTALL lance; LOAD lance;\nATTACH '{}' AS lance_ns (TYPE LANCE);\n",
-            lance_dataset_dir.display().to_string().replace('\'', "''")
+            sql_escape_path(&lance_dataset_dir)
         )
     } else {
         if !quiet {
@@ -184,8 +183,7 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         }
         String::new()
     };
-    let sql = sql_template
-        .replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql)
+    let sql = render_artifact_path_placeholders(&sql_template, &artifact_dir)
         .replace(LANCE_ATTACH_PLACEHOLDER, &lance_attach_sql);
 
     let mut child = Command::new("duckdb")
@@ -347,11 +345,11 @@ fn lance_sections_available(artifact_dir: &Path, quiet: bool) -> bool {
 }
 
 fn lance_section_bodies_row_count(dataset_dir: &Path) -> Result<usize> {
-    let dataset_dir_sql = dataset_dir.display().to_string().replace('\'', "''");
+    let dataset_dir_sql = sql_escape_path(dataset_dir);
     let sql = format!(
         "INSTALL lance; LOAD lance;\n\
          ATTACH '{dataset_dir_sql}' AS lance_probe (TYPE LANCE);\n\
-         SELECT count(*) FROM lance_probe.section_bodies;"
+         SELECT count(*) FROM lance_probe.{SECTIONS_TABLE};"
     );
     let output = Command::new("duckdb")
         .args(["-csv", "-noheader", ":memory:", "-c", &sql])
@@ -389,12 +387,13 @@ fn render_init_search_sql(lance_available: bool) -> Result<String> {
 }
 
 fn lance_sections_source_sql() -> String {
-    "CREATE OR REPLACE TABLE sections AS\n\
-     SELECT stable_symbol_id, parent_stable_id, qualified_name, file_path,\n\
-            heading_level, child_count, content_hash, body_byte_start, body_text\n\
-     FROM lance_ns.section_bodies\n\
-     WHERE body_text IS NOT NULL AND length(body_text) > 0;"
-        .to_string()
+    format!(
+        "CREATE OR REPLACE TABLE sections AS\n\
+         SELECT stable_symbol_id, parent_stable_id, qualified_name, file_path,\n\
+                heading_level, child_count, content_hash, body_byte_start, body_text\n\
+         FROM lance_ns.{SECTIONS_TABLE}\n\
+         WHERE body_text IS NOT NULL AND length(body_text) > 0;"
+    )
 }
 
 fn empty_sections_source_sql() -> String {
@@ -429,6 +428,30 @@ fn strip_lance_hybrid_sql(sql: &str) -> Result<String> {
     rendered.push_str(&sql[..start]);
     rendered.push_str(&sql[end..]);
     Ok(rendered)
+}
+
+fn render_artifact_path_placeholders(sql_template: &str, artifact_dir: &Path) -> String {
+    let code_symbols_placeholder = format!("{ARTIFACT_PLACEHOLDER}/{CODE_SYMBOLS_DATASET_DIR}");
+    let sections_table_placeholder =
+        format!("{ARTIFACT_PLACEHOLDER}/{SECTIONS_DATASET_DIR}/{SECTIONS_TABLE}.lance");
+    let code_symbols_path = sql_escape_path(&artifact_dir.join(CODE_SYMBOLS_DATASET_DIR));
+    let sections_table_path = sql_escape_path(&sections_table_lance_path(artifact_dir));
+    let artifact_dir_sql = sql_escape_path(artifact_dir);
+
+    sql_template
+        .replace(&code_symbols_placeholder, &code_symbols_path)
+        .replace(&sections_table_placeholder, &sections_table_path)
+        .replace(ARTIFACT_PLACEHOLDER, &artifact_dir_sql)
+}
+
+fn sections_table_lance_path(artifact_dir: &Path) -> PathBuf {
+    artifact_dir
+        .join(SECTIONS_DATASET_DIR)
+        .join(format!("{SECTIONS_TABLE}.lance"))
+}
+
+fn sql_escape_path(path: &Path) -> String {
+    path.display().to_string().replace('\'', "''")
 }
 
 /// FNV-1a fingerprint over `(graph content hash, assembled analyst SQL)`. Changes
@@ -983,6 +1006,28 @@ mod tests {
                 && INIT_SEARCH_SQL.contains("PARTITION BY candidate_id")
                 && INIT_SEARCH_SQL.contains("WHERE representative_rank = 1"),
             "hybrid context candidates must deduplicate by stable symbol before final ranking"
+        );
+    }
+
+    #[test]
+    fn init_search_sql_code_symbols_path_uses_graph_constant() {
+        use spur_graph::store::CODE_SYMBOLS_DATASET_DIR;
+
+        let artifact_dir = Path::new("/tmp/spur-graph-artifact");
+        let rendered = render_artifact_path_placeholders(INIT_SEARCH_SQL, artifact_dir);
+        let expected_path = artifact_dir
+            .join(CODE_SYMBOLS_DATASET_DIR)
+            .display()
+            .to_string()
+            .replace('\'', "''");
+
+        assert!(
+            rendered.contains(&format!("'{expected_path}'")),
+            "rendered init_search.sql must point code hybrid search at {expected_path}"
+        );
+        assert!(
+            !rendered.contains(&format!("{ARTIFACT_PLACEHOLDER}/code_symbols.lance")),
+            "code_symbols Lance path must be rendered through the graph constant"
         );
     }
 
