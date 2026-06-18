@@ -51,6 +51,106 @@ fn expected_import_names(import_names: &[String], expected: &[&str]) {
 }
 
 #[test]
+fn ts_spur_edges_query_captures_hof_bare_identifier_callbacks() {
+    let language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    let source = r#"
+function caller(items: Item[], promise: Promise<Item>) {
+  items.map(renderItem);
+  items.filter(isReady);
+  items.forEach(track);
+  items.flatMap(expand);
+  items.find(findItem);
+  items.findIndex(findItemIndex);
+  items.some(hasReady);
+  items.every(allReady);
+  items.sort(compareItems);
+  items.toSorted(compareCopy);
+  items.reduce(combine, initial);
+  items.reduceRight(combineRight, initial);
+  promise.then(handleSuccess);
+  promise.catch(handleError);
+  promise.finally(cleanup);
+}
+"#;
+
+    let reference_names = capture_texts(&language, source, "reference.name");
+
+    assert_eq!(
+        reference_names,
+        vec![
+            "renderItem",
+            "isReady",
+            "track",
+            "expand",
+            "findItem",
+            "findItemIndex",
+            "hasReady",
+            "allReady",
+            "compareItems",
+            "compareCopy",
+            "combine",
+            "combineRight",
+            "handleSuccess",
+            "handleError",
+            "cleanup",
+        ]
+    );
+}
+
+#[test]
+fn tsx_spur_edges_query_captures_hof_bare_identifier_callbacks() {
+    let language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+    let source = r#"
+export function List({ items }: { items: string[] }) {
+  const rows = items.map(renderItem).filter(isReady);
+  return <div>{rows}</div>;
+}
+"#;
+
+    let reference_names = capture_texts(&language, source, "reference.name");
+
+    assert_eq!(reference_names, vec!["renderItem", "isReady"]);
+}
+
+#[test]
+fn js_spur_edges_query_captures_hof_bare_identifier_callbacks() {
+    let language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+    let source = r#"
+function caller(items, promise) {
+  items.map(renderItem);
+  promise.then(handleSuccess);
+  promise.catch(handleError);
+}
+"#;
+
+    let reference_names = capture_texts(&language, source, "reference.name");
+
+    assert_eq!(
+        reference_names,
+        vec!["renderItem", "handleSuccess", "handleError"]
+    );
+}
+
+#[test]
+fn ts_spur_edges_query_ignores_non_hof_or_non_identifier_callbacks() {
+    let language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    let source = r#"
+function caller(items: Item[], promise: Promise<Item>) {
+  items.custom(callback);
+  items.map((item) => render(item));
+  items.filter(function itemIsReady(item) { return isReady(item); });
+  items.forEach("track");
+  items.reduce({ combine }, initial);
+  promise.then(handleSuccess());
+}
+"#;
+
+    let reference_names = capture_texts(&language, source, "reference.name");
+
+    assert!(reference_names.is_empty());
+}
+
+#[test]
 fn ts_spur_edges_query_captures_import_variants_implements_extends_reexports() {
     let language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     let source = r#"

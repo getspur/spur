@@ -108,7 +108,7 @@ seed of the Tier-0 ontology realization contract
 | binds | — | — | — | — | — | — | — | — | — | — | Y |
 | emits | — | — | — | — | — | — | — | — | — | — | Y |
 | defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| references (HOF/notebook facts) | Y | Y | TODO | TODO | TODO | — | Y | — | — | — | Y |
+| references (HOF/notebook facts) | Y | Y | Y | Y | Y | — | Y | — | — | — | Y |
 | links | — | — | — | — | — | — | — | — | — | Y | — |
 | implements | Y | Y | Y | Y | Y | — | — | — | — | — | — |
 | extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — |
@@ -121,9 +121,10 @@ TypeScript/Tsx/JavaScript `imports` includes both direct import declarations
 and re-export statements (`export { ... } from "..."`, `export * from "..."`),
 both mapped to `RelationKind::Imports` through the same resolver path.
 
-HOF references are realized in Rust, Python, and C++ via closed HOF-method
-allowlists in the respective `spur-edges.scm`; TypeScript/Tsx/JavaScript are
-TODO.
+HOF references are realized in Rust, Python, C++, and TypeScript/Tsx/JavaScript
+via closed HOF-method allowlists in the respective `spur-edges.scm` files.
+TypeScript/Tsx/JavaScript currently capture bare identifier callbacks passed as
+the first argument to recognized array/iterable and Promise-style methods.
 
 ### Notebook Semantic Facts
 
