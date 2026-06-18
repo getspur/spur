@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_dag_and_frontend_facts_emitted() {
+    fn notebook_metadata_emits_declared_dag_and_frontend_semantic_facts() {
         let nb = serde_json::to_vec(&serde_json::json!({
             "nbformat":4,"nbformat_minor":5,"metadata":{},
             "cells":[{
@@ -724,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_port_facts_and_cross_slot_match() {
+    fn notebook_source_emits_actual_put_get_dynamic_put_and_table_reference_facts() {
         let nb = serde_json::to_vec(&serde_json::json!({
             "nbformat":4,"nbformat_minor":5,"metadata":{"kernelspec":{"name":"python3"}},
             "cells":[
