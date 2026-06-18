@@ -661,6 +661,13 @@ fn lance_extension_version(db_path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner())
+    }
 
     fn temp_root() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -682,6 +689,7 @@ mod tests {
 
     #[test]
     fn resolve_artifact_dir_falls_back_to_env() {
+        let _env_guard = env_lock();
         let root = temp_root();
         let target = root.path().join("env-artifact");
         fs::create_dir_all(&target).unwrap();
@@ -703,6 +711,7 @@ mod tests {
 
     #[test]
     fn resolve_artifact_dir_uses_current_pointer() {
+        let _env_guard = env_lock();
         let root = temp_root();
         let artifact = root.path().join(".git/spur-graph/artifacts/v/h.parquet");
         fs::create_dir_all(&artifact).unwrap();
@@ -725,6 +734,7 @@ mod tests {
 
     #[test]
     fn resolve_artifact_dir_errors_when_nothing_resolves() {
+        let _env_guard = env_lock();
         let root = temp_root();
         let prev = std::env::var_os("SPUR_GRAPH_ARTIFACT_DIR");
         std::env::remove_var("SPUR_GRAPH_ARTIFACT_DIR");
@@ -1086,6 +1096,7 @@ mod tests {
 
     #[test]
     fn duckdb_cli_present_returns_some_when_on_path() {
+        let _env_guard = env_lock();
         let path = std::env::var_os("PATH").unwrap_or_default();
         let dir = temp_root();
         let shim = dir.path().join("duckdb");
@@ -1102,6 +1113,7 @@ mod tests {
 
     #[test]
     fn duckdb_cli_present_returns_false_when_absent() {
+        let _env_guard = env_lock();
         let prev = std::env::var_os("PATH").unwrap_or_default();
         let dir = temp_root();
         std::env::set_var("PATH", dir.path());
@@ -1114,6 +1126,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn build_happy_path_against_real_duckdb_if_present() {
+        let _env_guard = env_lock();
         if !duckdb_cli_present() {
             eprintln!("skipping: duckdb CLI not on PATH");
             return;
