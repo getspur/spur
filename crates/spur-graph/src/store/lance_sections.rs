@@ -27,8 +27,11 @@ use crate::{
     RelationKind,
 };
 
+pub const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
 pub const EMBED_MODEL_NAME: &str = "BGEBaseENV15";
+pub const JINA_CODE_EMBED_MODEL_NAME: &str = "JinaEmbeddingsV2BaseCode";
 pub const EMBED_MODEL_APPROX_SIZE_MB: usize = 420;
+pub const JINA_CODE_EMBED_MODEL_APPROX_SIZE_MB: usize = 550;
 pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
 pub const CODE_SYMBOLS_DATASET_DIR: &str = "code_symbols.lance";
@@ -42,13 +45,71 @@ pub const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
 const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
 const SYMBOL_EMBED_TEXT_VERSION: &str = "v2-bge-base";
+const JINA_CODE_EMBED_TEXT_VERSION: &str = "v2-jina-code";
 const INDEX_REBUILD_MIN_ROWS: usize = 50;
 const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 // Integration tests spawn the debug-built CLI; keep this hook out of release builds.
 #[cfg(debug_assertions)]
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
 
-static EMBED_MODEL: OnceLock<Option<TextEmbedding>> = OnceLock::new();
+static BGE_BASE_EMBED_MODEL: OnceLock<Option<TextEmbedding>> = OnceLock::new();
+static JINA_CODE_EMBED_MODEL: OnceLock<Option<TextEmbedding>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingModelSelection {
+    BgeBaseEnV15,
+    JinaCode,
+}
+
+impl EmbeddingModelSelection {
+    pub fn from_env() -> Self {
+        std::env::var(EMBED_MODEL_ENV)
+            .ok()
+            .and_then(|value| Self::parse(&value))
+            .unwrap_or(Self::BgeBaseEnV15)
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized = value
+            .trim()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        match normalized.as_str() {
+            "" | "bgebaseenv15" | "bgebaseen15" | "bgebase" => Some(Self::BgeBaseEnV15),
+            "jinacode" | "jinaembeddingsv2basecode" | "jinaembeddingv2basecode" => {
+                Some(Self::JinaCode)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn model_name(self) -> &'static str {
+        match self {
+            Self::BgeBaseEnV15 => EMBED_MODEL_NAME,
+            Self::JinaCode => JINA_CODE_EMBED_MODEL_NAME,
+        }
+    }
+
+    pub fn approximate_size_mb(self) -> usize {
+        match self {
+            Self::BgeBaseEnV15 => EMBED_MODEL_APPROX_SIZE_MB,
+            Self::JinaCode => JINA_CODE_EMBED_MODEL_APPROX_SIZE_MB,
+        }
+    }
+
+    pub fn dimensions(self) -> usize {
+        EMBEDDING_VECTOR_DIMENSIONS
+    }
+
+    pub fn fastembed_model(self) -> EmbeddingModel {
+        match self {
+            Self::BgeBaseEnV15 => EmbeddingModel::BGEBaseENV15,
+            Self::JinaCode => EmbeddingModel::JinaEmbeddingsV2BaseCode,
+        }
+    }
+}
 
 // Vector reuse is intentionally split across two scopes: in-place incremental
 // upserts skip unchanged rows within the same sidecar table, while
@@ -361,8 +422,14 @@ async fn write_sections_dataset_async(
     options: SectionSidecarOptions,
     progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<GraphArtifactSidecarRowCounts> {
-    let mut batcher =
-        SectionRowBatcher::new(artifact, worktree_root, options.write_batch_size, None);
+    let embedding_model = EmbeddingModelSelection::from_env();
+    let mut batcher = SectionRowBatcher::new(
+        artifact,
+        worktree_root,
+        options.write_batch_size,
+        None,
+        embedding_model,
+    );
     let total_rows = batcher.total_rows();
     emit_progress(
         progress,
@@ -389,7 +456,7 @@ async fn write_sections_dataset_async(
     let mut table = db.open_table(SECTIONS_TABLE).execute().await.ok();
     let is_first_write = table.is_none();
     let mut existing_versions = ExistingFileVersions::new(table.as_ref());
-    let mut embedder = SectionEmbedder::new(options.embedding);
+    let mut embedder = SectionEmbedder::new(options.embedding, embedding_model);
     let mut dataset_changed = false;
     let mut batch_index = 0usize;
     let mut processed_rows = 0usize;
@@ -440,8 +507,8 @@ async fn write_sections_dataset_async(
             emit_progress(
                 progress,
                 SectionSidecarProgressEvent::ModelDownloading {
-                    model_name: EMBED_MODEL_NAME,
-                    approximate_size_mb: EMBED_MODEL_APPROX_SIZE_MB,
+                    model_name: embedding_model.model_name(),
+                    approximate_size_mb: embedding_model.approximate_size_mb(),
                 },
             );
         }
@@ -564,9 +631,15 @@ async fn write_sections_dataset_async(
         .count_rows(None)
         .await
         .context("failed to count LanceDB section rows")?;
-    let code_symbols =
-        write_symbol_rows_dataset_async(artifact, worktree_root, artifact_dir, &options, progress)
-            .await?;
+    let code_symbols = write_symbol_rows_dataset_async(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        &options,
+        embedding_model,
+        progress,
+    )
+    .await?;
     Ok(GraphArtifactSidecarRowCounts {
         section_bodies,
         code_symbols,
@@ -578,11 +651,18 @@ async fn write_symbol_rows_dataset_async(
     worktree_root: &Path,
     artifact_dir: &Path,
     options: &SectionSidecarOptions,
+    embedding_model: EmbeddingModelSelection,
     progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<usize> {
     let write_batch_size = options.write_batch_size;
     let embedding_options = options.embedding;
-    let mut batcher = SymbolRowBatcher::new(artifact, worktree_root, write_batch_size, None);
+    let mut batcher = SymbolRowBatcher::new(
+        artifact,
+        worktree_root,
+        write_batch_size,
+        None,
+        embedding_model,
+    );
     let total_rows = batcher.total_rows();
 
     emit_progress(
@@ -603,7 +683,7 @@ async fn write_symbol_rows_dataset_async(
     let mut table = db.open_table(CODE_SYMBOLS_TABLE).execute().await.ok();
     let is_first_write = table.is_none();
     let mut existing_versions = ExistingSymbolFileVersions::new(table.as_ref());
-    let mut embedder = SymbolEmbedder::new(embedding_options);
+    let mut embedder = SymbolEmbedder::new(embedding_options, embedding_model);
     let mut dataset_changed = false;
     let mut batch_index = 0usize;
     let mut processed_rows = 0usize;
@@ -1202,6 +1282,7 @@ impl ExistingSymbolFileVersions {
 
 struct SectionRowBatcher<'a> {
     worktree_root: &'a Path,
+    embedding_model: EmbeddingModelSelection,
     child_count_by_parent: HashMap<&'a str, u32>,
     parent_by_child: HashMap<&'a str, String>,
     manifest_by_path: BTreeMap<&'a str, &'a GraphFileManifestEntry>,
@@ -1218,6 +1299,7 @@ impl<'a> SectionRowBatcher<'a> {
         worktree_root: &'a Path,
         write_batch_size: usize,
         changed_paths: Option<&'a HashSet<String>>,
+        embedding_model: EmbeddingModelSelection,
     ) -> Self {
         let write_batch_size = normalize_section_write_batch_size(write_batch_size);
         let section_ids: BTreeSet<&str> = artifact
@@ -1268,6 +1350,7 @@ impl<'a> SectionRowBatcher<'a> {
 
         Self {
             worktree_root,
+            embedding_model,
             child_count_by_parent,
             parent_by_child,
             manifest_by_path,
@@ -1326,7 +1409,9 @@ impl<'a> SectionRowBatcher<'a> {
                 return Ok(Vec::new());
             }
         };
-        let content_hash = blake3_hex(&bytes);
+        let source_content_hash = blake3_hex(&bytes);
+        let content_hash =
+            section_embed_content_hash_for_model(&source_content_hash, self.embedding_model);
         let source = match std::str::from_utf8(&bytes) {
             Ok(source) => source,
             Err(e) => {
@@ -1372,6 +1457,7 @@ impl<'a> SectionRowBatcher<'a> {
 
 struct SymbolRowBatcher<'a> {
     worktree_root: &'a Path,
+    embedding_model: EmbeddingModelSelection,
     symbols_by_path: BTreeMap<&'a str, Vec<&'a GraphSymbolArtifact>>,
     manifest_by_path: BTreeMap<&'a str, &'a GraphFileManifestEntry>,
     ordered_paths: Vec<&'a str>,
@@ -1386,6 +1472,7 @@ impl<'a> SymbolRowBatcher<'a> {
         worktree_root: &'a Path,
         write_batch_size: usize,
         changed_paths: Option<&'a HashSet<String>>,
+        embedding_model: EmbeddingModelSelection,
     ) -> Self {
         let write_batch_size = normalize_section_write_batch_size(write_batch_size);
         let mut symbols_by_path: BTreeMap<&str, Vec<&GraphSymbolArtifact>> = BTreeMap::new();
@@ -1420,6 +1507,7 @@ impl<'a> SymbolRowBatcher<'a> {
 
         Self {
             worktree_root,
+            embedding_model,
             symbols_by_path,
             manifest_by_path,
             ordered_paths,
@@ -1478,7 +1566,9 @@ impl<'a> SymbolRowBatcher<'a> {
 
         let mut rows = Vec::new();
         for symbol in symbols {
-            if let Some(row) = symbol_row(symbol, source, content_hash.as_str())? {
+            if let Some(row) =
+                symbol_row(symbol, source, content_hash.as_str(), self.embedding_model)?
+            {
                 rows.push(row);
             }
         }
@@ -1547,6 +1637,7 @@ fn symbol_row(
     symbol: &GraphSymbolArtifact,
     source: &str,
     content_hash: &str,
+    embedding_model: EmbeddingModelSelection,
 ) -> Result<Option<SymbolRow>> {
     let start = symbol.byte_range[0];
     let end = symbol.byte_range[1];
@@ -1594,11 +1685,8 @@ fn symbol_row(
     } else {
         embed_text
     };
-    let content_hash = if has_significant_body {
-        symbol_embed_content_hash(content_hash)
-    } else {
-        content_hash.to_owned()
-    };
+    let content_hash =
+        symbol_embed_content_hash_for_model(content_hash, has_significant_body, embedding_model);
 
     Ok(Some(SymbolRow {
         stable_symbol_id: symbol.stable_symbol_id.clone(),
@@ -1632,8 +1720,32 @@ fn first_source_line_for_symbol<'a>(
     Ok(body.lines().map(str::trim).find(|line| !line.is_empty()))
 }
 
-fn symbol_embed_content_hash(source_content_hash: &str) -> String {
-    blake3_hex(format!("{SYMBOL_EMBED_TEXT_VERSION}\0{source_content_hash}").as_bytes())
+fn section_embed_content_hash_for_model(
+    source_content_hash: &str,
+    embedding_model: EmbeddingModelSelection,
+) -> String {
+    match embedding_model {
+        EmbeddingModelSelection::BgeBaseEnV15 => source_content_hash.to_owned(),
+        EmbeddingModelSelection::JinaCode => blake3_hex(
+            format!("{JINA_CODE_EMBED_TEXT_VERSION}:section\0{source_content_hash}").as_bytes(),
+        ),
+    }
+}
+
+fn symbol_embed_content_hash_for_model(
+    source_content_hash: &str,
+    has_significant_body: bool,
+    embedding_model: EmbeddingModelSelection,
+) -> String {
+    match embedding_model {
+        EmbeddingModelSelection::BgeBaseEnV15 if has_significant_body => {
+            blake3_hex(format!("{SYMBOL_EMBED_TEXT_VERSION}\0{source_content_hash}").as_bytes())
+        }
+        EmbeddingModelSelection::BgeBaseEnV15 => source_content_hash.to_owned(),
+        EmbeddingModelSelection::JinaCode => blake3_hex(
+            format!("{JINA_CODE_EMBED_TEXT_VERSION}:symbol\0{source_content_hash}").as_bytes(),
+        ),
+    }
 }
 
 fn doc_text_for_symbol(source: &str, byte_start: usize) -> Result<String> {
@@ -1725,7 +1837,7 @@ fn embed_eligible_rows(
     rows: &[SectionRow],
     options: SectionEmbeddingOptions,
 ) -> Vec<Option<Vec<f32>>> {
-    let mut embedder = SectionEmbedder::new(options);
+    let mut embedder = SectionEmbedder::new(options, EmbeddingModelSelection::BgeBaseEnV15);
     embedder.embed_row_vectors(rows)
 }
 
@@ -1739,6 +1851,7 @@ struct SymbolEmbedder {
 
 struct TextEmbeddingService {
     options: SectionEmbeddingOptions,
+    embedding_model: EmbeddingModelSelection,
     model_requested: bool,
 }
 
@@ -1777,9 +1890,9 @@ struct SectionEmbeddingChunkProgress {
 }
 
 impl SectionEmbedder {
-    fn new(options: SectionEmbeddingOptions) -> Self {
+    fn new(options: SectionEmbeddingOptions, embedding_model: EmbeddingModelSelection) -> Self {
         Self {
-            service: TextEmbeddingService::new(options),
+            service: TextEmbeddingService::new(options, embedding_model),
         }
     }
 
@@ -1846,9 +1959,9 @@ impl SectionEmbedder {
 }
 
 impl SymbolEmbedder {
-    fn new(options: SectionEmbeddingOptions) -> Self {
+    fn new(options: SectionEmbeddingOptions, embedding_model: EmbeddingModelSelection) -> Self {
         Self {
-            service: TextEmbeddingService::new(options),
+            service: TextEmbeddingService::new(options, embedding_model),
         }
     }
 
@@ -1909,9 +2022,10 @@ impl SymbolEmbedder {
 }
 
 impl TextEmbeddingService {
-    fn new(options: SectionEmbeddingOptions) -> Self {
+    fn new(options: SectionEmbeddingOptions, embedding_model: EmbeddingModelSelection) -> Self {
         Self {
             options,
+            embedding_model,
             model_requested: false,
         }
     }
@@ -1920,7 +2034,7 @@ impl TextEmbeddingService {
         !self.options.skip_embeddings
             && !openrouter_api_key_available()
             && !self.model_requested
-            && EMBED_MODEL.get().is_none()
+            && embed_model_cell(self.embedding_model).get().is_none()
     }
 
     fn prepare_model(&mut self, embedding_kind: &'static str) -> bool {
@@ -2076,7 +2190,7 @@ impl TextEmbeddingService {
 
     fn model(&mut self, embedding_kind: &'static str) -> Option<&'static TextEmbedding> {
         self.model_requested = true;
-        shared_embed_model(embedding_kind)
+        shared_embed_model(self.embedding_model, embedding_kind)
     }
 
     fn embed_texts_locally(
@@ -2084,7 +2198,11 @@ impl TextEmbeddingService {
         texts: &[&str],
         embedding_kind: &'static str,
     ) -> Result<Vec<Vec<f32>>> {
-        tracing::info!(embedding_kind, "Using local fastembed");
+        tracing::info!(
+            embedding_kind,
+            model = self.embedding_model.model_name(),
+            "Using local fastembed"
+        );
         let Some(model) = self.model(embedding_kind) else {
             return Ok(Vec::new());
         };
@@ -2353,10 +2471,22 @@ where
     result
 }
 
-fn shared_embed_model(embedding_kind: &'static str) -> Option<&'static TextEmbedding> {
-    EMBED_MODEL
+fn embed_model_cell(
+    embedding_model: EmbeddingModelSelection,
+) -> &'static OnceLock<Option<TextEmbedding>> {
+    match embedding_model {
+        EmbeddingModelSelection::BgeBaseEnV15 => &BGE_BASE_EMBED_MODEL,
+        EmbeddingModelSelection::JinaCode => &JINA_CODE_EMBED_MODEL,
+    }
+}
+
+fn shared_embed_model(
+    embedding_model: EmbeddingModelSelection,
+    embedding_kind: &'static str,
+) -> Option<&'static TextEmbedding> {
+    embed_model_cell(embedding_model)
         .get_or_init(|| {
-            let mut init_options = InitOptions::new(EmbeddingModel::BGEBaseENV15)
+            let mut init_options = InitOptions::new(embedding_model.fastembed_model())
                 .with_show_download_progress(true);
 
             if let Some(cache_dir) = fastembed_cache_dir() {
@@ -2366,7 +2496,12 @@ fn shared_embed_model(embedding_kind: &'static str) -> Option<&'static TextEmbed
             match TextEmbedding::try_new(init_options) {
                 Ok(model) => Some(model),
                 Err(error) => {
-                    tracing::warn!(error = %error, embedding_kind, "fastembed model unavailable; skipping embeddings");
+                    tracing::warn!(
+                        error = %error,
+                        embedding_kind,
+                        model = embedding_model.model_name(),
+                        "fastembed model unavailable; skipping embeddings"
+                    );
                     None
                 }
             }
@@ -3132,6 +3267,63 @@ mod tests {
     }
 
     #[test]
+    fn embedding_model_from_env_accepts_jina_code_alias() {
+        let _guard = env_lock();
+        let _model = EnvGuard::set(EMBED_MODEL_ENV, "jina-code");
+
+        assert_eq!(
+            EmbeddingModelSelection::from_env(),
+            EmbeddingModelSelection::JinaCode
+        );
+        assert_eq!(
+            EmbeddingModelSelection::from_env().model_name(),
+            JINA_CODE_EMBED_MODEL_NAME
+        );
+        assert_eq!(EmbeddingModelSelection::JinaCode.dimensions(), 768);
+    }
+
+    #[test]
+    fn embedding_model_is_part_of_vector_content_hash_for_jina_code() {
+        let source_hash = "source-content";
+
+        assert_eq!(
+            section_embed_content_hash_for_model(
+                source_hash,
+                EmbeddingModelSelection::BgeBaseEnV15
+            ),
+            source_hash
+        );
+        assert_ne!(
+            section_embed_content_hash_for_model(source_hash, EmbeddingModelSelection::JinaCode),
+            source_hash
+        );
+        assert_ne!(
+            symbol_embed_content_hash_for_model(
+                source_hash,
+                false,
+                EmbeddingModelSelection::BgeBaseEnV15
+            ),
+            symbol_embed_content_hash_for_model(
+                source_hash,
+                false,
+                EmbeddingModelSelection::JinaCode
+            )
+        );
+        assert_ne!(
+            symbol_embed_content_hash_for_model(
+                source_hash,
+                true,
+                EmbeddingModelSelection::BgeBaseEnV15
+            ),
+            symbol_embed_content_hash_for_model(
+                source_hash,
+                true,
+                EmbeddingModelSelection::JinaCode
+            )
+        );
+    }
+
+    #[test]
     fn embed_eligible_rows_returns_none_for_h1_and_oversized() {
         let rows = vec![
             section_row_fixture(1, "# Title\n\nBody".to_owned()),
@@ -3301,7 +3493,13 @@ mod tests {
             symbol_snapshots: Vec::new(),
             temporal_edges: Vec::new(),
         };
-        let mut batcher = SectionRowBatcher::new(&artifact, root, 2, None);
+        let mut batcher = SectionRowBatcher::new(
+            &artifact,
+            root,
+            2,
+            None,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
         let mut lengths = Vec::new();
 
         while let Some(batch) = batcher.next_batch().expect("section batch") {
@@ -3353,7 +3551,13 @@ mod tests {
             ],
         );
 
-        let mut batcher = SectionRowBatcher::new(&artifact, root, 16, None);
+        let mut batcher = SectionRowBatcher::new(
+            &artifact,
+            root,
+            16,
+            None,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
         let rows = batcher
             .next_batch()
             .expect("section batch")
@@ -3438,7 +3642,13 @@ mod tests {
             temporal_edges: Vec::new(),
         };
 
-        let mut batcher = SymbolRowBatcher::new(&artifact, root, 16, None);
+        let mut batcher = SymbolRowBatcher::new(
+            &artifact,
+            root,
+            16,
+            None,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
         let rows = batcher
             .next_batch()
             .expect("symbol batch")
@@ -3513,7 +3723,13 @@ mod tests {
             ],
         );
 
-        let mut batcher = SymbolRowBatcher::new(&artifact, root, 16, None);
+        let mut batcher = SymbolRowBatcher::new(
+            &artifact,
+            root,
+            16,
+            None,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
         let rows = batcher
             .next_batch()
             .expect("symbol batch")
@@ -3668,10 +3884,13 @@ mod tests {
     #[test]
     fn section_embedder_does_not_initialize_model_for_skipped_or_ineligible_rows() {
         let rows = vec![section_row_fixture(1, "# Title\n\nSkipped.".to_owned())];
-        let mut embedder = SectionEmbedder::new(SectionEmbeddingOptions {
-            skip_embeddings: false,
-            batch_size: 1,
-        });
+        let mut embedder = SectionEmbedder::new(
+            SectionEmbeddingOptions {
+                skip_embeddings: false,
+                batch_size: 1,
+            },
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
 
         assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
         assert!(!embedder.service.model_requested);
@@ -3680,10 +3899,13 @@ mod tests {
             2,
             "## Install\n\nInstall body.".to_owned(),
         )];
-        let mut embedder = SectionEmbedder::new(SectionEmbeddingOptions {
-            skip_embeddings: true,
-            batch_size: 1,
-        });
+        let mut embedder = SectionEmbedder::new(
+            SectionEmbeddingOptions {
+                skip_embeddings: true,
+                batch_size: 1,
+            },
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
 
         assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
         assert!(!embedder.service.model_requested);
