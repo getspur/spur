@@ -107,3 +107,32 @@ fn ts_class_emits_implements_and_extends_edges() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn ts_plain_class_emits_no_inheritance_edges() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("lib.ts"), "class Plain {}\n").expect("write fixture");
+
+    let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+    let plain = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Class && node.label == "Plain")
+        .expect("Plain class node");
+
+    assert!(
+        !facts.edges.iter().any(|edge| {
+            edge.source_node_id == plain.node_id
+                && matches!(
+                    edge.relation,
+                    RelationKind::Implements | RelationKind::Extends
+                )
+        }),
+        "plain TS class must not emit inheritance edges; got {:?}",
+        facts
+            .edges
+            .iter()
+            .map(|edge| (edge.relation, edge.target_label.clone()))
+            .collect::<Vec<_>>()
+    );
+}
