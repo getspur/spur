@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use spur_graph::locking::try_lock_exclusive_with_timeout;
-use spur_graph::store::{CODE_SYMBOLS_DATASET_DIR, SECTIONS_DATASET_DIR, SECTIONS_TABLE};
+use spur_graph::store::{
+    CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
+};
 
 const INIT_SQL: &str = include_str!("../../../spur-context/poc/duckdb-analyst/init.sql");
 const INIT_TEMPORAL_SQL: &str =
@@ -111,8 +113,9 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     // Assemble the (pre-substitution) SQL template now so the freshness guard can
     // fingerprint it. Which scripts are included depends on temporal/lance
     // presence, so the fingerprint captures config as well as SQL content.
-    let lance_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
-    let lance_available = want_temporal && lance_sections_available(&artifact_dir, quiet);
+    let sections_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
+    let code_symbols_dataset_dir = artifact_dir.join(CODE_SYMBOLS_DATASET_DIR);
+    let lance_available = want_temporal && lance_hybrid_available(&artifact_dir, quiet);
     let init_search_sql = if want_temporal {
         render_init_search_sql(lance_available)?
     } else {
@@ -172,13 +175,14 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let lance_attach_sql = if lance_available {
         format!(
             "INSTALL lance; LOAD lance;\nATTACH '{}' AS lance_ns (TYPE LANCE);\n",
-            sql_escape_path(&lance_dataset_dir)
+            sql_escape_path(&sections_dataset_dir)
         )
     } else {
         if !quiet {
             eprintln!(
-                "[spur] warning: valid Lance section dataset not found at {} - using BM25-only search",
-                lance_dataset_dir.display()
+                "[spur] warning: valid Lance hybrid sidecars not found at {} and {} - using BM25-only search",
+                sections_dataset_dir.display(),
+                code_symbols_dataset_dir.display()
             );
         }
         String::new()
@@ -298,34 +302,85 @@ fn read_graph_content_hash(artifact_dir: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn manifest_sidecar_complete(artifact_dir: &Path) -> bool {
+#[derive(Debug, Clone, Copy)]
+struct LanceSidecarManifestStatus {
+    section_bodies: usize,
+    code_symbols: usize,
+}
+
+fn manifest_sidecar_status(artifact_dir: &Path) -> Option<LanceSidecarManifestStatus> {
     let Ok(bytes) = std::fs::read(artifact_dir.join("manifest.json")) else {
-        return false;
+        return None;
     };
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return false;
+        return None;
     };
-    parsed
+    if !parsed
         .get("sidecar_complete")
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
+    {
+        return None;
+    }
+    let row_counts = parsed.get("sidecar_row_counts")?;
+    Some(LanceSidecarManifestStatus {
+        section_bodies: manifest_usize_field(row_counts, "section_bodies"),
+        code_symbols: manifest_usize_field(row_counts, "code_symbols"),
+    })
 }
 
-fn lance_sections_available(artifact_dir: &Path, quiet: bool) -> bool {
-    let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
-    if !manifest_sidecar_complete(artifact_dir) {
+fn manifest_usize_field(value: &serde_json::Value, field: &str) -> usize {
+    value
+        .get(field)
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn lance_hybrid_available(artifact_dir: &Path, quiet: bool) -> bool {
+    let Some(status) = manifest_sidecar_status(artifact_dir) else {
+        return false;
+    };
+    if status.section_bodies == 0 || status.code_symbols == 0 {
+        if !quiet {
+            eprintln!(
+                "[spur] warning: Lance sidecar manifest has section_bodies={} and code_symbols={} - using BM25-only search",
+                status.section_bodies, status.code_symbols
+            );
+        }
         return false;
     }
-    if !dataset_dir.is_dir() {
+    let sections_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
+    let code_symbols_dataset_dir = artifact_dir.join(CODE_SYMBOLS_DATASET_DIR);
+    if !sections_dataset_dir.is_dir() || !code_symbols_dataset_dir.is_dir() {
         return false;
     }
-    match lance_section_bodies_row_count(&dataset_dir) {
+    lance_dataset_has_rows(
+        &sections_dataset_dir,
+        SECTIONS_TABLE,
+        "section table",
+        quiet,
+    ) && lance_dataset_has_rows(
+        &code_symbols_dataset_dir,
+        CODE_SYMBOLS_TABLE,
+        "code symbol table",
+        quiet,
+    )
+}
+
+fn lance_dataset_has_rows(
+    dataset_dir: &Path,
+    table_name: &str,
+    table_label: &str,
+    quiet: bool,
+) -> bool {
+    match lance_dataset_row_count(dataset_dir, table_name) {
         Ok(rows) if rows > 0 => true,
         Ok(_) => {
             if !quiet {
                 eprintln!(
-                    "[spur] warning: Lance section table at {} is empty - using BM25-only search",
-                    dataset_dir.display()
+                    "[spur] warning: Lance {table_label} at {} is empty - using BM25-only search",
+                    dataset_dir.display(),
                 );
             }
             false
@@ -333,8 +388,8 @@ fn lance_sections_available(artifact_dir: &Path, quiet: bool) -> bool {
         Err(err) => {
             if !quiet {
                 eprintln!(
-                    "[spur] warning: could not open Lance section table at {}: {err:#} - using BM25-only search",
-                    dataset_dir.display()
+                    "[spur] warning: could not open Lance {table_label} at {}: {err:#} - using BM25-only search",
+                    dataset_dir.display(),
                 );
             }
             false
@@ -342,12 +397,12 @@ fn lance_sections_available(artifact_dir: &Path, quiet: bool) -> bool {
     }
 }
 
-fn lance_section_bodies_row_count(dataset_dir: &Path) -> Result<usize> {
+fn lance_dataset_row_count(dataset_dir: &Path, table_name: &str) -> Result<usize> {
     let dataset_dir_sql = sql_escape_path(dataset_dir);
     let sql = format!(
         "INSTALL lance; LOAD lance;\n\
          ATTACH '{dataset_dir_sql}' AS lance_probe (TYPE LANCE);\n\
-         SELECT count(*) FROM lance_probe.{SECTIONS_TABLE};"
+         SELECT count(*) FROM lance_probe.{table_name};"
     );
     let output = Command::new("duckdb")
         .args(["-csv", "-noheader", ":memory:", "-c", &sql])
