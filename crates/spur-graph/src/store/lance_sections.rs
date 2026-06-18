@@ -13,8 +13,11 @@ use arrow_array::{
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use lancedb::index::{scalar::FtsIndexBuilder, vector::IvfHnswSqIndexBuilder, Index, IndexType};
+use lancedb::index::{
+    scalar::FtsIndexBuilder, vector::IvfHnswSqIndexBuilder, Index, IndexConfig, IndexType,
+};
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
+use lancedb::table::OptimizeAction;
 
 use crate::content_hash::blake3_hex;
 use crate::embedding::openrouter::OpenRouterEmbedder;
@@ -47,6 +50,9 @@ const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECA
 
 static EMBED_MODEL: OnceLock<Option<TextEmbedding>> = OnceLock::new();
 
+// Vector reuse is intentionally split across two scopes: in-place incremental
+// upserts skip unchanged rows within the same sidecar table, while
+// `previous_artifact_dir` carries vectors forward across artifact directories.
 pub type SectionSidecarProgressCallback<'a> = dyn Fn(SectionSidecarProgressEvent) + Sync + 'a;
 
 /// Identifies which phase of the sidecar write produced a progress event.
@@ -257,26 +263,14 @@ pub fn write_sections_dataset(
     worktree_root: &Path,
     artifact_dir: &Path,
 ) -> Result<()> {
-    write_sections_dataset_with_sidecar_options(
+    write_sections_dataset_with_sidecar_options_and_progress(
         artifact,
         worktree_root,
         artifact_dir,
         SectionSidecarOptions::from_env(),
+        None,
     )
     .map(|_| ())
-}
-
-pub fn write_sections_dataset_best_effort(
-    artifact: &GraphIndexArtifact,
-    worktree_root: &Path,
-    artifact_dir: &Path,
-) {
-    write_sections_dataset_best_effort_with_sidecar_options(
-        artifact,
-        worktree_root,
-        artifact_dir,
-        SectionSidecarOptions::from_env(),
-    );
 }
 
 pub fn write_sections_dataset_best_effort_with_options(
@@ -285,30 +279,19 @@ pub fn write_sections_dataset_best_effort_with_options(
     artifact_dir: &Path,
     options: SectionEmbeddingOptions,
 ) {
-    if let Err(error) =
-        write_sections_dataset_with_options(artifact, worktree_root, artifact_dir, options)
-    {
+    if let Err(error) = write_sections_dataset_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        SectionSidecarOptions::from_embedding_options(options),
+        None,
+    ) {
         tracing::warn!(
             error = %error,
             artifact_dir = %artifact_dir.display(),
             "spur-graph: section sidecar write failed; graph artifact remains usable"
         );
     }
-}
-
-fn write_sections_dataset_best_effort_with_sidecar_options(
-    artifact: &GraphIndexArtifact,
-    worktree_root: &Path,
-    artifact_dir: &Path,
-    options: SectionSidecarOptions,
-) {
-    write_sections_dataset_best_effort_with_sidecar_options_and_progress(
-        artifact,
-        worktree_root,
-        artifact_dir,
-        options,
-        None,
-    );
 }
 
 pub fn write_sections_dataset_best_effort_with_sidecar_options_and_progress(
@@ -340,36 +323,6 @@ pub fn write_sections_dataset_best_effort_with_sidecar_options_and_progress(
             );
         }
     }
-}
-
-fn write_sections_dataset_with_options(
-    artifact: &GraphIndexArtifact,
-    worktree_root: &Path,
-    artifact_dir: &Path,
-    options: SectionEmbeddingOptions,
-) -> Result<()> {
-    write_sections_dataset_with_sidecar_options(
-        artifact,
-        worktree_root,
-        artifact_dir,
-        SectionSidecarOptions::from_embedding_options(options),
-    )
-    .map(|_| ())
-}
-
-fn write_sections_dataset_with_sidecar_options(
-    artifact: &GraphIndexArtifact,
-    worktree_root: &Path,
-    artifact_dir: &Path,
-    options: SectionSidecarOptions,
-) -> Result<GraphArtifactSidecarRowCounts> {
-    write_sections_dataset_with_sidecar_options_and_progress(
-        artifact,
-        worktree_root,
-        artifact_dir,
-        options,
-        None,
-    )
 }
 
 pub(crate) fn write_sections_dataset_with_sidecar_options_and_progress(
@@ -612,7 +565,7 @@ async fn write_sections_dataset_async(
                     phase: SidecarPhase::Sections,
                 },
             );
-            ensure_body_text_fts_index(table).await?;
+            let mut should_optimize_existing_indices = ensure_body_text_fts_index(table).await?;
             emit_progress(
                 progress,
                 SectionSidecarProgressEvent::Indexing {
@@ -620,7 +573,10 @@ async fn write_sections_dataset_async(
                     phase: SidecarPhase::Sections,
                 },
             );
-            ensure_vector_index(table).await?;
+            should_optimize_existing_indices |= ensure_vector_index(table).await?;
+            if should_optimize_existing_indices {
+                optimize_existing_indices(table, "section").await?;
+            }
         }
     }
 
@@ -814,7 +770,7 @@ async fn write_symbol_rows_dataset_async(
                     phase: SidecarPhase::CodeSymbols,
                 },
             );
-            ensure_code_symbol_fts_index(table).await?;
+            let mut should_optimize_existing_indices = ensure_code_symbol_fts_index(table).await?;
             emit_progress(
                 progress,
                 SectionSidecarProgressEvent::Indexing {
@@ -822,7 +778,10 @@ async fn write_symbol_rows_dataset_async(
                     phase: SidecarPhase::CodeSymbols,
                 },
             );
-            ensure_code_symbol_vector_index(table).await?;
+            should_optimize_existing_indices |= ensure_code_symbol_vector_index(table).await?;
+            if should_optimize_existing_indices {
+                optimize_existing_indices(table, "code symbol").await?;
+            }
         }
     }
 
@@ -853,46 +812,45 @@ fn emit_progress(
     }
 }
 
-async fn ensure_body_text_fts_index(table: &lancedb::Table) -> Result<()> {
-    if table
-        .list_indices()
-        .await
-        .context("failed to list LanceDB section indices")?
-        .iter()
-        .any(|index| {
-            index.index_type == IndexType::FTS && index.columns.as_slice() == ["body_text"]
-        })
-    {
-        return Ok(());
+async fn ensure_body_text_fts_index(table: &lancedb::Table) -> Result<bool> {
+    if has_matching_index(
+        &table
+            .list_indices()
+            .await
+            .context("failed to list LanceDB section indices")?,
+        "body_text",
+        |index_type| *index_type == IndexType::FTS,
+    ) {
+        return Ok(true);
     }
 
     table
         .create_index(&["body_text"], Index::FTS(FtsIndexBuilder::default()))
         .execute()
         .await
-        .context("failed to create LanceDB body_text FTS index")
+        .context("failed to create LanceDB body_text FTS index")?;
+    Ok(false)
 }
 
-async fn ensure_vector_index(table: &lancedb::Table) -> Result<()> {
+async fn ensure_vector_index(table: &lancedb::Table) -> Result<bool> {
     let vector_rows = table
         .count_rows(Some("vector IS NOT NULL".to_owned()))
         .await
         .context("failed to count LanceDB section vector rows")?;
 
     if vector_rows == 0 {
-        return Ok(());
+        return Ok(false);
     }
 
-    if table
-        .list_indices()
-        .await
-        .context("failed to list LanceDB section indices")?
-        .iter()
-        .any(|index| {
-            is_vector_index_type(&index.index_type) && index.columns.as_slice() == ["vector"]
-        })
-    {
-        return Ok(());
+    if has_matching_index(
+        &table
+            .list_indices()
+            .await
+            .context("failed to list LanceDB section indices")?,
+        "vector",
+        is_vector_index_type,
+    ) {
+        return Ok(true);
     }
 
     table
@@ -902,7 +860,30 @@ async fn ensure_vector_index(table: &lancedb::Table) -> Result<()> {
         )
         .execute()
         .await
-        .context("failed to create LanceDB vector HNSW index")
+        .context("failed to create LanceDB vector HNSW index")?;
+    Ok(false)
+}
+
+fn has_matching_index(
+    indices: &[IndexConfig],
+    column: &str,
+    matches_type: impl Fn(&IndexType) -> bool,
+) -> bool {
+    indices
+        .iter()
+        .any(|index| matches_type(&index.index_type) && index_columns_match(index, column))
+}
+
+fn index_columns_match(index: &IndexConfig, column: &str) -> bool {
+    index.columns.len() == 1 && index.columns[0] == column
+}
+
+async fn optimize_existing_indices(table: &lancedb::Table, table_label: &str) -> Result<()> {
+    table
+        .optimize(OptimizeAction::Index(Default::default()))
+        .await
+        .with_context(|| format!("failed to optimize LanceDB {table_label} indices"))?;
+    Ok(())
 }
 
 fn is_vector_index_type(index_type: &IndexType) -> bool {
@@ -918,46 +899,45 @@ fn is_vector_index_type(index_type: &IndexType) -> bool {
     )
 }
 
-async fn ensure_code_symbol_fts_index(table: &lancedb::Table) -> Result<()> {
-    if table
-        .list_indices()
-        .await
-        .context("failed to list LanceDB code symbol indices")?
-        .iter()
-        .any(|index| {
-            index.index_type == IndexType::FTS && index.columns.as_slice() == ["embed_text"]
-        })
-    {
-        return Ok(());
+async fn ensure_code_symbol_fts_index(table: &lancedb::Table) -> Result<bool> {
+    if has_matching_index(
+        &table
+            .list_indices()
+            .await
+            .context("failed to list LanceDB code symbol indices")?,
+        "embed_text",
+        |index_type| *index_type == IndexType::FTS,
+    ) {
+        return Ok(true);
     }
 
     table
         .create_index(&["embed_text"], Index::FTS(FtsIndexBuilder::default()))
         .execute()
         .await
-        .context("failed to create LanceDB embed_text FTS index")
+        .context("failed to create LanceDB embed_text FTS index")?;
+    Ok(false)
 }
 
-async fn ensure_code_symbol_vector_index(table: &lancedb::Table) -> Result<()> {
+async fn ensure_code_symbol_vector_index(table: &lancedb::Table) -> Result<bool> {
     let vector_rows = table
         .count_rows(Some("vector IS NOT NULL".to_owned()))
         .await
         .context("failed to count LanceDB code symbol vector rows")?;
 
     if vector_rows == 0 {
-        return Ok(());
+        return Ok(false);
     }
 
-    if table
-        .list_indices()
-        .await
-        .context("failed to list LanceDB code symbol indices")?
-        .iter()
-        .any(|index| {
-            is_vector_index_type(&index.index_type) && index.columns.as_slice() == ["vector"]
-        })
-    {
-        return Ok(());
+    if has_matching_index(
+        &table
+            .list_indices()
+            .await
+            .context("failed to list LanceDB code symbol indices")?,
+        "vector",
+        is_vector_index_type,
+    ) {
+        return Ok(true);
     }
 
     table
@@ -967,7 +947,8 @@ async fn ensure_code_symbol_vector_index(table: &lancedb::Table) -> Result<()> {
         )
         .execute()
         .await
-        .context("failed to create LanceDB code symbol vector HNSW index")
+        .context("failed to create LanceDB code symbol vector HNSW index")?;
+    Ok(false)
 }
 
 struct ExistingFileVersions {
