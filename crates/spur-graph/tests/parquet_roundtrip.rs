@@ -9,11 +9,12 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use spur_graph::{
     load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,
-    write_artifact_parquet, ArtifactStagingDir, ChangeKind, CommitArtifact, Confidence,
-    EdgeEndpoint, GitPath, GraphArtifactManifest, GraphEdgeArtifact, GraphEdgeKind,
-    GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader,
-    GraphSymbolArtifact, GraphTombstoneEntry, NodeId, RelationKind, SnapshotKey,
-    SymbolSnapshotArtifact, TemporalEdgeArtifact, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
+    stamp_sidecar_status, write_artifact_parquet, ArtifactStagingDir, ChangeKind, CommitArtifact,
+    Confidence, EdgeEndpoint, GitPath, GraphArtifactManifest, GraphArtifactSidecarRowCounts,
+    GraphArtifactSidecarStatus, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphSymbolArtifact,
+    GraphTombstoneEntry, NodeId, RelationKind, SnapshotKey, SymbolSnapshotArtifact,
+    TemporalEdgeArtifact, WriteOptions, GRAPH_INDEX_VERSION_TEMPORAL,
 };
 
 #[test]
@@ -124,6 +125,46 @@ fn default_write_emits_edges_by_dst_with_edges_schema_and_dst_src_order() {
     let manifest = read_artifact_header_parquet(&dir).expect("read manifest");
     assert!(manifest.edges_by_dst_present);
     assert_eq!(manifest.row_counts.edges_by_dst, Some(resolved_edge_count));
+}
+
+#[test]
+fn sidecar_manifest_status_round_trips_after_stamp() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let dir = write_artifact_parquet(
+        &fixture_artifact(),
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
+
+    stamp_sidecar_status(
+        &dir,
+        GraphArtifactSidecarStatus {
+            complete: true,
+            row_counts: GraphArtifactSidecarRowCounts {
+                section_bodies: 7,
+                code_symbols: 11,
+            },
+        },
+    )
+    .expect("stamp sidecar manifest status");
+
+    let manifest = read_artifact_header_parquet(&dir).expect("read manifest");
+    assert!(
+        manifest.complete,
+        "Parquet completeness should be unchanged"
+    );
+    assert!(manifest.sidecar_complete);
+    assert_eq!(manifest.sidecar_row_counts.section_bodies, 7);
+    assert_eq!(manifest.sidecar_row_counts.code_symbols, 11);
+
+    let manifest_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).expect("read manifest"))
+            .expect("parse manifest");
+    assert_eq!(manifest_json["sidecar_complete"], true);
+    assert_eq!(manifest_json["sidecar_row_counts"]["section_bodies"], 7);
+    assert_eq!(manifest_json["sidecar_row_counts"]["code_symbols"], 11);
 }
 
 #[test]
