@@ -216,6 +216,10 @@ CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS
   LIMIT 40;
 
 -- __SPUR_LANCE_HYBRID_START__
+-- analyst.rs keeps this whole hybrid macro only when both Lance sidecars used
+-- below are valid: sections.lancedb/section_bodies and
+-- code_symbols.lance/code_symbols. Otherwise it strips the sentinel block and
+-- keeps BM25-only search.
 -- The Lance path suffixes below are rendered by analyst.rs from
 -- spur_graph::store::{CODE_SYMBOLS_DATASET_DIR, SECTIONS_DATASET_DIR, SECTIONS_TABLE}.
 CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, intent, query_vec) AS TABLE
