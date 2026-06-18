@@ -11,7 +11,10 @@ use spur_analyst::{
     query_context_candidates, query_graph_candidates, KnowledgeCandidate, KnowledgeQueryIntent,
     KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope,
 };
-use spur_graph::{resolve_worktree_root_from, EMBEDDING_VECTOR_DIMENSIONS};
+use spur_graph::{
+    resolve_worktree_root_from, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
+    EMBED_MODEL_ENV,
+};
 
 use crate::handlers::McpHandlerError;
 
@@ -29,7 +32,9 @@ const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
 #[cfg(feature = "embed")]
 const EMBED_INFERENCE_TIMEOUT: Duration = Duration::from_millis(1500);
 #[cfg(feature = "embed")]
-static EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
+static BGE_BASE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
+#[cfg(feature = "embed")]
+static JINA_CODE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
 
 impl McpCallbackServer {
     pub(crate) async fn handle_knowledge_context_pack(
@@ -327,36 +332,58 @@ impl<M> Drop for EmbedLoadPermit<'_, M> {
 }
 
 #[cfg(feature = "embed")]
-fn load_embed_model() -> Result<fastembed::TextEmbedding, String> {
-    tracing::info!("Loading embedding model BGEBaseENV15 for knowledge_context_pack hybrid search");
+fn embed_model_cell(
+    embedding_model: EmbeddingModelSelection,
+) -> &'static EmbedModelCell<fastembed::TextEmbedding> {
+    match embedding_model {
+        EmbeddingModelSelection::BgeBaseEnV15 => &BGE_BASE_EMBED_MODEL,
+        EmbeddingModelSelection::JinaCode => &JINA_CODE_EMBED_MODEL,
+    }
+}
+
+#[cfg(feature = "embed")]
+fn load_embed_model(
+    embedding_model: EmbeddingModelSelection,
+) -> Result<fastembed::TextEmbedding, String> {
+    tracing::info!(
+        model = embedding_model.model_name(),
+        "Loading embedding model for knowledge_context_pack hybrid search"
+    );
     fastembed::TextEmbedding::try_new(
-        fastembed::InitOptions::new(fastembed::EmbeddingModel::BGEBaseENV15)
+        fastembed::InitOptions::new(embedding_model.fastembed_model())
             .with_show_download_progress(false),
     )
     .map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "embed")]
-fn start_embed_model_load_if_needed() -> bool {
-    let Some(permit) = EMBED_MODEL.begin_load() else {
+fn start_embed_model_load_if_needed(embedding_model: EmbeddingModelSelection) -> bool {
+    let Some(permit) = embed_model_cell(embedding_model).begin_load() else {
         return false;
     };
 
     let spawn_result = std::thread::Builder::new()
         .name("spur-mcp-embed-warm".into())
         .spawn(move || {
-            tracing::info!("Pre-warming BGEBaseENV15 embedding model for knowledge_context_pack");
-            let load_result = load_embed_model();
+            tracing::info!(
+                model = embedding_model.model_name(),
+                "Pre-warming embedding model for knowledge_context_pack"
+            );
+            let load_result = load_embed_model(embedding_model);
             match load_result {
                 Ok(model) => {
                     let _ = permit.complete(Some(model));
-                    tracing::info!("BGEBaseENV15 embedding model loaded successfully");
+                    tracing::info!(
+                        model = embedding_model.model_name(),
+                        "embedding model loaded successfully"
+                    );
                 }
                 Err(error) => {
                     let _ = permit.complete(None);
                     tracing::warn!(
                         %error,
-                        "BGEBaseENV15 embedding model failed to load; will retry on a later warm or query"
+                        model = embedding_model.model_name(),
+                        "embedding model failed to load; will retry on a later warm or query"
                     );
                 }
             }
@@ -367,7 +394,8 @@ fn start_embed_model_load_if_needed() -> bool {
         Err(error) => {
             tracing::warn!(
                 %error,
-                "failed to spawn BGEBaseENV15 embedding model warm-up thread"
+                model = embedding_model.model_name(),
+                "failed to spawn embedding model warm-up thread"
             );
             false
         }
@@ -376,8 +404,12 @@ fn start_embed_model_load_if_needed() -> bool {
 
 #[cfg(feature = "embed")]
 pub fn warm_embed_model() {
-    if !start_embed_model_load_if_needed() {
-        tracing::debug!("BGEBaseENV15 embedding model warm-up skipped; already ready or loading");
+    let embedding_model = EmbeddingModelSelection::from_env();
+    if !start_embed_model_load_if_needed(embedding_model) {
+        tracing::debug!(
+            model = embedding_model.model_name(),
+            "embedding model warm-up skipped; already ready or loading"
+        );
     }
 }
 
@@ -386,25 +418,32 @@ pub fn warm_embed_model() {}
 
 #[cfg(feature = "embed")]
 async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    if !EMBED_MODEL.is_ready() {
-        let load_started = start_embed_model_load_if_needed();
-        if EMBED_MODEL.is_ready() {
-            return embed_query_with_ready_model(query).await;
+    let embedding_model = EmbeddingModelSelection::from_env();
+    let model_cell = embed_model_cell(embedding_model);
+    if !model_cell.is_ready() {
+        let load_started = start_embed_model_load_if_needed(embedding_model);
+        if model_cell.is_ready() {
+            return embed_query_with_ready_model(query, embedding_model).await;
         }
         tracing::debug!(
             load_started,
-            "BGEBaseENV15 embedding model not ready; degrading to BM25-only search"
+            model = embedding_model.model_name(),
+            env = EMBED_MODEL_ENV,
+            "embedding model not ready; degrading to BM25-only search"
         );
         return None;
     }
 
-    embed_query_with_ready_model(query).await
+    embed_query_with_ready_model(query, embedding_model).await
 }
 
 #[cfg(feature = "embed")]
-async fn embed_query_with_ready_model(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
+async fn embed_query_with_ready_model(
+    query: &str,
+    embedding_model: EmbeddingModelSelection,
+) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
     embed_with_ready_model(
-        &EMBED_MODEL,
+        embed_model_cell(embedding_model),
         query,
         EMBED_INFERENCE_TIMEOUT,
         move |model, query| {
@@ -1230,6 +1269,19 @@ mod tests {
         let mut embedding = [0.0; EMBEDDING_VECTOR_DIMENSIONS];
         embedding[0] = first_value;
         embedding
+    }
+
+    #[cfg(feature = "embed")]
+    #[test]
+    fn embed_model_cell_selection_keeps_bge_and_jina_code_separate() {
+        assert!(std::ptr::eq(
+            embed_model_cell(EmbeddingModelSelection::BgeBaseEnV15),
+            &BGE_BASE_EMBED_MODEL
+        ));
+        assert!(std::ptr::eq(
+            embed_model_cell(EmbeddingModelSelection::JinaCode),
+            &JINA_CODE_EMBED_MODEL
+        ));
     }
 
     #[cfg(feature = "embed")]

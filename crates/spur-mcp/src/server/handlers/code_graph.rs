@@ -5576,6 +5576,8 @@ mod tests {
                 target_stable_symbol_id: Some("parquet-child".to_string()),
                 target_label: Some("parquet_child".to_string()),
                 import_path: None,
+                receiver_text: None,
+                scope_text: None,
                 relation: RelationKind::Calls,
                 confidence: Confidence::SyntaxExact,
                 confidence_score: 1.0,
