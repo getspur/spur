@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 #[cfg(feature = "embed")]
-use std::sync::OnceLock;
+use std::{
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 use futures::future::join_all;
 use serde_json::{json, Value};
@@ -24,7 +27,9 @@ const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 0.80;
 const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
 
 #[cfg(feature = "embed")]
-static EMBED_MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
+const EMBED_INFERENCE_TIMEOUT: Duration = Duration::from_millis(1500);
+#[cfg(feature = "embed")]
+static EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
 
 impl McpCallbackServer {
     pub(crate) async fn handle_knowledge_context_pack(
@@ -233,32 +238,147 @@ impl KnowledgeIntent {
 }
 
 #[cfg(feature = "embed")]
-fn get_embed_model() -> Option<&'static fastembed::TextEmbedding> {
-    EMBED_MODEL
-        .get_or_init(|| {
-            tracing::info!(
-                "Loading embedding model BGEBaseENV15 for knowledge_context_pack hybrid search"
-            );
-            fastembed::TextEmbedding::try_new(
-                fastembed::InitOptions::new(fastembed::EmbeddingModel::BGEBaseENV15)
-                    .with_show_download_progress(false),
-            )
-            .ok()
+struct EmbedModelCell<M> {
+    model: OnceLock<Arc<M>>,
+    loading: Mutex<bool>,
+}
+
+#[cfg(feature = "embed")]
+struct EmbedLoadPermit<'a, M> {
+    cell: &'a EmbedModelCell<M>,
+    completed: bool,
+}
+
+#[cfg(feature = "embed")]
+impl<M> EmbedModelCell<M> {
+    const fn new() -> Self {
+        Self {
+            model: OnceLock::new(),
+            loading: Mutex::new(false),
+        }
+    }
+
+    fn ready(&self) -> Option<Arc<M>> {
+        self.model.get().cloned()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.model.get().is_some()
+    }
+
+    fn begin_load(&self) -> Option<EmbedLoadPermit<'_, M>> {
+        if self.is_ready() {
+            return None;
+        }
+
+        let mut loading = self
+            .loading
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.is_ready() || *loading {
+            return None;
+        }
+
+        *loading = true;
+        Some(EmbedLoadPermit {
+            cell: self,
+            completed: false,
         })
-        .as_ref()
+    }
+
+    #[cfg(test)]
+    fn load_if_idle(&self, load: impl FnOnce() -> Option<M>) -> Option<Arc<M>> {
+        if let Some(model) = self.ready() {
+            return Some(model);
+        }
+
+        let permit = self.begin_load()?;
+        permit.complete(load())
+    }
+
+    fn clear_loading(&self) {
+        let mut loading = self
+            .loading
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *loading = false;
+    }
+}
+
+#[cfg(feature = "embed")]
+impl<M> EmbedLoadPermit<'_, M> {
+    fn complete(mut self, model: Option<M>) -> Option<Arc<M>> {
+        if let Some(model) = model {
+            let _ = self.cell.model.set(Arc::new(model));
+        }
+        self.cell.clear_loading();
+        self.completed = true;
+        self.cell.ready()
+    }
+}
+
+#[cfg(feature = "embed")]
+impl<M> Drop for EmbedLoadPermit<'_, M> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cell.clear_loading();
+        }
+    }
+}
+
+#[cfg(feature = "embed")]
+fn load_embed_model() -> Result<fastembed::TextEmbedding, String> {
+    tracing::info!("Loading embedding model BGEBaseENV15 for knowledge_context_pack hybrid search");
+    fastembed::TextEmbedding::try_new(
+        fastembed::InitOptions::new(fastembed::EmbeddingModel::BGEBaseENV15)
+            .with_show_download_progress(false),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "embed")]
+fn start_embed_model_load_if_needed() -> bool {
+    let Some(permit) = EMBED_MODEL.begin_load() else {
+        return false;
+    };
+
+    let spawn_result = std::thread::Builder::new()
+        .name("spur-mcp-embed-warm".into())
+        .spawn(move || {
+            tracing::info!("Pre-warming BGEBaseENV15 embedding model for knowledge_context_pack");
+            let load_result = load_embed_model();
+            match load_result {
+                Ok(model) => {
+                    let _ = permit.complete(Some(model));
+                    tracing::info!("BGEBaseENV15 embedding model loaded successfully");
+                }
+                Err(error) => {
+                    let _ = permit.complete(None);
+                    tracing::warn!(
+                        %error,
+                        "BGEBaseENV15 embedding model failed to load; will retry on a later warm or query"
+                    );
+                }
+            }
+        });
+
+    match spawn_result {
+        Ok(_handle) => true,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "failed to spawn BGEBaseENV15 embedding model warm-up thread"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(feature = "embed")]
 pub fn warm_embed_model() {
-    std::thread::spawn(|| {
-        tracing::info!("Pre-warming BGEBaseENV15 embedding model for knowledge_context_pack");
-        match get_embed_model() {
-            Some(_) => tracing::info!("BGEBaseENV15 embedding model loaded successfully"),
-            None => tracing::warn!(
-                "BGEBaseENV15 embedding model failed to load; hybrid search will be unavailable"
-            ),
-        }
-    });
+    if !start_embed_model_load_if_needed() {
+        tracing::debug!("BGEBaseENV15 embedding model warm-up skipped; already ready or loading");
+    }
 }
 
 #[cfg(not(feature = "embed"))]
@@ -266,25 +386,107 @@ pub fn warm_embed_model() {}
 
 #[cfg(feature = "embed")]
 async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    let query = query.to_owned();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || {
-            let model = get_embed_model()?;
+    if !EMBED_MODEL.is_ready() {
+        let load_started = start_embed_model_load_if_needed();
+        if EMBED_MODEL.is_ready() {
+            return embed_query_with_ready_model(query).await;
+        }
+        tracing::debug!(
+            load_started,
+            "BGEBaseENV15 embedding model not ready; degrading to BM25-only search"
+        );
+        return None;
+    }
+
+    embed_query_with_ready_model(query).await
+}
+
+#[cfg(feature = "embed")]
+async fn embed_query_with_ready_model(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
+    embed_with_ready_model(
+        &EMBED_MODEL,
+        query,
+        EMBED_INFERENCE_TIMEOUT,
+        move |model, query| {
             let embeddings = model.embed(vec![query.as_str()], None).ok()?;
             let embedding = embeddings.into_iter().next()?;
             embedding.try_into().ok()
-        }),
+        },
     )
-    .await;
+    .await
+}
+
+#[cfg(feature = "embed")]
+async fn embed_with_ready_model<M, F>(
+    cell: &EmbedModelCell<M>,
+    query: &str,
+    timeout_duration: Duration,
+    inference: F,
+) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]>
+where
+    M: Send + Sync + 'static,
+    F: FnOnce(Arc<M>, String) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> + Send + 'static,
+{
+    let model = cell.ready()?;
+    let query = query.to_owned();
+    run_embed_inference_with_timeout(timeout_duration, move || inference(model, query)).await
+}
+
+#[cfg(feature = "embed")]
+async fn run_embed_inference_with_timeout<F>(
+    timeout_duration: Duration,
+    inference: F,
+) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]>
+where
+    F: FnOnce() -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> + Send + 'static,
+{
+    let started = Instant::now();
+    let result =
+        tokio::time::timeout(timeout_duration, tokio::task::spawn_blocking(inference)).await;
+    let elapsed = started.elapsed();
+    let elapsed_ms = duration_millis(elapsed);
+    let timeout_ms = duration_millis(timeout_duration);
+
     match result {
-        Ok(Ok(embedding)) => embedding,
-        Ok(Err(_join_error)) => None,
+        Ok(Ok(Some(embedding))) => {
+            tracing::debug!(
+                elapsed_ms,
+                timeout_ms,
+                "knowledge_context_pack embed inference completed"
+            );
+            Some(embedding)
+        }
+        Ok(Ok(None)) => {
+            tracing::warn!(
+                elapsed_ms,
+                timeout_ms,
+                "knowledge_context_pack embed inference failed; degrading to BM25-only search"
+            );
+            None
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %error,
+                elapsed_ms,
+                timeout_ms,
+                "knowledge_context_pack embed inference task failed; degrading to BM25-only search"
+            );
+            None
+        }
         Err(_timeout) => {
-            tracing::warn!("embed_query timed out after 5s; degrading to BM25-only search");
+            tracing::warn!(
+                elapsed_ms,
+                timeout_ms,
+                "knowledge_context_pack embed inference timed out; degrading to BM25-only search"
+            );
             None
         }
     }
+}
+
+#[cfg(feature = "embed")]
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(not(feature = "embed"))]
@@ -990,7 +1192,14 @@ fn is_test_file(file_path: &str) -> bool {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    #[cfg(feature = "embed")]
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use std::sync::{Mutex, MutexGuard};
+    #[cfg(feature = "embed")]
+    use std::time::Duration;
 
     use super::*;
     use duckdb::Connection;
@@ -1014,6 +1223,85 @@ mod tests {
             confidence_score_thresholds(Some("hybrid-code")),
             (0.80, 0.55)
         );
+    }
+
+    #[cfg(feature = "embed")]
+    fn test_embedding(first_value: f32) -> [f32; EMBEDDING_VECTOR_DIMENSIONS] {
+        let mut embedding = [0.0; EMBEDDING_VECTOR_DIMENSIONS];
+        embedding[0] = first_value;
+        embedding
+    }
+
+    #[cfg(feature = "embed")]
+    #[test]
+    fn embed_model_cell_retries_after_transient_load_failure() {
+        let cell = EmbedModelCell::<u32>::new();
+        let mut attempts = 0;
+
+        assert!(cell
+            .load_if_idle(|| {
+                attempts += 1;
+                None
+            })
+            .is_none());
+        assert_eq!(attempts, 1);
+
+        let model = cell
+            .load_if_idle(|| {
+                attempts += 1;
+                Some(7)
+            })
+            .expect("second load should succeed");
+        assert_eq!(*model, 7);
+        assert_eq!(attempts, 2);
+
+        let model = cell
+            .load_if_idle(|| {
+                attempts += 1;
+                Some(9)
+            })
+            .expect("ready model should be reused");
+        assert_eq!(*model, 7);
+        assert_eq!(attempts, 2, "ready model should not be reloaded");
+    }
+
+    #[cfg(feature = "embed")]
+    #[tokio::test]
+    async fn embed_with_ready_model_falls_back_while_load_in_progress() {
+        let cell = EmbedModelCell::<u32>::new();
+        let _permit = cell.begin_load().expect("load should begin");
+        let inference_called = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&inference_called);
+
+        let result =
+            embed_with_ready_model(&cell, "query", Duration::from_millis(25), move |_, _| {
+                called.store(true, Ordering::SeqCst);
+                Some(test_embedding(1.0))
+            })
+            .await;
+
+        assert!(result.is_none());
+        assert!(
+            !inference_called.load(Ordering::SeqCst),
+            "inference must not run while the model is still loading"
+        );
+    }
+
+    #[cfg(feature = "embed")]
+    #[tokio::test]
+    async fn embed_with_ready_model_times_out_inference_only() {
+        let cell = EmbedModelCell::<u32>::new();
+        cell.load_if_idle(|| Some(42))
+            .expect("test model should load");
+
+        let result =
+            embed_with_ready_model(&cell, "query", Duration::from_millis(10), move |_, _| {
+                std::thread::sleep(Duration::from_millis(100));
+                Some(test_embedding(1.0))
+            })
+            .await;
+
+        assert!(result.is_none());
     }
 
     fn candidate(stable_symbol_id: Option<&str>, title: &str, score: f64) -> KnowledgeCandidate {
