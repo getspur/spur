@@ -244,9 +244,9 @@ fn green_notebook_candidates(context: &NotebookResolverContext) -> Vec<(PathBuf,
     #[cfg(target_os = "macos")]
     {
         candidates.extend(
-            macos_jute_bundle_candidates(context)
+            macos_spurlab_bundle_candidates(context)
                 .into_iter()
-                .map(|path| (path, "external macOS Jute.app bundle".to_string())),
+                .map(|path| (path, "external macOS SpurLab.app bundle".to_string())),
         );
     }
 
@@ -322,20 +322,36 @@ fn should_use_sibling_notebook_binary(
 }
 
 #[cfg(target_os = "macos")]
-fn macos_jute_bundle_candidates(context: &NotebookResolverContext) -> Vec<PathBuf> {
+fn macos_app_bundle_candidates(
+    context: &NotebookResolverContext,
+    bundle_relative_path: &Path,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(home) = &context.home {
-        candidates.push(
-            home.join("Applications")
-                .join(jute_bundle_binary_relative_path()),
-        );
+        candidates.push(home.join("Applications").join(bundle_relative_path));
     }
-    candidates.push(
-        context
-            .system_applications_dir
-            .join(jute_bundle_binary_relative_path()),
-    );
+    candidates.push(context.system_applications_dir.join(bundle_relative_path));
     candidates
+}
+
+/// Green channel bundle: the standalone, rebranded `SpurLab` desktop app.
+#[cfg(target_os = "macos")]
+fn macos_spurlab_bundle_candidates(context: &NotebookResolverContext) -> Vec<PathBuf> {
+    macos_app_bundle_candidates(context, &spurlab_bundle_binary_relative_path())
+}
+
+/// Blue channel bundle: the legacy in-tree `Jute` desktop app.
+#[cfg(target_os = "macos")]
+fn macos_jute_bundle_candidates(context: &NotebookResolverContext) -> Vec<PathBuf> {
+    macos_app_bundle_candidates(context, &jute_bundle_binary_relative_path())
+}
+
+#[cfg(target_os = "macos")]
+fn spurlab_bundle_binary_relative_path() -> PathBuf {
+    PathBuf::from("SpurLab.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("SpurLab")
 }
 
 #[cfg(target_os = "macos")]
@@ -611,7 +627,7 @@ mod tests {
         let home = tempfile::tempdir().expect("temp home");
         let bundle_binary = home
             .path()
-            .join("Applications/Jute.app/Contents/MacOS/Jute");
+            .join("Applications/SpurLab.app/Contents/MacOS/SpurLab");
         std::fs::create_dir_all(bundle_binary.parent().unwrap()).expect("app bundle dir");
         std::fs::write(&bundle_binary, "").expect("bundle binary");
 
@@ -625,6 +641,30 @@ mod tests {
         assert_eq!(selection.channel, NotebookChannel::Green);
         assert_eq!(selection.path, bundle_binary);
         assert!(selection.reason.contains("app bundle"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notebook_binary_path_green_ignores_legacy_jute_app_bundle_on_macos() {
+        // The green channel is the rebranded SpurLab app; a leftover legacy
+        // Jute.app must NOT satisfy a green install (it would launch the old app).
+        let home = tempfile::tempdir().expect("temp home");
+        let legacy_bundle = home
+            .path()
+            .join("Applications/Jute.app/Contents/MacOS/Jute");
+        std::fs::create_dir_all(legacy_bundle.parent().unwrap()).expect("app bundle dir");
+        std::fs::write(&legacy_bundle, "").expect("bundle binary");
+
+        let mut context = test_context();
+        context.spur_notebook_channel = Some(OsString::from("green"));
+        context.home = Some(home.path().to_path_buf());
+
+        let error = notebook_launch_selection_with_context(&context)
+            .expect_err("legacy Jute.app must not satisfy green");
+        assert!(matches!(
+            error,
+            NotebookResolverError::GreenUnavailable { .. }
+        ));
     }
 
     #[cfg(target_os = "macos")]
