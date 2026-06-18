@@ -2,6 +2,7 @@ use std::fs;
 
 use arrow_array::{Array as _, LargeStringArray, StringArray, UInt32Array};
 use futures::TryStreamExt as _;
+use lancedb::index::IndexType;
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use spur_graph::store::lance_sections::{
     write_sections_dataset, write_sections_dataset_best_effort_with_options,
@@ -215,6 +216,67 @@ async fn lance_sections_streams_small_write_batches_without_vectors() {
             .expect("count vector rows"),
         0
     );
+}
+
+#[tokio::test]
+async fn lance_sections_refreshes_existing_fts_index_after_large_append() {
+    let _skip_embeddings = EnvGuard::set("SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS", "1");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("repo");
+    fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+    fs::write(root.join("docs/base.md"), "# Base\n\nBase body.\n").expect("write base");
+
+    let initial_facts = build_facts(&root, None).expect("build initial facts").0;
+    let initial_artifact = artifact_from_facts(&initial_facts, &root).expect("initial artifact");
+    let out_dir = tempdir.path().join("artifact");
+    write_sections_dataset(&initial_artifact, &root, &out_dir)
+        .expect("write initial sections sidecar");
+
+    for index in 0..50 {
+        fs::write(
+            root.join("docs").join(format!("topic-{index:02}.md")),
+            format!("# Topic {index:02}\n\nUnique appended body {index:02}.\n"),
+        )
+        .expect("write appended topic");
+    }
+    let updated_facts = build_facts(&root, None).expect("build updated facts").0;
+    let updated_artifact = artifact_from_facts(&updated_facts, &root).expect("updated artifact");
+    write_sections_dataset(&updated_artifact, &root, &out_dir)
+        .expect("append updated sections sidecar");
+
+    let db = lancedb::connect(
+        out_dir
+            .join(SECTIONS_DATASET_DIR)
+            .to_str()
+            .expect("dataset path"),
+    )
+    .execute()
+    .await
+    .expect("connect lancedb");
+    let table = db
+        .open_table(SECTIONS_TABLE)
+        .execute()
+        .await
+        .expect("open table");
+    assert_eq!(table.count_rows(None).await.expect("count rows"), 51);
+
+    let index = table
+        .list_indices()
+        .await
+        .expect("list indices")
+        .into_iter()
+        .find(|index| {
+            index.index_type == IndexType::FTS && index.columns.as_slice() == ["body_text"]
+        })
+        .expect("body_text FTS index");
+    let stats = table
+        .index_stats(&index.name)
+        .await
+        .expect("index stats")
+        .expect("body_text FTS stats");
+
+    assert_eq!(stats.num_indexed_rows, 51);
+    assert_eq!(stats.num_unindexed_rows, 0);
 }
 
 #[tokio::test]
