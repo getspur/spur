@@ -294,37 +294,6 @@ pub fn write_sections_dataset_best_effort_with_options(
     }
 }
 
-pub fn write_sections_dataset_best_effort_with_sidecar_options_and_progress(
-    artifact: &GraphIndexArtifact,
-    worktree_root: &Path,
-    artifact_dir: &Path,
-    options: SectionSidecarOptions,
-    progress: Option<&SectionSidecarProgressCallback<'_>>,
-) {
-    match write_sections_dataset_with_sidecar_options_and_progress(
-        artifact,
-        worktree_root,
-        artifact_dir,
-        options,
-        progress,
-    ) {
-        Ok(_) => {}
-        Err(error) => {
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::Failed {
-                    error: error.to_string(),
-                },
-            );
-            tracing::warn!(
-                error = %error,
-                artifact_dir = %artifact_dir.display(),
-                "spur-graph: section sidecar write failed; graph artifact remains usable"
-            );
-        }
-    }
-}
-
 pub(crate) fn write_sections_dataset_with_sidecar_options_and_progress(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
