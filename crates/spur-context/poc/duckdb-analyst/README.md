@@ -161,6 +161,32 @@ is" — in a single round trip. FTS indexes (`fts_main_sections`,
 `fts_main_symbol_text`) are persisted in the `.duckdb`; only `LOAD fts` is needed
 per connection (no rebuild).
 
+## `knowledge_context_pack_2` consumer surface
+
+`knowledge_context_pack_2` is the MCP-facing evidence-pack consumer of this
+analyst DB. It is designed to support semantic answers by returning structured,
+bounded evidence that an agent or LLM can synthesize into prose. It is not a
+free-form answer generator, and its `answerable` / `confidence` fields describe
+retrieval and grounding quality rather than proving behavioral correctness.
+
+The v2 pack preserves the v1 retrieval and exact-grounding sections:
+`primary_evidence`, `supporting_docs`, `impact`, `staleness`, and
+`recommended_next_tools`. It then appends graph-reasoning sections that are
+bounded by request options and response budgets:
+
+| Section | Backing surface | How to read it |
+|---------|-----------------|----------------|
+| `graph_paths` | DuckPGQ path queries, with recursive-SQL fallback | Explainable routes between grounded code candidates or supplied anchors; capped by `max_path_hops` and `max_paths`, with status/caveat metadata. |
+| `risk_scorecard` | `v_symbol_scorecard` and Onager-derived centrality tables | Prioritization and blast-radius signals such as PageRank, degree, churn, callers, and posture. These are signals, not correctness claims. |
+| `community_context` | Onager component/Louvain materializations | Component and community hints for subsystem spread. Community IDs are build-local labels, not stable ownership names. |
+| `temporal_context` | Scorecard/temporal analyst views | Recent-change context carried beside risk signals when available. |
+| `caveats` | Pack builder and analyst query errors | Missing/stale DBs, missing views, no path within budget, absent code candidates, and other reasons a section is partial. |
+
+DuckPGQ and Onager are graph-reasoning enrichers behind these response sections.
+They do not answer natural-language questions directly. Agents should treat
+BM25/hybrid retrieval as candidates, graph paths and scorecards as evidence, and
+the exact `code_*` tools as follow-up grounding for high-impact claims.
+
 ## The three query tiers (all in `examples.sql`)
 
 | Tier | Tool         | Example query                                           |
