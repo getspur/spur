@@ -803,6 +803,8 @@ fn import_edge(source: &str, target: &str) -> GraphEdgeArtifact {
         edge_kind: Some(GraphEdgeKind::ReferencesOther),
         bind_method: Some("external_import".to_string()),
         import_path: None,
+        receiver_text: None,
+        scope_text: None,
     }
 }
 
@@ -879,6 +881,8 @@ fn cross_crate_call_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
             edge_kind: Some(GraphEdgeKind::Calls),
             bind_method: Some("import_licensed".to_string()),
             import_path: None,
+            receiver_text: None,
+            scope_text: None,
         },
     ];
     artifact
@@ -901,6 +905,8 @@ fn workspace_import_edge(
         edge_kind: Some(GraphEdgeKind::ReferencesOther),
         bind_method: Some("import_path".to_string()),
         import_path: Some(import_path.to_string()),
+        receiver_text: None,
+        scope_text: None,
     }
 }
 
@@ -942,6 +948,8 @@ fn direct_symbol_id_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
         edge_kind: Some(GraphEdgeKind::Calls),
         bind_method: None,
         import_path: None,
+        receiver_text: None,
+        scope_text: None,
     });
 
     artifact.commits.push(CommitArtifact {
@@ -1029,6 +1037,8 @@ fn temporal_artifact_with_section(graph_content_hash: &str) -> GraphIndexArtifac
         edge_kind: Some(GraphEdgeKind::ReferencesOther),
         bind_method: None,
         import_path: None,
+        receiver_text: None,
+        scope_text: None,
     });
     artifact
 }
