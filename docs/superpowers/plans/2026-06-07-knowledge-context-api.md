@@ -379,7 +379,7 @@ git commit -m "feat(spur-mcp): task-2 register knowledge context tool"
 - [ ] Response includes `query`, `intent`, `scope`, `answerable`, `confidence`, `graph_content_hash`, `staleness`, `primary_evidence`, `supporting_docs`, `impact`, and `recommended_next_tools`.
 - [ ] Code candidates with stable symbol IDs include graph URI form `graph://symbol/<id>` and file references.
 - [ ] If analyst DB is missing, response is successful JSON with `answerable=false`, `confidence=low`, and `error.code="analyst_unavailable"`.
-- [ ] No Lance ANN is used in this task.
+- [ ] Lance hybrid vector re-ranking, when available through analyst SQL, remains opportunistic and the handler still succeeds with BM25-only candidates if embeddings or the sidecar are unavailable.
 
 **Suggested Worker:** codex
 
@@ -492,7 +492,7 @@ git commit -m "feat(spur-mcp): task-3 implement grounded context pack"
 - [ ] For top code evidence, response includes bounded impact counts: `callers_count`, `callees_count`, and `popular_sink`.
 - [ ] Popular sink threshold is `callers_count > 30`; popular sinks are not expanded.
 - [ ] `staleness` reports whether analyst `graph_content_hash` is present and whether the exact graph response hash matches when available.
-- [ ] Tool description explains that Lance ANN is not part of the MVP and that exact graph tools remain source-of-truth follow-ups.
+- [ ] Tool description explains BM25 + graph grounding, opportunistic Lance hybrid vector re-ranking, BM25-only degradation, and exact graph tools as source-of-truth follow-ups.
 - [ ] Full package verification commands pass or failures are documented with exact failing output.
 
 **Suggested Worker:** codex
@@ -528,7 +528,7 @@ Use exact graph caller/callee count paths. If the helper returns rows, only incl
 Ensure `knowledge_context_pack_def()` states:
 
 ```text
-Builds a bounded evidence pack by combining analyst BM25 candidates, scorecard signals, and exact graph grounding. Lance ANN is not used by this MVP; use code_read_symbol/code_callers/code_callees for exact follow-up.
+Builds a bounded evidence pack from BM25 candidates, scorecard signals, and exact graph grounding. Applies opportunistic Lance hybrid vector re-ranking when query embeddings and the sidecar respond; degrades to BM25-only on timeout or unavailability. Use code_read_symbol/code_callers/code_callees for exact follow-up.
 ```
 
 - [ ] **Step 4: Verify focused tests**
@@ -577,4 +577,3 @@ git commit -m "feat(spur-mcp): task-4 add context pack impact summaries"
 **DAG validation:** The DAG is a simple acyclic chain because each step depends on API surfaces introduced by the previous task. No independent implementation task can safely run before the shared query API and MCP contract exist.
 
 **beads compatibility:** Every task has a unique task ID, dependency list, acceptance criteria, Codex routing, scope boundary, and signal guidance.
-
