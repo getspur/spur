@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_acp::{DelegationId, DelegationResult};
+use spur_analyst::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 use tokio::sync::{oneshot, watch};
 
 // ─── Request/Response types for orchestrator communication ────────────
@@ -1129,6 +1130,79 @@ fn knowledge_context_pack_def() -> ToolDefinition {
     }
 }
 
+fn knowledge_context_pack_2_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "knowledge_context_pack_2".into(),
+        description: "experimental v2 evidence pack that preserves knowledge_context_pack retrieval and exact grounding while adding graph_paths, risk_scorecard, community_context, temporal_context, and caveats for graph reasoning.".into(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": { "type": "string", "minLength": 1 },
+                "intent": {
+                    "type": "string",
+                    "enum": ["explain", "change", "review", "debug", "plan"],
+                    "default": "explain"
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "docs", "code", "graph"],
+                    "default": "all"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 8
+                },
+                "include_tests": { "type": "boolean", "default": true },
+                "max_symbol_bodies": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 5,
+                    "default": 3
+                },
+                "graph_reasoning": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "boolean",
+                            "description": "When true, include bounded graph path evidence between top code candidates and graph anchors."
+                        },
+                        "communities": {
+                            "type": "boolean",
+                            "description": "When true, include component/community context for grounded code candidates."
+                        },
+                        "risk": {
+                            "type": "boolean",
+                            "description": "When true, include scorecard risk signals for grounded code candidates."
+                        },
+                        "max_path_hops": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_CONTEXT_PATH_HOPS,
+                            "default": 4
+                        },
+                        "max_paths": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_CONTEXT_PATHS,
+                            "default": 6
+                        },
+                        "anchors": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional graph://symbol/<id> or bare stable symbol IDs to use as path targets."
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
 // ─── Issue creation + dependency tools ────────────────────────────
 
 fn create_issue_def() -> ToolDefinition {
@@ -1567,6 +1641,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         code_symbol_history_def(),
         doc_navigate_def(),
         knowledge_context_pack_def(),
+        knowledge_context_pack_2_def(),
         submit_plan_def(),
         execute_epic_def(),
         get_plan_status_def(),
@@ -1611,6 +1686,7 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         code_symbol_history_def(),
         doc_navigate_def(),
         knowledge_context_pack_def(),
+        knowledge_context_pack_2_def(),
         update_issue_def(),
         report_signal_def(),
         report_progress_def(),
@@ -1794,6 +1870,99 @@ mod schema_truthfulness_tests {
         );
     }
 
+    #[test]
+    fn knowledge_context_pack_2_schema_matches_contract() {
+        let tools = tools_list();
+        let def = tools
+            .iter()
+            .find(|tool| tool.name == "knowledge_context_pack_2")
+            .expect("knowledge_context_pack_2 must appear in tools/list");
+        let props = def
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("properties");
+
+        assert!(
+            def.description.contains("experimental")
+                && def.description.contains("graph_paths")
+                && def.description.contains("risk_scorecard")
+                && def.description.contains("community_context"),
+            "knowledge_context_pack_2 description must advertise graph reasoning sections"
+        );
+        assert_eq!(def.input_schema.get("required"), Some(&json!(["query"])));
+        assert_eq!(
+            def.input_schema.get("additionalProperties"),
+            Some(&json!(false))
+        );
+        let mut prop_names = props.keys().cloned().collect::<Vec<_>>();
+        prop_names.sort();
+        assert_eq!(
+            prop_names,
+            vec![
+                "graph_reasoning",
+                "include_tests",
+                "intent",
+                "limit",
+                "max_symbol_bodies",
+                "query",
+                "scope",
+            ],
+            "knowledge_context_pack_2 property set drifted",
+        );
+
+        let graph_reasoning = props
+            .get("graph_reasoning")
+            .and_then(|v| v.get("properties"))
+            .and_then(|v| v.as_object())
+            .expect("graph_reasoning properties");
+        let mut graph_prop_names = graph_reasoning.keys().cloned().collect::<Vec<_>>();
+        graph_prop_names.sort();
+        assert_eq!(
+            graph_prop_names,
+            vec![
+                "anchors",
+                "communities",
+                "max_path_hops",
+                "max_paths",
+                "paths",
+                "risk",
+            ],
+            "knowledge_context_pack_2 graph_reasoning property set drifted",
+        );
+        assert_eq!(
+            graph_reasoning
+                .get("max_path_hops")
+                .and_then(|v| v.get("minimum")),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            graph_reasoning
+                .get("max_path_hops")
+                .and_then(|v| v.get("maximum")),
+            Some(&json!(6))
+        );
+        assert_eq!(
+            graph_reasoning
+                .get("max_paths")
+                .and_then(|v| v.get("minimum")),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            graph_reasoning
+                .get("max_paths")
+                .and_then(|v| v.get("maximum")),
+            Some(&json!(12))
+        );
+        assert_eq!(
+            graph_reasoning
+                .get("anchors")
+                .and_then(|v| v.get("items"))
+                .and_then(|v| v.get("type")),
+            Some(&json!("string"))
+        );
+    }
+
     #[tokio::test]
     async fn code_graph_schemas_advertise_selector_legacy_symbol_and_ambiguity_mode() {
         for def in [
@@ -1974,6 +2143,7 @@ mod worker_tools_subset_tests {
         "code_symbol_history",
         "doc_navigate",
         "knowledge_context_pack",
+        "knowledge_context_pack_2",
         "update_issue",
         "report_signal",
         "report_progress",
@@ -1986,6 +2156,7 @@ mod worker_tools_subset_tests {
             .map(|tool| tool.name.clone())
             .collect();
         assert!(actual.contains(&"knowledge_context_pack".to_string()));
+        assert!(actual.contains(&"knowledge_context_pack_2".to_string()));
     }
 
     #[test]
