@@ -1,9 +1,13 @@
+#![allow(clippy::needless_raw_string_hashes)]
+
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use spur_analyst::{
-    query_context_candidates, query_graph_candidates, KnowledgeQueryOptions, KnowledgeSearchScope,
+    query_context_candidates, query_context_paths, query_graph_candidates, KnowledgePathEngine,
+    KnowledgePathOptions, KnowledgePathStatus, KnowledgeQueryOptions, KnowledgeSearchScope,
+    MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
 };
 use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
 use spur_graph::{artifact_from_facts, build_facts, EMBEDDING_VECTOR_DIMENSIONS};
@@ -446,6 +450,199 @@ fn graph_candidates_return_primary_and_neighbor_rows() {
             && candidate.edge_bind_method.as_deref() == Some("resolved")));
 }
 
+#[test]
+fn context_paths_return_bounded_shortest_path_rows_via_sql_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_path_fixture(&conn);
+    drop(conn);
+
+    let result = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-d",
+        KnowledgePathOptions {
+            max_hops: 4,
+            max_paths: 2,
+        },
+    )
+    .expect("query context paths");
+
+    assert_eq!(
+        result.graph_content_hash.as_deref(),
+        Some("path-fixture-hash")
+    );
+    assert_eq!(result.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(result.status, KnowledgePathStatus::PathFound);
+    assert_eq!(result.max_hops, 4);
+    assert_eq!(result.max_paths, 2);
+    assert_eq!(result.rows.len(), 4, "{:#?}", result.rows);
+    assert!(result.rows.iter().all(|row| {
+        row.engine == KnowledgePathEngine::RecursiveSql
+            && row.status == KnowledgePathStatus::PathFound
+            && row.caveat.is_none()
+    }));
+
+    let first_path = result
+        .rows
+        .iter()
+        .filter(|row| row.path_index == 0)
+        .map(|row| {
+            (
+                row.hop_index,
+                row.source_stable_id.as_str(),
+                row.target_stable_id.as_str(),
+                row.relation.as_deref(),
+                row.edge_kind.as_deref(),
+                row.confidence.as_deref(),
+                row.bind_method.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_path,
+        vec![
+            (
+                0,
+                "sym-a",
+                "sym-b",
+                Some("calls"),
+                Some("calls"),
+                Some("syntax_exact"),
+                Some("singleton")
+            ),
+            (
+                1,
+                "sym-b",
+                "sym-d",
+                Some("calls"),
+                Some("calls_dyn"),
+                Some("heuristic"),
+                Some("type_inference")
+            ),
+        ]
+    );
+
+    let path_indexes = result
+        .rows
+        .iter()
+        .map(|row| row.path_index)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(path_indexes.into_iter().collect::<Vec<_>>(), vec![0, 1]);
+}
+
+#[test]
+fn context_paths_return_no_path_status() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_path_fixture(&conn);
+    drop(conn);
+
+    let result = query_context_paths(
+        &db_path,
+        "sym-d",
+        "sym-a",
+        KnowledgePathOptions {
+            max_hops: 3,
+            max_paths: 4,
+        },
+    )
+    .expect("query context paths");
+
+    assert_eq!(result.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(result.status, KnowledgePathStatus::NoPath);
+    assert_eq!(result.max_hops, 3);
+    assert_eq!(result.max_paths, 4);
+    assert!(result.rows.is_empty());
+    assert!(
+        result
+            .caveat
+            .as_deref()
+            .is_some_and(|caveat| caveat.contains("no path")),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn context_paths_clamp_max_hops_and_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_path_fixture(&conn);
+    drop(conn);
+
+    let lower = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-b",
+        KnowledgePathOptions {
+            max_hops: 0,
+            max_paths: 0,
+        },
+    )
+    .expect("query lower-clamped context paths");
+    assert_eq!(lower.max_hops, 1);
+    assert_eq!(lower.max_paths, 1);
+    assert_eq!(lower.rows.len(), 1);
+
+    let upper = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-d",
+        KnowledgePathOptions {
+            max_hops: usize::MAX,
+            max_paths: usize::MAX,
+        },
+    )
+    .expect("query upper-clamped context paths");
+    assert_eq!(upper.max_hops, MAX_CONTEXT_PATH_HOPS);
+    assert_eq!(upper.max_paths, MAX_CONTEXT_PATHS);
+}
+
+#[test]
+fn context_paths_return_unavailable_row_when_edges_schema_is_missing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('path-fixture-hash');
+        "#,
+    )
+    .expect("create incomplete fixture schema");
+    drop(conn);
+
+    let result = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-b",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 2,
+        },
+    )
+    .expect("query context paths");
+
+    assert_eq!(result.engine, KnowledgePathEngine::Unavailable);
+    assert_eq!(result.status, KnowledgePathStatus::Unavailable);
+    assert_eq!(result.rows.len(), 1, "{:#?}", result.rows);
+    let row = &result.rows[0];
+    assert_eq!(row.source_stable_id, "sym-a");
+    assert_eq!(row.target_stable_id, "sym-b");
+    assert_eq!(row.engine, KnowledgePathEngine::Unavailable);
+    assert_eq!(row.status, KnowledgePathStatus::Unavailable);
+    assert!(row.relation.is_none());
+    assert!(
+        row.caveat
+            .as_deref()
+            .is_some_and(|caveat| caveat.contains("unavailable")),
+        "{row:#?}"
+    );
+}
+
 fn context_candidate_macro_sql() -> String {
     INIT_SEARCH_SQL
         .split("CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS TABLE")
@@ -474,6 +671,53 @@ fn graph_candidate_macro_sql() -> String {
             format!("{start}{body}")
         })
         .expect("graph candidate macro should be present in init_search.sql")
+}
+
+fn create_path_fixture(conn: &duckdb::Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('path-fixture-hash');
+
+        CREATE TABLE nodes (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT,
+            file_path VARCHAR,
+            entity_name VARCHAR,
+            qualified_name VARCHAR,
+            symbol_kind VARCHAR
+        );
+        INSERT INTO nodes VALUES
+            ('sym-a', 1, 'src/a.rs', 'a', 'fixture::a', 'function'),
+            ('sym-b', 2, 'src/b.rs', 'b', 'fixture::b', 'function'),
+            ('sym-c', 3, 'src/c.rs', 'c', 'fixture::c', 'function'),
+            ('sym-d', 4, 'src/d.rs', 'd', 'fixture::d', 'function'),
+            ('sym-e', 5, 'src/e.rs', 'e', 'fixture::e', 'function'),
+            ('sym-f', 6, 'src/f.rs', 'f', 'fixture::f', 'function');
+
+        CREATE TABLE edges (
+            source_stable_id VARCHAR,
+            target_stable_id VARCHAR,
+            src_id BIGINT,
+            dst_id BIGINT,
+            target_label VARCHAR,
+            relation VARCHAR,
+            confidence VARCHAR,
+            confidence_score FLOAT,
+            edge_kind VARCHAR,
+            bind_method VARCHAR
+        );
+        INSERT INTO edges VALUES
+            ('sym-a', 'sym-b', 1, 2, 'b', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton'),
+            ('sym-b', 'sym-d', 2, 4, 'd', 'calls', 'heuristic', 0.6, 'calls_dyn', 'type_inference'),
+            ('sym-a', 'sym-c', 1, 3, 'c', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton'),
+            ('sym-c', 'sym-d', 3, 4, 'd', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton'),
+            ('sym-a', 'sym-e', 1, 5, 'e', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton'),
+            ('sym-e', 'sym-f', 5, 6, 'f', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton'),
+            ('sym-f', 'sym-d', 6, 4, 'd', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton');
+        "#,
+    )
+    .expect("create path fixture schema");
 }
 
 fn candidate_brief(
