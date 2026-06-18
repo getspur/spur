@@ -56,6 +56,16 @@
 (new_expression
   constructor: (identifier) @call.name) @call
 
+; Bare function values passed as the first argument to well-known
+; higher-order methods. The closed allowlist constrains references to
+; positions where a callable is expected, and the `(identifier)` shape excludes
+; inline arrows, function expressions, strings, object literals, and calls.
+((call_expression
+   function: (member_expression
+     property: (property_identifier) @hof_method)
+   arguments: (arguments . (identifier) @reference.name))
+ (#match? @hof_method "^(map|filter|forEach|flatMap|find|findIndex|some|every|sort|toSorted|reduce|reduceRight|then|catch|finally)$"))
+
 ; `class C implements I` emits an Implements edge to each interface.
 (class_declaration
   (class_heritage

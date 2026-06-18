@@ -3,12 +3,12 @@
     "graph_index_version": "4"
   },
   "manifest_version": "<normalized>",
-  "graph_content_hash": "744a96af7bbcf39a88d66acddab644e8a09ded16f50b698f7b4cc05289184ca7",
+  "graph_content_hash": "f65d0fe7c17ebd1abae888542ead77a6ceb0d6c719aae6b2744b3f0456ea5239",
   "file_manifests": [
     {
       "stable_file_id": "f6656417814146db",
       "path": "src/app.tsx",
-      "content_oid": "7e059269ea659fdcee7f8c4e8713ee3e7ed86437",
+      "content_oid": "bfd93a379e55ae97972085f5b5347dc8428f0b1a",
       "node_ids": [
         1,
         2,
@@ -557,6 +557,15 @@
     {
       "source_stable_symbol_id": "f6656417814146db",
       "target_stable_symbol_id": null,
+      "target_label": "map",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": null,
       "target_label": "./helpers",
       "import_path": "./helpers",
       "relation": "imports",
@@ -583,6 +592,15 @@
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
       "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "f6656417814146db",
+      "target_stable_symbol_id": "06b57d27bc6da2d7",
+      "target_label": "helper",
+      "relation": "references",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_hof"
     },
     {
       "source_stable_symbol_id": "f6656417814146db",
