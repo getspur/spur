@@ -139,3 +139,162 @@ void run(std::vector<int>& values, std::vector<int>& out) {
     assert_no_hof_reference(&facts, "lambda_only");
     assert_no_hof_reference(&facts, "make_predicate");
 }
+
+#[test]
+fn typescript_hof_calls_reference_bare_function_arguments() {
+    let facts = build_fixture(
+        "hof.ts",
+        r#"
+function renderItem(value: number): string {
+    return String(value);
+}
+
+function isReady(value: number): boolean {
+    return value > 0;
+}
+
+function track(value: number): void {
+    void value;
+}
+
+function combine(left: number, right: number): number {
+    return left + right;
+}
+
+function handleSuccess(value: number): number {
+    return value;
+}
+
+function handleError(error: Error): void {
+    void error;
+}
+
+function cleanup(): void {}
+
+function callback(value: number): number {
+    return value;
+}
+
+function render(value: number): string {
+    return String(value);
+}
+
+function factory(): (value: number) => string {
+    return renderItem;
+}
+
+function run(items: number[], promise: Promise<number>): void {
+    items.map(renderItem);
+    items.filter(isReady);
+    items.forEach(track);
+    items.reduce(combine, 0);
+    promise.then(handleSuccess);
+    promise.catch(handleError);
+    promise.finally(cleanup);
+    items.custom(callback);
+    items.map((value) => render(value));
+    items.map(factory());
+}
+"#,
+    );
+
+    for target in [
+        "renderItem",
+        "isReady",
+        "track",
+        "combine",
+        "handleSuccess",
+        "handleError",
+        "cleanup",
+    ] {
+        assert_hof_reference(&facts, target);
+    }
+    assert_eq!(hof_reference_labels(&facts).len(), 7);
+    assert_no_hof_reference(&facts, "callback");
+    assert_no_hof_reference(&facts, "render");
+    assert_no_hof_reference(&facts, "factory");
+}
+
+#[test]
+fn tsx_hof_calls_reference_bare_function_arguments() {
+    let facts = build_fixture(
+        "hof.tsx",
+        r#"
+function renderItem(value: string) {
+    return <span>{value}</span>;
+}
+
+function isReady(value: string): boolean {
+    return value.length > 0;
+}
+
+export function List({ items }: { items: string[] }) {
+    const rows = items.map(renderItem).filter(isReady);
+    return <div>{rows}</div>;
+}
+"#,
+    );
+
+    assert_hof_reference(&facts, "renderItem");
+    assert_hof_reference(&facts, "isReady");
+    assert_eq!(hof_reference_labels(&facts).len(), 2);
+}
+
+#[test]
+fn javascript_hof_calls_reference_bare_function_arguments() {
+    let facts = build_fixture(
+        "hof.js",
+        r#"
+function renderItem(value) {
+    return String(value);
+}
+
+function isReady(value) {
+    return value > 0;
+}
+
+function combine(left, right) {
+    return left + right;
+}
+
+function handleSuccess(value) {
+    return value;
+}
+
+function handleError(error) {
+    return error;
+}
+
+function callback(value) {
+    return value;
+}
+
+function render(value) {
+    return String(value);
+}
+
+function run(items, promise) {
+    items.map(renderItem);
+    items.filter(isReady);
+    items.reduce(combine, 0);
+    promise.then(handleSuccess);
+    promise.catch(handleError);
+    items.custom(callback);
+    items.map((value) => render(value));
+}
+"#,
+    );
+
+    for target in [
+        "renderItem",
+        "isReady",
+        "combine",
+        "handleSuccess",
+        "handleError",
+    ] {
+        assert_hof_reference(&facts, target);
+    }
+    assert_eq!(hof_reference_labels(&facts).len(), 5);
+    assert_no_hof_reference(&facts, "callback");
+    assert_no_hof_reference(&facts, "render");
+}
