@@ -26,6 +26,9 @@ const INIT_SEARCH_SQL: &str =
     include_str!("../../../spur-context/poc/duckdb-analyst/init_search.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 const LANCE_ATTACH_PLACEHOLDER: &str = "__SPUR_LANCE_ATTACH_SQL__";
+const SECTIONS_SOURCE_PLACEHOLDER: &str = "__SPUR_SECTIONS_SOURCE_SQL__";
+const LANCE_HYBRID_START: &str = "-- __SPUR_LANCE_HYBRID_START__";
+const LANCE_HYBRID_END: &str = "-- __SPUR_LANCE_HYBRID_END__";
 
 /// Compiled-in parquet schema version this analyst build understands.
 ///
@@ -109,7 +112,12 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     // fingerprint it. Which scripts are included depends on temporal/lance
     // presence, so the fingerprint captures config as well as SQL content.
     let lance_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
-    let lance_present = lance_dataset_dir.is_dir();
+    let lance_available = want_temporal && lance_sections_available(&artifact_dir, quiet);
+    let init_search_sql = if want_temporal {
+        render_init_search_sql(lance_available)?
+    } else {
+        String::new()
+    };
     let sql_template = [
         INIT_SQL,
         if want_temporal { INIT_TEMPORAL_SQL } else { "" },
@@ -123,13 +131,10 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         // the temporal layer is present.
         if want_temporal { INIT_VIEWS_SQL } else { "" },
         // Search appliance: materializes the prose (section bodies, from Lance)
-        // and code (symbol tokens) FTS indexes + search() macros. Needs the
-        // Lance section store attached AND v_symbol_scorecard (temporal views).
-        if want_temporal && lance_present {
-            INIT_SEARCH_SQL
-        } else {
-            ""
-        },
+        // and code (symbol tokens) FTS indexes + search() macros. It always
+        // needs v_symbol_scorecard (temporal views); Lance-backed prose and
+        // hybrid search are optional branches within the rendered SQL.
+        init_search_sql.as_str(),
     ]
     .concat();
 
@@ -165,15 +170,15 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let _ = std::fs::remove_file(&tmp_db);
 
     let artifact_dir_sql = artifact_dir.display().to_string().replace('\'', "''");
-    let lance_attach_sql = if lance_present {
+    let lance_attach_sql = if lance_available {
         format!(
-            "ATTACH '{}' AS lance_ns (TYPE LANCE);\n",
+            "INSTALL lance; LOAD lance;\nATTACH '{}' AS lance_ns (TYPE LANCE);\n",
             lance_dataset_dir.display().to_string().replace('\'', "''")
         )
     } else {
         if !quiet {
             eprintln!(
-                "[spur] warning: Lance section dataset not found at {} - skipping lance_ns attach",
+                "[spur] warning: valid Lance section dataset not found at {} - using BM25-only search",
                 lance_dataset_dir.display()
             );
         }
@@ -293,6 +298,137 @@ fn read_graph_content_hash(artifact_dir: &Path) -> Option<String> {
         .get("graph_content_hash")
         .and_then(|v| v.as_str())
         .map(str::to_owned)
+}
+
+fn manifest_sidecar_complete(artifact_dir: &Path) -> bool {
+    let bytes = match std::fs::read(artifact_dir.join("manifest.json")) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    parsed
+        .get("sidecar_complete")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn lance_sections_available(artifact_dir: &Path, quiet: bool) -> bool {
+    let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
+    if !manifest_sidecar_complete(artifact_dir) {
+        return false;
+    }
+    if !dataset_dir.is_dir() {
+        return false;
+    }
+    match lance_section_bodies_row_count(&dataset_dir) {
+        Ok(rows) if rows > 0 => true,
+        Ok(_) => {
+            if !quiet {
+                eprintln!(
+                    "[spur] warning: Lance section table at {} is empty - using BM25-only search",
+                    dataset_dir.display()
+                );
+            }
+            false
+        }
+        Err(err) => {
+            if !quiet {
+                eprintln!(
+                    "[spur] warning: could not open Lance section table at {}: {err:#} - using BM25-only search",
+                    dataset_dir.display()
+                );
+            }
+            false
+        }
+    }
+}
+
+fn lance_section_bodies_row_count(dataset_dir: &Path) -> Result<usize> {
+    let dataset_dir_sql = dataset_dir.display().to_string().replace('\'', "''");
+    let sql = format!(
+        "INSTALL lance; LOAD lance;\n\
+         ATTACH '{dataset_dir_sql}' AS lance_probe (TYPE LANCE);\n\
+         SELECT count(*) FROM lance_probe.section_bodies;"
+    );
+    let output = Command::new("duckdb")
+        .args(["-csv", "-noheader", ":memory:", "-c", &sql])
+        .output()
+        .with_context(|| "failed to spawn duckdb Lance sidecar probe")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "duckdb Lance sidecar probe exited {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout).context("duckdb probe stdout was not UTF-8")?;
+    stdout
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse::<usize>()
+        .with_context(|| format!("failed to parse Lance sidecar row count from {stdout:?}"))
+}
+
+fn render_init_search_sql(lance_available: bool) -> Result<String> {
+    let sections_source = if lance_available {
+        lance_sections_source_sql()
+    } else {
+        empty_sections_source_sql()
+    };
+    let sql = INIT_SEARCH_SQL.replace(SECTIONS_SOURCE_PLACEHOLDER, &sections_source);
+    if lance_available {
+        return Ok(sql);
+    }
+    strip_lance_hybrid_sql(&sql)
+}
+
+fn lance_sections_source_sql() -> String {
+    "CREATE OR REPLACE TABLE sections AS\n\
+     SELECT stable_symbol_id, parent_stable_id, qualified_name, file_path,\n\
+            heading_level, child_count, content_hash, body_byte_start, body_text\n\
+     FROM lance_ns.section_bodies\n\
+     WHERE body_text IS NOT NULL AND length(body_text) > 0;"
+        .to_string()
+}
+
+fn empty_sections_source_sql() -> String {
+    "CREATE OR REPLACE TABLE sections AS\n\
+     SELECT CAST(NULL AS VARCHAR) AS stable_symbol_id,\n\
+            CAST(NULL AS VARCHAR) AS parent_stable_id,\n\
+            CAST(NULL AS VARCHAR) AS qualified_name,\n\
+            CAST(NULL AS VARCHAR) AS file_path,\n\
+            CAST(NULL AS INTEGER) AS heading_level,\n\
+            CAST(NULL AS INTEGER) AS child_count,\n\
+            CAST(NULL AS VARCHAR) AS content_hash,\n\
+            CAST(NULL AS UBIGINT) AS body_byte_start,\n\
+            CAST(NULL AS VARCHAR) AS body_text\n\
+     WHERE FALSE;"
+        .to_string()
+}
+
+fn strip_lance_hybrid_sql(sql: &str) -> Result<String> {
+    let start = sql
+        .find(LANCE_HYBRID_START)
+        .ok_or_else(|| anyhow!("init_search.sql missing Lance hybrid start sentinel"))?;
+    let end = sql
+        .find(LANCE_HYBRID_END)
+        .ok_or_else(|| anyhow!("init_search.sql missing Lance hybrid end sentinel"))?;
+    if end < start {
+        return Err(anyhow!(
+            "init_search.sql Lance hybrid sentinels are out of order"
+        ));
+    }
+    let end = end + LANCE_HYBRID_END.len();
+    let mut rendered = String::with_capacity(sql.len().saturating_sub(end - start));
+    rendered.push_str(&sql[..start]);
+    rendered.push_str(&sql[end..]);
+    Ok(rendered)
 }
 
 /// FNV-1a fingerprint over `(graph content hash, assembled analyst SQL)`. Changes
@@ -843,8 +979,9 @@ mod tests {
     fn init_search_sql_hybrid_macro_has_per_doc_dedup() {
         assert!(
             INIT_SEARCH_SQL
-                .contains("PARTITION BY COALESCE(stable_symbol_id, file_path || ':' || title)")
-                && INIT_SEARCH_SQL.contains("WHERE dedupe_rank = 1"),
+                .contains("COALESCE(stable_symbol_id, file_path || ':' || title) AS candidate_id")
+                && INIT_SEARCH_SQL.contains("PARTITION BY candidate_id")
+                && INIT_SEARCH_SQL.contains("WHERE representative_rank = 1"),
             "hybrid context candidates must deduplicate by stable symbol before final ranking"
         );
     }
