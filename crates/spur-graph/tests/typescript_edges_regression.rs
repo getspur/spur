@@ -1,12 +1,14 @@
-use std::fs;
+use std::{collections::BTreeSet, fs};
 
 use spur_graph::{build_facts, NodeKind, RelationKind};
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator as _};
 
 const TS_EDGES_QUERY: &str = include_str!("../queries/typescript/spur-edges.scm");
+const JSX_EDGES_QUERY: &str = include_str!("../queries/typescript/jsx-edges.scm");
 
-fn capture_texts(
+fn capture_texts_for_query(
     language: &tree_sitter::Language,
+    query_source: &str,
     source: &str,
     capture_name: &str,
 ) -> Vec<String> {
@@ -15,7 +17,7 @@ fn capture_texts(
         .set_language(language)
         .expect("configure parser language");
     let tree = parser.parse(source, None).expect("parse source");
-    let query = Query::new(language, TS_EDGES_QUERY).expect("compile query");
+    let query = Query::new(language, query_source).expect("compile query");
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
@@ -37,6 +39,14 @@ fn capture_texts(
     names
 }
 
+fn capture_texts(
+    language: &tree_sitter::Language,
+    source: &str,
+    capture_name: &str,
+) -> Vec<String> {
+    capture_texts_for_query(language, TS_EDGES_QUERY, source, capture_name)
+}
+
 fn expected_import_names(import_names: &[String], expected: &[&str]) {
     use std::collections::HashSet;
     let mut actual: HashSet<&str> = import_names.iter().map(String::as_str).collect();
@@ -48,6 +58,21 @@ fn expected_import_names(import_names: &[String], expected: &[&str]) {
         actual, expected,
         "import captures missing expected names: {actual:?}"
     );
+}
+
+fn edge_target_label<'a>(
+    facts: &'a spur_graph::extract::GraphFacts,
+    edge: &'a spur_graph::GraphEdge,
+) -> Option<&'a str> {
+    edge.target_node_id
+        .and_then(|node_id| {
+            facts
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_id)
+                .map(|node| node.label.as_str())
+        })
+        .or(edge.target_label.as_deref())
 }
 
 #[test]
@@ -148,6 +173,66 @@ function caller(items: Item[], promise: Promise<Item>) {
     let reference_names = capture_texts(&language, source, "reference.name");
 
     assert!(reference_names.is_empty());
+}
+
+#[test]
+fn tsx_jsx_edges_query_captures_component_and_intrinsic_tags_before_filtering() {
+    let language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+    let source = r#"
+function Panel() {
+  return <span />;
+}
+
+export function Root() {
+  return <main><Panel /></main>;
+}
+"#;
+
+    let names = capture_texts_for_query(&language, JSX_EDGES_QUERY, source, "jsx_call.name");
+    let unique_names = names.iter().map(String::as_str).collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        unique_names,
+        BTreeSet::from(["Panel", "main", "span"]),
+        "JSX query should expose all tag names before emitter filtering; got {names:?}"
+    );
+}
+
+#[test]
+fn tsx_graph_emits_uppercase_jsx_component_calls_and_filters_intrinsics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("app.tsx"),
+        r#"
+function Panel() {
+  return <span />;
+}
+
+export function Root() {
+  return <main><Panel /></main>;
+}
+"#,
+    )
+    .expect("write app.tsx");
+
+    let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+    let root = facts
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Function && node.label == "Root")
+        .expect("Root function node");
+    let call_targets = facts
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == RelationKind::Calls && edge.source_node_id == root.node_id)
+        .filter_map(|edge| edge_target_label(&facts, edge))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        call_targets,
+        vec!["Panel"],
+        "Root should call only uppercase JSX components; intrinsic tags must be filtered"
+    );
 }
 
 #[test]
