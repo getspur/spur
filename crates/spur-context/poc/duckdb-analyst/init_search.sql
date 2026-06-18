@@ -7,20 +7,12 @@
 --
 -- Ordering contract:
 --   * runs AFTER init_views.sql        (search_code joins v_symbol_scorecard)
---   * requires lance_ns attached       (sections come from section_bodies)
--- analyst.rs gates inclusion on (temporal AND lance) presence.
+--   * analyst.rs injects either Lance-backed sections or an empty fallback table.
 
 INSTALL fts; LOAD fts;
--- Lance hybrid search is opportunistic. The Rust query layer retries BM25-only
--- if this extension is unavailable in a read connection.
-INSTALL lance; LOAD lance;
 
--- ── Prose corpus: section bodies materialized from Lance + persistent FTS ─────
-CREATE OR REPLACE TABLE sections AS
-SELECT stable_symbol_id, parent_stable_id, qualified_name, file_path,
-       heading_level, child_count, content_hash, body_byte_start, body_text
-FROM lance_ns.section_bodies
-WHERE body_text IS NOT NULL AND length(body_text) > 0;
+-- ── Prose corpus: section bodies + persistent FTS ────────────────────────────
+__SPUR_SECTIONS_SOURCE_SQL__
 
 -- Deduped search corpus. Skills are installed into ~6 agent dirs
 -- (.claude/.codex/.kiro/.gemini/.kimi/.opencode), so a skill's sections appear
@@ -223,6 +215,7 @@ CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS
   ORDER BY rank DESC NULLS LAST
   LIMIT 40;
 
+-- __SPUR_LANCE_HYBRID_START__
 CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, intent, query_vec) AS TABLE
   WITH bm25_rows AS (
     SELECT * FROM search_context_candidates(q, requested_scope, intent)
@@ -375,6 +368,7 @@ CREATE OR REPLACE MACRO search_context_candidates_hybrid(q, requested_scope, int
     CASE WHEN query_vec IS NOT NULL THEN sort_priority END ASC NULLS LAST,
     CASE WHEN query_vec IS NOT NULL THEN candidate_id END ASC NULLS LAST
   LIMIT 40;
+-- __SPUR_LANCE_HYBRID_END__
 
 -- Graph-augmented: BM25 top-k hits + selective 1-hop call-graph expansion.
 -- Gate: symbols with posture = 'load-bearing wall' AND callers > 30 are popular
