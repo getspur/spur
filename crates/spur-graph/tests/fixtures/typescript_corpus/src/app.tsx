@@ -28,3 +28,5 @@ export const Root = () => (
     <Greeting name="hi" />
   </div>
 );
+
+[Mode.Fast].map(helper);

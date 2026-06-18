@@ -625,6 +625,8 @@ struct EdgeDedupeKey {
     target_stable_symbol_id: Option<String>,
     target_label: Option<String>,
     import_path: Option<String>,
+    receiver_text: Option<String>,
+    scope_text: Option<String>,
     relation: RelationKind,
     edge_kind: Option<crate::GraphEdgeKind>,
     bind_method: Option<String>,
@@ -711,6 +713,8 @@ fn edge_key(edge: &GraphEdgeArtifact) -> EdgeDedupeKey {
         target_stable_symbol_id: edge.target_stable_symbol_id.clone(),
         target_label: edge.target_label.clone(),
         import_path: edge.import_path.clone(),
+        receiver_text: edge.receiver_text.clone(),
+        scope_text: edge.scope_text.clone(),
         relation: edge.relation,
         edge_kind: edge.edge_kind,
         bind_method: edge.bind_method.clone(),
@@ -744,7 +748,7 @@ const SYMBOL_COLUMNS: [&str; 11] = [
     "anchor_hash",
     "enclosing_scope",
 ];
-const RESOLVED_EDGE_COLUMNS: [&str; 8] = [
+const RESOLVED_EDGE_COLUMNS: [&str; 10] = [
     "source_stable_id",
     "target_stable_id",
     "target_label",
@@ -753,8 +757,10 @@ const RESOLVED_EDGE_COLUMNS: [&str; 8] = [
     "confidence_score",
     "edge_kind",
     "bind_method",
+    "receiver_text",
+    "scope_text",
 ];
-const UNRESOLVED_EDGE_COLUMNS: [&str; 7] = [
+const UNRESOLVED_EDGE_COLUMNS: [&str; 9] = [
     "source_stable_id",
     "target_label",
     "relation",
@@ -762,6 +768,8 @@ const UNRESOLVED_EDGE_COLUMNS: [&str; 7] = [
     "confidence_score",
     "edge_kind",
     "bind_method",
+    "receiver_text",
+    "scope_text",
 ];
 
 pub struct ParquetClient {
@@ -1833,6 +1841,8 @@ fn resolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdg
     let edge_kind = string_array_by_name(batch, "edge_kind")?;
     let bind_method = string_array_by_name(batch, "bind_method")?;
     let import_path = optional_string_array_by_name(batch, "import_path")?;
+    let receiver_text = optional_string_array_by_name(batch, "receiver_text")?;
+    let scope_text = optional_string_array_by_name(batch, "scope_text")?;
 
     let mut edges = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -1848,6 +1858,8 @@ fn resolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphEdg
             ),
             target_label: optional_string_value(target_label, row),
             import_path: import_path.and_then(|values| optional_string_value(values, row)),
+            receiver_text: receiver_text.and_then(|values| optional_string_value(values, row)),
+            scope_text: scope_text.and_then(|values| optional_string_value(values, row)),
             relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
             confidence: confidence_from_str(required_string_value(confidence, row, "confidence")?)?,
             confidence_score: confidence_score.value(row),
@@ -1870,6 +1882,8 @@ fn unresolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphE
     let edge_kind = string_array_by_name(batch, "edge_kind")?;
     let bind_method = string_array_by_name(batch, "bind_method")?;
     let import_path = optional_string_array_by_name(batch, "import_path")?;
+    let receiver_text = optional_string_array_by_name(batch, "receiver_text")?;
+    let scope_text = optional_string_array_by_name(batch, "scope_text")?;
 
     let mut edges = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -1883,6 +1897,8 @@ fn unresolved_edges_from_batch(batch: &RecordBatch) -> anyhow::Result<Vec<GraphE
             target_stable_symbol_id: None,
             target_label: optional_string_value(target_label, row),
             import_path: import_path.and_then(|values| optional_string_value(values, row)),
+            receiver_text: receiver_text.and_then(|values| optional_string_value(values, row)),
+            scope_text: scope_text.and_then(|values| optional_string_value(values, row)),
             relation: relation_from_str(required_string_value(relation, row, "relation")?)?,
             confidence: confidence_from_str(required_string_value(confidence, row, "confidence")?)?,
             confidence_score: confidence_score.value(row),

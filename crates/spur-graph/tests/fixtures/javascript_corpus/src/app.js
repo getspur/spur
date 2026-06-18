@@ -16,3 +16,4 @@ export function createDashboard(name) {
 }
 
 createDashboard("demo");
+["demo"].map(normalizeName);

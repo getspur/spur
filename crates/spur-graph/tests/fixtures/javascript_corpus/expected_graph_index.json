@@ -3,12 +3,12 @@
     "graph_index_version": "4"
   },
   "manifest_version": "<normalized>",
-  "graph_content_hash": "49da0c25d19f00b6771322df1e53068b8461e7b9e651d5a848e59415746aab10",
+  "graph_content_hash": "0456a9acf2a48aa3023a3a16ab8a5d9a08c6c8a755f48f2ec54947b96368293f",
   "file_manifests": [
     {
       "stable_file_id": "73295e90e7dc5f72",
       "path": "src/app.js",
-      "content_oid": "3e9b72b561c495a55777b6b65e9b3b3507e51f4a",
+      "content_oid": "5dd1e56c2242ce649745c4c7a667fea94a3d1c7b",
       "node_ids": [
         1,
         2,
@@ -325,6 +325,15 @@
     {
       "source_stable_symbol_id": "73295e90e7dc5f72",
       "target_stable_symbol_id": null,
+      "target_label": "map",
+      "relation": "calls",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "calls"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": null,
       "target_label": "./component.jsx",
       "import_path": "./component.jsx",
       "relation": "imports",
@@ -363,6 +372,15 @@
       "confidence_score": 0.8,
       "edge_kind": "references_other",
       "bind_method": "import_path"
+    },
+    {
+      "source_stable_symbol_id": "73295e90e7dc5f72",
+      "target_stable_symbol_id": "0afc01a1553ba0d6",
+      "target_label": "normalizeName",
+      "relation": "references",
+      "confidence": "heuristic",
+      "confidence_score": 0.5,
+      "edge_kind": "references_hof"
     },
     {
       "source_stable_symbol_id": "73295e90e7dc5f72",

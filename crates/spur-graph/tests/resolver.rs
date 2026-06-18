@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use spur_graph::{
-    artifact_from_facts, build_facts, resolve_artifact_location, write_current_pointer,
+    artifact_from_facts, build_facts, resolve_artifact_location, write_current_pointer, Confidence,
     GraphEdgeArtifact, GraphEdgeKind, GraphIndexArtifact, GraphIndexPointer, GraphSymbolArtifact,
     RelationKind, ResolvedArtifact, SourceKind,
 };
@@ -420,6 +420,114 @@ export function caller() {
         Some(helper.stable_symbol_id.as_str())
     );
     assert_eq!(helper_edge.bind_method.as_deref(), Some("import_path"));
+}
+
+#[test]
+fn cpp_qualified_call_edges_preserve_scope_and_receiver_evidence() {
+    let artifact = artifact_from_sources(&[(
+        "src/lib.cpp",
+        r#"
+namespace demo {
+void helper() {}
+}
+
+struct Catalog {
+    static void Load() {}
+    void Touch() {}
+};
+
+void caller() {
+    demo::helper();
+    Catalog::Load();
+    Catalog catalog;
+    catalog.Touch();
+}
+"#,
+    )]);
+    let caller = symbol(&artifact, "caller");
+    let helper = symbol(&artifact, "demo::helper");
+    let load = symbol(&artifact, "Catalog::Load");
+
+    let helper_edge = call_edge(&artifact, caller, "helper");
+    assert_eq!(
+        helper_edge.target_stable_symbol_id.as_deref(),
+        Some(helper.stable_symbol_id.as_str())
+    );
+    assert_eq!(helper_edge.scope_text.as_deref(), Some("demo"));
+    assert_eq!(helper_edge.receiver_text, None);
+    assert_eq!(helper_edge.bind_method.as_deref(), Some("fqn"));
+
+    let load_edge = call_edge(&artifact, caller, "Load");
+    assert_eq!(
+        load_edge.target_stable_symbol_id.as_deref(),
+        Some(load.stable_symbol_id.as_str())
+    );
+    assert_eq!(load_edge.scope_text.as_deref(), Some("Catalog"));
+    assert_eq!(load_edge.receiver_text, None);
+    assert_eq!(load_edge.bind_method.as_deref(), Some("fqn"));
+
+    let touch_edge = call_edge(&artifact, caller, "Touch");
+    assert_eq!(touch_edge.receiver_text.as_deref(), Some("catalog"));
+}
+
+#[test]
+fn cpp_qualified_call_bare_name_fallback_is_marked_heuristic() {
+    let artifact = artifact_from_sources(&[(
+        "src/lib.cpp",
+        r#"
+namespace alpha {
+void lonely() {}
+}
+
+void caller() {
+    beta::lonely();
+}
+"#,
+    )]);
+    let caller = symbol(&artifact, "caller");
+    let lonely = symbol(&artifact, "alpha::lonely");
+
+    let edge = call_edge(&artifact, caller, "lonely");
+
+    assert_eq!(
+        edge.target_stable_symbol_id.as_deref(),
+        Some(lonely.stable_symbol_id.as_str())
+    );
+    assert_eq!(edge.scope_text.as_deref(), Some("beta"));
+    assert_eq!(
+        edge.bind_method.as_deref(),
+        Some("bare_qualified_singleton")
+    );
+    assert_eq!(edge.confidence, Confidence::Heuristic);
+    assert_eq!(edge.confidence_score, 0.8);
+}
+
+#[test]
+fn cpp_ambiguous_qualified_call_keeps_scope_without_bare_resolution() {
+    let artifact = artifact_from_sources(&[(
+        "src/lib.cpp",
+        r#"
+namespace alpha {
+void collide() {}
+}
+
+namespace beta {
+void collide() {}
+}
+
+void caller() {
+    gamma::collide();
+}
+"#,
+    )]);
+    let caller = symbol(&artifact, "caller");
+
+    let edge = call_edge(&artifact, caller, "collide");
+
+    assert_eq!(edge.target_stable_symbol_id, None);
+    assert_eq!(edge.scope_text.as_deref(), Some("gamma"));
+    assert_eq!(edge.bind_method, None);
+    assert_eq!(edge.confidence, Confidence::Heuristic);
 }
 
 impl ResolverCase {
