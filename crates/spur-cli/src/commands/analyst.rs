@@ -299,13 +299,11 @@ fn read_graph_content_hash(artifact_dir: &Path) -> Option<String> {
 }
 
 fn manifest_sidecar_complete(artifact_dir: &Path) -> bool {
-    let bytes = match std::fs::read(artifact_dir.join("manifest.json")) {
-        Ok(bytes) => bytes,
-        Err(_) => return false,
+    let Ok(bytes) = std::fs::read(artifact_dir.join("manifest.json")) else {
+        return false;
     };
-    let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return false,
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
     };
     parsed
         .get("sidecar_complete")
