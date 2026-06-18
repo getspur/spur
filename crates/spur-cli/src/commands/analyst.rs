@@ -37,7 +37,7 @@ const LANCE_HYBRID_END: &str = "-- __SPUR_LANCE_HYBRID_END__";
 /// Must match `manifest.json::schema_version` in the artifact dir. Hard-fail
 /// on mismatch to prevent silent miscompiles where `init.sql` view definitions
 /// parse but produce wrong results against a newer parquet schema.
-pub const SUPPORTED_GRAPH_SCHEMA_VERSION: &str = "spur-graph-schema-v8";
+pub const SUPPORTED_GRAPH_SCHEMA_VERSION: &str = "spur-graph-schema-v9";
 
 /// Default relative path to the analyst DuckDB inside a worktree.
 pub const DEFAULT_ANALYST_DB_REL: &str = ".spur/analyst.duckdb";
@@ -355,12 +355,14 @@ fn lance_hybrid_available(artifact_dir: &Path, quiet: bool) -> bool {
     if !sections_dataset_dir.is_dir() || !code_symbols_dataset_dir.is_dir() {
         return false;
     }
-    lance_dataset_has_rows(
+    lance_table_has_rows(
+        &sections_dataset_dir,
         &sections_dataset_dir,
         SECTIONS_TABLE,
         "section table",
         quiet,
-    ) && lance_dataset_has_rows(
+    ) && lance_table_has_rows(
+        artifact_dir,
         &code_symbols_dataset_dir,
         CODE_SYMBOLS_TABLE,
         "code symbol table",
@@ -368,19 +370,20 @@ fn lance_hybrid_available(artifact_dir: &Path, quiet: bool) -> bool {
     )
 }
 
-fn lance_dataset_has_rows(
-    dataset_dir: &Path,
+fn lance_table_has_rows(
+    attach_dir: &Path,
+    display_dir: &Path,
     table_name: &str,
     table_label: &str,
     quiet: bool,
 ) -> bool {
-    match lance_dataset_row_count(dataset_dir, table_name) {
+    match lance_dataset_row_count(attach_dir, table_name) {
         Ok(rows) if rows > 0 => true,
         Ok(_) => {
             if !quiet {
                 eprintln!(
                     "[spur] warning: Lance {table_label} at {} is empty - using BM25-only search",
-                    dataset_dir.display(),
+                    display_dir.display(),
                 );
             }
             false
@@ -389,7 +392,7 @@ fn lance_dataset_has_rows(
             if !quiet {
                 eprintln!(
                     "[spur] warning: could not open Lance {table_label} at {}: {err:#} - using BM25-only search",
-                    dataset_dir.display(),
+                    display_dir.display(),
                 );
             }
             false
@@ -895,6 +898,87 @@ mod tests {
         let dir = temp_root();
 
         assert!(!diagnostics_present(dir.path()));
+    }
+
+    #[test]
+    fn lance_hybrid_available_probes_code_symbols_from_artifact_database() {
+        let _env_guard = env_lock();
+        let dir = temp_root();
+        let artifact_dir = dir.path().join("artifact.parquet");
+        fs::create_dir_all(artifact_dir.join(SECTIONS_DATASET_DIR)).unwrap();
+        fs::create_dir_all(artifact_dir.join(CODE_SYMBOLS_DATASET_DIR)).unwrap();
+        std::fs::write(
+            artifact_dir.join("manifest.json"),
+            r#"{
+              "sidecar_complete": true,
+              "sidecar_row_counts": {
+                "section_bodies": 4323,
+                "code_symbols": 8742
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let duckdb = bin_dir.join("duckdb");
+        std::fs::write(
+            &duckdb,
+            r#"#!/bin/sh
+sql=''
+prev=''
+for arg in "$@"; do
+  if [ "$prev" = "-c" ]; then
+    sql=$arg
+    break
+  fi
+  prev=$arg
+done
+
+case "$sql" in
+  *"sections.lancedb"*".section_bodies"*)
+    echo 4323
+    exit 0
+    ;;
+  *"code_symbols.lance"*)
+    echo "code symbol probe attached code_symbols.lance directly" >&2
+    exit 1
+    ;;
+  *"$SPUR_TEST_ARTIFACT_DIR"*".code_symbols"*)
+    echo 8742
+    exit 0
+    ;;
+  *)
+    echo "unexpected SQL: $sql" >&2
+    exit 1
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&duckdb, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let prev_path = std::env::var_os("PATH");
+        let prev_artifact = std::env::var_os("SPUR_TEST_ARTIFACT_DIR");
+        std::env::set_var("PATH", &bin_dir);
+        std::env::set_var("SPUR_TEST_ARTIFACT_DIR", &artifact_dir);
+
+        let available = lance_hybrid_available(&artifact_dir, true);
+
+        match prev_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match prev_artifact {
+            Some(value) => std::env::set_var("SPUR_TEST_ARTIFACT_DIR", value),
+            None => std::env::remove_var("SPUR_TEST_ARTIFACT_DIR"),
+        }
+
+        assert!(
+            available,
+            "code symbol sidecar probe must attach the artifact database, not code_symbols.lance"
+        );
     }
 
     #[test]
