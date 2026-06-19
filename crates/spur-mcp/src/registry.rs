@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use rmcp::model::{ErrorCode, ErrorData as McpError};
@@ -298,14 +298,167 @@ pub struct GraphMcpDeps {}
 #[non_exhaustive]
 pub struct AnalystMcpDeps {}
 
+const PM_CRUD_TOOL_NAMES: &[&str] = &[
+    "get_issue",
+    "list_issues",
+    "update_issue",
+    "create_issue",
+    "add_dependency",
+    "create_pr",
+];
+
+const PM_ISSUE_GRAPH_TOOL_NAMES: &[&str] = &[
+    "graph_triage",
+    "graph_plan",
+    "graph_insights",
+    "graph_alerts",
+    "graph_subgraph",
+];
+
+struct BrainPmMcpToolModule {
+    tool_names: &'static [&'static str],
+}
+
+impl BrainPmMcpToolModule {
+    fn crud() -> Self {
+        Self {
+            tool_names: PM_CRUD_TOOL_NAMES,
+        }
+    }
+
+    fn issue_graph() -> Self {
+        Self {
+            tool_names: PM_ISSUE_GRAPH_TOOL_NAMES,
+        }
+    }
+
+    fn deps_from_server(server: &crate::server::McpCallbackServer) -> spur_pm::mcp::PmMcpDeps {
+        let event_sink = server.event_sink.clone();
+        let on_issue_created = event_sink.map(|sink| {
+            Arc::new(move |event: spur_pm::mcp::IssueCreatedEvent| {
+                let issue = issue_to_summary_event(&event.issue, event.source);
+                if sink
+                    .try_emit(spur_acp::SpurEventBody::IssueCreated { issue })
+                    .is_err()
+                {
+                    tracing::warn!(
+                        issue_id = %event.issue.id,
+                        "dropping IssueCreated event because broadcast sink is full"
+                    );
+                }
+            }) as Arc<dyn Fn(spur_pm::mcp::IssueCreatedEvent) + Send + Sync>
+        });
+
+        spur_pm::mcp::PmMcpDeps {
+            pm_service: server.pm_service.clone(),
+            on_issue_created,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolModule for BrainPmMcpToolModule {
+    fn tools(&self) -> Vec<ToolDefinition> {
+        let definitions = spur_pm::mcp::tool_definitions();
+        self.tool_names
+            .iter()
+            .map(|name| {
+                definitions
+                    .iter()
+                    .find(|definition| definition.name == *name)
+                    .unwrap_or_else(|| panic!("spur-pm MCP module missing tool definition {name}"))
+                    .clone()
+            })
+            .map(pm_tool_definition)
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        ctx: ToolCallContext<'_>,
+        name: &str,
+        args: Value,
+    ) -> Result<ToolResponse, McpError> {
+        let id = ctx.request_id_value();
+        let server = ctx.callback_server()?;
+        let module = spur_pm::mcp::PmMcpModule::new(Self::deps_from_server(server));
+        let response = match module.call(name, args).await {
+            Ok(result) => JsonRpcResponse::success(id, result),
+            Err(error) => pm_error_response(id, name, error),
+        };
+        Ok(ToolResponse::from_json_rpc(response))
+    }
+}
+
+fn pm_tool_definition(definition: spur_pm::mcp::ToolDefinition) -> ToolDefinition {
+    ToolDefinition {
+        name: definition.name,
+        description: definition.description,
+        input_schema: definition.input_schema,
+    }
+}
+
+fn pm_error_response(
+    id: Value,
+    tool_name: &str,
+    error: spur_pm::mcp::McpHandlerError,
+) -> JsonRpcResponse {
+    match error {
+        spur_pm::mcp::McpHandlerError::InvalidParams(message) => {
+            JsonRpcResponse::invalid_params(id, message)
+        }
+        spur_pm::mcp::McpHandlerError::NotFound(message) => {
+            JsonRpcResponse::error(id, -32004, message)
+        }
+        spur_pm::mcp::McpHandlerError::Unauthorized(message) => {
+            JsonRpcResponse::error(id, -32001, message)
+        }
+        spur_pm::mcp::McpHandlerError::UpstreamPm(message) => {
+            JsonRpcResponse::internal_error(id, format!("{tool_name} failed: {message}"))
+        }
+        spur_pm::mcp::McpHandlerError::Internal(message) => {
+            JsonRpcResponse::internal_error(id, message)
+        }
+    }
+}
+
+fn issue_to_summary_event(
+    issue: &spur_pm::Issue,
+    source: &'static str,
+) -> spur_acp::domain::events::IssueSummaryEvent {
+    spur_acp::domain::events::IssueSummaryEvent {
+        id: issue.id.clone(),
+        source: source.to_string(),
+        title: issue.title.clone(),
+        status: issue.status.clone(),
+        labels: issue.labels.clone(),
+        priority: issue.priority,
+        issue_type: issue.issue_type.clone(),
+        assignee: issue.assignee.clone(),
+        description: Some(issue.body.clone()).filter(|body| !body.trim().is_empty()),
+    }
+}
+
 struct LegacyMcpToolModule {
     definitions: Vec<ToolDefinition>,
 }
 
 impl LegacyMcpToolModule {
-    fn full() -> Self {
+    fn full_prelude() -> Self {
         Self {
-            definitions: crate::tools::legacy_tools_definitions(),
+            definitions: crate::tools::legacy_prelude_tool_definitions(),
+        }
+    }
+
+    fn plan_management() -> Self {
+        Self {
+            definitions: crate::tools::legacy_plan_management_tool_definitions(),
+        }
+    }
+
+    fn full_remainder() -> Self {
+        Self {
+            definitions: crate::tools::legacy_remainder_tool_definitions(),
         }
     }
 
@@ -340,7 +493,11 @@ pub fn default_tool_registry() -> Result<&'static ToolRegistry, ToolRegistryErro
     REGISTRY
         .get_or_init(|| {
             ToolRegistry::builder()
-                .with(LegacyMcpToolModule::full())?
+                .with(LegacyMcpToolModule::full_prelude())?
+                .with(BrainPmMcpToolModule::crud())?
+                .with(LegacyMcpToolModule::plan_management())?
+                .with(BrainPmMcpToolModule::issue_graph())?
+                .with(LegacyMcpToolModule::full_remainder())?
                 .with_alias("code_search", "code_symbol_search")
                 .map(ToolRegistryBuilder::build)
         })

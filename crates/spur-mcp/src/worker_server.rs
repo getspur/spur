@@ -447,6 +447,20 @@ where
     }
 }
 
+fn pm_mcp_error(error: spur_pm::mcp::McpHandlerError) -> McpHandlerError {
+    match error {
+        spur_pm::mcp::McpHandlerError::InvalidParams(message) => {
+            McpHandlerError::InvalidParams(message)
+        }
+        spur_pm::mcp::McpHandlerError::NotFound(message) => McpHandlerError::NotFound(message),
+        spur_pm::mcp::McpHandlerError::Unauthorized(message) => {
+            McpHandlerError::Unauthorized(message)
+        }
+        spur_pm::mcp::McpHandlerError::UpstreamPm(message) => McpHandlerError::UpstreamPm(message),
+        spur_pm::mcp::McpHandlerError::Internal(message) => McpHandlerError::Internal(message),
+    }
+}
+
 fn has_analyst_db(root: &std::path::Path) -> bool {
     root.join(".spur").join("analyst.duckdb").exists()
 }
@@ -923,8 +937,10 @@ impl WorkerToolHandler {
             "get_issue",
             context,
             Some(issue_id),
-            move |worker_ctx| async move {
-                crate::handlers::get_issue(deps.pm_service.as_ref(), &worker_ctx, args).await
+            move |_worker_ctx| async move {
+                spur_pm::mcp::get_issue(deps.pm_service.as_ref(), args)
+                    .await
+                    .map_err(pm_mcp_error)
             },
         )
         .await
@@ -946,8 +962,10 @@ impl WorkerToolHandler {
             "list_issues",
             context,
             Some(None),
-            move |worker_ctx| async move {
-                crate::handlers::list_issues(deps.pm_service.as_ref(), &worker_ctx, args).await
+            move |_worker_ctx| async move {
+                spur_pm::mcp::list_issues(deps.pm_service.as_ref(), args)
+                    .await
+                    .map_err(pm_mcp_error)
             },
         )
         .await

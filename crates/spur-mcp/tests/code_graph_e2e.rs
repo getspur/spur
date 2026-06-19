@@ -2849,7 +2849,7 @@ async fn code_search_recovers_macro_bodied_callees_for_legacy_tool_definitions()
     let legacy_tools = symbol_by_file_entity_kind(
         &artifact,
         "crates/spur-mcp/src/tools.rs",
-        "legacy_tools_definitions",
+        "legacy_remainder_tool_definitions",
         "function",
     );
     let legacy_tools_uri = format!("graph://symbol/{}", legacy_tools.stable_symbol_id);
@@ -2886,15 +2886,21 @@ async fn code_search_recovers_macro_bodied_callees_for_legacy_tool_definitions()
     let names = entity_names(candidates);
 
     assert!(names.contains("delegate_to_worker_def"));
-    assert!(names.contains("get_issue_def"));
+    assert!(names.contains("merge_plan_def"));
     assert!(names.contains("submit_plan_def"));
     assert!(
-        search["total_matches"].as_u64().expect("total_matches") >= 30,
-        "expected at least 30 *_def functions, got {}",
+        search["total_matches"].as_u64().expect("total_matches") >= 20,
+        "expected at least 20 *_def functions, got {}",
         search["total_matches"]
     );
-    let allowed_compatibility_helpers =
-        ["legacy_tools_definitions", "legacy_worker_tool_definitions"];
+    let allowed_compatibility_helpers = [
+        "legacy_prelude_tool_definitions",
+        "legacy_plan_management_tool_definitions",
+        "legacy_remainder_tool_definitions",
+        "legacy_worker_tool_definitions",
+        "pm_tool_definition",
+        "pm_tool_definitions_by_names",
+    ];
     assert!(candidates.iter().all(|candidate| {
         let name = candidate["entity_name"].as_str().expect("entity_name");
         name.ends_with("_def") || allowed_compatibility_helpers.contains(&name)
