@@ -40,6 +40,7 @@ const EXPECTED: &[&str] = &[
     "code_symbol_history",
     "doc_navigate",
     "knowledge_context_pack",
+    "knowledge_context_pack_2",
     "submit_plan",
     "execute_epic",
     "get_plan_status",

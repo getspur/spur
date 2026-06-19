@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use spur_acp::domain::{BrainContinuation, ContinuationSource};
@@ -14,11 +14,16 @@ use spur_mcp::plan::PmLike;
 use spur_mcp::McpEventSink;
 use spur_pm::BeadsAdvanced;
 use tempfile::TempDir;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, MutexGuard, Notify};
 
 mod common;
 
 const COMPLETION_TASK_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn epic_completion_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().await
+}
 
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {
     Arc::new(spur_mcp::outcome_materializer::OutcomeMaterializer::new(
@@ -347,8 +352,9 @@ async fn seed_epic_fixture(
     (pm, epic_id, task_a_id, task_b_id)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn mock_pm_reconciler_cancelled_task_does_not_cascade_fail_dependent() {
+    let _guard = epic_completion_test_lock().await;
     let pm = spur_mcp::plan::test_util::MockPm::new().arc();
     let plan_id = "P-mock-cancel-dn4";
     let (_epic_id, task_issues) = seed_mock_plan(&pm, plan_id, &[("A", &[]), ("B", &["A"])]).await;
@@ -416,8 +422,9 @@ async fn mock_pm_reconciler_cancelled_task_does_not_cascade_fail_dependent() {
         .expect("mock completion tasks should finish");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready_to_merge() {
+    let _guard = epic_completion_test_lock().await;
     let pm = spur_mcp::plan::test_util::MockPm::new().arc();
     let plan_id = "P-mock-cancelled-complete";
     let (epic_id, task_issues) = seed_mock_plan(&pm, plan_id, &[("A", &[]), ("B", &[])]).await;
@@ -567,8 +574,9 @@ async fn mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready
         .expect("plan-completion artifact delegation id must satisfy backend UUID validation");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuation() {
+    let _guard = epic_completion_test_lock().await;
     let pm = spur_mcp::plan::test_util::MockPm::new().arc();
     let plan_id = "P-mock-awaiting-review-continuation";
     let (_epic_id, task_issues) = seed_mock_plan(&pm, plan_id, &[("A", &[])]).await;
@@ -631,8 +639,9 @@ async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuatio
         .expect("mock completion tasks should finish");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn mock_pm_reconciler_terminal_failure_fires_escalated_task_continuation() {
+    let _guard = epic_completion_test_lock().await;
     let pm = spur_mcp::plan::test_util::MockPm::new().arc();
     let plan_id = "P-mock-failed-continuation";
     let (_epic_id, task_issues) = seed_mock_plan(&pm, plan_id, &[("A", &[])]).await;
@@ -725,8 +734,9 @@ async fn mock_pm_reconciler_terminal_failure_fires_escalated_task_continuation()
         .expect("mock completion tasks should finish");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_closes_epic() {
+    let _guard = epic_completion_test_lock().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let plan_id = "P-reconciler-continuation";
@@ -877,8 +887,9 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     assert_eq!(epic.status, pm.closed_status());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn t_v0d_1_epic_closes_when_children_terminal() {
+    let _guard = epic_completion_test_lock().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P1").await;
@@ -929,8 +940,9 @@ async fn t_v0d_1_epic_closes_when_children_terminal() {
     )));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
+    let _guard = epic_completion_test_lock().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P1").await;
@@ -1013,8 +1025,9 @@ async fn t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge() {
     assert_eq!(ready_events, 1, "expected one PlanReadyToMerge event");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ring() {
+    let _guard = epic_completion_test_lock().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
 
@@ -1191,8 +1204,9 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn epic_completion_backfills_missing_audit_for_closed_terminal_epic() {
+    let _guard = epic_completion_test_lock().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P1").await;
@@ -1249,8 +1263,9 @@ async fn epic_completion_backfills_missing_audit_for_closed_terminal_epic() {
     )));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn closed_epic_backfill_emits_plan_completed_event() {
+    let _guard = epic_completion_test_lock().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P2").await;
@@ -1334,8 +1349,9 @@ async fn closed_epic_backfill_emits_plan_completed_event() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn closed_epic_backfill_clears_stale_integration_pending_on_failure() {
+    let _guard = epic_completion_test_lock().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P3").await;
@@ -1393,8 +1409,9 @@ async fn closed_epic_backfill_clears_stale_integration_pending_on_failure() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn epic_closure_ignores_non_task_plan_scoped_issues() {
+    let _guard = epic_completion_test_lock().await;
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_epic_fixture(dir.path(), "P4").await;
