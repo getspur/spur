@@ -46,6 +46,8 @@ const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
 const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
 const SYMBOL_EMBED_TEXT_VERSION: &str = "v2-bge-base";
 const JINA_CODE_EMBED_TEXT_VERSION: &str = "v2-jina-code";
+const EMBEDDING_INPUT_HASH_COLUMN: &str = "embedding_input_hash";
+const EMBEDDING_MODEL_COLUMN: &str = "embedding_model";
 const INDEX_REBUILD_MIN_ROWS: usize = 50;
 const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 // Integration tests spawn the debug-built CLI; keep this hook out of release builds.
@@ -335,6 +337,8 @@ struct SectionRow {
     child_count: u32,
     parent_stable_id: Option<String>,
     content_hash: String,
+    embedding_input_hash: String,
+    embedding_model: String,
     vector: Option<Vec<f32>>,
 }
 
@@ -348,6 +352,8 @@ struct SymbolRow {
     embed_text: String,
     vector: Option<Vec<f32>>,
     content_hash: String,
+    embedding_input_hash: String,
+    embedding_model: String,
 }
 
 pub fn write_sections_dataset(
@@ -454,24 +460,7 @@ async fn write_sections_dataset_async(
     progress: Option<&SectionSidecarProgressCallback<'_>>,
 ) -> Result<GraphArtifactSidecarRowCounts> {
     let embedding_model = EmbeddingModelSelection::from_env();
-    let mut batcher = SectionRowBatcher::new(
-        artifact,
-        worktree_root,
-        options.write_batch_size,
-        None,
-        embedding_model,
-    );
-    let total_rows = batcher.total_rows();
-    emit_progress(
-        progress,
-        SectionSidecarProgressEvent::Started {
-            total_rows,
-            markdown_files: batcher.markdown_file_count(),
-            embeddings_enabled: !options.embedding.skip_embeddings,
-            embedding_batch_size: options.embedding.batch_size,
-            write_batch_size: batcher.write_batch_size(),
-        },
-    );
+    let mut changed_paths = options.delta.as_ref().map(|delta| &delta.changed_paths);
 
     fs::create_dir_all(artifact_dir)
         .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
@@ -485,14 +474,72 @@ async fn write_sections_dataset_async(
         .context("failed to connect to sections.lancedb")?;
     let schema = sections_schema();
     let mut table = db.open_table(SECTIONS_TABLE).execute().await.ok();
+    if let Some(existing_table) = table.as_ref() {
+        if !table_has_vector_identity_columns(existing_table, "section sidecar").await {
+            tracing::info!(
+                table = SECTIONS_TABLE,
+                "section sidecar schema is missing vector identity columns; rebuilding table"
+            );
+            db.drop_table(SECTIONS_TABLE, &[])
+                .await
+                .context("failed to drop legacy LanceDB section rows table")?;
+            table = None;
+        }
+    }
     let is_first_write = table.is_none();
+    let mut dataset_changed = false;
+    let mut skipped_existing_rows = 0usize;
+    if is_first_write && options.delta.is_some() {
+        let mut seeded_previous_rows = false;
+        if let (Some(prev_dir), Some(delta)) = (
+            options.previous_artifact_dir.as_deref(),
+            options.delta.as_ref(),
+        ) {
+            if prev_dir != artifact_dir {
+                if let Some((seeded_table, seeded_rows)) = seed_previous_rows_from_table(
+                    &db,
+                    SECTIONS_TABLE,
+                    &prev_dir.join(SECTIONS_DATASET_DIR),
+                    delta,
+                    embedding_model,
+                    "section",
+                )
+                .await?
+                {
+                    table = Some(seeded_table);
+                    skipped_existing_rows = seeded_rows;
+                    dataset_changed = true;
+                    seeded_previous_rows = true;
+                }
+            }
+        }
+        if !seeded_previous_rows {
+            changed_paths = None;
+        }
+    }
+    let mut batcher = SectionRowBatcher::new(
+        artifact,
+        worktree_root,
+        options.write_batch_size,
+        changed_paths,
+        embedding_model,
+    );
+    let total_rows = batcher.total_rows();
+    emit_progress(
+        progress,
+        SectionSidecarProgressEvent::Started {
+            total_rows,
+            markdown_files: batcher.markdown_file_count(),
+            embeddings_enabled: !options.embedding.skip_embeddings,
+            embedding_batch_size: options.embedding.batch_size,
+            write_batch_size: batcher.write_batch_size(),
+        },
+    );
     let mut existing_versions = ExistingFileVersions::new(table.as_ref());
     let mut embedder = SectionEmbedder::new(options.embedding, embedding_model);
-    let mut dataset_changed = false;
     let mut batch_index = 0usize;
     let mut processed_rows = 0usize;
     let mut written_rows = 0usize;
-    let mut skipped_existing_rows = 0usize;
 
     while let Some(rows) = batcher.next_batch()? {
         batch_index += 1;
@@ -687,11 +734,64 @@ async fn write_symbol_rows_dataset_async(
 ) -> Result<usize> {
     let write_batch_size = options.write_batch_size;
     let embedding_options = options.embedding;
+    let mut changed_paths = options.delta.as_ref().map(|delta| &delta.changed_paths);
+
+    fs::create_dir_all(artifact_dir)
+        .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
+    let db = lancedb::connect(artifact_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .context("failed to connect to code_symbols.lance")?;
+    let schema = symbol_rows_schema();
+    let mut table = db.open_table(CODE_SYMBOLS_TABLE).execute().await.ok();
+    if let Some(existing_table) = table.as_ref() {
+        if !table_has_vector_identity_columns(existing_table, "code symbol sidecar").await {
+            tracing::info!(
+                table = CODE_SYMBOLS_TABLE,
+                "code symbol sidecar schema is missing vector identity columns; rebuilding table"
+            );
+            db.drop_table(CODE_SYMBOLS_TABLE, &[])
+                .await
+                .context("failed to drop legacy LanceDB code symbol rows table")?;
+            table = None;
+        }
+    }
+    let is_first_write = table.is_none();
+    let mut dataset_changed = false;
+    let mut skipped_existing_rows = 0usize;
+    if is_first_write && options.delta.is_some() {
+        let mut seeded_previous_rows = false;
+        if let (Some(prev_dir), Some(delta)) = (
+            options.previous_artifact_dir.as_deref(),
+            options.delta.as_ref(),
+        ) {
+            if prev_dir != artifact_dir {
+                if let Some((seeded_table, seeded_rows)) = seed_previous_rows_from_table(
+                    &db,
+                    CODE_SYMBOLS_TABLE,
+                    prev_dir,
+                    delta,
+                    embedding_model,
+                    "code symbol",
+                )
+                .await?
+                {
+                    table = Some(seeded_table);
+                    skipped_existing_rows = seeded_rows;
+                    dataset_changed = true;
+                    seeded_previous_rows = true;
+                }
+            }
+        }
+        if !seeded_previous_rows {
+            changed_paths = None;
+        }
+    }
     let mut batcher = SymbolRowBatcher::new(
         artifact,
         worktree_root,
         write_batch_size,
-        None,
+        changed_paths,
         embedding_model,
     );
     let total_rows = batcher.total_rows();
@@ -703,23 +803,11 @@ async fn write_symbol_rows_dataset_async(
             embeddings_enabled: !embedding_options.skip_embeddings,
         },
     );
-
-    fs::create_dir_all(artifact_dir)
-        .with_context(|| format!("failed to create `{}`", artifact_dir.display()))?;
-    let db = lancedb::connect(artifact_dir.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .context("failed to connect to code_symbols.lance")?;
-    let schema = symbol_rows_schema();
-    let mut table = db.open_table(CODE_SYMBOLS_TABLE).execute().await.ok();
-    let is_first_write = table.is_none();
     let mut existing_versions = ExistingSymbolFileVersions::new(table.as_ref());
     let mut embedder = SymbolEmbedder::new(embedding_options, embedding_model);
-    let mut dataset_changed = false;
     let mut batch_index = 0usize;
     let mut processed_rows = 0usize;
     let mut written_rows = 0usize;
-    let mut skipped_existing_rows = 0usize;
 
     while let Some(rows) = batcher.next_batch()? {
         batch_index += 1;
@@ -1031,6 +1119,137 @@ async fn ensure_code_symbol_vector_index(table: &lancedb::Table) -> Result<bool>
     Ok(false)
 }
 
+async fn table_has_column(table: &lancedb::Table, column: &str, table_label: &str) -> bool {
+    match table.schema().await {
+        Ok(schema) => schema.field_with_name(column).is_ok(),
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                table = table_label,
+                column,
+                "failed to inspect LanceDB table schema"
+            );
+            false
+        }
+    }
+}
+
+async fn table_has_vector_identity_columns(table: &lancedb::Table, table_label: &str) -> bool {
+    table_has_column(table, EMBEDDING_INPUT_HASH_COLUMN, table_label).await
+        && table_has_column(table, EMBEDDING_MODEL_COLUMN, table_label).await
+}
+
+async fn seed_previous_rows_from_table(
+    target_db: &lancedb::Connection,
+    table_name: &str,
+    prev_db_dir: &Path,
+    delta: &SidecarDelta,
+    embedding_model: EmbeddingModelSelection,
+    table_label: &str,
+) -> Result<Option<(lancedb::Table, usize)>> {
+    let prev_db = match lancedb::connect(prev_db_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+    {
+        Ok(db) => db,
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                prev_dir = %prev_db_dir.display(),
+                table = table_label,
+                "seed previous sidecar rows: cannot connect to previous database"
+            );
+            return Ok(None);
+        }
+    };
+    let prev_table = match prev_db.open_table(table_name).execute().await {
+        Ok(table) => table,
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                prev_dir = %prev_db_dir.display(),
+                table = table_label,
+                "seed previous sidecar rows: previous table absent"
+            );
+            return Ok(None);
+        }
+    };
+    if !table_has_vector_identity_columns(&prev_table, table_label).await {
+        tracing::debug!(
+            prev_dir = %prev_db_dir.display(),
+            table = table_label,
+            "seed previous sidecar rows: previous schema is legacy; skipping seed"
+        );
+        return Ok(None);
+    }
+
+    let mut query = prev_table.query();
+    query = query.only_if(previous_seed_filter(delta, embedding_model));
+    let mut stream = match query.execute().await {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                prev_dir = %prev_db_dir.display(),
+                table = table_label,
+                "seed previous sidecar rows: failed to query previous rows"
+            );
+            return Ok(None);
+        }
+    };
+
+    let mut table: Option<lancedb::Table> = None;
+    let mut seeded_rows = 0usize;
+    while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
+        .await
+        .transpose()
+        .with_context(|| format!("failed to read previous LanceDB {table_label} rows"))?
+    {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        seeded_rows += batch.num_rows();
+        if let Some(existing_table) = table.as_ref() {
+            existing_table
+                .add(batch)
+                .execute()
+                .await
+                .with_context(|| format!("failed to append seeded LanceDB {table_label} rows"))?;
+        } else {
+            table = Some(
+                target_db
+                    .create_table(table_name, batch)
+                    .execute()
+                    .await
+                    .with_context(|| {
+                        format!("failed to create seeded LanceDB {table_label} table")
+                    })?,
+            );
+        }
+    }
+
+    Ok(table.map(|table| (table, seeded_rows)))
+}
+
+fn previous_seed_filter(delta: &SidecarDelta, embedding_model: EmbeddingModelSelection) -> String {
+    let mut excluded_paths = BTreeSet::new();
+    excluded_paths.extend(delta.changed_paths.iter().map(String::as_str));
+    excluded_paths.extend(delta.deleted_paths.iter().map(String::as_str));
+    let model_filter = format!(
+        "{EMBEDDING_MODEL_COLUMN} = '{}'",
+        sql_string_literal(embedding_model.model_name())
+    );
+    if excluded_paths.is_empty() {
+        return model_filter;
+    }
+    let literals = excluded_paths
+        .into_iter()
+        .map(|path| format!("'{}'", sql_string_literal(path)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{model_filter} AND file_path NOT IN ({literals})")
+}
+
 struct ExistingFileVersions {
     table: Option<lancedb::Table>,
     missing_by_file_version: HashSet<(String, String)>,
@@ -1329,7 +1548,7 @@ impl<'a> SectionRowBatcher<'a> {
         artifact: &'a GraphIndexArtifact,
         worktree_root: &'a Path,
         write_batch_size: usize,
-        changed_paths: Option<&'a HashSet<String>>,
+        changed_paths: Option<&'a BTreeSet<String>>,
         embedding_model: EmbeddingModelSelection,
     ) -> Self {
         let write_batch_size = normalize_section_write_batch_size(write_batch_size);
@@ -1416,7 +1635,11 @@ impl<'a> SectionRowBatcher<'a> {
     }
 
     fn total_rows(&self) -> usize {
-        self.sections_by_path.values().map(Vec::len).sum::<usize>()
+        self.ordered_paths
+            .iter()
+            .filter_map(|path| self.sections_by_path.get(*path))
+            .map(Vec::len)
+            .sum::<usize>()
             + self
                 .ordered_paths
                 .iter()
@@ -1458,6 +1681,7 @@ impl<'a> SectionRowBatcher<'a> {
                     section,
                     source,
                     content_hash.as_str(),
+                    self.embedding_model,
                     &self.child_count_by_parent,
                     &self.parent_by_child,
                 )? {
@@ -1481,6 +1705,11 @@ impl<'a> SectionRowBatcher<'a> {
             child_count: 0,
             parent_stable_id: None,
             content_hash,
+            embedding_input_hash: section_embedding_input_hash_for_model(
+                source,
+                self.embedding_model,
+            ),
+            embedding_model: self.embedding_model.model_name().to_owned(),
             vector: None,
         }])
     }
@@ -1502,7 +1731,7 @@ impl<'a> SymbolRowBatcher<'a> {
         artifact: &'a GraphIndexArtifact,
         worktree_root: &'a Path,
         write_batch_size: usize,
-        changed_paths: Option<&'a HashSet<String>>,
+        changed_paths: Option<&'a BTreeSet<String>>,
         embedding_model: EmbeddingModelSelection,
     ) -> Self {
         let write_batch_size = normalize_section_write_batch_size(write_batch_size);
@@ -1572,7 +1801,11 @@ impl<'a> SymbolRowBatcher<'a> {
 
     /// Upper-bound estimate of the total rows that will be emitted (based on symbol count).
     fn total_rows(&self) -> usize {
-        self.symbols_by_path.values().map(Vec::len).sum::<usize>()
+        self.ordered_paths
+            .iter()
+            .filter_map(|path| self.symbols_by_path.get(*path))
+            .map(Vec::len)
+            .sum::<usize>()
     }
 
     fn rows_for_path(&self, path: &str) -> Result<Vec<SymbolRow>> {
@@ -1628,6 +1861,7 @@ fn section_row(
     section: &GraphSymbolArtifact,
     source: &str,
     content_hash: &str,
+    embedding_model: EmbeddingModelSelection,
     child_count_by_parent: &HashMap<&str, u32>,
     parent_by_child: &HashMap<&str, String>,
 ) -> Result<Option<SectionRow>> {
@@ -1644,6 +1878,7 @@ fn section_row(
         return Ok(None);
     };
     let body_text = body_text.to_owned();
+    let embedding_input_hash = section_embedding_input_hash_for_model(&body_text, embedding_model);
     Ok(Some(SectionRow {
         stable_symbol_id: section.stable_symbol_id.clone(),
         file_path: section.file_path.clone(),
@@ -1660,6 +1895,8 @@ fn section_row(
             .get(section.stable_symbol_id.as_str())
             .cloned(),
         content_hash: content_hash.to_owned(),
+        embedding_input_hash,
+        embedding_model: embedding_model.model_name().to_owned(),
         vector: None,
     }))
 }
@@ -1718,6 +1955,8 @@ fn symbol_row(
     };
     let content_hash =
         symbol_embed_content_hash_for_model(content_hash, has_significant_body, embedding_model);
+    let embedding_input_hash =
+        symbol_embedding_input_hash_for_model(&embed_text, has_significant_body, embedding_model);
 
     Ok(Some(SymbolRow {
         stable_symbol_id: symbol.stable_symbol_id.clone(),
@@ -1728,6 +1967,8 @@ fn symbol_row(
         embed_text,
         vector: None,
         content_hash,
+        embedding_input_hash,
+        embedding_model: embedding_model.model_name().to_owned(),
     }))
 }
 
@@ -1763,6 +2004,13 @@ fn section_embed_content_hash_for_model(
     }
 }
 
+fn section_embedding_input_hash_for_model(
+    body_text: &str,
+    embedding_model: EmbeddingModelSelection,
+) -> String {
+    section_embed_content_hash_for_model(&blake3_hex(body_text.as_bytes()), embedding_model)
+}
+
 fn symbol_embed_content_hash_for_model(
     source_content_hash: &str,
     has_significant_body: bool,
@@ -1777,6 +2025,18 @@ fn symbol_embed_content_hash_for_model(
             format!("{JINA_CODE_EMBED_TEXT_VERSION}:symbol\0{source_content_hash}").as_bytes(),
         ),
     }
+}
+
+fn symbol_embedding_input_hash_for_model(
+    embed_text: &str,
+    has_significant_body: bool,
+    embedding_model: EmbeddingModelSelection,
+) -> String {
+    symbol_embed_content_hash_for_model(
+        &blake3_hex(embed_text.as_bytes()),
+        has_significant_body,
+        embedding_model,
+    )
 }
 
 fn doc_text_for_symbol(source: &str, byte_start: usize) -> Result<String> {
@@ -2594,9 +2854,11 @@ fn parent_by_child<'a>(
 }
 
 /// Query the `sections.lancedb` table in `prev_dir` and fill `row.vector` for
-/// any row whose `(file_path, content_hash, stable_symbol_id)` matches a row
-/// in the previous table.  Rows with the wrong vector length are silently
-/// skipped.  Any failure to open the previous table is silently ignored.
+/// any row whose `(file_path, embedding_model, embedding_input_hash,
+/// stable_symbol_id)` matches a row in the previous table.  Rows with the
+/// wrong vector length are silently skipped.  Any failure to open the previous
+/// table, including legacy sidecars without vector identity columns, is
+/// silently ignored.
 async fn fill_section_vectors_from_prev(rows: &mut [SectionRow], prev_dir: &Path) {
     let dataset_dir = prev_dir.join(SECTIONS_DATASET_DIR);
     let db = match lancedb::connect(dataset_dir.to_string_lossy().as_ref())
@@ -2648,7 +2910,8 @@ async fn fill_section_vectors_from_prev(rows: &mut [SectionRow], prev_dir: &Path
         .only_if(filter)
         .select(Select::columns(&[
             "file_path",
-            "content_hash",
+            EMBEDDING_MODEL_COLUMN,
+            EMBEDDING_INPUT_HASH_COLUMN,
             "stable_symbol_id",
             "vector",
         ]))
@@ -2665,8 +2928,8 @@ async fn fill_section_vectors_from_prev(rows: &mut [SectionRow], prev_dir: &Path
         }
     };
 
-    // Build map: (file_path, content_hash, stable_symbol_id) -> vector
-    let mut prev_vectors: HashMap<(String, String, String), Vec<f32>> = HashMap::new();
+    // Build map: (file_path, embedding_model, embedding_input_hash, stable_symbol_id) -> vector
+    let mut prev_vectors: HashMap<(String, String, String, String), Vec<f32>> = HashMap::new();
     loop {
         match std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
             Some(Ok(batch)) => {
@@ -2677,13 +2940,18 @@ async fn fill_section_vectors_from_prev(rows: &mut [SectionRow], prev_dir: &Path
                     let fp_col = batch
                         .column_by_name("file_path")
                         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    let ch_col = batch
-                        .column_by_name("content_hash")
+                    let input_hash_col = batch
+                        .column_by_name(EMBEDDING_INPUT_HASH_COLUMN)
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+                    let model_col = batch
+                        .column_by_name(EMBEDDING_MODEL_COLUMN)
                         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
                     let id_col = batch
                         .column_by_name("stable_symbol_id")
                         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    if let (Some(fp_col), Some(ch_col), Some(id_col)) = (fp_col, ch_col, id_col) {
+                    if let (Some(fp_col), Some(model_col), Some(input_hash_col), Some(id_col)) =
+                        (fp_col, model_col, input_hash_col, id_col)
+                    {
                         for i in 0..batch.num_rows() {
                             if vec_col.is_null(i) {
                                 continue;
@@ -2698,7 +2966,8 @@ async fn fill_section_vectors_from_prev(rows: &mut [SectionRow], prev_dir: &Path
                                     prev_vectors.insert(
                                         (
                                             fp_col.value(i).to_owned(),
-                                            ch_col.value(i).to_owned(),
+                                            model_col.value(i).to_owned(),
+                                            input_hash_col.value(i).to_owned(),
                                             id_col.value(i).to_owned(),
                                         ),
                                         v,
@@ -2728,7 +2997,8 @@ async fn fill_section_vectors_from_prev(rows: &mut [SectionRow], prev_dir: &Path
         }
         let key = (
             row.file_path.clone(),
-            row.content_hash.clone(),
+            row.embedding_model.clone(),
+            row.embedding_input_hash.clone(),
             row.stable_symbol_id.clone(),
         );
         if let Some(v) = prev_vectors.get(&key) {
@@ -2746,7 +3016,8 @@ async fn fill_section_vectors_from_prev(rows: &mut [SectionRow], prev_dir: &Path
 }
 
 /// Query the `code_symbols.lance` table in `prev_dir` and fill `row.vector`
-/// for any row whose `(file_path, content_hash, stable_symbol_id)` matches.
+/// for any row whose `(file_path, embedding_model, embedding_input_hash,
+/// stable_symbol_id)` matches.
 async fn fill_symbol_vectors_from_prev(rows: &mut [SymbolRow], prev_dir: &Path) {
     let db = match lancedb::connect(prev_dir.to_string_lossy().as_ref())
         .execute()
@@ -2796,7 +3067,8 @@ async fn fill_symbol_vectors_from_prev(rows: &mut [SymbolRow], prev_dir: &Path) 
         .only_if(filter)
         .select(Select::columns(&[
             "file_path",
-            "content_hash",
+            EMBEDDING_MODEL_COLUMN,
+            EMBEDDING_INPUT_HASH_COLUMN,
             "stable_symbol_id",
             "vector",
         ]))
@@ -2813,7 +3085,7 @@ async fn fill_symbol_vectors_from_prev(rows: &mut [SymbolRow], prev_dir: &Path) 
         }
     };
 
-    let mut prev_vectors: HashMap<(String, String, String), Vec<f32>> = HashMap::new();
+    let mut prev_vectors: HashMap<(String, String, String, String), Vec<f32>> = HashMap::new();
     loop {
         match std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
             Some(Ok(batch)) => {
@@ -2824,13 +3096,18 @@ async fn fill_symbol_vectors_from_prev(rows: &mut [SymbolRow], prev_dir: &Path) 
                     let fp_col = batch
                         .column_by_name("file_path")
                         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    let ch_col = batch
-                        .column_by_name("content_hash")
+                    let input_hash_col = batch
+                        .column_by_name(EMBEDDING_INPUT_HASH_COLUMN)
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+                    let model_col = batch
+                        .column_by_name(EMBEDDING_MODEL_COLUMN)
                         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
                     let id_col = batch
                         .column_by_name("stable_symbol_id")
                         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                    if let (Some(fp_col), Some(ch_col), Some(id_col)) = (fp_col, ch_col, id_col) {
+                    if let (Some(fp_col), Some(model_col), Some(input_hash_col), Some(id_col)) =
+                        (fp_col, model_col, input_hash_col, id_col)
+                    {
                         for i in 0..batch.num_rows() {
                             if vec_col.is_null(i) {
                                 continue;
@@ -2845,7 +3122,8 @@ async fn fill_symbol_vectors_from_prev(rows: &mut [SymbolRow], prev_dir: &Path) 
                                     prev_vectors.insert(
                                         (
                                             fp_col.value(i).to_owned(),
-                                            ch_col.value(i).to_owned(),
+                                            model_col.value(i).to_owned(),
+                                            input_hash_col.value(i).to_owned(),
                                             id_col.value(i).to_owned(),
                                         ),
                                         v,
@@ -2875,7 +3153,8 @@ async fn fill_symbol_vectors_from_prev(rows: &mut [SymbolRow], prev_dir: &Path) 
         }
         let key = (
             row.file_path.clone(),
-            row.content_hash.clone(),
+            row.embedding_model.clone(),
+            row.embedding_input_hash.clone(),
             row.stable_symbol_id.clone(),
         );
         if let Some(v) = prev_vectors.get(&key) {
@@ -2920,6 +3199,8 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
     let mut child_counts = Vec::with_capacity(rows.len());
     let mut parent_stable_ids = Vec::with_capacity(rows.len());
     let mut content_hashes = Vec::with_capacity(rows.len());
+    let mut embedding_input_hashes = Vec::with_capacity(rows.len());
+    let mut embedding_models = Vec::with_capacity(rows.len());
     let mut flat_vectors = Vec::with_capacity(rows.len() * EMBEDDING_VECTOR_DIMENSIONS);
     let mut vector_validity = Vec::with_capacity(rows.len());
 
@@ -2934,6 +3215,8 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
         child_counts.push(row.child_count);
         parent_stable_ids.push(row.parent_stable_id);
         content_hashes.push(row.content_hash);
+        embedding_input_hashes.push(row.embedding_input_hash);
+        embedding_models.push(row.embedding_model);
         if let Some(vector) = row
             .vector
             .filter(|vector| vector.len() == EMBEDDING_VECTOR_DIMENSIONS)
@@ -2968,6 +3251,8 @@ fn rows_to_batch(rows: Vec<SectionRow>, schema: Arc<Schema>) -> Result<RecordBat
             Arc::new(StringArray::from(parent_stable_ids)),
             Arc::new(StringArray::from(content_hashes)),
             Arc::new(vector_array),
+            Arc::new(StringArray::from(embedding_input_hashes)),
+            Arc::new(StringArray::from(embedding_models)),
         ],
     )
     .context("failed to build LanceDB sections batch")
@@ -2983,6 +3268,8 @@ fn symbol_rows_to_batch(rows: Vec<SymbolRow>, schema: Arc<Schema>) -> Result<Rec
     let mut flat_vectors = Vec::with_capacity(rows.len() * EMBEDDING_VECTOR_DIMENSIONS);
     let mut vector_validity = Vec::with_capacity(rows.len());
     let mut content_hashes = Vec::with_capacity(rows.len());
+    let mut embedding_input_hashes = Vec::with_capacity(rows.len());
+    let mut embedding_models = Vec::with_capacity(rows.len());
 
     for row in rows {
         stable_symbol_ids.push(row.stable_symbol_id);
@@ -3002,6 +3289,8 @@ fn symbol_rows_to_batch(rows: Vec<SymbolRow>, schema: Arc<Schema>) -> Result<Rec
             vector_validity.push(false);
         }
         content_hashes.push(row.content_hash);
+        embedding_input_hashes.push(row.embedding_input_hash);
+        embedding_models.push(row.embedding_model);
     }
 
     let vector_array = FixedSizeListArray::try_new(
@@ -3023,6 +3312,8 @@ fn symbol_rows_to_batch(rows: Vec<SymbolRow>, schema: Arc<Schema>) -> Result<Rec
             Arc::new(LargeStringArray::from(embed_texts)),
             Arc::new(vector_array),
             Arc::new(StringArray::from(content_hashes)),
+            Arc::new(StringArray::from(embedding_input_hashes)),
+            Arc::new(StringArray::from(embedding_models)),
         ],
     )
     .context("failed to build LanceDB code symbols batch")
@@ -3048,6 +3339,8 @@ fn sections_schema() -> Arc<Schema> {
             ),
             true,
         ),
+        Field::new(EMBEDDING_INPUT_HASH_COLUMN, DataType::Utf8, false),
+        Field::new(EMBEDDING_MODEL_COLUMN, DataType::Utf8, false),
     ]))
 }
 
@@ -3068,6 +3361,8 @@ fn symbol_rows_schema() -> Arc<Schema> {
             true,
         ),
         Field::new("content_hash", DataType::Utf8, false),
+        Field::new(EMBEDDING_INPUT_HASH_COLUMN, DataType::Utf8, false),
+        Field::new(EMBEDDING_MODEL_COLUMN, DataType::Utf8, false),
     ]))
 }
 
@@ -3155,6 +3450,10 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn section_row_fixture(heading_level: u8, body_text: String) -> SectionRow {
+        let embedding_input_hash = section_embedding_input_hash_for_model(
+            &body_text,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
         SectionRow {
             stable_symbol_id: "symbol".to_owned(),
             file_path: "docs/example.md".to_owned(),
@@ -3166,6 +3465,8 @@ mod tests {
             child_count: 0,
             parent_stable_id: None,
             content_hash: "hash".to_owned(),
+            embedding_input_hash,
+            embedding_model: EMBED_MODEL_NAME.to_owned(),
             vector: None,
         }
     }
@@ -3175,22 +3476,34 @@ mod tests {
         file_path: &str,
         content_hash: &str,
     ) -> SectionRow {
+        let body_text = format!("## {stable_symbol_id}\n\nBody.");
+        let embedding_input_hash = section_embedding_input_hash_for_model(
+            &body_text,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
         SectionRow {
             stable_symbol_id: stable_symbol_id.to_owned(),
             file_path: file_path.to_owned(),
             qualified_name: stable_symbol_id.to_owned(),
             heading_level: 2,
-            body_text: format!("## {stable_symbol_id}\n\nBody."),
+            body_text,
             body_byte_start: 0,
             body_byte_end: 0,
             child_count: 0,
             parent_stable_id: None,
             content_hash: content_hash.to_owned(),
+            embedding_input_hash,
+            embedding_model: EMBED_MODEL_NAME.to_owned(),
             vector: None,
         }
     }
 
     fn symbol_row_fixture(stable_symbol_id: &str, embed_text: &str) -> SymbolRow {
+        let embedding_input_hash = symbol_embedding_input_hash_for_model(
+            embed_text,
+            false,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
         SymbolRow {
             stable_symbol_id: stable_symbol_id.to_owned(),
             file_path: "src/lib.rs".to_owned(),
@@ -3200,6 +3513,8 @@ mod tests {
             embed_text: embed_text.to_owned(),
             vector: None,
             content_hash: "hash".to_owned(),
+            embedding_input_hash,
+            embedding_model: EMBED_MODEL_NAME.to_owned(),
         }
     }
 
@@ -3807,6 +4122,25 @@ mod tests {
             symbol_embed_content_hash_for_model(
                 source_hash,
                 true,
+                EmbeddingModelSelection::JinaCode
+            )
+        );
+        assert_ne!(
+            section_embedding_input_hash_for_model(
+                "same body",
+                EmbeddingModelSelection::BgeBaseEnV15
+            ),
+            section_embedding_input_hash_for_model("same body", EmbeddingModelSelection::JinaCode)
+        );
+        assert_ne!(
+            symbol_embedding_input_hash_for_model(
+                "same embed text",
+                false,
+                EmbeddingModelSelection::BgeBaseEnV15
+            ),
+            symbol_embedding_input_hash_for_model(
+                "same embed text",
+                false,
                 EmbeddingModelSelection::JinaCode
             )
         );
@@ -4540,8 +4874,8 @@ mod tests {
 
     /// Write section rows with known fake vectors into dir A (v1), then write
     /// into fresh dir B with `previous_artifact_dir = Some(A)` and embeddings
-    /// disabled.  Unchanged rows must carry their vectors; a changed row must
-    /// not.
+    /// disabled.  Unchanged embedding inputs must carry their vectors; a
+    /// changed embedding input must not.
     #[tokio::test]
     async fn carry_forward_fills_section_vectors_from_previous_dir() {
         let dir_a = tempfile::tempdir().expect("dir_a");
@@ -4562,6 +4896,8 @@ mod tests {
         .execute()
         .await
         .expect("connect a");
+        let old_changed_body = "## Changed\n\nOld body.";
+        let new_changed_body = "## Changed\n\nNew body.";
         let row_unchanged = SectionRow {
             vector: Some(fake_vec.clone()),
             heading_level: 2,
@@ -4570,6 +4906,11 @@ mod tests {
         let row_changed = SectionRow {
             vector: Some(fake_vec.clone()),
             heading_level: 2,
+            body_text: old_changed_body.to_owned(),
+            embedding_input_hash: section_embedding_input_hash_for_model(
+                old_changed_body,
+                EmbeddingModelSelection::BgeBaseEnV15,
+            ),
             ..versioned_section_row("changed", "docs/b.md", "hash-old")
         };
         db_a.create_table(
@@ -4582,10 +4923,17 @@ mod tests {
 
         // ---- carry forward to dir_b ----
         let rows_v2 = vec![
-            // unchanged: same (file_path, content_hash, stable_symbol_id)
+            // unchanged: same (file_path, embedding_input_hash, stable_symbol_id)
             versioned_section_row("unchanged", "docs/a.md", "hash-unchanged"),
-            // changed: different content_hash
-            versioned_section_row("changed", "docs/b.md", "hash-new"),
+            // changed: same stable id, but different embedding input
+            SectionRow {
+                body_text: new_changed_body.to_owned(),
+                embedding_input_hash: section_embedding_input_hash_for_model(
+                    new_changed_body,
+                    EmbeddingModelSelection::BgeBaseEnV15,
+                ),
+                ..versioned_section_row("changed", "docs/b.md", "hash-new")
+            },
         ];
         let carried = carry_forward_section_vectors(rows_v2, dir_a.path()).await;
 
@@ -4610,7 +4958,7 @@ mod tests {
         );
         assert!(
             changed.vector.is_none(),
-            "changed content_hash must NOT carry vector"
+            "changed embedding input must NOT carry vector"
         );
     }
 
@@ -4685,6 +5033,21 @@ mod tests {
             .execute()
             .await
             .expect("connect a");
+        let unchanged_input_hash = symbol_embedding_input_hash_for_model(
+            "unchanged embed text",
+            false,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
+        let old_changed_input_hash = symbol_embedding_input_hash_for_model(
+            "old changed embed text",
+            false,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
+        let new_changed_input_hash = symbol_embedding_input_hash_for_model(
+            "new changed embed text",
+            false,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
 
         let row_unchanged = SymbolRow {
             stable_symbol_id: "sym-unchanged".to_owned(),
@@ -4695,6 +5058,8 @@ mod tests {
             embed_text: "unchanged embed text".to_owned(),
             vector: Some(fake_vec.clone()),
             content_hash: "hash-old".to_owned(),
+            embedding_input_hash: unchanged_input_hash.clone(),
+            embedding_model: EMBED_MODEL_NAME.to_owned(),
         };
         let row_changed = SymbolRow {
             stable_symbol_id: "sym-changed".to_owned(),
@@ -4705,6 +5070,8 @@ mod tests {
             embed_text: "old changed embed text".to_owned(),
             vector: Some(fake_vec.clone()),
             content_hash: "hash-old".to_owned(),
+            embedding_input_hash: old_changed_input_hash,
+            embedding_model: EMBED_MODEL_NAME.to_owned(),
         };
         db_a.create_table(
             CODE_SYMBOLS_TABLE,
@@ -4724,6 +5091,8 @@ mod tests {
                 embed_text: "unchanged embed text".to_owned(),
                 vector: None,
                 content_hash: "hash-new".to_owned(),
+                embedding_input_hash: unchanged_input_hash,
+                embedding_model: EMBED_MODEL_NAME.to_owned(),
             },
             SymbolRow {
                 stable_symbol_id: "sym-changed".to_owned(),
@@ -4734,6 +5103,8 @@ mod tests {
                 embed_text: "new changed embed text".to_owned(),
                 vector: None,
                 content_hash: "hash-new".to_owned(),
+                embedding_input_hash: new_changed_input_hash,
+                embedding_model: EMBED_MODEL_NAME.to_owned(),
             },
         ];
         let carried = carry_forward_symbol_vectors(rows_v2, dir_a.path()).await;
@@ -4756,6 +5127,97 @@ mod tests {
         assert!(
             changed.vector.is_none(),
             "changed embed_text must not carry a stale vector"
+        );
+    }
+
+    #[tokio::test]
+    async fn carry_forward_section_vectors_reuses_unchanged_body_in_changed_file() {
+        let dir_a = tempfile::tempdir().expect("dir_a");
+
+        let fake_vec: Vec<f32> = (0..EMBEDDING_VECTOR_DIMENSIONS)
+            .map(|i| i as f32 * 0.003)
+            .collect();
+
+        let schema = sections_schema();
+        let db_a = lancedb::connect(
+            dir_a
+                .path()
+                .join(SECTIONS_DATASET_DIR)
+                .to_str()
+                .expect("path"),
+        )
+        .execute()
+        .await
+        .expect("connect a");
+        let unchanged_input_hash = section_embedding_input_hash_for_model(
+            "## Stable\n\nUnchanged body.",
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
+        let old_changed_input_hash = section_embedding_input_hash_for_model(
+            "## Changed\n\nOld body.",
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
+        let new_changed_input_hash = section_embedding_input_hash_for_model(
+            "## Changed\n\nNew body.",
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
+
+        let row_unchanged = SectionRow {
+            vector: Some(fake_vec.clone()),
+            body_text: "## Stable\n\nUnchanged body.".to_owned(),
+            content_hash: "hash-old".to_owned(),
+            embedding_input_hash: unchanged_input_hash.clone(),
+            ..versioned_section_row("section-unchanged", "docs/a.md", "hash-old")
+        };
+        let row_changed = SectionRow {
+            vector: Some(fake_vec.clone()),
+            body_text: "## Changed\n\nOld body.".to_owned(),
+            content_hash: "hash-old".to_owned(),
+            embedding_input_hash: old_changed_input_hash,
+            ..versioned_section_row("section-changed", "docs/a.md", "hash-old")
+        };
+        db_a.create_table(
+            SECTIONS_TABLE,
+            rows_to_batch(vec![row_unchanged, row_changed], schema).expect("v1 batch"),
+        )
+        .execute()
+        .await
+        .expect("create v1 section table");
+
+        let rows_v2 = vec![
+            SectionRow {
+                body_text: "## Stable\n\nUnchanged body.".to_owned(),
+                content_hash: "hash-new".to_owned(),
+                embedding_input_hash: unchanged_input_hash,
+                ..versioned_section_row("section-unchanged", "docs/a.md", "hash-new")
+            },
+            SectionRow {
+                body_text: "## Changed\n\nNew body.".to_owned(),
+                content_hash: "hash-new".to_owned(),
+                embedding_input_hash: new_changed_input_hash,
+                ..versioned_section_row("section-changed", "docs/a.md", "hash-new")
+            },
+        ];
+        let carried = carry_forward_section_vectors(rows_v2, dir_a.path()).await;
+
+        let unchanged = carried
+            .iter()
+            .find(|r| r.stable_symbol_id == "section-unchanged")
+            .expect("unchanged");
+        let changed = carried
+            .iter()
+            .find(|r| r.stable_symbol_id == "section-changed")
+            .expect("changed");
+
+        assert_eq!(
+            unchanged.vector.as_ref().map(Vec::len),
+            Some(EMBEDDING_VECTOR_DIMENSIONS),
+            "unchanged section body must carry even when file content_hash changed"
+        );
+        assert_eq!(unchanged.vector.as_ref(), Some(&fake_vec));
+        assert!(
+            changed.vector.is_none(),
+            "changed section body must not carry a stale vector"
         );
     }
 
@@ -5111,7 +5573,7 @@ mod tests {
         let changed_old_source = concat!(
             "/// Keep docs are unchanged even though this file changes.\n",
             "pub fn keep_symbol() {}\n\n",
-            "/// Old docs for the changed embedding input.\n",
+            "/// Old docs for the changed embedding input with enough detail to be embedded.\n",
             "pub fn reembed_symbol() {}\n",
         );
         let deleted_source =
@@ -5180,7 +5642,7 @@ mod tests {
         let changed_new_source = concat!(
             "/// Keep docs are unchanged even though this file changes.\n",
             "pub fn keep_symbol() {}\n\n",
-            "/// New docs for the changed embedding input.\n",
+            "/// New docs for the changed embedding input with enough detail to be embedded.\n",
             "pub fn reembed_symbol() {}\n",
         );
         write_source(root.path(), "src/changed.rs", changed_new_source);
