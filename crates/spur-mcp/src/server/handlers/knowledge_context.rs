@@ -1146,6 +1146,19 @@ impl GraphReasoningSections {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GraphPathBudgetPlan {
+    target_cap: usize,
+    per_target_max_paths: usize,
+}
+
+fn path_budget_plan(num_targets: usize, max_paths: usize) -> GraphPathBudgetPlan {
+    GraphPathBudgetPlan {
+        target_cap: num_targets.min(max_paths),
+        per_target_max_paths: max_paths,
+    }
+}
+
 fn stale_graph_reasoning_sections(
     result: &KnowledgeQueryResult,
     exact_context: &ExactGraphContext,
@@ -1297,28 +1310,21 @@ fn collect_graph_paths(
         return;
     }
 
-    let mut groups_remaining = request.graph_reasoning.max_paths;
-    for target in targets {
-        if groups_remaining == 0 {
-            break;
-        }
+    let budget = path_budget_plan(targets.len(), request.graph_reasoning.max_paths);
+    for target in targets.into_iter().take(budget.target_cap) {
         match query_context_paths(
             db_path,
             source,
             &target,
             KnowledgePathOptions {
                 max_hops: request.graph_reasoning.max_path_hops,
-                max_paths: groups_remaining,
+                max_paths: budget.per_target_max_paths,
                 undirected: true,
             },
         ) {
             Ok(path_result) => {
                 if let Some(caveat) = path_result.caveat.as_deref() {
-                    sections.caveats.push(caveat_value(
-                        "graph_path_unavailable",
-                        caveat,
-                        Some(source.clone()),
-                    ));
+                    push_graph_path_caveat(sections, caveat, source);
                 }
                 sections.graph_paths.push(json!({
                     "source_stable_id": source,
@@ -1333,25 +1339,32 @@ fn collect_graph_paths(
                 }));
             }
             Err(error) => {
-                sections.caveats.push(caveat_value(
-                    "graph_path_unavailable",
-                    format!("context path search unavailable: {error:#}"),
-                    Some(source.clone()),
-                ));
+                let caveat = format!("context path search unavailable: {error:#}");
+                push_graph_path_caveat(sections, caveat.clone(), source);
                 sections.graph_paths.push(json!({
                     "source_stable_id": source,
                     "target_stable_id": target,
                     "graph_content_hash": null,
                     "max_hops": request.graph_reasoning.max_path_hops,
-                    "max_paths": groups_remaining,
+                    "max_paths": budget.per_target_max_paths,
                     "engine": "unavailable",
                     "status": "unavailable",
-                    "caveat": format!("context path search unavailable: {error:#}"),
+                    "caveat": caveat,
                     "rows": [],
                 }));
             }
         }
-        groups_remaining = groups_remaining.saturating_sub(1);
+    }
+}
+
+fn push_graph_path_caveat(
+    sections: &mut GraphReasoningSections,
+    message: impl Into<String>,
+    source: &str,
+) {
+    let caveat = caveat_value("graph_path_unavailable", message, Some(source.to_string()));
+    if !sections.caveats.contains(&caveat) {
+        sections.caveats.push(caveat);
     }
 }
 
@@ -1993,6 +2006,28 @@ mod tests {
         (temp_dir, db_path)
     }
 
+    fn analyst_db_with_path_budget_fixture() -> (tempfile::TempDir, PathBuf) {
+        let (temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let conn = Connection::open(&db_path).expect("open fixture db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE edges (
+                source_stable_id VARCHAR,
+                target_stable_id VARCHAR,
+                relation VARCHAR,
+                edge_kind VARCHAR,
+                confidence VARCHAR,
+                bind_method VARCHAR
+            );
+            INSERT INTO edges VALUES
+                ('sym-source', 'sym-connected', 'calls', 'calls', 'syntax_exact', 'singleton');
+            "#,
+        )
+        .expect("create path budget fixture");
+        drop(conn);
+        (temp_dir, db_path)
+    }
+
     fn analyst_db_with_graph_reasoning_views() -> (tempfile::TempDir, PathBuf) {
         let (temp_dir, db_path) = minimal_analyst_db_with_meta();
         let conn = Connection::open(&db_path).expect("open fixture db");
@@ -2605,6 +2640,125 @@ pub fn lexical_signal_anchor() {
         .expect("low budget request");
         assert_eq!(low.graph_reasoning.max_path_hops, 1);
         assert_eq!(low.graph_reasoning.max_paths, 1);
+    }
+
+    #[test]
+    fn path_budget_plan_caps_targets_without_shrinking_per_target_limit() {
+        const MAX_PATHS: usize = 4;
+        let plan = path_budget_plan(6, MAX_PATHS);
+
+        assert_eq!(plan.target_cap, MAX_PATHS);
+        assert_eq!(plan.per_target_max_paths, MAX_PATHS);
+
+        let target_outcomes = [
+            "no_path",
+            "path_found",
+            "no_path",
+            "path_found",
+            "path_found",
+        ];
+        let processed_limits = target_outcomes
+            .iter()
+            .take(plan.target_cap)
+            .map(|_| plan.per_target_max_paths)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            processed_limits,
+            vec![MAX_PATHS; MAX_PATHS],
+            "target outcomes must not feed back into per-target path limits"
+        );
+
+        let smaller_target_set = path_budget_plan(2, MAX_PATHS);
+        assert_eq!(smaller_target_set.target_cap, 2);
+        assert_eq!(smaller_target_set.per_target_max_paths, MAX_PATHS);
+    }
+
+    #[test]
+    fn collect_graph_paths_keeps_full_per_target_limit_after_no_path() {
+        let (_temp_dir, db_path) = analyst_db_with_path_budget_fixture();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "graph_reasoning": {
+                "paths": true,
+                "max_path_hops": 2,
+                "max_paths": 2
+            }
+        }))
+        .expect("request");
+        let mut sections = GraphReasoningSections::default();
+        let code_symbol_ids = vec![
+            "sym-source".to_string(),
+            "sym-disconnected".to_string(),
+            "sym-connected".to_string(),
+            "sym-late".to_string(),
+        ];
+
+        collect_graph_paths(&db_path, &request, &code_symbol_ids, &mut sections);
+
+        assert_eq!(
+            sections.graph_paths.len(),
+            2,
+            "processed targets should be capped by max_paths"
+        );
+        assert_eq!(
+            sections
+                .graph_paths
+                .iter()
+                .map(|path| path["target_stable_id"].as_str().expect("target id"))
+                .collect::<Vec<_>>(),
+            vec!["sym-disconnected", "sym-connected"]
+        );
+        assert_eq!(sections.graph_paths[0]["status"], "no_path");
+        assert_eq!(sections.graph_paths[1]["status"], "path_found");
+        assert_eq!(
+            sections
+                .graph_paths
+                .iter()
+                .map(|path| path["max_paths"].as_u64().expect("max paths"))
+                .collect::<Vec<_>>(),
+            vec![2, 2],
+            "a disconnected target must not shrink the later target's path limit"
+        );
+    }
+
+    #[test]
+    fn collect_graph_paths_dedupes_repeated_no_path_caveats_for_source() {
+        let (_temp_dir, db_path) = analyst_db_with_path_budget_fixture();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "graph_reasoning": {
+                "paths": true,
+                "max_path_hops": 2,
+                "max_paths": 3
+            }
+        }))
+        .expect("request");
+        let mut sections = GraphReasoningSections::default();
+        let code_symbol_ids = vec![
+            "sym-source".to_string(),
+            "sym-disconnected-one".to_string(),
+            "sym-disconnected-two".to_string(),
+        ];
+
+        collect_graph_paths(&db_path, &request, &code_symbol_ids, &mut sections);
+
+        let graph_path_caveats = sections
+            .caveats
+            .iter()
+            .filter(|caveat| caveat["code"] == "graph_path_unavailable")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            graph_path_caveats.len(),
+            1,
+            "identical no_path caveats for one source should collapse"
+        );
+        assert_eq!(
+            graph_path_caveats[0]["message"],
+            "no undirected path found within 2 hops"
+        );
+        assert_eq!(graph_path_caveats[0]["stable_symbol_id"], "sym-source");
     }
 
     #[test]
