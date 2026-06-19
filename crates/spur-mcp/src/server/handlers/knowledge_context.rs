@@ -10,8 +10,9 @@ use serde_json::{json, Value};
 use spur_analyst::{
     query_context_candidates, query_context_paths, query_graph_candidates,
     query_symbol_risk_community, KnowledgeCandidate, KnowledgePathOptions, KnowledgeQueryIntent,
-    KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope, SymbolEvidenceCaveat,
-    SymbolEvidenceStatus, SymbolRiskScorecardRow, MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
+    KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope, SymbolCommunityContextRow,
+    SymbolEvidenceCaveat, SymbolEvidenceStatus, SymbolRiskScorecardRow, MAX_CONTEXT_PATHS,
+    MAX_CONTEXT_PATH_HOPS,
 };
 use spur_graph::{
     resolve_worktree_root_from, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
@@ -1105,7 +1106,7 @@ async fn pack_query_result_v2_with_graph_reasoning(
         Some(false) if request.graph_reasoning.any_enabled() => {
             stale_graph_reasoning_sections(&result, &exact_context)
         }
-        _ => graph_reasoning_sections(request, &result, db_path),
+        _ => graph_reasoning_sections(request, &result, &exact_context, db_path),
     };
     let mut pack = pack_query_result_with_exact_context(&request.base, result, exact_context).await;
     insert_v2_sections(&mut pack, graph_sections);
@@ -1185,6 +1186,7 @@ impl GraphReasoningOptions {
 fn graph_reasoning_sections(
     request: &KnowledgeContextPackV2Request,
     result: &KnowledgeQueryResult,
+    exact_context: &ExactGraphContext,
     db_path: &Path,
 ) -> GraphReasoningSections {
     let code_symbol_ids = graph_reasoning_code_symbol_ids(&result.candidates, &request.base);
@@ -1218,7 +1220,7 @@ fn graph_reasoning_sections(
                     sections.temporal_context = temporal_context_from_risk_rows(&risk_rows);
                     sections.risk_scorecard = risk_rows
                         .iter()
-                        .filter_map(to_json_value)
+                        .filter_map(|row| risk_scorecard_value(row, exact_context))
                         .collect::<Vec<_>>();
                 } else {
                     sections.temporal_context = Vec::new();
@@ -1226,7 +1228,7 @@ fn graph_reasoning_sections(
                 if wants_communities {
                     sections.community_context = community_rows
                         .iter()
-                        .filter_map(to_json_value)
+                        .filter_map(community_context_value)
                         .collect::<Vec<_>>();
                 }
                 sections
@@ -1329,6 +1331,7 @@ fn collect_graph_paths(
                 sections.graph_paths.push(json!({
                     "source_stable_id": source,
                     "target_stable_id": target,
+                    "traversal": "undirected",
                     "graph_content_hash": path_result.graph_content_hash,
                     "max_hops": path_result.max_hops,
                     "max_paths": path_result.max_paths,
@@ -1344,6 +1347,7 @@ fn collect_graph_paths(
                 sections.graph_paths.push(json!({
                     "source_stable_id": source,
                     "target_stable_id": target,
+                    "traversal": "undirected",
                     "graph_content_hash": null,
                     "max_hops": request.graph_reasoning.max_path_hops,
                     "max_paths": budget.per_target_max_paths,
@@ -1436,6 +1440,47 @@ fn temporal_context_from_risk_rows(rows: &[SymbolRiskScorecardRow]) -> Vec<Value
             })
         })
         .collect()
+}
+
+fn risk_scorecard_value(
+    row: &SymbolRiskScorecardRow,
+    exact_context: &ExactGraphContext,
+) -> Option<Value> {
+    let mut value = to_json_value(row)?;
+    if let Some(impact) = exact_context
+        .impacts
+        .iter()
+        .flatten()
+        .find(|impact| raw_stable_symbol_id(&impact.selector) == row.stable_symbol_id.as_str())
+    {
+        let resolved_callers = row
+            .callers
+            .and_then(|callers| u64::try_from(callers).ok())
+            .unwrap_or_default();
+        let label_inbound = impact.callers_count;
+
+        if let Some(object) = value.as_object_mut() {
+            object.insert("label_inbound".into(), json!(label_inbound));
+            object.insert(
+                "inbound_unresolved".into(),
+                json!(label_inbound.saturating_sub(resolved_callers)),
+            );
+            object.insert(
+                "name_ambiguous".into(),
+                json!(label_inbound > resolved_callers),
+            );
+        }
+    }
+    Some(value)
+}
+
+fn community_context_value(row: &SymbolCommunityContextRow) -> Option<Value> {
+    let mut value = to_json_value(row)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("component_id");
+        object.remove("component_size");
+    }
+    Some(value)
 }
 
 fn insert_v2_sections(pack: &mut Value, sections: GraphReasoningSections) {
@@ -2027,6 +2072,66 @@ mod tests {
         (temp_dir, db_path)
     }
 
+    fn analyst_db_with_duplicate_and_containment_paths() -> (tempfile::TempDir, PathBuf) {
+        let (temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let conn = Connection::open(&db_path).expect("open fixture db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE edges (
+                source_stable_id VARCHAR,
+                target_stable_id VARCHAR,
+                relation VARCHAR,
+                edge_kind VARCHAR,
+                confidence VARCHAR,
+                bind_method VARCHAR
+            );
+            INSERT INTO edges VALUES
+                ('sym-source', 'sym-target', 'references', 'references_other', 'heuristic', 'label_match'),
+                ('sym-source', 'sym-mid', 'calls', 'calls', 'syntax_exact', 'singleton'),
+                ('sym-source', 'sym-mid', 'calls', 'calls', 'syntax_exact', 'singleton'),
+                ('sym-mid', 'sym-target', 'calls', 'calls', 'syntax_exact', 'singleton'),
+                ('sym-mid', 'sym-target', 'calls', 'calls', 'syntax_exact', 'singleton'),
+                ('sym-source', 'sym-module', 'contains', 'references_other', 'syntax_exact', 'scope'),
+                ('sym-module', 'sym-target', 'imports', 'references_other', 'syntax_exact', 'external');
+            "#,
+        )
+        .expect("create duplicate path fixture");
+        drop(conn);
+        (temp_dir, db_path)
+    }
+
+    fn analyst_db_with_leaf_scorecard_row() -> (tempfile::TempDir, PathBuf) {
+        let (temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let conn = Connection::open(&db_path).expect("open fixture db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE v_symbol_scorecard (
+                stable_symbol_id VARCHAR,
+                entity_name VARCHAR,
+                qualified_name VARCHAR,
+                symbol_kind VARCHAR,
+                file_path VARCHAR,
+                pagerank DOUBLE,
+                in_degree BIGINT,
+                out_degree BIGINT,
+                callers BIGINT,
+                importers BIGINT,
+                inbound_total BIGINT,
+                churn_90d BIGINT,
+                last_touched TIMESTAMP,
+                blast_radius_score DOUBLE,
+                posture VARCHAR
+            );
+            INSERT INTO v_symbol_scorecard VALUES
+                ('sym-sink', 'subscribe', 'fixture::Broker::subscribe', 'method', 'src/broker.rs',
+                 0.01, 0, 0, 0, 0, 0, 0, NULL, 0.0, 'leaf');
+            "#,
+        )
+        .expect("create leaf scorecard fixture");
+        drop(conn);
+        (temp_dir, db_path)
+    }
+
     fn analyst_db_with_graph_reasoning_views() -> (tempfile::TempDir, PathBuf) {
         let (temp_dir, db_path) = minimal_analyst_db_with_meta();
         let conn = Connection::open(&db_path).expect("open fixture db");
@@ -2071,6 +2176,17 @@ mod tests {
             INSERT INTO v_symbol_community VALUES
                 ('sym-one', 20),
                 ('sym-two', 20);
+
+            CREATE TABLE edges (
+                source_stable_id VARCHAR,
+                target_stable_id VARCHAR,
+                relation VARCHAR,
+                edge_kind VARCHAR,
+                confidence VARCHAR,
+                bind_method VARCHAR
+            );
+            INSERT INTO edges VALUES
+                ('sym-one', 'sym-two', 'calls', 'calls', 'syntax_exact', 'singleton');
 
             CREATE TABLE v_graph_metrics (
                 calls_edges BIGINT,
@@ -2761,6 +2877,71 @@ pub fn lexical_signal_anchor() {
     }
 
     #[test]
+    fn query_context_paths_dedupes_before_cap_and_returns_calls_only() {
+        let (_temp_dir, db_path) = analyst_db_with_duplicate_and_containment_paths();
+
+        let result = query_context_paths(
+            &db_path,
+            "sym-source",
+            "sym-target",
+            KnowledgePathOptions {
+                max_hops: 2,
+                max_paths: 4,
+                undirected: true,
+            },
+        )
+        .expect("query context paths");
+
+        assert_eq!(result.status, spur_analyst::KnowledgePathStatus::PathFound);
+        assert!(
+            result
+                .rows
+                .iter()
+                .all(|row| row.relation.as_deref() == Some("calls")
+                    && row.edge_kind.as_deref() == Some("calls")),
+            "recursive SQL paths must exclude containment/import hops: {:?}",
+            result.rows
+        );
+
+        let mut rows_by_path = std::collections::BTreeMap::new();
+        for row in &result.rows {
+            rows_by_path
+                .entry(row.path_index)
+                .or_insert_with(Vec::new)
+                .push(row);
+        }
+        let mut path_sequences = rows_by_path
+            .values()
+            .map(|rows| {
+                let mut sequence = rows
+                    .iter()
+                    .map(|row| row.source_stable_id.as_str())
+                    .collect::<Vec<_>>();
+                sequence.push(
+                    rows.last()
+                        .expect("path rows should not be empty")
+                        .target_stable_id
+                        .as_str(),
+                );
+                sequence
+            })
+            .collect::<Vec<_>>();
+        path_sequences.sort_unstable();
+        path_sequences.dedup();
+
+        let path_count = rows_by_path.len();
+        assert_eq!(
+            path_sequences.len(),
+            path_count,
+            "duplicate full node-sequences must be collapsed before max_paths cap"
+        );
+        assert_eq!(
+            path_sequences,
+            vec![vec!["sym-source", "sym-mid", "sym-target"]]
+        );
+    }
+
+    #[test]
     fn knowledge_context_pack_2_parser_defaults_graph_reasoning_by_intent_and_scope() {
         let change = KnowledgeContextPackV2Request::parse(&json!({
             "query": "semantic search",
@@ -2953,13 +3134,62 @@ pub fn lexical_signal_anchor() {
         assert_eq!(pack["risk_scorecard"][0]["status"], "available");
         assert_eq!(pack["risk_scorecard"][0]["churn_90d"], 9);
         assert_eq!(pack["community_context"][0]["status"], "available");
-        assert_eq!(pack["community_context"][0]["component_id"], 10);
+        assert_eq!(pack["community_context"][0]["community_id"], 20);
+        let community = pack["community_context"][0]
+            .as_object()
+            .expect("community row");
+        assert!(!community.contains_key("component_id"));
+        assert!(!community.contains_key("component_size"));
         assert_eq!(pack["temporal_context"][0]["stable_symbol_id"], "sym-one");
         assert_eq!(pack["temporal_context"][0]["churn_90d"], 9);
         assert!(pack["temporal_context"][0]["last_touched"]
             .as_str()
             .expect("last touched")
             .contains("2026-06-17"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_marks_undirected_paths_and_hides_component_noise() {
+        let (_temp_dir, db_path) = analyst_db_with_graph_reasoning_views();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "scope": "code",
+            "limit": 2,
+            "graph_reasoning": {
+                "paths": true,
+                "communities": true,
+                "risk": false,
+                "max_path_hops": 2,
+                "max_paths": 1
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-one"), "symbol_one", 8.0),
+                candidate(Some("sym-two"), "symbol_two", 7.0),
+            ],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext::default(),
+            &db_path,
+        )
+        .await;
+
+        assert_eq!(pack["graph_paths"][0]["status"], "path_found");
+        assert_eq!(pack["graph_paths"][0]["traversal"], "undirected");
+        let community = pack["community_context"][0]
+            .as_object()
+            .expect("community row");
+        assert!(community.contains_key("community_id"));
+        assert!(!community.contains_key("component_id"));
+        assert!(!community.contains_key("component_size"));
     }
 
     #[tokio::test]
@@ -3129,8 +3359,12 @@ pub fn lexical_signal_anchor() {
             pack["community_context"][0]["stable_symbol_id"],
             "sym-dispatch"
         );
-        assert_eq!(pack["community_context"][0]["component_id"], 10);
         assert_eq!(pack["community_context"][0]["community_id"], 20);
+        let community = pack["community_context"][0]
+            .as_object()
+            .expect("community row");
+        assert!(!community.contains_key("component_id"));
+        assert!(!community.contains_key("component_size"));
         assert_eq!(
             pack["recommended_next_tools"][0]["selector"],
             "graph://symbol/sym-dispatch"
@@ -3243,6 +3477,57 @@ pub fn lexical_signal_anchor() {
         assert_eq!(pack["graph_paths"], json!([]));
         assert_eq!(pack["risk_scorecard"], json!([]));
         assert_eq!(pack["community_context"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_reconciles_popular_sink_risk_with_label_inbound() {
+        let (_temp_dir, db_path) = analyst_db_with_leaf_scorecard_row();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "popular impact",
+            "intent": "change",
+            "scope": "code",
+            "graph_reasoning": {
+                "paths": false,
+                "communities": false,
+                "risk": true
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![candidate(Some("sym-sink"), "subscribe", 9.0)],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext {
+                graph_content_hash: Some("fixture-hash".into()),
+                response_file_oids_match: Some(true),
+                impacts: vec![Some(SymbolImpactSummary {
+                    selector: "graph://symbol/sym-sink".into(),
+                    callers_count: POPULAR_SINK_CALLERS_THRESHOLD + 6,
+                    callees_count: 0,
+                    caller_neighbors: Vec::new(),
+                    callee_neighbors: Vec::new(),
+                })],
+            },
+            &db_path,
+        )
+        .await;
+
+        assert_eq!(pack["impact"]["popular_sink"], true);
+        let risk = &pack["risk_scorecard"][0];
+        assert_eq!(risk["stable_symbol_id"], "sym-sink");
+        assert_eq!(risk["callers"], 0);
+        assert_eq!(risk["posture"], "leaf");
+        assert_eq!(risk["label_inbound"], POPULAR_SINK_CALLERS_THRESHOLD + 6);
+        assert_eq!(
+            risk["inbound_unresolved"],
+            POPULAR_SINK_CALLERS_THRESHOLD + 6
+        );
+        assert_eq!(risk["name_ambiguous"], true);
     }
 
     #[test]
