@@ -39,26 +39,6 @@ use tokio::sync::Mutex;
 
 mod common;
 
-struct CwdGuard {
-    original: std::path::PathBuf,
-}
-
-static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-impl CwdGuard {
-    fn enter(path: &Path) -> Self {
-        let original = std::env::current_dir().expect("current dir");
-        std::env::set_current_dir(path).expect("set current dir");
-        Self { original }
-    }
-}
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
-    }
-}
-
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
         .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
@@ -377,7 +357,6 @@ async fn tools_list_advertises_response_format_for_worker_code_graph_tools() {
 
 #[tokio::test]
 async fn code_graph_worker_tools_do_not_duplicate_structured_payload_as_text_content() {
-    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
     let (dir, server) = test_server_with_real_pm().await;
     write_worker_graph_fixture(dir.path());
     server.register_delegation_worktree_root("d-no-duplicate".into(), dir.path().to_path_buf());
@@ -462,10 +441,9 @@ fn schema_ref_target<'a>(root: &'a Value, reference: &str) -> &'a Value {
 
 #[tokio::test]
 async fn tools_call_code_graph_metadata_tools_are_reachable() {
-    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
     let (dir, server) = test_server_with_real_pm().await;
     write_worker_graph_fixture(dir.path());
-    let _cwd = CwdGuard::enter(dir.path());
+    server.register_delegation_worktree_root("d-1".into(), dir.path().to_path_buf());
     let token = server.issue_token("d-1", Duration::from_secs(60));
 
     for (tool, arguments, expected_key) in [
@@ -503,10 +481,9 @@ async fn tools_call_code_graph_metadata_tools_are_reachable() {
 
 #[tokio::test]
 async fn tools_call_code_file_symbols_omitted_response_format_stays_full() {
-    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
     let (dir, server) = test_server_with_real_pm().await;
     write_worker_graph_fixture(dir.path());
-    let _cwd = CwdGuard::enter(dir.path());
+    server.register_delegation_worktree_root("d-1".into(), dir.path().to_path_buf());
     let token = server.issue_token("d-1", Duration::from_secs(60));
 
     let result = call_tool_raw(
@@ -537,10 +514,9 @@ async fn tools_call_code_file_symbols_omitted_response_format_stays_full() {
 
 #[tokio::test]
 async fn tools_call_code_file_symbols_compact_and_table_formats_are_structured_only() {
-    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
     let (dir, server) = test_server_with_real_pm().await;
     write_worker_graph_fixture(dir.path());
-    let _cwd = CwdGuard::enter(dir.path());
+    server.register_delegation_worktree_root("d-1".into(), dir.path().to_path_buf());
     let token = server.issue_token("d-1", Duration::from_secs(60));
 
     let compact = call_tool_raw(
@@ -594,10 +570,9 @@ async fn tools_call_code_file_symbols_compact_and_table_formats_are_structured_o
 
 #[tokio::test]
 async fn tools_call_code_read_symbol_source_format_is_structured_only() {
-    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
     let (dir, server) = test_server_with_real_pm().await;
     let content_oid = write_worker_graph_fixture(dir.path());
-    let _cwd = CwdGuard::enter(dir.path());
+    server.register_delegation_worktree_root("d-1".into(), dir.path().to_path_buf());
     let token = server.issue_token("d-1", Duration::from_secs(60));
 
     let result = call_tool_raw(

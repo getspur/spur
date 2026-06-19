@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -54,7 +54,11 @@ const AMBIGUOUS_LEFT_ID: &str = "ambiguous-left";
 const AMBIGUOUS_RIGHT_ID: &str = "ambiguous-right";
 const UNKNOWN_ID: &str = "unknown-symbol";
 
-static CWD_LOCK: Mutex<()> = Mutex::new(());
+static CWD_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+
+async fn cwd_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    CWD_LOCK.get_or_init(|| TokioMutex::new(())).lock().await
+}
 
 #[derive(Clone, Copy, Debug)]
 enum CodeGraphFixtureBackend {
@@ -641,6 +645,7 @@ fn build_real_tools_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     let root = workspace_root();
     let files = [
         PathBuf::from("crates/spur-mcp/src/tools.rs"),
+        PathBuf::from("crates/spur-graph/src/mcp/mod.rs"),
         PathBuf::from("crates/spur-mcp/tests/rework_reuse_prior_worktree_e2e.rs"),
     ];
     let facts = build_facts_for_paths(&root, &files).expect("build graph facts for real tools");
@@ -961,7 +966,7 @@ fn assert_omits_full_metadata_defaults(body: &Value) {
 
 #[tokio::test]
 async fn linked_worktree_without_self_graph_overlays_root_for_code_search_and_callers() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let parent = TempDir::new().expect("temp parent");
     let main = parent.path().join("main");
     let worker = parent.path().join("worker");
@@ -1001,7 +1006,7 @@ async fn linked_worktree_without_self_graph_overlays_root_for_code_search_and_ca
 
 #[tokio::test]
 async fn linked_worktree_without_self_graph_overlays_modified_file_for_code_search_and_callers() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let parent = TempDir::new().expect("temp parent");
     let main = parent.path().join("main");
     let worker = parent.path().join("worker");
@@ -1054,7 +1059,7 @@ async fn linked_worktree_without_self_graph_overlays_modified_file_for_code_sear
 
 #[tokio::test]
 async fn linked_worktree_cold_open_modified_file_awaits_overlay_past_latency_budget() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let parent = TempDir::new().expect("temp parent");
     let main = parent.path().join("main");
     let worker = parent.path().join("worker");
@@ -1092,7 +1097,7 @@ async fn linked_worktree_cold_open_modified_file_awaits_overlay_past_latency_bud
 
 #[tokio::test]
 async fn code_search_uses_overlay_for_unsaved_edit_without_rebuild() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1126,7 +1131,7 @@ async fn code_search_uses_overlay_for_unsaved_edit_without_rebuild() {
 
 #[tokio::test]
 async fn code_search_uses_overlay_for_untracked_source_without_rebuild() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1159,7 +1164,7 @@ async fn code_search_uses_overlay_for_untracked_source_without_rebuild() {
 
 #[tokio::test]
 async fn code_search_ignores_untracked_non_source_scratch_file() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1200,7 +1205,7 @@ async fn code_search_ignores_untracked_non_source_scratch_file() {
 
 #[tokio::test]
 async fn code_search_uses_overlay_for_committed_unindexed_source_without_rebuild() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1238,7 +1243,7 @@ async fn code_search_uses_overlay_for_committed_unindexed_source_without_rebuild
 
 #[tokio::test]
 async fn root_parquet_self_pointer_uses_overlay_for_unsaved_edit_without_rebuild() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1291,7 +1296,7 @@ async fn root_parquet_self_pointer_uses_overlay_for_unsaved_edit_without_rebuild
 
 #[tokio::test]
 async fn code_search_unrelated_edit_does_not_rebuild() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     write_multi_file_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1329,7 +1334,7 @@ async fn code_search_unrelated_edit_does_not_rebuild() {
 #[tokio::test]
 async fn worker_code_search_freshness_uses_registered_worktree_root() {
     skip_if_no_loopback!("worker_code_search_freshness_uses_registered_worktree_root");
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let parent = TempDir::new().expect("temp parent");
     let main = parent.path().join("main");
     let worker = parent.path().join("worker");
@@ -1395,7 +1400,7 @@ async fn worker_linked_worktree_without_self_graph_overlays_root_for_code_search
     skip_if_no_loopback!(
         "worker_linked_worktree_without_self_graph_overlays_root_for_code_search_and_callers"
     );
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let parent = TempDir::new().expect("temp parent");
     let main = parent.path().join("main");
     let worker = parent.path().join("worker");
@@ -1451,7 +1456,7 @@ async fn worker_linked_worktree_without_self_graph_overlays_root_for_code_search
 
 #[tokio::test]
 async fn code_search_concurrent_dirty_requests_use_overlay_without_rebuild() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1486,7 +1491,7 @@ async fn code_search_concurrent_dirty_requests_use_overlay_without_rebuild() {
 
 #[tokio::test]
 async fn code_search_overlay_ignores_rebuild_budget() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1520,7 +1525,7 @@ async fn code_search_overlay_ignores_rebuild_budget() {
 
 #[tokio::test]
 async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -1663,7 +1668,7 @@ async fn code_graph_tools_traverse_artifact_built_from_real_rust_fixture() {
 
 #[tokio::test]
 async fn code_graph_tools_accept_real_sixteen_hex_legacy_symbol_id() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -1702,7 +1707,7 @@ async fn code_graph_tools_accept_real_sixteen_hex_legacy_symbol_id() {
 
 #[tokio::test]
 async fn code_graph_response_format_omitted_keeps_full_metadata() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -1736,7 +1741,7 @@ async fn code_graph_response_format_omitted_keeps_full_metadata() {
 
 #[tokio::test]
 async fn code_graph_compact_metadata_omits_healthy_defaults() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1777,7 +1782,7 @@ async fn code_graph_compact_metadata_omits_healthy_defaults() {
 
 #[tokio::test]
 async fn code_graph_compact_metadata_preserves_stale_dirty_status() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1828,7 +1833,7 @@ async fn code_graph_compact_metadata_preserves_stale_dirty_status() {
 
 #[tokio::test]
 async fn code_file_symbols_table_format_interns_file_paths_and_reduces_size() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1888,7 +1893,7 @@ async fn code_file_symbols_table_format_interns_file_paths_and_reduces_size() {
 
 #[tokio::test]
 async fn code_callers_and_callees_table_format_returns_rows_and_counts() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -1977,7 +1982,7 @@ async fn code_callers_and_callees_table_format_returns_rows_and_counts() {
 
 #[tokio::test]
 async fn code_subgraph_table_format_returns_node_edge_tables_and_unresolved_edges() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create git marker");
     let mut unresolved = graph_edge("root", "missing-target");
@@ -2095,7 +2100,7 @@ async fn code_subgraph_table_format_returns_node_edge_tables_and_unresolved_edge
 
 #[tokio::test]
 async fn code_graph_response_format_invalid_returns_invalid_params() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -2130,7 +2135,7 @@ async fn code_graph_response_format_invalid_returns_invalid_params() {
 
 #[tokio::test]
 async fn code_graph_source_format_is_invalid_for_non_read_symbol_tools() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -2161,7 +2166,7 @@ async fn code_graph_source_format_is_invalid_for_non_read_symbol_tools() {
 
 #[tokio::test]
 async fn code_subgraph_frontier_start_nodes_resume_budgeted_exploration() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     write_wide_fixture_crate(worktree.path(), 55);
     let artifact = build_graph_artifact(worktree.path());
@@ -2235,7 +2240,7 @@ async fn code_subgraph_frontier_start_nodes_resume_budgeted_exploration() {
 
 #[tokio::test]
 async fn code_resolve_returns_candidate_rows_without_traversal_payloads() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -2273,7 +2278,7 @@ async fn code_resolve_returns_candidate_rows_without_traversal_payloads() {
 
 #[tokio::test]
 async fn code_resolve_prefers_real_submit_plan_mcp_tool_registration() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     let artifact = build_real_tools_graph_artifact(worktree.path());
     let mcp_tool = symbol_by_file_entity_kind(
@@ -2311,7 +2316,7 @@ async fn code_resolve_prefers_real_submit_plan_mcp_tool_registration() {
 
 #[tokio::test]
 async fn code_file_symbols_returns_candidate_rows_for_worktree_relative_file() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -2372,7 +2377,7 @@ async fn code_file_symbols_returns_candidate_rows_for_worktree_relative_file() {
 
 #[tokio::test]
 async fn code_file_symbols_uses_symbol_uri_selector_for_legacy_empty_qualified_name() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     let artifact = GraphIndexArtifact {
         header: GraphIndexHeader {
@@ -2436,7 +2441,7 @@ async fn code_file_symbols_uses_symbol_uri_selector_for_legacy_empty_qualified_n
 
 #[tokio::test]
 async fn code_symbol_info_returns_single_symbol_metadata() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     let artifact = build_graph_artifact(worktree.path());
@@ -2476,7 +2481,7 @@ async fn code_symbol_info_returns_single_symbol_metadata() {
 
 #[tokio::test]
 async fn code_read_symbol_reads_source_by_stable_symbol_id() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -2515,7 +2520,7 @@ async fn code_read_symbol_reads_source_by_stable_symbol_id() {
 
 #[tokio::test]
 async fn code_read_symbol_reads_source_by_path_name_tuple() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -2550,7 +2555,7 @@ async fn code_read_symbol_reads_source_by_path_name_tuple() {
 
 #[tokio::test]
 async fn code_read_symbol_source_format_by_stable_symbol_id_is_source_first() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -2592,7 +2597,7 @@ async fn code_read_symbol_source_format_by_stable_symbol_id_is_source_first() {
 
 #[tokio::test]
 async fn code_read_symbol_source_format_by_path_name_tuple_preserves_context_indicator() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -2635,7 +2640,7 @@ async fn code_read_symbol_source_format_by_path_name_tuple_preserves_context_ind
 
 #[tokio::test]
 async fn code_read_symbol_source_format_preserves_stale_indexed_source_signal() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -2683,7 +2688,7 @@ async fn code_read_symbol_source_format_preserves_stale_indexed_source_signal() 
 
 #[tokio::test]
 async fn code_read_symbol_source_format_ambiguous_request_returns_compact_candidates() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     write_ambiguous_symbol_fixture(worktree.path());
     commit_fixture(worktree.path());
@@ -2741,7 +2746,7 @@ async fn code_read_symbol_source_format_ambiguous_request_returns_compact_candid
 
 #[tokio::test]
 async fn code_read_symbol_returns_candidates_for_ambiguous_path_name_tuple() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     write_ambiguous_symbol_fixture(worktree.path());
     commit_fixture(worktree.path());
@@ -2769,7 +2774,7 @@ async fn code_read_symbol_returns_candidates_for_ambiguous_path_name_tuple() {
 
 #[tokio::test]
 async fn code_read_symbol_marks_stale_but_returns_indexed_source() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -2809,7 +2814,7 @@ async fn code_read_symbol_marks_stale_but_returns_indexed_source() {
 
 #[tokio::test]
 async fn code_read_symbol_clamps_and_echoes_context_lines() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     commit_fixture(worktree.path());
@@ -2842,17 +2847,17 @@ async fn code_read_symbol_clamps_and_echoes_context_lines() {
 }
 
 #[tokio::test]
-async fn code_search_recovers_macro_bodied_callees_for_legacy_tool_definitions() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+async fn code_search_recovers_macro_bodied_callees_for_tool_definitions() {
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     let artifact = build_real_tools_graph_artifact(worktree.path());
-    let legacy_tools = symbol_by_file_entity_kind(
+    let graph_tools = symbol_by_file_entity_kind(
         &artifact,
-        "crates/spur-mcp/src/tools.rs",
-        "legacy_remainder_tool_definitions",
+        "crates/spur-graph/src/mcp/mod.rs",
+        "tool_definitions",
         "function",
     );
-    let legacy_tools_uri = format!("graph://symbol/{}", legacy_tools.stable_symbol_id);
+    let graph_tools_uri = format!("graph://symbol/{}", graph_tools.stable_symbol_id);
     let _cwd = enter_dir(worktree.path());
     let server = test_server();
 
@@ -2860,12 +2865,12 @@ async fn code_search_recovers_macro_bodied_callees_for_legacy_tool_definitions()
         call_tool(
             &server,
             "code_callees",
-            json!({ "selector": legacy_tools_uri }),
+            json!({ "selector": graph_tools_uri }),
         )
         .await,
     );
     let callee_names = entity_names(callees["callees"].as_array().expect("callees"));
-    assert!(callee_names.contains("submit_plan_def"));
+    assert!(callee_names.contains("code_resolve_def"));
     assert!(callee_names.contains("code_symbol_search_def"));
 
     let search = tool_body(
@@ -2897,7 +2902,8 @@ async fn code_search_recovers_macro_bodied_callees_for_legacy_tool_definitions()
         "legacy_prelude_tool_definitions",
         "legacy_plan_management_tool_definitions",
         "legacy_remainder_tool_definitions",
-        "legacy_worker_tool_definitions",
+        "legacy_worker_prelude_tool_definitions",
+        "legacy_worker_remainder_tool_definitions",
         "pm_tool_definition",
         "pm_tool_definitions_by_names",
     ];
@@ -2928,7 +2934,7 @@ async fn code_search_recovers_macro_bodied_callees_for_legacy_tool_definitions()
 
 #[tokio::test]
 async fn code_search_echoes_requested_limit_when_clamped() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     copy_fixture_crate(worktree.path());
     build_graph_artifact(worktree.path());
@@ -2954,7 +2960,7 @@ async fn code_search_echoes_requested_limit_when_clamped() {
 
 #[tokio::test]
 async fn code_search_candidate_rows_include_enclosing_scope() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     let artifact = build_real_tools_graph_artifact(worktree.path());
     let mcp_tool = symbol_by_file_entity_kind(
@@ -2989,7 +2995,7 @@ async fn code_search_candidate_rows_include_enclosing_scope() {
 
 #[tokio::test]
 async fn code_graph_tools_resolve_requested_symbol_as_of_historical_commit() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     write_temporal_fixture_artifact(worktree.path());
     let _cwd = enter_dir(worktree.path());
@@ -3104,7 +3110,7 @@ async fn code_graph_tools_resolve_requested_symbol_as_of_historical_commit() {
 
 #[tokio::test]
 async fn code_subgraph_returns_deleted_with_last_seen() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     write_temporal_resolution_fixture_artifact(worktree.path());
     let _cwd = enter_dir(worktree.path());
@@ -3217,7 +3223,7 @@ async fn code_subgraph_returns_deleted_with_last_seen() {
 
 #[tokio::test]
 async fn code_symbol_history_returns_rename_chain_for_parquet_and_in_memory_backends() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     for backend in [
         CodeGraphFixtureBackend::Parquet,
         CodeGraphFixtureBackend::InMemory,
@@ -3242,7 +3248,7 @@ async fn code_symbol_history_returns_rename_chain_for_parquet_and_in_memory_back
 
 #[tokio::test]
 async fn code_symbol_history_uses_parquet_temporal_index_cache() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     std::fs::write(worktree.path().join("README.md"), "fixture\n").expect("write fixture file");
     commit_fixture(worktree.path());
@@ -3264,7 +3270,7 @@ async fn code_symbol_history_uses_parquet_temporal_index_cache() {
 
 #[tokio::test]
 async fn code_symbol_history_reports_missing_commit_index_cleanly() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     write_graph_without_commit_index(worktree.path());
     let _cwd = enter_dir(worktree.path());
@@ -3286,7 +3292,7 @@ async fn code_symbol_history_reports_missing_commit_index_cleanly() {
 
 #[tokio::test]
 async fn code_symbol_history_returns_empty_when_no_snapshots() {
-    let _lock = CWD_LOCK.lock().expect("cwd lock");
+    let _lock = cwd_lock().await;
     let worktree = TempDir::new().expect("temp worktree");
     write_graph_with_empty_snapshots(worktree.path());
     let _cwd = enter_dir(worktree.path());
