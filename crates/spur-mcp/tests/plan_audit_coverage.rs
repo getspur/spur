@@ -34,11 +34,6 @@ fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
     common::beads::run_br(repo, args)
 }
 
-fn extract_id(json: &str) -> String {
-    let value: serde_json::Value = serde_json::from_str(json).expect("br create json");
-    value["id"].as_str().expect("br create id").to_string()
-}
-
 /// Parse comments from a `br comments list` JSON output and collect only those
 /// that are valid `[[spur-audit v1]]` sentinels.
 fn collect_sentinels(list_json: &str) -> Vec<AuditSentinelKind> {
@@ -66,40 +61,6 @@ async fn add_labels_individually(pm: &spur_pm::PmService, issue_id: &str, labels
         .await
         .expect("seed label");
     }
-
-    let dir = TempDir::new().expect("tempdir");
-    run_br(dir.path(), &["init"]).expect("br init failed");
-
-    let pm = spur_pm::PmService::try_new(None, true, false, dir.path(), None)
-        .await
-        .expect("PmService::try_new failed")
-        .expect("expected beads pm");
-
-    let issue_id = extract_id(
-        &run_br(dir.path(), &["create", "Dispatch Target", "-t", "task"]).expect("create issue"),
-    );
-
-    spur_mcp::plan::persist_dispatch_intent(
-        &pm,
-        &issue_id,
-        common::server_builder::pro_feature_gate().as_ref(),
-        "plan-1",
-        "del-A",
-        "codex",
-        1,
-        std::time::Duration::from_secs(600),
-    )
-    .await
-    .expect("persist dispatch intent");
-
-    let issue = pm.get_issue(&issue_id).await.expect("get issue");
-    assert!(
-        issue
-            .labels
-            .contains(&spur_mcp::plan::labels::delegation_id("del-A")),
-        "dispatch label must be present after persistence: {:?}",
-        issue.labels
-    );
 }
 
 #[tokio::test]

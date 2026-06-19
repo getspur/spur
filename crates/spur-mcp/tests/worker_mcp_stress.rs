@@ -35,7 +35,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,6 +61,7 @@ use spur_pm::test_workspace::TestBeadsWorkspace;
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
+use tokio::sync::Barrier;
 
 const N_WORKERS: usize = 8;
 const CALLS_PER_WORKER: usize = 10;
@@ -297,36 +297,19 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
         }
 
         // ── (b) 8 workers × 10 calls in parallel. ───────────────────────
-        let peak_active = Arc::new(AtomicU32::new(0));
-        let stop_sampling = Arc::new(AtomicBool::new(false));
-        let observer_server = Arc::clone(&server);
-        let observer_peak = Arc::clone(&peak_active);
-        let observer_stop = Arc::clone(&stop_sampling);
-        let observer = tokio::spawn(async move {
-            while !observer_stop.load(Ordering::Relaxed) {
-                let observed = observer_server.active_count();
-                let mut current = observer_peak.load(Ordering::Relaxed);
-                while observed > current {
-                    match observer_peak.compare_exchange(
-                        current,
-                        observed,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(_) => break,
-                        Err(actual) => current = actual,
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        });
-
+        // The barrier releases all workers together. `get_issue` handlers are
+        // fast enough that a polling observer can miss the active window on
+        // loaded builders; deterministic `active_count` overlap is covered by
+        // `worker_server_lifecycle`.
+        let start_calls = Arc::new(Barrier::new(N_WORKERS + 1));
         let mut call_handles = Vec::with_capacity(N_WORKERS);
         for (_, issue_id, token) in &delegations {
             let issue_id = issue_id.clone();
             let token = token.clone();
             let server_url = server_url.clone();
+            let start_calls = Arc::clone(&start_calls);
             call_handles.push(tokio::spawn(async move {
+                start_calls.wait().await;
                 let mut results = Vec::with_capacity(CALLS_PER_WORKER);
                 for _ in 0..CALLS_PER_WORKER {
                     let resp = call_tool_with_bearer(
@@ -341,6 +324,7 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
                 results
             }));
         }
+        start_calls.wait().await;
 
         let mut total_successful = 0usize;
         for handle in call_handles {
@@ -358,14 +342,6 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
             total_successful,
             N_WORKERS * CALLS_PER_WORKER,
             "all 80 calls must succeed"
-        );
-        stop_sampling.store(true, Ordering::Relaxed);
-        observer.await.expect("active-count observer should join");
-
-        let peak = peak_active.load(Ordering::SeqCst);
-        assert!(
-            peak >= 2,
-            "active_count should peak above one under concurrent sessions (observed peak={peak})"
         );
         assert_eq!(
             server.active_count(),

@@ -171,9 +171,9 @@ pub struct McpCallbackServer {
     /// Duration written into `spur:lease-expires-at:<ts>` labels for
     /// reconciler-owned persisted-plan dispatches.
     pub(crate) dispatch_lease_duration: std::time::Duration,
-    /// Singleflight coordinator for in-memory code graph rebuilds on stale
-    /// code_* response files.
-    pub(crate) graph_rebuild_coordinator: Arc<handlers::code_graph::RebuildCoordinator>,
+    /// Explicit code-graph MCP dependencies, including rebuild singleflight
+    /// policy owned by `spur-graph`.
+    pub(crate) graph_mcp_deps: spur_graph::mcp::GraphMcpDeps,
 }
 
 impl McpCallbackServer {
@@ -237,7 +237,7 @@ impl McpCallbackServer {
             versioned_cache_serve: false,
             nonadvisory_review_writes: false,
             dispatch_lease_duration: std::time::Duration::from_secs(600),
-            graph_rebuild_coordinator: Arc::new(handlers::code_graph::RebuildCoordinator::new()),
+            graph_mcp_deps: spur_graph::mcp::GraphMcpDeps::default(),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
