@@ -468,7 +468,6 @@ async fn invoke_knowledge_context_for_worker(
     deps: Arc<DispatcherDeps>,
     worker_ctx: WorkerCallContext,
     args: Value,
-    v2: bool,
 ) -> Result<Value, McpHandlerError> {
     let worker_root = {
         deps.delegation_worktree_roots
@@ -478,11 +477,7 @@ async fn invoke_knowledge_context_for_worker(
     };
     let root = select_knowledge_context_root(worker_root, deps.repo_root.clone());
     let future = async move {
-        if v2 {
-            crate::server::handlers::knowledge_context::knowledge_context_pack_2(&args).await
-        } else {
-            crate::server::handlers::knowledge_context::knowledge_context_pack(&args).await
-        }
+        crate::server::handlers::knowledge_context::knowledge_context_pack_2(&args).await
     };
     if let Some(root) = root {
         crate::server::handlers::code_graph::with_worktree_root_for_request(root, future).await
@@ -723,27 +718,6 @@ struct CodeSubgraphParams {
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct CodeSymbolHistoryParams {
     symbol: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-struct KnowledgeContextPackParams {
-    /// Natural-language query to orient code or docs exploration.
-    query: String,
-    /// Retrieval intent. Defaults to explain.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    intent: Option<KnowledgeIntentParam>,
-    /// Retrieval scope. Defaults to all.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    scope: Option<KnowledgeScopeParam>,
-    /// Result limit. Clamped by the handler to 1..=20.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    limit: Option<u64>,
-    /// Include test symbols in code evidence. Defaults to true.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    include_tests: Option<bool>,
-    /// Maximum number of symbol bodies to include. Clamped by the handler to 0..=5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_symbol_bodies: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -1298,8 +1272,8 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "knowledge_context_pack",
-        description = "Builds a bounded evidence pack from BM25 candidates, scorecard signals, and exact graph grounding. Applies opportunistic Lance hybrid vector re-ranking when query embeddings and the sidecar respond; degrades to BM25-only on timeout or unavailability. Use code_read_symbol/code_callers/code_callees for exact follow-up.",
-        input_schema = crate::tool_schemas::schema_object::<KnowledgeContextPackParams>()
+        description = "Deprecated alias for knowledge_context_pack_2; routes to v2 behavior. Use knowledge_context_pack_2 as the first-class canonical evidence pack.",
+        input_schema = crate::tool_schemas::schema_object::<KnowledgeContextPackV2Params>()
     )]
     async fn knowledge_context_pack_tool(
         &self,
@@ -1313,7 +1287,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_knowledge_context_for_worker(deps, worker_ctx, args, false).await
+                invoke_knowledge_context_for_worker(deps, worker_ctx, args).await
             },
         )
         .await
@@ -1321,7 +1295,7 @@ impl WorkerToolHandler {
 
     #[tool(
         name = "knowledge_context_pack_2",
-        description = "experimental v2 evidence pack that preserves knowledge_context_pack retrieval and exact grounding while adding graph_paths, risk_scorecard, community_context, temporal_context, and caveats for graph reasoning.",
+        description = "First-class canonical evidence pack that preserves knowledge_context_pack retrieval and exact grounding while adding graph_paths, risk_scorecard, community_context, temporal_context, and caveats for graph reasoning.",
         input_schema = crate::tool_schemas::schema_object::<KnowledgeContextPackV2Params>()
     )]
     async fn knowledge_context_pack_2_tool(
@@ -1336,7 +1310,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_knowledge_context_for_worker(deps, worker_ctx, args, true).await
+                invoke_knowledge_context_for_worker(deps, worker_ctx, args).await
             },
         )
         .await

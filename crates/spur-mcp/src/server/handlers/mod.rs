@@ -145,8 +145,9 @@ impl McpCallbackServer {
             "code_subgraph" => self.handle_code_subgraph(id, arguments).await,
             "code_symbol_history" => self.handle_code_symbol_history(id, arguments).await,
             "doc_navigate" => self.handle_doc_navigate(id, arguments).await,
-            "knowledge_context_pack" => self.handle_knowledge_context_pack(id, arguments).await,
-            "knowledge_context_pack_2" => self.handle_knowledge_context_pack_2(id, arguments).await,
+            "knowledge_context_pack" | "knowledge_context_pack_2" => {
+                self.handle_knowledge_context_pack_2(id, arguments).await
+            }
             "submit_plan" => self.handle_submit_plan(id, arguments).await,
             "execute_epic" => self.handle_execute_epic(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
@@ -188,10 +189,9 @@ mod tests {
     fn dispatcher_routes_knowledge_context_pack() {
         let source = include_str!("mod.rs");
         assert!(
-            source.contains(
-                "\"knowledge_context_pack\" => self.handle_knowledge_context_pack(id, arguments).await"
-            ),
-            "knowledge_context_pack must be routed by handle_tool_call",
+            source.contains("\"knowledge_context_pack\" | \"knowledge_context_pack_2\"")
+                && source.contains("self.handle_knowledge_context_pack_2(id, arguments).await"),
+            "knowledge_context_pack must route as a deprecated alias to v2 behavior",
         );
     }
 
@@ -199,10 +199,9 @@ mod tests {
     fn dispatcher_routes_knowledge_context_pack_2() {
         let source = include_str!("mod.rs");
         assert!(
-            source.contains(
-                "\"knowledge_context_pack_2\" => self.handle_knowledge_context_pack_2(id, arguments).await"
-            ),
-            "knowledge_context_pack_2 must be routed by handle_tool_call",
+            source.contains("\"knowledge_context_pack\" | \"knowledge_context_pack_2\"")
+                && source.contains("self.handle_knowledge_context_pack_2(id, arguments).await"),
+            "knowledge_context_pack_2 must be the canonical dispatcher route",
         );
     }
 }
