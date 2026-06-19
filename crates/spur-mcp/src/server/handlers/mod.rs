@@ -1,11 +1,9 @@
 pub(crate) mod code_graph;
 pub(crate) mod delegation;
 pub(crate) mod doc_navigate;
-pub(crate) mod graph;
 pub(crate) mod knowledge_context;
 pub(crate) mod plan;
 pub(crate) mod plan_execute;
-pub(crate) mod pm;
 
 use super::McpCallbackServer;
 use super::*;
@@ -86,9 +84,6 @@ impl McpCallbackServer {
             "fetch_outcome_artifact" => self.handle_fetch_outcome_artifact(id, arguments).await,
             "cancel_delegation" => self.handle_cancel_delegation(id, arguments).await,
             "list_available_workers" => self.handle_list_available_workers(id).await,
-            "get_issue" => self.handle_get_issue(id, arguments).await,
-            "list_issues" => self.handle_list_issues(id, arguments).await,
-            "update_issue" => self.handle_update_issue(id, arguments).await,
             "report_signal" => {
                 if let Some(response) =
                     self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
@@ -145,17 +140,9 @@ impl McpCallbackServer {
                     }
                 }
             }
-            "create_issue" => self.handle_create_issue(id, arguments).await,
-            "add_dependency" => self.handle_add_dependency(id, arguments).await,
-            "create_pr" => self.handle_create_pr(id, arguments).await,
             "merge_plan" => self.handle_merge_plan(id, arguments).await,
             "resume_plan" => self.handle_resume_plan(id, arguments).await,
             "force_reclaim_plan" => self.handle_force_reclaim_plan(id, arguments).await,
-            "graph_triage" => self.handle_graph_triage(id, arguments).await,
-            "graph_plan" => self.handle_graph_plan(id, arguments).await,
-            "graph_insights" => self.handle_graph_insights(id, arguments).await,
-            "graph_alerts" => self.handle_graph_alerts(id, arguments).await,
-            "graph_subgraph" => self.handle_graph_subgraph(id, arguments).await,
             "code_resolve" => self.handle_code_resolve(id, arguments).await,
             // `code_search` is the legacy alias for `code_symbol_search`.
             "code_symbol_search" | "code_search" => self.handle_code_search(id, arguments).await,

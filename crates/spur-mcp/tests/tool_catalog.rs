@@ -55,6 +55,20 @@ const EXPECTED: &[&str] = &[
     "report_progress",
 ];
 
+const PM_ISSUE_GRAPH_TOOLS: &[&str] = &[
+    "get_issue",
+    "list_issues",
+    "update_issue",
+    "create_issue",
+    "add_dependency",
+    "create_pr",
+    "graph_triage",
+    "graph_plan",
+    "graph_insights",
+    "graph_alerts",
+    "graph_subgraph",
+];
+
 #[test]
 fn tool_catalog_matches_expected() {
     let actual: Vec<String> = tools_list().iter().map(|t| t.name.clone()).collect();
@@ -63,6 +77,30 @@ fn tool_catalog_matches_expected() {
         actual, expected,
         "tool_catalog drift detected; update EXPECTED in tests/tool_catalog.rs if intentional",
     );
+}
+
+#[test]
+fn pm_module_definitions_are_composed_into_brain_catalog() {
+    let pm_module = spur_pm::mcp::PmMcpModule::new(Default::default());
+    let module_defs = pm_module.tools();
+    let module_names: Vec<&str> = module_defs.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(module_names, PM_ISSUE_GRAPH_TOOLS);
+
+    let brain_defs = tools_list();
+    for module_def in module_defs {
+        let brain_def = brain_defs
+            .iter()
+            .find(|tool| tool.name == module_def.name)
+            .unwrap_or_else(|| panic!("brain catalog missing {}", module_def.name));
+        let module_json =
+            serde_json::to_string(&module_def).expect("serialize pm module tool definition");
+        let brain_json = serde_json::to_string(brain_def).expect("serialize brain tool definition");
+        assert_eq!(
+            brain_json, module_json,
+            "brain catalog definition for {} must be byte-for-byte identical to the PM module",
+            module_def.name
+        );
+    }
 }
 
 #[test]

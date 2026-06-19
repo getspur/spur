@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
-use spur_mcp::handlers::{update_issue, McpHandlerError, WorkerCallContext};
+use spur_pm::mcp::{update_issue, McpHandlerError};
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 
@@ -44,12 +44,8 @@ async fn update_issue_writes_comment_via_pm() {
         "id": issue_id.clone(),
         "comment": "hello from worker"
     });
-    let ctx = WorkerCallContext {
-        delegation_id: "d".into(),
-        brain_session_id: "b".into(),
-    };
 
-    let result = update_issue(&pm, &ctx, args).await.unwrap();
+    let result = update_issue(&pm, args).await.unwrap();
     assert_eq!(result["ok"], true);
 
     let comments = pm
@@ -73,12 +69,8 @@ async fn update_issue_missing_id_invalid_params() {
     run_br(dir.path(), &["init"]);
 
     let pm = test_pm_service_empty(dir.path()).await;
-    let ctx = WorkerCallContext {
-        delegation_id: "d".into(),
-        brain_session_id: "b".into(),
-    };
 
-    let err = update_issue(&pm, &ctx, json!({"comment": "x"}))
+    let err = update_issue(&pm, json!({"comment": "x"}))
         .await
         .expect_err("missing id should produce InvalidParams");
 
@@ -97,12 +89,8 @@ async fn update_issue_propagates_priority_and_assignee() {
         "priority": 2,
         "assignee": "alice"
     });
-    let ctx = WorkerCallContext {
-        delegation_id: "d".to_string(),
-        brain_session_id: "b".to_string(),
-    };
 
-    update_issue(&pm, &ctx, args)
+    update_issue(&pm, args)
         .await
         .expect("update_issue should succeed");
 
