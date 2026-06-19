@@ -53,7 +53,7 @@ fn advanced_beads<'a>(
     pm.advanced().expect("advanced backend")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn derive_beads_version_advances_through_bd334_task_audit_sequence() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -128,7 +128,7 @@ async fn derive_beads_version_advances_through_bd334_task_audit_sequence() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn derive_beads_version_does_not_collide_across_plan_restart_same_plan_id() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -210,7 +210,7 @@ async fn derive_beads_version_does_not_collide_across_plan_restart_same_plan_id(
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn derive_beads_version_includes_malformed_task_audit_sentinel() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;

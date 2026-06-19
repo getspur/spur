@@ -2842,17 +2842,17 @@ async fn code_read_symbol_clamps_and_echoes_context_lines() {
 }
 
 #[tokio::test]
-async fn code_search_recovers_macro_bodied_callees_for_tools_list() {
+async fn code_search_recovers_macro_bodied_callees_for_legacy_tool_definitions() {
     let _lock = CWD_LOCK.lock().expect("cwd lock");
     let worktree = TempDir::new().expect("temp worktree");
     let artifact = build_real_tools_graph_artifact(worktree.path());
-    let tools_list = symbol_by_file_entity_kind(
+    let legacy_tools = symbol_by_file_entity_kind(
         &artifact,
         "crates/spur-mcp/src/tools.rs",
-        "tools_list",
+        "legacy_tools_definitions",
         "function",
     );
-    let tools_list_uri = format!("graph://symbol/{}", tools_list.stable_symbol_id);
+    let legacy_tools_uri = format!("graph://symbol/{}", legacy_tools.stable_symbol_id);
     let _cwd = enter_dir(worktree.path());
     let server = test_server();
 
@@ -2860,7 +2860,7 @@ async fn code_search_recovers_macro_bodied_callees_for_tools_list() {
         call_tool(
             &server,
             "code_callees",
-            json!({ "selector": tools_list_uri }),
+            json!({ "selector": legacy_tools_uri }),
         )
         .await,
     );
@@ -2893,10 +2893,12 @@ async fn code_search_recovers_macro_bodied_callees_for_tools_list() {
         "expected at least 30 *_def functions, got {}",
         search["total_matches"]
     );
-    assert!(candidates.iter().all(|candidate| candidate["entity_name"]
-        .as_str()
-        .expect("entity_name")
-        .ends_with("_def")));
+    let allowed_compatibility_helpers =
+        ["legacy_tools_definitions", "legacy_worker_tool_definitions"];
+    assert!(candidates.iter().all(|candidate| {
+        let name = candidate["entity_name"].as_str().expect("entity_name");
+        name.ends_with("_def") || allowed_compatibility_helpers.contains(&name)
+    }));
 
     let submit_tools = tool_body(
         call_tool(
