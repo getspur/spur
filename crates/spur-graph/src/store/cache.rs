@@ -1013,6 +1013,7 @@ mod tests {
             },
             write_batch_size: 512,
             previous_artifact_dir: None,
+            delta: None,
         }
     }
 
