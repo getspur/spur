@@ -15,17 +15,13 @@ use spur_graph::store::{
     CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
 };
 
-const INIT_SQL: &str = include_str!("../../../spur-context/poc/duckdb-analyst/init.sql");
-const INIT_TEMPORAL_SQL: &str =
-    include_str!("../../../spur-context/poc/duckdb-analyst/init_temporal.sql");
+const INIT_SQL: &str = include_str!("../../../spur-context/analyst/init.sql");
+const INIT_TEMPORAL_SQL: &str = include_str!("../../../spur-context/analyst/init_temporal.sql");
 const INIT_DIAGNOSTICS_SQL: &str =
-    include_str!("../../../spur-context/poc/duckdb-analyst/init_diagnostics.sql");
-const INIT_ALGORITHMS_SQL: &str =
-    include_str!("../../../spur-context/poc/duckdb-analyst/init_algorithms.sql");
-const INIT_VIEWS_SQL: &str =
-    include_str!("../../../spur-context/poc/duckdb-analyst/init_views.sql");
-const INIT_SEARCH_SQL: &str =
-    include_str!("../../../spur-context/poc/duckdb-analyst/init_search.sql");
+    include_str!("../../../spur-context/analyst/init_diagnostics.sql");
+const INIT_ALGORITHMS_SQL: &str = include_str!("../../../spur-context/analyst/init_algorithms.sql");
+const INIT_VIEWS_SQL: &str = include_str!("../../../spur-context/analyst/init_views.sql");
+const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 const LANCE_ATTACH_PLACEHOLDER: &str = "__SPUR_LANCE_ATTACH_SQL__";
 const SECTIONS_SOURCE_PLACEHOLDER: &str = "__SPUR_SECTIONS_SOURCE_SQL__";

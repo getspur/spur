@@ -13,7 +13,7 @@ use spur_analyst::{
 use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
 use spur_graph::{artifact_from_facts, build_facts, EMBEDDING_VECTOR_DIMENSIONS};
 
-const INIT_SEARCH_SQL: &str = include_str!("../../spur-context/poc/duckdb-analyst/init_search.sql");
+const INIT_SEARCH_SQL: &str = include_str!("../../spur-context/analyst/init_search.sql");
 const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
