@@ -768,6 +768,68 @@ fn context_paths_return_bounded_shortest_path_rows_via_sql_fallback() {
 }
 
 #[test]
+fn context_paths_count_parallel_edges_as_one_directed_node_sequence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_parallel_edge_path_fixture(&conn);
+    drop(conn);
+
+    let result = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-b",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 5,
+            undirected: false,
+        },
+    )
+    .expect("query directed parallel-edge path");
+
+    assert_eq!(result.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(result.status, KnowledgePathStatus::PathFound);
+    assert_eq!(result.rows.len(), 1, "{:#?}", result.rows);
+    let row = &result.rows[0];
+    assert_eq!(row.path_index, 0);
+    assert_eq!(row.hop_index, 0);
+    assert_eq!(row.source_stable_id, "sym-a");
+    assert_eq!(row.target_stable_id, "sym-b");
+    assert_eq!(row.direction, None);
+}
+
+#[test]
+fn undirected_context_paths_count_parallel_edges_as_one_node_sequence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_parallel_edge_path_fixture(&conn);
+    drop(conn);
+
+    let result = query_context_paths(
+        &db_path,
+        "sym-b",
+        "sym-a",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 5,
+            undirected: true,
+        },
+    )
+    .expect("query undirected parallel-edge path");
+
+    assert_eq!(result.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(result.status, KnowledgePathStatus::PathFound);
+    assert_eq!(result.rows.len(), 1, "{:#?}", result.rows);
+    let row = &result.rows[0];
+    assert_eq!(row.path_index, 0);
+    assert_eq!(row.hop_index, 0);
+    assert_eq!(row.source_stable_id, "sym-b");
+    assert_eq!(row.target_stable_id, "sym-a");
+    assert_eq!(row.direction.as_deref(), Some("reverse"));
+}
+
+#[test]
 fn context_paths_return_no_path_status() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
@@ -1128,6 +1190,45 @@ fn create_path_fixture(conn: &duckdb::Connection) {
         "#,
     )
     .expect("create path fixture schema");
+}
+
+fn create_parallel_edge_path_fixture(conn: &duckdb::Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('parallel-path-fixture-hash');
+
+        CREATE TABLE nodes (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT,
+            file_path VARCHAR,
+            entity_name VARCHAR,
+            qualified_name VARCHAR,
+            symbol_kind VARCHAR
+        );
+        INSERT INTO nodes VALUES
+            ('sym-a', 1, 'src/a.rs', 'a', 'fixture::a', 'function'),
+            ('sym-b', 2, 'src/b.rs', 'b', 'fixture::b', 'function');
+
+        CREATE TABLE edges (
+            source_stable_id VARCHAR,
+            target_stable_id VARCHAR,
+            src_id BIGINT,
+            dst_id BIGINT,
+            target_label VARCHAR,
+            relation VARCHAR,
+            confidence VARCHAR,
+            confidence_score FLOAT,
+            edge_kind VARCHAR,
+            bind_method VARCHAR
+        );
+        INSERT INTO edges VALUES
+            ('sym-a', 'sym-b', 1, 2, 'b', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton'),
+            ('sym-a', 'sym-b', 1, 2, 'b', 'references_other', 'syntax_exact', 0.8, 'references_other', 'name_resolution'),
+            ('sym-a', 'sym-b', 1, 2, 'b', 'imports', 'syntax_exact', 0.7, 'imports', 'import_resolution');
+        "#,
+    )
+    .expect("create parallel edge path fixture schema");
 }
 
 fn create_simple_directed_path_fixture(conn: &duckdb::Connection) {
