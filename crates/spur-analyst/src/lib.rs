@@ -757,8 +757,11 @@ fn query_recursive_context_path_rows(
          ), \
          complete_paths AS ( \
            SELECT row_number() OVER (ORDER BY depth, sort_key) - 1 AS path_index, depth, node_path \
-           FROM walk \
-           WHERE current_id = ?2 AND depth > 0 \
+           FROM ( \
+             SELECT DISTINCT depth, node_path, sort_key \
+             FROM walk \
+             WHERE current_id = ?2 AND depth > 0 \
+           ) \
            ORDER BY depth, sort_key \
            LIMIT {max_paths} \
          ), \
@@ -838,8 +841,11 @@ fn query_recursive_undirected_context_path_rows(
           ), \
           complete_paths AS ( \
             SELECT row_number() OVER (ORDER BY depth, sort_key) - 1 AS path_index, depth, node_path \
-            FROM walk \
-            WHERE current_id = ?2 AND depth > 0 \
+            FROM ( \
+              SELECT DISTINCT depth, node_path, sort_key \
+              FROM walk \
+              WHERE current_id = ?2 AND depth > 0 \
+            ) \
             ORDER BY depth, sort_key \
             LIMIT {max_paths} \
           ), \
