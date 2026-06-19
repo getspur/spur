@@ -1,4 +1,10 @@
-# SPUR code-graph analyst — DuckDB POC
+# SPUR code-graph analyst — DuckDB build
+
+> **Not a proof-of-concept.** Despite this directory's history (it began life
+> under `poc/duckdb-analyst/`), the SQL here is the production source of the
+> `.spur/analyst.duckdb` build: `init*.sql` are compiled into `spur-cli` and
+> `spur-mcp` via `include_str!` and rebuilt automatically by `spur-cli graph
+> build`. Treat these files as shipping code.
 
 Stands up a local **DuckDB** instance that reads the current spur-graph
 Parquet artifact via `.spur/graph/CURRENT`, loads **DuckPGQ** (SQL/PGQ pattern
@@ -12,14 +18,14 @@ Architecturally this is the warm tier from `bd-1rqxk`:
 ```
 spur-graph (petgraph, hot)  ◄── code_callers / code_callees / code_subgraph
        │
-       └─ artifact Parquet ─►  this POC: DuckDB + DuckPGQ + Onager (warm)
+       └─ artifact Parquet ─►  analyst: DuckDB + DuckPGQ + Onager (warm)
                                        │
                                        └─ DuckDB MCP server (separate process)
                                                                  │
                                                                  └─ brain  (data-analyst profile)
 ```
 
-No SPUR Rust crate links `libduckdb` in this POC. The brain talks to DuckDB
+No SPUR Rust crate links `libduckdb` in this design. The brain talks to DuckDB
 only via an MCP subprocess.
 
 ## Building the analyst DuckDB
@@ -37,7 +43,7 @@ spur-cli graph build --workspace
 spur-cli analyst build
 
 # Legacy entry point — forwards to `spur-cli analyst build`.
-./crates/spur-context/poc/duckdb-analyst/setup.sh
+./crates/spur-context/analyst/setup.sh
 ```
 
 ### Opting out
@@ -236,8 +242,9 @@ extension state" below.
    `explain(sql)`.
 4. Enforces statement timeout, row cap, rejects DDL/DML.
 
-Recommended once the POC turns into a real capability — gives exact control
-over safety rails. For the POC, use Option A and accept the rough edges.
+Recommended for the production analyst surface — gives exact control over
+safety rails. For a quick local spin-up, use Option A and accept the rough
+edges.
 
 ## Per-connection extension state — the one gotcha
 
