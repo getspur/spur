@@ -17,7 +17,7 @@ use spur_graph::{
     WriteOptions,
 };
 
-const INIT_SQL: &str = include_str!("../../spur-context/poc/duckdb-analyst/init.sql");
+const INIT_SQL: &str = include_str!("../../spur-context/analyst/init.sql");
 
 fn duckdb_cli_present() -> bool {
     std::env::var_os("PATH")
