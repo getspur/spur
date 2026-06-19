@@ -12,7 +12,9 @@ use super::*;
 
 impl McpCallbackServer {
     pub(crate) fn rmcp_tools(&self) -> Vec<Tool> {
-        tools::tools_list()
+        crate::registry::default_tool_registry()
+            .expect("default MCP tool registry must be valid")
+            .list_tools()
             .into_iter()
             .map(|def| Tool::new(def.name, def.description, rmcp_object(def.input_schema)))
             .collect()
@@ -63,7 +65,21 @@ impl McpCallbackServer {
             return JsonRpcResponse::internal_error(id, "server not yet bound to brain session");
         }
 
-        match tool_name.as_str() {
+        let ctx = crate::registry::ToolCallContext::brain_server(self, &id);
+        let registry = crate::registry::default_tool_registry()
+            .expect("default MCP tool registry must be valid");
+        registry.call_json_tool(ctx, &tool_name, arguments).await
+    }
+
+    pub(crate) async fn handle_registered_tool_call(
+        &self,
+        ctx: crate::registry::ToolCallContext<'_>,
+        tool_name: &str,
+        arguments: Value,
+    ) -> JsonRpcResponse {
+        let id = ctx.request_id_value();
+
+        match tool_name {
             "delegate_to_worker" => self.handle_delegate_to_worker(id, arguments).await,
             "delegate_parallel" => self.handle_delegate_parallel(id, arguments).await,
             "check_delegation_status" => self.handle_check_delegation_status(id, arguments).await,
@@ -86,14 +102,20 @@ impl McpCallbackServer {
                     }
                 };
 
-                let ctx = crate::handlers::WorkerCallContext {
+                let brain_session_id = ctx
+                    .brain_session_id
+                    .unwrap_or_else(|| self.brain_session_id())
+                    .as_session_id()
+                    .0
+                    .clone();
+                let worker_ctx = crate::handlers::WorkerCallContext {
                     delegation_id: String::new(),
-                    brain_session_id: self.brain_session_id().as_session_id().0.clone(),
+                    brain_session_id,
                 };
                 match crate::handlers::report_signal(
                     pm.as_ref(),
                     self.feature_gate.as_ref(),
-                    &ctx,
+                    &worker_ctx,
                     arguments,
                 )
                 .await

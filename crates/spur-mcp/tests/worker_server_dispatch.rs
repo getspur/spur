@@ -333,6 +333,7 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         "code_subgraph",
         "code_symbol_history",
         "knowledge_context_pack",
+        "knowledge_context_pack_2",
         "report_signal",
         "report_progress",
     ];
