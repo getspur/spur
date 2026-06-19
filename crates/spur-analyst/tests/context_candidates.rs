@@ -830,6 +830,127 @@ fn undirected_context_paths_count_parallel_edges_as_one_node_sequence() {
 }
 
 #[test]
+fn contains_hops_are_not_traversable_in_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_contains_only_path_fixture(&conn);
+    drop(conn);
+
+    let undirected = query_context_paths(
+        &db_path,
+        "sym-source",
+        "sym-target",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 3,
+            undirected: true,
+        },
+    )
+    .expect("query undirected containment path");
+    assert_eq!(undirected.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(undirected.rows.len(), 0, "{undirected:#?}");
+    assert_eq!(undirected.status, KnowledgePathStatus::NoPath);
+
+    let directed = query_context_paths(
+        &db_path,
+        "sym-parent",
+        "sym-source",
+        KnowledgePathOptions {
+            max_hops: 1,
+            max_paths: 1,
+            undirected: false,
+        },
+    )
+    .expect("query directed containment path");
+    assert_eq!(directed.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(directed.rows.len(), 0, "{directed:#?}");
+    assert_eq!(directed.status, KnowledgePathStatus::NoPath);
+}
+
+#[test]
+fn external_import_hub_is_not_traversable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_external_import_hub_path_fixture(&conn);
+    drop(conn);
+
+    let undirected = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-b",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 3,
+            undirected: true,
+        },
+    )
+    .expect("query undirected external import hub path");
+    assert_eq!(undirected.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(undirected.rows.len(), 0, "{undirected:#?}");
+    assert_eq!(undirected.status, KnowledgePathStatus::NoPath);
+
+    let directed = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-hub",
+        KnowledgePathOptions {
+            max_hops: 1,
+            max_paths: 1,
+            undirected: false,
+        },
+    )
+    .expect("query directed external import path");
+    assert_eq!(directed.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(directed.rows.len(), 0, "{directed:#?}");
+    assert_eq!(directed.status, KnowledgePathStatus::NoPath);
+}
+
+#[test]
+fn real_calls_path_still_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_real_dependency_path_fixture(&conn);
+    drop(conn);
+
+    let calls = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-b",
+        KnowledgePathOptions {
+            max_hops: 1,
+            max_paths: 1,
+            undirected: false,
+        },
+    )
+    .expect("query directed calls path");
+    assert_eq!(calls.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(calls.status, KnowledgePathStatus::PathFound);
+    assert_eq!(calls.rows.len(), 1, "{calls:#?}");
+    assert_eq!(calls.rows[0].edge_kind.as_deref(), Some("calls"));
+
+    let first_party_import = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-c",
+        KnowledgePathOptions {
+            max_hops: 1,
+            max_paths: 1,
+            undirected: false,
+        },
+    )
+    .expect("query directed first-party import path");
+    assert_eq!(first_party_import.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(first_party_import.status, KnowledgePathStatus::PathFound);
+    assert_eq!(first_party_import.rows.len(), 1, "{first_party_import:#?}");
+    let import_row = &first_party_import.rows[0];
+    assert_eq!(import_row.relation.as_deref(), Some("imports"));
+    assert_eq!(import_row.bind_method.as_deref(), Some("singleton"));
+}
+
+#[test]
 fn context_paths_return_no_path_status() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
@@ -1229,6 +1350,123 @@ fn create_parallel_edge_path_fixture(conn: &duckdb::Connection) {
         "#,
     )
     .expect("create parallel edge path fixture schema");
+}
+
+fn create_contains_only_path_fixture(conn: &duckdb::Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('contains-path-fixture-hash');
+
+        CREATE TABLE nodes (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT,
+            file_path VARCHAR,
+            entity_name VARCHAR,
+            qualified_name VARCHAR,
+            symbol_kind VARCHAR
+        );
+        INSERT INTO nodes VALUES
+            ('sym-parent', 1, 'src/parent.rs', 'parent', 'fixture::parent', 'module'),
+            ('sym-source', 2, 'src/parent.rs', 'source', 'fixture::parent::source', 'function'),
+            ('sym-target', 3, 'src/parent.rs', 'target', 'fixture::parent::target', 'function');
+
+        CREATE TABLE edges (
+            source_stable_id VARCHAR,
+            target_stable_id VARCHAR,
+            src_id BIGINT,
+            dst_id BIGINT,
+            target_label VARCHAR,
+            relation VARCHAR,
+            confidence VARCHAR,
+            confidence_score FLOAT,
+            edge_kind VARCHAR,
+            bind_method VARCHAR
+        );
+        INSERT INTO edges VALUES
+            ('sym-parent', 'sym-source', 1, 2, 'source', 'contains', 'syntax_exact', 1.0, 'references_other', 'scope'),
+            ('sym-parent', 'sym-target', 1, 3, 'target', 'contains', 'syntax_exact', 1.0, 'references_other', 'scope');
+        "#,
+    )
+    .expect("create contains-only path fixture schema");
+}
+
+fn create_external_import_hub_path_fixture(conn: &duckdb::Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('external-import-path-fixture-hash');
+
+        CREATE TABLE nodes (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT,
+            file_path VARCHAR,
+            entity_name VARCHAR,
+            qualified_name VARCHAR,
+            symbol_kind VARCHAR
+        );
+        INSERT INTO nodes VALUES
+            ('sym-a', 1, 'src/a.rs', 'a', 'fixture::a', 'function'),
+            ('sym-b', 2, 'src/b.rs', 'b', 'fixture::b', 'function'),
+            ('sym-hub', 3, 'external/serde.rs', 'serde', 'serde', 'module');
+
+        CREATE TABLE edges (
+            source_stable_id VARCHAR,
+            target_stable_id VARCHAR,
+            src_id BIGINT,
+            dst_id BIGINT,
+            target_label VARCHAR,
+            relation VARCHAR,
+            confidence VARCHAR,
+            confidence_score FLOAT,
+            edge_kind VARCHAR,
+            bind_method VARCHAR
+        );
+        INSERT INTO edges VALUES
+            ('sym-a', 'sym-hub', 1, 3, 'serde', 'imports', 'syntax_exact', 1.0, 'references_other', 'external'),
+            ('sym-b', 'sym-hub', 2, 3, 'serde', 'imports', 'syntax_exact', 1.0, 'references_other', 'external');
+        "#,
+    )
+    .expect("create external-import hub path fixture schema");
+}
+
+fn create_real_dependency_path_fixture(conn: &duckdb::Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('real-dependency-path-fixture-hash');
+
+        CREATE TABLE nodes (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT,
+            file_path VARCHAR,
+            entity_name VARCHAR,
+            qualified_name VARCHAR,
+            symbol_kind VARCHAR
+        );
+        INSERT INTO nodes VALUES
+            ('sym-a', 1, 'src/a.rs', 'a', 'fixture::a', 'function'),
+            ('sym-b', 2, 'src/b.rs', 'b', 'fixture::b', 'function'),
+            ('sym-c', 3, 'src/c.rs', 'c', 'fixture::c', 'function');
+
+        CREATE TABLE edges (
+            source_stable_id VARCHAR,
+            target_stable_id VARCHAR,
+            src_id BIGINT,
+            dst_id BIGINT,
+            target_label VARCHAR,
+            relation VARCHAR,
+            confidence VARCHAR,
+            confidence_score FLOAT,
+            edge_kind VARCHAR,
+            bind_method VARCHAR
+        );
+        INSERT INTO edges VALUES
+            ('sym-a', 'sym-b', 1, 2, 'b', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton'),
+            ('sym-a', 'sym-c', 1, 3, 'c', 'imports', 'syntax_exact', 1.0, 'references_other', 'singleton');
+        "#,
+    )
+    .expect("create real-dependency path fixture schema");
 }
 
 fn create_simple_directed_path_fixture(conn: &duckdb::Connection) {
