@@ -38,7 +38,7 @@ use tracing::{debug, error, info};
 
 use spur_acp::*;
 use spur_license::FeatureKey;
-use spur_pm::{IssueFilter, IssueSummary, IssueUpdate, PmService, PrParams};
+use spur_pm::{IssueFilter, IssueSummary, IssueUpdate, PmService};
 use spur_worktree::WorktreeManager;
 
 use crate::outcome_materializer::OutcomeMaterializer;

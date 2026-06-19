@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
-use spur_mcp::handlers::{get_issue, McpHandlerError, WorkerCallContext};
+use spur_pm::mcp::{get_issue, McpHandlerError};
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 
@@ -41,12 +41,8 @@ async fn get_issue_returns_issue_via_pm_service() {
     let pm = pm_service_fixture(dir.path()).await;
     let issue_id = create_issue(&pm, "Issue title", "test issue body").await;
     let args = json!({ "id": issue_id.clone() });
-    let ctx = WorkerCallContext {
-        delegation_id: "d-1".to_string(),
-        brain_session_id: "b-1".to_string(),
-    };
 
-    let value = get_issue(&pm, &ctx, args)
+    let value = get_issue(&pm, args)
         .await
         .expect("get_issue should return issue");
 
@@ -61,12 +57,8 @@ async fn get_issue_missing_id_param_returns_invalid_params() {
 
     let pm = pm_service_fixture(dir.path()).await;
     let args = json!({});
-    let ctx = WorkerCallContext {
-        delegation_id: "d-1".to_string(),
-        brain_session_id: "b-1".to_string(),
-    };
 
-    let err = get_issue(&pm, &ctx, args)
+    let err = get_issue(&pm, args)
         .await
         .expect_err("get_issue should return invalid params error");
     assert!(matches!(err, McpHandlerError::InvalidParams(_)));
