@@ -11,7 +11,7 @@ use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
 use spur_graph::store::lance_sections::{
     SectionSidecarOptions, SectionSidecarProgressCallback, SectionSidecarProgressEvent,
-    SidecarPhase,
+    SidecarDelta, SidecarPhase, SidecarRowScope,
 };
 use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
@@ -115,14 +115,17 @@ pub fn build_with_section_embedding_override(
         }
     };
 
-    let section_sidecar_options =
-        SectionSidecarOptions::from_env_with_skip_override(no_section_embeddings)
-            .with_previous_artifact_dir(previous_artifact_path);
-
+    let mut sidecar_delta = None;
     let (mut artifact, file_counts, node_count, edge_count) = match previous_artifact {
         Some(prev) => match artifact_from_facts_incremental(&prev, &root) {
-            Ok((artifact, build_mode, _stats)) => {
+            Ok((artifact, build_mode, stats)) => {
                 mode = build_mode;
+                if build_mode == BuildMode::Incremental {
+                    sidecar_delta = Some(SidecarDelta::new(
+                        stats.changed_or_added_paths,
+                        stats.removed_paths,
+                    ));
+                }
                 let language_counts = language_counts_from_artifact(&root, &artifact);
                 (
                     artifact.clone(),
@@ -148,6 +151,10 @@ pub fn build_with_section_embedding_override(
                 .map(|stats| extraction_progress_bar(stats.file_count)),
         )?,
     };
+    let section_sidecar_options =
+        SectionSidecarOptions::from_env_with_skip_override(no_section_embeddings)
+            .with_previous_artifact_dir(previous_artifact_path)
+            .with_delta(sidecar_delta);
 
     let mut temporal_write_stage = None;
     if use_temporal {
@@ -563,6 +570,7 @@ fn report_section_sidecar_progress(
             embeddings_enabled,
             embedding_batch_size,
             write_batch_size,
+            row_scope,
         } => {
             if let Some(progress) = progress {
                 progress.enable_steady_tick(Duration::from_millis(120));
@@ -570,8 +578,9 @@ fn report_section_sidecar_progress(
                 progress.set_position(0);
                 progress.set_message("sections: preparing Lance rows");
             }
+            let row_label = sidecar_row_label(row_scope);
             println!(
-                "[spur] Section sidecar: rows: {}, markdown files: {}, embeddings: {}, embed batch: {}, write batch: {}",
+                "[spur] Section sidecar: {row_label}: {}, markdown files: {}, embeddings: {}, embed batch: {}, write batch: {}",
                 fmt_thousands(total_rows),
                 fmt_thousands(markdown_files),
                 if embeddings_enabled { "enabled" } else { "disabled" },
@@ -582,6 +591,7 @@ fn report_section_sidecar_progress(
         SectionSidecarProgressEvent::CodeSymbolsStarted {
             total_rows,
             embeddings_enabled,
+            row_scope,
         } => {
             if let Some(progress) = progress {
                 progress.reset();
@@ -590,8 +600,9 @@ fn report_section_sidecar_progress(
                 progress.set_position(0);
                 progress.set_message("code symbols: preparing Lance rows");
             }
+            let row_label = sidecar_row_label(row_scope);
             println!(
-                "[spur] Code symbol sidecar: rows: {}, embeddings: {}",
+                "[spur] Code symbol sidecar: {row_label}: {}, embeddings: {}",
                 fmt_thousands(total_rows),
                 if embeddings_enabled {
                     "enabled"
@@ -702,18 +713,24 @@ fn report_section_sidecar_progress(
         }
         SectionSidecarProgressEvent::Finished {
             total_rows,
+            final_rows,
             written_rows,
             skipped_existing_rows,
             phase,
+            row_scope,
         } => match phase {
             SidecarPhase::Sections => {
                 if let Some(progress) = progress {
                     progress.finish_and_clear();
                 }
+                let row_label = sidecar_row_label(row_scope);
                 println!(
-                    "[spur] Section sidecar ready: wrote {} rows, skipped {} unchanged rows",
+                    "[spur] Section sidecar ready: processed {} {}, wrote {} rows, skipped {} unchanged rows, final rows: {}",
+                    fmt_thousands(total_rows),
+                    row_label,
                     fmt_thousands(written_rows),
-                    fmt_thousands(skipped_existing_rows)
+                    fmt_thousands(skipped_existing_rows),
+                    fmt_thousands(final_rows)
                 );
             }
             SidecarPhase::CodeSymbols => {
@@ -721,10 +738,14 @@ fn report_section_sidecar_progress(
                     progress.set_position(u64::try_from(total_rows).unwrap_or(u64::MAX));
                     progress.finish_and_clear();
                 }
+                let row_label = sidecar_row_label(row_scope);
                 println!(
-                    "[spur] Code symbol sidecar ready: wrote {} rows, skipped {} unchanged rows",
+                    "[spur] Code symbol sidecar ready: processed {} {}, wrote {} rows, skipped {} unchanged rows, final rows: {}",
+                    fmt_thousands(total_rows),
+                    row_label,
                     fmt_thousands(written_rows),
-                    fmt_thousands(skipped_existing_rows)
+                    fmt_thousands(skipped_existing_rows),
+                    fmt_thousands(final_rows)
                 );
             }
         },
@@ -734,6 +755,13 @@ fn report_section_sidecar_progress(
             }
             eprintln!("[spur] Section sidecar failed; graph artifact remains usable: {error}");
         }
+    }
+}
+
+fn sidecar_row_label(row_scope: SidecarRowScope) -> &'static str {
+    match row_scope {
+        SidecarRowScope::Full => "rows",
+        SidecarRowScope::Delta => "delta rows",
     }
 }
 
