@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
@@ -10,13 +10,8 @@ use spur_graph::{
 };
 use spur_mcp::server::{community_feature_gate, DetachedContinuationCtx};
 use spur_mcp::McpCallbackServer;
-use tokio::sync::Mutex as TokioMutex;
 
-static CWD_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
-
-async fn cwd_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    CWD_LOCK.get_or_init(|| TokioMutex::new(())).lock().await
-}
+static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 struct CwdGuard {
     original: PathBuf,
@@ -114,7 +109,7 @@ fn tool_body(response: Value) -> Value {
 
 #[tokio::test]
 async fn doc_navigate_returns_fts_hits_with_score_and_lede() {
-    let _lock = cwd_lock().await;
+    let _lock = CWD_LOCK.lock().expect("cwd lock");
     let tempdir = tempfile::tempdir().expect("tempdir");
     let worktree = tempdir.path().join("repo");
     std::fs::create_dir_all(&worktree).expect("create worktree");

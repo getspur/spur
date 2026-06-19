@@ -216,6 +216,11 @@ pub struct WorkerMcpServer {
     /// `Arc` so the guard owned by each dispatch task can decrement
     /// independently of the server's lifetime.
     active_delegations: Arc<AtomicU32>,
+    /// High-water mark of `active_delegations`, raised by [`ActiveCallGuard`]
+    /// on each increment and never lowered. Lets [`peak_active_count`]
+    /// report true max concurrency without lossy time-sampling. Same `Arc`
+    /// instance as in [`DispatcherDeps`].
+    peak_active_delegations: Arc<AtomicU32>,
 }
 
 /// RAII guard that increments [`WorkerMcpServer::active_delegations`] on
@@ -228,8 +233,13 @@ struct ActiveCallGuard {
 }
 
 impl ActiveCallGuard {
-    fn new(counter: Arc<AtomicU32>) -> Self {
-        counter.fetch_add(1, Ordering::SeqCst);
+    fn new(counter: Arc<AtomicU32>, peak: &AtomicU32) -> Self {
+        // `fetch_add` returns the prior value; the new in-flight count is +1.
+        let in_flight = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        // Raise the high-water mark to at least the current in-flight count.
+        // Done atomically here, so it captures every momentary overlap with
+        // no sampling gap.
+        peak.fetch_max(in_flight, Ordering::SeqCst);
         Self { counter }
     }
 }
@@ -398,6 +408,11 @@ struct DispatcherDeps {
     /// Shared counter incremented/decremented by [`ActiveCallGuard`] inside
     /// [`dispatch`]. Same `Arc` instance held by [`WorkerMcpServer`].
     active_delegations: Arc<AtomicU32>,
+    /// High-water mark of `active_delegations`: the max concurrent in-flight
+    /// dispatcher count ever observed. Raised by [`ActiveCallGuard`] on each
+    /// increment (never lowered). Same `Arc` instance held by
+    /// [`WorkerMcpServer`].
+    peak_active_delegations: Arc<AtomicU32>,
     /// Per-delegation summary guards. Each entry emits one
     /// `WorkerMcpDelegationSummary` on removal (or on server shutdown).
     delegation_guards:
@@ -905,7 +920,10 @@ impl WorkerToolHandler {
         }
 
         let delegation_id = worker_ctx.delegation_id.clone();
-        let _active_guard = ActiveCallGuard::new(Arc::clone(&self.deps.active_delegations));
+        let _active_guard = ActiveCallGuard::new(
+            Arc::clone(&self.deps.active_delegations),
+            &self.deps.peak_active_delegations,
+        );
         let call_start = Instant::now();
 
         if let Some(target_issue_id) = read_audit_target {
@@ -1671,6 +1689,7 @@ impl WorkerMcpServer {
             Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let (flush_tx, flush_rx) = mpsc::unbounded_channel::<FlushMessage>();
         let active_delegations = Arc::new(AtomicU32::new(0));
+        let peak_active_delegations = Arc::new(AtomicU32::new(0));
         let delegation_guards = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let dispatcher_deps = Arc::new(DispatcherDeps {
             pm_service: deps.pm_service,
@@ -1686,6 +1705,7 @@ impl WorkerMcpServer {
             read_audit_buffers: Arc::clone(&read_audit_buffers),
             flush_tx,
             active_delegations: Arc::clone(&active_delegations),
+            peak_active_delegations: Arc::clone(&peak_active_delegations),
             delegation_guards: Arc::clone(&delegation_guards),
         });
 
@@ -1704,6 +1724,7 @@ impl WorkerMcpServer {
             flusher_handle: Mutex::new(None),
             flush_rx: Mutex::new(Some(flush_rx)),
             active_delegations,
+            peak_active_delegations,
         });
 
         let handler = Arc::new(WorkerToolHandler::new(
@@ -1968,6 +1989,15 @@ impl WorkerMcpServer {
     /// observe pressure without reaching into `DispatcherDeps`.
     pub fn active_count(&self) -> u32 {
         self.active_delegations.load(Ordering::SeqCst)
+    }
+
+    /// High-water mark of [`active_count`](Self::active_count) over this
+    /// server's lifetime — the max concurrent in-flight dispatcher count.
+    /// Recorded atomically on each dispatch entry, so it captures every
+    /// momentary overlap that time-sampled observation can miss. Used by
+    /// concurrency tests to assert real parallelism deterministically.
+    pub fn peak_active_count(&self) -> u32 {
+        self.peak_active_delegations.load(Ordering::SeqCst)
     }
 
     /// `true` while the accept loop is still running — i.e. [`shutdown`]

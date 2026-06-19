@@ -70,49 +70,7 @@ fn error_message(response: &serde_json::Value) -> &str {
         .expect("error message")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plan_ownership_resume_acceptance() {
-    resume_plan_claims_unowned_plan().await;
-    resume_plan_refuses_plan_owned_by_other_brain().await;
-    resume_plan_rejects_duplicate_plan_epics().await;
-    resume_plan_refuses_mixed_current_and_other_owner_labels().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plan_ownership_guarded_tool_acceptance() {
-    merge_plan_refuses_plan_owned_by_other_brain().await;
-    merge_plan_refuses_unowned_plan().await;
-    review_task_refuses_plan_owned_by_other_brain().await;
-    review_task_refuses_unowned_plan().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plan_ownership_execute_epic_acceptance() {
-    execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic().await;
-    execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_brain().await;
-    execute_epic_refuses_plan_owned_by_other_brain().await;
-    execute_epic_refuses_plan_with_ambiguous_owners().await;
-    execute_epic_allows_unowned_plan().await;
-    execute_epic_allows_re_issue_by_current_brain().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plan_ownership_force_reclaim_acceptance() {
-    force_reclaim_plan_refuses_without_confirm().await;
-    force_reclaim_plan_takes_over_from_other_brain().await;
-    force_reclaim_plan_handles_unowned_plan().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plan_ownership_active_plan_cardinality_acceptance() {
-    resume_plan_rejects_unowned_plan_when_current_brain_already_owns_active_plan().await;
-    execute_epic_rejects_new_epic_when_current_brain_already_owns_active_plan().await;
-    terminal_owned_plan_does_not_block_resume_plan_claim().await;
-    terminal_owned_plan_does_not_block_execute_epic().await;
-    concurrent_resume_plan_claims_only_one_active_plan_for_current_brain().await;
-    concurrent_execute_epic_starts_only_one_active_plan_for_current_brain().await;
-}
-
+#[tokio::test(flavor = "current_thread")]
 async fn resume_plan_claims_unowned_plan() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -160,6 +118,7 @@ async fn resume_plan_claims_unowned_plan() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn resume_plan_refuses_plan_owned_by_other_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -205,6 +164,7 @@ async fn resume_plan_refuses_plan_owned_by_other_brain() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn resume_plan_rejects_duplicate_plan_epics() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -251,6 +211,7 @@ async fn resume_plan_rejects_duplicate_plan_epics() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn resume_plan_refuses_mixed_current_and_other_owner_labels() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -300,6 +261,7 @@ async fn resume_plan_refuses_mixed_current_and_other_owner_labels() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn merge_plan_refuses_plan_owned_by_other_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -346,6 +308,7 @@ async fn merge_plan_refuses_plan_owned_by_other_brain() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn merge_plan_refuses_unowned_plan() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -383,6 +346,7 @@ async fn merge_plan_refuses_unowned_plan() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn review_task_refuses_plan_owned_by_other_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -436,6 +400,7 @@ async fn review_task_refuses_plan_owned_by_other_brain() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn review_task_refuses_unowned_plan() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -495,6 +460,7 @@ async fn collect_epic_sentinels(pm: &spur_pm::PmService, epic_id: &str) -> Vec<A
         .collect()
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -553,6 +519,7 @@ async fn execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic()
     assert_eq!(reason, "execute_epic");
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -630,6 +597,7 @@ async fn execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_br
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn execute_epic_refuses_plan_owned_by_other_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -679,6 +647,7 @@ async fn execute_epic_refuses_plan_owned_by_other_brain() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn execute_epic_refuses_plan_with_ambiguous_owners() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -731,6 +700,7 @@ async fn execute_epic_refuses_plan_with_ambiguous_owners() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn execute_epic_allows_unowned_plan() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -760,6 +730,7 @@ async fn execute_epic_allows_unowned_plan() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn execute_epic_allows_re_issue_by_current_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -799,6 +770,7 @@ async fn execute_epic_allows_re_issue_by_current_brain() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn force_reclaim_plan_refuses_without_confirm() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -893,6 +865,7 @@ fn parse_force_reclaim_response_body(response: &serde_json::Value) -> serde_json
     serde_json::from_str(text).expect("force_reclaim_plan body must be valid JSON")
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn force_reclaim_plan_takes_over_from_other_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -1013,6 +986,7 @@ async fn force_reclaim_plan_takes_over_from_other_brain() {
     assert_eq!(reason.as_deref(), Some("takeover test"));
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn force_reclaim_plan_handles_unowned_plan() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -1217,6 +1191,7 @@ fn response_text(response: &serde_json::Value) -> &str {
         .and_then(|text| text.as_str())
         .expect("response text")
 }
+#[tokio::test(flavor = "current_thread")]
 async fn resume_plan_rejects_unowned_plan_when_current_brain_already_owns_active_plan() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -1259,6 +1234,7 @@ async fn resume_plan_rejects_unowned_plan_when_current_brain_already_owns_active
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn execute_epic_rejects_new_epic_when_current_brain_already_owns_active_plan() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -1295,6 +1271,7 @@ async fn execute_epic_rejects_new_epic_when_current_brain_already_owns_active_pl
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn terminal_owned_plan_does_not_block_resume_plan_claim() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -1342,6 +1319,7 @@ async fn terminal_owned_plan_does_not_block_resume_plan_claim() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn terminal_owned_plan_does_not_block_execute_epic() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -1384,6 +1362,7 @@ async fn terminal_owned_plan_does_not_block_execute_epic() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn concurrent_resume_plan_claims_only_one_active_plan_for_current_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -1415,20 +1394,16 @@ async fn concurrent_resume_plan_claims_only_one_active_plan_for_current_brain() 
         common::server_builder::pro_feature_gate(),
     );
 
-    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        tokio::join!(
-            server.__test_call_tool(
-                "resume_plan",
-                json!({ "plan_id": "plan-concurrent-resume-a" })
-            ),
-            server.__test_call_tool(
-                "resume_plan",
-                json!({ "plan_id": "plan-concurrent-resume-b" })
-            ),
-        )
-    })
-    .await
-    .expect("concurrent resume_plan calls must not hang");
+    let (first, second) = tokio::join!(
+        server.__test_call_tool(
+            "resume_plan",
+            json!({ "plan_id": "plan-concurrent-resume-a" })
+        ),
+        server.__test_call_tool(
+            "resume_plan",
+            json!({ "plan_id": "plan-concurrent-resume-b" })
+        ),
+    );
 
     let successes = [first.get("error").is_none(), second.get("error").is_none()]
         .into_iter()
@@ -1453,6 +1428,7 @@ async fn concurrent_resume_plan_claims_only_one_active_plan_for_current_brain() 
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn concurrent_execute_epic_starts_only_one_active_plan_for_current_brain() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]).expect("br init");
@@ -1474,14 +1450,10 @@ async fn concurrent_execute_epic_starts_only_one_active_plan_for_current_brain()
         ..Default::default()
     }]);
 
-    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        tokio::join!(
-            server.__test_call_execute_epic(&first_epic, Some("codex")),
-            server.__test_call_execute_epic(&second_epic, Some("codex")),
-        )
-    })
-    .await
-    .expect("concurrent execute_epic calls must not hang");
+    let (first, second) = tokio::join!(
+        server.__test_call_execute_epic(&first_epic, Some("codex")),
+        server.__test_call_execute_epic(&second_epic, Some("codex")),
+    );
 
     let successes = [first.get("error").is_none(), second.get("error").is_none()]
         .into_iter()

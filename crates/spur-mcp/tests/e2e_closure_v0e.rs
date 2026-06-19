@@ -190,13 +190,7 @@ impl ReconcilerAutomation for RecordingAutomation {
 }
 
 #[tokio::test]
-async fn e2e_closure_v0e_acceptance() {
-    assert_v0e_1_no_persisted_direct_dispatch().await;
-    assert_v0e_2_auto_merge_pr_is_opt_in().await;
-    assert_v0e_3_fast_forward_matches_polling().await;
-}
-
-async fn assert_v0e_2_auto_merge_pr_is_opt_in() {
+async fn t_v0e_2_auto_merge_pr_is_opt_in() {
     let dir = TempDir::new().expect("tempdir");
     run_br(dir.path(), &["init"]);
     let (pm, epic_id, task_a_id, task_b_id) = seed_all_approved_epic(dir.path(), "P1").await;
@@ -421,7 +415,8 @@ fn seed_ready_task(repo: &Path, plan_id: &str) -> (String, String) {
 
 // ── T-v0e-1: persisted direct-dispatch retirement ───────────────────────
 
-async fn assert_v0e_1_no_persisted_direct_dispatch() {
+#[tokio::test]
+async fn t_v0e_1_no_persisted_direct_dispatch() {
     let dir = TempDir::new().expect("tempdir");
     init_test_repo(dir.path());
 
@@ -574,14 +569,12 @@ async fn assert_v0e_1_no_persisted_direct_dispatch() {
         ),
         "persisted review approve must not enqueue a follow-up dispatch"
     );
-
-    server.shutdown().await;
-    server_exec.shutdown().await;
 }
 
 // ── T-v0e-3: wakeup equivalence ─────────────────────────────────────────
 
-async fn assert_v0e_3_fast_forward_matches_polling() {
+#[tokio::test]
+async fn t_v0e_3_fast_forward_matches_polling() {
     let plan_id = "P-wake";
 
     // ── 1. Ready-task progression equivalence ─────────────────────────
