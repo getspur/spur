@@ -2,18 +2,16 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use rusqlite::{params, Error as SqliteError, ErrorCode};
 use serde_json::json;
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::labels;
-use spur_mcp::plan::mutation::{MutationBatch, TaskDraft};
+use spur_mcp::plan::mutation::MutationBatch;
 use spur_mcp::plan::mutation_executor::SIGNAL_ESCALATED_LABEL;
 use spur_mcp::plan::proposers::{
     MutationProposer, MutationScorer, RetryExhaustedProposer, ScopeDriftSplitProposer,
@@ -200,32 +198,17 @@ impl MutationProposer for FixedMutationIdProposer {
                 last_error,
                 ..
             } => {
-                let child_count = 2;
-                let children = (0..child_count)
-                    .map(|index| {
-                        serde_json::from_value::<TaskDraft>(json!({
-                            "title": format!("[retry {}/{}] {}", index + 1, child_count, last_error),
-                            "description": format!(
-                                "Deterministic retry split for signal {} on task {}.",
-                                signal_id, triggering_task
-                            ),
-                            "assignee": null,
-                            "priority": null
-                        }))
-                        .expect("TaskDraft JSON must deserialize")
-                    })
-                    .collect::<Vec<_>>();
                 vec![serde_json::from_value::<MutationBatch>(json!({
                     "mutation_id": mutation_id,
                     "trigger_signal_id": signal_id,
                     "trigger_task_id": triggering_task,
                     "ops": [{
-                        "op": "split_task",
-                        "parent": triggering_task,
-                        "children": children,
-                        "dep_rewire": {
-                            "policy": "barrier"
-                        }
+                        "op": "modify_task_spec",
+                        "issue_id": triggering_task,
+                        "new_task": format!("deterministic failed mutation for {last_error}"),
+                        "new_agent": null,
+                        "new_context_files": null,
+                        "new_depends_on": [triggering_task]
                     }]
                 }))
                 .expect("MutationBatch JSON must deserialize")]
@@ -243,67 +226,8 @@ fn audit_sentinels(comments: &[spur_pm::Comment]) -> Vec<AuditSentinelKind> {
         .collect()
 }
 
-fn is_sqlite_busy(err: &SqliteError) -> bool {
-    matches!(
-        err,
-        SqliteError::SqliteFailure(error, _)
-            if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-    )
-}
-
 fn is_busy_message(err: &str) -> bool {
     err.contains("database is busy") || err.contains("database is locked")
-}
-
-fn issue_ids_for_label(repo: &Path, label: &str) -> Result<Vec<String>, SqliteError> {
-    let conn = rusqlite::Connection::open(repo.join(".beads/beads.db"))?;
-    conn.busy_timeout(Duration::from_millis(100))?;
-    let mut stmt =
-        conn.prepare("SELECT issue_id FROM labels WHERE label = ?1 ORDER BY issue_id")?;
-    let ids = stmt
-        .query_map(params![label], |row| row.get::<_, String>(0))?
-        .collect();
-    ids
-}
-
-fn insert_dependency_cycle(repo: &Path, ids: &[String]) -> Result<(), SqliteError> {
-    let conn = rusqlite::Connection::open(repo.join(".beads/beads.db"))?;
-    conn.busy_timeout(Duration::from_millis(100))?;
-    for (issue_id, depends_on_id) in [(&ids[0], &ids[1]), (&ids[1], &ids[0])] {
-        conn.execute(
-            "INSERT OR IGNORE INTO dependencies(issue_id, depends_on_id, type, created_by)
-             VALUES (?1, ?2, 'blocks', 'signal-dedup-test')",
-            params![issue_id, depends_on_id],
-        )?;
-    }
-    Ok(())
-}
-
-async fn inject_cycle_when_children_exist(repo: PathBuf, mutation_id: Uuid) -> Result<(), String> {
-    let label = labels::mutation_id_label(&mutation_id);
-    for _ in 0..2_000 {
-        let mut ids = match issue_ids_for_label(&repo, &label) {
-            Ok(ids) => ids,
-            Err(err) if is_sqlite_busy(&err) => {
-                sleep(Duration::from_millis(2)).await;
-                continue;
-            }
-            Err(err) => return Err(err.to_string()),
-        };
-        if ids.len() >= 2 {
-            ids.sort();
-            match insert_dependency_cycle(&repo, &ids) {
-                Ok(()) => return Ok(()),
-                Err(err) if is_sqlite_busy(&err) => {
-                    sleep(Duration::from_millis(2)).await;
-                    continue;
-                }
-                Err(err) => return Err(err.to_string()),
-            }
-        }
-        sleep(Duration::from_millis(2)).await;
-    }
-    Err("timed out waiting for mutation children before injecting cycle".into())
 }
 
 async fn tick_once_retrying_busy<P, S>(watcher: &SignalWatcher<P, S>, context: &str)
@@ -636,15 +560,7 @@ async fn watcher_reserves_signal_before_mutation_and_does_not_retry_on_failure()
         common::server_builder::pro_feature_gate(),
     );
 
-    let first_injector = tokio::spawn(inject_cycle_when_children_exist(
-        dir.path().to_path_buf(),
-        first_mutation_id,
-    ));
     tick_once_retrying_busy(&watcher, "first tick_once").await;
-    first_injector
-        .await
-        .expect("first injector task panicked")
-        .expect("first cycle injector failed");
 
     let first_issue = pm
         .get_issue(&task_id)

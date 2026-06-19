@@ -1083,7 +1083,13 @@ mod reconciler_fast_forward_tests {
         assert_eq!(loaded.state.lock().await.tasks.len(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persisted_plan_reclaim_acceptance() {
+        reclaim_persisted_plans_hydrates_empty_cache().await;
+        detector_skips_reclaim_when_all_epics_have_rev1_metadata().await;
+        detector_reclaims_when_plan_submit_lacks_bootstrap_metadata().await;
+    }
+
     async fn reclaim_persisted_plans_hydrates_empty_cache() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let (_beads, pm) = super::init_beads_pm(dir.path()).await;
@@ -1255,7 +1261,6 @@ mod reconciler_fast_forward_tests {
         assert_eq!(cached.state.lock().await.tasks.len(), 2);
     }
 
-    #[tokio::test]
     async fn detector_skips_reclaim_when_all_epics_have_rev1_metadata() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let (_beads, pm) = super::init_beads_pm(dir.path()).await;
@@ -1312,7 +1317,6 @@ mod reconciler_fast_forward_tests {
         );
     }
 
-    #[tokio::test]
     async fn detector_reclaims_when_plan_submit_lacks_bootstrap_metadata() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let (_beads, pm) = super::init_beads_pm(dir.path()).await;
