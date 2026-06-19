@@ -2,7 +2,7 @@
 --
 -- Loads DuckPGQ (SQL/PGQ pattern matching) and Onager (graph algorithms),
 -- exposes the spur-graph Parquet artifact through views, registers a DuckPGQ
--- property graph, and builds a BIGINT-keyed edge view that Onager can chew on.
+-- property graph, and builds BIGINT-keyed edge views that Onager can chew on.
 --
 -- Template variable (substituted by setup.sh before execution):
 --   __SPUR_GRAPH_ARTIFACT_DIR__  — absolute resolved Parquet artifact directory
@@ -21,7 +21,8 @@
 --                              — zero-row-on-pass witness/language gate for import_licensed calls
 --   _meta                      — manifest metadata and row counts
 --   PROPERTY GRAPH code        — DuckPGQ surface
---   onager_edges(src, dst)     — Onager surface (BIGINT-keyed, globally unique)
+--   onager_edges(src, dst)     — calls-only Onager surface (BIGINT-keyed, globally unique)
+--   onager_dep_edges(src, dst) — all resolved dependency edges for connectivity algorithms
 --
 -- Why the re-key: the upstream Parquet's `node_id` column is NOT globally unique —
 -- empirically (artifact 3744e65c…) 28543 rows have only 27868 distinct `node_id`s,
@@ -365,6 +366,10 @@ CREATE OR REPLACE VIEW onager_edges AS
 SELECT src_id AS src, dst_id AS dst
 FROM   edges
 WHERE  edge_kind = 'calls';
+
+CREATE OR REPLACE VIEW onager_dep_edges AS
+SELECT src_id AS src, dst_id AS dst
+FROM   edges;
 
 CREATE OR REPLACE PROPERTY GRAPH code
   VERTEX TABLES (
