@@ -140,13 +140,16 @@ impl McpCallbackServer {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn __test_code_graph_rebuild_invocation_count(&self) -> usize {
-        self.graph_rebuild_coordinator.build_invocation_count()
+        self.graph_mcp_deps
+            .rebuild_coordinator
+            .build_invocation_count()
     }
 
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn __test_code_graph_temporal_index_build_invocation_count(&self) -> usize {
-        self.graph_rebuild_coordinator
+        self.graph_mcp_deps
+            .rebuild_coordinator
             .temporal_index_build_invocation_count()
     }
 

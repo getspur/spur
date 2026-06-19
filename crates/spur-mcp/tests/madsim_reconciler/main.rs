@@ -23,7 +23,7 @@ use spur_mcp::plan::reconciler::{
 };
 use spur_mcp::plan::{PlanState, PlanTaskStatus, PmLike};
 use spur_pm::{BeadsAdvanced, Issue, IssueFilter, IssueSummary, PmSource, ReadyFilter};
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify};
 
 const PLAN_ID: &str = "plan-madsim";
 const EPIC_ID: &str = "bd-epic";
@@ -190,7 +190,7 @@ async fn edge_cancel_mid_tick_scenario() {
 
     assert_eq!(pm.dispatch_count("T1"), 1);
 
-    let _ = dispatch_rx.lock().unwrap().recv().await;
+    let _ = dispatch_rx.lock().await.recv().await;
     let recovery = Harness::from_existing_pm_with_config(pm, sink, continuations, |cfg| {
         cfg.base_interval = Duration::from_secs(1);
     });
@@ -203,7 +203,7 @@ async fn edge_cancel_mid_tick_scenario() {
     let (recovery_cancel_tx, recovery_cancel_rx) = oneshot::channel();
     let recovery_run = tokio::spawn(reconciler.run(recovery_cancel_rx));
     let request = tokio::time::timeout(Duration::from_secs(3), async {
-        dispatch_rx.lock().unwrap().recv().await.unwrap()
+        dispatch_rx.lock().await.recv().await.unwrap()
     })
     .await
     .unwrap();
@@ -334,7 +334,7 @@ struct Harness {
     pm: Arc<SimPm>,
     reconciler: Reconciler,
     dispatch_tx: mpsc::Sender<spur_mcp::tools::DelegationRequest>,
-    dispatch_rx: Mutex<mpsc::Receiver<spur_mcp::tools::DelegationRequest>>,
+    dispatch_rx: AsyncMutex<mpsc::Receiver<spur_mcp::tools::DelegationRequest>>,
     fast_forward: Arc<Notify>,
     sink: Arc<RecordingEventSink>,
     continuations: Arc<AtomicUsize>,
@@ -411,7 +411,7 @@ impl Harness {
             pm,
             reconciler,
             dispatch_tx,
-            dispatch_rx: Mutex::new(dispatch_rx),
+            dispatch_rx: AsyncMutex::new(dispatch_rx),
             fast_forward,
             sink,
             continuations,
@@ -425,7 +425,7 @@ impl Harness {
 
     async fn recv_dispatch(&self) -> spur_mcp::tools::DelegationRequest {
         tokio::time::timeout(Duration::from_secs(1), async {
-            self.dispatch_rx.lock().unwrap().recv().await.unwrap()
+            self.dispatch_rx.lock().await.recv().await.unwrap()
         })
         .await
         .unwrap()
@@ -434,7 +434,7 @@ impl Harness {
     async fn assert_no_dispatch(&self) {
         assert!(
             tokio::time::timeout(Duration::from_millis(5), async {
-                self.dispatch_rx.lock().unwrap().recv().await
+                self.dispatch_rx.lock().await.recv().await
             })
             .await
             .is_err(),

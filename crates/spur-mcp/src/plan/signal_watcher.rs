@@ -345,7 +345,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signal_watcher_escalation_acceptance() {
+        escalate_signal_routes_to_brain_escalation_without_proposer().await;
+        scope_drift_routes_to_brain_escalation_without_proposer().await;
+    }
+
     async fn escalate_signal_routes_to_brain_escalation_without_proposer() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         std::fs::create_dir(dir.path().join(".beads")).expect("create .beads");
@@ -482,7 +487,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
     async fn scope_drift_routes_to_brain_escalation_without_proposer() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         std::fs::create_dir(dir.path().join(".beads")).expect("create .beads");

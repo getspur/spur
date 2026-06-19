@@ -44,7 +44,7 @@ default = ["embed"]
 # Enables OutcomeMaterializer cap-override builders for tests in
 # downstream crates. spur-blob-store has the same feature for its
 # MockFailingOutcomeStore (Task 3).
-test-support = []
+test-support = ["spur-graph/test-support"]
 # Enables cfg(madsim)-only reconciler simulation tests. Normal builds and
 # default cargo test runs do not compile the madsim harness.
 madsim-sim = ["test-support"]
