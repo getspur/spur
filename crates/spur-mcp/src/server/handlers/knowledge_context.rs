@@ -1309,6 +1309,7 @@ fn collect_graph_paths(
             KnowledgePathOptions {
                 max_hops: request.graph_reasoning.max_path_hops,
                 max_paths: groups_remaining,
+                undirected: true,
             },
         ) {
             Ok(path_result) => {
