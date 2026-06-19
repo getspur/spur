@@ -365,6 +365,29 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
+fn pm_tool_definition(definition: spur_pm::mcp::ToolDefinition) -> ToolDefinition {
+    ToolDefinition {
+        name: definition.name,
+        description: definition.description,
+        input_schema: definition.input_schema,
+    }
+}
+
+fn pm_tool_definitions_by_names(names: &[&str]) -> Vec<ToolDefinition> {
+    let definitions = spur_pm::mcp::tool_definitions();
+    names
+        .iter()
+        .map(|name| {
+            definitions
+                .iter()
+                .find(|definition| definition.name == *name)
+                .unwrap_or_else(|| panic!("spur-pm MCP module missing tool definition {name}"))
+                .clone()
+        })
+        .map(pm_tool_definition)
+        .collect()
+}
+
 // ─── Tool definitions ─────────────────────────────────────────────────
 
 fn delegate_to_worker_def() -> ToolDefinition {
@@ -390,147 +413,6 @@ fn list_available_workers_def() -> ToolDefinition {
         input_schema: json!({
             "type": "object",
             "properties": {}
-        }),
-    }
-}
-
-fn get_issue_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "get_issue".into(),
-        description: "Retrieve an issue from the configured project management backend (beads, GitHub, etc.)."
-            .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "Issue identifier"
-                }
-            },
-            "required": ["id"]
-        }),
-    }
-}
-
-fn list_issues_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "list_issues".into(),
-        description:
-            "List issues from the configured project management backend with optional filters."
-                .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "description": "Filter by status: open, in_progress, blocked, closed"
-                },
-                "labels": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Filter by labels (issues must have all listed labels)"
-                },
-                "assignee": {
-                    "type": "string",
-                    "description": "Filter by assignee username"
-                },
-                "priority_min": {
-                    "type": "integer",
-                    "description": "Minimum priority (0=critical, 4=backlog)"
-                },
-                "priority_max": {
-                    "type": "integer",
-                    "description": "Maximum priority (0=critical, 4=backlog)"
-                },
-                "issue_type": {
-                    "type": "string",
-                    "description": "Filter by issue type: task, bug, feature, epic"
-                },
-                "text_search": {
-                    "type": "string",
-                    "description": "Search issue titles by text"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return (default 20, max 100)"
-                }
-            }
-        }),
-    }
-}
-
-fn update_issue_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "update_issue".into(),
-        description: "Update an issue in the configured project management backend.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "Issue identifier"
-                },
-                "status": {
-                    "type": "string",
-                    "description": "New status to set"
-                },
-                "comment": {
-                    "type": "string",
-                    "description": "Comment to add to the issue"
-                },
-                "priority": {
-                    "type": "integer",
-                    "description": "New priority (0=critical, 4=backlog)"
-                },
-                "assignee": {
-                    "type": "string",
-                    "description": "Assignee username. Use empty string to unassign."
-                },
-                "add_labels": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Labels to add to the issue"
-                },
-                "remove_labels": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Labels to remove from the issue"
-                }
-            },
-            "required": ["id"]
-        }),
-    }
-}
-
-fn create_pr_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "create_pr".into(),
-        description: "Create a pull request.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "PR title"
-                },
-                "body": {
-                    "type": "string",
-                    "description": "PR description body"
-                },
-                "branch": {
-                    "type": "string",
-                    "description": "Head branch name"
-                },
-                "base_branch": {
-                    "type": "string",
-                    "description": "Base branch to merge into (optional, defaults to repo default)"
-                },
-                "repo": {
-                    "type": "string",
-                    "description": "Repository identifier (optional, for multi-repo setups)"
-                }
-            },
-            "required": ["title", "body", "branch"]
         }),
     }
 }
@@ -652,93 +534,6 @@ fn cancel_delegation_def() -> ToolDefinition {
                 }
             },
             "required": ["delegation_id"]
-        }),
-    }
-}
-
-// ─── Graph analysis tool definitions (in-process graph engine) ──────
-
-fn graph_triage_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "graph_triage".into(),
-        description: "Get PageRank-weighted project triage: top recommendations, quick wins, blockers to clear, and project health metrics. Complements list_issues (CRUD) with graph-based dependency analysis. Call this FIRST for orientation before starting work. Note: triage includes alert data — only call graph_alerts separately when you need standalone alert monitoring without the full triage context. Optionally scope to a label.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "description": "Scope analysis to issues with this label"
-                }
-            }
-        }),
-    }
-}
-
-fn graph_plan_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "graph_plan".into(),
-        description: "Get a dependency-aware parallel execution plan. Returns independent tracks of work that can proceed simultaneously. Use to identify what can be delegated in parallel.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "description": "Scope to issues with this label"
-                }
-            }
-        }),
-    }
-}
-
-fn graph_insights_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "graph_insights".into(),
-        description: "Get full graph metrics: PageRank (importance), betweenness (bottlenecks), HITS (hubs/authorities), critical path, cycles, articulation points. Use for deep structural analysis of the project dependency graph.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "description": "Scope to issues with this label"
-                }
-            }
-        }),
-    }
-}
-
-fn graph_alerts_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "graph_alerts".into(),
-        description: "Get active health alerts: stale issues, blocking cascades, priority mismatches, circular dependencies. Use for project health monitoring.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {}
-        }),
-    }
-}
-
-fn graph_subgraph_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "graph_subgraph".into(),
-        description: "Get the dependency subgraph for a specific issue. Returns nodes and edges showing what this issue depends on and what depends on it. Use format=mermaid for visual dependency diagrams.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "root_id": {
-                    "type": "string",
-                    "description": "Issue ID to center the subgraph on"
-                },
-                "depth": {
-                    "type": "integer",
-                    "description": "Traversal depth in hops. Defaults to 2 when omitted. Larger values fan out further; `0` returns only the seed node."
-                },
-                "format": {
-                    "type": "string",
-                    "enum": ["json", "dot", "mermaid"],
-                    "description": "Output format (default: json)"
-                }
-            },
-            "required": ["root_id"]
         }),
     }
 }
@@ -1203,81 +998,6 @@ fn knowledge_context_pack_2_def() -> ToolDefinition {
     }
 }
 
-// ─── Issue creation + dependency tools ────────────────────────────
-
-fn create_issue_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "create_issue".into(),
-        description: "Create a new issue in the project tracker. For task decomposition: create an epic first (type=epic), then create child tasks with parent=<epic_id>. Structure descriptions as CONTEXT / GOAL / CONSTRAINTS / ACCEPTANCE CRITERIA. Use depends_on to wire dependency edges so graph_plan can compute optimal execution ordering. After creating all tasks, call graph_plan() to get dependency-aware tracks, then submit_plan() to execute.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Issue title — concise, action-oriented"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Detailed description (markdown). Structure as CONTEXT / GOAL / CONSTRAINTS / ACCEPTANCE CRITERIA for tasks."
-                },
-                "type": {
-                    "type": "string",
-                    "enum": ["task", "bug", "feature", "epic"],
-                    "description": "Issue type. Use 'epic' for grouping, 'task' for work items."
-                },
-                "priority": {
-                    "type": "integer",
-                    "description": "Priority 0-4 (0=critical, 4=backlog). Affects graph_triage ranking."
-                },
-                "labels": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Labels for categorization"
-                },
-                "parent": {
-                    "type": "string",
-                    "description": "Parent issue ID — creates parent-child dependency (e.g., epic ID for child tasks)"
-                },
-                "assignee": {
-                    "type": "string",
-                    "description": "Assignee username"
-                },
-                "estimate": {
-                    "type": "integer",
-                    "description": "Time estimate in minutes"
-                },
-                "depends_on": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Issue IDs this new issue depends on (blocking deps). Used by graph_plan for execution ordering."
-                }
-            },
-            "required": ["title"]
-        }),
-    }
-}
-
-fn add_dependency_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "add_dependency".into(),
-        description: "Add a dependency edge between existing issues: issue_id is blocked by depends_on_id. Use after creating issues to wire the dependency graph. After wiring deps, call graph_plan() to get optimized execution ordering. Beads backend only — returns error for GitHub.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "issue_id": {
-                    "type": "string",
-                    "description": "The issue that is blocked"
-                },
-                "depends_on_id": {
-                    "type": "string",
-                    "description": "The issue that blocks it (must complete first)"
-                }
-            },
-            "required": ["issue_id", "depends_on_id"]
-        }),
-    }
-}
-
 // ─── Plan execution tool definitions ──────────────────────────────
 
 fn submit_plan_def() -> ToolDefinition {
@@ -1607,7 +1327,7 @@ fn execute_epic_def() -> ToolDefinition {
     }
 }
 
-pub(crate) fn legacy_tools_definitions() -> Vec<ToolDefinition> {
+pub(crate) fn legacy_prelude_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         delegate_to_worker_def(),
         delegate_parallel_def(),
@@ -1615,20 +1335,19 @@ pub(crate) fn legacy_tools_definitions() -> Vec<ToolDefinition> {
         fetch_outcome_artifact_def(),
         cancel_delegation_def(),
         list_available_workers_def(),
-        get_issue_def(),
-        list_issues_def(),
-        update_issue_def(),
-        create_issue_def(),
-        add_dependency_def(),
-        create_pr_def(),
+    ]
+}
+
+pub(crate) fn legacy_plan_management_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         merge_plan_def(),
         resume_plan_def(),
         force_reclaim_plan_def(),
-        graph_triage_def(),
-        graph_plan_def(),
-        graph_insights_def(),
-        graph_alerts_def(),
-        graph_subgraph_def(),
+    ]
+}
+
+pub(crate) fn legacy_remainder_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         code_resolve_def(),
         code_file_symbols_def(),
         code_symbol_info_def(),
@@ -1675,9 +1394,8 @@ pub fn tools_list() -> Vec<ToolDefinition> {
 /// workers would invert the brain→worker authority direction and let workers
 /// self-dispatch.
 pub(crate) fn legacy_worker_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
-        get_issue_def(),
-        list_issues_def(),
+    let mut tools = pm_tool_definitions_by_names(&["get_issue", "list_issues"]);
+    tools.extend([
         get_task_diff_def(),
         get_plan_status_def(),
         fetch_outcome_artifact_def(),
@@ -1693,10 +1411,10 @@ pub(crate) fn legacy_worker_tool_definitions() -> Vec<ToolDefinition> {
         doc_navigate_def(),
         knowledge_context_pack_def(),
         knowledge_context_pack_2_def(),
-        update_issue_def(),
-        report_signal_def(),
-        report_progress_def(),
-    ]
+    ]);
+    tools.extend(pm_tool_definitions_by_names(&["update_issue"]));
+    tools.extend([report_signal_def(), report_progress_def()]);
+    tools
 }
 
 pub fn worker_tools_list() -> Vec<ToolDefinition> {
@@ -1738,7 +1456,10 @@ mod schema_truthfulness_tests {
 
     #[test]
     fn get_issue_schema_does_not_advertise_source() {
-        let def = get_issue_def();
+        let def = tools_list()
+            .into_iter()
+            .find(|tool| tool.name == "get_issue")
+            .expect("get_issue must appear in tools/list");
         assert!(
             !props_of(&def).contains(&"source".to_string()),
             "get_issue must not advertise `source` until multi-backend lands",
@@ -1747,7 +1468,10 @@ mod schema_truthfulness_tests {
 
     #[test]
     fn update_issue_schema_does_not_advertise_source() {
-        let def = update_issue_def();
+        let def = tools_list()
+            .into_iter()
+            .find(|tool| tool.name == "update_issue")
+            .expect("update_issue must appear in tools/list");
         assert!(
             !props_of(&def).contains(&"source".to_string()),
             "update_issue must not advertise `source` until multi-backend lands",
