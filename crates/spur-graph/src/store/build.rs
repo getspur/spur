@@ -154,10 +154,12 @@ pub enum BuildMode {
     Incremental,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BuildStats {
     pub reused_buckets: usize,
     pub changed_paths: usize,
+    pub changed_or_added_paths: BTreeSet<String>,
+    pub removed_paths: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -429,7 +431,7 @@ pub fn artifact_from_facts_incremental(
         prev_files = prev.file_manifests.len(),
         changed_paths = tracing::field::Empty
     );
-    let (mut buckets, changed_paths, reused_buckets) = {
+    let (mut buckets, changed_paths, changed_or_added_paths, reused_buckets) = {
         let _entered = changed_span.enter();
         let prev_content_oids: BTreeMap<_, _> = prev
             .file_manifests
@@ -439,6 +441,7 @@ pub fn artifact_from_facts_incremental(
 
         let mut buckets = BTreeMap::new();
         let mut changed_paths = Vec::new();
+        let mut changed_or_added_paths = BTreeSet::new();
         let mut reused = 0_usize;
         for current in current_entries.values() {
             if prev_content_oids
@@ -452,6 +455,7 @@ pub fn artifact_from_facts_incremental(
                 }
             }
             if current.extractable {
+                changed_or_added_paths.insert(current.path.clone());
                 changed_paths.push(root.join(&current.path));
             }
         }
@@ -463,12 +467,15 @@ pub fn artifact_from_facts_incremental(
             elapsed_ms = elapsed_ms(changed_started),
             "spur-graph build phase completed"
         );
-        (buckets, changed_paths, reused)
+        (buckets, changed_paths, changed_or_added_paths, reused)
     };
     let changed_count = changed_paths.len();
+    let removed_paths = removed_paths_from_previous(prev, &current_entries);
     let stats = BuildStats {
         reused_buckets,
         changed_paths: changed_count,
+        changed_or_added_paths,
+        removed_paths: removed_paths.clone(),
     };
 
     if !changed_paths.is_empty() {
@@ -1046,6 +1053,17 @@ fn tombstones_from_removed_paths(
         .collect();
     tombstones.sort_by(|a, b| a.path.cmp(&b.path));
     tombstones
+}
+
+fn removed_paths_from_previous(
+    prev: &GraphIndexArtifact,
+    current_entries: &BTreeMap<String, CurrentFileEntry>,
+) -> BTreeSet<String> {
+    prev.file_manifests
+        .iter()
+        .filter(|entry| !current_entries.contains_key(&entry.path))
+        .map(|entry| entry.path.clone())
+        .collect()
 }
 
 fn compose_artifact(
@@ -3635,6 +3653,35 @@ fn submit_plan_def() -> ToolDefinition {
             .file_manifests
             .iter()
             .any(|entry| entry.path == "src/a.rs"));
+    }
+
+    #[test]
+    fn incremental_stats_include_relative_changed_and_removed_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write a.rs");
+        fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").expect("write b.rs");
+
+        let prev = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+            .expect("artifact");
+
+        fs::write(root.join("src/b.rs"), "pub fn beta_changed() {}\n").expect("rewrite b.rs");
+        fs::write(root.join("src/c.rs"), "pub fn gamma() {}\n").expect("write c.rs");
+        fs::remove_file(root.join("src/a.rs")).expect("remove a.rs");
+
+        let (_next, mode, stats) =
+            artifact_from_facts_incremental(&prev, root).expect("incremental");
+
+        assert_eq!(mode, BuildMode::Incremental);
+        assert_eq!(
+            stats.changed_or_added_paths,
+            std::collections::BTreeSet::from(["src/b.rs".to_owned(), "src/c.rs".to_owned()])
+        );
+        assert_eq!(
+            stats.removed_paths,
+            std::collections::BTreeSet::from(["src/a.rs".to_owned()])
+        );
     }
 
     #[derive(Clone, Default)]
