@@ -61,7 +61,6 @@ use spur_pm::test_workspace::TestBeadsWorkspace;
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
-use tokio::sync::Barrier;
 
 const N_WORKERS: usize = 8;
 const CALLS_PER_WORKER: usize = 10;
@@ -297,19 +296,12 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
         }
 
         // ── (b) 8 workers × 10 calls in parallel. ───────────────────────
-        // The barrier releases all workers together. `get_issue` handlers are
-        // fast enough that a polling observer can miss the active window on
-        // loaded builders; deterministic `active_count` overlap is covered by
-        // `worker_server_lifecycle`.
-        let start_calls = Arc::new(Barrier::new(N_WORKERS + 1));
         let mut call_handles = Vec::with_capacity(N_WORKERS);
         for (_, issue_id, token) in &delegations {
             let issue_id = issue_id.clone();
             let token = token.clone();
             let server_url = server_url.clone();
-            let start_calls = Arc::clone(&start_calls);
             call_handles.push(tokio::spawn(async move {
-                start_calls.wait().await;
                 let mut results = Vec::with_capacity(CALLS_PER_WORKER);
                 for _ in 0..CALLS_PER_WORKER {
                     let resp = call_tool_with_bearer(
@@ -324,7 +316,6 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
                 results
             }));
         }
-        start_calls.wait().await;
 
         let mut total_successful = 0usize;
         for handle in call_handles {
@@ -342,6 +333,15 @@ async fn concurrency_n8_dedupes_server_and_summarizes_each_delegation() {
             total_successful,
             N_WORKERS * CALLS_PER_WORKER,
             "all 80 calls must succeed"
+        );
+        // Assert real concurrency via the server's atomic high-water mark,
+        // which records every momentary overlap exactly. A time-sampled
+        // observer (the previous approach) could miss sub-interval overlaps
+        // and flake; the high-water mark cannot.
+        let peak = server.peak_active_count();
+        assert!(
+            peak >= 2,
+            "active_count should peak above one under concurrent sessions (observed peak={peak})"
         );
         assert_eq!(
             server.active_count(),
