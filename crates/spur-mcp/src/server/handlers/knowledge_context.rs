@@ -1101,7 +1101,12 @@ async fn pack_query_result_v2_with_graph_reasoning(
     exact_context: ExactGraphContext,
     db_path: &Path,
 ) -> Value {
-    let graph_sections = graph_reasoning_sections(request, &result, db_path);
+    let graph_sections = match analyst_matches_exact_graph(&result, &exact_context) {
+        Some(false) if request.graph_reasoning.any_enabled() => {
+            stale_graph_reasoning_sections(&result, &exact_context)
+        }
+        _ => graph_reasoning_sections(request, &result, db_path),
+    };
     let mut pack = pack_query_result_with_exact_context(&request.base, result, exact_context).await;
     insert_v2_sections(&mut pack, graph_sections);
     pack
@@ -1130,6 +1135,38 @@ struct GraphReasoningSections {
     community_context: Vec<Value>,
     temporal_context: Vec<Value>,
     caveats: Vec<Value>,
+}
+
+impl GraphReasoningSections {
+    fn with_caveat(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            caveats: vec![caveat_value(code, message, None)],
+            ..Self::default()
+        }
+    }
+}
+
+fn stale_graph_reasoning_sections(
+    result: &KnowledgeQueryResult,
+    exact_context: &ExactGraphContext,
+) -> GraphReasoningSections {
+    let analyst_hash = result.graph_content_hash.as_deref().unwrap_or("<missing>");
+    let exact_hash = exact_context
+        .graph_content_hash
+        .as_deref()
+        .unwrap_or("<missing>");
+    GraphReasoningSections::with_caveat(
+        "analyst_graph_stale",
+        format!(
+            "analyst DB graph hash {analyst_hash} differs from exact graph hash {exact_hash}; graph reasoning skipped until analyst DB is rebuilt"
+        ),
+    )
+}
+
+impl GraphReasoningOptions {
+    fn any_enabled(&self) -> bool {
+        self.paths || self.communities || self.risk
+    }
 }
 
 fn graph_reasoning_sections(
@@ -1451,10 +1488,9 @@ fn confidence_score_thresholds(grounding: Option<&str>) -> (f64, f64) {
 fn staleness_value(result: &KnowledgeQueryResult, exact_context: &ExactGraphContext) -> Value {
     let analyst_hash = result.graph_content_hash.clone();
     let exact_hash = exact_context.graph_content_hash.clone();
-    let analyst_matches_exact_graph = match (analyst_hash.as_deref(), exact_hash.as_deref()) {
-        (Some(analyst), Some(exact)) => Value::Bool(analyst == exact),
-        _ => Value::Null,
-    };
+    let analyst_matches_exact_graph = analyst_matches_exact_graph(result, exact_context)
+        .map(Value::Bool)
+        .unwrap_or(Value::Null);
 
     json!({
         "available": analyst_hash.is_some(),
@@ -1467,6 +1503,13 @@ fn staleness_value(result: &KnowledgeQueryResult, exact_context: &ExactGraphCont
         "response_file_oids_match": exact_context.response_file_oids_match,
         "exact_graph_note": "Exact graph tools remain the source-of-truth follow-up for current working tree source and impact."
     })
+}
+
+fn analyst_matches_exact_graph(
+    result: &KnowledgeQueryResult,
+    exact_context: &ExactGraphContext,
+) -> Option<bool> {
+    Some(result.graph_content_hash.as_deref()? == exact_context.graph_content_hash.as_deref()?)
 }
 
 fn primary_evidence_with_impact(
@@ -2763,6 +2806,61 @@ pub fn lexical_signal_anchor() {
             .as_str()
             .expect("last touched")
             .contains("2026-06-17"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_suppresses_graph_reasoning_when_analyst_hash_is_stale() {
+        let (_temp_dir, db_path) = analyst_db_with_graph_reasoning_views();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "scope": "code",
+            "limit": 2,
+            "graph_reasoning": {
+                "paths": true,
+                "communities": true,
+                "risk": true,
+                "max_path_hops": 2,
+                "max_paths": 1
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-one"), "symbol_one", 8.0),
+                candidate(Some("sym-two"), "symbol_two", 7.0),
+            ],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext {
+                graph_content_hash: Some("exact-graph-hash".into()),
+                response_file_oids_match: Some(true),
+                impacts: Vec::new(),
+            },
+            &db_path,
+        )
+        .await;
+
+        assert_eq!(
+            pack["staleness"]["analyst_graph_content_hash"],
+            "fixture-hash"
+        );
+        assert_eq!(pack["staleness"]["exact_graph_hash"], "exact-graph-hash");
+        assert_eq!(pack["staleness"]["analyst_matches_exact_graph"], false);
+        assert_eq!(pack["graph_paths"], json!([]));
+        assert_eq!(pack["risk_scorecard"], json!([]));
+        assert_eq!(pack["community_context"], json!([]));
+        assert_eq!(pack["temporal_context"], json!([]));
+        assert!(pack["caveats"]
+            .as_array()
+            .expect("caveats")
+            .iter()
+            .any(|caveat| caveat["code"] == "analyst_graph_stale"));
     }
 
     #[tokio::test]
