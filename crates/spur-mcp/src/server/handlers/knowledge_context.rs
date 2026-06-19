@@ -40,27 +40,6 @@ static BGE_BASE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedMod
 static JINA_CODE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
 
 impl McpCallbackServer {
-    pub(crate) async fn handle_knowledge_context_pack(
-        &self,
-        id: Value,
-        args: Value,
-    ) -> JsonRpcResponse {
-        match knowledge_context_pack(&args).await {
-            Ok(result) => {
-                let text =
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
-            }
-            Err(McpHandlerError::InvalidParams(error)) => {
-                JsonRpcResponse::invalid_params(id, error)
-            }
-            Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
-        }
-    }
-
     pub(crate) async fn handle_knowledge_context_pack_2(
         &self,
         id: Value,
@@ -83,18 +62,9 @@ impl McpCallbackServer {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
-    let request = KnowledgeContextPackRequest::parse(args)?;
-    let db_path = analyst_db_path()?;
-    if !db_path.exists() {
-        return Ok(unavailable_pack(&request, &db_path));
-    }
-
-    let query_result =
-        query_candidates_for_request(&request, &db_path, "knowledge_context_pack").await?;
-
-    let exact_context = exact_graph_context_for_result(&request, &query_result).await;
-    Ok(pack_query_result_with_exact_context(&request, query_result, exact_context).await)
+    knowledge_context_pack_2(args).await
 }
 
 pub(crate) async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerError> {
@@ -1041,25 +1011,7 @@ async fn pack_query_result_with_exact_context(
     let recommended_next_tools =
         recommended_next_tools(request.intent, &primary_evidence, &supporting_docs);
     let answerable = !primary_evidence.is_empty() || !supporting_docs.is_empty();
-    let confidence = if !answerable {
-        "low"
-    } else {
-        let top_evidence = primary_evidence.first();
-        let top_score = top_evidence
-            .and_then(|evidence| evidence.get("score").and_then(Value::as_f64))
-            .unwrap_or(0.0);
-        let top_grounding =
-            top_evidence.and_then(|evidence| evidence.get("grounding").and_then(Value::as_str));
-        let (high_score, medium_score) = confidence_score_thresholds(top_grounding);
-        let evidence_count = primary_evidence.len() + supporting_docs.len();
-        if top_score > high_score && evidence_count >= 3 {
-            "high"
-        } else if top_score > medium_score && evidence_count >= 2 {
-            "medium"
-        } else {
-            "low"
-        }
-    };
+    let confidence = confidence_for_evidence(&primary_evidence, &supporting_docs);
     let impact = aggregate_impact_value(&exact_context.impacts);
     let staleness = staleness_value(&result, &exact_context);
     let mut pack = base_pack(request, result.graph_content_hash.clone(), staleness);
@@ -1433,10 +1385,8 @@ fn temporal_context_from_risk_rows(rows: &[SymbolRiskScorecardRow]) -> Vec<Value
             json!({
                 "input_index": row.input_index,
                 "stable_symbol_id": row.stable_symbol_id,
-                "file_path": row.file_path,
                 "churn_90d": row.churn_90d,
                 "last_touched": row.last_touched,
-                "posture": row.posture,
             })
         })
         .collect()
@@ -1542,6 +1492,139 @@ fn confidence_score_thresholds(grounding: Option<&str>) -> (f64, f64) {
         }
         _ => (BM25_HIGH_CONFIDENCE_SCORE, BM25_MEDIUM_CONFIDENCE_SCORE),
     }
+}
+
+fn confidence_for_evidence(primary_evidence: &[Value], supporting_docs: &[Value]) -> &'static str {
+    let Some(top_evidence) = primary_evidence.first() else {
+        return "low";
+    };
+
+    let top_score = evidence_score(top_evidence).unwrap_or(0.0);
+    let top_grounding = evidence_grounding(top_evidence);
+    let (high_score, medium_score) = confidence_score_thresholds(top_grounding);
+    let evidence_count = primary_evidence.len() + supporting_docs.len();
+    let scores = primary_evidence
+        .iter()
+        .chain(supporting_docs.iter())
+        .filter_map(evidence_score)
+        .collect::<Vec<_>>();
+    let median_score = median_score(scores).unwrap_or(0.0);
+    let score_separation = top_score - median_score;
+    let has_hybrid_grounding = primary_evidence
+        .iter()
+        .chain(supporting_docs.iter())
+        .filter_map(evidence_grounding)
+        .any(|grounding| grounding.starts_with("hybrid-"));
+    let strong_separation = if has_hybrid_grounding {
+        score_separation >= 0.20
+    } else {
+        score_separation >= 2.50
+    };
+    let moderate_separation = if has_hybrid_grounding {
+        score_separation >= 0.08
+    } else {
+        score_separation >= 1.00
+    };
+    let code_doc_corroborates = code_doc_area_corroborates(primary_evidence, supporting_docs);
+    let primary_supports_top = primary_evidence.len() >= 2;
+
+    if top_score > high_score
+        && evidence_count >= 3
+        && strong_separation
+        && (code_doc_corroborates || primary_supports_top || has_hybrid_grounding)
+    {
+        "high"
+    } else if top_score > medium_score
+        && evidence_count >= 2
+        && (moderate_separation
+            || code_doc_corroborates
+            || primary_supports_top
+            || has_hybrid_grounding)
+    {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+fn evidence_score(evidence: &Value) -> Option<f64> {
+    evidence.get("score").and_then(Value::as_f64)
+}
+
+fn evidence_grounding(evidence: &Value) -> Option<&str> {
+    evidence.get("grounding").and_then(Value::as_str)
+}
+
+fn median_score(mut scores: Vec<f64>) -> Option<f64> {
+    scores.retain(|score| score.is_finite());
+    if scores.is_empty() {
+        return None;
+    }
+    scores.sort_by(f64::total_cmp);
+    let mid = scores.len() / 2;
+    if scores.len().is_multiple_of(2) {
+        Some(f64::midpoint(scores[mid - 1], scores[mid]))
+    } else {
+        Some(scores[mid])
+    }
+}
+
+fn code_doc_area_corroborates(primary_evidence: &[Value], supporting_docs: &[Value]) -> bool {
+    primary_evidence.iter().take(3).any(|code| {
+        let code_tokens = evidence_area_tokens(code);
+        supporting_docs.iter().take(3).any(|doc| {
+            let doc_tokens = evidence_area_tokens(doc);
+            code_tokens
+                .iter()
+                .filter(|token| doc_tokens.contains(token))
+                .take(2)
+                .count()
+                >= 2
+        })
+    })
+}
+
+fn evidence_area_tokens(evidence: &Value) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for field in ["title", "file", "stable_symbol_id"] {
+        if let Some(value) = evidence.get(field).and_then(Value::as_str) {
+            extend_area_tokens(value, &mut tokens);
+        }
+    }
+    tokens
+}
+
+fn extend_area_tokens(value: &str, tokens: &mut Vec<String>) {
+    for token in value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+    {
+        if is_area_token(&token) && !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+}
+
+fn is_area_token(token: &str) -> bool {
+    token.len() >= 3
+        && !token.chars().all(|ch| ch.is_ascii_digit())
+        && !matches!(
+            token,
+            "src"
+                | "lib"
+                | "mod"
+                | "docs"
+                | "test"
+                | "tests"
+                | "fixture"
+                | "fixtures"
+                | "function"
+                | "method"
+                | "struct"
+                | "section"
+                | "api"
+                | "plan"
+        )
 }
 
 fn staleness_value(result: &KnowledgeQueryResult, exact_context: &ExactGraphContext) -> Value {
@@ -3149,6 +3232,102 @@ pub fn lexical_signal_anchor() {
     }
 
     #[tokio::test]
+    async fn knowledge_context_pack_2_temporal_context_omits_scorecard_duplicate_fields() {
+        let (_temp_dir, db_path) = analyst_db_with_graph_reasoning_views();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "scope": "code",
+            "limit": 2,
+            "graph_reasoning": {
+                "paths": false,
+                "communities": true,
+                "risk": true
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-one"), "symbol_one", 8.0),
+                candidate(Some("sym-two"), "symbol_two", 7.0),
+            ],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext::default(),
+            &db_path,
+        )
+        .await;
+
+        let temporal = pack["temporal_context"][0]
+            .as_object()
+            .expect("temporal row");
+        assert!(temporal.contains_key("stable_symbol_id"));
+        assert!(temporal.contains_key("churn_90d"));
+        assert!(temporal.contains_key("last_touched"));
+        assert!(!temporal.contains_key("file_path"));
+        assert!(!temporal.contains_key("posture"));
+        assert!(pack["risk_scorecard"][0].get("file_path").is_some());
+        assert!(pack["risk_scorecard"][0].get("posture").is_some());
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_dedupes_graph_path_caveats_per_source() {
+        let (_temp_dir, db_path) = analyst_db_with_path_budget_fixture();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "scope": "code",
+            "limit": 3,
+            "max_symbol_bodies": 0,
+            "graph_reasoning": {
+                "paths": true,
+                "communities": false,
+                "risk": false,
+                "max_path_hops": 2,
+                "max_paths": 3
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                candidate(Some("sym-source"), "symbol_source", 8.0),
+                candidate(Some("sym-disconnected-one"), "symbol_disconnected_one", 7.0),
+                candidate(Some("sym-disconnected-two"), "symbol_disconnected_two", 6.0),
+            ],
+        };
+
+        let pack = pack_query_result_v2_with_graph_reasoning(
+            &request,
+            result,
+            ExactGraphContext::default(),
+            &db_path,
+        )
+        .await;
+
+        let graph_path_caveats = pack["caveats"]
+            .as_array()
+            .expect("caveats")
+            .iter()
+            .filter(|caveat| {
+                caveat["code"] == "graph_path_unavailable"
+                    && caveat["stable_symbol_id"] == "sym-source"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            graph_path_caveats.len(),
+            1,
+            "repeated no_path results should emit one caveat per source: {pack:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn knowledge_context_pack_2_marks_undirected_paths_and_hides_component_noise() {
         let (_temp_dir, db_path) = analyst_db_with_graph_reasoning_views();
         let request = KnowledgeContextPackV2Request::parse(&json!({
@@ -3663,6 +3842,120 @@ pub fn lexical_signal_anchor() {
                     neighbor_kind: None,
                     edge_bind_method: None,
                     grounding: "bm25-doc".into(),
+                },
+            ],
+        };
+
+        let pack = pack_query_result(&request, result).await;
+
+        assert_eq!(pack["confidence"], "high");
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_downgrades_confidence_for_off_target_flat_scores() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "review loop event drain",
+            "limit": 3
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "config_loader_stub".into(),
+                    file_path: "crates/spur-cli/src/config.rs".into(),
+                    stable_symbol_id: Some("sym-config".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 9.7,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "doc".into(),
+                    title: "Notebook Migration Config".into(),
+                    file_path: "docs/notebook-config.md".into(),
+                    stable_symbol_id: Some("doc-config".into()),
+                    symbol_kind: Some("section".into()),
+                    score: 9.5,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-doc".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "unused_config_fixture".into(),
+                    file_path: "crates/spur-cli/src/config_fixture.rs".into(),
+                    stable_symbol_id: Some("sym-fixture".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 9.4,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+            ],
+        };
+
+        let pack = pack_query_result(&request, result).await;
+
+        assert!(
+            matches!(pack["confidence"].as_str(), Some("low" | "medium")),
+            "flat off-target score sets must not report high confidence: {}",
+            pack["confidence"]
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_reports_high_confidence_for_corroborated_area() {
+        let request = KnowledgeContextPackRequest::parse(&json!({
+            "query": "knowledge context graph paths",
+            "limit": 3
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: "/repo/.spur/analyst.duckdb".into(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "knowledge_context_pack_2".into(),
+                    file_path: "crates/spur-mcp/src/server/handlers/knowledge_context.rs".into(),
+                    stable_symbol_id: Some("sym-kcp2".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 14.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "doc".into(),
+                    title: "Knowledge Context API Implementation Plan".into(),
+                    file_path: "docs/superpowers/plans/2026-06-07-knowledge-context-api.md".into(),
+                    stable_symbol_id: Some("doc-kcp".into()),
+                    symbol_kind: Some("section".into()),
+                    score: 9.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-doc".into(),
+                },
+                KnowledgeCandidate {
+                    kind: "code".into(),
+                    title: "collect_graph_paths".into(),
+                    file_path: "crates/spur-mcp/src/server/handlers/knowledge_context.rs".into(),
+                    stable_symbol_id: Some("sym-paths".into()),
+                    symbol_kind: Some("function".into()),
+                    score: 4.0,
+                    signal: None,
+                    neighbor_kind: None,
+                    edge_bind_method: None,
+                    grounding: "bm25-code".into(),
                 },
             ],
         };
