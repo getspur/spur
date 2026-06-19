@@ -747,8 +747,8 @@ fn query_recursive_context_path_rows(
         "WITH RECURSIVE traversable_edges AS ( \
            SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
            FROM edges \
-           WHERE relation IS DISTINCT FROM 'contains' \
-             AND (relation IS DISTINCT FROM 'imports' OR bind_method IS DISTINCT FROM 'external') \
+           WHERE relation = 'calls' \
+             AND edge_kind = 'calls' \
          ), \
          walk(current_id, depth, node_path, sort_key) AS ( \
            SELECT ?1::VARCHAR AS current_id, 0::INTEGER AS depth, [?1::VARCHAR] AS node_path, ?1::VARCHAR AS sort_key \
@@ -832,8 +832,8 @@ fn query_recursive_undirected_context_path_rows(
         "WITH RECURSIVE traversable_edges AS ( \
             SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
             FROM edges \
-            WHERE relation IS DISTINCT FROM 'contains' \
-              AND (relation IS DISTINCT FROM 'imports' OR bind_method IS DISTINCT FROM 'external') \
+            WHERE relation = 'calls' \
+              AND edge_kind = 'calls' \
          ), \
          edges_undirected AS ( \
             SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method, 'forward' AS direction FROM traversable_edges \
