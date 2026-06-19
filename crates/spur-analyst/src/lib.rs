@@ -197,6 +197,7 @@ pub enum KnowledgePathStatus {
 pub struct KnowledgePathOptions {
     pub max_hops: usize,
     pub max_paths: usize,
+    pub undirected: bool,
 }
 
 impl Default for KnowledgePathOptions {
@@ -204,6 +205,7 @@ impl Default for KnowledgePathOptions {
         Self {
             max_hops: 4,
             max_paths: 6,
+            undirected: false,
         }
     }
 }
@@ -218,6 +220,8 @@ pub struct KnowledgePathRow {
     pub edge_kind: Option<String>,
     pub confidence: Option<String>,
     pub bind_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
     pub engine: KnowledgePathEngine,
     pub status: KnowledgePathStatus,
     pub caveat: Option<String>,
@@ -450,6 +454,46 @@ pub fn query_context_paths(
         ));
     }
 
+    if options.undirected {
+        match query_recursive_undirected_context_path_rows(
+            &conn,
+            source_stable_id,
+            target_stable_id,
+            max_hops,
+            max_paths,
+            KnowledgePathEngine::RecursiveSql,
+        ) {
+            Ok(rows) if rows.is_empty() => {
+                let caveat = format!("no undirected path found within {max_hops} hops");
+                return Ok(path_result(
+                    &result_context,
+                    KnowledgePathEngine::RecursiveSql,
+                    KnowledgePathStatus::NoPath,
+                    Some(caveat),
+                    rows,
+                ));
+            }
+            Ok(rows) => {
+                return Ok(path_result(
+                    &result_context,
+                    KnowledgePathEngine::RecursiveSql,
+                    KnowledgePathStatus::PathFound,
+                    None,
+                    rows,
+                ));
+            }
+            Err(error) => {
+                let caveat = format!("undirected context path search unavailable: {error:#}");
+                return Ok(unavailable_path_result(
+                    &result_context,
+                    source_stable_id,
+                    target_stable_id,
+                    caveat,
+                ));
+            }
+        }
+    }
+
     if let Ok(rows) =
         query_duckpgq_direct_paths(&conn, source_stable_id, target_stable_id, max_paths)
     {
@@ -589,6 +633,7 @@ fn unavailable_path_result(
         edge_kind: None,
         confidence: None,
         bind_method: None,
+        direction: None,
         engine: KnowledgePathEngine::Unavailable,
         status: KnowledgePathStatus::Unavailable,
         caveat: Some(caveat.clone()),
@@ -640,6 +685,7 @@ fn query_duckpgq_direct_paths(
                 edge_kind: row.get(3)?,
                 confidence: row.get(4)?,
                 bind_method: row.get(5)?,
+                direction: None,
                 engine: KnowledgePathEngine::DuckPgq,
                 status: KnowledgePathStatus::PathFound,
                 caveat: None,
@@ -754,6 +800,7 @@ fn query_recursive_context_path_rows(
                 edge_kind: row.get(5)?,
                 confidence: row.get(6)?,
                 bind_method: row.get(7)?,
+                direction: None,
                 engine,
                 status: KnowledgePathStatus::PathFound,
                 caveat: None,
@@ -762,6 +809,87 @@ fn query_recursive_context_path_rows(
         .context("failed to run recursive context path query")?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .context("failed to read recursive context path rows")
+}
+
+fn query_recursive_undirected_context_path_rows(
+    conn: &duckdb::Connection,
+    source_stable_id: &str,
+    target_stable_id: &str,
+    max_hops: usize,
+    max_paths: usize,
+    engine: KnowledgePathEngine,
+) -> Result<Vec<KnowledgePathRow>> {
+    let sql = format!(
+        "WITH RECURSIVE edges_undirected AS ( \
+            SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method, 'forward' AS direction FROM edges \
+            UNION ALL \
+            SELECT target_stable_id AS source_stable_id, source_stable_id AS target_stable_id, relation, edge_kind, confidence, bind_method, 'reverse' AS direction FROM edges \
+         ), \
+         walk(current_id, depth, node_path, sort_key) AS ( \
+            SELECT ?1::VARCHAR AS current_id, 0::INTEGER AS depth, [?1::VARCHAR] AS node_path, ?1::VARCHAR AS sort_key \
+            UNION ALL \
+            SELECT e.target_stable_id, w.depth + 1, list_append(w.node_path, e.target_stable_id), \
+                   w.sort_key || '>' || e.target_stable_id \
+            FROM walk w \
+            JOIN edges_undirected e ON e.source_stable_id = w.current_id \
+            WHERE w.depth < {max_hops} \
+              AND e.target_stable_id IS NOT NULL \
+              AND NOT list_contains(w.node_path, e.target_stable_id) \
+          ), \
+          complete_paths AS ( \
+            SELECT row_number() OVER (ORDER BY depth, sort_key) - 1 AS path_index, depth, node_path \
+            FROM walk \
+            WHERE current_id = ?2 AND depth > 0 \
+            ORDER BY depth, sort_key \
+            LIMIT {max_paths} \
+          ), \
+          path_edges AS ( \
+            SELECT path_index, idx - 1 AS hop_index, \
+                   list_extract(node_path, idx) AS source_stable_id, \
+                   list_extract(node_path, idx + 1) AS target_stable_id \
+            FROM complete_paths \
+            CROSS JOIN range(1, depth + 1) AS r(idx) \
+          ), \
+          ranked_edges AS ( \
+            SELECT pe.path_index, pe.hop_index, e.source_stable_id, e.target_stable_id, \
+                   e.relation, e.edge_kind, e.confidence, e.bind_method, e.direction, \
+                   row_number() OVER ( \
+                     PARTITION BY pe.path_index, pe.hop_index \
+                     ORDER BY e.relation, e.edge_kind, e.confidence, e.bind_method \
+                   ) AS edge_rank \
+            FROM path_edges pe \
+            JOIN edges_undirected e \
+              ON e.source_stable_id = pe.source_stable_id \
+             AND e.target_stable_id = pe.target_stable_id \
+          ) \
+          SELECT path_index, hop_index, source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method, direction \
+          FROM ranked_edges \
+          WHERE edge_rank = 1 \
+          ORDER BY path_index, hop_index"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .context("failed to prepare undirected recursive context path query")?;
+    let rows = stmt
+        .query_map(duckdb::params![source_stable_id, target_stable_id], |row| {
+            Ok(KnowledgePathRow {
+                path_index: i64_to_usize(row.get(0)?),
+                hop_index: i64_to_usize(row.get(1)?),
+                source_stable_id: row.get(2)?,
+                target_stable_id: row.get(3)?,
+                relation: row.get(4)?,
+                edge_kind: row.get(5)?,
+                confidence: row.get(6)?,
+                bind_method: row.get(7)?,
+                direction: row.get(8)?,
+                engine,
+                status: KnowledgePathStatus::PathFound,
+                caveat: None,
+            })
+        })
+        .context("failed to run undirected recursive context path query")?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to read undirected recursive context path rows")
 }
 
 fn i64_to_usize(value: i64) -> usize {
