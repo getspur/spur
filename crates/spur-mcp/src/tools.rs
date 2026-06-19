@@ -1607,8 +1607,7 @@ fn execute_epic_def() -> ToolDefinition {
     }
 }
 
-/// Returns all tool definitions for the MCP `tools/list` response.
-pub fn tools_list() -> Vec<ToolDefinition> {
+pub(crate) fn legacy_tools_definitions() -> Vec<ToolDefinition> {
     vec![
         delegate_to_worker_def(),
         delegate_parallel_def(),
@@ -1657,6 +1656,13 @@ pub fn tools_list() -> Vec<ToolDefinition> {
     ]
 }
 
+/// Returns all tool definitions for the MCP `tools/list` response.
+pub fn tools_list() -> Vec<ToolDefinition> {
+    crate::registry::default_tool_registry()
+        .expect("default MCP tool registry must be valid")
+        .list_tools()
+}
+
 /// Curated worker-facing tool subset exposed by `WorkerMcpServer`.
 ///
 /// Workers receive only read-and-emit tools: read tools that surface
@@ -1668,7 +1674,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
 /// plan_truncate_and_restart) are intentionally excluded — exposing them to
 /// workers would invert the brain→worker authority direction and let workers
 /// self-dispatch.
-pub fn worker_tools_list() -> Vec<ToolDefinition> {
+pub(crate) fn legacy_worker_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         get_issue_def(),
         list_issues_def(),
@@ -1691,6 +1697,12 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         report_signal_def(),
         report_progress_def(),
     ]
+}
+
+pub fn worker_tools_list() -> Vec<ToolDefinition> {
+    crate::registry::default_worker_tool_registry()
+        .expect("default worker MCP tool registry must be valid")
+        .list_tools()
 }
 
 #[cfg(test)]
@@ -2129,6 +2141,53 @@ mod schema_truthfulness_tests {
 mod worker_tools_subset_tests {
     use super::*;
 
+    const EXPECTED_ALL_TOOLS: &[&str] = &[
+        "delegate_to_worker",
+        "delegate_parallel",
+        "check_delegation_status",
+        "fetch_outcome_artifact",
+        "cancel_delegation",
+        "list_available_workers",
+        "get_issue",
+        "list_issues",
+        "update_issue",
+        "create_issue",
+        "add_dependency",
+        "create_pr",
+        "merge_plan",
+        "resume_plan",
+        "force_reclaim_plan",
+        "graph_triage",
+        "graph_plan",
+        "graph_insights",
+        "graph_alerts",
+        "graph_subgraph",
+        "code_resolve",
+        "code_file_symbols",
+        "code_symbol_info",
+        "code_read_symbol",
+        "code_callers",
+        "code_callees",
+        "code_symbol_search",
+        "code_subgraph",
+        "code_symbol_history",
+        "doc_navigate",
+        "knowledge_context_pack",
+        "knowledge_context_pack_2",
+        "submit_plan",
+        "execute_epic",
+        "get_plan_status",
+        "get_reconciler_status",
+        "get_task_diff",
+        "preview_task_base",
+        "plan_truncate_and_restart",
+        "recover_orphaned_dispatch",
+        "review_task",
+        "submit_plan_mutation",
+        "report_signal",
+        "report_progress",
+    ];
+
     const EXPECTED_WORKER_TOOLS: &[&str] = &[
         "get_issue",
         "list_issues",
@@ -2151,6 +2210,31 @@ mod worker_tools_subset_tests {
         "report_signal",
         "report_progress",
     ];
+
+    #[test]
+    fn tools_list_contains_exactly_the_compatibility_set() {
+        let actual: Vec<String> = tools_list().iter().map(|t| t.name.clone()).collect();
+        let expected: Vec<String> = EXPECTED_ALL_TOOLS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            actual, expected,
+            "tools_list drift; update EXPECTED_ALL_TOOLS in same commit if intentional",
+        );
+    }
+
+    #[test]
+    fn default_tool_registry_preserves_code_search_alias_without_advertising_it() {
+        let registry = crate::registry::default_tool_registry().expect("default registry");
+        let names: Vec<String> = registry
+            .list_tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert!(!names.contains(&"code_search".to_string()));
+        assert_eq!(
+            registry.canonical_name("code_search"),
+            Some("code_symbol_search")
+        );
+    }
 
     #[test]
     fn knowledge_context_pack_appears_in_worker_tools_list() {
@@ -2225,6 +2309,55 @@ mod worker_tools_subset_tests {
                 w.name,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_registry_tests {
+    use super::*;
+    use crate::registry::{ToolCallContext, ToolModule, ToolRegistry, ToolResponse};
+    use async_trait::async_trait;
+    use rmcp::model::ErrorData as McpError;
+
+    struct StaticToolModule {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl ToolModule for StaticToolModule {
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: self.name.to_string(),
+                description: "test tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+            }]
+        }
+
+        async fn call(
+            &self,
+            _ctx: ToolCallContext<'_>,
+            _name: &str,
+            _args: Value,
+        ) -> Result<ToolResponse, McpError> {
+            unreachable!("registry duplicate test never invokes tools")
+        }
+    }
+
+    #[test]
+    fn tool_registry_rejects_duplicate_tool_names() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(StaticToolModule { name: "duplicate" })
+            .expect("first registration succeeds");
+
+        let err = registry
+            .register(StaticToolModule { name: "duplicate" })
+            .expect_err("duplicate tool names must be rejected");
+
+        assert!(
+            err.to_string().contains("duplicate"),
+            "unexpected duplicate error: {err}"
+        );
     }
 }
 

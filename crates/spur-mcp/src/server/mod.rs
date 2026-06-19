@@ -47,7 +47,7 @@ use crate::plan::reconciler::{
     Reconciler, ReconcilerConfig, ReconcilerDispatch, ReconcilerDispatchCtx,
 };
 use crate::plan::signal_watcher::SignalWatcher;
-use crate::tools::{self, DelegationChannel, DelegationRequest};
+use crate::tools::{DelegationChannel, DelegationRequest};
 
 pub(crate) mod handlers;
 pub(crate) mod plan_builder;
