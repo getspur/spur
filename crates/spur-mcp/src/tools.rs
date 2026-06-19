@@ -1092,114 +1092,88 @@ fn doc_navigate_def() -> ToolDefinition {
     }
 }
 
+fn knowledge_context_pack_2_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": { "type": "string", "minLength": 1 },
+            "intent": {
+                "type": "string",
+                "enum": ["explain", "change", "review", "debug", "plan"],
+                "default": "explain"
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["all", "docs", "code", "graph"],
+                "default": "all"
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 8
+            },
+            "include_tests": { "type": "boolean", "default": true },
+            "max_symbol_bodies": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5,
+                "default": 3
+            },
+            "graph_reasoning": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "boolean",
+                        "description": "When true, include bounded graph path evidence between top code candidates and graph anchors."
+                    },
+                    "communities": {
+                        "type": "boolean",
+                        "description": "When true, include component/community context for grounded code candidates."
+                    },
+                    "risk": {
+                        "type": "boolean",
+                        "description": "When true, include scorecard risk signals for grounded code candidates."
+                    },
+                    "max_path_hops": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_CONTEXT_PATH_HOPS,
+                        "default": 4
+                    },
+                    "max_paths": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_CONTEXT_PATHS,
+                        "default": 6
+                    },
+                    "anchors": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional graph://symbol/<id> or bare stable symbol IDs to use as path targets."
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn knowledge_context_pack_def() -> ToolDefinition {
     ToolDefinition {
         name: "knowledge_context_pack".into(),
-        description: "Builds a bounded evidence pack from BM25 candidates, scorecard signals, and exact graph grounding. Applies opportunistic Lance hybrid vector re-ranking when query embeddings and the sidecar respond; degrades to BM25-only on timeout or unavailability. Use code_read_symbol/code_callers/code_callees for exact follow-up.".into(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": { "type": "string", "minLength": 1 },
-                "intent": {
-                    "type": "string",
-                    "enum": ["explain", "change", "review", "debug", "plan"],
-                    "default": "explain"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["all", "docs", "code", "graph"],
-                    "default": "all"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 8
-                },
-                "include_tests": { "type": "boolean", "default": true },
-                "max_symbol_bodies": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 5,
-                    "default": 3
-                }
-            },
-            "additionalProperties": false
-        }),
+        description: "Deprecated alias for knowledge_context_pack_2; routes to v2 behavior. Use knowledge_context_pack_2 as the first-class canonical evidence pack.".into(),
+        input_schema: knowledge_context_pack_2_input_schema(),
     }
 }
 
 fn knowledge_context_pack_2_def() -> ToolDefinition {
     ToolDefinition {
         name: "knowledge_context_pack_2".into(),
-        description: "experimental v2 structured evidence pack for semantic answers; it does not generate final prose. Preserves knowledge_context_pack retrieval and exact grounding while adding DuckPGQ/Onager-backed graph_paths, risk_scorecard, community_context, temporal_context, and caveats as bounded graph-reasoning evidence.".into(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": { "type": "string", "minLength": 1 },
-                "intent": {
-                    "type": "string",
-                    "enum": ["explain", "change", "review", "debug", "plan"],
-                    "default": "explain"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["all", "docs", "code", "graph"],
-                    "default": "all"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 8
-                },
-                "include_tests": { "type": "boolean", "default": true },
-                "max_symbol_bodies": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 5,
-                    "default": 3
-                },
-                "graph_reasoning": {
-                    "type": "object",
-                    "properties": {
-                        "paths": {
-                            "type": "boolean",
-                            "description": "When true, include bounded graph path evidence between top code candidates and graph anchors."
-                        },
-                        "communities": {
-                            "type": "boolean",
-                            "description": "When true, include component/community context for grounded code candidates."
-                        },
-                        "risk": {
-                            "type": "boolean",
-                            "description": "When true, include scorecard risk signals for grounded code candidates."
-                        },
-                        "max_path_hops": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_CONTEXT_PATH_HOPS,
-                            "default": 4
-                        },
-                        "max_paths": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_CONTEXT_PATHS,
-                            "default": 6
-                        },
-                        "anchors": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Optional graph://symbol/<id> or bare stable symbol IDs to use as path targets."
-                        }
-                    },
-                    "additionalProperties": false
-                }
-            },
-            "additionalProperties": false
-        }),
+        description: "First-class canonical structured evidence pack for semantic answers; it does not generate final prose. Preserves knowledge_context_pack retrieval and exact grounding while adding DuckPGQ/Onager-backed graph_paths, risk_scorecard, community_context, temporal_context, and caveats as bounded graph-reasoning evidence.".into(),
+        input_schema: knowledge_context_pack_2_input_schema(),
     }
 }
 
@@ -1640,8 +1614,8 @@ pub fn tools_list() -> Vec<ToolDefinition> {
         code_subgraph_def(),
         code_symbol_history_def(),
         doc_navigate_def(),
-        knowledge_context_pack_def(),
         knowledge_context_pack_2_def(),
+        knowledge_context_pack_def(),
         submit_plan_def(),
         execute_epic_def(),
         get_plan_status_def(),
@@ -1685,8 +1659,8 @@ pub fn worker_tools_list() -> Vec<ToolDefinition> {
         code_subgraph_def(),
         code_symbol_history_def(),
         doc_navigate_def(),
-        knowledge_context_pack_def(),
         knowledge_context_pack_2_def(),
+        knowledge_context_pack_def(),
         update_issue_def(),
         report_signal_def(),
         report_progress_def(),
@@ -1787,13 +1761,11 @@ mod schema_truthfulness_tests {
         let stale_ann_boundary = ["Lance ANN is", "not used by this MVP"].join(" ");
 
         assert!(
-            !def.description.contains(&stale_ann_boundary)
-                && def
-                    .description
-                    .contains("opportunistic Lance hybrid vector re-ranking")
-                && def.description.contains("degrades to BM25-only")
-                && def.description.contains("code_read_symbol/code_callers/code_callees"),
-            "knowledge_context_pack description must state opportunistic Lance fallback and exact graph follow-ups"
+            def.description.contains("Deprecated alias")
+                && def.description.contains("knowledge_context_pack_2")
+                && def.description.contains("v2 behavior")
+                && !def.description.contains(&stale_ann_boundary),
+            "knowledge_context_pack description must mark v1 as a deprecated alias to v2"
         );
         assert_eq!(def.input_schema.get("required"), Some(&json!(["query"])));
         assert_eq!(
@@ -1805,6 +1777,7 @@ mod schema_truthfulness_tests {
         assert_eq!(
             prop_names,
             vec![
+                "graph_reasoning",
                 "include_tests",
                 "intent",
                 "limit",
@@ -1812,7 +1785,7 @@ mod schema_truthfulness_tests {
                 "query",
                 "scope",
             ],
-            "knowledge_context_pack property set drifted",
+            "knowledge_context_pack alias must advertise the v2 input shape",
         );
         assert_eq!(
             props.get("query").and_then(|v| v.get("minLength")),
@@ -1884,7 +1857,10 @@ mod schema_truthfulness_tests {
             .expect("properties");
 
         assert!(
-            def.description.contains("structured evidence pack")
+            def.description.contains("First-class")
+                && def.description.contains("canonical")
+                && !def.description.contains("experimental")
+                && def.description.contains("structured evidence pack")
                 && def.description.contains("semantic answers")
                 && def.description.contains("does not generate final prose")
                 && def.description.contains("DuckPGQ/Onager")
@@ -2145,8 +2121,8 @@ mod worker_tools_subset_tests {
         "code_subgraph",
         "code_symbol_history",
         "doc_navigate",
-        "knowledge_context_pack",
         "knowledge_context_pack_2",
+        "knowledge_context_pack",
         "update_issue",
         "report_signal",
         "report_progress",
