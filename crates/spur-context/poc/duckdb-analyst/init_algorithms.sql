@@ -7,13 +7,17 @@
 -- read-only MCP can SELECT without ever touching Onager.
 --
 -- Ordering contract:
---   * runs AFTER  init.sql            (needs `onager_edges`, `nodes`)
+--   * runs AFTER  init.sql            (needs `onager_edges`, `onager_dep_edges`, `nodes`)
 --   * runs BEFORE init_views.sql      (v_symbol_risk / v_symbol_scorecard join
 --                                       the v_symbol_centrality/_component/_community views)
 --
 -- `onager_edges` is the resolved calls subgraph (edge_kind='calls'), dense-keyed
--- by node_id. All _algo_* tables are therefore keyed by the SAME dense node_id
--- the `nodes` view exposes, so the public v_symbol_* views join cleanly.
+-- by node_id, and remains the basis for PageRank and degree. `onager_dep_edges`
+-- is the full resolved dependency graph (calls + references + imports + ...)
+-- used for components and communities. All _algo_* tables are keyed by the SAME
+-- dense node_id the `nodes` view exposes, so the public v_symbol_* views join
+-- cleanly; component/community views synthesize singleton rows for nodes Onager
+-- does not return.
 --
 -- Note: Louvain community ids are not stable across rebuilds (the algorithm is
 -- randomized); only the grouping is meaningful, not the integer label.
@@ -23,20 +27,20 @@ CREATE OR REPLACE TABLE _algo_pagerank AS
 SELECT node_id, rank AS pagerank
 FROM onager_par_pagerank((SELECT src, dst FROM onager_edges));
 
--- Weakly-connected components (connectivity islands / dead clusters).
+-- Weakly-connected components over the full dependency graph.
 CREATE OR REPLACE TABLE _algo_component AS
 SELECT node_id, component AS component_id
-FROM onager_par_components((SELECT src, dst FROM onager_edges));
+FROM onager_par_components((SELECT src, dst FROM onager_dep_edges));
 
 CREATE OR REPLACE TABLE _algo_component_size AS
 SELECT component_id, count(*) AS component_size
 FROM _algo_component
 GROUP BY component_id;
 
--- Louvain communities (de-facto modules; cross-crate communities = leaky abstraction).
+-- Louvain communities over the full dependency graph.
 CREATE OR REPLACE TABLE _algo_community AS
 SELECT node_id, community AS community_id
-FROM onager_cmm_louvain((SELECT src, dst FROM onager_edges));
+FROM onager_cmm_louvain((SELECT src, dst FROM onager_dep_edges));
 
 -- In/out degree over the calls graph (plain SQL — no Onager needed).
 CREATE OR REPLACE TABLE _algo_degree AS
@@ -63,18 +67,18 @@ LEFT JOIN _algo_degree   d  USING (node_id);
 CREATE OR REPLACE VIEW v_symbol_component AS
 SELECT n.stable_symbol_id,
        n.node_id,
-       c.component_id,
-       cs.component_size
+       COALESCE(c.component_id, -n.node_id - 1) AS component_id,
+       COALESCE(cs.component_size, 1) AS component_size
 FROM nodes n
-JOIN _algo_component c USING (node_id)
-LEFT JOIN _algo_component_size cs USING (component_id);
+LEFT JOIN _algo_component c USING (node_id)
+LEFT JOIN _algo_component_size cs ON cs.component_id = c.component_id;
 
 CREATE OR REPLACE VIEW v_symbol_community AS
 SELECT n.stable_symbol_id,
        n.node_id,
-       cm.community_id
+       COALESCE(cm.community_id, -n.node_id - 1) AS community_id
 FROM nodes n
-JOIN _algo_community cm USING (node_id);
+LEFT JOIN _algo_community cm USING (node_id);
 
 -- One-row whole-graph metrics — trend these across rebuilds.
 CREATE OR REPLACE TABLE v_graph_metrics AS
