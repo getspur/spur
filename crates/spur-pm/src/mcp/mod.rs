@@ -264,10 +264,10 @@ impl PmMcpModule {
     }
 
     async fn handle_graph_subgraph(&self, args: Value) -> Result<Value, McpHandlerError> {
+        let analyzer = self.require_analyzer()?;
         let root_id = args.get("root_id").and_then(Value::as_str).ok_or_else(|| {
             McpHandlerError::InvalidParams("Missing required field 'root_id'".to_string())
         })?;
-        let analyzer = self.require_analyzer()?;
         let depth = args
             .get("depth")
             .and_then(Value::as_u64)

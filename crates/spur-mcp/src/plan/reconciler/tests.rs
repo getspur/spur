@@ -1479,16 +1479,7 @@ async fn seed_ready_overlay_plan(
     (pm, dep_issue_id, ready_issue_id)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconciler_beads_tick_acceptance() {
-    tick_once_predicts_overlay_conflict_and_blocks_without_dispatch().await;
-    tick_once_with_clean_preview_dispatches_normally().await;
-    auto_merge_config_off_produces_zero_actions().await;
-    failed_epic_completion_audit_suppresses_automation().await;
-    tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task().await;
-    tick_once_strips_plan_complete_when_plan_submit_audit_is_absent().await;
-}
-
+#[tokio::test]
 async fn tick_once_predicts_overlay_conflict_and_blocks_without_dispatch() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let plan_id = "PREDISPATCH-CONFLICT";
@@ -1544,6 +1535,7 @@ async fn tick_once_predicts_overlay_conflict_and_blocks_without_dispatch() {
     );
 }
 
+#[tokio::test]
 async fn tick_once_with_clean_preview_dispatches_normally() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let plan_id = "PREDISPATCH-CLEAN";
@@ -1577,6 +1569,7 @@ async fn tick_once_with_clean_preview_dispatches_normally() {
     ));
 }
 
+#[tokio::test]
 async fn auto_merge_config_off_produces_zero_actions() {
     use tempfile::TempDir;
 
@@ -1617,6 +1610,7 @@ async fn auto_merge_config_off_produces_zero_actions() {
 /// integration-pending. Without this guard the old code would proceed
 /// because it unconditionally appended a synthetic EpicCompletion to the
 /// local audits vector.
+#[tokio::test]
 async fn failed_epic_completion_audit_suppresses_automation() {
     use tempfile::TempDir;
 
@@ -2183,6 +2177,7 @@ async fn expected_plan_id_from_parent_epic_is_deterministic_when_blocked_by_reve
     assert_eq!(forward.as_deref(), Some("PLAN-A"));
 }
 
+#[tokio::test]
 async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -2261,6 +2256,7 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
     );
 }
 
+#[tokio::test]
 async fn tick_once_strips_plan_complete_when_plan_submit_audit_is_absent() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let repo = dir.path();
