@@ -288,25 +288,38 @@ cat >/usr/local/sbin/spur-autoshutdown <<'SCRIPT'
 # Returns 0 if VM is idle (should shut down), 1 if active.
 set -u
 IDLE_MIN=__IDLE_MIN__
+STALE_BUILD_MIN=60
+STALE_BUILD_SECONDS=$((STALE_BUILD_MIN * 60))
 TARGETS=/mnt/cargo/targets
 
-# 1. Any cargo, rustc, or rust-lld process? -> active. sccache runs as a
-#    long-lived daemon and is excluded; it would otherwise pin the VM up forever.
-if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null || pgrep -x rust-lld >/dev/null; then
-    echo "active: build process running"
-    exit 1
-fi
-
-# 2. Any logged-in user (ssh session)? -> active.
+# 1. Any logged-in user (ssh session)? -> active.
 if [[ $(who | wc -l) -gt 0 ]]; then
     echo "active: ssh session(s) open"
     exit 1
 fi
 
-# 3. Any file under targets/ modified within IDLE_MIN minutes? -> active.
-if [[ -d "$TARGETS" ]] && find "$TARGETS" -mmin -"$IDLE_MIN" -type f -print -quit | grep -q .; then
-    echo "active: target/ modified in last $IDLE_MIN min"
-    exit 1
+BUILD_PROCESS_TABLE=$(ps -eo pid=,comm=,etimes=,cmd= 2>/dev/null || true)
+STALE_CARGO=$(awk -v max="$STALE_BUILD_SECONDS" \
+    '$2 == "cargo" && $3 ~ /^[0-9]+$/ && $3 > max { print }' \
+    <<<"$BUILD_PROCESS_TABLE")
+
+if [[ -n "$STALE_CARGO" ]]; then
+    echo "stale: cargo process older than $STALE_BUILD_MIN min: $(printf '%s\n' "$STALE_CARGO" | head -1)"
+else
+    # 2. Any fresh cargo, rustc, or rust-lld process? -> active. sccache runs
+    #    as a long-lived daemon and is excluded; it would otherwise pin the VM
+    #    up forever.
+    if awk '$2 == "cargo" || $2 == "rustc" || $2 == "rust-lld" { found=1 } END { exit(found ? 0 : 1) }' \
+            <<<"$BUILD_PROCESS_TABLE"; then
+        echo "active: build process running"
+        exit 1
+    fi
+
+    # 3. Any file under targets/ modified within IDLE_MIN minutes? -> active.
+    if [[ -d "$TARGETS" ]] && find "$TARGETS" -mmin -"$IDLE_MIN" -type f -print -quit | grep -q .; then
+        echo "active: target/ modified in last $IDLE_MIN min"
+        exit 1
+    fi
 fi
 
 echo "idle for $IDLE_MIN+ min — shutting down"
