@@ -1,6 +1,6 @@
 ---
 name: code-explore
-description: "You MUST use this before any code exploration, navigation, or impact analysis — instead of Grep/Glob/Read-walking. Establishes the three-layer retrieval stack: knowledge_context_pack for orientation, the code_* MCP graph tools for precise symbol work and blast-radius bounding, and spur-analyst SQL for aggregation and graph algorithms."
+description: "You MUST use this before any code exploration, navigation, or impact analysis — instead of Grep/Glob/Read-walking. Establishes the three-layer retrieval stack: knowledge_context_pack_2 for orientation, the code_* MCP graph tools for precise symbol work and blast-radius bounding, and spur-analyst SQL for aggregation and graph algorithms."
 role: both
 ---
 
@@ -16,7 +16,7 @@ Before opening more than one file with Read, or running more than one Grep/Glob 
 
 | Layer | Tool surface | Reach for it when |
 |---|---|---|
-| **1 — Orient** | `knowledge_context_pack` | Any new "where does X live / what's around this concept / get me oriented" question. One call returns a bounded evidence pack: BM25 code+doc hits, scorecard signals (pagerank, churn, posture), exact-graph caller/callee context with popular-sink boundaries pre-applied, staleness metadata, and `recommended_next_tools` with pre-filled selectors. |
+| **1 — Orient** | `knowledge_context_pack_2` | Any new "where does X live / what's around this concept / get me oriented" question. One call returns a bounded evidence pack: hybrid code+doc hits, scorecard signals, exact-graph caller/callee context with popular-sink boundaries pre-applied, v2 graph reasoning, staleness metadata, and `recommended_next_tools` with pre-filled selectors. The old `knowledge_context_pack` name is a deprecated alias. |
 | **2 — Precise** | `code_*` tools (rest of this skill) | Exact symbol work: read a body, list callers/callees, map a neighborhood. Seed selectors from layer 1's `recommended_next_tools` instead of re-resolving by name. Drop straight into layer 2 when you already know the exact symbol or file. |
 | **3 — Aggregate** | spur-analyst (DuckDB SQL) | The answer is a *set*, not a symbol: ranking, hotspots, time-series, multi-table JOINs, co-change rings, reachability paths, PageRank/SCC. **REQUIRED SUB-SKILL:** use spur-analyst for SQL idioms and the schema-discovery hard gate. |
 
@@ -24,13 +24,16 @@ Before opening more than one file with Read, or running more than one Grep/Glob 
 
 **Escalate 2 → 3 when you start iterating.** Hand-chaining many `code_callers` calls to build a ranking or closure is the signal that the question is SQL-shaped.
 
-### Layer-1 trust rules (from multi-round evaluation, 2026-06-10)
+### Layer-1 trust rules (verified after v2 gate, 2026-06-19)
 
-- **Code retrieval is BM25-only (temporary).** A concept query whose words don't appear in identifiers can return off-domain code hits while doc hits stay on-target. When `primary_evidence` looks unrelated to `supporting_docs`, the code recall failed — fall back to filtered `code_symbol_search` or `rg`.
-- **Do not trust `confidence` alone.** It tracks retrieval-score shape, not relevance: observed `high` on irrelevant code hits and `low` on perfect doc-only results. Judge by reading the hit titles and files.
+- **Hybrid retrieval is live.** `knowledge_context_pack_2` applies vector re-rank when embeddings are available and falls back to BM25 on timeout or sidecar unavailability. Judge fallback results by titles/files, especially for vocabulary-thin concept queries.
+- **`confidence` is calibrated, not absolute.** It now accounts for score separation, code/doc corroboration, and hybrid-vs-BM25 grounding. Use `low|medium|high` as a relevance hint, then read the evidence.
 - **`recommended_next_tools` inherits top-hit quality.** Sanity-check the suggested selector's file path before following it.
-- **The docs side is reliably strong.** For concept-shaped questions, read `supporting_docs` first, harvest the identifier vocabulary from them, then re-query the pack or layer 2 with that vocabulary.
-- **Verified-good behaviors you can lean on:** identifier-rich queries hit precisely (impact counts in the pack matched exact `code_callers` output); popular sinks are counted but not expanded; `scope=docs`/`scope=code` and `intent` (`explain|change|review|debug|plan`) meaningfully shape the pack.
+- **Corroboration matters.** Strong packs align `primary_evidence` and `supporting_docs` around the same files, crates, or feature area. If they diverge, harvest vocabulary from the docs and re-query the pack or layer 2.
+- **Caller evidence is explicit about uncertainty.** Label-derived callers are surfaced as `label_inbound`, unresolved inbound labels as `inbound_unresolved`, and ambiguous name matches as `name_ambiguous`; keep them distinct from resolved call edges.
+- **Graph paths are deliberately bounded.** Directed paths are calls-only, including `calls_dyn` and `references_hof`; containment/import edges stay out. Common-dependency evidence is reported with `traversal: "undirected"`.
+- **Community context is trimmed.** `community_context` omits component identifiers and size noise; use it for local neighborhood hints, not component analytics.
+- **Verified-good behaviors you can lean on:** identifier-rich queries hit precisely; popular sinks are counted but not expanded; `scope=docs`/`scope=code` and `intent` (`explain|change|review|debug|plan`) meaningfully shape the pack.
 
 ## Why graph-first
 
@@ -45,8 +48,8 @@ Most code questions are not call-graph questions. Pick the right shape before re
 
 | Question shape | Right tool sequence |
 |---|---|
-| **"Get me oriented / where does <concept> live / what's the impact area?"** (new investigation, no symbol in hand) | `knowledge_context_pack` (layer 1) — then follow its `recommended_next_tools` selectors into the rows below. |
-| **"How does <concept> work / where is it documented?"** (you know the *topic*, not the symbol name) | `knowledge_context_pack` or `code_semantic_search` — BM25 over doc + code content. Then `code_read_symbol` / `doc_navigate` on a hit. |
+| **"Get me oriented / where does <concept> live / what's the impact area?"** (new investigation, no symbol in hand) | `knowledge_context_pack_2` (layer 1) — then follow its `recommended_next_tools` selectors into the rows below. |
+| **"How does <concept> work / where is it documented?"** (you know the *topic*, not the symbol name) | `knowledge_context_pack_2` or `code_semantic_search` — hybrid/BM25 doc + code retrieval. Then `code_read_symbol` / `doc_navigate` on a hit. |
 | **"What does X mean / contain / advertise?"** (schema audit, doc read, single-symbol body) | filtered `code_symbol_search` → `code_read_symbol`. **No call graph.** |
 | **"What breaks if I change X?"** (refactor, rename) | `code_callers` with `include_unresolved=true`. Counts-first; bail on popular sinks. |
 | **"What does X end up doing?"** (trace one branch) | Iterated `code_callees`. Pick one non-sink child per hop. Never `code_subgraph r=2`. |
@@ -242,7 +245,7 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 
 ## Key principles
 
-- **Stack before tools.** Orient with `knowledge_context_pack`, work precisely with `code_*`, aggregate with spur-analyst SQL. Pick the layer before picking a tool.
+- **Stack before tools.** Orient with `knowledge_context_pack_2`, work precisely with `code_*`, aggregate with spur-analyst SQL. Pick the layer before picking a tool.
 - **Graph before text.** Every code question gets a stack attempt before Grep/Glob/Read-walking.
 - **Classify the question first.** Most are "read one symbol," not "trace the call graph."
 - **`code_symbol_search` is primary, filtered.** Always pair with `symbol_kind` and `file`/`file_glob` to avoid noise (markdown sections, test duplicates) and overflow.
@@ -257,7 +260,7 @@ When this happens, do NOT chunk-read the saved file. Switch strategy:
 ## TL;DR
 
 ```
-0. Classify the question. New investigation → knowledge_context_pack first;
+0. Classify the question. New investigation → knowledge_context_pack_2 first;
    carry its graph://symbol selectors forward. Ranked/aggregated/path answer
    → spur-analyst SQL. Most of the rest are "read one symbol" — skip the
    call graph.
