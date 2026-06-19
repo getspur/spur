@@ -288,10 +288,7 @@ pub struct WorkerMcpDeps {}
 #[non_exhaustive]
 pub struct PmMcpDeps {}
 
-/// Future code-graph handles for symbol lookup, graph traversal, and rebuilds.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct GraphMcpDeps {}
+pub use spur_graph::mcp::GraphMcpDeps;
 
 /// Future analyst handles for DuckDB-backed evidence and graph reasoning.
 #[derive(Debug, Clone, Default)]
@@ -439,6 +436,59 @@ fn issue_to_summary_event(
     }
 }
 
+struct GraphMcpToolModule;
+
+#[async_trait]
+impl ToolModule for GraphMcpToolModule {
+    fn tools(&self) -> Vec<ToolDefinition> {
+        spur_graph::mcp::tool_definitions()
+            .into_iter()
+            .map(graph_tool_definition)
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        ctx: ToolCallContext<'_>,
+        name: &str,
+        args: Value,
+    ) -> Result<ToolResponse, McpError> {
+        let id = ctx.request_id_value();
+        let server = ctx.callback_server()?;
+        let module = spur_graph::mcp::GraphMcpModule::new(server.graph_mcp_deps.clone());
+        Ok(ToolResponse::from_json_rpc(
+            graph_response(id, module.call(name, args).await).await,
+        ))
+    }
+}
+
+fn graph_tool_definition(definition: spur_graph::mcp::ToolDefinition) -> ToolDefinition {
+    ToolDefinition {
+        name: definition.name,
+        description: definition.description,
+        input_schema: definition.input_schema,
+    }
+}
+
+async fn graph_response(id: Value, result: spur_graph::mcp::CodeGraphResult) -> JsonRpcResponse {
+    match result {
+        Ok(body) => {
+            let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
+            )
+        }
+        Err(error) => {
+            let error = error.into_error_response().await;
+            match error.data {
+                Some(data) => JsonRpcResponse::error_with_data(id, error.code, error.message, data),
+                None => JsonRpcResponse::error(id, error.code, error.message),
+            }
+        }
+    }
+}
+
 struct LegacyMcpToolModule {
     definitions: Vec<ToolDefinition>,
 }
@@ -462,9 +512,15 @@ impl LegacyMcpToolModule {
         }
     }
 
-    fn worker() -> Self {
+    fn worker_prelude() -> Self {
         Self {
-            definitions: crate::tools::legacy_worker_tool_definitions(),
+            definitions: crate::tools::legacy_worker_prelude_tool_definitions(),
+        }
+    }
+
+    fn worker_remainder() -> Self {
+        Self {
+            definitions: crate::tools::legacy_worker_remainder_tool_definitions(),
         }
     }
 }
@@ -497,6 +553,7 @@ pub fn default_tool_registry() -> Result<&'static ToolRegistry, ToolRegistryErro
                 .with(BrainPmMcpToolModule::crud())?
                 .with(LegacyMcpToolModule::plan_management())?
                 .with(BrainPmMcpToolModule::issue_graph())?
+                .with(GraphMcpToolModule)?
                 .with(LegacyMcpToolModule::full_remainder())?
                 .with_alias("code_search", "code_symbol_search")
                 .map(ToolRegistryBuilder::build)
@@ -510,7 +567,9 @@ pub fn default_worker_tool_registry() -> Result<&'static ToolRegistry, ToolRegis
     REGISTRY
         .get_or_init(|| {
             ToolRegistry::builder()
-                .with(LegacyMcpToolModule::worker())?
+                .with(LegacyMcpToolModule::worker_prelude())?
+                .with(GraphMcpToolModule)?
+                .with(LegacyMcpToolModule::worker_remainder())?
                 .with_alias("code_search", "code_symbol_search")
                 .map(ToolRegistryBuilder::build)
         })
