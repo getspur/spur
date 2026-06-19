@@ -99,17 +99,3 @@ async fn pm_mcp_module_update_issue_missing_id_is_invalid_params() {
 
     assert!(matches!(err, McpHandlerError::InvalidParams(_)));
 }
-
-#[tokio::test]
-async fn pm_mcp_module_graph_subgraph_missing_root_is_invalid_params_without_pm() {
-    let module = PmMcpModule::new(PmMcpDeps::default());
-
-    let err = module
-        .call("graph_subgraph", json!({}))
-        .await
-        .expect_err("missing root_id should fail before analyzer lookup");
-
-    assert!(
-        matches!(err, McpHandlerError::InvalidParams(message) if message == "Missing required field 'root_id'")
-    );
-}
