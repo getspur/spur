@@ -886,6 +886,115 @@ fn context_paths_return_no_path_status() {
 }
 
 #[test]
+fn context_paths_support_undirected_reverse_traversal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    create_simple_directed_path_fixture(&conn);
+    drop(conn);
+
+    let forward = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-c",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 1,
+            undirected: false,
+        },
+    )
+    .expect("query forward directed path");
+    assert_eq!(forward.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(forward.status, KnowledgePathStatus::PathFound);
+    assert_eq!(forward.rows.len(), 2, "{forward:#?}");
+    assert!(
+        forward.rows.iter().all(|row| row.direction.is_none()),
+        "directed traversal should not populate direction: {forward:#?}"
+    );
+
+    let forward_undirected = query_context_paths(
+        &db_path,
+        "sym-a",
+        "sym-c",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 1,
+            undirected: true,
+        },
+    )
+    .expect("query forward undirected path");
+    assert_eq!(forward_undirected.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(forward_undirected.status, KnowledgePathStatus::PathFound);
+    let forward_path = forward_undirected
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.hop_index,
+                row.source_stable_id.as_str(),
+                row.target_stable_id.as_str(),
+                row.direction.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        forward_path,
+        vec![
+            (0, "sym-a", "sym-b", Some("forward")),
+            (1, "sym-b", "sym-c", Some("forward")),
+        ]
+    );
+
+    let reverse_directed = query_context_paths(
+        &db_path,
+        "sym-c",
+        "sym-a",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 1,
+            undirected: false,
+        },
+    )
+    .expect("query reverse directed path");
+    assert_eq!(reverse_directed.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(reverse_directed.status, KnowledgePathStatus::NoPath);
+    assert!(reverse_directed.rows.is_empty(), "{reverse_directed:#?}");
+
+    let reverse_undirected = query_context_paths(
+        &db_path,
+        "sym-c",
+        "sym-a",
+        KnowledgePathOptions {
+            max_hops: 2,
+            max_paths: 1,
+            undirected: true,
+        },
+    )
+    .expect("query reverse undirected path");
+    assert_eq!(reverse_undirected.engine, KnowledgePathEngine::RecursiveSql);
+    assert_eq!(reverse_undirected.status, KnowledgePathStatus::PathFound);
+    let reverse_path = reverse_undirected
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.hop_index,
+                row.source_stable_id.as_str(),
+                row.target_stable_id.as_str(),
+                row.direction.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reverse_path,
+        vec![
+            (0, "sym-c", "sym-b", Some("reverse")),
+            (1, "sym-b", "sym-a", Some("reverse")),
+        ]
+    );
+}
+
+#[test]
 fn context_paths_clamp_max_hops_and_paths() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
@@ -1110,6 +1219,45 @@ fn create_path_fixture(conn: &duckdb::Connection) {
         "#,
     )
     .expect("create path fixture schema");
+}
+
+fn create_simple_directed_path_fixture(conn: &duckdb::Connection) {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('simple-path-fixture-hash');
+
+        CREATE TABLE nodes (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT,
+            file_path VARCHAR,
+            entity_name VARCHAR,
+            qualified_name VARCHAR,
+            symbol_kind VARCHAR
+        );
+        INSERT INTO nodes VALUES
+            ('sym-a', 1, 'src/a.rs', 'a', 'fixture::a', 'function'),
+            ('sym-b', 2, 'src/b.rs', 'b', 'fixture::b', 'function'),
+            ('sym-c', 3, 'src/c.rs', 'c', 'fixture::c', 'function');
+
+        CREATE TABLE edges (
+            source_stable_id VARCHAR,
+            target_stable_id VARCHAR,
+            src_id BIGINT,
+            dst_id BIGINT,
+            target_label VARCHAR,
+            relation VARCHAR,
+            confidence VARCHAR,
+            confidence_score FLOAT,
+            edge_kind VARCHAR,
+            bind_method VARCHAR
+        );
+        INSERT INTO edges VALUES
+            ('sym-a', 'sym-b', 1, 2, 'b', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton'),
+            ('sym-b', 'sym-c', 2, 3, 'c', 'calls', 'syntax_exact', 1.0, 'calls', 'singleton');
+        "#,
+    )
+    .expect("create simple path fixture schema");
 }
 
 fn candidate_brief(
