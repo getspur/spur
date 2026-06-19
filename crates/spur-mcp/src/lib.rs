@@ -31,10 +31,6 @@
     reason = "legacy MCP plan prompt builders append formatted strings"
 )]
 #![expect(
-    clippy::future_not_send,
-    reason = "code-graph handlers intentionally use non-Send closures inside request-local async helpers"
-)]
-#![expect(
     clippy::ignored_unit_patterns,
     reason = "legacy worker select branches use ignored patterns in shutdown paths"
 )]
@@ -77,10 +73,6 @@
 #![expect(
     clippy::option_option,
     reason = "legacy worker audit plumbing distinguishes unset from explicitly empty targets"
-)]
-#![expect(
-    clippy::needless_borrow,
-    reason = "legacy code-graph helper passes borrowed paths through coercions"
 )]
 #![expect(
     clippy::redundant_type_annotations,
@@ -129,10 +121,6 @@
 #![expect(
     clippy::unnecessary_literal_bound,
     reason = "legacy MCP test utilities keep trait-like string method signatures"
-)]
-#![expect(
-    clippy::unnecessary_wraps,
-    reason = "legacy code-graph expansion helpers keep Result signatures for caller symmetry"
 )]
 #![expect(
     clippy::use_self,
