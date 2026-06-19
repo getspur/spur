@@ -744,13 +744,19 @@ fn query_recursive_context_path_rows(
     engine: KnowledgePathEngine,
 ) -> Result<Vec<KnowledgePathRow>> {
     let sql = format!(
-        "WITH RECURSIVE walk(current_id, depth, node_path, sort_key) AS ( \
+        "WITH RECURSIVE traversable_edges AS ( \
+           SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
+           FROM edges \
+           WHERE relation IS DISTINCT FROM 'contains' \
+             AND (relation IS DISTINCT FROM 'imports' OR bind_method IS DISTINCT FROM 'external') \
+         ), \
+         walk(current_id, depth, node_path, sort_key) AS ( \
            SELECT ?1::VARCHAR AS current_id, 0::INTEGER AS depth, [?1::VARCHAR] AS node_path, ?1::VARCHAR AS sort_key \
            UNION ALL \
            SELECT e.target_stable_id, w.depth + 1, list_append(w.node_path, e.target_stable_id), \
                   w.sort_key || '>' || e.target_stable_id \
            FROM walk w \
-           JOIN edges e ON e.source_stable_id = w.current_id \
+           JOIN traversable_edges e ON e.source_stable_id = w.current_id \
            WHERE w.depth < {max_hops} \
              AND e.target_stable_id IS NOT NULL \
              AND NOT list_contains(w.node_path, e.target_stable_id) \
@@ -780,7 +786,7 @@ fn query_recursive_context_path_rows(
                     ORDER BY e.relation, e.edge_kind, e.confidence, e.bind_method \
                   ) AS edge_rank \
            FROM path_edges pe \
-           JOIN edges e \
+           JOIN traversable_edges e \
              ON e.source_stable_id = pe.source_stable_id \
             AND e.target_stable_id = pe.target_stable_id \
          ) \
@@ -823,10 +829,16 @@ fn query_recursive_undirected_context_path_rows(
     engine: KnowledgePathEngine,
 ) -> Result<Vec<KnowledgePathRow>> {
     let sql = format!(
-        "WITH RECURSIVE edges_undirected AS ( \
-            SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method, 'forward' AS direction FROM edges \
+        "WITH RECURSIVE traversable_edges AS ( \
+            SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
+            FROM edges \
+            WHERE relation IS DISTINCT FROM 'contains' \
+              AND (relation IS DISTINCT FROM 'imports' OR bind_method IS DISTINCT FROM 'external') \
+         ), \
+         edges_undirected AS ( \
+            SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method, 'forward' AS direction FROM traversable_edges \
             UNION ALL \
-            SELECT target_stable_id AS source_stable_id, source_stable_id AS target_stable_id, relation, edge_kind, confidence, bind_method, 'reverse' AS direction FROM edges \
+            SELECT target_stable_id AS source_stable_id, source_stable_id AS target_stable_id, relation, edge_kind, confidence, bind_method, 'reverse' AS direction FROM traversable_edges \
          ), \
          walk(current_id, depth, node_path, sort_key) AS ( \
             SELECT ?1::VARCHAR AS current_id, 0::INTEGER AS depth, [?1::VARCHAR] AS node_path, ?1::VARCHAR AS sort_key \
