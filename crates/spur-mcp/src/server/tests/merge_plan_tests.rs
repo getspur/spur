@@ -1045,17 +1045,7 @@ async fn integrate_plan_branches_reports_conflict_and_keeps_partial_branch() {
     assert_eq!(merged_contents, "worker-a");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn merge_plan_diff_acceptance() {
-    merge_plan_rehydrates_when_cache_missing().await;
-    merge_plan_clears_integration_pending_on_success().await;
-    get_task_diff_rehydrates_latest_attempt_when_cache_missing().await;
-    get_task_diff_uses_dispatched_base_oid_when_present().await;
-    get_task_diff_warns_and_falls_back_for_legacy_task().await;
-    get_task_diff_historical_attempts_remain_summary_only().await;
-    comment_lookup_returns_false_when_advanced_feature_unlicensed().await;
-}
-
+#[tokio::test]
 async fn merge_plan_rehydrates_when_cache_missing() {
     let fixture = setup_persisted_merge_ready_plan("plan-merge-recover", true).await;
 
@@ -1069,6 +1059,7 @@ async fn merge_plan_rehydrates_when_cache_missing() {
     assert_eq!(status["merge"]["merged_task_ids"], json!(["task-a"]));
 }
 
+#[tokio::test]
 async fn merge_plan_clears_integration_pending_on_success() {
     let fixture = setup_persisted_merge_ready_plan("plan-merge-clear-label", true).await;
     fixture
@@ -1105,6 +1096,7 @@ async fn merge_plan_clears_integration_pending_on_success() {
     );
 }
 
+#[tokio::test]
 async fn get_task_diff_rehydrates_latest_attempt_when_cache_missing() {
     let fixture = setup_persisted_merge_ready_plan("plan-diff-recover", true).await;
 
@@ -1132,6 +1124,7 @@ async fn get_task_diff_rehydrates_latest_attempt_when_cache_missing() {
     );
 }
 
+#[tokio::test]
 async fn get_task_diff_uses_dispatched_base_oid_when_present() {
     let fixture = setup_cached_overlay_diff_plan("plan-diff-overlay", true).await;
 
@@ -1159,6 +1152,7 @@ async fn get_task_diff_uses_dispatched_base_oid_when_present() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
 async fn get_task_diff_warns_and_falls_back_for_legacy_task() {
     let fixture = setup_cached_overlay_diff_plan("plan-diff-legacy", false).await;
     let warnings = CapturedWarnings::default();
@@ -1192,6 +1186,7 @@ async fn get_task_diff_warns_and_falls_back_for_legacy_task() {
     );
 }
 
+#[tokio::test]
 async fn get_task_diff_historical_attempts_remain_summary_only() {
     let fixture = setup_persisted_retried_plan("plan-diff-history", true).await;
 
@@ -1226,6 +1221,7 @@ async fn get_task_diff_historical_attempts_remain_summary_only() {
     );
 }
 
+#[tokio::test]
 async fn comment_lookup_returns_false_when_advanced_feature_unlicensed() {
     use spur_acp::{BrainSessionId, SessionId};
 

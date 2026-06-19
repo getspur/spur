@@ -66,7 +66,7 @@ fn delegation_id(result: &rmcp::model::CallToolResult) -> String {
 /// `BlockTimeout` source skips the `completed_delegations` map write
 /// (INV-ASYNC-2), the bridge is the sole delivery channel and we assert on
 /// its callback counter.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "current_thread")]
 async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn std::error::Error>> {
     const N: usize = 3;
 
