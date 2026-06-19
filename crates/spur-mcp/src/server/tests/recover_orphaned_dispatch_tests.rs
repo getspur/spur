@@ -150,7 +150,7 @@ fn recovery_server(
     server
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn brain_attach_rediscovery_replays_awaiting_review_task_once() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -275,7 +275,7 @@ async fn brain_attach_rediscovery_replays_awaiting_review_task_once() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -422,7 +422,7 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_reemits_already_awaiting_review_without_new_audit() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -532,7 +532,7 @@ async fn recover_orphaned_dispatch_reemits_already_awaiting_review_without_new_a
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_accepts_legacy_delegation_label() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -590,7 +590,7 @@ async fn recover_orphaned_dispatch_accepts_legacy_delegation_label() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_prefers_dispatched_base_oid_label() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -670,7 +670,7 @@ async fn recover_orphaned_dispatch_prefers_dispatched_base_oid_label() {
     assert_eq!(recovered_base, Some(base_oid.as_str()));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_uses_audit_delegation_when_label_mismatches() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -735,7 +735,7 @@ async fn recover_orphaned_dispatch_uses_audit_delegation_when_label_mismatches()
     )));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_rejects_label_only_delegation_without_audit() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -804,7 +804,7 @@ async fn recover_orphaned_dispatch_rejects_label_only_delegation_without_audit()
     drop(beads);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "pinned residual; requires deterministic-recovery follow-up"]
 async fn recover_orphaned_dispatch_with_split_dispatched_base_oid_labels() {
     let _serial = super::beads_sqlite_serial_guard().await;
@@ -850,7 +850,7 @@ async fn recover_orphaned_dispatch_with_split_dispatched_base_oid_labels() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_rejects_more_than_one_commit() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -886,7 +886,7 @@ async fn recover_orphaned_dispatch_rejects_more_than_one_commit() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_rejects_zero_commits() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -913,7 +913,7 @@ async fn recover_orphaned_dispatch_rejects_zero_commits() {
     assert!(err.contains("0 commits"), "unexpected error: {err}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_reemits_legacy_already_awaiting_review_delegation() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -968,7 +968,7 @@ async fn recover_orphaned_dispatch_reemits_legacy_already_awaiting_review_delega
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_rejects_missing_branch() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -994,7 +994,7 @@ async fn recover_orphaned_dispatch_rejects_missing_branch() {
     assert!(err.contains("not found"), "unexpected error: {err}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_rejects_missing_plan_id() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
@@ -1042,7 +1042,7 @@ async fn recover_orphaned_dispatch_rejects_missing_plan_id() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn recover_orphaned_dispatch_rejects_non_ancestor_base() {
     let _serial = super::beads_sqlite_serial_guard().await;
     let dir = init_repo().await;
