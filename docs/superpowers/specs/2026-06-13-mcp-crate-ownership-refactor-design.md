@@ -1,6 +1,6 @@
 # MCP Crate Ownership Refactor — Design Spec
 
-- **Status:** Draft for user review
+- **Status:** Approved for phased execution (§3/§7 inventory gaps closed 2026-06-19)
 - **Date:** 2026-06-13
 - **Scope:** `crates/spur-mcp`, plus MCP-facing modules inside existing domain crates
 - **Goal:** Make `spur-mcp` the shared MCP infrastructure crate, and move domain tool ownership into the crates that own the underlying capability.
@@ -46,7 +46,8 @@ The refactor is therefore not just a catalog split. It must split server infrast
 |---|---|---|
 | PM / issue tracker | `get_issue`, `list_issues`, `update_issue`, `create_issue`, `add_dependency`, PR helper surfaces backed by PM adapter contracts | `crates/spur-pm/src/mcp/` |
 | Code graph | `code_resolve`, `code_file_symbols`, `code_symbol_info`, `code_read_symbol`, `code_callers`, `code_callees`, `code_symbol_search`, `code_subgraph`, `code_symbol_history` | `crates/spur-graph/src/mcp/` |
-| Analyst / DuckDB | `knowledge_context_pack`, future `duckdb_query`, `duckdb_describe`, `duckdb_explain`, `duckdb_list_tables` | `crates/spur-analyst/src/mcp/` |
+| Project / issue graph | `graph_triage`, `graph_insights`, `graph_alerts`, `graph_plan`, `graph_subgraph` — PageRank/dependency analysis over the **beads issue graph** (not the code graph); complements `list_issues` CRUD | `crates/spur-pm/src/mcp/` |
+| Analyst / DuckDB | `knowledge_context_pack`, `knowledge_context_pack_2`, future `duckdb_query`, `duckdb_describe`, `duckdb_explain`, `duckdb_list_tables` | `crates/spur-analyst/src/mcp/` |
 | Documentation navigation | `doc_navigate`, doc-tree lookups, section reads | `crates/spur-analyst/src/mcp/` when backed by `.spur/analyst.duckdb`; otherwise `crates/spur-graph/src/mcp/` for graph-backed reads |
 | Delegation / worker lifecycle | `delegate_to_worker`, `delegate_parallel`, `check_delegation_status`, `cancel_delegation`, `fetch_outcome_artifact`, `list_available_workers` | `crates/spur-core/src/mcp/` |
 | Plan / review / reconciler | `submit_plan`, `execute_epic`, `merge_plan`, `resume_plan`, `force_reclaim_plan`, `get_plan_status`, `get_reconciler_status`, `get_task_diff`, `preview_task_base`, `review_task`, `submit_plan_mutation`, `plan_truncate_and_restart`, `recover_orphaned_dispatch` | `crates/spur-core/src/mcp/` |
@@ -187,6 +188,7 @@ Responsibilities:
 - Load per-connection extensions as needed.
 - Expose `duckdb_query`, `duckdb_describe`, `duckdb_explain`, and `duckdb_list_tables`.
 - Share row caps, timeout policy, and SQL safety checks through `spur-analyst`, not through `spur-mcp`.
+- Own the `include_str!` of the analyst build SQL at `crates/spur-context/analyst/init*.sql` (the source repointed by the 2026-06-19 `poc/duckdb-analyst/ → analyst/` promotion). When the `knowledge_context_pack`/`_2` handler moves here from `spur-mcp/src/server/handlers/knowledge_context.rs`, its relative `include_str!("…/spur-context/analyst/init_search.sql")` must be re-derived for the new module depth. A later optional consolidation MAY relocate the SQL into `spur-analyst`; it is not required for this refactor.
 
 `spur-mcp` only supplies the transport and registry mechanics.
 
