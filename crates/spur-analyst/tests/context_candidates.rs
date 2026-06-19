@@ -14,6 +14,8 @@ use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
 use spur_graph::{artifact_from_facts, build_facts, EMBEDDING_VECTOR_DIMENSIONS};
 
 const INIT_SEARCH_SQL: &str = include_str!("../../spur-context/poc/duckdb-analyst/init_search.sql");
+const INIT_ALGORITHMS_SQL: &str =
+    include_str!("../../spur-context/poc/duckdb-analyst/init_algorithms.sql");
 const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -511,6 +513,90 @@ fn symbol_risk_community_reads_materialized_views() {
 }
 
 #[test]
+fn symbol_component_and_community_views_are_total_over_nodes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("analyst.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE nodes (
+            stable_symbol_id VARCHAR,
+            node_id BIGINT
+        );
+        INSERT INTO nodes VALUES
+            ('sym-reference-only', 0),
+            ('sym-called-a', 1),
+            ('sym-called-b', 2);
+
+        CREATE TABLE _algo_component (
+            node_id BIGINT,
+            component_id BIGINT
+        );
+        INSERT INTO _algo_component VALUES
+            (1, 7),
+            (2, 7);
+
+        CREATE TABLE _algo_component_size (
+            component_id BIGINT,
+            component_size BIGINT
+        );
+        INSERT INTO _algo_component_size VALUES
+            (7, 2);
+
+        CREATE TABLE _algo_community (
+            node_id BIGINT,
+            community_id BIGINT
+        );
+        INSERT INTO _algo_community VALUES
+            (1, 11),
+            (2, 11);
+        "#,
+    )
+    .expect("create component fixture schema");
+    conn.execute_batch(&algorithm_view_sql("v_symbol_component"))
+        .expect("define component view");
+    conn.execute_batch(&algorithm_view_sql("v_symbol_community"))
+        .expect("define community view");
+
+    let node_count: i64 = conn
+        .query_row("SELECT count(*) FROM nodes", [], |row| row.get(0))
+        .expect("count nodes");
+    let component_count: i64 = conn
+        .query_row("SELECT count(*) FROM v_symbol_component", [], |row| {
+            row.get(0)
+        })
+        .expect("count component view");
+    let community_count: i64 = conn
+        .query_row("SELECT count(*) FROM v_symbol_community", [], |row| {
+            row.get(0)
+        })
+        .expect("count community view");
+    assert_eq!(component_count, node_count);
+    assert_eq!(community_count, node_count);
+
+    let (component_id, component_size): (i64, i64) = conn
+        .query_row(
+            "SELECT component_id, component_size FROM v_symbol_component WHERE node_id = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read singleton component row");
+    assert_eq!(component_id, -1);
+    assert_eq!(component_size, 1);
+    assert_ne!(component_id, 7);
+
+    let community_id: i64 = conn
+        .query_row(
+            "SELECT community_id FROM v_symbol_community WHERE node_id = 0",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read singleton community row");
+    assert_eq!(community_id, -1);
+    assert_ne!(community_id, 11);
+}
+
+#[test]
 fn symbol_risk_community_returns_caveats_when_views_are_missing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
@@ -887,6 +973,16 @@ fn context_candidate_macro_sql() -> String {
             format!("{start}{body}")
         })
         .expect("context candidate macro should be present in init_search.sql")
+}
+
+fn algorithm_view_sql(view_name: &str) -> String {
+    let marker = format!("CREATE OR REPLACE VIEW {view_name} AS");
+    INIT_ALGORITHMS_SQL
+        .split(marker.as_str())
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .map(|body| format!("{marker}{body};"))
+        .unwrap_or_else(|| panic!("{view_name} view should be present in init_algorithms.sql"))
 }
 
 fn context_candidate_macro_sql_with_artifact_dir(artifact_dir: &Path) -> String {
