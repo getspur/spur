@@ -223,6 +223,23 @@ impl Default for SectionEmbeddingOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarDelta {
+    /// Worktree-relative paths whose sidecar rows must be regenerated.
+    pub changed_paths: BTreeSet<String>,
+    /// Worktree-relative paths whose previous sidecar rows must not be copied.
+    pub deleted_paths: BTreeSet<String>,
+}
+
+impl SidecarDelta {
+    pub fn new(changed_paths: BTreeSet<String>, deleted_paths: BTreeSet<String>) -> Self {
+        Self {
+            changed_paths,
+            deleted_paths,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionSidecarOptions {
     pub embedding: SectionEmbeddingOptions,
     pub write_batch_size: usize,
@@ -230,6 +247,10 @@ pub struct SectionSidecarOptions {
     /// tables in this directory before the embedder runs.  Any failure to
     /// open the previous directory is silently ignored.
     pub previous_artifact_dir: Option<PathBuf>,
+    /// Caller-known path delta for incremental sidecar planning.  Production
+    /// handling is intentionally left to the implementation task; regression
+    /// tests use this to make the expected changed/deleted paths explicit.
+    pub delta: Option<SidecarDelta>,
 }
 
 impl SectionSidecarOptions {
@@ -238,6 +259,7 @@ impl SectionSidecarOptions {
             embedding: SectionEmbeddingOptions::from_env(),
             write_batch_size: section_write_batch_size_from_env(),
             previous_artifact_dir: None,
+            delta: None,
         }
     }
 
@@ -248,6 +270,7 @@ impl SectionSidecarOptions {
             ),
             write_batch_size: section_write_batch_size_from_env(),
             previous_artifact_dir: None,
+            delta: None,
         }
     }
 
@@ -256,12 +279,19 @@ impl SectionSidecarOptions {
             embedding,
             write_batch_size: section_write_batch_size_from_env(),
             previous_artifact_dir: None,
+            delta: None,
         }
     }
 
     /// Set the directory to carry vectors from.  Returns `self` for chaining.
     pub fn with_previous_artifact_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.previous_artifact_dir = dir;
+        self
+    }
+
+    /// Set the caller-known path delta for incremental sidecar planning.
+    pub fn with_delta(mut self, delta: Option<SidecarDelta>) -> Self {
+        self.delta = delta;
         self
     }
 }
@@ -272,6 +302,7 @@ impl Default for SectionSidecarOptions {
             embedding: SectionEmbeddingOptions::default(),
             write_batch_size: SECTION_WRITE_BATCH_SIZE_DEFAULT,
             previous_artifact_dir: None,
+            delta: None,
         }
     }
 }
@@ -3172,6 +3203,464 @@ mod tests {
         }
     }
 
+    fn fake_vector(seed: f32) -> Vec<f32> {
+        vec![seed; EMBEDDING_VECTOR_DIMENSIONS]
+    }
+
+    fn write_source(root: &Path, path: &str, source: &str) {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().expect("source parent")).expect("create source parent");
+        fs::write(path, source).expect("write source");
+    }
+
+    fn sidecar_delta(changed_paths: &[&str], deleted_paths: &[&str]) -> SidecarDelta {
+        SidecarDelta::new(
+            changed_paths
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect(),
+            deleted_paths
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect(),
+        )
+    }
+
+    fn incremental_skip_sidecar_options(
+        previous_artifact_dir: &Path,
+        changed_paths: &[&str],
+        deleted_paths: &[&str],
+    ) -> SectionSidecarOptions {
+        SectionSidecarOptions {
+            embedding: SectionEmbeddingOptions {
+                skip_embeddings: true,
+                batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
+            },
+            write_batch_size: SECTION_WRITE_BATCH_SIZE_DEFAULT,
+            previous_artifact_dir: Some(previous_artifact_dir.to_path_buf()),
+            delta: Some(sidecar_delta(changed_paths, deleted_paths)),
+        }
+    }
+
+    fn many_functions_source(prefix: &str, count: usize) -> String {
+        let mut source = String::new();
+        for index in 0..count {
+            let name = format!("{prefix}_{index:03}");
+            source.push_str(&format!(
+                "/// Stable documentation for {name} that is deliberately long enough to form embedding text.\n",
+            ));
+            source.push_str(&format!("pub fn {name}() {{}}\n\n"));
+        }
+        source
+    }
+
+    fn code_symbol(
+        path: &str,
+        source: &str,
+        stable_symbol_id: &str,
+        entity_name: &str,
+    ) -> GraphSymbolArtifact {
+        let needle = format!("pub fn {entity_name}");
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing function `{entity_name}` in `{path}`"));
+        let line_len = source[start..].lines().next().expect("function line").len();
+        let line = source[..start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
+        GraphSymbolArtifact {
+            stable_symbol_id: stable_symbol_id.to_owned(),
+            file_path: path.to_owned(),
+            byte_range: [start, start + line_len],
+            line_range: [line, line],
+            entity_name: entity_name.to_owned(),
+            qualified_name: entity_name.to_owned(),
+            symbol_kind: "function".to_owned(),
+            anchor_hash: format!("anchor:{stable_symbol_id}"),
+            enclosing_scope: None,
+        }
+    }
+
+    fn code_symbols_for_functions(
+        path: &str,
+        source: &str,
+        ids_and_names: &[(&str, String)],
+    ) -> Vec<GraphSymbolArtifact> {
+        ids_and_names
+            .iter()
+            .map(|(stable_symbol_id, entity_name)| {
+                code_symbol(path, source, stable_symbol_id, entity_name)
+            })
+            .collect()
+    }
+
+    fn markdown_section_symbols(
+        path: &str,
+        source: &str,
+        ids_and_headings: &[(&str, &str)],
+    ) -> Vec<GraphSymbolArtifact> {
+        let headings = ids_and_headings
+            .iter()
+            .map(|(_, heading)| *heading)
+            .collect::<Vec<_>>();
+        let ranges = section_ranges(source, &headings);
+        ids_and_headings
+            .iter()
+            .zip(ranges)
+            .map(|((stable_symbol_id, heading), [start, end])| {
+                let line = source[..start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1;
+                let end_line = line
+                    + source[start..end]
+                        .bytes()
+                        .filter(|byte| *byte == b'\n')
+                        .count();
+                let entity_name = heading.trim_start_matches('#').trim().to_owned();
+                GraphSymbolArtifact {
+                    stable_symbol_id: (*stable_symbol_id).to_owned(),
+                    file_path: path.to_owned(),
+                    byte_range: [start, end],
+                    line_range: [line, end_line],
+                    entity_name: entity_name.clone(),
+                    qualified_name: format!("{path}::{entity_name}"),
+                    symbol_kind: "section".to_owned(),
+                    anchor_hash: format!("anchor:{stable_symbol_id}"),
+                    enclosing_scope: None,
+                }
+            })
+            .collect()
+    }
+
+    fn graph_artifact_for_code_files(
+        graph_content_hash: &str,
+        files: Vec<(&str, &str, Vec<GraphSymbolArtifact>)>,
+    ) -> GraphIndexArtifact {
+        let mut file_manifests = Vec::new();
+        let mut graph_files = Vec::new();
+        let mut file_node_ids = Vec::new();
+        let mut symbols = Vec::new();
+        let mut symbol_node_ids = Vec::new();
+        let mut next_node_id = 1_u64;
+
+        for (path, source, mut file_symbols) in files {
+            let stable_file_id = format!("file:{path}");
+            let file_node_id = crate::NodeId(next_node_id);
+            next_node_id += 1;
+            file_manifests.push(GraphFileManifestEntry {
+                stable_file_id: stable_file_id.clone(),
+                path: path.to_owned(),
+                content_oid: blake3_hex(source.as_bytes()),
+                node_ids: vec![file_node_id],
+            });
+            graph_files.push(crate::GraphFileArtifact {
+                stable_file_id,
+                file_path: path.to_owned(),
+            });
+            file_node_ids.push(file_node_id);
+            for symbol in file_symbols.drain(..) {
+                symbols.push(symbol);
+                symbol_node_ids.push(crate::NodeId(next_node_id));
+                next_node_id += 1;
+            }
+        }
+
+        GraphIndexArtifact {
+            header: crate::GraphIndexHeader {
+                graph_index_version: "test".to_owned(),
+                content_hash_blake3: None,
+            },
+            manifest_version: "test".to_owned(),
+            graph_content_hash: graph_content_hash.to_owned(),
+            file_manifests,
+            files: graph_files,
+            file_node_ids,
+            symbols,
+            symbol_node_ids,
+            edges: Vec::new(),
+            tombstones: Vec::new(),
+            diagnostics: Vec::new(),
+            commits: Vec::new(),
+            symbol_snapshots: Vec::new(),
+            temporal_edges: Vec::new(),
+        }
+    }
+
+    fn symbol_rows_from_artifact(artifact: &GraphIndexArtifact, root: &Path) -> Vec<SymbolRow> {
+        let mut batcher = SymbolRowBatcher::new(
+            artifact,
+            root,
+            4096,
+            None,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
+        let mut rows = Vec::new();
+        while let Some(batch) = batcher.next_batch().expect("symbol row batch") {
+            rows.extend(batch);
+        }
+        rows
+    }
+
+    fn section_rows_from_artifact(artifact: &GraphIndexArtifact, root: &Path) -> Vec<SectionRow> {
+        let mut batcher = SectionRowBatcher::new(
+            artifact,
+            root,
+            4096,
+            None,
+            EmbeddingModelSelection::BgeBaseEnV15,
+        );
+        let mut rows = Vec::new();
+        while let Some(batch) = batcher.next_batch().expect("section row batch") {
+            rows.extend(batch);
+        }
+        rows
+    }
+
+    async fn write_previous_section_sidecar_rows(dir: &Path, rows: Vec<SectionRow>) {
+        let dataset_dir = dir.join(SECTIONS_DATASET_DIR);
+        fs::create_dir_all(&dataset_dir).expect("create previous section sidecar dir");
+        let db = lancedb::connect(dataset_dir.to_str().expect("previous section sidecar dir"))
+            .execute()
+            .await
+            .expect("connect previous section sidecar");
+        db.create_table(
+            SECTIONS_TABLE,
+            rows_to_batch(rows, sections_schema()).expect("previous section batch"),
+        )
+        .execute()
+        .await
+        .expect("create previous section table");
+    }
+
+    async fn write_previous_symbol_sidecar_rows(dir: &Path, rows: Vec<SymbolRow>) {
+        fs::create_dir_all(dir).expect("create previous sidecar dir");
+        let db = lancedb::connect(dir.to_str().expect("previous sidecar dir"))
+            .execute()
+            .await
+            .expect("connect previous sidecar");
+        db.create_table(
+            CODE_SYMBOLS_TABLE,
+            symbol_rows_to_batch(rows, symbol_rows_schema()).expect("previous symbol batch"),
+        )
+        .execute()
+        .await
+        .expect("create previous symbol table");
+    }
+
+    #[derive(Debug)]
+    struct StoredSymbolRow {
+        stable_symbol_id: String,
+        file_path: String,
+        has_vector: bool,
+    }
+
+    #[derive(Debug)]
+    struct StoredSectionRow {
+        stable_symbol_id: String,
+        file_path: String,
+        has_vector: bool,
+    }
+
+    async fn read_stored_section_rows(dir: &Path) -> Vec<StoredSectionRow> {
+        let db = lancedb::connect(
+            dir.join(SECTIONS_DATASET_DIR)
+                .to_str()
+                .expect("section sidecar dir"),
+        )
+        .execute()
+        .await
+        .expect("connect section sidecar");
+        let table = db
+            .open_table(SECTIONS_TABLE)
+            .execute()
+            .await
+            .expect("open section table");
+        let mut stream = table
+            .query()
+            .select(Select::columns(&[
+                "stable_symbol_id",
+                "file_path",
+                "vector",
+            ]))
+            .execute()
+            .await
+            .expect("query sections");
+        let mut rows = Vec::new();
+        while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
+            .await
+            .transpose()
+            .expect("read section batch")
+        {
+            let ids = batch
+                .column_by_name("stable_symbol_id")
+                .expect("stable_symbol_id column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("stable_symbol_id utf8");
+            let file_paths = batch
+                .column_by_name("file_path")
+                .expect("file_path column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("file_path utf8");
+            let vectors = batch
+                .column_by_name("vector")
+                .expect("vector column")
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .expect("vector fixed-size list");
+            for index in 0..batch.num_rows() {
+                rows.push(StoredSectionRow {
+                    stable_symbol_id: ids.value(index).to_owned(),
+                    file_path: file_paths.value(index).to_owned(),
+                    has_vector: !vectors.is_null(index),
+                });
+            }
+        }
+        rows
+    }
+
+    async fn read_stored_symbol_rows(dir: &Path) -> Vec<StoredSymbolRow> {
+        let db = lancedb::connect(dir.to_str().expect("sidecar dir"))
+            .execute()
+            .await
+            .expect("connect sidecar");
+        let table = db
+            .open_table(CODE_SYMBOLS_TABLE)
+            .execute()
+            .await
+            .expect("open code symbol table");
+        let mut stream = table
+            .query()
+            .select(Select::columns(&[
+                "stable_symbol_id",
+                "file_path",
+                "vector",
+            ]))
+            .execute()
+            .await
+            .expect("query code symbols");
+        let mut rows = Vec::new();
+        while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
+            .await
+            .transpose()
+            .expect("read code symbol batch")
+        {
+            let ids = batch
+                .column_by_name("stable_symbol_id")
+                .expect("stable_symbol_id column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("stable_symbol_id utf8");
+            let file_paths = batch
+                .column_by_name("file_path")
+                .expect("file_path column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("file_path utf8");
+            let vectors = batch
+                .column_by_name("vector")
+                .expect("vector column")
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .expect("vector fixed-size list");
+            for index in 0..batch.num_rows() {
+                rows.push(StoredSymbolRow {
+                    stable_symbol_id: ids.value(index).to_owned(),
+                    file_path: file_paths.value(index).to_owned(),
+                    has_vector: !vectors.is_null(index),
+                });
+            }
+        }
+        rows
+    }
+
+    fn code_symbol_batches(events: &[SectionSidecarProgressEvent]) -> Vec<(usize, usize)> {
+        let mut in_code_symbols = false;
+        let mut batches = Vec::new();
+        for event in events {
+            match event {
+                SectionSidecarProgressEvent::CodeSymbolsStarted { .. } => {
+                    in_code_symbols = true;
+                }
+                SectionSidecarProgressEvent::Finished {
+                    phase: SidecarPhase::CodeSymbols,
+                    ..
+                } => {
+                    in_code_symbols = false;
+                }
+                SectionSidecarProgressEvent::BatchStarted {
+                    batch_rows,
+                    embedding_eligible_rows,
+                    ..
+                } if in_code_symbols => {
+                    batches.push((*batch_rows, *embedding_eligible_rows));
+                }
+                _ => {}
+            }
+        }
+        batches
+    }
+
+    fn section_batches(events: &[SectionSidecarProgressEvent]) -> Vec<(usize, usize)> {
+        let mut in_sections = true;
+        let mut batches = Vec::new();
+        for event in events {
+            match event {
+                SectionSidecarProgressEvent::CodeSymbolsStarted { .. }
+                | SectionSidecarProgressEvent::Finished {
+                    phase: SidecarPhase::Sections,
+                    ..
+                } => {
+                    in_sections = false;
+                }
+                SectionSidecarProgressEvent::BatchStarted {
+                    batch_rows,
+                    embedding_eligible_rows,
+                    ..
+                } if in_sections => {
+                    batches.push((*batch_rows, *embedding_eligible_rows));
+                }
+                _ => {}
+            }
+        }
+        batches
+    }
+
+    fn code_symbol_finished(events: &[SectionSidecarProgressEvent]) -> (usize, usize, usize) {
+        events
+            .iter()
+            .find_map(|event| match event {
+                SectionSidecarProgressEvent::Finished {
+                    total_rows,
+                    written_rows,
+                    skipped_existing_rows,
+                    phase: SidecarPhase::CodeSymbols,
+                } => Some((*total_rows, *written_rows, *skipped_existing_rows)),
+                _ => None,
+            })
+            .expect("code symbol finished event")
+    }
+
+    fn section_finished(events: &[SectionSidecarProgressEvent]) -> (usize, usize, usize) {
+        events
+            .iter()
+            .find_map(|event| match event {
+                SectionSidecarProgressEvent::Finished {
+                    total_rows,
+                    written_rows,
+                    skipped_existing_rows,
+                    phase: SidecarPhase::Sections,
+                } => Some((*total_rows, *written_rows, *skipped_existing_rows)),
+                _ => None,
+            })
+            .expect("section finished event")
+    }
+
     fn graph_artifact_for_path(
         stable_file_id: &str,
         path: &str,
@@ -4180,10 +4669,11 @@ mod tests {
         );
     }
 
-    /// Carry-forward for code symbols: same identity key (file_path,
-    /// content_hash, stable_symbol_id) carries; changed content_hash does not.
+    /// Carry-forward for code symbols must be keyed by embedding input, so a
+    /// large changed file does not re-embed every unchanged symbol in the
+    /// default 512-row write batches split into 64-row embedding chunks.
     #[tokio::test]
-    async fn carry_forward_fills_symbol_vectors_from_previous_dir() {
+    async fn carry_forward_symbol_vectors_reuses_unchanged_embed_text_in_changed_file() {
         let dir_a = tempfile::tempdir().expect("dir_a");
 
         let fake_vec: Vec<f32> = (0..EMBEDDING_VECTOR_DIMENSIONS)
@@ -4204,7 +4694,7 @@ mod tests {
             symbol_kind: "function".to_owned(),
             embed_text: "unchanged embed text".to_owned(),
             vector: Some(fake_vec.clone()),
-            content_hash: "hash-unchanged".to_owned(),
+            content_hash: "hash-old".to_owned(),
         };
         let row_changed = SymbolRow {
             stable_symbol_id: "sym-changed".to_owned(),
@@ -4212,7 +4702,7 @@ mod tests {
             qualified_name: "sym-changed".to_owned(),
             entity_name: "sym_changed".to_owned(),
             symbol_kind: "function".to_owned(),
-            embed_text: "changed embed text".to_owned(),
+            embed_text: "old changed embed text".to_owned(),
             vector: Some(fake_vec.clone()),
             content_hash: "hash-old".to_owned(),
         };
@@ -4233,7 +4723,7 @@ mod tests {
                 symbol_kind: "function".to_owned(),
                 embed_text: "unchanged embed text".to_owned(),
                 vector: None,
-                content_hash: "hash-unchanged".to_owned(),
+                content_hash: "hash-new".to_owned(),
             },
             SymbolRow {
                 stable_symbol_id: "sym-changed".to_owned(),
@@ -4241,7 +4731,7 @@ mod tests {
                 qualified_name: "sym-changed".to_owned(),
                 entity_name: "sym_changed".to_owned(),
                 symbol_kind: "function".to_owned(),
-                embed_text: "changed embed text".to_owned(),
+                embed_text: "new changed embed text".to_owned(),
                 vector: None,
                 content_hash: "hash-new".to_owned(),
             },
@@ -4260,12 +4750,534 @@ mod tests {
         assert_eq!(
             unchanged.vector.as_ref().map(Vec::len),
             Some(EMBEDDING_VECTOR_DIMENSIONS),
-            "unchanged symbol must carry vector"
+            "unchanged embed_text must carry even when the file content_hash changed"
         );
         assert_eq!(unchanged.vector.as_ref(), Some(&fake_vec));
         assert!(
             changed.vector.is_none(),
-            "changed content_hash must not carry"
+            "changed embed_text must not carry a stale vector"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_planning_limits_512_row_batches_to_touched_paths_before_64_row_chunks() {
+        let root = tempfile::tempdir().expect("root");
+        let prev_dir = tempfile::tempdir().expect("prev sidecar");
+        let next_dir = tempfile::tempdir().expect("next sidecar");
+        let unchanged_source = many_functions_source("unchanged_symbol", 513);
+        let changed_old_source = concat!(
+            "/// Stable keep docs that should continue to use the previous embedding input.\n",
+            "pub fn keep_symbol() {}\n\n",
+            "/// Old docs for the symbol whose embedding input changed.\n",
+            "pub fn reembed_symbol() {}\n",
+        );
+        let deleted_source =
+            "/// Removed docs with a previous sidecar row.\npub fn removed_symbol() {}\n";
+        write_source(root.path(), "src/unchanged.rs", &unchanged_source);
+        write_source(root.path(), "src/changed.rs", changed_old_source);
+        write_source(root.path(), "src/deleted.rs", deleted_source);
+
+        let unchanged_symbols = (0..513)
+            .map(|index| {
+                (
+                    format!("sym:unchanged:{index:03}"),
+                    format!("unchanged_symbol_{index:03}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let prev_artifact = graph_artifact_for_code_files(
+            "prev-hash",
+            vec![
+                (
+                    "src/unchanged.rs",
+                    &unchanged_source,
+                    code_symbols_for_functions(
+                        "src/unchanged.rs",
+                        &unchanged_source,
+                        &unchanged_symbols
+                            .iter()
+                            .map(|(id, name)| (id.as_str(), name.clone()))
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+                (
+                    "src/changed.rs",
+                    changed_old_source,
+                    vec![
+                        code_symbol(
+                            "src/changed.rs",
+                            changed_old_source,
+                            "sym:keep",
+                            "keep_symbol",
+                        ),
+                        code_symbol(
+                            "src/changed.rs",
+                            changed_old_source,
+                            "sym:reembed",
+                            "reembed_symbol",
+                        ),
+                    ],
+                ),
+                (
+                    "src/deleted.rs",
+                    deleted_source,
+                    vec![code_symbol(
+                        "src/deleted.rs",
+                        deleted_source,
+                        "sym:removed",
+                        "removed_symbol",
+                    )],
+                ),
+            ],
+        );
+        write_previous_symbol_sidecar_rows(
+            prev_dir.path(),
+            symbol_rows_from_artifact(&prev_artifact, root.path()),
+        )
+        .await;
+
+        let changed_new_source = concat!(
+            "/// Stable keep docs that should continue to use the previous embedding input.\n",
+            "pub fn keep_symbol() {}\n\n",
+            "/// New docs for the symbol whose embedding input changed.\n",
+            "pub fn reembed_symbol() {}\n",
+        );
+        write_source(root.path(), "src/changed.rs", changed_new_source);
+        fs::remove_file(root.path().join("src/deleted.rs")).expect("remove deleted source");
+        let next_artifact = graph_artifact_for_code_files(
+            "next-hash",
+            vec![
+                (
+                    "src/unchanged.rs",
+                    &unchanged_source,
+                    code_symbols_for_functions(
+                        "src/unchanged.rs",
+                        &unchanged_source,
+                        &unchanged_symbols
+                            .iter()
+                            .map(|(id, name)| (id.as_str(), name.clone()))
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+                (
+                    "src/changed.rs",
+                    changed_new_source,
+                    vec![
+                        code_symbol(
+                            "src/changed.rs",
+                            changed_new_source,
+                            "sym:keep",
+                            "keep_symbol",
+                        ),
+                        code_symbol(
+                            "src/changed.rs",
+                            changed_new_source,
+                            "sym:reembed",
+                            "reembed_symbol",
+                        ),
+                    ],
+                ),
+            ],
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let progress = {
+            let events = Arc::clone(&events);
+            move |event| events.lock().expect("events").push(event)
+        };
+
+        let row_counts = write_sections_dataset_with_sidecar_options_and_progress(
+            &next_artifact,
+            root.path(),
+            next_dir.path(),
+            incremental_skip_sidecar_options(
+                prev_dir.path(),
+                &["src/changed.rs"],
+                &["src/deleted.rs"],
+            ),
+            Some(&progress),
+        )
+        .expect("write incremental sidecar");
+
+        let events = events.lock().expect("events").clone();
+        let code_batches = code_symbol_batches(&events);
+        let (_total_rows, written_rows, skipped_existing_rows) = code_symbol_finished(&events);
+        assert_eq!(
+            row_counts.code_symbols, 515,
+            "final sidecar should keep 513 copied rows plus 2 touched rows"
+        );
+        assert_eq!(
+            written_rows, 2,
+            "incremental sidecar planning should write only the touched path rows, avoiding a full 512-row batch that becomes 64-row embedding chunks"
+        );
+        assert_eq!(
+            skipped_existing_rows, 513,
+            "unchanged-path rows should be copied/seeded from the previous sidecar"
+        );
+        assert!(
+            code_batches.iter().all(|(batch_rows, _)| *batch_rows <= 2),
+            "code-symbol generation should be proportional to touched rows; got batches {code_batches:?}"
+        );
+        let stored_rows = read_stored_symbol_rows(next_dir.path()).await;
+        assert_eq!(stored_rows.len(), 515);
+        assert!(
+            !stored_rows
+                .iter()
+                .any(|row| row.file_path == "src/deleted.rs"),
+            "deleted-path rows from the previous sidecar must not survive seeding"
+        );
+    }
+
+    #[tokio::test]
+    async fn section_sidecar_planning_limits_markdown_delta_to_touched_paths() {
+        let root = tempfile::tempdir().expect("root");
+        let prev_dir = tempfile::tempdir().expect("prev sidecar");
+        let next_dir = tempfile::tempdir().expect("next sidecar");
+        let unchanged_source = concat!(
+            "## Stable One\n\nUnchanged section body one.\n\n",
+            "## Stable Two\n\nUnchanged section body two.\n\n",
+            "## Stable Three\n\nUnchanged section body three.\n",
+        );
+        let changed_old_source = concat!(
+            "## Keep Section\n\nThis section body stays the same across the markdown edit.\n\n",
+            "## Reembed Section\n\nOld markdown body that should no longer provide a vector.\n",
+        );
+        let deleted_source =
+            "## Removed Section\n\nPrevious markdown row that should be dropped.\n";
+        write_source(root.path(), "docs/unchanged.md", unchanged_source);
+        write_source(root.path(), "docs/changed.md", changed_old_source);
+        write_source(root.path(), "docs/deleted.md", deleted_source);
+
+        let prev_artifact = graph_artifact_for_code_files(
+            "prev-section-hash",
+            vec![
+                (
+                    "docs/unchanged.md",
+                    unchanged_source,
+                    markdown_section_symbols(
+                        "docs/unchanged.md",
+                        unchanged_source,
+                        &[
+                            ("section:stable-one", "## Stable One"),
+                            ("section:stable-two", "## Stable Two"),
+                            ("section:stable-three", "## Stable Three"),
+                        ],
+                    ),
+                ),
+                (
+                    "docs/changed.md",
+                    changed_old_source,
+                    markdown_section_symbols(
+                        "docs/changed.md",
+                        changed_old_source,
+                        &[
+                            ("section:keep", "## Keep Section"),
+                            ("section:reembed", "## Reembed Section"),
+                        ],
+                    ),
+                ),
+                (
+                    "docs/deleted.md",
+                    deleted_source,
+                    markdown_section_symbols(
+                        "docs/deleted.md",
+                        deleted_source,
+                        &[("section:removed", "## Removed Section")],
+                    ),
+                ),
+            ],
+        );
+        let mut prev_rows = section_rows_from_artifact(&prev_artifact, root.path());
+        for (index, row) in prev_rows.iter_mut().enumerate() {
+            row.vector = Some(fake_vector(index as f32));
+        }
+        write_previous_section_sidecar_rows(prev_dir.path(), prev_rows).await;
+
+        let changed_new_source = concat!(
+            "## Keep Section\n\nThis section body stays the same across the markdown edit.\n\n",
+            "## Reembed Section\n\nNew markdown body that should be embedded later.\n",
+        );
+        write_source(root.path(), "docs/changed.md", changed_new_source);
+        fs::remove_file(root.path().join("docs/deleted.md")).expect("remove deleted markdown");
+        let next_artifact = graph_artifact_for_code_files(
+            "next-section-hash",
+            vec![
+                (
+                    "docs/unchanged.md",
+                    unchanged_source,
+                    markdown_section_symbols(
+                        "docs/unchanged.md",
+                        unchanged_source,
+                        &[
+                            ("section:stable-one", "## Stable One"),
+                            ("section:stable-two", "## Stable Two"),
+                            ("section:stable-three", "## Stable Three"),
+                        ],
+                    ),
+                ),
+                (
+                    "docs/changed.md",
+                    changed_new_source,
+                    markdown_section_symbols(
+                        "docs/changed.md",
+                        changed_new_source,
+                        &[
+                            ("section:keep", "## Keep Section"),
+                            ("section:reembed", "## Reembed Section"),
+                        ],
+                    ),
+                ),
+            ],
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let progress = {
+            let events = Arc::clone(&events);
+            move |event| events.lock().expect("events").push(event)
+        };
+
+        let row_counts = write_sections_dataset_with_sidecar_options_and_progress(
+            &next_artifact,
+            root.path(),
+            next_dir.path(),
+            incremental_skip_sidecar_options(
+                prev_dir.path(),
+                &["docs/changed.md"],
+                &["docs/deleted.md"],
+            ),
+            Some(&progress),
+        )
+        .expect("write incremental section sidecar");
+
+        let events = events.lock().expect("events").clone();
+        let section_batches = section_batches(&events);
+        let (_total_rows, written_rows, skipped_existing_rows) = section_finished(&events);
+        assert_eq!(
+            row_counts.section_bodies, 5,
+            "final section sidecar should keep 3 copied rows plus 2 touched rows"
+        );
+        assert_eq!(
+            section_batches,
+            vec![(2, 1)],
+            "section generation should be limited to the changed markdown path, not a default 512-row batch before 64-row embedding chunks"
+        );
+        assert_eq!(
+            written_rows, 2,
+            "incremental section planning should write only touched markdown rows"
+        );
+        assert_eq!(
+            skipped_existing_rows, 3,
+            "unchanged markdown rows should be copied/seeded from the previous sidecar"
+        );
+
+        let stored_rows = read_stored_section_rows(next_dir.path()).await;
+        assert_eq!(stored_rows.len(), 5);
+        assert!(
+            !stored_rows
+                .iter()
+                .any(|row| row.file_path == "docs/deleted.md"),
+            "deleted markdown rows from the previous sidecar must not survive seeding"
+        );
+        for stable_symbol_id in [
+            "section:stable-one",
+            "section:stable-two",
+            "section:stable-three",
+            "section:keep",
+        ] {
+            assert!(
+                stored_rows
+                    .iter()
+                    .any(|row| row.stable_symbol_id == stable_symbol_id && row.has_vector),
+                "{stable_symbol_id} should retain its previous section vector"
+            );
+        }
+        assert!(
+            stored_rows
+                .iter()
+                .any(|row| row.stable_symbol_id == "section:reembed" && !row.has_vector),
+            "changed markdown body should not retain a stale previous vector"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_sidecar_seed_reuses_vectors_without_full_512_by_64_reembedding() {
+        let root = tempfile::tempdir().expect("root");
+        let prev_dir = tempfile::tempdir().expect("prev sidecar");
+        let next_dir = tempfile::tempdir().expect("next sidecar");
+        let unchanged_source = concat!(
+            "/// One unchanged function with a previous vector.\n",
+            "pub fn stable_one() {}\n\n",
+            "/// Two unchanged function with a previous vector.\n",
+            "pub fn stable_two() {}\n",
+        );
+        let changed_old_source = concat!(
+            "/// Keep docs are unchanged even though this file changes.\n",
+            "pub fn keep_symbol() {}\n\n",
+            "/// Old docs for the changed embedding input.\n",
+            "pub fn reembed_symbol() {}\n",
+        );
+        let deleted_source =
+            "/// Removed docs with a previous vector.\npub fn removed_symbol() {}\n";
+        write_source(root.path(), "src/unchanged.rs", unchanged_source);
+        write_source(root.path(), "src/changed.rs", changed_old_source);
+        write_source(root.path(), "src/deleted.rs", deleted_source);
+
+        let prev_artifact = graph_artifact_for_code_files(
+            "prev-hash-small",
+            vec![
+                (
+                    "src/unchanged.rs",
+                    unchanged_source,
+                    vec![
+                        code_symbol(
+                            "src/unchanged.rs",
+                            unchanged_source,
+                            "sym:stable-one",
+                            "stable_one",
+                        ),
+                        code_symbol(
+                            "src/unchanged.rs",
+                            unchanged_source,
+                            "sym:stable-two",
+                            "stable_two",
+                        ),
+                    ],
+                ),
+                (
+                    "src/changed.rs",
+                    changed_old_source,
+                    vec![
+                        code_symbol(
+                            "src/changed.rs",
+                            changed_old_source,
+                            "sym:keep",
+                            "keep_symbol",
+                        ),
+                        code_symbol(
+                            "src/changed.rs",
+                            changed_old_source,
+                            "sym:reembed",
+                            "reembed_symbol",
+                        ),
+                    ],
+                ),
+                (
+                    "src/deleted.rs",
+                    deleted_source,
+                    vec![code_symbol(
+                        "src/deleted.rs",
+                        deleted_source,
+                        "sym:removed",
+                        "removed_symbol",
+                    )],
+                ),
+            ],
+        );
+        let mut prev_rows = symbol_rows_from_artifact(&prev_artifact, root.path());
+        for (index, row) in prev_rows.iter_mut().enumerate() {
+            row.vector = Some(fake_vector(index as f32));
+        }
+        write_previous_symbol_sidecar_rows(prev_dir.path(), prev_rows).await;
+
+        let changed_new_source = concat!(
+            "/// Keep docs are unchanged even though this file changes.\n",
+            "pub fn keep_symbol() {}\n\n",
+            "/// New docs for the changed embedding input.\n",
+            "pub fn reembed_symbol() {}\n",
+        );
+        write_source(root.path(), "src/changed.rs", changed_new_source);
+        fs::remove_file(root.path().join("src/deleted.rs")).expect("remove deleted source");
+        let next_artifact = graph_artifact_for_code_files(
+            "next-hash-small",
+            vec![
+                (
+                    "src/unchanged.rs",
+                    unchanged_source,
+                    vec![
+                        code_symbol(
+                            "src/unchanged.rs",
+                            unchanged_source,
+                            "sym:stable-one",
+                            "stable_one",
+                        ),
+                        code_symbol(
+                            "src/unchanged.rs",
+                            unchanged_source,
+                            "sym:stable-two",
+                            "stable_two",
+                        ),
+                    ],
+                ),
+                (
+                    "src/changed.rs",
+                    changed_new_source,
+                    vec![
+                        code_symbol(
+                            "src/changed.rs",
+                            changed_new_source,
+                            "sym:keep",
+                            "keep_symbol",
+                        ),
+                        code_symbol(
+                            "src/changed.rs",
+                            changed_new_source,
+                            "sym:reembed",
+                            "reembed_symbol",
+                        ),
+                    ],
+                ),
+            ],
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let progress = {
+            let events = Arc::clone(&events);
+            move |event| events.lock().expect("events").push(event)
+        };
+
+        let row_counts = write_sections_dataset_with_sidecar_options_and_progress(
+            &next_artifact,
+            root.path(),
+            next_dir.path(),
+            incremental_skip_sidecar_options(
+                prev_dir.path(),
+                &["src/changed.rs"],
+                &["src/deleted.rs"],
+            ),
+            Some(&progress),
+        )
+        .expect("write fresh seeded sidecar");
+
+        let events = events.lock().expect("events").clone();
+        let code_batches = code_symbol_batches(&events);
+        let (_total_rows, written_rows, skipped_existing_rows) = code_symbol_finished(&events);
+        assert_eq!(row_counts.code_symbols, 4);
+        assert_eq!(
+            code_batches,
+            vec![(2, 1)],
+            "fresh staging should generate the touched file only and re-embed only the changed embedding input"
+        );
+        assert_eq!(
+            written_rows, 2,
+            "fresh staging should be seeded from the previous sidecar instead of rewriting all rows"
+        );
+        assert_eq!(
+            skipped_existing_rows, 2,
+            "unchanged rows should be present from the seed before touched rows are written"
+        );
+
+        let stored_rows = read_stored_symbol_rows(next_dir.path()).await;
+        assert_eq!(stored_rows.len(), 4);
+        for stable_symbol_id in ["sym:stable-one", "sym:stable-two", "sym:keep"] {
+            assert!(
+                stored_rows
+                    .iter()
+                    .any(|row| row.stable_symbol_id == stable_symbol_id && row.has_vector),
+                "{stable_symbol_id} should retain its previous vector in the fresh sidecar"
+            );
+        }
+        assert!(
+            !stored_rows
+                .iter()
+                .any(|row| row.stable_symbol_id == "sym:removed"),
+            "deleted-path vector rows must not be copied into fresh staging"
         );
     }
 
