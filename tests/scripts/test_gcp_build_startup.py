@@ -17,6 +17,54 @@ def extract_wrapper(startup: str, name: str) -> str:
     return startup[start:end] + "\n"
 
 
+def extract_sbin_script(startup: str, name: str) -> str:
+    marker = f"cat >/usr/local/sbin/{name} <<'SCRIPT'\n"
+    start = startup.index(marker) + len(marker)
+    end = startup.index("\nSCRIPT", start)
+    return startup[start:end] + "\n"
+
+
+def run_autoshutdown(tmp_path: Path, ps_output: str, who_output: str = "") -> subprocess.CompletedProcess[str]:
+    startup = STARTUP_SH.read_text()
+    targets = tmp_path / "targets"
+    worktrees = targets / "worktrees"
+    fake_shutdown = tmp_path / "shutdown"
+    shutdown_args = tmp_path / "shutdown.args"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    targets.mkdir(exist_ok=True)
+
+    script = extract_sbin_script(startup, "spur-autoshutdown")
+    script = script.replace("IDLE_MIN=__IDLE_MIN__", "IDLE_MIN=30")
+    script = script.replace("TARGETS=/mnt/cargo/targets", f"TARGETS={targets}")
+    script = script.replace("WORKTREES=/mnt/cargo/targets/worktrees", f"WORKTREES={worktrees}")
+    script = script.replace("/sbin/shutdown", str(fake_shutdown))
+
+    script_path = tmp_path / "spur-autoshutdown"
+    script_path.write_text(script)
+    script_path.chmod(0o755)
+
+    (fake_bin / "ps").write_text(f"#!/bin/sh\ncat <<'EOF'\n{ps_output}EOF\n")
+    (fake_bin / "ps").chmod(0o755)
+    (fake_bin / "pgrep").write_text(
+        "#!/bin/sh\n"
+        "name=\"\"\n"
+        "for arg in \"$@\"; do\n"
+        "  case \"$arg\" in -*) ;; *) name=\"$arg\" ;; esac\n"
+        "done\n"
+        f"awk -v name=\"$name\" '$2 == name {{ print $1; found=1 }} END {{ exit(found ? 0 : 1) }}' <<'EOF'\n{ps_output}EOF\n"
+    )
+    (fake_bin / "pgrep").chmod(0o755)
+    (fake_bin / "who").write_text(f"#!/bin/sh\ncat <<'EOF'\n{who_output}EOF\n")
+    (fake_bin / "who").chmod(0o755)
+    fake_shutdown.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" > {shutdown_args}\n")
+    fake_shutdown.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    return subprocess.run([str(script_path)], env=env, text=True, capture_output=True)
+
+
 def test_builder_defaults_to_standard_16_lssd_for_local_cargo_cache():
     config = CONFIG_ENV.read_text()
 
@@ -45,7 +93,37 @@ def test_autoshutdown_defaults_to_30_minutes_and_tracks_linkers():
     startup = STARTUP_SH.read_text()
 
     assert "IDLE_MINUTES=30" in startup
-    assert "pgrep -x rust-lld" in startup
+    assert "rust-lld" in extract_sbin_script(startup, "spur-autoshutdown")
+
+
+def test_autoshutdown_keeps_fresh_cargo_process_active(tmp_path):
+    result = run_autoshutdown(
+        tmp_path,
+        ps_output="123 cargo 1800 /mnt/cargo/rustup/bin/cargo test --workspace\n",
+    )
+
+    assert result.returncode == 1
+    assert "active: build process running" in result.stdout
+    assert not (tmp_path / "shutdown.args").exists()
+
+
+def test_autoshutdown_treats_cargo_older_than_one_hour_as_stale(tmp_path):
+    recent_target = tmp_path / "targets" / "debug" / "fresh-artifact"
+    recent_target.parent.mkdir(parents=True)
+    recent_target.write_text("fresh\n")
+
+    result = run_autoshutdown(
+        tmp_path,
+        ps_output=(
+            "123 cargo 3601 /mnt/cargo/rustup/bin/cargo test --workspace\n"
+            "456 rustc 20 rustc --crate-name spur_core\n"
+        ),
+    )
+
+    assert result.returncode == 0
+    assert "stale: cargo process older than 60 min" in result.stdout
+    assert "idle for 30+ min" in result.stdout
+    assert (tmp_path / "shutdown.args").read_text().startswith("-h now SPUR autoshutdown")
 
 
 def test_startup_mounts_local_ssd_as_cargo_cache():
