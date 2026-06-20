@@ -121,6 +121,7 @@ pub struct ToolRegistry {
     tools: Vec<RegisteredTool>,
     tool_indices: HashMap<String, usize>,
     aliases: HashMap<String, String>,
+    denied_tool_calls: HashSet<String>,
 }
 
 impl ToolRegistry {
@@ -130,6 +131,7 @@ impl ToolRegistry {
             tools: Vec::new(),
             tool_indices: HashMap::new(),
             aliases: HashMap::new(),
+            denied_tool_calls: HashSet::new(),
         }
     }
 
@@ -186,9 +188,19 @@ impl ToolRegistry {
         Ok(())
     }
 
+    pub fn deny_tool_calls<I, S>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.denied_tool_calls
+            .extend(names.into_iter().map(Into::into));
+    }
+
     pub fn list_tools(&self) -> Vec<ToolDefinition> {
         self.tools
             .iter()
+            .filter(|entry| !self.denied_tool_calls.contains(&entry.definition.name))
             .map(|entry| entry.definition.clone())
             .collect()
     }
@@ -200,15 +212,37 @@ impl ToolRegistry {
         self.aliases.get(name).map(String::as_str)
     }
 
+    pub fn tool_definition_for_call(&self, name: &str) -> Option<ToolDefinition> {
+        let canonical_name = self.canonical_name(name)?;
+        if self.denied_tool_calls.contains(canonical_name) || self.denied_tool_calls.contains(name)
+        {
+            return None;
+        }
+        self.tool_indices
+            .get(canonical_name)
+            .map(|index| self.tools[*index].definition.clone())
+    }
+
+    pub fn canonical_name_for_call<'a>(&'a self, name: &'a str) -> Result<&'a str, McpError> {
+        if self.denied_tool_calls.contains(name) {
+            return Err(worker_tool_authorization_error(name));
+        }
+        let canonical_name = self.canonical_name(name).ok_or_else(|| {
+            McpError::new(ErrorCode(-32601), format!("Unknown tool: {name}"), None)
+        })?;
+        if self.denied_tool_calls.contains(canonical_name) {
+            return Err(worker_tool_authorization_error(name));
+        }
+        Ok(canonical_name)
+    }
+
     pub async fn call_tool(
         &self,
         ctx: ToolCallContext<'_>,
         name: &str,
         args: Value,
     ) -> Result<ToolResponse, McpError> {
-        let canonical_name = self.canonical_name(name).ok_or_else(|| {
-            McpError::new(ErrorCode(-32601), format!("Unknown tool: {name}"), None)
-        })?;
+        let canonical_name = self.canonical_name_for_call(name)?;
         let tool_index = self
             .tool_indices
             .get(canonical_name)
@@ -264,9 +298,26 @@ impl ToolRegistryBuilder {
         Ok(self)
     }
 
+    pub fn with_denied_tool_calls<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.registry.deny_tool_calls(names);
+        self
+    }
+
     pub fn build(self) -> ToolRegistry {
         self.registry
     }
+}
+
+fn worker_tool_authorization_error(name: &str) -> McpError {
+    McpError::new(
+        ErrorCode(-32001),
+        format!("worker is not authorized to call restricted tool: {name}"),
+        None,
+    )
 }
 
 /// Future spur-core-owned MCP handles.
@@ -305,6 +356,34 @@ const PM_CRUD_TOOL_NAMES: &[&str] = &[
 ];
 
 const PM_ISSUE_GRAPH_TOOL_NAMES: &[&str] = &[
+    "graph_triage",
+    "graph_plan",
+    "graph_insights",
+    "graph_alerts",
+    "graph_subgraph",
+];
+
+const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
+    "delegate_to_worker",
+    "delegate_parallel",
+    "check_delegation_status",
+    "cancel_delegation",
+    "list_available_workers",
+    "update_issue",
+    "create_issue",
+    "add_dependency",
+    "create_pr",
+    "merge_plan",
+    "resume_plan",
+    "force_reclaim_plan",
+    "submit_plan",
+    "execute_epic",
+    "get_reconciler_status",
+    "preview_task_base",
+    "plan_truncate_and_restart",
+    "recover_orphaned_dispatch",
+    "review_task",
+    "submit_plan_mutation",
     "graph_triage",
     "graph_plan",
     "graph_insights",
@@ -629,13 +708,14 @@ pub fn default_worker_tool_registry() -> Result<&'static ToolRegistry, ToolRegis
     static REGISTRY: OnceLock<Result<ToolRegistry, ToolRegistryError>> = OnceLock::new();
     REGISTRY
         .get_or_init(|| {
-            ToolRegistry::builder()
+            Ok(ToolRegistry::builder()
                 .with(LegacyMcpToolModule::worker_prelude())?
                 .with(GraphMcpToolModule)?
                 .with(AnalystMcpToolModule::read_only())?
                 .with(LegacyMcpToolModule::worker_remainder())?
-                .with_alias("code_search", "code_symbol_search")
-                .map(ToolRegistryBuilder::build)
+                .with_alias("code_search", "code_symbol_search")?
+                .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied())
+                .build())
         })
         .as_ref()
         .map_err(Clone::clone)
@@ -643,6 +723,9 @@ pub fn default_worker_tool_registry() -> Result<&'static ToolRegistry, ToolRegis
 
 #[cfg(test)]
 mod analyst_module_ownership_tests {
+    use super::*;
+    use serde_json::json;
+
     #[test]
     fn default_registries_compose_analyst_module_explicitly() {
         let source = include_str!("registry.rs");
@@ -654,5 +737,45 @@ mod analyst_module_ownership_tests {
             source.contains(".with(AnalystMcpToolModule::read_only())?"),
             "worker registry must compose analyst-owned tools through AnalystMcpToolModule"
         );
+    }
+
+    #[tokio::test]
+    async fn worker_registry_denies_brain_only_tool_calls_with_authorization_error() {
+        let registry = default_worker_tool_registry().expect("default worker registry");
+        let names: Vec<String> = registry
+            .list_tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+
+        for tool_name in [
+            "submit_plan",
+            "review_task",
+            "delegate_to_worker",
+            "delegate_parallel",
+            "execute_epic",
+        ] {
+            assert!(
+                !names.iter().any(|name| name == tool_name),
+                "{tool_name} must not be advertised to workers"
+            );
+
+            let ctx = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
+            let err = match registry.call_tool(ctx, tool_name, json!({})).await {
+                Ok(_) => panic!("brain-only worker call must be rejected: {tool_name}"),
+                Err(err) => err,
+            };
+
+            assert_eq!(
+                err.code,
+                ErrorCode(-32001),
+                "{tool_name} should fail authorization, not tool lookup"
+            );
+            assert!(
+                err.message.contains("not authorized"),
+                "{tool_name} denial should explain authorization: {}",
+                err.message
+            );
+        }
     }
 }
