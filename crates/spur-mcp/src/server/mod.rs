@@ -67,6 +67,18 @@ pub(crate) use sync::*;
 pub use sync::{compensate_mutation_orphans, resolve_dispatch_orphan};
 pub use types::*;
 
+/// Brain/orchestrator MCP callback server.
+///
+/// Phase 4 field ownership (see
+/// `docs/superpowers/plans/2026-06-21-phase4-plan-reconciler-core-extraction.md`):
+/// the transport/session fields (`brain_session_id*`, `task_tracker`,
+/// `feature_gate`, `retiring`, `cancel_token`, `root_handle`,
+/// `root_shutdown_tx`, `tool_registry`, `inline_wait`, `event_sink`) are
+/// infrastructure and stay in `spur-mcp`. The remaining fields — active plans,
+/// plan registry, plan-ownership lock, reconciler handle/outcomes/config,
+/// continuation context, cancellation control, outcome materialization, and the
+/// delegation lifecycle handles — are orchestration-domain state that moves to
+/// `spur-core`. The accessors below expose that subset for the staged move.
 pub struct McpCallbackServer {
     /// Channel to send delegation requests to the orchestrator.
     pub(crate) delegation_tx: mpsc::Sender<DelegationRequest>,
@@ -516,6 +528,69 @@ impl McpCallbackServer {
         &self,
     ) -> Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>> {
         Arc::clone(&self.reconciler_outcomes)
+    }
+
+    // ─── Orchestration-state extraction surface (Phase 4) ─────────────────
+    //
+    // These accessors expose the plan/reconciler orchestration-domain handles
+    // so `spur_core::mcp::plan::PlanMcpDeps::from_server` can bundle them as
+    // the input to the staged engine move into `spur-core`. They mirror the
+    // delegation-extraction accessors above and add no behavior. See
+    // `docs/superpowers/plans/2026-06-21-phase4-plan-reconciler-core-extraction.md`.
+
+    /// Clone-shared handle to the versioned active-plan cache.
+    pub fn active_plans_handle(&self) -> Arc<tokio::sync::Mutex<HashMap<String, CachedPlan>>> {
+        Arc::clone(&self.active_plans)
+    }
+
+    /// Clone-shared handle to the `epic_id → plan_id` registry.
+    pub fn plan_registry_handle(&self) -> Arc<tokio::sync::Mutex<crate::plan::PlanRegistry>> {
+        Arc::clone(&self.plan_registry)
+    }
+
+    /// Clone-shared handle to the current-brain plan-ownership claim lock.
+    pub fn plan_claim_lock_handle(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.active_plan_claim_lock)
+    }
+
+    /// Optional PM service used by plan submission/projection.
+    pub fn pm_service_handle(&self) -> Option<Arc<PmService>> {
+        self.pm_service.clone()
+    }
+
+    /// Optional `PmLike` substrate handle used by the plan projector/reconciler.
+    pub fn pm_like_handle(&self) -> Option<Arc<dyn crate::plan::PmLike>> {
+        self.pm_service_like.clone()
+    }
+
+    /// Persisted-plan versioned-cache serving flag.
+    pub fn versioned_cache_serve(&self) -> bool {
+        self.versioned_cache_serve
+    }
+
+    /// PR3 non-advisory review-write flag.
+    pub fn nonadvisory_review_writes(&self) -> bool {
+        self.nonadvisory_review_writes
+    }
+
+    /// Reconciler-owned dispatch lease duration.
+    pub fn dispatch_lease_duration(&self) -> std::time::Duration {
+        self.dispatch_lease_duration
+    }
+
+    /// Opt-in auto-merge/PR on durable epic completion.
+    pub fn auto_merge_approved_plans(&self) -> bool {
+        self.auto_merge_approved_plans
+    }
+
+    /// Startup quarantine grace for stale `spur:plan-pending` epics.
+    pub fn plan_pending_grace(&self) -> std::time::Duration {
+        self.plan_pending_grace
+    }
+
+    /// Whether the beads reconciler is enabled for this server.
+    pub fn reconciler_enabled(&self) -> bool {
+        self.reconciler_enabled
     }
 
     /// v0e: opt-in auto-merge/PR on durable epic completion.
