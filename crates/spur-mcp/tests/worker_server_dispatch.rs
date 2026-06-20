@@ -332,6 +332,7 @@ async fn tools_list_returns_curated_worker_tools_including_code_graph_reads() {
         "code_callees",
         "code_subgraph",
         "code_symbol_history",
+        "doc_navigate",
         "knowledge_context_pack",
         "knowledge_context_pack_2",
         "report_signal",
@@ -917,7 +918,7 @@ async fn tools_call_get_issue_routes_to_handler() {
 }
 
 #[tokio::test]
-async fn tools_call_unknown_tool_returns_method_not_found() {
+async fn tools_call_brain_only_tool_returns_authorization_error() {
     let (_dir, server) = test_server_with_real_pm().await;
     let token = server.issue_token("d-1", Duration::from_secs(60));
     let body = call_jsonrpc(
@@ -929,8 +930,14 @@ async fn tools_call_unknown_tool_returns_method_not_found() {
     .await;
     assert_eq!(
         body["error"]["code"].as_i64(),
-        Some(-32602),
-        "unknown worker tool should be invalid params/tool-not-found under native RMCP routing, got: {body}"
+        Some(-32001),
+        "brain-only worker tool should be rejected as authorization failure, got: {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not authorized")),
+        "authorization denial should explain worker authority, got: {body}"
     );
     server.shutdown(Duration::from_secs(5)).await;
 }
