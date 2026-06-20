@@ -6,6 +6,7 @@
 //! existing freestanding handlers in [`crate::handlers`]. Audit emission and
 //! per-delegation lifecycle guards remain in this module.
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -35,8 +36,11 @@ impl Default for WorkerMcpServerConfig {
 use parking_lot::Mutex;
 use rand::RngCore;
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    model::{CallToolResult, Implementation, JsonObject, ServerCapabilities, ServerInfo},
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext as RmcpToolCallContext},
+    model::{
+        object as rmcp_object, CallToolRequestParams, CallToolResult, Implementation, JsonObject,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    },
     service::RequestContext,
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
@@ -540,6 +544,30 @@ async fn invoke_knowledge_context_for_worker(
     }
 }
 
+async fn invoke_doc_navigate_for_worker(
+    deps: Arc<DispatcherDeps>,
+    worker_ctx: WorkerCallContext,
+    args: Value,
+) -> Result<Value, McpHandlerError> {
+    let worker_root = {
+        deps.delegation_worktree_roots
+            .lock()
+            .get(&worker_ctx.delegation_id)
+            .cloned()
+    };
+    let root = select_knowledge_context_root(worker_root, deps.repo_root.clone());
+    let future = async move {
+        spur_analyst::mcp::doc_navigate(&args)
+            .await
+            .map_err(analyst_mcp_error)
+    };
+    if let Some(root) = root {
+        spur_graph::mcp::with_worktree_root_for_request(root, future).await
+    } else {
+        future.await
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct GetIssueParams {
     id: String,
@@ -628,6 +656,28 @@ enum KnowledgeScopeParam {
     Docs,
     Code,
     Graph,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema, Serialize)]
+struct DocNavigateParams {
+    /// Full-text query. Required when root is null or omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
+    /// Stable symbol id. When set, expand one Contains hop instead of FTS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
+    /// Result count. Clamped by the handler to 1..=100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    k: Option<u64>,
+    /// Optional glob over worktree-relative file_path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_glob: Option<String>,
+    /// Optional git commit SHA for point-in-time root symbol resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_of: Option<String>,
+    /// Include the first body_text characters as lede. Defaults true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_lede: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -1404,6 +1454,29 @@ impl WorkerToolHandler {
     // or `report_progress` and let the brain reconcile issue state.
 
     #[tool(
+        name = "doc_navigate",
+        description = "Navigate indexed documentation sections. Without root, performs BM25 full-text search over section body_text in the Lance sidecar. With root, returns one-hop child sections via Contains order using the stable_symbol_id frontier.",
+        input_schema = crate::tool_schemas::schema_object::<DocNavigateParams>()
+    )]
+    async fn doc_navigate_tool(
+        &self,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = Value::Object(arguments);
+        let deps = Arc::clone(&self.deps);
+        self.invoke_with_lifecycle(
+            "doc_navigate",
+            context,
+            Some(None),
+            move |worker_ctx| async move {
+                invoke_doc_navigate_for_worker(deps, worker_ctx, args).await
+            },
+        )
+        .await
+    }
+
+    #[tool(
         name = "report_signal",
         description = "Worker-facing. Record a typed WorkerSignal on a task. Brain-side watcher will inspect and may mutate the plan.",
         input_schema = crate::tool_schemas::schema_object::<ReportSignalParams>()
@@ -1473,13 +1546,63 @@ fn structured_only_result(value: Value) -> CallToolResult {
     result
 }
 
+fn worker_registry() -> Result<&'static crate::registry::ToolRegistry, McpError> {
+    crate::registry::default_worker_tool_registry().map_err(|error| {
+        McpError::internal_error(
+            format!("default worker MCP tool registry is invalid: {error}"),
+            None,
+        )
+    })
+}
+
+fn worker_rmcp_tool(definition: crate::tools::ToolDefinition) -> Tool {
+    Tool::new(
+        definition.name,
+        definition.description,
+        rmcp_object(definition.input_schema),
+    )
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for WorkerToolHandler {
+    async fn call_tool(
+        &self,
+        mut request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let canonical_name = worker_registry()?.canonical_name_for_call(&request.name)?;
+        request.name = Cow::Owned(canonical_name.to_string());
+        let tcc = RmcpToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: worker_registry()?
+                .list_tools()
+                .into_iter()
+                .map(worker_rmcp_tool)
+                .collect(),
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        worker_registry()
+            .ok()?
+            .tool_definition_for_call(name)
+            .map(worker_rmcp_tool)
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.instructions = Some(
-            "Use these tools to inspect/update assigned issues and report worker progress/signals."
-                .into(),
+            "Use these tools to inspect assigned issues and report worker progress/signals.".into(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
 
