@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+
 /// Configuration for the background audit flusher and idle thresholds.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerMcpServerConfig {
@@ -69,6 +71,21 @@ use crate::events::McpEventSink;
 use crate::handlers::{McpHandlerError, PlanResolver, WorkerCallContext};
 use crate::outcome_materializer::OutcomeMaterializer;
 use crate::token::validate_token;
+
+#[async_trait]
+pub trait WorkerSignalSink: Send + Sync {
+    async fn report_signal(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError>;
+
+    async fn report_progress(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError>;
+}
 
 /// Per-delegation context cached by the dispatcher so gating checks never
 /// hit the PM on the hot path.
@@ -181,6 +198,7 @@ pub struct WorkerMcpDeps {
     pub pm_service: Arc<spur_pm::PmService>,
     pub feature_gate: Arc<spur_license::FeatureGate>,
     pub funnel: Arc<dyn McpEventSink>,
+    pub worker_signal_sink: Arc<dyn WorkerSignalSink>,
     pub plan_resolver: Arc<dyn PlanResolver>,
     pub reconciler_outcomes: Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>>,
     pub outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
@@ -381,6 +399,7 @@ struct DispatcherDeps {
     pm_service: Arc<spur_pm::PmService>,
     feature_gate: Arc<spur_license::FeatureGate>,
     funnel: Arc<dyn McpEventSink>,
+    worker_signal_sink: Arc<dyn WorkerSignalSink>,
     plan_resolver: Arc<dyn PlanResolver>,
     reconciler_outcomes: Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>>,
     outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
@@ -920,6 +939,25 @@ struct ReportProgressParams {
     message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     percent: Option<f64>,
+}
+
+pub(crate) fn worker_signal_tool_definitions() -> Vec<crate::tools::ToolDefinition> {
+    vec![
+        crate::tools::ToolDefinition {
+            name: "report_signal".into(),
+            description: "Worker-facing. Record a typed WorkerSignal on a task. Brain-side watcher will inspect and may mutate the plan.".into(),
+            input_schema: serde_json::Value::Object(
+                crate::tool_schemas::schema_object::<ReportSignalParams>(),
+            ),
+        },
+        crate::tools::ToolDefinition {
+            name: "report_progress".into(),
+            description: "Worker-facing fire-and-forget progress emission. Sends a free-form `message` (and optional `percent`) to the brain as a `WorkerReportProgress` event. The handler returns `{ok: true}` on accept; the side effect IS the event. No PM writes, no audit sentinel - distinct from `report_signal` (which persists). Workers stream rich progress text without minting structured milestone names. Consumers (TUI / dashboards) decide how to render `percent` (no clamping).".into(),
+            input_schema: serde_json::Value::Object(
+                crate::tool_schemas::schema_object::<ReportProgressParams>(),
+            ),
+        },
+    ]
 }
 
 /// RMCP `ServerHandler` for the curated worker tool subset.
@@ -1493,13 +1531,9 @@ impl WorkerToolHandler {
             context,
             None,
             move |worker_ctx| async move {
-                crate::handlers::report_signal(
-                    deps.pm_service.as_ref(),
-                    deps.feature_gate.as_ref(),
-                    &worker_ctx,
-                    args,
-                )
-                .await
+                deps.worker_signal_sink
+                    .report_signal(&worker_ctx, args)
+                    .await
             },
         )
         .await
@@ -1531,7 +1565,9 @@ impl WorkerToolHandler {
                 if !delegation_ctx.enable_worker_progress {
                     Ok(json!({ "ok": true }))
                 } else {
-                    crate::handlers::report_progress(deps.funnel.as_ref(), &worker_ctx, args).await
+                    deps.worker_signal_sink
+                        .report_progress(&worker_ctx, args)
+                        .await
                 }
             },
         )
@@ -1838,6 +1874,7 @@ impl WorkerMcpServer {
             pm_service: deps.pm_service,
             feature_gate: deps.feature_gate,
             funnel: deps.funnel,
+            worker_signal_sink: deps.worker_signal_sink,
             plan_resolver: deps.plan_resolver,
             reconciler_outcomes: deps.reconciler_outcomes,
             outcome_store: deps.outcome_store,

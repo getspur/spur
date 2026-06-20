@@ -1,13 +1,15 @@
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
-static BEADS_SQLITE_SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static BEADS_SQLITE_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
-async fn beads_sqlite_serial_guard() -> tokio::sync::MutexGuard<'static, ()> {
+fn beads_sqlite_serial_guard() -> MutexGuard<'static, ()> {
     BEADS_SQLITE_SERIAL
-        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .get_or_init(|| Mutex::new(()))
         .lock()
-        .await
+        .unwrap()
 }
 
 #[cfg(test)]

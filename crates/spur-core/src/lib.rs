@@ -141,6 +141,7 @@ pub mod event_replay;
 pub mod event_sink;
 pub mod license_runtime;
 pub mod lineage;
+pub mod mcp;
 pub mod notebook;
 pub(crate) mod notification_drain;
 pub mod notification_pump;

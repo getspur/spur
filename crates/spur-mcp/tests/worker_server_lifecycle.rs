@@ -63,10 +63,13 @@ impl PlanResolver for NullPlanResolver {
 }
 
 fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
+    let funnel = test_funnel();
+    let worker_signal_sink = Arc::new(common::TestWorkerSignalSink::new(Arc::clone(&funnel)));
     WorkerMcpDeps {
         pm_service: pm,
         feature_gate: test_feature_gate(),
-        funnel: test_funnel(),
+        funnel,
+        worker_signal_sink,
         plan_resolver: Arc::new(NullPlanResolver),
         reconciler_outcomes: Arc::new(
             Mutex::new(spur_mcp::plan::outcomes::OutcomeStore::default()),
@@ -216,13 +219,14 @@ async fn active_count_tracks_concurrent_dispatch_entry_and_exit() {
 
     let server_slot: Arc<OnceLock<Weak<WorkerMcpServer>>> = Arc::new(OnceLock::new());
     let max_seen = Arc::new(AtomicU32::new(0));
-    let sink = Arc::new(ObservingSink {
+    let sink: Arc<dyn McpEventSink> = Arc::new(ObservingSink {
         server: Arc::clone(&server_slot),
         max_seen: Arc::clone(&max_seen),
         delay: Duration::from_millis(300),
     });
 
     let mut deps = test_deps(pm);
+    deps.worker_signal_sink = Arc::new(common::TestWorkerSignalSink::new(Arc::clone(&sink)));
     deps.funnel = sink;
     let server = WorkerMcpServer::start("session-active".into(), deps)
         .await
@@ -285,12 +289,13 @@ async fn shutdown_blocks_until_active_count_reaches_zero() {
     // `ActiveCallGuard::drop` and shutdown's drain polling completes.
     let started = Arc::new(AtomicU32::new(0));
     let dispatch_hold = Duration::from_millis(3000);
-    let sink = Arc::new(DelayingSink {
+    let sink: Arc<dyn McpEventSink> = Arc::new(DelayingSink {
         started: Arc::clone(&started),
         delay: dispatch_hold,
     });
 
     let mut deps = test_deps(pm);
+    deps.worker_signal_sink = Arc::new(common::TestWorkerSignalSink::new(Arc::clone(&sink)));
     deps.funnel = sink;
     let server = WorkerMcpServer::start("session-drain".into(), deps)
         .await
@@ -445,12 +450,13 @@ async fn shutdown_warns_and_returns_undrained_when_deadline_elapses() {
     // margin even on slow CI.
     let started = Arc::new(AtomicU32::new(0));
     let dispatch_hold = Duration::from_millis(3000);
-    let sink = Arc::new(DelayingSink {
+    let sink: Arc<dyn McpEventSink> = Arc::new(DelayingSink {
         started: Arc::clone(&started),
         delay: dispatch_hold,
     });
 
     let mut deps = test_deps(pm);
+    deps.worker_signal_sink = Arc::new(common::TestWorkerSignalSink::new(Arc::clone(&sink)));
     deps.funnel = sink;
     let server = WorkerMcpServer::start("session-deadline".into(), deps)
         .await

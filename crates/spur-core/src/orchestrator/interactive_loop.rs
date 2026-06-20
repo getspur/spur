@@ -3241,10 +3241,20 @@ mod phase5_orchestrator_finalization_tests {
     }
 
     fn test_worker_deps(pm: Arc<spur_pm::PmService>) -> WorkerMcpDeps {
+        let feature_gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
+        let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(NullWorkerMcpEventSink);
+        let worker_signal_sink = Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
+            crate::mcp::signals::SignalMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                event_sink: Some(Arc::clone(&funnel)),
+                feature_gate: Arc::clone(&feature_gate),
+            },
+        ));
         WorkerMcpDeps {
             pm_service: pm,
-            feature_gate: Arc::new(FeatureGate::new(PolicyResolver::embedded())),
-            funnel: Arc::new(NullWorkerMcpEventSink),
+            feature_gate,
+            funnel,
+            worker_signal_sink,
             plan_resolver: Arc::new(NullWorkerPlanResolver),
             reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
                 spur_mcp::plan::outcomes::OutcomeStore::default(),
