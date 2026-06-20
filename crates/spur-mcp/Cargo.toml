@@ -8,17 +8,12 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-arrow-array = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 base64ct = { version = "1", features = ["alloc"] }
 chrono = { workspace = true }
 futures = { workspace = true }
-fastembed = { version = "4", default-features = false, optional = true }
-globset = "0.4"
 hmac = "0.12"
-lance-index = { workspace = true }
-lancedb = { workspace = true }
 parking_lot = "0.12"
 rand = "0.8"
 rmcp = { workspace = true }
@@ -27,7 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 spur-acp = { workspace = true }
-spur-analyst = { workspace = true }
+spur-analyst = { workspace = true, default-features = false }
 spur-blob-store = { workspace = true }
 spur-license = { workspace = true }
 spur-graph = { workspace = true }
@@ -48,11 +43,7 @@ test-support = ["spur-graph/test-support"]
 # Enables cfg(madsim)-only reconciler simulation tests. Normal builds and
 # default cargo test runs do not compile the madsim harness.
 madsim-sim = ["test-support"]
-embed = [
-    "dep:fastembed",
-    "fastembed/hf-hub-native-tls",
-    "fastembed/ort-download-binaries",
-]
+embed = ["spur-analyst/embed"]
 
 [[test]]
 name = "madsim_reconciler"
