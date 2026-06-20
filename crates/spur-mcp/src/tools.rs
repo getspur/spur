@@ -5,7 +5,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spur_acp::{DelegationId, DelegationResult};
-use spur_analyst::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 use tokio::sync::{oneshot, watch};
 
 // ─── Request/Response types for orchestrator communication ────────────
@@ -538,156 +537,6 @@ fn cancel_delegation_def() -> ToolDefinition {
     }
 }
 
-fn doc_navigate_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "doc_navigate".into(),
-        description: "Navigate indexed documentation sections. Without root, performs BM25 full-text search over section body_text in the Lance sidecar. With root, returns one-hop child sections via Contains order using the stable_symbol_id frontier.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Full-text query. Required when root is null or omitted."
-                },
-                "root": {
-                    "type": "string",
-                    "description": "Stable symbol id. When set, expand one Contains hop instead of FTS."
-                },
-                "k": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "default": 20
-                },
-                "file_glob": {
-                    "type": "string",
-                    "description": "Optional glob over worktree-relative file_path. Applied in Lance when possible, otherwise post-filtered."
-                },
-                "as_of": {
-                    "type": "string",
-                    "description": "Optional git commit SHA for point-in-time root symbol resolution."
-                },
-                "include_lede": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "When true, include the first 200 UTF-8 characters from body_text as lede."
-                }
-            }
-        }),
-    }
-}
-
-fn knowledge_context_pack_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "knowledge_context_pack".into(),
-        description: "Builds a bounded evidence pack from BM25 candidates, scorecard signals, and exact graph grounding. Applies opportunistic Lance hybrid vector re-ranking when query embeddings and the sidecar respond; degrades to BM25-only on timeout or unavailability. Use code_read_symbol/code_callers/code_callees for exact follow-up.".into(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": { "type": "string", "minLength": 1 },
-                "intent": {
-                    "type": "string",
-                    "enum": ["explain", "change", "review", "debug", "plan"],
-                    "default": "explain"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["all", "docs", "code", "graph"],
-                    "default": "all"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 8
-                },
-                "include_tests": { "type": "boolean", "default": true },
-                "max_symbol_bodies": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 5,
-                    "default": 3
-                }
-            },
-            "additionalProperties": false
-        }),
-    }
-}
-
-fn knowledge_context_pack_2_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "knowledge_context_pack_2".into(),
-        description: "experimental v2 structured evidence pack for semantic answers; it does not generate final prose. Preserves knowledge_context_pack retrieval and exact grounding while adding DuckPGQ/Onager-backed graph_paths, risk_scorecard, community_context, temporal_context, and caveats as bounded graph-reasoning evidence.".into(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": { "type": "string", "minLength": 1 },
-                "intent": {
-                    "type": "string",
-                    "enum": ["explain", "change", "review", "debug", "plan"],
-                    "default": "explain"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["all", "docs", "code", "graph"],
-                    "default": "all"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 8
-                },
-                "include_tests": { "type": "boolean", "default": true },
-                "max_symbol_bodies": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 5,
-                    "default": 3
-                },
-                "graph_reasoning": {
-                    "type": "object",
-                    "properties": {
-                        "paths": {
-                            "type": "boolean",
-                            "description": "When true, include bounded graph path evidence between top code candidates and graph anchors."
-                        },
-                        "communities": {
-                            "type": "boolean",
-                            "description": "When true, include component/community context for grounded code candidates."
-                        },
-                        "risk": {
-                            "type": "boolean",
-                            "description": "When true, include scorecard risk signals for grounded code candidates."
-                        },
-                        "max_path_hops": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_CONTEXT_PATH_HOPS,
-                            "default": 4
-                        },
-                        "max_paths": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_CONTEXT_PATHS,
-                            "default": 6
-                        },
-                        "anchors": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Optional graph://symbol/<id> or bare stable symbol IDs to use as path targets."
-                        }
-                    },
-                    "additionalProperties": false
-                }
-            },
-            "additionalProperties": false
-        }),
-    }
-}
-
 // ─── Plan execution tool definitions ──────────────────────────────
 
 fn submit_plan_def() -> ToolDefinition {
@@ -1038,9 +887,6 @@ pub(crate) fn legacy_plan_management_tool_definitions() -> Vec<ToolDefinition> {
 
 pub(crate) fn legacy_remainder_tool_definitions() -> Vec<ToolDefinition> {
     vec![
-        doc_navigate_def(),
-        knowledge_context_pack_def(),
-        knowledge_context_pack_2_def(),
         submit_plan_def(),
         execute_epic_def(),
         get_plan_status_def(),
@@ -1085,11 +931,7 @@ pub(crate) fn legacy_worker_prelude_tool_definitions() -> Vec<ToolDefinition> {
 }
 
 pub(crate) fn legacy_worker_remainder_tool_definitions() -> Vec<ToolDefinition> {
-    let mut tools = vec![
-        doc_navigate_def(),
-        knowledge_context_pack_def(),
-        knowledge_context_pack_2_def(),
-    ];
+    let mut tools = Vec::new();
     tools.extend(pm_tool_definitions_by_names(&["update_issue"]));
     tools.extend([report_signal_def(), report_progress_def()]);
     tools
@@ -1660,6 +1502,42 @@ mod worker_tools_subset_tests {
             .collect();
         assert!(actual.contains(&"knowledge_context_pack".to_string()));
         assert!(actual.contains(&"knowledge_context_pack_2".to_string()));
+    }
+
+    #[test]
+    fn analyst_tools_are_not_owned_by_legacy_remainder() {
+        let actual: Vec<String> = legacy_remainder_tool_definitions()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        for name in [
+            "doc_navigate",
+            "knowledge_context_pack",
+            "knowledge_context_pack_2",
+        ] {
+            assert!(
+                !actual.contains(&name.to_string()),
+                "{name} must be owned by spur_analyst::mcp, not the legacy remainder"
+            );
+        }
+    }
+
+    #[test]
+    fn analyst_worker_tools_are_not_owned_by_legacy_worker_remainder() {
+        let actual: Vec<String> = legacy_worker_remainder_tool_definitions()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        for name in [
+            "doc_navigate",
+            "knowledge_context_pack",
+            "knowledge_context_pack_2",
+        ] {
+            assert!(
+                !actual.contains(&name.to_string()),
+                "{name} must be owned by spur_analyst::mcp, not the legacy worker remainder"
+            );
+        }
     }
 
     #[test]
