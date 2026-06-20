@@ -260,10 +260,20 @@ mod flush_ordering_tests {
         delegation_id: &str,
     ) -> Arc<WorkerMcpServer> {
         let pm = build_pm_service(repo).await;
+        let feature_gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
+        let event_sink = make_funnel_sink(funnel);
+        let worker_signal_sink = Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
+            crate::mcp::signals::SignalMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                event_sink: Some(Arc::clone(&event_sink)),
+                feature_gate: Arc::clone(&feature_gate),
+            },
+        ));
         let deps = WorkerMcpDeps {
             pm_service: pm,
-            feature_gate: Arc::new(FeatureGate::new(PolicyResolver::embedded())),
-            funnel: make_funnel_sink(funnel),
+            feature_gate,
+            funnel: event_sink,
+            worker_signal_sink,
             plan_resolver: Arc::new(NullPlanResolver),
             reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
                 spur_mcp::plan::outcomes::OutcomeStore::default(),

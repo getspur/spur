@@ -107,10 +107,12 @@ fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
 }
 
 fn test_deps_with_funnel(pm: Arc<PmService>, funnel: Arc<dyn McpEventSink>) -> WorkerMcpDeps {
+    let worker_signal_sink = Arc::new(common::TestWorkerSignalSink::new(Arc::clone(&funnel)));
     WorkerMcpDeps {
         pm_service: pm,
         feature_gate: test_feature_gate(),
         funnel,
+        worker_signal_sink,
         plan_resolver: Arc::new(NullPlanResolver),
         reconciler_outcomes: Arc::new(
             Mutex::new(spur_mcp::plan::outcomes::OutcomeStore::default()),

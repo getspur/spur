@@ -60,10 +60,13 @@ impl PlanResolver for NullPlanResolver {
 }
 
 fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
+    let funnel = test_funnel();
+    let worker_signal_sink = Arc::new(common::TestWorkerSignalSink::new(Arc::clone(&funnel)));
     WorkerMcpDeps {
         pm_service: pm,
         feature_gate: test_feature_gate(),
-        funnel: test_funnel(),
+        funnel,
+        worker_signal_sink,
         plan_resolver: Arc::new(NullPlanResolver),
         reconciler_outcomes: Arc::new(
             Mutex::new(spur_mcp::plan::outcomes::OutcomeStore::default()),

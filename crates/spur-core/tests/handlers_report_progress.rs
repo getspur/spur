@@ -1,11 +1,12 @@
-//! T13: report_progress handler — fire-and-forget event emission.
+//! T13: report_progress handler - fire-and-forget event emission.
 
 use std::sync::Mutex;
 
 use serde_json::json;
 use spur_acp::SpurEventBody;
+use spur_core::mcp::signals::report_progress;
 use spur_mcp::events::McpEventSink;
-use spur_mcp::handlers::{report_progress, McpHandlerError, WorkerCallContext};
+use spur_mcp::handlers::{McpHandlerError, WorkerCallContext};
 
 #[derive(Default)]
 struct RecordingSink {

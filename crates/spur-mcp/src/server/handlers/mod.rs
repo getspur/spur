@@ -8,8 +8,7 @@ use super::*;
 
 impl McpCallbackServer {
     pub(crate) fn rmcp_tools(&self) -> Vec<Tool> {
-        crate::registry::default_tool_registry()
-            .expect("default MCP tool registry must be valid")
+        self.tool_registry
             .list_tools()
             .into_iter()
             .map(|def| Tool::new(def.name, def.description, rmcp_object(def.input_schema)))
@@ -62,9 +61,9 @@ impl McpCallbackServer {
         }
 
         let ctx = crate::registry::ToolCallContext::brain_server(self, &id);
-        let registry = crate::registry::default_tool_registry()
-            .expect("default MCP tool registry must be valid");
-        registry.call_json_tool(ctx, &tool_name, arguments).await
+        self.tool_registry
+            .call_json_tool(ctx, &tool_name, arguments)
+            .await
     }
 
     pub(crate) async fn handle_registered_tool_call(
@@ -82,62 +81,6 @@ impl McpCallbackServer {
             "fetch_outcome_artifact" => self.handle_fetch_outcome_artifact(id, arguments).await,
             "cancel_delegation" => self.handle_cancel_delegation(id, arguments).await,
             "list_available_workers" => self.handle_list_available_workers(id).await,
-            "report_signal" => {
-                if let Some(response) =
-                    self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
-                {
-                    return response;
-                }
-                let pm = match self.pm_service.clone() {
-                    Some(pm) => pm,
-                    None => {
-                        return JsonRpcResponse::internal_error(id, "No issue tracker configured");
-                    }
-                };
-
-                let brain_session_id = ctx
-                    .brain_session_id
-                    .unwrap_or_else(|| self.brain_session_id())
-                    .as_session_id()
-                    .0
-                    .clone();
-                let worker_ctx = crate::handlers::WorkerCallContext {
-                    delegation_id: String::new(),
-                    brain_session_id,
-                };
-                match crate::handlers::report_signal(
-                    pm.as_ref(),
-                    self.feature_gate.as_ref(),
-                    &worker_ctx,
-                    arguments,
-                )
-                .await
-                {
-                    Ok(result) => {
-                        let text = serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|_| result.to_string());
-                        JsonRpcResponse::success(
-                            id,
-                            json!({ "content": [{ "type": "text", "text": text }] }),
-                        )
-                    }
-                    Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
-                        JsonRpcResponse::invalid_params(id, e)
-                    }
-                    Err(crate::handlers::McpHandlerError::NotFound(e)) => {
-                        JsonRpcResponse::error(id, -32004, e)
-                    }
-                    Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
-                        JsonRpcResponse::error(id, -32001, e)
-                    }
-                    Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
-                        JsonRpcResponse::internal_error(id, format!("report_signal failed: {e}"))
-                    }
-                    Err(crate::handlers::McpHandlerError::Internal(e)) => {
-                        JsonRpcResponse::internal_error(id, e)
-                    }
-                }
-            }
             "merge_plan" => self.handle_merge_plan(id, arguments).await,
             "resume_plan" => self.handle_resume_plan(id, arguments).await,
             "force_reclaim_plan" => self.handle_force_reclaim_plan(id, arguments).await,
@@ -180,7 +123,6 @@ impl McpCallbackServer {
                 }
             }
             "submit_plan_mutation" => self.handle_submit_plan_mutation(id, arguments).await,
-            "report_progress" => self.handle_report_progress(id, arguments).await,
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
         }
     }

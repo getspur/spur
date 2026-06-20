@@ -1,9 +1,8 @@
 //! Tool catalog snapshot test.
 //!
 //! Guards INV-1 from the T1 contract-truthfulness spec: the set of tool
-//! names exposed via `tools/list` must not drift silently. Any addition
-//! or removal requires updating the `EXPECTED` list in this test in the
-//! same commit.
+//! names still owned by `spur-mcp` must not drift silently. Core-owned
+//! signal tools are asserted by `spur-core`.
 
 use spur_mcp::tools::worker_tools_list;
 use spur_mcp::{tools_list, ToolDefinition};
@@ -51,8 +50,6 @@ const EXPECTED: &[&str] = &[
     "recover_orphaned_dispatch",
     "review_task",
     "submit_plan_mutation",
-    "report_signal",
-    "report_progress",
 ];
 
 const PM_ISSUE_GRAPH_TOOLS: &[&str] = &[
