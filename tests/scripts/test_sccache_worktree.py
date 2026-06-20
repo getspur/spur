@@ -170,6 +170,108 @@ def test_sccache_worktree_enables_gcs_cache_on_darwin_when_requested(tmp_path):
     ]
 
 
+def test_sccache_worktree_enables_s3_cache_by_default(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    uname = bin_dir / "uname"
+    uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n")
+    uname.chmod(0o755)
+
+    sccache_log = tmp_path / "sccache.log"
+    sccache = bin_dir / "sccache"
+    sccache.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'bucket=%s\\n' \"${{SCCACHE_BUCKET-}}\" > {shlex.quote(str(sccache_log))}",
+                f"printf 'region=%s\\n' \"${{SCCACHE_REGION-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'chain=%s\\n' \"${{SCCACHE_MULTILEVEL_CHAIN-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'dir=%s\\n' \"${{SCCACHE_DIR-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'basedirs=%s\\n' \"$SCCACHE_BASEDIRS\" >> {shlex.quote(str(sccache_log))}",
+            ]
+        )
+        + "\n"
+    )
+    sccache.chmod(0o755)
+
+    rustc = tmp_path / "rustc"
+    rustc.write_text("#!/bin/sh\nexit 3\n")
+    rustc.chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir()
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["HOME"] = str(home)
+    env["SPUR_ROOT"] = str(ROOT)
+    env.pop("SPUR_SCCACHE_S3", None)
+    env.pop("SPUR_SCCACHE_GCS", None)
+    env.pop("CODEX_SANDBOX", None)
+
+    result = subprocess.run(
+        [str(WRAPPER), str(rustc), "-vV"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sccache_log.read_text().splitlines() == [
+        "bucket=wiilearn-spur-sccache-apne1",
+        "region=ap-northeast-1",
+        "chain=disk,s3",
+        f"dir={home / 'Library' / 'Caches' / 'Mozilla.sccache'}",
+        f"basedirs={ROOT}",
+    ]
+
+
+def test_sccache_worktree_can_disable_default_s3_cache(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    sccache_log = tmp_path / "sccache.log"
+    sccache = bin_dir / "sccache"
+    sccache.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'bucket=%s\\n' \"${{SCCACHE_BUCKET-}}\" > {shlex.quote(str(sccache_log))}",
+                f"printf 'chain=%s\\n' \"${{SCCACHE_MULTILEVEL_CHAIN-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'basedirs=%s\\n' \"$SCCACHE_BASEDIRS\" >> {shlex.quote(str(sccache_log))}",
+            ]
+        )
+        + "\n"
+    )
+    sccache.chmod(0o755)
+
+    rustc = tmp_path / "rustc"
+    rustc.write_text("#!/bin/sh\nexit 3\n")
+    rustc.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["SPUR_ROOT"] = str(ROOT)
+    env["SPUR_SCCACHE_S3"] = "0"
+    env.pop("SPUR_SCCACHE_GCS", None)
+    env.pop("CODEX_SANDBOX", None)
+
+    result = subprocess.run(
+        [str(WRAPPER), str(rustc), "-vV"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sccache_log.read_text().splitlines() == [
+        "bucket=",
+        "chain=",
+        f"basedirs={ROOT}",
+    ]
+
+
 def test_sccache_worktree_enables_s3_cache_when_requested(tmp_path):
     bin_dir = make_isolated_bin(tmp_path)
 
@@ -411,7 +513,7 @@ def test_spur_cargo_disables_incremental_when_gcs_cache_is_requested(tmp_path):
     ]
 
 
-def test_spur_cargo_disables_incremental_when_s3_cache_is_requested(tmp_path):
+def test_spur_cargo_disables_incremental_for_default_s3_cache(tmp_path):
     bin_dir = make_isolated_bin(tmp_path)
 
     cargo_log = tmp_path / "cargo.log"
@@ -430,8 +532,9 @@ def test_spur_cargo_disables_incremental_when_s3_cache_is_requested(tmp_path):
 
     env = os.environ.copy()
     env["PATH"] = str(bin_dir)
-    env["SPUR_SCCACHE_S3"] = "1"
     env["CODEX_SANDBOX"] = "seatbelt"
+    env.pop("SPUR_SCCACHE_S3", None)
+    env.pop("SPUR_SCCACHE_GCS", None)
     env.pop("RUSTC_WRAPPER", None)
     env.pop("CARGO_INCREMENTAL", None)
 
@@ -487,7 +590,8 @@ def test_spur_cargo_restarts_when_s3_cache_is_not_active(tmp_path):
 
     env = os.environ.copy()
     env["PATH"] = str(bin_dir)
-    env["SPUR_SCCACHE_S3"] = "1"
+    env.pop("SPUR_SCCACHE_S3", None)
+    env.pop("SPUR_SCCACHE_GCS", None)
     env.pop("CODEX_SANDBOX", None)
     env.pop("RUSTC_WRAPPER", None)
 
