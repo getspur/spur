@@ -1,10 +1,10 @@
 //! T-F7: duplicate worker signals with the same `signal_id` are applied once.
+#![allow(clippy::await_holding_lock)]
 
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,9 +33,7 @@ mod common;
 static SIGNAL_TEST_MUTEX: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
 
 async fn signal_test_guard() -> OwnedMutexGuard<()> {
-    SIGNAL_TEST_MUTEX
-        .get_or_init(|| Arc::new(AsyncMutex::new(())))
-        .clone()
+    Arc::clone(SIGNAL_TEST_MUTEX.get_or_init(|| Arc::new(AsyncMutex::new(()))))
         .lock_owned()
         .await
 }

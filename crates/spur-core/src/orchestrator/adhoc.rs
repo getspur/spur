@@ -55,13 +55,17 @@ impl Orchestrator {
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
         let adhoc_ctx = self.build_continuation_ctx(Arc::clone(&brain_session_id_cell));
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(
+        let tool_registry = self
+            .brain_tool_registry(sink.clone())
+            .context("Failed to compose brain MCP tool registry")?;
+        let (mcp_server, delegation_channel) = McpCallbackServer::new_with_tool_registry(
             None,
             self.pm_service.clone(),
             sink,
             adhoc_ctx,
             self.outcome_store.clone(),
             self.mcp_feature_gate(),
+            tool_registry,
         );
         let mut mcp_server = mcp_server;
 

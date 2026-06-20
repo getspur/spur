@@ -51,6 +51,14 @@ impl WorkerMcpFetcher {
                     }
                 })?;
                 let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(self.funnel.clone());
+                let worker_signal_sink =
+                    Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
+                        crate::mcp::signals::SignalMcpDeps {
+                            pm_service: Some(Arc::clone(&pm)),
+                            event_sink: Some(Arc::clone(&funnel)),
+                            feature_gate: Arc::clone(&gate),
+                        },
+                    ));
                 let plan_resolver: Arc<dyn spur_mcp::handlers::PlanResolver> =
                     Arc::clone(&self.mcp_server) as Arc<dyn spur_mcp::handlers::PlanResolver>;
                 let reconciler_outcomes = self.mcp_server.reconciler_outcomes_handle();
@@ -58,6 +66,7 @@ impl WorkerMcpFetcher {
                     pm_service: pm,
                     feature_gate: gate,
                     funnel,
+                    worker_signal_sink,
                     plan_resolver,
                     reconciler_outcomes,
                     outcome_store: Arc::clone(&self.outcome_store),

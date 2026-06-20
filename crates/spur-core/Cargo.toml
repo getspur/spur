@@ -18,6 +18,7 @@ libc = "0.2"
 rand = "0.8"
 rusqlite = { workspace = true }
 regex = { workspace = true }
+rmcp = { workspace = true }
 sha2 = { workspace = true }
 spur-acp = { workspace = true }
 spur-blob-store = { workspace = true }
@@ -52,7 +53,6 @@ spur-license = { workspace = true, features = ["test-support"] }
 proptest = "1"
 fs4 = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }
-rmcp = { workspace = true }
 
 [target.'cfg(madsim)'.dev-dependencies]
 madsim = "0.2"

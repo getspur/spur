@@ -42,12 +42,7 @@ impl Orchestrator {
         let seeds = spur_acp::config::load_seed_template();
         let mut found = Vec::new();
         for seed in seeds.entries {
-            let ok = tokio::process::Command::new("which")
-                .arg(&seed.command)
-                .output()
-                .await
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let ok = command_exists_on_path(&seed.command);
             if ok {
                 info!(agent = %seed.name, command = %seed.command, "Found agent");
                 found.push(seed.name.clone());
@@ -285,6 +280,35 @@ impl Orchestrator {
 
         Vec::new()
     }
+}
+
+fn command_exists_on_path(command: &str) -> bool {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 || command_path.is_absolute() {
+        return is_executable_file(command_path);
+    }
+
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(command)))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
 }
 
 fn parse_kiro_history_from_jsonl(content: &str) -> Vec<spur_acp::HistoryEntry> {
