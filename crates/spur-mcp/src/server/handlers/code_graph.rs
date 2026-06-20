@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 
 use crate::handlers::McpHandlerError;
@@ -8,9 +5,7 @@ use crate::server::types::JsonRpcResponse;
 
 use super::McpCallbackServer;
 
-pub(crate) use spur_graph::mcp::{
-    scoped_worktree_root, shared_rebuild_coordinator, with_worktree_root_for_request,
-};
+pub(crate) use spur_graph::mcp::with_worktree_root_for_request;
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use spur_graph::mcp::{
@@ -117,18 +112,6 @@ pub(crate) async fn code_symbol_history(args: &Value) -> Result<Value, McpHandle
     spur_graph::mcp::code_symbol_history(args)
         .await
         .map_err(graph_handler_error)
-}
-
-pub(crate) async fn overlaid_graph_artifact_from_base_seed_for_worktree(
-    worktree: PathBuf,
-    rebuild_coordinator: Arc<spur_graph::mcp::RebuildCoordinator>,
-) -> Result<Arc<spur_graph::GraphIndexArtifact>, McpHandlerError> {
-    spur_graph::mcp::overlaid_graph_artifact_from_base_seed_for_worktree(
-        worktree,
-        rebuild_coordinator,
-    )
-    .await
-    .map_err(graph_handler_error)
 }
 
 async fn code_graph_response(

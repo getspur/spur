@@ -20,36 +20,13 @@ use spur_graph::{
 };
 use uuid::Uuid;
 
-use crate::handlers::McpHandlerError;
-
-use super::McpCallbackServer;
-use super::*;
+use super::McpHandlerError;
 
 const DEFAULT_K: usize = 20;
 const MAX_K: usize = 100;
 const LEDE_CHARS: usize = 200;
 
-impl McpCallbackServer {
-    pub(crate) async fn handle_doc_navigate(&self, id: Value, args: Value) -> JsonRpcResponse {
-        match doc_navigate(&args).await {
-            Ok(result) => {
-                let text =
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
-            }
-            Err(McpHandlerError::InvalidParams(error)) => {
-                JsonRpcResponse::invalid_params(id, error)
-            }
-            Err(McpHandlerError::NotFound(error)) => JsonRpcResponse::error(id, -32004, error),
-            Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
-        }
-    }
-}
-
-pub(crate) async fn doc_navigate(args: &Value) -> Result<Value, McpHandlerError> {
+pub async fn doc_navigate(args: &Value) -> Result<Value, McpHandlerError> {
     let request = DocNavigateRequest::parse(args)?;
     let worktree = current_worktree()?;
     let source = open_doc_artifact_for_request(&worktree).await?;
@@ -149,25 +126,25 @@ impl Drop for OverlayDocTempDir {
 async fn open_doc_artifact_for_request(
     worktree: &Path,
 ) -> Result<DocArtifactSource, McpHandlerError> {
-    match resolve_artifact_location(worktree, None) {
-        Ok(resolved) => Ok(DocArtifactSource::resolved(resolved.path)),
-        Err(_) => {
-            let artifact = super::code_graph::overlaid_graph_artifact_from_base_seed_for_worktree(
-                worktree.to_path_buf(),
-                super::code_graph::shared_rebuild_coordinator(),
-            )
-            .await?;
-            let temp_dir = OverlayDocTempDir::new()?;
-            let artifact_dir = temp_dir.path().join("artifact");
-            write_sections_dataset(&artifact, worktree, &artifact_dir).map_err(|error| {
-                McpHandlerError::Internal(format!(
-                    "failed to build doc_navigate overlay sections in {}: {error}",
-                    worktree.display()
-                ))
-            })?;
-            Ok(DocArtifactSource::overlay(artifact_dir, artifact, temp_dir))
-        }
+    if let Ok(resolved) = resolve_artifact_location(worktree, None) {
+        return Ok(DocArtifactSource::resolved(resolved.path));
     }
+
+    let artifact = spur_graph::mcp::overlaid_graph_artifact_from_base_seed_for_worktree(
+        worktree.to_path_buf(),
+        spur_graph::mcp::shared_rebuild_coordinator(),
+    )
+    .await
+    .map_err(McpHandlerError::from)?;
+    let temp_dir = OverlayDocTempDir::new()?;
+    let artifact_dir = temp_dir.path().join("artifact");
+    write_sections_dataset(&artifact, worktree, &artifact_dir).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "failed to build doc_navigate overlay sections in {}: {error}",
+            worktree.display()
+        ))
+    })?;
+    Ok(DocArtifactSource::overlay(artifact_dir, artifact, temp_dir))
 }
 
 struct DocNavigateRequest {
@@ -185,7 +162,7 @@ impl DocNavigateRequest {
         let query = optional_string(args, "query")?;
         if root.is_none() && query.as_deref().is_none_or(str::is_empty) {
             return Err(McpHandlerError::InvalidParams(
-                "field 'query' is required when 'root' is not set".to_string(),
+                "field 'query' is required when 'root' is not set".to_owned(),
             ));
         }
 
@@ -208,7 +185,7 @@ impl DocNavigateRequest {
         let as_of = optional_string(args, "as_of")?;
         if as_of.as_deref().is_some_and(str::is_empty) {
             return Err(McpHandlerError::InvalidParams(
-                "field 'as_of' must not be empty".to_string(),
+                "field 'as_of' must not be empty".to_owned(),
             ));
         }
         let include_lede = args
@@ -285,9 +262,9 @@ async fn fts_hits(
     table: &lancedb::Table,
     request: &DocNavigateRequest,
 ) -> Result<Vec<DocHit>, McpHandlerError> {
-    let query = request.query.as_deref().unwrap_or_default().to_string();
+    let query = request.query.as_deref().unwrap_or_default().to_owned();
     let fts = FullTextSearchQuery::new(query)
-        .with_column("body_text".to_string())
+        .with_column("body_text".to_owned())
         .map_err(|error| McpHandlerError::InvalidParams(format!("invalid FTS query: {error}")))?;
     let batches = table
         .query()
@@ -357,9 +334,9 @@ fn project_batch(batch: &RecordBatch, include_score: bool) -> Result<Vec<DocHit>
     let mut hits = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
         hits.push(DocHit {
-            stable_symbol_id: stable_symbol_id.value(row).to_string(),
-            qualified_name: qualified_name.value(row).to_string(),
-            file_path: file_path.value(row).to_string(),
+            stable_symbol_id: stable_symbol_id.value(row).to_owned(),
+            qualified_name: qualified_name.value(row).to_owned(),
+            file_path: file_path.value(row).to_owned(),
             heading_level: heading_level.value(row),
             child_count: child_count.value(row),
             score: score.and_then(|scores| (!scores.is_null(row)).then(|| scores.value(row))),
@@ -378,7 +355,7 @@ fn resolve_root_for_as_of(
     artifact: Option<&Arc<GraphIndexArtifact>>,
 ) -> Result<String, McpHandlerError> {
     let Some(as_of) = as_of else {
-        return Ok(root.to_string());
+        return Ok(root.to_owned());
     };
     let artifact = match artifact {
         Some(artifact) => Arc::clone(artifact),
@@ -465,7 +442,7 @@ fn load_commit_index(worktree: &Path) -> Result<CommitIndexArtifact, McpHandlerE
 }
 
 fn current_worktree() -> Result<PathBuf, McpHandlerError> {
-    if let Some(worktree) = super::code_graph::scoped_worktree_root() {
+    if let Some(worktree) = spur_graph::mcp::scoped_worktree_root() {
         return Ok(worktree);
     }
     let current_dir = std::env::current_dir().map_err(|error| {
@@ -488,7 +465,7 @@ fn strip_symbol_uri(value: String) -> String {
     value
         .strip_prefix(CODE_SYMBOL_URI_PREFIX)
         .unwrap_or(value.as_str())
-        .to_string()
+        .to_owned()
 }
 
 fn string_column<'a>(

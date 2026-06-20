@@ -5,23 +5,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::future::join_all;
-use serde_json::{json, Value};
-use spur_analyst::{
+use crate::{
     query_context_candidates, query_context_paths, query_graph_candidates,
     query_symbol_risk_community, KnowledgeCandidate, KnowledgePathOptions, KnowledgeQueryIntent,
     KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope, SymbolEvidenceCaveat,
     SymbolEvidenceStatus, SymbolRiskScorecardRow, MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
 };
+use futures::future::join_all;
+use serde_json::{json, Value};
 use spur_graph::{
     resolve_worktree_root_from, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
     EMBED_MODEL_ENV,
 };
 
-use crate::handlers::McpHandlerError;
-
-use super::McpCallbackServer;
-use super::*;
+use super::McpHandlerError;
 
 const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
 const MAX_IMPACT_SYMBOLS: usize = 2;
@@ -38,51 +35,7 @@ static BGE_BASE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedMod
 #[cfg(feature = "embed")]
 static JINA_CODE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
 
-impl McpCallbackServer {
-    pub(crate) async fn handle_knowledge_context_pack(
-        &self,
-        id: Value,
-        args: Value,
-    ) -> JsonRpcResponse {
-        match knowledge_context_pack(&args).await {
-            Ok(result) => {
-                let text =
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
-            }
-            Err(McpHandlerError::InvalidParams(error)) => {
-                JsonRpcResponse::invalid_params(id, error)
-            }
-            Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
-        }
-    }
-
-    pub(crate) async fn handle_knowledge_context_pack_2(
-        &self,
-        id: Value,
-        args: Value,
-    ) -> JsonRpcResponse {
-        match knowledge_context_pack_2(&args).await {
-            Ok(result) => {
-                let text =
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
-            }
-            Err(McpHandlerError::InvalidParams(error)) => {
-                JsonRpcResponse::invalid_params(id, error)
-            }
-            Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
-        }
-    }
-}
-
-pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
+pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
     let db_path = analyst_db_path()?;
     if !db_path.exists() {
@@ -96,7 +49,7 @@ pub(crate) async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHan
     Ok(pack_query_result_with_exact_context(&request, query_result, exact_context).await)
 }
 
-pub(crate) async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerError> {
+pub async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackV2Request::parse(args)?;
     let db_path = analyst_db_path()?;
     if !db_path.exists() {
@@ -181,7 +134,7 @@ impl KnowledgeContextPackRequest {
                     "knowledge_context_pack requires non-empty string field 'query'".into(),
                 )
             })?
-            .to_string();
+            .to_owned();
         let intent = KnowledgeIntent::parse(parse_enum(
             args,
             "intent",
@@ -715,7 +668,7 @@ fn parse_enum(
     default: &str,
 ) -> Result<String, McpHandlerError> {
     let Some(value) = args.get(field) else {
-        return Ok(default.to_string());
+        return Ok(default.to_owned());
     };
     let value = value.as_str().ok_or_else(|| {
         McpHandlerError::InvalidParams(format!(
@@ -723,7 +676,7 @@ fn parse_enum(
         ))
     })?;
     if allowed.contains(&value) {
-        Ok(value.to_string())
+        Ok(value.to_owned())
     } else {
         Err(McpHandlerError::InvalidParams(format!(
             "knowledge_context_pack field '{field}' must be one of {}",
@@ -822,7 +775,7 @@ fn analyst_db_path() -> Result<PathBuf, McpHandlerError> {
 }
 
 fn current_repo_root() -> Result<PathBuf, McpHandlerError> {
-    if let Some(worktree) = super::code_graph::scoped_worktree_root() {
+    if let Some(worktree) = spur_graph::mcp::scoped_worktree_root() {
         return Ok(worktree);
     }
     let current_dir = std::env::current_dir().map_err(|error| {
@@ -877,7 +830,7 @@ async fn exact_graph_context_for_result(
         return ExactGraphContext::default();
     };
 
-    let symbol_info = super::code_graph::code_symbol_info(&json!({
+    let symbol_info = spur_graph::mcp::code_symbol_info(&json!({
         "selector": first_selector,
     }))
     .await;
@@ -914,8 +867,8 @@ async fn impact_summary_for_selector(selector: &str) -> Option<SymbolImpactSumma
         "include_unresolved": true,
     });
     let (callers, callees) = tokio::join!(
-        super::code_graph::code_callers(&callers_args),
-        super::code_graph::code_callees(&callees_args)
+        spur_graph::mcp::code_callers(&callers_args),
+        spur_graph::mcp::code_callees(&callees_args)
     );
     let callers = callers.ok()?;
     let callees = callees.ok()?;
@@ -925,7 +878,7 @@ async fn impact_summary_for_selector(selector: &str) -> Option<SymbolImpactSumma
     let popular_sink = callers_count > POPULAR_SINK_CALLERS_THRESHOLD;
 
     Some(SymbolImpactSummary {
-        selector: selector.to_string(),
+        selector: selector.to_owned(),
         callers_count,
         callees_count,
         caller_neighbors: representative_neighbors(&callers, "callers", popular_sink),
@@ -1005,7 +958,7 @@ async fn pack_query_result_with_exact_context(
                 evidence
                     .get("stable_symbol_id")
                     .and_then(Value::as_str)
-                    .map(|selector| (selector.to_string(), index))
+                    .map(|selector| (selector.to_owned(), index))
             })
             .collect();
 
@@ -1013,7 +966,7 @@ async fn pack_query_result_with_exact_context(
             |(selector, index)| async move {
                 (
                     index,
-                    super::code_graph::code_read_symbol(&json!({
+                    spur_graph::mcp::code_read_symbol(&json!({
                         "selector": selector,
                     }))
                     .await,
@@ -1276,7 +1229,7 @@ fn graph_reasoning_code_symbol_ids(
         let Some(stable_symbol_id) = candidate.stable_symbol_id.as_deref() else {
             continue;
         };
-        let id = raw_stable_symbol_id(stable_symbol_id).to_string();
+        let id = raw_stable_symbol_id(stable_symbol_id).to_owned();
         if !ids.contains(&id) {
             ids.push(id);
         }
@@ -1362,7 +1315,7 @@ fn push_graph_path_caveat(
     message: impl Into<String>,
     source: &str,
 ) {
-    let caveat = caveat_value("graph_path_unavailable", message, Some(source.to_string()));
+    let caveat = caveat_value("graph_path_unavailable", message, Some(source.to_owned()));
     if !sections.caveats.contains(&caveat) {
         sections.caveats.push(caveat);
     }
@@ -1391,11 +1344,11 @@ fn resolve_anchor_targets(
                 sections.caveats.push(caveat_value(
                     "graph_anchor_same_as_source",
                     format!("anchor {trimmed:?} resolves to the source symbol"),
-                    Some(source.to_string()),
+                    Some(source.to_owned()),
                 ));
                 return None;
             }
-            Some(target.to_string())
+            Some(target.to_owned())
         })
         .collect()
 }
@@ -1847,7 +1800,7 @@ mod tests {
     use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
     use spur_graph::{artifact_from_facts, build_facts, EMBEDDING_VECTOR_DIMENSIONS};
 
-    const INIT_SEARCH_SQL: &str = include_str!("../../../../spur-context/analyst/init_search.sql");
+    const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct HybridConfidenceFixture {
@@ -2525,7 +2478,7 @@ pub fn lexical_signal_anchor() {
         let tools = |intent| {
             code_next_tools(intent)
                 .into_iter()
-                .map(|tool| tool["tool"].as_str().expect("tool name").to_string())
+                .map(|tool| tool["tool"].as_str().expect("tool name").to_owned())
                 .collect::<Vec<_>>()
         };
 
@@ -2550,12 +2503,11 @@ pub fn lexical_signal_anchor() {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join(".spur")).expect("create .spur");
 
-        let result =
-            super::super::code_graph::with_worktree_root_for_request(repo.clone(), async {
-                knowledge_context_pack(&json!({ "query": "semantic search" })).await
-            })
-            .await
-            .expect("structured unavailable response");
+        let result = spur_graph::mcp::with_worktree_root_for_request(repo.clone(), async {
+            knowledge_context_pack(&json!({ "query": "semantic search" })).await
+        })
+        .await
+        .expect("structured unavailable response");
 
         assert_eq!(result["query"], "semantic search");
         assert_eq!(result["intent"], "explain");
@@ -2618,15 +2570,12 @@ pub fn lexical_signal_anchor() {
         assert!(high.graph_reasoning.risk);
         assert_eq!(
             high.graph_reasoning.max_path_hops,
-            spur_analyst::MAX_CONTEXT_PATH_HOPS
+            crate::MAX_CONTEXT_PATH_HOPS
         );
-        assert_eq!(
-            high.graph_reasoning.max_paths,
-            spur_analyst::MAX_CONTEXT_PATHS
-        );
+        assert_eq!(high.graph_reasoning.max_paths, crate::MAX_CONTEXT_PATHS);
         assert_eq!(
             high.graph_reasoning.anchors,
-            vec!["graph://symbol/anchor-one".to_string()]
+            vec!["graph://symbol/anchor-one".to_owned()]
         );
 
         let low = KnowledgeContextPackV2Request::parse(&json!({
@@ -2687,10 +2636,10 @@ pub fn lexical_signal_anchor() {
         .expect("request");
         let mut sections = GraphReasoningSections::default();
         let code_symbol_ids = vec![
-            "sym-source".to_string(),
-            "sym-disconnected".to_string(),
-            "sym-connected".to_string(),
-            "sym-late".to_string(),
+            "sym-source".to_owned(),
+            "sym-disconnected".to_owned(),
+            "sym-connected".to_owned(),
+            "sym-late".to_owned(),
         ];
 
         collect_graph_paths(&db_path, &request, &code_symbol_ids, &mut sections);
@@ -2736,9 +2685,9 @@ pub fn lexical_signal_anchor() {
         .expect("request");
         let mut sections = GraphReasoningSections::default();
         let code_symbol_ids = vec![
-            "sym-source".to_string(),
-            "sym-disconnected-one".to_string(),
-            "sym-disconnected-two".to_string(),
+            "sym-source".to_owned(),
+            "sym-disconnected-one".to_owned(),
+            "sym-disconnected-two".to_owned(),
         ];
 
         collect_graph_paths(&db_path, &request, &code_symbol_ids, &mut sections);
@@ -3074,7 +3023,7 @@ pub fn lexical_signal_anchor() {
     async fn knowledge_context_pack_2_reads_fixture_db_end_to_end() {
         let (_temp_dir, repo) = kcp2_fixture_repo(true);
 
-        let pack = super::super::code_graph::with_worktree_root_for_request(repo, async {
+        let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
             knowledge_context_pack_2(&json!({
                 "query": "dispatch approval evidence",
                 "intent": "review",
@@ -3145,7 +3094,7 @@ pub fn lexical_signal_anchor() {
     async fn knowledge_context_pack_2_missing_graph_views_keeps_candidates_and_returns_caveats() {
         let (_temp_dir, repo) = kcp2_fixture_repo(false);
 
-        let pack = super::super::code_graph::with_worktree_root_for_request(repo, async {
+        let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
             knowledge_context_pack_2(&json!({
                 "query": "dispatch approval evidence",
                 "intent": "review",

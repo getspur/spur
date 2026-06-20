@@ -489,6 +489,68 @@ async fn graph_response(id: Value, result: spur_graph::mcp::CodeGraphResult) -> 
     }
 }
 
+struct AnalystMcpToolModule;
+
+impl AnalystMcpToolModule {
+    fn read_only() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl ToolModule for AnalystMcpToolModule {
+    fn tools(&self) -> Vec<ToolDefinition> {
+        spur_analyst::mcp::tool_definitions()
+            .into_iter()
+            .map(analyst_tool_definition)
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        ctx: ToolCallContext<'_>,
+        name: &str,
+        args: Value,
+    ) -> Result<ToolResponse, McpError> {
+        let id = ctx.request_id_value();
+        let module = spur_analyst::mcp::AnalystMcpModule::new();
+        Ok(ToolResponse::from_json_rpc(analyst_response(
+            id,
+            module.call(name, args).await,
+        )))
+    }
+}
+
+fn analyst_tool_definition(definition: spur_analyst::mcp::ToolDefinition) -> ToolDefinition {
+    ToolDefinition {
+        name: definition.name,
+        description: definition.description,
+        input_schema: definition.input_schema,
+    }
+}
+
+fn analyst_response(
+    id: Value,
+    result: Result<Value, spur_analyst::mcp::McpHandlerError>,
+) -> JsonRpcResponse {
+    match result {
+        Ok(body) => {
+            let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
+            )
+        }
+        Err(spur_analyst::mcp::McpHandlerError::InvalidParams(message)) => {
+            JsonRpcResponse::invalid_params(id, message)
+        }
+        Err(spur_analyst::mcp::McpHandlerError::NotFound(message)) => {
+            JsonRpcResponse::error(id, -32004, message)
+        }
+        Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
+    }
+}
+
 struct LegacyMcpToolModule {
     definitions: Vec<ToolDefinition>,
 }
@@ -554,6 +616,7 @@ pub fn default_tool_registry() -> Result<&'static ToolRegistry, ToolRegistryErro
                 .with(LegacyMcpToolModule::plan_management())?
                 .with(BrainPmMcpToolModule::issue_graph())?
                 .with(GraphMcpToolModule)?
+                .with(AnalystMcpToolModule)?
                 .with(LegacyMcpToolModule::full_remainder())?
                 .with_alias("code_search", "code_symbol_search")
                 .map(ToolRegistryBuilder::build)
@@ -569,10 +632,27 @@ pub fn default_worker_tool_registry() -> Result<&'static ToolRegistry, ToolRegis
             ToolRegistry::builder()
                 .with(LegacyMcpToolModule::worker_prelude())?
                 .with(GraphMcpToolModule)?
+                .with(AnalystMcpToolModule::read_only())?
                 .with(LegacyMcpToolModule::worker_remainder())?
                 .with_alias("code_search", "code_symbol_search")
                 .map(ToolRegistryBuilder::build)
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+#[cfg(test)]
+mod analyst_module_ownership_tests {
+    #[test]
+    fn default_registries_compose_analyst_module_explicitly() {
+        let source = include_str!("registry.rs");
+        assert!(
+            source.contains(".with(AnalystMcpToolModule)?"),
+            "brain registry must compose analyst-owned tools through AnalystMcpToolModule"
+        );
+        assert!(
+            source.contains(".with(AnalystMcpToolModule::read_only())?"),
+            "worker registry must compose analyst-owned tools through AnalystMcpToolModule"
+        );
+    }
 }
