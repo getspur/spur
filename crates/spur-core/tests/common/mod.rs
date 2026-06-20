@@ -5,6 +5,7 @@ use std::sync::Arc;
 use spur_license::policy::PolicyResolver;
 use spur_license::{FeatureGate, FeatureKey, LicenseState, Plan};
 use spur_mcp::plan::signals::WorkerSignal;
+use spur_mcp::McpCallbackServer;
 use spur_pm::advanced::Comment;
 use spur_pm::test_workspace::TestBeadsWorkspace;
 use spur_pm::{IssueCreate, IssueUpdate, PmService};
@@ -16,6 +17,23 @@ pub fn pro_feature_gate() -> Arc<FeatureGate> {
     let features = BTreeSet::from([FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string()]);
     gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
     gate
+}
+
+pub fn community_feature_gate() -> Arc<FeatureGate> {
+    Arc::new(FeatureGate::new(PolicyResolver::embedded()))
+}
+
+pub fn install_core_brain_registry(server: &mut McpCallbackServer) {
+    let registry = spur_core::mcp::brain_tool_registry(
+        spur_core::mcp::delegation::DelegationMcpDeps::from_server(server),
+        spur_core::mcp::signals::SignalMcpDeps {
+            pm_service: None,
+            event_sink: None,
+            feature_gate: pro_feature_gate(),
+        },
+    )
+    .expect("core-composed brain registry");
+    server.set_tool_registry(registry);
 }
 
 pub async fn beads_pm(repo: &Path) -> Arc<PmService> {
