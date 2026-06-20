@@ -912,10 +912,10 @@ pub fn tools_list() -> Vec<ToolDefinition> {
 /// Curated worker-facing tool subset exposed by `WorkerMcpServer`.
 ///
 /// Workers receive only read-and-emit tools: read tools that surface
-/// project state plus 1 write tool (`update_issue`) and 2 fire-and-forget
-/// signal tools (`report_signal`, `report_progress`). Brain-only orchestration
+/// project state plus 2 fire-and-forget signal tools (`report_signal`,
+/// `report_progress`). Brain-only orchestration
 /// tools (delegate_*, submit_plan, merge_plan, execute_epic, review_task,
-/// create_pr, create_issue, add_dependency, cancel_delegation,
+/// update_issue, create_pr, create_issue, add_dependency, cancel_delegation,
 /// list_available_workers, get_reconciler_status, graph_*, preview_task_base,
 /// plan_truncate_and_restart) are intentionally excluded — exposing them to
 /// workers would invert the brain→worker authority direction and let workers
@@ -931,10 +931,7 @@ pub(crate) fn legacy_worker_prelude_tool_definitions() -> Vec<ToolDefinition> {
 }
 
 pub(crate) fn legacy_worker_remainder_tool_definitions() -> Vec<ToolDefinition> {
-    let mut tools = Vec::new();
-    tools.extend(pm_tool_definitions_by_names(&["update_issue"]));
-    tools.extend([report_signal_def(), report_progress_def()]);
-    tools
+    vec![report_signal_def(), report_progress_def()]
 }
 
 pub fn worker_tools_list() -> Vec<ToolDefinition> {
@@ -1464,7 +1461,6 @@ mod worker_tools_subset_tests {
         "doc_navigate",
         "knowledge_context_pack",
         "knowledge_context_pack_2",
-        "update_issue",
         "report_signal",
         "report_progress",
     ];
@@ -1588,6 +1584,22 @@ mod worker_tools_subset_tests {
             assert!(
                 !actual.iter().any(|n| n == tool),
                 "leaked brain-only tool into worker subset: {tool}",
+            );
+        }
+    }
+
+    #[test]
+    fn worker_tools_list_excludes_pm_write_tools() {
+        let actual: Vec<String> = worker_tools_list().iter().map(|t| t.name.clone()).collect();
+        for tool in [
+            "update_issue",
+            "create_issue",
+            "add_dependency",
+            "create_pr",
+        ] {
+            assert!(
+                !actual.iter().any(|n| n == tool),
+                "leaked PM write tool into worker subset: {tool}",
             );
         }
     }
