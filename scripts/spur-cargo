@@ -129,6 +129,39 @@ elif [[ $REMOTE_CAPABLE -eq 1 && -x "$LEGACY_REMOTE_BUILD_SH" ]]; then
 fi
 
 # ---- local fallback (original behavior) ------------------------------------
+# Restart the sccache server so it picks up the two-level disk,s3 config. The
+# server reads the backend config once at start-server time, so a stale
+# local-only daemon must be bounced. Mirrors the GCS path below.
+ensure_spur_s3_sccache_server() {
+    [[ "${SPUR_SCCACHE_S3:-0}" == "1" ]] || return 0
+    [[ -z "${CODEX_SANDBOX:-}" ]] || return 0
+    command -v sccache >/dev/null 2>&1 || return 0
+
+    local stats
+    # Text --show-stats reports the running server's backend reliably as
+    # "Multi-level (N levels)" for disk,s3; the JSON format omits cache_location,
+    # so match on text. If no server is running this probe auto-starts one with
+    # the wrapper's multilevel env (already correct), and we no-op.
+    stats=$("$WRAPPER" --show-stats 2>/dev/null || true)
+    if [[ "$stats" == *"Multi-level"* && "$stats" == *"L0 (disk)"* && "$stats" == *"L1 (s3)"* ]]; then
+        return 0
+    fi
+
+    if pgrep -f '/rustc[^ ]*$|/rustc ' >/dev/null 2>&1; then
+        echo "[spur-cargo] SPUR_SCCACHE_S3=1 but rustc is running; leaving existing sccache server unchanged" >&2
+        return 0
+    fi
+
+    local error_log="${SCCACHE_ERROR_LOG:-/tmp/spur-sccache-s3.log}"
+    "$WRAPPER" --stop-server >/dev/null 2>&1 || true
+    if ! SCCACHE_ERROR_LOG="$error_log" "$WRAPPER" --start-server >/dev/null 2>&1; then
+        sccache --start-server >/dev/null 2>&1 || true
+        echo "[spur-cargo] failed to start S3 sccache server for SPUR_SCCACHE_S3=1" >&2
+        echo "[spur-cargo] see $error_log; verify AWS creds (aws sts get-caller-identity) and bucket region match SCCACHE_REGION" >&2
+        exit 1
+    fi
+}
+
 ensure_spur_gcs_sccache_server() {
     [[ "${SPUR_SCCACHE_GCS:-0}" == "1" ]] || return 0
     [[ -z "${CODEX_SANDBOX:-}" ]] || return 0
@@ -158,8 +191,15 @@ ensure_spur_gcs_sccache_server() {
 if [[ -z "${RUSTC_WRAPPER+x}" ]]; then
     export RUSTC_WRAPPER="$WRAPPER"
 fi
-if [[ "${SPUR_SCCACHE_GCS:-0}" == "1" && -z "${CARGO_INCREMENTAL+x}" ]]; then
+# Incremental rustc invocations are non-cacheable; disable them so a remote
+# cache layer (GCS or S3) actually gets populated and hit.
+if [[ ( "${SPUR_SCCACHE_GCS:-0}" == "1" || "${SPUR_SCCACHE_S3:-0}" == "1" ) && -z "${CARGO_INCREMENTAL+x}" ]]; then
     export CARGO_INCREMENTAL=0
 fi
-ensure_spur_gcs_sccache_server
+# S3 takes precedence; only one remote backend is configured per invocation.
+if [[ "${SPUR_SCCACHE_S3:-0}" == "1" ]]; then
+    ensure_spur_s3_sccache_server
+else
+    ensure_spur_gcs_sccache_server
+fi
 exec cargo "$@"
