@@ -174,6 +174,9 @@ pub struct McpCallbackServer {
     /// Explicit code-graph MCP dependencies, including rebuild singleflight
     /// policy owned by `spur-graph`.
     pub(crate) graph_mcp_deps: spur_graph::mcp::GraphMcpDeps,
+    /// Per-server brain tool registry. Core-owned orchestration modules are
+    /// composed by the orchestrator at construction time.
+    pub(crate) tool_registry: Arc<crate::registry::ToolRegistry>,
 }
 
 impl McpCallbackServer {
@@ -238,10 +241,40 @@ impl McpCallbackServer {
             nonadvisory_review_writes: false,
             dispatch_lease_duration: std::time::Duration::from_secs(600),
             graph_mcp_deps: spur_graph::mcp::GraphMcpDeps::default(),
+            tool_registry: Arc::new(
+                crate::registry::legacy_brain_tool_registry()
+                    .expect("legacy MCP tool registry must be valid"),
+            ),
         };
 
         let channel = DelegationChannel { request_rx: req_rx };
         (server, channel)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_tool_registry(
+        session_id: Option<&spur_acp::BrainSessionId>,
+        pm_service: Option<Arc<PmService>>,
+        event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+        continuation_ctx: DetachedContinuationCtx,
+        outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+        tool_registry: crate::registry::ToolRegistry,
+    ) -> (Self, DelegationChannel) {
+        let (mut server, channel) = Self::new(
+            session_id,
+            pm_service,
+            event_sink,
+            continuation_ctx,
+            outcome_store,
+            feature_gate,
+        );
+        server.set_tool_registry(tool_registry);
+        (server, channel)
+    }
+
+    pub fn set_tool_registry(&mut self, tool_registry: crate::registry::ToolRegistry) {
+        self.tool_registry = Arc::new(tool_registry);
     }
 
     /// Returns the brain_session_id. Panics if not yet set - callers from

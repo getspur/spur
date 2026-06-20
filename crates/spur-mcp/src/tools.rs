@@ -780,61 +780,6 @@ fn submit_plan_mutation_def() -> ToolDefinition {
     }
 }
 
-fn report_signal_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "report_signal".into(),
-        description: "Worker-facing. Record a typed WorkerSignal on a task. \
-            Brain-side watcher will inspect and may mutate the plan."
-            .into(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["task_id", "signal"],
-            "properties": {
-                "task_id": { "type": "string" },
-                "signal": {
-                    "type": "object",
-                    "required": ["kind", "signal_id"],
-                    "properties": {
-                        "kind": { "type": "string", "enum": ["scope_drift", "retry_exhausted"] },
-                        "signal_id": { "type": "string", "format": "uuid" },
-                        // ScopeDrift fields
-                        "severity": { "type": "number", "minimum": 0, "maximum": 1 },
-                        "reason": { "type": "string" },
-                        "estimated_subtasks": { "type": ["integer", "null"], "minimum": 1 },
-                        // RetryExhausted fields (bd-2m2u Phase 2e)
-                        "task_id": { "type": "string" },
-                        "attempt": { "type": "integer", "minimum": 0 },
-                        "last_error": { "type": "string" }
-                    }
-                }
-            }
-        }),
-    }
-}
-
-fn report_progress_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "report_progress".into(),
-        description: "Worker-facing fire-and-forget progress emission. Sends \
-            a free-form `message` (and optional `percent`) to the brain as a \
-            `WorkerReportProgress` event. The handler returns `{ok: true}` \
-            on accept; the side effect IS the event. No PM writes, no audit \
-            sentinel — distinct from `report_signal` (which persists). \
-            Workers stream rich progress text without minting structured \
-            milestone names. Consumers (TUI / dashboards) decide how to \
-            render `percent` (no clamping)."
-            .into(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["message"],
-            "properties": {
-                "message": { "type": "string" },
-                "percent": { "type": ["number", "null"] }
-            }
-        }),
-    }
-}
-
 fn execute_epic_def() -> ToolDefinition {
     ToolDefinition {
         name: "execute_epic".into(),
@@ -897,12 +842,13 @@ pub(crate) fn legacy_remainder_tool_definitions() -> Vec<ToolDefinition> {
         recover_orphaned_dispatch_def(),
         review_task_def(),
         submit_plan_mutation_def(),
-        report_signal_def(),
-        report_progress_def(),
     ]
 }
 
-/// Returns all tool definitions for the MCP `tools/list` response.
+/// Returns the legacy `spur-mcp` brain tool definitions.
+///
+/// Application crates compose externally owned modules, such as
+/// `spur_core::mcp::signals`, into the per-server registry.
 pub fn tools_list() -> Vec<ToolDefinition> {
     crate::registry::default_tool_registry()
         .expect("default MCP tool registry must be valid")
@@ -931,7 +877,7 @@ pub(crate) fn legacy_worker_prelude_tool_definitions() -> Vec<ToolDefinition> {
 }
 
 pub(crate) fn legacy_worker_remainder_tool_definitions() -> Vec<ToolDefinition> {
-    vec![report_signal_def(), report_progress_def()]
+    Vec::new()
 }
 
 pub fn worker_tools_list() -> Vec<ToolDefinition> {
@@ -1439,8 +1385,6 @@ mod worker_tools_subset_tests {
         "recover_orphaned_dispatch",
         "review_task",
         "submit_plan_mutation",
-        "report_signal",
-        "report_progress",
     ];
 
     const EXPECTED_WORKER_TOOLS: &[&str] = &[
@@ -1537,6 +1481,34 @@ mod worker_tools_subset_tests {
     }
 
     #[test]
+    fn worker_signal_tools_are_not_owned_by_legacy_remainder() {
+        let actual: Vec<String> = legacy_remainder_tool_definitions()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        for name in ["report_signal", "report_progress"] {
+            assert!(
+                !actual.contains(&name.to_string()),
+                "{name} must be owned by spur_core::mcp::signals, not the legacy remainder"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_signal_tools_are_not_owned_by_legacy_worker_remainder() {
+        let actual: Vec<String> = legacy_worker_remainder_tool_definitions()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        for name in ["report_signal", "report_progress"] {
+            assert!(
+                !actual.contains(&name.to_string()),
+                "{name} must be owned by spur_core::mcp::signals, not the legacy worker remainder"
+            );
+        }
+    }
+
+    #[test]
     fn worker_tools_list_contains_exactly_the_curated_set() {
         let actual: Vec<String> = worker_tools_list().iter().map(|t| t.name.clone()).collect();
         let expected: Vec<String> = EXPECTED_WORKER_TOOLS
@@ -1608,10 +1580,14 @@ mod worker_tools_subset_tests {
     fn worker_tools_list_is_a_strict_subset_of_tools_list() {
         let full: std::collections::HashSet<String> =
             tools_list().iter().map(|t| t.name.clone()).collect();
+        let core_worker_tools = std::collections::HashSet::from([
+            "report_signal".to_string(),
+            "report_progress".to_string(),
+        ]);
         for w in worker_tools_list() {
             assert!(
-                full.contains(&w.name),
-                "worker tool '{}' missing from full tools_list — definitions must align",
+                full.contains(&w.name) || core_worker_tools.contains(&w.name),
+                "worker tool '{}' missing from full tools_list or core-owned worker tool set",
                 w.name,
             );
         }

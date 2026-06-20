@@ -80,6 +80,16 @@ impl ToolResponse {
         }
     }
 
+    pub fn json_text(id: Value, value: Value) -> Self {
+        let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+        Self {
+            envelope: JsonRpcResponse::success(
+                id,
+                serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
+            ),
+        }
+    }
+
     pub(crate) fn from_json_rpc(envelope: JsonRpcResponse) -> Self {
         Self { envelope }
     }
@@ -685,23 +695,49 @@ impl ToolModule for LegacyMcpToolModule {
     }
 }
 
+struct WorkerSignalMcpToolModule;
+
+#[async_trait]
+impl ToolModule for WorkerSignalMcpToolModule {
+    fn tools(&self) -> Vec<ToolDefinition> {
+        crate::worker_server::worker_signal_tool_definitions()
+    }
+
+    async fn call(
+        &self,
+        _ctx: ToolCallContext<'_>,
+        name: &str,
+        _args: Value,
+    ) -> Result<ToolResponse, McpError> {
+        Err(McpError::internal_error(
+            format!("worker signal tool {name} is dispatched by WorkerMcpServer"),
+            None,
+        ))
+    }
+}
+
 pub fn default_tool_registry() -> Result<&'static ToolRegistry, ToolRegistryError> {
     static REGISTRY: OnceLock<Result<ToolRegistry, ToolRegistryError>> = OnceLock::new();
     REGISTRY
-        .get_or_init(|| {
-            ToolRegistry::builder()
-                .with(LegacyMcpToolModule::full_prelude())?
-                .with(BrainPmMcpToolModule::crud())?
-                .with(LegacyMcpToolModule::plan_management())?
-                .with(BrainPmMcpToolModule::issue_graph())?
-                .with(GraphMcpToolModule)?
-                .with(AnalystMcpToolModule)?
-                .with(LegacyMcpToolModule::full_remainder())?
-                .with_alias("code_search", "code_symbol_search")
-                .map(ToolRegistryBuilder::build)
-        })
+        .get_or_init(legacy_brain_tool_registry)
         .as_ref()
         .map_err(Clone::clone)
+}
+
+pub fn legacy_brain_tool_registry_builder() -> Result<ToolRegistryBuilder, ToolRegistryError> {
+    ToolRegistry::builder()
+        .with(LegacyMcpToolModule::full_prelude())?
+        .with(BrainPmMcpToolModule::crud())?
+        .with(LegacyMcpToolModule::plan_management())?
+        .with(BrainPmMcpToolModule::issue_graph())?
+        .with(GraphMcpToolModule)?
+        .with(AnalystMcpToolModule)?
+        .with(LegacyMcpToolModule::full_remainder())?
+        .with_alias("code_search", "code_symbol_search")
+}
+
+pub fn legacy_brain_tool_registry() -> Result<ToolRegistry, ToolRegistryError> {
+    legacy_brain_tool_registry_builder().map(ToolRegistryBuilder::build)
 }
 
 pub fn default_worker_tool_registry() -> Result<&'static ToolRegistry, ToolRegistryError> {
@@ -713,6 +749,7 @@ pub fn default_worker_tool_registry() -> Result<&'static ToolRegistry, ToolRegis
                 .with(GraphMcpToolModule)?
                 .with(AnalystMcpToolModule::read_only())?
                 .with(LegacyMcpToolModule::worker_remainder())?
+                .with(WorkerSignalMcpToolModule)?
                 .with_alias("code_search", "code_symbol_search")?
                 .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied())
                 .build())

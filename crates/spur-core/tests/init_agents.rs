@@ -37,7 +37,7 @@ async fn init_agents_finds_only_stubs_on_path() {
     let result = {
         let _guard = PATH_LOCK.lock().unwrap();
         let prev_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", format!("{}:/usr/bin", tmp.path().display()));
+        std::env::set_var("PATH", tmp.path());
         let r = {
             let mut orch =
                 Orchestrator::new(tmp.path().into(), SpurConfig::default(), None).unwrap();
@@ -60,12 +60,12 @@ async fn init_agents_finds_only_stubs_on_path() {
 #[allow(clippy::await_holding_lock)]
 async fn init_agents_with_empty_path_returns_empty() {
     let tmp = TempDir::new().unwrap();
-    // tmp is empty (no stubs created); /usr/bin has `which` but not agent binaries.
+    // tmp is empty (no stubs created).
 
     let result = {
         let _guard = PATH_LOCK.lock().unwrap();
         let prev_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", format!("{}:/usr/bin", tmp.path().display()));
+        std::env::set_var("PATH", tmp.path());
         let r = {
             let mut orch =
                 Orchestrator::new(tmp.path().into(), SpurConfig::default(), None).unwrap();
@@ -96,7 +96,7 @@ async fn init_agents_registers_full_spec12_config() {
     let registered = {
         let _guard = PATH_LOCK.lock().unwrap();
         let prev_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", format!("{}:/usr/bin", tmp.path().display()));
+        std::env::set_var("PATH", tmp.path());
         let r = {
             let mut orch =
                 Orchestrator::new(tmp.path().into(), SpurConfig::default(), None).unwrap();
