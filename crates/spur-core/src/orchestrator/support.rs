@@ -194,6 +194,17 @@ impl Orchestrator {
             })
     }
 
+    pub(in crate::orchestrator) fn brain_tool_registry(
+        &self,
+        event_sink: Option<Arc<dyn spur_mcp::McpEventSink>>,
+    ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
+        crate::mcp::brain_tool_registry(crate::mcp::signals::SignalMcpDeps {
+            pm_service: self.pm_service.clone(),
+            event_sink,
+            feature_gate: self.mcp_feature_gate(),
+        })
+    }
+
     /// Classify an error as an auth-required failure.
     ///
     /// The ACP spec reserves error code `-32000` with `authRequired`-shaped

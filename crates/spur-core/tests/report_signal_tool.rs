@@ -1,94 +1,25 @@
 //! T-F5: happy path. T-I3: late-arrival gate.
 
-use std::path::Path;
-use std::sync::Arc;
-
 use serde_json::json;
-use spur_mcp::handlers::{report_signal, WorkerCallContext};
+use spur_core::mcp::signals::report_signal;
+use spur_mcp::handlers::WorkerCallContext;
 use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_mcp::plan::labels;
 use spur_mcp::plan::signals::{self, WorkerSignal};
-use spur_pm::{IssueCreate, PmService};
-use tempfile::TempDir;
 use uuid::Uuid;
 
 mod common;
 
-fn run_br(repo: &Path, args: &[&str]) -> Result<String, String> {
-    common::beads::run_br(repo, args)
-}
-
-async fn beads_pm(repo: &Path) -> Arc<PmService> {
-    Arc::new(
-        PmService::try_new(
-            None,  // no github_repo
-            true,  // beads_enabled
-            false, // github_enabled
-            repo, None, // closed_status default
-        )
-        .await
-        .expect("PmService::try_new failed")
-        .expect("expected Some(PmService) — beads dir must exist after br init"),
-    )
-}
-
-async fn create_task(pm: &PmService, title: &str) -> String {
-    pm.create_issue(IssueCreate {
-        title: title.to_string(),
-        issue_type: Some("task".into()),
-        ..Default::default()
-    })
-    .await
-    .expect("create_issue must succeed")
-}
-
-fn comment_texts(repo: &Path, issue_id: &str) -> Vec<String> {
-    let raw = run_br(repo, &["comments", "list", issue_id]).expect("br comments list failed");
-    let items: serde_json::Value =
-        serde_json::from_str(&raw).expect("br comments list output must be valid JSON");
-    items
-        .as_array()
-        .expect("comments list must be a JSON array")
-        .iter()
-        .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
-        .map(String::from)
-        .collect()
-}
-
-fn issue_labels(repo: &Path, issue_id: &str) -> Vec<String> {
-    let raw = run_br(repo, &["show", issue_id]).expect("br show failed");
-    let items: serde_json::Value =
-        serde_json::from_str(&raw).expect("br show output must be valid JSON");
-    items[0]["labels"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|label| label.as_str().map(String::from))
-        .collect()
-}
-
-fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
-    WorkerSignal::ScopeDrift {
-        signal_id,
-        severity: 0.82,
-        reason: "auth refactor pulls in 4 new subsystems".into(),
-        estimated_subtasks: Some(3),
-    }
-}
-
 #[tokio::test]
 async fn report_signal_on_open_task_records_all_artifacts() {
-    let dir = TempDir::new().expect("tempdir");
-    run_br(dir.path(), &["init"]).expect("br init failed");
-
-    let pm = beads_pm(dir.path()).await;
-    let task_id = create_task(&pm, "Open signal task").await;
-    let signal = scope_drift_signal(Uuid::new_v4());
+    let (_dir, pm) = common::temp_beads_pm().await;
+    let task_id = common::create_task(&pm, "Open signal task").await;
+    let signal = common::scope_drift_signal(Uuid::new_v4());
     let signal_id = signal.signal_id().to_string();
 
     let result = report_signal(
         &pm,
-        common::server_builder::pro_feature_gate().as_ref(),
+        common::pro_feature_gate().as_ref(),
         &WorkerCallContext {
             delegation_id: String::new(),
             brain_session_id: "test-session".into(),
@@ -110,7 +41,7 @@ async fn report_signal_on_open_task_records_all_artifacts() {
         })
     );
 
-    let comments = comment_texts(dir.path(), &task_id);
+    let comments = common::comment_texts(&pm, &task_id).await;
     let parsed_signals: Vec<WorkerSignal> = comments
         .iter()
         .filter_map(|text| signals::parse_comment(text).and_then(|parsed| parsed.ok()))
@@ -147,7 +78,7 @@ async fn report_signal_on_open_task_records_all_artifacts() {
         )
     }));
 
-    let labels = issue_labels(dir.path(), &task_id);
+    let labels = common::issue_labels(&pm, &task_id).await;
     assert!(
         labels.contains(&labels::signal_kind(signal.kind_label())),
         "open task should carry the signal kind label; got labels: {labels:?}"
@@ -160,15 +91,9 @@ async fn report_signal_on_open_task_records_all_artifacts() {
 
 #[tokio::test]
 async fn report_signal_on_terminal_task_records_late_arrival() {
-    let dir = TempDir::new().expect("tempdir");
-    run_br(dir.path(), &["init"]).expect("br init failed");
-
-    let pm = beads_pm(dir.path()).await;
-    let task_id = create_task(&pm, "Terminal signal task").await;
-    // Beads vocabulary reality: all SPUR terminals project to `closed`.
-    // Close via `br close` (production flow) instead of injecting a SPUR-vocab
-    // string via sqlite — the handler now gates on `status == closed_status()`.
-    run_br(dir.path(), &["close", &task_id]).expect("br close failed");
+    let (_dir, pm) = common::temp_beads_pm().await;
+    let task_id = common::create_task(&pm, "Terminal signal task").await;
+    common::close_task(&pm, &task_id).await;
     assert_eq!(
         pm.get_issue(&task_id)
             .await
@@ -177,12 +102,12 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
         pm.closed_status()
     );
 
-    let signal = scope_drift_signal(Uuid::new_v4());
+    let signal = common::scope_drift_signal(Uuid::new_v4());
     let signal_id = signal.signal_id().to_string();
 
     let result = report_signal(
         &pm,
-        common::server_builder::pro_feature_gate().as_ref(),
+        common::pro_feature_gate().as_ref(),
         &WorkerCallContext {
             delegation_id: String::new(),
             brain_session_id: "test-session".into(),
@@ -204,7 +129,7 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
         })
     );
 
-    let comments = comment_texts(dir.path(), &task_id);
+    let comments = common::comment_texts(&pm, &task_id).await;
     let parsed_signals: Vec<WorkerSignal> = comments
         .iter()
         .filter_map(|text| signals::parse_comment(text).and_then(|parsed| parsed.ok()))
@@ -234,7 +159,7 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
         )
     }));
 
-    let labels = issue_labels(dir.path(), &task_id);
+    let labels = common::issue_labels(&pm, &task_id).await;
     assert!(
         labels.contains(&labels::SIGNAL_LATE_ARRIVAL.to_string()),
         "late-arrival path should carry the late-arrival label; got labels: {labels:?}"
@@ -247,18 +172,15 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
 
 #[tokio::test]
 async fn report_signal_threads_worker_call_context() {
-    let dir = TempDir::new().expect("tempdir");
-    run_br(dir.path(), &["init"]).expect("br init failed");
-
-    let pm = beads_pm(dir.path()).await;
-    let task_id = create_task(&pm, "Context thread task").await;
-    let signal = scope_drift_signal(Uuid::new_v4());
+    let (_dir, pm) = common::temp_beads_pm().await;
+    let task_id = common::create_task(&pm, "Context thread task").await;
+    let signal = common::scope_drift_signal(Uuid::new_v4());
     let signal_id = signal.signal_id().to_string();
     let expected_delegation_id = "del-test-42";
 
     let result = report_signal(
         &pm,
-        common::server_builder::pro_feature_gate().as_ref(),
+        common::pro_feature_gate().as_ref(),
         &WorkerCallContext {
             delegation_id: expected_delegation_id.into(),
             brain_session_id: "test-session".into(),
@@ -280,7 +202,7 @@ async fn report_signal_threads_worker_call_context() {
         })
     );
 
-    let comments = comment_texts(dir.path(), &task_id);
+    let comments = common::comment_texts(&pm, &task_id).await;
     let parsed_audits: Vec<AuditSentinelKind> = comments
         .iter()
         .filter_map(|text| audit_sentinel::parse_comment(text).and_then(|parsed| parsed.ok()))

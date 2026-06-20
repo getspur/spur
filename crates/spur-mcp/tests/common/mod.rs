@@ -7,6 +7,14 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use spur_acp::SpurEventBody;
+use spur_mcp::events::McpEventSink;
+use spur_mcp::handlers::{McpHandlerError, WorkerCallContext};
+use spur_mcp::worker_server::WorkerSignalSink;
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 
@@ -15,6 +23,52 @@ pub mod g_strict_harness;
 pub mod server_builder;
 
 static LOOPBACK_BINDABLE: OnceCell<bool> = OnceCell::const_new();
+
+pub struct TestWorkerSignalSink {
+    funnel: Arc<dyn McpEventSink>,
+}
+
+impl TestWorkerSignalSink {
+    pub fn new(funnel: Arc<dyn McpEventSink>) -> Self {
+        Self { funnel }
+    }
+}
+
+#[async_trait]
+impl WorkerSignalSink for TestWorkerSignalSink {
+    async fn report_signal(
+        &self,
+        _ctx: &WorkerCallContext,
+        _args: Value,
+    ) -> Result<Value, McpHandlerError> {
+        Err(McpHandlerError::Unauthorized(
+            "test signal sink is not licensed".into(),
+        ))
+    }
+
+    async fn report_progress(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            message: String,
+            #[serde(default)]
+            percent: Option<f64>,
+        }
+
+        let Args { message, percent } = serde_json::from_value(args)
+            .map_err(|e| McpHandlerError::InvalidParams(format!("invalid args: {e}")))?;
+        let _ = self.funnel.try_emit(SpurEventBody::WorkerReportProgress {
+            delegation_id: ctx.delegation_id.clone(),
+            message,
+            percent,
+        });
+
+        Ok(json!({ "ok": true }))
+    }
+}
 
 /// Probe `127.0.0.1:0` at most once per test binary. The result is cached
 /// after up to 3 bind attempts so that a transient port-exhaustion blip on a

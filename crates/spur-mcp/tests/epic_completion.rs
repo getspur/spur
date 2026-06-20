@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
@@ -14,15 +16,17 @@ use spur_mcp::plan::PmLike;
 use spur_mcp::McpEventSink;
 use spur_pm::BeadsAdvanced;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, MutexGuard, Notify};
+use tokio::sync::{Mutex as TokioMutex, Notify, OwnedMutexGuard};
 
 mod common;
 
 const COMPLETION_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
-async fn epic_completion_test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
+async fn epic_completion_test_lock() -> OwnedMutexGuard<()> {
+    static LOCK: OnceLock<Arc<TokioMutex<()>>> = OnceLock::new();
+    Arc::clone(LOCK.get_or_init(|| Arc::new(TokioMutex::new(()))))
+        .lock_owned()
+        .await
 }
 
 fn test_materializer() -> Arc<spur_mcp::outcome_materializer::OutcomeMaterializer> {

@@ -754,10 +754,13 @@ impl PlanResolver for NullWorkerPlanResolver {
 }
 
 fn worker_mcp_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
+    let funnel: Arc<dyn McpEventSink> = Arc::new(NullWorkerSink);
+    let worker_signal_sink = Arc::new(common::TestWorkerSignalSink::new(Arc::clone(&funnel)));
     WorkerMcpDeps {
         pm_service: pm,
         feature_gate: community_feature_gate(),
-        funnel: Arc::new(NullWorkerSink),
+        funnel,
+        worker_signal_sink,
         plan_resolver: Arc::new(NullWorkerPlanResolver),
         reconciler_outcomes: Arc::new(TokioMutex::new(
             spur_mcp::plan::outcomes::OutcomeStore::default(),

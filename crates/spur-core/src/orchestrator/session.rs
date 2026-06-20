@@ -1031,13 +1031,17 @@ mod session_attach_guard_transfer_tests {
             .set(spur_session_id)
             .expect("test brain session id set once");
         let cont_ctx = orchestrator.build_continuation_ctx(brain_session_id_cell);
-        let (mut server, _channel) = McpCallbackServer::new(
+        let tool_registry = orchestrator
+            .brain_tool_registry(None)
+            .expect("compose brain MCP tool registry");
+        let (mut server, _channel) = McpCallbackServer::new_with_tool_registry(
             Some(&brain_session_id),
             orchestrator.pm_service.clone(),
             None,
             cont_ctx,
             orchestrator.outcome_store.clone(),
             orchestrator.mcp_feature_gate(),
+            tool_registry,
         );
 
         // First call wires the orchestrator-derived settings.
@@ -1509,13 +1513,17 @@ impl Orchestrator {
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
         let cont_ctx = self.build_continuation_ctx(Arc::clone(&brain_session_id_cell));
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(
+        let tool_registry = self
+            .brain_tool_registry(sink.clone())
+            .context("Failed to compose brain MCP tool registry")?;
+        let (mcp_server, delegation_channel) = McpCallbackServer::new_with_tool_registry(
             None,
             self.pm_service.clone(),
             sink,
             cont_ctx,
             self.outcome_store.clone(),
             self.mcp_feature_gate(),
+            tool_registry,
         );
         let mut mcp_server = mcp_server;
 
@@ -1807,13 +1815,17 @@ impl Orchestrator {
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
         let cont_ctx = self.build_continuation_ctx(Arc::clone(&brain_session_id_cell));
-        let (mcp_server, delegation_channel) = McpCallbackServer::new(
+        let tool_registry = self
+            .brain_tool_registry(sink.clone())
+            .context("Failed to compose brain MCP tool registry")?;
+        let (mcp_server, delegation_channel) = McpCallbackServer::new_with_tool_registry(
             None,
             self.pm_service.clone(),
             sink,
             cont_ctx,
             self.outcome_store.clone(),
             self.mcp_feature_gate(),
+            tool_registry,
         );
         let mut mcp_server = mcp_server;
 

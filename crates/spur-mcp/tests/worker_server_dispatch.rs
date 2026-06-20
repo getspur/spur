@@ -30,9 +30,9 @@ use spur_graph::{
 use spur_license::policy::PolicyResolver;
 use spur_license::FeatureGate;
 use spur_mcp::events::McpEventSink;
-use spur_mcp::handlers::PlanResolver;
+use spur_mcp::handlers::{McpHandlerError, PlanResolver, WorkerCallContext};
 use spur_mcp::plan::PlanState;
-use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
+use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer, WorkerSignalSink};
 use spur_pm::{IssueCreate, PmService};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -151,6 +151,77 @@ impl McpEventSink for RecordingSink {
     }
 }
 
+struct ForwardingWorkerSignalSink {
+    funnel: Arc<dyn McpEventSink>,
+}
+
+#[async_trait]
+impl WorkerSignalSink for ForwardingWorkerSignalSink {
+    async fn report_signal(
+        &self,
+        _ctx: &WorkerCallContext,
+        _args: Value,
+    ) -> Result<Value, McpHandlerError> {
+        Err(McpHandlerError::Unauthorized(
+            "test signal sink is not licensed".into(),
+        ))
+    }
+
+    async fn report_progress(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError> {
+        let message = args
+            .get("message")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpHandlerError::InvalidParams("missing message".into()))?
+            .to_owned();
+        let percent = args.get("percent").and_then(Value::as_f64);
+        let _ = self.funnel.try_emit(SpurEventBody::WorkerReportProgress {
+            delegation_id: ctx.delegation_id.clone(),
+            message,
+            percent,
+        });
+        Ok(json!({ "ok": true }))
+    }
+}
+
+#[derive(Default)]
+struct RecordingWorkerSignalSink {
+    signal_calls: AtomicUsize,
+    progress_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl WorkerSignalSink for RecordingWorkerSignalSink {
+    async fn report_signal(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError> {
+        self.signal_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(json!({
+            "from_injected_signal_sink": true,
+            "delegation_id": ctx.delegation_id,
+            "task_id": args.get("task_id").and_then(Value::as_str),
+        }))
+    }
+
+    async fn report_progress(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError> {
+        self.progress_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(json!({
+            "from_injected_progress_sink": true,
+            "delegation_id": ctx.delegation_id,
+            "message": args.get("message").and_then(Value::as_str),
+        }))
+    }
+}
+
 struct NullPlanResolver;
 
 #[async_trait]
@@ -165,10 +236,22 @@ fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
 }
 
 fn test_deps_with_funnel(pm: Arc<PmService>, funnel: Arc<dyn McpEventSink>) -> WorkerMcpDeps {
+    let worker_signal_sink = Arc::new(ForwardingWorkerSignalSink {
+        funnel: Arc::clone(&funnel),
+    });
+    test_deps_with_funnel_and_signal_sink(pm, funnel, worker_signal_sink)
+}
+
+fn test_deps_with_funnel_and_signal_sink(
+    pm: Arc<PmService>,
+    funnel: Arc<dyn McpEventSink>,
+    worker_signal_sink: Arc<dyn WorkerSignalSink>,
+) -> WorkerMcpDeps {
     WorkerMcpDeps {
         pm_service: pm,
         feature_gate: test_feature_gate(),
         funnel,
+        worker_signal_sink,
         plan_resolver: Arc::new(NullPlanResolver),
         reconciler_outcomes: Arc::new(
             Mutex::new(spur_mcp::plan::outcomes::OutcomeStore::default()),
@@ -894,6 +977,78 @@ async fn report_progress_enabled_with_capacity_emits_event() {
         1,
         "event must be emitted exactly once"
     );
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn worker_signal_tools_route_through_injected_sink() {
+    let worker_signal_sink = Arc::new(RecordingWorkerSignalSink::default());
+    let dir = TempDir::new().expect("tempdir");
+    run_br(dir.path(), &["init"]);
+    let pm = pm_service_fixture(dir.path()).await;
+    let server = WorkerMcpServer::start(
+        "session-disp".into(),
+        test_deps_with_funnel_and_signal_sink(
+            pm,
+            Arc::new(NullSink),
+            Arc::<RecordingWorkerSignalSink>::clone(&worker_signal_sink)
+                as Arc<dyn WorkerSignalSink>,
+        ),
+    )
+    .await
+    .expect("start must succeed");
+    server.register_delegation(
+        "d-injected".into(),
+        spur_mcp::worker_server::DelegationContext {
+            enable_worker_progress: true,
+        },
+    );
+    let token = server.issue_token("d-injected", Duration::from_secs(60));
+
+    let signal = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({
+            "name": "report_signal",
+            "arguments": {
+                "task_id": "issue-injected",
+                "signal": {
+                    "kind": "scope_drift",
+                    "signal_id": "550e8400-e29b-41d4-a716-446655441111",
+                    "severity": 0.5,
+                    "reason": "dispatch-routing-test",
+                    "estimated_subtasks": 2
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(signal["result"]["from_injected_signal_sink"], true);
+    assert_eq!(signal["result"]["delegation_id"], "d-injected");
+    assert_eq!(signal["result"]["task_id"], "issue-injected");
+
+    let progress = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        serde_json::json!({"name": "report_progress", "arguments": {"message": "working"}}),
+    )
+    .await;
+    assert_eq!(progress["result"]["from_injected_progress_sink"], true);
+    assert_eq!(progress["result"]["delegation_id"], "d-injected");
+    assert_eq!(progress["result"]["message"], "working");
+    assert_eq!(
+        worker_signal_sink.signal_calls.load(Ordering::SeqCst),
+        1,
+        "report_signal must call the injected sink exactly once"
+    );
+    assert_eq!(
+        worker_signal_sink.progress_calls.load(Ordering::SeqCst),
+        1,
+        "report_progress must call the injected sink exactly once"
+    );
+
     server.shutdown(Duration::from_secs(5)).await;
 }
 
