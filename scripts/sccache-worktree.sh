@@ -3,14 +3,15 @@
 #
 # rustc-wrapper that dynamically sets SCCACHE_BASEDIRS to the current git
 # worktree root so sccache normalizes workspace paths identically across all
-# worktrees and the main repo. Local builds can opt into a shared remote
-# backend:
-#   SPUR_SCCACHE_S3=1  → two-level cache L0=local disk, L1=AWS S3
-#                        (SCCACHE_MULTILEVEL_CHAIN=disk,s3). Default bucket
-#                        wiilearn-spur-sccache-apne1 in ap-northeast-1.
-#   SPUR_SCCACHE_GCS=1 → two-level cache L0=local disk, L1=GCS (macOS-gated).
-# S3 takes precedence when both are set. Each restarts the sccache server via
-# spur-cargo so the daemon picks up the multilevel config.
+# worktrees and the main repo. Local builds default to a shared remote backend:
+#   default             → two-level cache L0=local disk, L1=AWS S3
+#                         (SCCACHE_MULTILEVEL_CHAIN=disk,s3). Default bucket
+#                         wiilearn-spur-sccache-apne1 in ap-northeast-1.
+#   SPUR_SCCACHE_S3=0  → disable the default S3 backend.
+#   SPUR_SCCACHE_GCS=1 → two-level cache L0=local disk, L1=GCS (macOS-gated)
+#                         when SPUR_SCCACHE_S3 is unset or disabled.
+# Explicit S3 takes precedence when both are set. Each remote backend restarts
+# the sccache server via spur-cargo so the daemon picks up the multilevel config.
 #
 # Why: sccache 0.14.0 strips SCCACHE_BASEDIRS prefixes before hashing.
 # Without this wrapper, each worktree's unique subdirectory name remains in the
@@ -37,12 +38,24 @@ fi
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
 SPUR_ROOT="${SPUR_ROOT:-$REPO_ROOT}"
 
+use_spur_s3_sccache() {
+    case "${SPUR_SCCACHE_S3-__spur_unset__}" in
+        0|false|False|FALSE|no|No|NO|off|Off|OFF)
+            return 1 ;;
+        __spur_unset__)
+            [[ "${SPUR_SCCACHE_GCS:-0}" == "1" ]] && return 1
+            return 0 ;;
+        *)
+            return 0 ;;
+    esac
+}
+
 # Two-level cache: L0=local disk (fast), L1=AWS S3 (shared, durable). sccache
 # 0.15+ implements this natively via SCCACHE_MULTILEVEL_CHAIN; on an L1 hit it
-# backfills L0. Returns 0 when activated, 1 when SPUR_SCCACHE_S3 is unset so the
-# caller can fall through to the GCS path.
+# backfills L0. Returns 0 when activated, 1 when the caller can fall through to
+# the GCS path.
 enable_spur_s3_cache() {
-    [[ "${SPUR_SCCACHE_S3:-0}" == "1" ]] || return 1
+    use_spur_s3_sccache || return 1
 
     # L1: AWS S3. SCCACHE_REGION MUST match the bucket's region or S3 rejects
     # the request. Bucket suffix apne1 == ap-northeast-1 (Tokyo).
