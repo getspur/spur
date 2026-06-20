@@ -16,6 +16,19 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+fn install_core_delegation_registry(server: &mut spur_mcp::McpCallbackServer) {
+    let registry = spur_core::mcp::brain_tool_registry(
+        spur_core::mcp::delegation::DelegationMcpDeps::from_server(server),
+        spur_core::mcp::signals::SignalMcpDeps {
+            pm_service: None,
+            event_sink: None,
+            feature_gate: spur_mcp::server::community_feature_gate(),
+        },
+    )
+    .expect("core delegation registry");
+    server.set_tool_registry(registry);
+}
+
 fn mk_cont(id: &str) -> BrainContinuation {
     BrainContinuation {
         delegation_id: id.into(),
@@ -196,6 +209,7 @@ async fn test_no_double_delivery_on_block_timeout() {
         tier: Some("generalist".into()),
         ..Default::default()
     }]);
+    install_core_delegation_registry(&mut server);
     let server = Arc::new(server);
 
     // Fake worker: consume the delegation request; send the oneshot reply
@@ -328,6 +342,7 @@ async fn test_no_double_delivery_on_fast_path() {
         ..Default::default()
     }]);
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
+    install_core_delegation_registry(&mut server);
     let server = Arc::new(server);
 
     let worker_handle = tokio::spawn(async move {

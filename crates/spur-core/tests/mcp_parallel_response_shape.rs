@@ -4,7 +4,7 @@
 //! concurrent via FuturesUnordered/JoinSet while preserving input→output order.
 //!
 //! RUNNING:
-//!   cargo test -p spur-mcp --test parallel_response_shape -- --ignored
+//!   scripts/spur-cargo test -p spur-core --test mcp_parallel_response_shape
 //!
 //! EXPECTED BEHAVIOR:
 //!   - Current main (serial dispatch): tests FAIL
@@ -55,7 +55,7 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
         None,
         empty_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        common::server_builder::pro_feature_gate(),
+        common::pro_feature_gate(),
     );
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {
@@ -63,6 +63,7 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
         tier: Some("generalist".into()),
         ..Default::default()
     }]);
+    common::install_core_brain_registry(&mut server);
     let server = Arc::new(server);
 
     let respond_count = Arc::new(AtomicUsize::new(0));
@@ -192,7 +193,7 @@ async fn test_parallel_preserves_input_order() {
         None,
         empty_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        common::server_builder::pro_feature_gate(),
+        common::pro_feature_gate(),
     );
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {
@@ -200,6 +201,7 @@ async fn test_parallel_preserves_input_order() {
         tier: Some("generalist".into()),
         ..Default::default()
     }]);
+    common::install_core_brain_registry(&mut server);
     let server = Arc::new(server);
 
     let respond_indices = [0, 2];
@@ -290,7 +292,7 @@ async fn test_parallel_no_serial_dispatch_regression() {
         None,
         empty_continuation_ctx(),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        common::server_builder::pro_feature_gate(),
+        common::pro_feature_gate(),
     );
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
     server.set_workers(vec![WorkerInfo {
@@ -298,6 +300,7 @@ async fn test_parallel_no_serial_dispatch_regression() {
         tier: Some("generalist".into()),
         ..Default::default()
     }]);
+    common::install_core_brain_registry(&mut server);
     let server = Arc::new(server);
 
     let worker_handle = tokio::spawn(async move {

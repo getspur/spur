@@ -1,3 +1,16 @@
+fn install_core_delegation_registry(server: &mut McpCallbackServer) {
+    let registry = crate::mcp::brain_tool_registry(
+        DelegationMcpDeps::from_server(server),
+        crate::mcp::signals::SignalMcpDeps {
+            pm_service: None,
+            event_sink: None,
+            feature_gate: community_feature_gate(),
+        },
+    )
+    .expect("core delegation registry");
+    server.set_tool_registry(registry);
+}
+
 #[cfg(test)]
 mod cancel_delegation_tests {
     use spur_acp::{CancelOutcome, CancellationControl};
@@ -71,7 +84,7 @@ mod retirement_state_tests {
     #[tokio::test]
     async fn test_server_mark_retiring_rejects_new_delegations() {
         let session_id = BrainSessionId::new(SessionId("brain".into()));
-        let (server, _channel) = super::McpCallbackServer::new(
+        let (mut server, _channel) = super::McpCallbackServer::new(
             Some(&session_id),
             None,
             None,
@@ -79,6 +92,7 @@ mod retirement_state_tests {
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
             super::community_feature_gate(),
         );
+        super::install_core_delegation_registry(&mut server);
 
         server.mark_retiring();
 
@@ -106,14 +120,14 @@ mod retirement_state_tests {
         );
 
         assert!(
-            !server.cancel_token.is_cancelled(),
+            !server.cancel_token().is_cancelled(),
             "fresh servers must start with an active cancellation token"
         );
 
         server.cancel_in_flight_workers();
 
         assert!(
-            server.cancel_token.is_cancelled(),
+            server.cancel_token().is_cancelled(),
             "cancel_in_flight_workers must signal the shared cancellation token"
         );
     }
@@ -132,7 +146,7 @@ mod retirement_state_tests {
         let dropped = Arc::new(AtomicBool::new(false));
         let started = Arc::new(Notify::new());
 
-        *server.root_handle.lock().unwrap() = Some(tokio::spawn({
+        server.__test_set_root_handle(tokio::spawn({
             let dropped = Arc::clone(&dropped);
             let started = Arc::clone(&started);
             async move {
@@ -158,7 +172,7 @@ mod retirement_state_tests {
             "force_abort must abort the stored root task"
         );
         assert!(
-            server.root_handle.lock().unwrap().is_none(),
+            server.__test_root_handle_is_none(),
             "force_abort must take the root handle so repeated calls stay idempotent"
         );
     }
@@ -177,7 +191,7 @@ mod retirement_state_tests {
         let server = Arc::new(server);
 
         let release = Arc::new(Notify::new());
-        server.task_tracker.spawn({
+        server.task_tracker_handle().spawn({
             let release = Arc::clone(&release);
             async move {
                 release.notified().await;
@@ -185,7 +199,7 @@ mod retirement_state_tests {
         });
 
         let dropped = Arc::new(AtomicBool::new(false));
-        *server.root_handle.lock().unwrap() = Some(tokio::spawn({
+        server.__test_set_root_handle(tokio::spawn({
             let dropped = Arc::clone(&dropped);
             async move {
                 let _flag = DropFlag(dropped);
@@ -231,8 +245,8 @@ mod retirement_state_tests {
         let started = Arc::new(Notify::new());
         let dropped = Arc::new(AtomicBool::new(false));
         let (root_shutdown_tx, root_shutdown_rx) = oneshot::channel();
-        *server.root_shutdown_tx.lock().unwrap() = Some(root_shutdown_tx);
-        *server.root_handle.lock().unwrap() = Some(tokio::spawn({
+        server.__test_set_root_shutdown_tx(root_shutdown_tx);
+        server.__test_set_root_handle(tokio::spawn({
             let started = Arc::clone(&started);
             let dropped = Arc::clone(&dropped);
             async move {
@@ -332,6 +346,7 @@ mod inline_completion_materialization_tests {
             super::community_feature_gate(),
         );
         server.set_inline_wait(Duration::from_secs(5));
+        super::install_core_delegation_registry(&mut server);
         let server = Arc::new(server);
         let expected = result("single-inline");
 
@@ -377,6 +392,7 @@ mod inline_completion_materialization_tests {
             super::community_feature_gate(),
         );
         server.set_inline_wait(Duration::from_secs(5));
+        super::install_core_delegation_registry(&mut server);
         let server = Arc::new(server);
         let expected = [result("parallel-a"), result("parallel-b")];
 
@@ -449,7 +465,7 @@ mod continuation_producer_tests {
         events: Mutex<Vec<SpurEventBody>>,
     }
 
-    impl crate::events::McpEventSink for RecordingSink {
+    impl spur_mcp::events::McpEventSink for RecordingSink {
         fn emit(&self, event: SpurEventBody) {
             self.events.lock().unwrap().push(event);
         }
@@ -460,7 +476,7 @@ mod continuation_producer_tests {
         result: DelegationResult,
         attempt: u32,
         brain_session: SessionId,
-        event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
+        event_sink: Option<Arc<dyn spur_mcp::events::McpEventSink>>,
     ) -> BrainContinuation {
         let tracker = TaskTracker::new();
         let active = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
@@ -532,7 +548,7 @@ mod continuation_producer_tests {
         use spur_blob_store::MemoryOutcomeStore;
 
         let store: Arc<dyn spur_blob_store::OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
-        let mat = crate::outcome_materializer::OutcomeMaterializer::new(store);
+        let mat = spur_mcp::outcome_materializer::OutcomeMaterializer::new(store);
         let result = DelegationResult {
             status: DelegationStatus::Success,
             diff: None,
@@ -565,7 +581,7 @@ mod continuation_producer_tests {
     async fn test_producer_materializes_oversized_summary_with_fetch_hint() {
         let delegation_id: DelegationId = "del-oversized".into();
         let sink = Arc::new(RecordingSink::default());
-        let sink_obj: Arc<dyn crate::events::McpEventSink> = sink.clone();
+        let sink_obj: Arc<dyn spur_mcp::events::McpEventSink> = sink.clone();
         let original_summary = "x".repeat(super::PRODUCER_MAX_FIELD_BYTES + 64);
 
         let continuation = capture_continuation(
@@ -612,7 +628,7 @@ mod continuation_producer_tests {
     #[tokio::test]
     async fn test_producer_diff_summary_handled() {
         let sink = Arc::new(RecordingSink::default());
-        let sink_obj: Arc<dyn crate::events::McpEventSink> = sink.clone();
+        let sink_obj: Arc<dyn spur_mcp::events::McpEventSink> = sink.clone();
         let diff_summary = DiffSummary {
             files_changed: 2,
             insertions: 8,
@@ -764,6 +780,7 @@ mod fetch_outcome_artifact_tests {
             super::community_feature_gate(),
         );
         server.set_repo_root(repo_root.to_path_buf());
+        super::install_core_delegation_registry(&mut server);
         server
     }
 
@@ -822,10 +839,6 @@ mod fetch_outcome_artifact_tests {
         }
     }
 
-    fn dispatch_args(name: &str, args: Value) -> Value {
-        json!({ "name": name, "arguments": args })
-    }
-
     fn response_text(response: &super::JsonRpcResponse) -> &str {
         response.result.as_ref().expect("expected success response")["content"][0]["text"]
             .as_str()
@@ -848,12 +861,9 @@ mod fetch_outcome_artifact_tests {
         put_outcome(&store, &brain_session, delegation_id.clone(), 1, &result).await;
 
         let response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({ "delegation_id": delegation_id.as_str() }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({ "delegation_id": delegation_id.as_str() }),
             )
             .await;
 
@@ -879,15 +889,12 @@ mod fetch_outcome_artifact_tests {
         put_outcome(&store, &brain_session, delegation_id.clone(), 1, &result).await;
 
         let response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({
-                        "delegation_id": delegation_id.as_str(),
-                        "section": "status_only"
-                    }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({
+                    "delegation_id": delegation_id.as_str(),
+                    "section": "status_only"
+                }),
             )
             .await;
 
@@ -916,15 +923,12 @@ mod fetch_outcome_artifact_tests {
         put_outcome(&store, &brain_session, delegation_id.clone(), 1, &result).await;
 
         let response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({
-                        "delegation_id": delegation_id.as_str(),
-                        "section": "summary"
-                    }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({
+                    "delegation_id": delegation_id.as_str(),
+                    "section": "summary"
+                }),
             )
             .await;
 
@@ -953,15 +957,12 @@ mod fetch_outcome_artifact_tests {
         put_outcome(&store, &brain_session, delegation_id.clone(), 1, &result).await;
 
         let response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({
-                        "delegation_id": delegation_id.as_str(),
-                        "section": "diff_only"
-                    }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({
+                    "delegation_id": delegation_id.as_str(),
+                    "section": "diff_only"
+                }),
             )
             .await;
 
@@ -987,7 +988,7 @@ mod fetch_outcome_artifact_tests {
 
         let delegation_id: DelegationId = "deadbeef-attempts".into();
         server
-            .materializer
+            .outcome_materializer()
             .materialize(
                 success_result("attempt one", "diff one", 0.0),
                 delegation_id.clone(),
@@ -998,7 +999,7 @@ mod fetch_outcome_artifact_tests {
             )
             .await;
         server
-            .materializer
+            .outcome_materializer()
             .materialize(
                 success_result("attempt two", "diff two", 0.0),
                 delegation_id.clone(),
@@ -1010,15 +1011,12 @@ mod fetch_outcome_artifact_tests {
             .await;
 
         let latest_response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({
-                        "delegation_id": delegation_id.as_str(),
-                        "section": "summary"
-                    }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({
+                    "delegation_id": delegation_id.as_str(),
+                    "section": "summary"
+                }),
             )
             .await;
         let latest: Value = serde_json::from_str(response_text(&latest_response)).expect("json");
@@ -1026,16 +1024,13 @@ mod fetch_outcome_artifact_tests {
         assert_eq!(latest["summary"], "attempt two");
 
         let pinned_response = server
-            .handle_tool_call(
-                Value::Number(2.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({
-                        "delegation_id": delegation_id.as_str(),
-                        "attempt": 1,
-                        "section": "summary"
-                    }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({
+                    "delegation_id": delegation_id.as_str(),
+                    "attempt": 1,
+                    "section": "summary"
+                }),
             )
             .await;
         let pinned: Value = serde_json::from_str(response_text(&pinned_response)).expect("json");
@@ -1052,15 +1047,12 @@ mod fetch_outcome_artifact_tests {
 
         for invalid in [json!(-1), json!("two"), json!(0), json!(false)] {
             let response = server
-                .handle_tool_call(
-                    Value::Number(1.into()),
-                    dispatch_args(
-                        "fetch_outcome_artifact",
-                        json!({
-                            "delegation_id": "deadbeef-1111-2222-3333-444455556666",
-                            "attempt": invalid,
-                        }),
-                    ),
+                .__test_call_tool_response(
+                    "fetch_outcome_artifact",
+                    json!({
+                        "delegation_id": "deadbeef-1111-2222-3333-444455556666",
+                        "attempt": invalid,
+                    }),
                 )
                 .await;
             let error = response
@@ -1101,16 +1093,13 @@ mod fetch_outcome_artifact_tests {
         store.put(&key, bytes, &metadata).await.expect("put");
 
         let response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({
-                        "delegation_id": delegation_id.as_str(),
-                        "attempt": 1,
-                        "section": "summary"
-                    }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({
+                    "delegation_id": delegation_id.as_str(),
+                    "attempt": 1,
+                    "section": "summary"
+                }),
             )
             .await;
         let error = response
@@ -1133,12 +1122,9 @@ mod fetch_outcome_artifact_tests {
         let server = build_test_server(td.path(), "any-session");
 
         let response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({ "delegation_id": "nonexistent-delegation-id" }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({ "delegation_id": "nonexistent-delegation-id" }),
             )
             .await;
 
@@ -1161,15 +1147,12 @@ mod fetch_outcome_artifact_tests {
         let server = build_test_server(td.path(), "any-session");
 
         let response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({
-                        "delegation_id": "any-id",
-                        "section": "not_a_section"
-                    }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({
+                    "delegation_id": "any-id",
+                    "section": "not_a_section"
+                }),
             )
             .await;
 
@@ -1194,10 +1177,7 @@ mod fetch_outcome_artifact_tests {
         let server = build_test_server(td.path(), "any-session");
 
         let response = server
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args("fetch_outcome_artifact", json!({ "delegation_id": "" })),
-            )
+            .__test_call_tool_response("fetch_outcome_artifact", json!({ "delegation_id": "" }))
             .await;
 
         let error = response.error.as_ref().expect("expected error response");
@@ -1232,12 +1212,9 @@ mod fetch_outcome_artifact_tests {
 
         // Server A can fetch its own delegation.
         let resp_a = server_a
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({ "delegation_id": delegation_a.as_str() }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({ "delegation_id": delegation_a.as_str() }),
             )
             .await;
         let text = response_text(&resp_a);
@@ -1251,12 +1228,9 @@ mod fetch_outcome_artifact_tests {
         // Unauthorized — the store-miss is deliberately indistinguishable
         // from a "different session" miss to prevent cross-session probing.
         let resp_b = server_b
-            .handle_tool_call(
-                Value::Number(1.into()),
-                dispatch_args(
-                    "fetch_outcome_artifact",
-                    json!({ "delegation_id": delegation_a.as_str() }),
-                ),
+            .__test_call_tool_response(
+                "fetch_outcome_artifact",
+                json!({ "delegation_id": delegation_a.as_str() }),
             )
             .await;
         let err = resp_b.error.as_ref().expect("server B must error");
