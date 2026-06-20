@@ -72,14 +72,15 @@ async fn test_shutdown_bounded_with_pending_collectors() -> Result<(), Box<dyn s
 
     let failed_count = Arc::new(AtomicUsize::new(0));
     let brain_sid = BrainSessionId::new(SessionId::new());
-    let (server, channel) = McpCallbackServer::new(
+    let (mut server, channel) = McpCallbackServer::new(
         Some(&brain_sid),
         None,
         None,
         observing_continuation_ctx(Arc::clone(&failed_count)),
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        common::server_builder::pro_feature_gate(),
+        common::pro_feature_gate(),
     );
+    common::install_core_brain_registry(&mut server);
     let server = Arc::new(server);
     let (client_io, server_io) = tokio::io::duplex(16 * 1024);
     let server_service_task = tokio::spawn({

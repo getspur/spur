@@ -10,10 +10,11 @@ impl McpCallbackServer {
     /// HTTP stack. Returns the raw JSON-RPC response as a `serde_json::Value`.
     #[doc(hidden)]
     pub async fn __test_call_delegate_to_worker(&self, agent: &str, task: &str) -> Value {
-        let resp = self
-            .handle_delegate_to_worker(Value::from(1), json!({ "agent": agent, "task": task }))
-            .await;
-        serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+        self.__test_call_tool(
+            "delegate_to_worker",
+            json!({ "agent": agent, "task": task }),
+        )
+        .await
     }
 
     /// Test-only: invoke the `cancel_delegation` JSON-RPC handler directly.
@@ -24,10 +25,11 @@ impl McpCallbackServer {
     /// up the full HTTP stack.
     #[doc(hidden)]
     pub async fn __test_call_cancel_delegation(&self, delegation_id: &str) -> Value {
-        let resp = self
-            .handle_cancel_delegation(Value::from(2), json!({ "delegation_id": delegation_id }))
-            .await;
-        serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+        self.__test_call_tool(
+            "cancel_delegation",
+            json!({ "delegation_id": delegation_id }),
+        )
+        .await
     }
 
     /// Test-only: invoke the `delegate_parallel` JSON-RPC handler directly.
@@ -51,8 +53,7 @@ impl McpCallbackServer {
                 .collect(),
         );
         let args = json!({ "tasks": task_array });
-        let resp = self.handle_delegate_parallel(Value::from(1), args).await;
-        serde_json::to_value(&resp).expect("serialize JsonRpcResponse")
+        self.__test_call_tool("delegate_parallel", args).await
     }
 
     /// Test-only: invoke the `execute_epic` JSON-RPC handler directly.
@@ -135,6 +136,42 @@ impl McpCallbackServer {
             )
             .await;
         serde_json::to_value(&response).expect("serialize JsonRpcResponse")
+    }
+
+    /// Test-only: invoke any tool handler through JSON-RPC dispatch while
+    /// preserving the typed response envelope for assertions on error/result.
+    #[doc(hidden)]
+    pub async fn __test_call_tool_response(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> JsonRpcResponse {
+        self.handle_tool_call(
+            Value::Null,
+            json!({
+                "name": tool_name,
+                "arguments": arguments,
+            }),
+        )
+        .await
+    }
+
+    /// Test-only: install a synthetic root listener handle.
+    #[doc(hidden)]
+    pub fn __test_set_root_handle(&self, handle: JoinHandle<()>) {
+        *self.root_handle.lock().unwrap() = Some(handle);
+    }
+
+    /// Test-only: report whether the root listener handle has been taken.
+    #[doc(hidden)]
+    pub fn __test_root_handle_is_none(&self) -> bool {
+        self.root_handle.lock().unwrap().is_none()
+    }
+
+    /// Test-only: install a synthetic root shutdown channel.
+    #[doc(hidden)]
+    pub fn __test_set_root_shutdown_tx(&self, tx: tokio::sync::oneshot::Sender<()>) {
+        *self.root_shutdown_tx.lock().unwrap() = Some(tx);
     }
 
     #[cfg(any(test, feature = "test-support"))]

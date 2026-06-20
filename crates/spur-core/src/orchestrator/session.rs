@@ -1031,23 +1031,26 @@ mod session_attach_guard_transfer_tests {
             .set(spur_session_id)
             .expect("test brain session id set once");
         let cont_ctx = orchestrator.build_continuation_ctx(brain_session_id_cell);
-        let tool_registry = orchestrator
-            .brain_tool_registry(None)
-            .expect("compose brain MCP tool registry");
-        let (mut server, _channel) = McpCallbackServer::new_with_tool_registry(
+        let (mut server, _channel) = McpCallbackServer::new(
             Some(&brain_session_id),
             orchestrator.pm_service.clone(),
             None,
             cont_ctx,
             orchestrator.outcome_store.clone(),
             orchestrator.mcp_feature_gate(),
-            tool_registry,
         );
 
         // First call wires the orchestrator-derived settings.
         orchestrator.apply_mcp_server_settings(&mut server);
         // Second call must be safe — same args, same effect.
         orchestrator.apply_mcp_server_settings(&mut server);
+        let tool_registry = orchestrator
+            .brain_tool_registry(
+                crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
+                None,
+            )
+            .expect("compose brain MCP tool registry");
+        server.set_tool_registry(tool_registry);
 
         // With `pm_service = None`, the reconciler stays disabled and `start`
         // does not attempt pidfile acquisition, so we can verify the server
@@ -1513,17 +1516,13 @@ impl Orchestrator {
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
         let cont_ctx = self.build_continuation_ctx(Arc::clone(&brain_session_id_cell));
-        let tool_registry = self
-            .brain_tool_registry(sink.clone())
-            .context("Failed to compose brain MCP tool registry")?;
-        let (mcp_server, delegation_channel) = McpCallbackServer::new_with_tool_registry(
+        let (mcp_server, delegation_channel) = McpCallbackServer::new(
             None,
             self.pm_service.clone(),
-            sink,
+            sink.clone(),
             cont_ctx,
             self.outcome_store.clone(),
             self.mcp_feature_gate(),
-            tool_registry,
         );
         let mut mcp_server = mcp_server;
 
@@ -1541,6 +1540,13 @@ impl Orchestrator {
             self.config.delegation.inline_wait_ms,
         ));
         self.apply_mcp_server_settings(&mut mcp_server);
+        let tool_registry = self
+            .brain_tool_registry(
+                crate::mcp::delegation::DelegationMcpDeps::from_server(&mcp_server),
+                sink.clone(),
+            )
+            .context("Failed to compose brain MCP tool registry")?;
+        mcp_server.set_tool_registry(tool_registry);
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -1815,17 +1821,13 @@ impl Orchestrator {
             Some(std::sync::Arc::new(self.funnel.clone()));
         let brain_session_id_cell = Arc::new(std::sync::OnceLock::new());
         let cont_ctx = self.build_continuation_ctx(Arc::clone(&brain_session_id_cell));
-        let tool_registry = self
-            .brain_tool_registry(sink.clone())
-            .context("Failed to compose brain MCP tool registry")?;
-        let (mcp_server, delegation_channel) = McpCallbackServer::new_with_tool_registry(
+        let (mcp_server, delegation_channel) = McpCallbackServer::new(
             None,
             self.pm_service.clone(),
-            sink,
+            sink.clone(),
             cont_ctx,
             self.outcome_store.clone(),
             self.mcp_feature_gate(),
-            tool_registry,
         );
         let mut mcp_server = mcp_server;
 
@@ -1844,6 +1846,13 @@ impl Orchestrator {
         ));
         // bd-3rvt: missing here meant resumed sessions silently never dispatched.
         self.apply_mcp_server_settings(&mut mcp_server);
+        let tool_registry = self
+            .brain_tool_registry(
+                crate::mcp::delegation::DelegationMcpDeps::from_server(&mcp_server),
+                sink.clone(),
+            )
+            .context("Failed to compose brain MCP tool registry")?;
+        mcp_server.set_tool_registry(tool_registry);
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server

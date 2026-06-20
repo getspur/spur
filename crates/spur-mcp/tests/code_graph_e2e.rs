@@ -2893,7 +2893,7 @@ async fn code_search_recovers_macro_bodied_callees_for_tool_definitions() {
     let candidates = search["candidates"].as_array().expect("candidates");
     let names = entity_names(candidates);
 
-    assert!(names.contains("delegate_to_worker_def"));
+    assert!(names.contains("recover_orphaned_dispatch_def"));
     assert!(names.contains("merge_plan_def"));
     assert!(names.contains("submit_plan_def"));
     assert!(
