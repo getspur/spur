@@ -643,6 +643,34 @@ struct FetchOutcomeArtifactParams {
     section: Option<OutcomeArtifactSection>,
 }
 
+pub(crate) fn fetch_outcome_artifact_tool_definition() -> crate::tools::ToolDefinition {
+    crate::tools::ToolDefinition {
+        name: "fetch_outcome_artifact".into(),
+        description: "Fetch the side-channel artifact (full or sectioned) for a completed delegation. Use when continuation.payload.artifact_id is Some(_) and you need fuller context. Sections let you pick what to fetch: pass 'status_only' for just status fields (~100B), 'summary' for the inline summary, 'diff_only' for full diff text, or 'full' for the entire DelegationResult JSON.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "delegation_id": {
+                    "type": "string",
+                    "description": "The delegation_id whose artifact you want to fetch."
+                },
+                "attempt": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional attempt number. Default: latest known attempt for this delegation. Pin a specific attempt for forensic queries on retried delegations."
+                },
+                "section": {
+                    "type": "string",
+                    "enum": ["status_only", "summary", "diff_only", "full"],
+                    "default": "full",
+                    "description": "Which section to fetch."
+                }
+            },
+            "required": ["delegation_id"]
+        }),
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CodeAmbiguityMode {

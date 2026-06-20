@@ -75,12 +75,6 @@ impl McpCallbackServer {
         let id = ctx.request_id_value();
 
         match tool_name {
-            "delegate_to_worker" => self.handle_delegate_to_worker(id, arguments).await,
-            "delegate_parallel" => self.handle_delegate_parallel(id, arguments).await,
-            "check_delegation_status" => self.handle_check_delegation_status(id, arguments).await,
-            "fetch_outcome_artifact" => self.handle_fetch_outcome_artifact(id, arguments).await,
-            "cancel_delegation" => self.handle_cancel_delegation(id, arguments).await,
-            "list_available_workers" => self.handle_list_available_workers(id).await,
             "merge_plan" => self.handle_merge_plan(id, arguments).await,
             "resume_plan" => self.handle_resume_plan(id, arguments).await,
             "force_reclaim_plan" => self.handle_force_reclaim_plan(id, arguments).await,
