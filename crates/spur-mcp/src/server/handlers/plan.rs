@@ -1253,47 +1253,6 @@ impl McpCallbackServer {
         }
     }
 
-    pub(crate) async fn handle_report_progress(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let sink = match self.event_sink.as_deref() {
-            Some(sink) => sink,
-            None => {
-                return JsonRpcResponse::internal_error(
-                    id,
-                    "report_progress: event sink not configured",
-                )
-            }
-        };
-        let ctx = crate::handlers::WorkerCallContext {
-            delegation_id: String::new(),
-            brain_session_id: self.brain_session_id().as_session_id().0.clone(),
-        };
-        match crate::handlers::report_progress(sink, &ctx, args).await {
-            Ok(value) => {
-                let text =
-                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-                JsonRpcResponse::success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                )
-            }
-            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
-                JsonRpcResponse::invalid_params(id, e)
-            }
-            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
-                JsonRpcResponse::error(id, -32004, e)
-            }
-            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
-                JsonRpcResponse::error(id, -32001, e)
-            }
-            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
-                JsonRpcResponse::internal_error(id, format!("report_progress failed: {e}"))
-            }
-            Err(crate::handlers::McpHandlerError::Internal(e)) => {
-                JsonRpcResponse::internal_error(id, e)
-            }
-        }
-    }
-
     pub(crate) async fn handle_preview_task_base(&self, id: Value, args: Value) -> JsonRpcResponse {
         let input: crate::tool_schemas::PreviewTaskBaseInput = match serde_json::from_value(args) {
             Ok(input) => input,
