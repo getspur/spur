@@ -196,13 +196,17 @@ impl Orchestrator {
 
     pub(in crate::orchestrator) fn brain_tool_registry(
         &self,
+        delegation_deps: crate::mcp::delegation::DelegationMcpDeps,
         event_sink: Option<Arc<dyn spur_mcp::McpEventSink>>,
     ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
-        crate::mcp::brain_tool_registry(crate::mcp::signals::SignalMcpDeps {
-            pm_service: self.pm_service.clone(),
-            event_sink,
-            feature_gate: self.mcp_feature_gate(),
-        })
+        crate::mcp::brain_tool_registry(
+            delegation_deps,
+            crate::mcp::signals::SignalMcpDeps {
+                pm_service: self.pm_service.clone(),
+                event_sink,
+                feature_gate: self.mcp_feature_gate(),
+            },
+        )
     }
 
     /// Classify an error as an auth-required failure.

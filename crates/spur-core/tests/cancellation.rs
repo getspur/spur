@@ -14,6 +14,19 @@ use spur_acp::{
 use std::sync::Arc;
 use std::time::Duration;
 
+fn install_core_delegation_registry(server: &mut spur_mcp::McpCallbackServer) {
+    let registry = spur_core::mcp::brain_tool_registry(
+        spur_core::mcp::delegation::DelegationMcpDeps::from_server(server),
+        spur_core::mcp::signals::SignalMcpDeps {
+            pm_service: None,
+            event_sink: None,
+            feature_gate: spur_mcp::server::community_feature_gate(),
+        },
+    )
+    .expect("core delegation registry");
+    server.set_tool_registry(registry);
+}
+
 /// Register a token, race execute_delegation look-alike against it,
 /// signal cancel — verify the select! arm yields Cancelled status.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -236,6 +249,7 @@ async fn test_cancel_during_inline_window_fast_arm_wins() {
     server.set_inline_wait(Duration::from_secs(5));
     let cc = CancellationControl::new();
     server.set_cancellation_control(cc.clone());
+    install_core_delegation_registry(&mut server);
     let server = Arc::new(server);
 
     // Fake worker: recv request → register cancel token → publish id → select
@@ -387,6 +401,7 @@ async fn test_cancel_during_detached_path_continuation_delivers_cancelled() {
     server.set_inline_wait(Duration::from_secs(5));
     let cc = CancellationControl::new();
     server.set_cancellation_control(cc.clone());
+    install_core_delegation_registry(&mut server);
     let server = Arc::new(server);
 
     let (id_tx, id_rx) = tokio::sync::oneshot::channel::<String>();

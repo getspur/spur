@@ -58,7 +58,7 @@ pub(crate) const UNVERSIONED_PLAN_CACHE_INLINE_REFRESH_TIMEOUT: std::time::Durat
 /// normal operation — `BlockTimeout` collectors skip it (INV-ASYNC-2).
 /// The 60 s TTL is generous for any residual debug-injection use; the
 /// map is allowed to stay permanently empty in production.
-pub(crate) const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+pub const COMPLETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) const DEFAULT_PLAN_PENDING_GRACE: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 pub(crate) const BRAIN_SESSION_BIND_TIMEOUT: std::time::Duration =
@@ -245,31 +245,31 @@ pub(crate) async fn pause_startup_recovery_if_probed() {
 }
 
 #[cfg(test)]
-pub(crate) const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
+pub const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
 pub(crate) const MCP_NOT_LICENSED_ERROR_CODE: i32 = -32041;
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
-pub(crate) struct JsonRpcResponse {
-    pub(crate) jsonrpc: String,
-    pub(crate) id: Value,
+pub struct JsonRpcResponse {
+    pub jsonrpc: String,
+    pub id: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) result: Option<Value>,
+    pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) error: Option<JsonRpcError>,
+    pub error: Option<JsonRpcError>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct JsonRpcError {
-    pub(crate) code: i64,
-    pub(crate) message: String,
+pub struct JsonRpcError {
+    pub code: i64,
+    pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) data: Option<Value>,
+    pub data: Option<Value>,
 }
 
 impl JsonRpcError {
-    pub(crate) fn into_mcp_error(self) -> McpError {
+    pub fn into_mcp_error(self) -> McpError {
         McpError::new(
             rmcp::model::ErrorCode(self.code as i32),
             self.message,
@@ -279,7 +279,7 @@ impl JsonRpcError {
 }
 
 impl JsonRpcResponse {
-    pub(crate) fn success(id: Value, result: Value) -> Self {
+    pub fn success(id: Value, result: Value) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             id,
@@ -288,7 +288,7 @@ impl JsonRpcResponse {
         }
     }
 
-    pub(crate) fn error(id: Value, code: i64, message: impl Into<String>) -> Self {
+    pub fn error(id: Value, code: i64, message: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             id,
@@ -301,12 +301,7 @@ impl JsonRpcResponse {
         }
     }
 
-    pub(crate) fn error_with_data(
-        id: Value,
-        code: i64,
-        message: impl Into<String>,
-        data: Value,
-    ) -> Self {
+    pub fn error_with_data(id: Value, code: i64, message: impl Into<String>, data: Value) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             id,
@@ -319,15 +314,15 @@ impl JsonRpcResponse {
         }
     }
 
-    pub(crate) fn invalid_params(id: Value, msg: impl Into<String>) -> Self {
+    pub fn invalid_params(id: Value, msg: impl Into<String>) -> Self {
         Self::error(id, -32602, msg)
     }
 
-    pub(crate) fn internal_error(id: Value, msg: impl Into<String>) -> Self {
+    pub fn internal_error(id: Value, msg: impl Into<String>) -> Self {
         Self::error(id, -32603, msg)
     }
 
-    pub(crate) fn mcp_error(id: Value, error: McpError) -> Self {
+    pub fn mcp_error(id: Value, error: McpError) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             id,
@@ -420,7 +415,7 @@ pub(crate) fn project_section(
 /// crate-local `JsonRpcResponse`. Lives here because `JsonRpcResponse`
 /// is private to this crate and the orphan rules forbid an inherent
 /// `impl` on the foreign enum.
-pub(crate) fn dispatch_error_response(err: DelegationDispatchError, id: Value) -> JsonRpcResponse {
+pub fn dispatch_error_response(err: DelegationDispatchError, id: Value) -> JsonRpcResponse {
     JsonRpcResponse::error(id, err.json_rpc_code(), err.to_string())
 }
 
@@ -512,14 +507,125 @@ pub struct DetachedCompletionHandle {
     pub materializer: OutcomeMaterializer,
 }
 
-pub(crate) fn new_attempt_tracker() -> Arc<AtomicU32> {
+pub fn new_attempt_tracker() -> Arc<AtomicU32> {
     Arc::new(AtomicU32::new(1))
+}
+
+/// Spawn a background task that awaits a delegation oneshot and stores the
+/// result in `completed_delegations` for later polling.
+///
+/// When `detached` is `Some`, the task additionally calls the detached
+/// continuation callback to route the result back into the orchestrator
+/// ingress (INV-C3 ordering: UI event before ingress).
+pub fn spawn_result_collector(
+    tracker: &TaskTracker,
+    delegation_id: DelegationId,
+    rx: tokio::sync::oneshot::Receiver<DelegationResult>,
+    cancel_token: CancellationToken,
+    active: Arc<tokio::sync::Mutex<HashSet<DelegationId>>>,
+    completed: Arc<
+        tokio::sync::Mutex<HashMap<DelegationId, (DelegationResult, tokio::time::Instant)>>,
+    >,
+    detached: Option<DetachedCompletionHandle>,
+) {
+    tracker.spawn(async move {
+        tracing::info!(
+            target: "spur.metrics.completion_task_entered",
+            delegation_id = %delegation_id,
+            "detached completion task entered"
+        );
+        let result = tokio::select! {
+            res = rx => match res {
+                Ok(r) => r,
+                Err(_) => DelegationResult {
+                    status: DelegationStatus::Failed {
+                        error: "Orchestrator disconnected".into(),
+                    },
+                    diff: None,
+                    diff_summary: None,
+                    summary: None,
+                    estimated_cost_usd: 0.0,
+                    worker_branch: None,
+                    artifact: None,
+                },
+            },
+            _ = cancel_token.cancelled() => DelegationResult {
+                status: DelegationStatus::Cancelled {
+                    reason: "Brain session retiring".into(),
+                },
+                diff: None,
+                diff_summary: None,
+                summary: None,
+                estimated_cost_usd: 0.0,
+                worker_branch: None,
+                artifact: None,
+            },
+        };
+        active.lock().await.remove(&delegation_id);
+
+        // INV-ASYNC-2 (source_kind-gated): the continuation bridge is the
+        // sole delivery channel for `BlockTimeout` collectors. Writing to
+        // the map on that path would allow `check_delegation_status` to
+        // redeliver a result already sent as a continuation.
+        let keep_map_entry = match &detached {
+            None => true,
+            Some(h) => matches!(h.source_kind, DetachedSourceKind::AsyncRequested),
+        };
+        if keep_map_entry {
+            completed.lock().await.insert(
+                delegation_id.clone(),
+                (result.clone(), tokio::time::Instant::now()),
+            );
+        }
+
+        if let Some(h) = detached {
+            let source = if matches!(result.status, DelegationStatus::Cancelled { .. }) {
+                spur_acp::domain::ContinuationSource::Cancelled
+            } else {
+                match h.source_kind {
+                    DetachedSourceKind::AsyncRequested => {
+                        spur_acp::domain::ContinuationSource::AsyncRequested
+                    }
+                    DetachedSourceKind::BlockTimeout => {
+                        spur_acp::domain::ContinuationSource::BlockTimeout
+                    }
+                }
+            };
+
+            let DetachedCompletionHandle {
+                ctx,
+                attempt_tracker,
+                brain_session,
+                event_sink,
+                materializer,
+                ..
+            } = h;
+            let attempt = attempt_tracker.load(Ordering::SeqCst);
+            tracing::info!(
+                target: "spur.metrics.detached_continuation_dispatch",
+                delegation_id = %delegation_id,
+                attempt,
+                "dispatching to build_detached_continuation"
+            );
+            let cont = build_detached_continuation(
+                &delegation_id,
+                &result,
+                source,
+                attempt,
+                brain_session,
+                event_sink.as_ref(),
+                &materializer,
+            )
+            .await;
+            (ctx.on_complete)(cont, delegation_id.clone().into()).await;
+        }
+    });
 }
 
 /// Phase 3 (plan-5 §7.3): the materializer is the single producer of
 /// `BrainContinuation` for completed delegations. This function is now a
 /// thin wrapper that forwards to `OutcomeMaterializer::materialize`.
-pub(crate) async fn build_detached_continuation(
+pub async fn build_detached_continuation(
     delegation_id: &DelegationId,
     result: &DelegationResult,
     source: spur_acp::domain::ContinuationSource,
