@@ -1,7 +1,5 @@
 pub(crate) mod code_graph;
 pub(crate) mod delegation;
-pub(crate) mod doc_navigate;
-pub(crate) mod knowledge_context;
 pub(crate) mod plan;
 pub(crate) mod plan_execute;
 
@@ -153,9 +151,6 @@ impl McpCallbackServer {
             "code_callees" => self.handle_code_callees(id, arguments).await,
             "code_subgraph" => self.handle_code_subgraph(id, arguments).await,
             "code_symbol_history" => self.handle_code_symbol_history(id, arguments).await,
-            "doc_navigate" => self.handle_doc_navigate(id, arguments).await,
-            "knowledge_context_pack" => self.handle_knowledge_context_pack(id, arguments).await,
-            "knowledge_context_pack_2" => self.handle_knowledge_context_pack_2(id, arguments).await,
             "submit_plan" => self.handle_submit_plan(id, arguments).await,
             "execute_epic" => self.handle_execute_epic(id, arguments).await,
             "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
@@ -188,30 +183,5 @@ impl McpCallbackServer {
             "report_progress" => self.handle_report_progress(id, arguments).await,
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn dispatcher_routes_knowledge_context_pack() {
-        let source = include_str!("mod.rs");
-        assert!(
-            source.contains(
-                "\"knowledge_context_pack\" => self.handle_knowledge_context_pack(id, arguments).await"
-            ),
-            "knowledge_context_pack must be routed by handle_tool_call",
-        );
-    }
-
-    #[test]
-    fn dispatcher_routes_knowledge_context_pack_2() {
-        let source = include_str!("mod.rs");
-        assert!(
-            source.contains(
-                "\"knowledge_context_pack_2\" => self.handle_knowledge_context_pack_2(id, arguments).await"
-            ),
-            "knowledge_context_pack_2 must be routed by handle_tool_call",
-        );
     }
 }
