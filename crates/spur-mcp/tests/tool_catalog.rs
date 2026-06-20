@@ -2,18 +2,12 @@
 //!
 //! Guards INV-1 from the T1 contract-truthfulness spec: the set of tool
 //! names still owned by `spur-mcp` must not drift silently. Core-owned
-//! signal tools are asserted by `spur-core`.
+//! delegation and signal tools are asserted by `spur-core`.
 
 use spur_mcp::tools::worker_tools_list;
 use spur_mcp::{tools_list, ToolDefinition};
 
 const EXPECTED: &[&str] = &[
-    "delegate_to_worker",
-    "delegate_parallel",
-    "check_delegation_status",
-    "fetch_outcome_artifact",
-    "cancel_delegation",
-    "list_available_workers",
     "get_issue",
     "list_issues",
     "update_issue",
@@ -74,6 +68,24 @@ fn tool_catalog_matches_expected() {
         actual, expected,
         "tool_catalog drift detected; update EXPECTED in tests/tool_catalog.rs if intentional",
     );
+}
+
+#[test]
+fn delegation_tools_are_not_owned_by_spur_mcp_catalog() {
+    let actual: Vec<String> = tools_list().iter().map(|t| t.name.clone()).collect();
+    for tool in [
+        "delegate_to_worker",
+        "delegate_parallel",
+        "check_delegation_status",
+        "fetch_outcome_artifact",
+        "cancel_delegation",
+        "list_available_workers",
+    ] {
+        assert!(
+            !actual.iter().any(|name| name == tool),
+            "{tool} must be owned by spur_core::mcp::delegation"
+        );
+    }
 }
 
 #[test]

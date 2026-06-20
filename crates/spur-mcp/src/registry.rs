@@ -90,7 +90,7 @@ impl ToolResponse {
         }
     }
 
-    pub(crate) fn from_json_rpc(envelope: JsonRpcResponse) -> Self {
+    pub fn from_json_rpc(envelope: JsonRpcResponse) -> Self {
         Self { envelope }
     }
 
@@ -725,7 +725,13 @@ pub fn default_tool_registry() -> Result<&'static ToolRegistry, ToolRegistryErro
 }
 
 pub fn legacy_brain_tool_registry_builder() -> Result<ToolRegistryBuilder, ToolRegistryError> {
-    ToolRegistry::builder()
+    legacy_brain_tool_registry_builder_from(ToolRegistry::builder())
+}
+
+pub fn legacy_brain_tool_registry_builder_from(
+    builder: ToolRegistryBuilder,
+) -> Result<ToolRegistryBuilder, ToolRegistryError> {
+    builder
         .with(LegacyMcpToolModule::full_prelude())?
         .with(BrainPmMcpToolModule::crud())?
         .with(LegacyMcpToolModule::plan_management())?

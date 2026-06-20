@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, OnceCell};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info};
@@ -127,7 +127,7 @@ pub struct McpCallbackServer {
     pub(crate) inline_wait: std::time::Duration,
     /// v3-c: set by `mark_retiring`; delegation entry points reject new
     /// requests once retirement begins.
-    pub(crate) retiring: AtomicBool,
+    pub(crate) retiring: Arc<AtomicBool>,
     /// v3-c: parent cancellation token for in-flight collector tasks.
     pub(crate) cancel_token: CancellationToken,
     /// v3-c: handle to the root listener task so `force_abort` can stop it.
@@ -225,7 +225,7 @@ impl McpCallbackServer {
             outcome_store,
             version_churn_epic_for_test: Arc::new(tokio::sync::Mutex::new(None)),
             inline_wait: std::time::Duration::from_millis(0),
-            retiring: AtomicBool::new(false),
+            retiring: Arc::new(AtomicBool::new(false)),
             cancel_token: CancellationToken::new(),
             root_handle: Mutex::new(None),
             root_shutdown_tx: Mutex::new(None),
@@ -386,6 +386,65 @@ impl McpCallbackServer {
 
     pub fn cancel_in_flight_workers(&self) {
         self.cancel_token.cancel();
+    }
+
+    pub fn delegation_sender(&self) -> mpsc::Sender<DelegationRequest> {
+        self.delegation_tx.clone()
+    }
+
+    pub fn workers_snapshot(&self) -> Vec<WorkerInfo> {
+        self.workers.clone()
+    }
+
+    pub fn brain_session_id_cell(&self) -> Arc<OnceCell<spur_acp::BrainSessionId>> {
+        Arc::clone(&self.brain_session_id)
+    }
+
+    pub fn active_delegations_handle(&self) -> Arc<tokio::sync::Mutex<HashSet<DelegationId>>> {
+        Arc::clone(&self.active_delegations)
+    }
+
+    pub fn completed_delegations_handle(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<HashMap<DelegationId, (DelegationResult, tokio::time::Instant)>>>
+    {
+        Arc::clone(&self.completed_delegations)
+    }
+
+    pub fn task_tracker_handle(&self) -> TaskTracker {
+        self.task_tracker.clone()
+    }
+
+    pub fn cancellation_control_handle(&self) -> Option<CancellationControl> {
+        self.cancellation_control.clone()
+    }
+
+    pub fn continuation_ctx_handle(&self) -> Arc<DetachedContinuationCtx> {
+        Arc::clone(&self.continuation_ctx)
+    }
+
+    pub fn outcome_materializer(&self) -> OutcomeMaterializer {
+        self.materializer.clone()
+    }
+
+    pub fn outcome_store_handle(&self) -> Arc<dyn spur_blob_store::OutcomeStore> {
+        Arc::clone(&self.outcome_store)
+    }
+
+    pub fn inline_wait_duration(&self) -> std::time::Duration {
+        self.inline_wait
+    }
+
+    pub fn retiring_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.retiring)
+    }
+
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
+    pub fn event_sink_handle(&self) -> Option<Arc<dyn crate::events::McpEventSink>> {
+        self.event_sink.clone()
     }
 
     pub fn force_abort(&self) {

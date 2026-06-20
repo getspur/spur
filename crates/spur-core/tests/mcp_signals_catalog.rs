@@ -98,8 +98,11 @@ fn signal_module_advertises_only_worker_signal_tools() {
 
 #[test]
 fn core_brain_registry_preserves_compatibility_catalog() {
-    let registry =
-        spur_core::mcp::brain_tool_registry(catalog_deps()).expect("core-composed brain registry");
+    let registry = spur_core::mcp::brain_tool_registry(
+        spur_core::mcp::delegation::DelegationMcpDeps::catalog_only(),
+        catalog_deps(),
+    )
+    .expect("core-composed brain registry");
     let names: Vec<String> = registry
         .list_tools()
         .into_iter()

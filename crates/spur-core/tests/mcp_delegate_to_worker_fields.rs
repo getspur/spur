@@ -24,7 +24,7 @@ fn json_object(value: Value) -> JsonObject {
 
 fn mock_server() -> (McpCallbackServer, spur_mcp::DelegationChannel) {
     let brain_sid = BrainSessionId::new(SessionId::new());
-    McpCallbackServer::new(
+    let (mut server, channel) = McpCallbackServer::new(
         Some(&brain_sid),
         None,
         None,
@@ -32,8 +32,10 @@ fn mock_server() -> (McpCallbackServer, spur_mcp::DelegationChannel) {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         },
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        common::server_builder::community_feature_gate(),
-    )
+        common::community_feature_gate(),
+    );
+    common::install_core_brain_registry(&mut server);
+    (server, channel)
 }
 
 /// Call delegate_to_worker via the rmcp trait and return the captured

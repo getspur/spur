@@ -387,35 +387,6 @@ fn pm_tool_definitions_by_names(names: &[&str]) -> Vec<ToolDefinition> {
         .collect()
 }
 
-// ─── Tool definitions ─────────────────────────────────────────────────
-
-fn delegate_to_worker_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "delegate_to_worker".into(),
-        description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. `enable_worker_mcp` defaults to on — the worker receives the curated worker MCP server unless you pass `false`. `enable_worker_progress` defaults to off; opt in for progress events. Use `list_available_workers` when routing is ambiguous.".into(),
-        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateToWorkerInput>(),
-    }
-}
-
-fn delegate_parallel_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "delegate_parallel".into(),
-        description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Per-task `enable_worker_mcp` defaults to on — each worker receives the curated worker MCP server unless explicitly set to `false`. `enable_worker_progress` defaults to off; opt in per task for progress events. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
-        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateParallelInput>(),
-    }
-}
-
-fn list_available_workers_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "list_available_workers".into(),
-        description: "Returns tier, description, good_for, avoid_for, output_shape, and cost_tier for each worker. Call when the system-prompt one-liner is insufficient.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {}
-        }),
-    }
-}
-
 fn merge_plan_def() -> ToolDefinition {
     ToolDefinition {
         name: "merge_plan".into(),
@@ -471,68 +442,6 @@ fn force_reclaim_plan_def() -> ToolDefinition {
                 }
             },
             "required": ["plan_id", "confirm"]
-        }),
-    }
-}
-
-fn check_delegation_status_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "check_delegation_status".into(),
-        description: "Non-blocking status query for a delegation. Returns the result if finished, or `{\"status\":\"running\"}`. Primarily a debugging affordance — brains are re-prompted automatically when delegations complete and normally do not need to call this.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "delegation_id": {
-                    "type": "string",
-                    "description": "The delegation_id to check"
-                }
-            },
-            "required": ["delegation_id"]
-        }),
-    }
-}
-
-fn fetch_outcome_artifact_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "fetch_outcome_artifact".into(),
-        description: "Fetch the side-channel artifact (full or sectioned) for a completed delegation. Use when continuation.payload.artifact_id is Some(_) and you need fuller context. Sections let you pick what to fetch: pass 'status_only' for just status fields (~100B), 'summary' for the inline summary, 'diff_only' for full diff text, or 'full' for the entire DelegationResult JSON.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "delegation_id": {
-                    "type": "string",
-                    "description": "The delegation_id whose artifact you want to fetch."
-                },
-                "attempt": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Optional attempt number. Default: latest known attempt for this delegation. Pin a specific attempt for forensic queries on retried delegations."
-                },
-                "section": {
-                    "type": "string",
-                    "enum": ["status_only", "summary", "diff_only", "full"],
-                    "default": "full",
-                    "description": "Which section to fetch."
-                }
-            },
-            "required": ["delegation_id"]
-        }),
-    }
-}
-
-fn cancel_delegation_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "cancel_delegation".into(),
-        description: "Request cancellation of a running delegation. If the delegation already completed, returns its result. Otherwise forwards the cancellation to the orchestrator and returns its response.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "delegation_id": {
-                    "type": "string",
-                    "description": "The delegation_id to cancel"
-                }
-            },
-            "required": ["delegation_id"]
         }),
     }
 }
@@ -812,14 +721,7 @@ fn execute_epic_def() -> ToolDefinition {
 }
 
 pub(crate) fn legacy_prelude_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
-        delegate_to_worker_def(),
-        delegate_parallel_def(),
-        check_delegation_status_def(),
-        fetch_outcome_artifact_def(),
-        cancel_delegation_def(),
-        list_available_workers_def(),
-    ]
+    Vec::new()
 }
 
 pub(crate) fn legacy_plan_management_tool_definitions() -> Vec<ToolDefinition> {
@@ -848,7 +750,8 @@ pub(crate) fn legacy_remainder_tool_definitions() -> Vec<ToolDefinition> {
 /// Returns the legacy `spur-mcp` brain tool definitions.
 ///
 /// Application crates compose externally owned modules, such as
-/// `spur_core::mcp::signals`, into the per-server registry.
+/// `spur_core::mcp::delegation` and `spur_core::mcp::signals`, into the
+/// per-server registry.
 pub fn tools_list() -> Vec<ToolDefinition> {
     crate::registry::default_tool_registry()
         .expect("default MCP tool registry must be valid")
@@ -871,7 +774,7 @@ pub(crate) fn legacy_worker_prelude_tool_definitions() -> Vec<ToolDefinition> {
     tools.extend([
         get_task_diff_def(),
         get_plan_status_def(),
-        fetch_outcome_artifact_def(),
+        crate::worker_server::fetch_outcome_artifact_tool_definition(),
     ]);
     tools
 }
@@ -947,13 +850,22 @@ mod schema_truthfulness_tests {
     }
 
     #[test]
-    fn fetch_outcome_artifact_appears_in_tools_list() {
+    fn delegation_tools_are_not_owned_by_legacy_tools_list() {
         let tools = tools_list();
         let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(
-            names.contains(&"fetch_outcome_artifact"),
-            "fetch_outcome_artifact must appear in tools/list, got: {names:?}"
-        );
+        for tool in [
+            "delegate_to_worker",
+            "delegate_parallel",
+            "check_delegation_status",
+            "fetch_outcome_artifact",
+            "cancel_delegation",
+            "list_available_workers",
+        ] {
+            assert!(
+                !names.contains(&tool),
+                "{tool} must be owned by spur_core::mcp::delegation, got: {names:?}"
+            );
+        }
     }
 
     #[test]
@@ -1306,8 +1218,8 @@ mod schema_truthfulness_tests {
     }
 
     #[test]
-    fn fetch_outcome_artifact_schema_advertises_phase3_sections() {
-        let def = fetch_outcome_artifact_def();
+    fn worker_fetch_outcome_artifact_schema_advertises_phase3_sections() {
+        let def = crate::worker_server::fetch_outcome_artifact_tool_definition();
         let props = def
             .input_schema
             .get("properties")
@@ -1343,12 +1255,6 @@ mod worker_tools_subset_tests {
     use super::*;
 
     const EXPECTED_ALL_TOOLS: &[&str] = &[
-        "delegate_to_worker",
-        "delegate_parallel",
-        "check_delegation_status",
-        "fetch_outcome_artifact",
-        "cancel_delegation",
-        "list_available_workers",
         "get_issue",
         "list_issues",
         "update_issue",
@@ -1580,14 +1486,15 @@ mod worker_tools_subset_tests {
     fn worker_tools_list_is_a_strict_subset_of_tools_list() {
         let full: std::collections::HashSet<String> =
             tools_list().iter().map(|t| t.name.clone()).collect();
-        let core_worker_tools = std::collections::HashSet::from([
+        let externally_owned_worker_tools = std::collections::HashSet::from([
             "report_signal".to_string(),
             "report_progress".to_string(),
+            "fetch_outcome_artifact".to_string(),
         ]);
         for w in worker_tools_list() {
             assert!(
-                full.contains(&w.name) || core_worker_tools.contains(&w.name),
-                "worker tool '{}' missing from full tools_list or core-owned worker tool set",
+                full.contains(&w.name) || externally_owned_worker_tools.contains(&w.name),
+                "worker tool '{}' missing from full tools_list or externally owned worker tool set",
                 w.name,
             );
         }
