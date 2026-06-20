@@ -1,4 +1,5 @@
 pub mod delegation;
+pub mod plan;
 pub mod signals;
 
 pub fn brain_tool_registry(

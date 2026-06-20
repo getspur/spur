@@ -14,8 +14,14 @@ pub(crate) enum BeadsVersion {
     ContentHash([u8; 32]),
 }
 
+/// Versioned cache entry for a projected plan.
+///
+/// Phase 4 ownership: orchestration-domain state. Exposed `pub` (fields stay
+/// crate-private) so the `spur-core` `PlanMcpDeps` extraction bundle can hold
+/// the `active_plans` handle by name during the staged engine migration. See
+/// `docs/superpowers/plans/2026-06-21-phase4-plan-reconciler-core-extraction.md`.
 #[derive(Debug, Clone)]
-pub(crate) struct CachedPlan {
+pub struct CachedPlan {
     pub(crate) state: Arc<tokio::sync::Mutex<crate::plan::PlanState>>,
     pub(crate) beads_version: BeadsVersion,
     pub(crate) cached_at: Instant,
