@@ -476,6 +476,22 @@ fn pm_mcp_error(error: spur_pm::mcp::McpHandlerError) -> McpHandlerError {
     }
 }
 
+fn analyst_mcp_error(error: spur_analyst::mcp::McpHandlerError) -> McpHandlerError {
+    match error {
+        spur_analyst::mcp::McpHandlerError::InvalidParams(message) => {
+            McpHandlerError::InvalidParams(message)
+        }
+        spur_analyst::mcp::McpHandlerError::NotFound(message) => McpHandlerError::NotFound(message),
+        spur_analyst::mcp::McpHandlerError::Unauthorized(message) => {
+            McpHandlerError::Unauthorized(message)
+        }
+        spur_analyst::mcp::McpHandlerError::UpstreamPm(message) => {
+            McpHandlerError::UpstreamPm(message)
+        }
+        spur_analyst::mcp::McpHandlerError::Internal(message) => McpHandlerError::Internal(message),
+    }
+}
+
 fn has_analyst_db(root: &std::path::Path) -> bool {
     root.join(".spur").join("analyst.duckdb").exists()
 }
@@ -508,13 +524,17 @@ async fn invoke_knowledge_context_for_worker(
     let root = select_knowledge_context_root(worker_root, deps.repo_root.clone());
     let future = async move {
         if v2 {
-            crate::server::handlers::knowledge_context::knowledge_context_pack_2(&args).await
+            spur_analyst::mcp::knowledge_context_pack_2(&args)
+                .await
+                .map_err(analyst_mcp_error)
         } else {
-            crate::server::handlers::knowledge_context::knowledge_context_pack(&args).await
+            spur_analyst::mcp::knowledge_context_pack(&args)
+                .await
+                .map_err(analyst_mcp_error)
         }
     };
     if let Some(root) = root {
-        crate::server::handlers::code_graph::with_worktree_root_for_request(root, future).await
+        spur_graph::mcp::with_worktree_root_for_request(root, future).await
     } else {
         future.await
     }

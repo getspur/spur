@@ -119,7 +119,7 @@ spur-interactive = { path = "crates/spur-interactive" }
 spur-bot = { path = "crates/spur-bot" }
 spur-context = { path = "crates/spur-context" }
 spur-graph = { path = "crates/spur-graph" }
-spur-analyst = { path = "crates/spur-analyst" }
+spur-analyst = { path = "crates/spur-analyst", default-features = false }
 
 
 # ---------------------------------------------------------------------------
