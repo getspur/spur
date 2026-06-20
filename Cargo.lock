@@ -9750,12 +9750,22 @@ name = "spur-analyst"
 version = "1.6.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
  "duckdb",
+ "fastembed",
+ "futures",
+ "globset",
+ "lance-index",
+ "lancedb",
  "serde",
+ "serde_json",
  "spur-cli",
  "spur-graph",
  "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -10026,18 +10036,13 @@ version = "1.6.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
- "arrow-array",
  "async-trait",
  "axum",
  "base64ct",
  "chrono",
  "duckdb",
- "fastembed",
  "futures",
- "globset",
  "hmac",
- "lance-index",
- "lancedb",
  "madsim",
  "madsim-tokio",
  "parking_lot",
