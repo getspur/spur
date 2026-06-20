@@ -3,9 +3,10 @@
 #
 # Remote is the DEFAULT for heavy compiles; lightweight subcommands auto-run
 # local. Routing (by subcommand):
-#   heavy  — build / check / test / doc / clean: dispatched to the GCP build VM
-#       (scripts/gcp-build/build.sh) with the GCS-backed sccache, falling back
-#       to local cargo only if the VM is unreachable. (clean is here so it
+#   heavy  — build / check / test / doc / clean: dispatched to the centralized
+#       cloud-build pipeline (scripts/cloud-build/build.sh, owned by the
+#       standalone spur-notebook checkout) with AWS primary, GCP fallback, then
+#       local cargo only if both clouds are unreachable. (clean is here so it
 #       cleans the remote target, not the unused local one.)
 #   lint   — clippy: auto-forced LOCAL by default (fast, incremental, no VM
 #       round-trip). SPUR_REMOTE=1 forces it remote — use that in CI, or in a
@@ -30,7 +31,7 @@
 #                     clippy and run; run additionally syncs outputs back)
 #
 # See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
-#      scripts/gcp-build/ — remote build pipeline
+#      scripts/cloud-build/ — centralized remote build pipeline
 set -euo pipefail
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"
@@ -38,7 +39,8 @@ SCRIPT_DIR="${SCRIPT_PATH%/*}"
 [[ "$SCRIPT_DIR" == "$SCRIPT_PATH" ]] && SCRIPT_DIR="."
 SCRIPT_DIR=$(cd "$SCRIPT_DIR" && pwd -P)
 WRAPPER="$SCRIPT_DIR/sccache-worktree.sh"
-REMOTE_BUILD_SH="$SCRIPT_DIR/gcp-build/build.sh"
+REMOTE_BUILD_SH="$SCRIPT_DIR/cloud-build/build.sh"
+LEGACY_REMOTE_BUILD_SH="$SCRIPT_DIR/gcp-build/build.sh"
 
 # ---- routing ---------------------------------------------------------------
 # Remote is the default for heavy compiles; lightweight subcommands auto-run
@@ -82,14 +84,38 @@ esac
 # ---- remote dispatch -------------------------------------------------------
 # build.sh exits with INFRA_UNAVAILABLE (200) only when the VM itself is
 # unreachable; cargo's own exit codes (1/100/101 for build/test failures)
-# pass through unchanged. We fall back to local cargo ONLY for 200 — a
-# genuine test/build failure must propagate so the worker doesn't waste
-# effort re-running locally.
+# pass through unchanged. We fall through AWS -> GCP -> local ONLY for 200 — a
+# genuine test/build failure must propagate so the worker doesn't waste effort
+# re-running elsewhere.
 INFRA_UNAVAILABLE=200
 if [[ $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
-    echo "[spur-cargo] remote ($SUBCOMMAND) → GCP VM" >&2
+    PRIMARY_CLOUD="${SPUR_CLOUD:-aws}"
+    FALLBACK_CLOUD="${SPUR_CLOUD_FALLBACK-gcp}"
+    REMOTE_CLOUDS=("$PRIMARY_CLOUD")
+    if [[ -n "$FALLBACK_CLOUD" && "$FALLBACK_CLOUD" != "$PRIMARY_CLOUD" ]]; then
+        REMOTE_CLOUDS+=("$FALLBACK_CLOUD")
+    fi
+
+    for cloud in "${REMOTE_CLOUDS[@]}"; do
+        echo "[spur-cargo] remote ($SUBCOMMAND) → $cloud VM" >&2
+        set +e
+        SPUR_REMOTE_NAMESPACE=spur SPUR_CLOUD="$cloud" "$REMOTE_BUILD_SH" --auto-spin -- "$@"
+        REMOTE_EXIT=$?
+        set -e
+        if [[ $REMOTE_EXIT -eq 0 ]]; then
+            exit 0
+        fi
+        if [[ $REMOTE_EXIT -ne $INFRA_UNAVAILABLE ]]; then
+            echo "[spur-cargo] remote cargo exited $REMOTE_EXIT on $cloud — propagating (not a VM-availability issue)" >&2
+            exit $REMOTE_EXIT
+        fi
+        echo "[spur-cargo] remote $cloud VM unavailable (exit $REMOTE_EXIT) — trying next cloud/local" >&2
+    done
+    echo "[spur-cargo] all remote clouds unavailable — falling back to local cargo" >&2
+elif [[ $REMOTE_CAPABLE -eq 1 && -x "$LEGACY_REMOTE_BUILD_SH" ]]; then
+    echo "[spur-cargo] centralized cloud-build unavailable; using legacy GCP build helper" >&2
     set +e
-    "$REMOTE_BUILD_SH" --auto-spin -- "$@"
+    "$LEGACY_REMOTE_BUILD_SH" --auto-spin -- "$@"
     REMOTE_EXIT=$?
     set -e
     if [[ $REMOTE_EXIT -eq 0 ]]; then
@@ -99,7 +125,7 @@ if [[ $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
         echo "[spur-cargo] remote cargo exited $REMOTE_EXIT — propagating (not a VM-availability issue)" >&2
         exit $REMOTE_EXIT
     fi
-    echo "[spur-cargo] remote VM unavailable (exit $REMOTE_EXIT) — falling back to local cargo" >&2
+    echo "[spur-cargo] legacy GCP VM unavailable (exit $REMOTE_EXIT) — falling back to local cargo" >&2
 fi
 
 # ---- local fallback (original behavior) ------------------------------------
