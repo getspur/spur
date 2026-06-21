@@ -403,16 +403,12 @@ mod analyst_module_ownership_tests {
     use serde_json::json;
 
     #[test]
-    fn default_registries_compose_analyst_module_explicitly() {
-        let source = include_str!("registry.rs");
-        assert!(
-            source.contains(".with(AnalystMcpToolModule)?"),
-            "brain registry must compose analyst-owned tools through AnalystMcpToolModule"
-        );
-        assert!(
-            source.contains(".with(AnalystMcpToolModule::read_only())?"),
-            "worker registry must compose analyst-owned tools through AnalystMcpToolModule"
-        );
+    fn default_registries_are_infrastructure_empty_after_core_extraction() {
+        let brain = default_tool_registry().expect("default brain registry");
+        let worker = default_worker_tool_registry().expect("default worker registry");
+
+        assert!(brain.list_tools().is_empty());
+        assert!(worker.list_tools().is_empty());
     }
 
     #[tokio::test]

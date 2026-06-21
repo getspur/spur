@@ -265,6 +265,7 @@ impl McpCallbackServer {
         };
         let tool_registry = crate::mcp::brain_tool_registry(
             crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
+            crate::mcp::plan::PlanMcpDeps::from_server(&server),
             crate::mcp::signals::SignalMcpDeps {
                 pm_service: server.pm_service.clone(),
                 event_sink: server.event_sink.clone(),
@@ -916,7 +917,7 @@ impl McpCallbackServer {
         Ok((url, handle))
     }
 
-    async fn check_plan_owner_for_op(
+    pub(crate) async fn check_plan_owner_for_op(
         &self,
         plan_id: &str,
         op_name: &str,
