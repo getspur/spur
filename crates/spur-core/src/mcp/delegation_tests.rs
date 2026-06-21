@@ -1,6 +1,7 @@
 fn install_core_delegation_registry(server: &mut McpCallbackServer) {
     let registry = crate::mcp::brain_tool_registry(
         DelegationMcpDeps::from_server(server),
+        crate::mcp::plan::PlanMcpDeps::from_server(server),
         crate::mcp::signals::SignalMcpDeps {
             pm_service: None,
             event_sink: None,

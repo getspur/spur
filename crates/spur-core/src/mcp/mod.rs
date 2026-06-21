@@ -33,11 +33,15 @@ const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
 
 pub fn brain_tool_registry(
     delegation_deps: delegation::DelegationMcpDeps,
+    plan_deps: plan::PlanMcpDeps,
     signal_deps: signals::SignalMcpDeps,
 ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
     let builder = spur_mcp::ToolRegistry::builder()
         .with(delegation::DelegationMcpModule::new(delegation_deps))?
-        .with(catalog::ServerCatalogMcpModule)?
+        .with(catalog::ServerCatalogMcpModule::prelude())?
+        .with(plan::PlanMcpModule::management(plan_deps.clone()))?
+        .with(catalog::ServerCatalogMcpModule::remainder())?
+        .with(plan::PlanMcpModule::remainder(plan_deps))?
         .with(signals::SignalMcpModule::new(signal_deps))?
         .with_alias("code_search", "code_symbol_search")?;
     Ok(builder.build())
@@ -48,7 +52,14 @@ pub fn catalog_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolR
         .with(delegation::DelegationMcpModule::new(
             delegation::DelegationMcpDeps::catalog_only(),
         ))?
-        .with(catalog::ServerCatalogMcpModule)?
+        .with(catalog::ServerCatalogMcpModule::prelude())?
+        .with(plan::PlanMcpModule::management(
+            plan::PlanMcpDeps::catalog_only(),
+        ))?
+        .with(catalog::ServerCatalogMcpModule::remainder())?
+        .with(plan::PlanMcpModule::remainder(
+            plan::PlanMcpDeps::catalog_only(),
+        ))?
         .with(signals::SignalMcpModule::new(signals::SignalMcpDeps {
             pm_service: None,
             event_sink: None,

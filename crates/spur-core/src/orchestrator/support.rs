@@ -197,10 +197,12 @@ impl Orchestrator {
     pub(in crate::orchestrator) fn brain_tool_registry(
         &self,
         delegation_deps: crate::mcp::delegation::DelegationMcpDeps,
+        plan_deps: crate::mcp::plan::PlanMcpDeps,
         event_sink: Option<Arc<dyn spur_mcp::McpEventSink>>,
     ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
         crate::mcp::brain_tool_registry(
             delegation_deps,
+            plan_deps,
             crate::mcp::signals::SignalMcpDeps {
                 pm_service: self.pm_service.clone(),
                 event_sink,
