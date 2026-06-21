@@ -107,11 +107,11 @@ pub(super) fn build_auto_pr_params(
 
 impl super::Reconciler {
     pub(super) async fn reconcile_terminal_epics(&self) -> anyhow::Result<bool> {
-        crate::server::require_feature(
+        crate::feature::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
         )
-        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
+        .map_err(|error| anyhow::anyhow!(crate::feature::feature_error_message(error)))?;
         let Some(adv) = self.pm.advanced() else {
             return Ok(false);
         };
