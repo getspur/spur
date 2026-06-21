@@ -35,16 +35,14 @@ use agent_client_protocol::schema::{
     SetSessionModeRequest, TextContent,
 };
 
+use crate::worker_server::WorkerMcpServer;
 use spur_blob_store::{
     ContentType, MeasuredOutcomeStore, OutcomeKey, OutcomeMetadata, OutcomeStore,
 };
 use spur_cost::CostTracker;
 use spur_license::SpurLicense;
 use spur_mcp::tools::BaseSpec;
-use spur_mcp::worker_server::WorkerMcpServer;
-use spur_mcp::{
-    build_worker_info, DelegationChannel, DelegationRequest, McpCallbackServer, WorkerInfo,
-};
+use spur_mcp::{DelegationChannel, DelegationRequest};
 
 use dashmap::DashMap;
 use spur_pm::PmService;
@@ -54,6 +52,7 @@ use spur_worktree::{manager::WorktreeError, WorktreeManager};
 use crate::lineage::ExecutorId;
 use crate::review_sink::ReviewSink;
 use crate::scheduler::TurnGuard;
+use crate::server::{build_worker_info, McpCallbackServer, WorkerInfo};
 
 pub mod adhoc;
 pub mod connection;

@@ -9,8 +9,8 @@ use rmcp::{
 };
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
+use spur_core::{server::DetachedContinuationCtx, McpCallbackServer};
 use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
-use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use std::sync::Arc;
 
 mod common;

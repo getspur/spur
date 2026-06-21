@@ -10,7 +10,7 @@ use spur_acp::domain::{
 };
 use spur_acp::{BrainSessionId, SessionId};
 use spur_core::continuation_bridge::{continuation_cost_bytes, MERGE_BUDGET_DEFAULT_BYTES};
-use spur_mcp::outcome_materializer::estimate_envelope_cost;
+use spur_core::outcome_materializer::estimate_envelope_cost;
 
 fn outcome_key(delegation_id: DelegationId, attempt: u32) -> OutcomeKey {
     OutcomeKey {
