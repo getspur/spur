@@ -51,6 +51,7 @@ use crate::tools::{DelegationChannel, DelegationRequest};
 
 pub(crate) mod handlers;
 pub(crate) mod plan_builder;
+pub(crate) mod plan_deps;
 pub(crate) mod recovery;
 pub(crate) mod review;
 pub(crate) mod sync;
@@ -560,6 +561,11 @@ impl McpCallbackServer {
         Arc::clone(&self.active_plan_claim_lock)
     }
 
+    /// Clone-shared test hook for forced persisted-plan version churn.
+    pub fn version_churn_epic_for_test_handle(&self) -> Arc<tokio::sync::Mutex<Option<String>>> {
+        Arc::clone(&self.version_churn_epic_for_test)
+    }
+
     /// Optional PM service used by plan submission/projection.
     pub fn pm_service_handle(&self) -> Option<Arc<PmService>> {
         self.pm_service.clone()
@@ -710,7 +716,8 @@ impl McpCallbackServer {
             ..Default::default()
         };
         let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
-            Some(Arc::clone(&self) as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
+            Some(Arc::new(self.plan_mcp_deps())
+                as Arc<dyn crate::plan::reconciler::ReconcilerAutomation>);
         let feature_gate = Arc::clone(&self.feature_gate);
         let reconciler_outcomes = Arc::clone(&self.reconciler_outcomes);
         let journal_notify = Arc::new(tokio::sync::Notify::new());
@@ -907,85 +914,15 @@ impl McpCallbackServer {
         plan_id: &str,
         op_name: &str,
     ) -> Result<(), (i64, String)> {
-        let Some(pm) = self.pm_service.as_deref() else {
-            return Ok(());
-        };
-
-        let epics = pm
-            .list_issues(IssueFilter {
-                labels: vec![crate::plan::labels::plan_id(plan_id)],
-                issue_type: Some("epic".to_string()),
-                include_closed: true,
-                limit: Some(10),
-                ..Default::default()
-            })
+        self.plan_mcp_deps()
+            .check_plan_owner_for_op(plan_id, op_name)
             .await
-            .map_err(|error| (-32603, format!("{op_name}: failed to find plan: {error}")))?;
-
-        let Some(epic_summary) = epics.first() else {
-            return Err((-32004, format!("{op_name}: plan not found: {plan_id}")));
-        };
-        if epics.len() > 1 {
-            let epic_ids = epics
-                .iter()
-                .map(|epic| epic.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err((
-                -32009,
-                format!(
-                    "{op_name}: ambiguous plan lookup for {plan_id}; multiple epics matched: {epic_ids}"
-                ),
-            ));
-        }
-        let epic_id = epic_summary.id.clone();
-        let epic = pm.get_issue(&epic_id).await.map_err(|error| {
-            (
-                -32603,
-                format!("{op_name}: failed to load epic {epic_id}: {error}"),
-            )
-        })?;
-
-        match crate::plan::ownership::classify_owner(
-            &epic.labels,
-            self.brain_session_id().as_session_id(),
-        ) {
-            crate::plan::ownership::PlanOwnerMatch::OwnedByCurrent => Ok(()),
-            crate::plan::ownership::PlanOwnerMatch::OwnedByOther { owner } => Err((
-                -32009,
-                format!(
-                    "{op_name}: plan {plan_id} is owned by {owner}; active handoff is not implemented in MVP"
-                ),
-            )),
-            crate::plan::ownership::PlanOwnerMatch::Ambiguous { owners } => Err((
-                -32009,
-                format!(
-                    "{op_name}: plan {plan_id} has ambiguous owner labels: {}",
-                    owners.join(", ")
-                ),
-            )),
-            crate::plan::ownership::PlanOwnerMatch::Unowned => Err((
-                -32009,
-                format!(
-                    "{op_name}: plan {plan_id} is unowned; claim it via execute_epic or resume_plan first"
-                ),
-            )),
-        }
-    }
-
-    async fn projected_plan_status(&self, plan_id: &str) -> Result<serde_json::Value, String> {
-        let plan_arc = self.load_or_project_plan(plan_id).await?;
-        let state = plan_arc.lock().await;
-        Ok(crate::plan::build_plan_status(plan_id, &state))
     }
 
     async fn is_projected_plan_nonterminal(&self, plan_id: &str) -> Result<bool, String> {
-        let status = self.projected_plan_status(plan_id).await?;
-        let overall = status
-            .get("status")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown");
-        Ok(!crate::plan::is_terminal_plan_status(overall))
+        self.plan_mcp_deps()
+            .is_projected_plan_nonterminal(plan_id)
+            .await
     }
 
     /// Single-active-plan-per-brain quota check. Layered ON TOP of plan-scoped
@@ -998,46 +935,9 @@ impl McpCallbackServer {
         exempt_plan_id: Option<&str>,
         exempt_epic_id: Option<&str>,
     ) -> Result<Option<ActiveOwnedPlan>, String> {
-        let owner_label =
-            crate::plan::labels::plan_owner(&self.brain_session_id().as_session_id().0);
-        let epics = pm
-            .list_issues(IssueFilter {
-                labels: vec![owner_label],
-                status: Some("open".to_string()),
-                issue_type: Some("epic".to_string()),
-                include_closed: false,
-                limit: Some(10_000),
-                ..Default::default()
-            })
+        self.plan_mcp_deps()
+            .current_brain_active_owned_plan(pm, exempt_plan_id, exempt_epic_id)
             .await
-            .map_err(|error| format!("failed to scan active owned plans: {error}"))?;
-
-        for epic_summary in epics {
-            let epic_id = epic_summary.id;
-            let epic = pm
-                .get_issue(&epic_id)
-                .await
-                .map_err(|error| format!("failed to load owned plan epic {epic_id}: {error}"))?;
-            let plan_ids = epic
-                .labels
-                .iter()
-                .filter_map(|label| crate::plan::labels::parse_plan_id(label))
-                .collect::<HashSet<_>>();
-
-            for plan_id in plan_ids {
-                if exempt_plan_id == Some(plan_id) || exempt_epic_id == Some(epic_id.as_str()) {
-                    continue;
-                }
-                if self.is_projected_plan_nonterminal(plan_id).await? {
-                    return Ok(Some(ActiveOwnedPlan {
-                        plan_id: plan_id.to_string(),
-                        epic_id: epic_id.clone(),
-                    }));
-                }
-            }
-        }
-
-        Ok(None)
     }
 
     async fn nonterminal_plan_status_for_epic(
@@ -1045,426 +945,52 @@ impl McpCallbackServer {
         pm: &dyn crate::plan::PmLike,
         epic_id: &str,
     ) -> Result<Option<(String, serde_json::Value)>, String> {
-        let epic = pm
-            .get_issue(epic_id)
+        self.plan_mcp_deps()
+            .nonterminal_plan_status_for_epic(pm, epic_id)
             .await
-            .map_err(|error| format!("failed to load epic {epic_id}: {error}"))?;
-        let plan_ids = epic
-            .labels
-            .iter()
-            .filter_map(|label| crate::plan::labels::parse_plan_id(label))
-            .collect::<HashSet<_>>();
-        let mut active = Vec::new();
-
-        for plan_id in plan_ids {
-            let status = self.projected_plan_status(plan_id).await?;
-            let overall = status
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
-            if !crate::plan::is_terminal_plan_status(overall) {
-                active.push((plan_id.to_string(), status));
-            }
-        }
-
-        match active.len() {
-            0 => Ok(None),
-            1 => Ok(active.into_iter().next()),
-            _ => Err(format!(
-                "epic {epic_id} has multiple nonterminal plans: {}",
-                active
-                    .iter()
-                    .map(|(plan_id, _)| plan_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-        }
     }
 
     async fn install_projected_plan(&self, projected: crate::plan::PlanState, emit_snapshot: bool) {
-        let plan_id = projected.plan_id.clone();
-        if let Some(epic_id) = projected.epic_id.clone() {
-            self.plan_registry
-                .lock()
-                .await
-                .by_epic
-                .insert(epic_id, plan_id.clone());
-        }
-        if emit_snapshot {
-            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &projected);
-        }
-        self.install_projected_plan_with_version(projected, unknown_beads_version())
+        self.plan_mcp_deps()
+            .install_projected_plan(projected, emit_snapshot)
             .await;
     }
 
-    async fn install_projected_plan_with_version(
-        &self,
-        projected: crate::plan::PlanState,
-        beads_version: BeadsVersion,
-    ) -> Arc<tokio::sync::Mutex<crate::plan::PlanState>> {
-        let plan_id = projected.plan_id.clone();
-        if let Some(epic_id) = projected.epic_id.clone() {
-            self.plan_registry
-                .lock()
-                .await
-                .by_epic
-                .insert(epic_id, plan_id.clone());
-        }
-        let state = Arc::new(tokio::sync::Mutex::new(projected));
-        self.active_plans
-            .lock()
-            .await
-            .insert(plan_id, CachedPlan::new(Arc::clone(&state), beads_version));
-        state
-    }
-
-    async fn refresh_unversioned_cached_plan(
-        &self,
-        plan_id: &str,
-    ) -> Result<crate::handlers::ResolvedPlanState, String> {
-        let pm = self
-            .submit_plan_substrate_pm()
-            .ok_or_else(|| format!("unknown plan '{plan_id}'"))?;
-        let projected = crate::plan::projector::project_plan_from_beads(
-            pm,
-            plan_id,
-            self.feature_gate.as_ref(),
-        )
-        .await
-        .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
-        let state = self
-            .install_projected_plan_with_version(projected, unknown_beads_version())
-            .await;
-        Ok(crate::handlers::ResolvedPlanState {
-            state,
-            freshness: crate::handlers::PlanStateFreshness::Projection,
-        })
-    }
-
-    async fn maybe_churn_beads_version_for_test(&self, epic_id: &str) -> Result<(), String> {
-        let churn_epic = self.version_churn_epic_for_test.lock().await.clone();
-        if churn_epic.as_deref() != Some(epic_id) {
-            return Ok(());
-        }
-        let pm = self
-            .pm_service
-            .as_deref()
-            .ok_or_else(|| "test version churn requires PM service".to_string())?;
-        require_feature(
-            FeatureKey::PM_PRO_BEADS_ADVANCED,
-            self.feature_gate.as_ref(),
-        )
-        .map_err(feature_error_message)?;
-        let advanced = pm
-            .advanced()
-            .ok_or_else(|| "test version churn requires beads advanced backend".to_string())?;
-        advanced
-            .add_comment(
-                epic_id,
-                &crate::plan::audit_sentinel::encode_comment(
-                    &crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
-                        plan_id: "test-version-churn".into(),
-                        owner: "test".into(),
-                        token: uuid::Uuid::new_v4().to_string(),
-                        reason: "versioned-cache-retry-bound".into(),
-                    },
-                ),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("test version churn failed: {error}"))
-    }
-
-    async fn beads_version_for_epic(&self, epic_id: &str) -> Result<BeadsVersion, String> {
-        self.maybe_churn_beads_version_for_test(epic_id).await?;
-        let pm = self.pm_service.as_deref().ok_or_else(|| {
-            format!("beads version unavailable for epic '{epic_id}': PM service not configured")
-        })?;
-        Self::derive_beads_version(pm, self.feature_gate.as_ref(), epic_id).await
-    }
-
+    #[cfg(test)]
     async fn derive_beads_version(
         pm: &spur_pm::PmService,
         feature_gate: &spur_license::FeatureGate,
         epic_id: &str,
     ) -> Result<BeadsVersion, String> {
-        require_feature(
-            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
-            feature_gate,
-        )
-        .map_err(feature_error_message)?;
-        let adv = pm
-            .advanced()
-            .ok_or_else(|| "beads version derivation requires beads backend".to_string())?;
-        let comments = adv
-            .list_comments(epic_id)
-            .await
-            .map_err(|error| format!("list_comments({epic_id}) failed: {error}"))?;
-        let epic_issue = pm
-            .get_issue(epic_id)
-            .await
-            .map_err(|error| format!("get_issue({epic_id}) failed: {error}"))?;
-        let plan_id = epic_issue
-            .labels
-            .iter()
-            .find_map(|label| crate::plan::labels::parse_plan_id(label));
-        let Some(plan_id) = plan_id else {
-            return Ok(BeadsVersion::AuditSeq(
-                crate::plan::projector::sort_projection_comments(comments)
-                    .into_iter()
-                    .filter(|comment| {
-                        comment
-                            .body
-                            .starts_with(crate::plan::audit_sentinel::SENTINEL_PREFIX)
-                    })
-                    .count() as u64,
-            ));
-        };
-
-        // Option B (content-addressed): derive a cache token from the sorted
-        // set of plan-scoped audit comment IDs. This avoids additive-count
-        // collisions across plan restarts and aligns issue discovery with the
-        // projector (scan by `spur:plan-id:<id>` label).
-        let mut summary_by_id = HashMap::new();
-        for status in [
-            Some("open".to_string()),
-            Some("in_progress".to_string()),
-            Some(pm.closed_status().to_string()),
-        ] {
-            for summary in pm
-                .list_issues(IssueFilter {
-                    labels: vec![crate::plan::labels::plan_id(plan_id)],
-                    status,
-                    limit: Some(1_000),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|error| format!("list_issues(plan={plan_id}) failed: {error}"))?
-            {
-                summary_by_id.insert(summary.id.clone(), summary);
-            }
-        }
-        let mut issue_ids: Vec<String> = summary_by_id.into_keys().collect();
-        issue_ids.sort();
-
-        let comments_by_issue =
-            futures::future::try_join_all(issue_ids.iter().map(|issue_id| async move {
-                adv.list_comments(issue_id)
-                    .await
-                    .map(|comments| (issue_id.clone(), comments))
-            }))
-            .await
-            .map_err(|error| format!("list_comments(plan={plan_id}) failed: {error}"))?;
-
-        let mut audit_keys = Vec::new();
-        for (issue_id, comments) in comments_by_issue {
-            for comment in crate::plan::projector::sort_projection_comments(comments) {
-                if !comment
-                    .body
-                    .starts_with(crate::plan::audit_sentinel::SENTINEL_PREFIX)
-                {
-                    continue;
-                }
-                if let Some(Err(error)) = crate::plan::audit_sentinel::parse_comment(&comment.body)
-                {
-                    tracing::warn!(
-                        %plan_id,
-                        %issue_id,
-                        comment_id = %comment.id,
-                        %error,
-                        "malformed audit sentinel included in beads version hash"
-                    );
-                }
-                audit_keys.push((issue_id.clone(), comment.id));
-            }
-        }
-        audit_keys.sort();
-
-        let mut hasher = Sha256::new();
-        for (issue_id, comment_id) in audit_keys {
-            hasher.update(issue_id.as_bytes());
-            hasher.update([0_u8]);
-            hasher.update(comment_id.as_bytes());
-            hasher.update([0_u8]);
-        }
-        let digest = hasher.finalize();
-        let mut hash = [0_u8; 32];
-        hash.copy_from_slice(&digest);
-        Ok(BeadsVersion::ContentHash(hash))
-    }
-
-    async fn project_plan_from_beads_with_stable_version(
-        &self,
-        pm: &spur_pm::PmService,
-        plan_id: &str,
-    ) -> Result<(crate::plan::PlanState, BeadsVersion), String> {
-        let epic = find_plan_epic(
-            pm,
-            self.feature_gate.as_ref(),
-            plan_id,
-            "load_or_project_plan",
-        )
-        .await?;
-
-        for (attempt, backoff) in VERSIONED_PLAN_CACHE_BACKOFFS.iter().enumerate() {
-            let before_version = self.beads_version_for_epic(&epic.id).await?;
-            let projected = crate::plan::projector::project_plan_from_beads(
-                pm,
-                plan_id,
-                self.feature_gate.as_ref(),
-            )
-            .await
-            .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
-            let after_version = self.beads_version_for_epic(&epic.id).await?;
-            if before_version == after_version {
-                return Ok((projected, after_version));
-            }
-
-            tracing::debug!(
-                %plan_id,
-                epic_id = %epic.id,
-                attempt = attempt + 1,
-                before_version = ?before_version,
-                after_version = ?after_version,
-                "persisted plan changed during projection; retrying"
-            );
-
-            if attempt + 1 < VERSIONED_PLAN_CACHE_MAX_ATTEMPTS {
-                tokio::time::sleep(*backoff).await;
-            }
-        }
-
-        Err(format!(
-            "load_or_project_plan: plan '{plan_id}' changed during projection after {VERSIONED_PLAN_CACHE_MAX_ATTEMPTS} attempts"
-        ))
+        plan_deps::PlanMcpDeps::derive_beads_version(pm, feature_gate, epic_id).await
     }
 
     async fn load_or_project_plan(
         &self,
         plan_id: &str,
     ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
-        Ok(self
-            .load_or_project_plan_with_freshness(plan_id)
-            .await?
-            .state)
+        self.plan_mcp_deps().load_or_project_plan(plan_id).await
     }
 
+    #[cfg(test)]
     async fn load_or_project_plan_with_freshness(
         &self,
         plan_id: &str,
     ) -> Result<crate::handlers::ResolvedPlanState, String> {
-        let cached = self.active_plans.lock().await.get(plan_id).cloned();
-        if let Some(existing) = cached.clone() {
-            let (epic_id, has_nonterminal_tasks) = {
-                let state = existing.state.lock().await;
-                (
-                    state.epic_id.clone(),
-                    state.tasks.iter().any(|task| !task.status.is_terminal()),
-                )
-            };
-            if self.versioned_cache_serve {
-                if let Some(epic_id) = epic_id {
-                    let current_version = self.beads_version_for_epic(&epic_id).await?;
-                    if current_version == existing.beads_version {
-                        return Ok(crate::handlers::ResolvedPlanState {
-                            state: existing.state,
-                            freshness: crate::handlers::PlanStateFreshness::Cache {
-                                beads_version_verified: true,
-                                cached_age_ms: existing.cached_at.elapsed().as_millis() as u64,
-                            },
-                        });
-                    }
-                    tracing::debug!(
-                        %plan_id,
-                        %epic_id,
-                        cached_age_ms = existing.cached_at.elapsed().as_millis(),
-                        cached_version = ?existing.beads_version,
-                        current_version = ?current_version,
-                        "persisted plan cache version mismatch; re-projecting from beads"
-                    );
-                }
-            } else {
-                if epic_id.is_some()
-                    && has_nonterminal_tasks
-                    && existing.cached_at.elapsed() >= UNVERSIONED_PLAN_CACHE_REFRESH_AFTER
-                {
-                    match tokio::time::timeout(
-                        UNVERSIONED_PLAN_CACHE_INLINE_REFRESH_TIMEOUT,
-                        self.refresh_unversioned_cached_plan(plan_id),
-                    )
-                    .await
-                    {
-                        Ok(Ok(resolved)) => return Ok(resolved),
-                        Ok(Err(error)) => {
-                            tracing::warn!(
-                                %plan_id,
-                                %error,
-                                "stale unversioned plan cache refresh failed; serving cache"
-                            );
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                %plan_id,
-                                timeout_ms = UNVERSIONED_PLAN_CACHE_INLINE_REFRESH_TIMEOUT
-                                    .as_millis(),
-                                "stale unversioned plan cache refresh timed out; serving cache"
-                            );
-                        }
-                    }
-                }
-                return Ok(crate::handlers::ResolvedPlanState {
-                    state: existing.state,
-                    freshness: crate::handlers::PlanStateFreshness::Cache {
-                        beads_version_verified: false,
-                        cached_age_ms: existing.cached_at.elapsed().as_millis() as u64,
-                    },
-                });
-            }
-        }
-
-        let pm = self
-            .submit_plan_substrate_pm()
-            .ok_or_else(|| format!("unknown plan '{plan_id}'"))?;
-        if self.versioned_cache_serve {
-            if let Some(pm_service) = self.pm_service.as_deref() {
-                let (projected, beads_version) = self
-                    .project_plan_from_beads_with_stable_version(pm_service, plan_id)
-                    .await?;
-                let state = self
-                    .install_projected_plan_with_version(projected, beads_version)
-                    .await;
-                return Ok(crate::handlers::ResolvedPlanState {
-                    state,
-                    freshness: crate::handlers::PlanStateFreshness::Projection,
-                });
-            }
-        }
-
-        let projected = crate::plan::projector::project_plan_from_beads(
-            pm,
-            plan_id,
-            self.feature_gate.as_ref(),
-        )
-        .await
-        .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
-        let state = self
-            .install_projected_plan_with_version(projected, unknown_beads_version())
-            .await;
-        Ok(crate::handlers::ResolvedPlanState {
-            state,
-            freshness: crate::handlers::PlanStateFreshness::Projection,
-        })
+        self.plan_mcp_deps()
+            .load_or_project_plan_with_freshness(plan_id)
+            .await
     }
 }
 
 #[async_trait::async_trait]
 impl crate::plan::reconciler::ReconcilerAutomation for McpCallbackServer {
     async fn merge_plan(&self, plan_id: &str) -> anyhow::Result<crate::plan::PlanMergeState> {
-        self.merge_plan_impl(plan_id).await
+        self.plan_mcp_deps().merge_plan_impl(plan_id).await
     }
 
     async fn create_pr(&self, params: spur_pm::PrParams) -> anyhow::Result<String> {
-        self.create_pr_impl(params).await
+        self.plan_mcp_deps().create_pr_impl(params).await
     }
 }
 
@@ -1474,14 +1000,16 @@ impl crate::handlers::PlanResolver for McpCallbackServer {
         &self,
         plan_id: &str,
     ) -> Result<Arc<tokio::sync::Mutex<crate::plan::PlanState>>, String> {
-        McpCallbackServer::load_or_project_plan(self, plan_id).await
+        self.plan_mcp_deps().load_or_project_plan(plan_id).await
     }
 
     async fn load_or_project_plan_with_freshness(
         &self,
         plan_id: &str,
     ) -> Result<crate::handlers::ResolvedPlanState, String> {
-        McpCallbackServer::load_or_project_plan_with_freshness(self, plan_id).await
+        self.plan_mcp_deps()
+            .load_or_project_plan_with_freshness(plan_id)
+            .await
     }
 }
 
