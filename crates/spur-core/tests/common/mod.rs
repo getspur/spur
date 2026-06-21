@@ -121,6 +121,7 @@ pub fn community_feature_gate() -> Arc<FeatureGate> {
 pub fn install_core_brain_registry(server: &mut McpCallbackServer) {
     let registry = spur_core::mcp::brain_tool_registry(
         spur_core::mcp::delegation::DelegationMcpDeps::from_server(server),
+        spur_core::mcp::plan::PlanMcpDeps::from_server(server),
         spur_core::mcp::signals::SignalMcpDeps {
             pm_service: None,
             event_sink: None,
