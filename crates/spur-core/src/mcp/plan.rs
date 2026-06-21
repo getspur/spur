@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use spur_acp::BrainSessionId;
 use spur_blob_store::OutcomeStore as BlobOutcomeStore;
 use spur_license::FeatureGate;
 use spur_mcp::outcome_materializer::OutcomeMaterializer;
@@ -25,6 +26,7 @@ use spur_mcp::plan::{PlanRegistry, PmLike};
 use spur_mcp::server::{CachedPlan, DetachedContinuationCtx};
 use spur_mcp::{McpCallbackServer, McpEventSink};
 use spur_pm::PmService;
+use tokio::sync::OnceCell;
 
 /// Orchestration-domain handles for the plan/review/reconciler MCP tools.
 ///
@@ -34,6 +36,8 @@ use spur_pm::PmService;
 /// or diverging state.
 #[derive(Clone)]
 pub struct PlanMcpDeps {
+    /// Brain session owner cell used by plan ownership checks.
+    pub brain_session_id: Arc<OnceCell<BrainSessionId>>,
     /// Versioned active-plan cache (`plan_id → CachedPlan`).
     pub active_plans: Arc<tokio::sync::Mutex<HashMap<String, CachedPlan>>>,
     /// `epic_id → plan_id` registry for idempotent execute/resume.
@@ -46,6 +50,8 @@ pub struct PlanMcpDeps {
     pub pm_service: Option<Arc<PmService>>,
     /// `PmLike` substrate handle used by the projector/reconciler.
     pub pm_service_like: Option<Arc<dyn PmLike>>,
+    /// Test hook used to force persisted-plan version churn between reads.
+    pub version_churn_epic_for_test: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Feature gate shared with the license runtime.
     pub feature_gate: Arc<FeatureGate>,
     /// Detached-completion continuation bridge.
@@ -80,12 +86,14 @@ impl PlanMcpDeps {
     /// `McpCallbackServer` still co-owns the same state during the migration.
     pub fn from_server(server: &McpCallbackServer) -> Self {
         Self {
+            brain_session_id: server.brain_session_id_cell(),
             active_plans: server.active_plans_handle(),
             plan_registry: server.plan_registry_handle(),
             plan_claim_lock: server.plan_claim_lock_handle(),
             reconciler_outcomes: server.reconciler_outcomes_handle(),
             pm_service: server.pm_service_handle(),
             pm_service_like: server.pm_like_handle(),
+            version_churn_epic_for_test: server.version_churn_epic_for_test_handle(),
             feature_gate: server.feature_gate(),
             continuation_ctx: server.continuation_ctx_handle(),
             materializer: server.outcome_materializer(),
@@ -142,6 +150,10 @@ mod tests {
 
         // Plan-state handles are clone-shared with the server, not fresh copies.
         assert!(
+            Arc::ptr_eq(&deps.brain_session_id, &server.brain_session_id_cell()),
+            "brain_session_id must be shared with the server"
+        );
+        assert!(
             Arc::ptr_eq(&deps.active_plans, &server.active_plans_handle()),
             "active_plans must be shared with the server"
         );
@@ -159,6 +171,13 @@ mod tests {
         assert!(
             Arc::ptr_eq(&deps.plan_claim_lock, &server.plan_claim_lock_handle()),
             "plan_claim_lock must be shared with the server"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &deps.version_churn_epic_for_test,
+                &server.version_churn_epic_for_test_handle()
+            ),
+            "version_churn_epic_for_test must be shared with the server"
         );
     }
 }
