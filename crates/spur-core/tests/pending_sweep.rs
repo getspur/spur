@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
@@ -15,6 +15,18 @@ use tempfile::TempDir;
 mod common;
 
 const SWEEP_COMMENT_PREFIX: &str = "SPUR startup sweep quarantined stale pending plan";
+
+/// Serialize the startup-sweep server lifecycle across this binary's tests.
+///
+/// Each test stands up a full `McpCallbackServer` whose `start()` warms a
+/// process-global embed model and spawns background tasks; running several of
+/// these heavyweight servers concurrently (libtest's default in-binary
+/// parallelism) oversubscribes that shared global state and can deadlock the
+/// heaviest sweep. The relocation of this suite from `spur-mcp` into the
+/// heavier `spur-core` test binary surfaced the latent hang. Mirror the
+/// existing `cec4a975_concurrent_hang_simulator` / `code_graph_e2e` precedent
+/// and gate the server-lifecycle window behind a shared async mutex.
+static SWEEP_SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 struct SweepEvent {
@@ -139,6 +151,15 @@ async fn start_server_for_sweep(
     grace: Duration,
     sink: Option<Arc<dyn McpEventSink>>,
 ) {
+    // Hold the shared lock across the whole server lifecycle (start through the
+    // `drop(handle)` below) so only one sweep server runs at a time; this is the
+    // entire concurrent-hang-prone window. Released when this fn returns, so the
+    // tests' post-sweep beads assertions still run in parallel.
+    let _serial = SWEEP_SERIAL
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, _channel) = McpCallbackServer::new(
         Some(&brain_sid),
