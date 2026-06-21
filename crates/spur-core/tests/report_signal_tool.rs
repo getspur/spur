@@ -1,17 +1,30 @@
 //! T-F5: happy path. T-I3: late-arrival gate.
+#![allow(clippy::await_holding_lock)]
+
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::json;
+use spur_core::handlers::WorkerCallContext;
 use spur_core::mcp::signals::report_signal;
-use spur_mcp::handlers::WorkerCallContext;
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
-use spur_mcp::plan::labels;
-use spur_mcp::plan::signals::{self, WorkerSignal};
+use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
+use spur_core::plan::labels;
+use spur_core::plan::signals::{self, WorkerSignal};
 use uuid::Uuid;
 
 mod common;
 
+static REPORT_SIGNAL_PM_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn report_signal_pm_lock() -> MutexGuard<'static, ()> {
+    REPORT_SIGNAL_PM_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("report_signal PM lock poisoned")
+}
+
 #[tokio::test]
 async fn report_signal_on_open_task_records_all_artifacts() {
+    let _lock = report_signal_pm_lock();
     let (_dir, pm) = common::temp_beads_pm().await;
     let task_id = common::create_task(&pm, "Open signal task").await;
     let signal = common::scope_drift_signal(Uuid::new_v4());
@@ -91,6 +104,7 @@ async fn report_signal_on_open_task_records_all_artifacts() {
 
 #[tokio::test]
 async fn report_signal_on_terminal_task_records_late_arrival() {
+    let _lock = report_signal_pm_lock();
     let (_dir, pm) = common::temp_beads_pm().await;
     let task_id = common::create_task(&pm, "Terminal signal task").await;
     common::close_task(&pm, &task_id).await;
@@ -172,6 +186,7 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
 
 #[tokio::test]
 async fn report_signal_threads_worker_call_context() {
+    let _lock = report_signal_pm_lock();
     let (_dir, pm) = common::temp_beads_pm().await;
     let task_id = common::create_task(&pm, "Context thread task").await;
     let signal = common::scope_drift_signal(Uuid::new_v4());

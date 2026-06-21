@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::server::McpCallbackServer;
+use crate::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use agent_client_protocol::schema::{McpServer, McpServerHttp};
 use dashmap::DashMap;
 use spur_acp::DelegationDispatchError;
 use spur_blob_store::OutcomeStore;
-use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
-use spur_mcp::McpCallbackServer;
 use spur_pm::PmService;
 
 /// Phase 5 / Task 26 — clonable bundle of orchestrator state needed to
@@ -59,8 +59,8 @@ impl WorkerMcpFetcher {
                             feature_gate: Arc::clone(&gate),
                         },
                     ));
-                let plan_resolver: Arc<dyn spur_mcp::handlers::PlanResolver> =
-                    Arc::clone(&self.mcp_server) as Arc<dyn spur_mcp::handlers::PlanResolver>;
+                let plan_resolver: Arc<dyn crate::handlers::PlanResolver> =
+                    Arc::clone(&self.mcp_server) as Arc<dyn crate::handlers::PlanResolver>;
                 let reconciler_outcomes = self.mcp_server.reconciler_outcomes_handle();
                 let deps = WorkerMcpDeps {
                     pm_service: pm,

@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use rmcp::model::{ErrorCode, ErrorData as McpError};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::server::types::JsonRpcResponse;
+use crate::response::JsonRpcResponse;
 use crate::tools::ToolDefinition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,6 @@ pub struct ToolCallContext<'a> {
     pub authority: ToolAuthority,
     pub brain_session_id: Option<&'a spur_acp::BrainSessionId>,
     pub request_id: Option<&'a Value>,
-    pub(crate) callback_server: Option<&'a crate::server::McpCallbackServer>,
 }
 
 impl<'a> ToolCallContext<'a> {
@@ -41,31 +40,11 @@ impl<'a> ToolCallContext<'a> {
             authority,
             brain_session_id,
             request_id,
-            callback_server: None,
         }
     }
 
-    pub(crate) fn brain_server(
-        server: &'a crate::server::McpCallbackServer,
-        request_id: &'a Value,
-    ) -> Self {
-        Self {
-            server_kind: ServerKind::Brain,
-            authority: ToolAuthority::Brain,
-            brain_session_id: server.brain_session_id.get(),
-            request_id: Some(request_id),
-            callback_server: Some(server),
-        }
-    }
-
-    pub(crate) fn request_id_value(&self) -> Value {
+    pub fn request_id_value(&self) -> Value {
         self.request_id.cloned().unwrap_or(Value::Null)
-    }
-
-    pub(crate) fn callback_server(&self) -> Result<&'a crate::server::McpCallbackServer, McpError> {
-        self.callback_server.ok_or_else(|| {
-            McpError::internal_error("legacy MCP tool requires callback server context", None)
-        })
     }
 }
 
@@ -263,7 +242,7 @@ impl ToolRegistry {
             .await
     }
 
-    pub(crate) async fn call_json_tool(
+    pub async fn call_json_tool(
         &self,
         ctx: ToolCallContext<'_>,
         name: &str,
@@ -356,23 +335,6 @@ pub use spur_graph::mcp::GraphMcpDeps;
 #[non_exhaustive]
 pub struct AnalystMcpDeps {}
 
-const PM_CRUD_TOOL_NAMES: &[&str] = &[
-    "get_issue",
-    "list_issues",
-    "update_issue",
-    "create_issue",
-    "add_dependency",
-    "create_pr",
-];
-
-const PM_ISSUE_GRAPH_TOOL_NAMES: &[&str] = &[
-    "graph_triage",
-    "graph_plan",
-    "graph_insights",
-    "graph_alerts",
-    "graph_subgraph",
-];
-
 const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
     "delegate_to_worker",
     "delegate_parallel",
@@ -401,345 +363,22 @@ const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
     "graph_subgraph",
 ];
 
-struct BrainPmMcpToolModule {
-    tool_names: &'static [&'static str],
-}
-
-impl BrainPmMcpToolModule {
-    fn crud() -> Self {
-        Self {
-            tool_names: PM_CRUD_TOOL_NAMES,
-        }
-    }
-
-    fn issue_graph() -> Self {
-        Self {
-            tool_names: PM_ISSUE_GRAPH_TOOL_NAMES,
-        }
-    }
-
-    fn deps_from_server(server: &crate::server::McpCallbackServer) -> spur_pm::mcp::PmMcpDeps {
-        let event_sink = server.event_sink.clone();
-        let on_issue_created = event_sink.map(|sink| {
-            Arc::new(move |event: spur_pm::mcp::IssueCreatedEvent| {
-                let issue = issue_to_summary_event(&event.issue, event.source);
-                if sink
-                    .try_emit(spur_acp::SpurEventBody::IssueCreated { issue })
-                    .is_err()
-                {
-                    tracing::warn!(
-                        issue_id = %event.issue.id,
-                        "dropping IssueCreated event because broadcast sink is full"
-                    );
-                }
-            }) as Arc<dyn Fn(spur_pm::mcp::IssueCreatedEvent) + Send + Sync>
-        });
-
-        spur_pm::mcp::PmMcpDeps {
-            pm_service: server.pm_service.clone(),
-            on_issue_created,
-        }
-    }
-}
-
-#[async_trait]
-impl ToolModule for BrainPmMcpToolModule {
-    fn tools(&self) -> Vec<ToolDefinition> {
-        let definitions = spur_pm::mcp::tool_definitions();
-        self.tool_names
-            .iter()
-            .map(|name| {
-                definitions
-                    .iter()
-                    .find(|definition| definition.name == *name)
-                    .unwrap_or_else(|| panic!("spur-pm MCP module missing tool definition {name}"))
-                    .clone()
-            })
-            .map(pm_tool_definition)
-            .collect()
-    }
-
-    async fn call(
-        &self,
-        ctx: ToolCallContext<'_>,
-        name: &str,
-        args: Value,
-    ) -> Result<ToolResponse, McpError> {
-        let id = ctx.request_id_value();
-        let server = ctx.callback_server()?;
-        let module = spur_pm::mcp::PmMcpModule::new(Self::deps_from_server(server));
-        let response = match module.call(name, args).await {
-            Ok(result) => JsonRpcResponse::success(id, result),
-            Err(error) => pm_error_response(id, name, error),
-        };
-        Ok(ToolResponse::from_json_rpc(response))
-    }
-}
-
-fn pm_tool_definition(definition: spur_pm::mcp::ToolDefinition) -> ToolDefinition {
-    ToolDefinition {
-        name: definition.name,
-        description: definition.description,
-        input_schema: definition.input_schema,
-    }
-}
-
-fn pm_error_response(
-    id: Value,
-    tool_name: &str,
-    error: spur_pm::mcp::McpHandlerError,
-) -> JsonRpcResponse {
-    match error {
-        spur_pm::mcp::McpHandlerError::InvalidParams(message) => {
-            JsonRpcResponse::invalid_params(id, message)
-        }
-        spur_pm::mcp::McpHandlerError::NotFound(message) => {
-            JsonRpcResponse::error(id, -32004, message)
-        }
-        spur_pm::mcp::McpHandlerError::Unauthorized(message) => {
-            JsonRpcResponse::error(id, -32001, message)
-        }
-        spur_pm::mcp::McpHandlerError::UpstreamPm(message) => {
-            JsonRpcResponse::internal_error(id, format!("{tool_name} failed: {message}"))
-        }
-        spur_pm::mcp::McpHandlerError::Internal(message) => {
-            JsonRpcResponse::internal_error(id, message)
-        }
-    }
-}
-
-fn issue_to_summary_event(
-    issue: &spur_pm::Issue,
-    source: &'static str,
-) -> spur_acp::domain::events::IssueSummaryEvent {
-    spur_acp::domain::events::IssueSummaryEvent {
-        id: issue.id.clone(),
-        source: source.to_string(),
-        title: issue.title.clone(),
-        status: issue.status.clone(),
-        labels: issue.labels.clone(),
-        priority: issue.priority,
-        issue_type: issue.issue_type.clone(),
-        assignee: issue.assignee.clone(),
-        description: Some(issue.body.clone()).filter(|body| !body.trim().is_empty()),
-    }
-}
-
-struct GraphMcpToolModule;
-
-#[async_trait]
-impl ToolModule for GraphMcpToolModule {
-    fn tools(&self) -> Vec<ToolDefinition> {
-        spur_graph::mcp::tool_definitions()
-            .into_iter()
-            .map(graph_tool_definition)
-            .collect()
-    }
-
-    async fn call(
-        &self,
-        ctx: ToolCallContext<'_>,
-        name: &str,
-        args: Value,
-    ) -> Result<ToolResponse, McpError> {
-        let id = ctx.request_id_value();
-        let server = ctx.callback_server()?;
-        let module = spur_graph::mcp::GraphMcpModule::new(server.graph_mcp_deps.clone());
-        Ok(ToolResponse::from_json_rpc(
-            graph_response(id, module.call(name, args).await).await,
-        ))
-    }
-}
-
-fn graph_tool_definition(definition: spur_graph::mcp::ToolDefinition) -> ToolDefinition {
-    ToolDefinition {
-        name: definition.name,
-        description: definition.description,
-        input_schema: definition.input_schema,
-    }
-}
-
-async fn graph_response(id: Value, result: spur_graph::mcp::CodeGraphResult) -> JsonRpcResponse {
-    match result {
-        Ok(body) => {
-            let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
-            JsonRpcResponse::success(
-                id,
-                serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
-            )
-        }
-        Err(error) => {
-            let error = error.into_error_response().await;
-            match error.data {
-                Some(data) => JsonRpcResponse::error_with_data(id, error.code, error.message, data),
-                None => JsonRpcResponse::error(id, error.code, error.message),
-            }
-        }
-    }
-}
-
-struct AnalystMcpToolModule;
-
-impl AnalystMcpToolModule {
-    fn read_only() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl ToolModule for AnalystMcpToolModule {
-    fn tools(&self) -> Vec<ToolDefinition> {
-        spur_analyst::mcp::tool_definitions()
-            .into_iter()
-            .map(analyst_tool_definition)
-            .collect()
-    }
-
-    async fn call(
-        &self,
-        ctx: ToolCallContext<'_>,
-        name: &str,
-        args: Value,
-    ) -> Result<ToolResponse, McpError> {
-        let id = ctx.request_id_value();
-        let module = spur_analyst::mcp::AnalystMcpModule::new();
-        Ok(ToolResponse::from_json_rpc(analyst_response(
-            id,
-            module.call(name, args).await,
-        )))
-    }
-}
-
-fn analyst_tool_definition(definition: spur_analyst::mcp::ToolDefinition) -> ToolDefinition {
-    ToolDefinition {
-        name: definition.name,
-        description: definition.description,
-        input_schema: definition.input_schema,
-    }
-}
-
-fn analyst_response(
-    id: Value,
-    result: Result<Value, spur_analyst::mcp::McpHandlerError>,
-) -> JsonRpcResponse {
-    match result {
-        Ok(body) => {
-            let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
-            JsonRpcResponse::success(
-                id,
-                serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
-            )
-        }
-        Err(spur_analyst::mcp::McpHandlerError::InvalidParams(message)) => {
-            JsonRpcResponse::invalid_params(id, message)
-        }
-        Err(spur_analyst::mcp::McpHandlerError::NotFound(message)) => {
-            JsonRpcResponse::error(id, -32004, message)
-        }
-        Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
-    }
-}
-
-struct LegacyMcpToolModule {
-    definitions: Vec<ToolDefinition>,
-}
-
-impl LegacyMcpToolModule {
-    fn full_prelude() -> Self {
-        Self {
-            definitions: crate::tools::legacy_prelude_tool_definitions(),
-        }
-    }
-
-    fn plan_management() -> Self {
-        Self {
-            definitions: crate::tools::legacy_plan_management_tool_definitions(),
-        }
-    }
-
-    fn full_remainder() -> Self {
-        Self {
-            definitions: crate::tools::legacy_remainder_tool_definitions(),
-        }
-    }
-
-    fn worker_prelude() -> Self {
-        Self {
-            definitions: crate::tools::legacy_worker_prelude_tool_definitions(),
-        }
-    }
-
-    fn worker_remainder() -> Self {
-        Self {
-            definitions: crate::tools::legacy_worker_remainder_tool_definitions(),
-        }
-    }
-}
-
-#[async_trait]
-impl ToolModule for LegacyMcpToolModule {
-    fn tools(&self) -> Vec<ToolDefinition> {
-        self.definitions.clone()
-    }
-
-    async fn call(
-        &self,
-        ctx: ToolCallContext<'_>,
-        name: &str,
-        args: Value,
-    ) -> Result<ToolResponse, McpError> {
-        let server = ctx.callback_server()?;
-        Ok(ToolResponse::from_json_rpc(
-            server.handle_registered_tool_call(ctx, name, args).await,
-        ))
-    }
-}
-
-struct WorkerSignalMcpToolModule;
-
-#[async_trait]
-impl ToolModule for WorkerSignalMcpToolModule {
-    fn tools(&self) -> Vec<ToolDefinition> {
-        crate::worker_server::worker_signal_tool_definitions()
-    }
-
-    async fn call(
-        &self,
-        _ctx: ToolCallContext<'_>,
-        name: &str,
-        _args: Value,
-    ) -> Result<ToolResponse, McpError> {
-        Err(McpError::internal_error(
-            format!("worker signal tool {name} is dispatched by WorkerMcpServer"),
-            None,
-        ))
-    }
-}
-
 pub fn default_tool_registry() -> Result<&'static ToolRegistry, ToolRegistryError> {
     static REGISTRY: OnceLock<Result<ToolRegistry, ToolRegistryError>> = OnceLock::new();
     REGISTRY
-        .get_or_init(legacy_brain_tool_registry)
+        .get_or_init(|| Ok(ToolRegistry::new()))
         .as_ref()
         .map_err(Clone::clone)
 }
 
 pub fn legacy_brain_tool_registry_builder() -> Result<ToolRegistryBuilder, ToolRegistryError> {
-    legacy_brain_tool_registry_builder_from(ToolRegistry::builder())
+    Ok(ToolRegistry::builder())
 }
 
 pub fn legacy_brain_tool_registry_builder_from(
     builder: ToolRegistryBuilder,
 ) -> Result<ToolRegistryBuilder, ToolRegistryError> {
-    builder
-        .with(LegacyMcpToolModule::full_prelude())?
-        .with(BrainPmMcpToolModule::crud())?
-        .with(LegacyMcpToolModule::plan_management())?
-        .with(BrainPmMcpToolModule::issue_graph())?
-        .with(GraphMcpToolModule)?
-        .with(AnalystMcpToolModule)?
-        .with(LegacyMcpToolModule::full_remainder())?
-        .with_alias("code_search", "code_symbol_search")
+    Ok(builder)
 }
 
 pub fn legacy_brain_tool_registry() -> Result<ToolRegistry, ToolRegistryError> {
@@ -751,12 +390,6 @@ pub fn default_worker_tool_registry() -> Result<&'static ToolRegistry, ToolRegis
     REGISTRY
         .get_or_init(|| {
             Ok(ToolRegistry::builder()
-                .with(LegacyMcpToolModule::worker_prelude())?
-                .with(GraphMcpToolModule)?
-                .with(AnalystMcpToolModule::read_only())?
-                .with(LegacyMcpToolModule::worker_remainder())?
-                .with(WorkerSignalMcpToolModule)?
-                .with_alias("code_search", "code_symbol_search")?
                 .with_denied_tool_calls(WORKER_DENIED_TOOL_CALLS.iter().copied())
                 .build())
         })

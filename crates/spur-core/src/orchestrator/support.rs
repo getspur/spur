@@ -88,14 +88,14 @@ impl Orchestrator {
     pub(in crate::orchestrator) fn build_continuation_ctx(
         &self,
         brain_session_id: Arc<std::sync::OnceLock<spur_acp::types::SessionId>>,
-    ) -> spur_mcp::server::DetachedContinuationCtx {
+    ) -> crate::server::DetachedContinuationCtx {
         match (
             self.continuation_tx.clone(),
             self.continuation_overflow.clone(),
         ) {
             (Some(tx), Some(overflow)) => {
                 let session_cell = Arc::clone(&brain_session_id);
-                spur_mcp::server::DetachedContinuationCtx {
+                crate::server::DetachedContinuationCtx {
                     on_complete: std::sync::Arc::new(move |cont, worker_session_str| {
                         let tx = tx.clone();
                         let overflow = overflow.clone();
@@ -120,7 +120,7 @@ impl Orchestrator {
             _ => {
                 // No ingress channel wired — produce a no-op ctx so the
                 // constructor signature is satisfied (run_adhoc path).
-                spur_mcp::server::DetachedContinuationCtx {
+                crate::server::DetachedContinuationCtx {
                     on_complete: std::sync::Arc::new(|_cont, _worker| Box::pin(async {})),
                 }
             }
@@ -190,7 +190,7 @@ impl Orchestrator {
                 tracing::warn!(
                     "MCP server constructed without explicit FeatureGate; falling back to community-tier permissions"
                 );
-                spur_mcp::server::community_feature_gate()
+                crate::server::community_feature_gate()
             })
     }
 
