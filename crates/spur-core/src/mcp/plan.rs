@@ -17,14 +17,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::outcome_materializer::OutcomeMaterializer;
+use crate::plan::outcomes::OutcomeStore;
+use crate::plan::{PlanRegistry, PmLike};
+use crate::server::{CachedPlan, DetachedContinuationCtx, McpCallbackServer};
 use spur_acp::BrainSessionId;
 use spur_blob_store::OutcomeStore as BlobOutcomeStore;
 use spur_license::FeatureGate;
-use spur_mcp::outcome_materializer::OutcomeMaterializer;
-use spur_mcp::plan::outcomes::OutcomeStore;
-use spur_mcp::plan::{PlanRegistry, PmLike};
-use spur_mcp::server::{CachedPlan, DetachedContinuationCtx};
-use spur_mcp::{McpCallbackServer, McpEventSink};
+use spur_mcp::McpEventSink;
 use spur_pm::PmService;
 use tokio::sync::OnceCell;
 
@@ -113,8 +113,8 @@ impl PlanMcpDeps {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::community_feature_gate;
     use spur_acp::{BrainSessionId, SessionId};
-    use spur_mcp::server::community_feature_gate;
 
     fn no_op_continuation() -> DetachedContinuationCtx {
         DetachedContinuationCtx {

@@ -74,16 +74,16 @@ async fn ensure_worker_mcp_server_boots_real_listener_and_caches() {
     // outcome handle from this instance.
     let brain_session_id: spur_acp::BrainSessionId =
         SessionId("550e8400-e29b-41d4-a716-446655440000".into()).into();
-    let ctx = spur_mcp::server::DetachedContinuationCtx {
+    let ctx = spur_core::server::DetachedContinuationCtx {
         on_complete: Arc::new(|_, _| Box::pin(async {})),
     };
-    let (mcp_server, _channel) = spur_mcp::McpCallbackServer::new(
+    let (mcp_server, _channel) = spur_core::McpCallbackServer::new(
         Some(&brain_session_id),
         Some(Arc::clone(&pm)),
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        spur_core::server::community_feature_gate(),
     );
     let mcp_server = Arc::new(mcp_server);
 

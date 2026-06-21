@@ -2,11 +2,11 @@
 //! not passed to proposer.
 
 use serde_json::json;
+use spur_core::handlers::WorkerCallContext;
 use spur_core::mcp::signals::report_signal;
-use spur_mcp::handlers::WorkerCallContext;
-use spur_mcp::plan::audit_sentinel::{self, AuditSentinelKind};
-use spur_mcp::plan::labels;
-use spur_mcp::plan::signals::{self, WorkerSignal};
+use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
+use spur_core::plan::labels;
+use spur_core::plan::signals::{self, WorkerSignal};
 use uuid::Uuid;
 
 mod common;

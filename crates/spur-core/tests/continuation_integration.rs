@@ -16,13 +16,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-fn install_core_delegation_registry(server: &mut spur_mcp::McpCallbackServer) {
+fn install_core_delegation_registry(server: &mut spur_core::McpCallbackServer) {
     let registry = spur_core::mcp::brain_tool_registry(
         spur_core::mcp::delegation::DelegationMcpDeps::from_server(server),
         spur_core::mcp::signals::SignalMcpDeps {
             pm_service: None,
             event_sink: None,
-            feature_gate: spur_mcp::server::community_feature_gate(),
+            feature_gate: spur_core::server::community_feature_gate(),
         },
     )
     .expect("core delegation registry");
@@ -171,8 +171,8 @@ fn autonomous_turn_is_self_describing() {
 async fn test_no_double_delivery_on_block_timeout() {
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::{BrainSessionId, DelegationResult};
-    use spur_mcp::server::DetachedContinuationCtx;
-    use spur_mcp::{McpCallbackServer, WorkerInfo};
+    use spur_core::server::DetachedContinuationCtx;
+    use spur_core::{McpCallbackServer, WorkerInfo};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::time::Duration;
@@ -202,7 +202,7 @@ async fn test_no_double_delivery_on_block_timeout() {
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        spur_core::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-slow".into(),
@@ -306,8 +306,8 @@ async fn test_no_double_delivery_on_fast_path() {
     use serde_json::Value;
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::{BrainSessionId, DelegationResult};
-    use spur_mcp::server::DetachedContinuationCtx;
-    use spur_mcp::{McpCallbackServer, WorkerInfo};
+    use spur_core::server::DetachedContinuationCtx;
+    use spur_core::{McpCallbackServer, WorkerInfo};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::time::Duration;
@@ -334,7 +334,7 @@ async fn test_no_double_delivery_on_fast_path() {
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        spur_core::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-fast".into(),

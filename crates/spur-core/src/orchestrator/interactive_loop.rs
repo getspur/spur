@@ -492,7 +492,7 @@ impl Orchestrator {
                         };
 
                         let original_session_id = session_id.clone();
-                        let loading_session_id = spur_mcp::plan::labels::derive_brain_session_id(
+                        let loading_session_id = crate::plan::labels::derive_brain_session_id(
                             &spur_acp::SessionId(session_id.clone()),
                         )
                         .as_session_id()
@@ -1946,12 +1946,12 @@ mod peer_mailbox_drain_tests {
         prompt_builder::PeerPromptContextBuilder, InMemoryLedger, Limits, PeerMailboxBundle,
         PeerMailboxLedger, PeerMailboxRouter,
     };
+    use crate::plan::scope_snapshot::PlanScopeSnapshot;
     use spur_acp::domain::delegation::DelegationId;
     use spur_acp::domain::events::SpurEventBody;
     use spur_acp::domain::peer_message::{
         LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
     };
-    use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::Duration;
@@ -3117,7 +3117,10 @@ mod phase5_orchestrator_finalization_tests {
     use super::{commit_rendered_batch, session::retire_brain_session, TurnGuard};
     use crate::continuation_bridge::{new_overflow_buf, ContinuationEventSink, RenderOutcome};
     use crate::event_funnel::spawn_funnel;
+    use crate::handlers::PlanResolver;
+    use crate::plan::PlanState;
     use crate::scheduler::{BrainScheduler, ScheduledAction};
+    use crate::worker_server::{WorkerMcpDeps, WorkerMcpServer};
     use async_trait::async_trait;
     use chrono::Utc;
     use dashmap::DashMap;
@@ -3131,9 +3134,6 @@ mod phase5_orchestrator_finalization_tests {
     use spur_acp::types::SessionId;
     use spur_license::policy::PolicyResolver;
     use spur_license::FeatureGate;
-    use spur_mcp::handlers::PlanResolver;
-    use spur_mcp::plan::PlanState;
-    use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
     use spur_pm::test_workspace::TestBeadsWorkspace;
     use std::future::Future;
     use std::path::Path;
@@ -3257,7 +3257,7 @@ mod phase5_orchestrator_finalization_tests {
             worker_signal_sink,
             plan_resolver: Arc::new(NullWorkerPlanResolver),
             reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
-                spur_mcp::plan::outcomes::OutcomeStore::default(),
+                crate::plan::outcomes::OutcomeStore::default(),
             )),
             outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
             repo_root: None,

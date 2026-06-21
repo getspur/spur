@@ -10,8 +10,9 @@ use rmcp::{
 };
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
+use spur_core::server::DetachedContinuationCtx;
+use spur_core::McpCallbackServer;
 use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
-use spur_mcp::{server::DetachedContinuationCtx, McpCallbackServer};
 use std::sync::Arc;
 
 mod common;
@@ -26,7 +27,7 @@ fn per_task_context_files_survive_to_delegation_requests() {
     });
 
     let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("test-brain".into()));
-    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
     assert_eq!(parsed.len(), 2);
     assert_eq!(
         parsed[0].context_files,
@@ -56,7 +57,7 @@ fn per_task_issue_id_and_delegation_plan_survive_unshared() {
     });
 
     let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("test-brain".into()));
-    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
     assert_eq!(parsed.len(), 2);
 
     assert_eq!(parsed[0].issue_id.as_deref(), Some("bd-1"));
@@ -85,7 +86,7 @@ fn duplicate_non_none_issue_id_is_rejected() {
         ]
     });
     let err =
-        spur_mcp::validate_parallel_args(&args).expect_err("duplicate issue_id must be rejected");
+        spur_core::validate_parallel_args(&args).expect_err("duplicate issue_id must be rejected");
     assert!(
         err.contains("issue_id"),
         "error should mention issue_id: {err}",
@@ -100,7 +101,7 @@ fn duplicate_none_issue_id_across_tasks_is_allowed() {
             { "agent": "x", "task": "B" }
         ]
     });
-    spur_mcp::validate_parallel_args(&args).expect("None-id twice is fine");
+    spur_core::validate_parallel_args(&args).expect("None-id twice is fine");
 }
 
 #[test]
@@ -111,7 +112,7 @@ fn distinct_issue_ids_pass() {
             { "agent": "x", "task": "B", "issue_id": "bd-2" }
         ]
     });
-    spur_mcp::validate_parallel_args(&args).expect("distinct ids pass");
+    spur_core::validate_parallel_args(&args).expect("distinct ids pass");
 }
 
 #[test]
@@ -125,7 +126,7 @@ fn parse_parallel_tasks_requires_brain_session_id() {
     });
     let brain_sid = BrainSessionId::new(SessionId("brain-xyz".into()));
 
-    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
 
     assert_eq!(parsed.len(), 1);
     assert_eq!(
@@ -153,7 +154,7 @@ fn per_task_base_repo_main_survives() {
         ]
     });
     let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
-    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
     assert_eq!(parsed[0].base, Some(BaseSpec::RepoMain));
 }
 
@@ -165,7 +166,7 @@ fn per_task_base_branch_survives() {
         ]
     });
     let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
-    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
     assert_eq!(
         parsed[0].base,
         Some(BaseSpec::Branch {
@@ -183,7 +184,7 @@ fn per_task_base_commit_survives() {
         ]
     });
     let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
-    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
     assert_eq!(parsed[0].base, Some(BaseSpec::Commit { oid: oid.into() }));
 }
 
@@ -209,10 +210,10 @@ fn per_task_base_with_overlay_survives() {
         ]
     });
     let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
-    let parsed = spur_mcp::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
     match &parsed[0].base {
         Some(BaseSpec::WithOverlay { base, overlays }) => {
-            assert_eq!(*base, BaseTarget::RepoMain);
+            assert_eq!(base, &BaseTarget::RepoMain);
             assert_eq!(overlays.len(), 1);
             assert_eq!(
                 overlays[0],
@@ -240,7 +241,7 @@ fn per_task_delegation_plan_rejects_malformed_object() {
     });
 
     let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("test-brain".into()));
-    let err = spur_mcp::parse_parallel_tasks(&args, &brain_sid)
+    let err = spur_core::parse_parallel_tasks(&args, &brain_sid)
         .expect_err("malformed per-task delegation_plan must be rejected");
 
     assert!(
