@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
@@ -771,11 +773,7 @@ pub fn tools_list() -> Vec<ToolDefinition> {
 /// self-dispatch.
 pub(crate) fn legacy_worker_prelude_tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = pm_tool_definitions_by_names(&["get_issue", "list_issues"]);
-    tools.extend([
-        get_task_diff_def(),
-        get_plan_status_def(),
-        crate::worker_server::fetch_outcome_artifact_tool_definition(),
-    ]);
+    tools.extend([get_task_diff_def(), get_plan_status_def()]);
     tools
 }
 
@@ -825,12 +823,24 @@ mod schema_truthfulness_tests {
             .unwrap_or_default()
     }
 
+    fn analyst_tool_def(name: &str) -> ToolDefinition {
+        let definition = spur_analyst::mcp::tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("spur-analyst MCP module missing tool definition {name}"));
+        ToolDefinition {
+            name: definition.name,
+            description: definition.description,
+            input_schema: definition.input_schema,
+        }
+    }
+
     #[test]
     fn get_issue_schema_does_not_advertise_source() {
-        let def = tools_list()
+        let def = pm_tool_definitions_by_names(&["get_issue"])
             .into_iter()
-            .find(|tool| tool.name == "get_issue")
-            .expect("get_issue must appear in tools/list");
+            .next()
+            .expect("get_issue definition");
         assert!(
             !props_of(&def).contains(&"source".to_string()),
             "get_issue must not advertise `source` until multi-backend lands",
@@ -839,10 +849,10 @@ mod schema_truthfulness_tests {
 
     #[test]
     fn update_issue_schema_does_not_advertise_source() {
-        let def = tools_list()
+        let def = pm_tool_definitions_by_names(&["update_issue"])
             .into_iter()
-            .find(|tool| tool.name == "update_issue")
-            .expect("update_issue must appear in tools/list");
+            .next()
+            .expect("update_issue definition");
         assert!(
             !props_of(&def).contains(&"source".to_string()),
             "update_issue must not advertise `source` until multi-backend lands",
@@ -870,31 +880,27 @@ mod schema_truthfulness_tests {
 
     #[test]
     fn plan_truncate_and_restart_appears_in_tools_list() {
-        let tools = tools_list();
+        let tools = legacy_remainder_tool_definitions();
         let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(
             names.contains(&"plan_truncate_and_restart"),
-            "plan_truncate_and_restart must appear in tools/list, got: {names:?}"
+            "plan_truncate_and_restart definition missing from legacy plan definitions, got: {names:?}"
         );
     }
 
     #[test]
     fn recover_orphaned_dispatch_appears_in_tools_list() {
-        let tools = tools_list();
+        let tools = legacy_remainder_tool_definitions();
         let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(
             names.contains(&"recover_orphaned_dispatch"),
-            "recover_orphaned_dispatch must appear in tools/list, got: {names:?}"
+            "recover_orphaned_dispatch definition missing from legacy plan definitions, got: {names:?}"
         );
     }
 
     #[test]
     fn knowledge_context_pack_schema_matches_contract() {
-        let tools = tools_list();
-        let def = tools
-            .iter()
-            .find(|tool| tool.name == "knowledge_context_pack")
-            .expect("knowledge_context_pack must appear in tools/list");
+        let def = analyst_tool_def("knowledge_context_pack");
         let props = def
             .input_schema
             .get("properties")
@@ -987,11 +993,7 @@ mod schema_truthfulness_tests {
 
     #[test]
     fn knowledge_context_pack_2_schema_matches_contract() {
-        let tools = tools_list();
-        let def = tools
-            .iter()
-            .find(|tool| tool.name == "knowledge_context_pack_2")
-            .expect("knowledge_context_pack_2 must appear in tools/list");
+        let def = analyst_tool_def("knowledge_context_pack_2");
         let props = def
             .input_schema
             .get("properties")
@@ -1149,10 +1151,13 @@ mod schema_truthfulness_tests {
         .expect("write graph fixture");
         let _cwd = enter_dir(dir.path());
 
-        let error = crate::server::handlers::code_graph::code_callers(&json!({}))
+        let error = spur_graph::mcp::code_callers(&json!({}))
             .await
             .expect_err("handler must reject calls without selector or symbol");
-        assert_eq!(error.json_rpc_code(), -32602);
+        assert!(matches!(
+            error,
+            spur_graph::mcp::McpHandlerError::InvalidParams(_)
+        ));
         assert!(
             error
                 .to_string()
@@ -1217,38 +1222,6 @@ mod schema_truthfulness_tests {
             Some(&json!(20))
         );
         assert_eq!(def.input_schema.get("required"), Some(&json!(["query"])));
-    }
-
-    #[test]
-    fn worker_fetch_outcome_artifact_schema_advertises_phase3_sections() {
-        let def = crate::worker_server::fetch_outcome_artifact_tool_definition();
-        let props = def
-            .input_schema
-            .get("properties")
-            .and_then(|v| v.as_object())
-            .expect("properties");
-        let section = props.get("section").expect("section property");
-        let enum_values: Vec<&str> = section
-            .get("enum")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-            .unwrap_or_default();
-        assert_eq!(
-            enum_values,
-            vec!["status_only", "summary", "diff_only", "full"],
-            "Phase 3 must advertise all fetchable sections"
-        );
-
-        let required: Vec<&str> = def
-            .input_schema
-            .get("required")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-            .unwrap_or_default();
-        assert!(
-            required.contains(&"delegation_id"),
-            "delegation_id must be required"
-        );
     }
 }
 
@@ -1320,10 +1293,9 @@ mod worker_tools_subset_tests {
     #[test]
     fn tools_list_contains_exactly_the_compatibility_set() {
         let actual: Vec<String> = tools_list().iter().map(|t| t.name.clone()).collect();
-        let expected: Vec<String> = EXPECTED_ALL_TOOLS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(
-            actual, expected,
-            "tools_list drift; update EXPECTED_ALL_TOOLS in same commit if intentional",
+        assert!(
+            actual.is_empty(),
+            "spur-mcp no longer owns the brain tool catalog after core extraction; got {actual:?}",
         );
     }
 
@@ -1336,15 +1308,12 @@ mod worker_tools_subset_tests {
             .map(|tool| tool.name.clone())
             .collect();
         assert!(!names.contains(&"code_search".to_string()));
-        assert_eq!(
-            registry.canonical_name("code_search"),
-            Some("code_symbol_search")
-        );
+        assert_eq!(registry.canonical_name("code_search"), None);
     }
 
     #[test]
     fn knowledge_context_pack_appears_in_worker_tools_list() {
-        let actual: Vec<String> = worker_tools_list()
+        let actual: Vec<String> = spur_analyst::mcp::tool_definitions()
             .iter()
             .map(|tool| tool.name.clone())
             .collect();
@@ -1419,13 +1388,9 @@ mod worker_tools_subset_tests {
     #[test]
     fn worker_tools_list_contains_exactly_the_curated_set() {
         let actual: Vec<String> = worker_tools_list().iter().map(|t| t.name.clone()).collect();
-        let expected: Vec<String> = EXPECTED_WORKER_TOOLS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "worker_tools_list drift; update EXPECTED_WORKER_TOOLS in same commit if intentional",
+        assert!(
+            actual.is_empty(),
+            "spur-mcp no longer owns the worker tool catalog after core extraction; got {actual:?}",
         );
     }
 

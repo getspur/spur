@@ -388,7 +388,7 @@ pub(super) async fn annotate_plan_summary_canonical_epics(
                 continue;
             }
         };
-        let audits = spur_mcp::plan::projector::collect_sorted_audits_for_issue(
+        let audits = crate::plan::projector::collect_sorted_audits_for_issue(
             &candidate.summary.epic_id,
             comments,
         );
@@ -406,7 +406,7 @@ pub(super) async fn annotate_plan_summary_canonical_epics(
             }
         };
         for audit in audits {
-            if let spur_mcp::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+            if let crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
                 plan_id,
                 epic_issue_id,
                 ..

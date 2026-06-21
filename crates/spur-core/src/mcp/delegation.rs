@@ -3,27 +3,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::outcome_materializer::OutcomeMaterializer;
+use crate::server::McpCallbackServer;
+use crate::server::{
+    dispatch_error_response, new_attempt_tracker, spawn_result_collector, DetachedCompletionHandle,
+    DetachedContinuationCtx, DetachedSourceKind, JsonRpcResponse, WorkerInfo, COMPLETED_TTL,
+};
 use async_trait::async_trait;
 use rmcp::model::{ErrorCode, ErrorData as McpError};
 use serde_json::{json, Value};
 use spur_acp::domain::{DelegationResult, DelegationStatus};
 use spur_acp::{BrainSessionId, CancelOutcome, CancellationControl, DelegationId, SessionId};
 use spur_blob_store::OutcomeStore;
-use spur_mcp::outcome_materializer::OutcomeMaterializer;
-use spur_mcp::server::{
-    dispatch_error_response, new_attempt_tracker, spawn_result_collector, DetachedCompletionHandle,
-    DetachedContinuationCtx, DetachedSourceKind, JsonRpcResponse, WorkerInfo, COMPLETED_TTL,
-};
-use spur_mcp::{
-    DelegationRequest, McpCallbackServer, ToolCallContext, ToolDefinition, ToolModule, ToolResponse,
-};
+use spur_mcp::{DelegationRequest, ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
 use tokio::sync::{mpsc, OnceCell};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 #[cfg(test)]
-use spur_mcp::server::{build_detached_continuation, community_feature_gate};
+use crate::server::{build_detached_continuation, community_feature_gate};
 
 #[cfg(test)]
 const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
@@ -302,11 +301,11 @@ impl DelegationMcpModule {
             );
         }
 
-        if let Err(e) = spur_mcp::validate_parallel_args(&args) {
+        if let Err(e) = crate::server::validate_parallel_args(&args) {
             return JsonRpcResponse::invalid_params(id, e);
         }
 
-        let skeletons = match spur_mcp::parse_parallel_tasks(&args, self.brain_session_id()) {
+        let skeletons = match crate::server::parse_parallel_tasks(&args, self.brain_session_id()) {
             Ok(s) => s,
             Err(e) => return JsonRpcResponse::invalid_params(id, e),
         };
@@ -510,11 +509,11 @@ impl DelegationMcpModule {
     }
 
     async fn handle_fetch_outcome_artifact(&self, id: Value, args: Value) -> JsonRpcResponse {
-        let ctx = spur_mcp::handlers::WorkerCallContext {
+        let ctx = crate::handlers::WorkerCallContext {
             delegation_id: String::new(),
             brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
-        match spur_mcp::handlers::fetch_outcome_artifact(
+        match crate::handlers::fetch_outcome_artifact(
             &self.deps.materializer,
             self.deps.outcome_store.as_ref(),
             &ctx,
@@ -523,19 +522,19 @@ impl DelegationMcpModule {
         .await
         {
             Ok(value) => JsonRpcResponse::success(id, value),
-            Err(spur_mcp::handlers::McpHandlerError::InvalidParams(e)) => {
+            Err(crate::handlers::McpHandlerError::InvalidParams(e)) => {
                 JsonRpcResponse::invalid_params(id, e)
             }
-            Err(spur_mcp::handlers::McpHandlerError::NotFound(e)) => {
+            Err(crate::handlers::McpHandlerError::NotFound(e)) => {
                 JsonRpcResponse::error(id, -32004, e)
             }
-            Err(spur_mcp::handlers::McpHandlerError::Unauthorized(e)) => {
+            Err(crate::handlers::McpHandlerError::Unauthorized(e)) => {
                 JsonRpcResponse::error(id, -32001, e)
             }
-            Err(spur_mcp::handlers::McpHandlerError::UpstreamPm(e)) => {
+            Err(crate::handlers::McpHandlerError::UpstreamPm(e)) => {
                 JsonRpcResponse::internal_error(id, format!("fetch_outcome_artifact failed: {e}"))
             }
-            Err(spur_mcp::handlers::McpHandlerError::Internal(e)) => {
+            Err(crate::handlers::McpHandlerError::Internal(e)) => {
                 JsonRpcResponse::internal_error(id, e)
             }
         }

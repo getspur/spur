@@ -40,15 +40,7 @@ default = ["embed"]
 # downstream crates. spur-blob-store has the same feature for its
 # MockFailingOutcomeStore (Task 3).
 test-support = ["spur-graph/test-support", "spur-license/test-support"]
-# Enables cfg(madsim)-only reconciler simulation tests. Normal builds and
-# default cargo test runs do not compile the madsim harness.
-madsim-sim = ["test-support"]
 embed = ["spur-analyst/embed"]
-
-[[test]]
-name = "madsim_reconciler"
-path = "tests/madsim_reconciler/main.rs"
-required-features = ["madsim-sim"]
 
 [dev-dependencies]
 agent-client-protocol = { workspace = true }
@@ -58,7 +50,6 @@ proptest-state-machine = "0.8"
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 spur-blob-store = { workspace = true, features = ["test-support"] }
-spur-core = { workspace = true }
 spur-license = { workspace = true, features = ["test-support"] }
 spur-mcp = { path = ".", features = ["test-support"] }
 tempfile = "3"
@@ -70,7 +61,6 @@ tracing-subscriber = { workspace = true }
 [target.'cfg(madsim)'.dev-dependencies]
 madsim = "0.2"
 madsim-tokio = { version = "0.2", features = ["full", "test-util"] }
-spur-test-madsim = { path = "../spur-test-madsim" }
 
 [lints]
 workspace = true
