@@ -548,7 +548,7 @@ mod continuation_producer_tests {
         use spur_blob_store::MemoryOutcomeStore;
 
         let store: Arc<dyn spur_blob_store::OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
-        let mat = spur_mcp::outcome_materializer::OutcomeMaterializer::new(store);
+        let mat = crate::outcome_materializer::OutcomeMaterializer::new(store);
         let result = DelegationResult {
             status: DelegationStatus::Success,
             diff: None,

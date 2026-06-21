@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
+use crate::handlers::{McpHandlerError, WorkerCallContext};
+use crate::worker_server::WorkerSignalSink;
 use async_trait::async_trait;
 use rmcp::model::{ErrorCode, ErrorData as McpError};
 use serde_json::{json, Value};
 use spur_acp::SpurEventBody;
 use spur_license::{FeatureGate, FeatureKey};
 use spur_mcp::events::McpEventSink;
-use spur_mcp::handlers::{McpHandlerError, WorkerCallContext};
-use spur_mcp::worker_server::WorkerSignalSink;
 use spur_mcp::{ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
 use spur_pm::PmService;
 
@@ -192,9 +192,9 @@ pub async fn report_signal(
     ctx: &WorkerCallContext,
     args: Value,
 ) -> Result<Value, McpHandlerError> {
-    use spur_mcp::plan::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
-    use spur_mcp::plan::labels;
-    use spur_mcp::plan::signals::{encode_comment as signal_encode, WorkerSignal};
+    use crate::plan::audit_sentinel::{encode_comment as audit_encode, AuditSentinelKind};
+    use crate::plan::labels;
+    use crate::plan::signals::{encode_comment as signal_encode, WorkerSignal};
 
     #[derive(serde::Deserialize)]
     struct Args {
@@ -284,7 +284,6 @@ pub async fn report_signal(
         WorkerSignal::MarkNoop { reason, .. } => {
             (0.0, reason.clone(), args.signal.kind_label().to_string())
         }
-        _ => (0.0, String::new(), args.signal.kind_label().to_string()),
     };
 
     adv.add_comment(

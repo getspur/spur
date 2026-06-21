@@ -4,11 +4,11 @@ use crate::peer_mailbox::ledger::{
     AcceptOutcome, LedgerError, PeerMailboxLedger, TransitionOutcome,
 };
 use crate::peer_mailbox::limits::Limits;
+use crate::plan::scope_snapshot::{EdgeCheck, PlanScopeSnapshot};
 use spur_acp::domain::events::SpurEventBody;
 use spur_acp::domain::peer_message::{
     LedgerState, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
 };
-use spur_mcp::plan::scope_snapshot::{EdgeCheck, PlanScopeSnapshot};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -270,10 +270,10 @@ mod tests {
     use super::*;
     use crate::peer_mailbox::guard::GuardOutcome;
     use crate::peer_mailbox::ledger::InMemoryLedger;
+    use crate::plan::scope_snapshot::PlanScopeSnapshot;
     use spur_acp::domain::delegation::DelegationId;
     use spur_acp::domain::events::SpurEventBody;
     use spur_acp::domain::peer_message::MessageKind;
-    use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
     use std::collections::{HashMap, HashSet};
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
