@@ -127,7 +127,7 @@ impl Orchestrator {
 
             let acp_session_id = spur_acp::SessionId(session_response.session_id.to_string());
             let brain_session_id =
-                spur_mcp::plan::labels::derive_brain_session_id(&acp_session_id);
+                crate::plan::labels::derive_brain_session_id(&acp_session_id);
             mcp_server
                 .set_brain_session_id(brain_session_id.clone())
                 .expect("set once");

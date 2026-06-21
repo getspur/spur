@@ -4,9 +4,9 @@ use std::sync::Mutex;
 
 use serde_json::json;
 use spur_acp::SpurEventBody;
+use spur_core::handlers::{McpHandlerError, WorkerCallContext};
 use spur_core::mcp::signals::report_progress;
 use spur_mcp::events::McpEventSink;
-use spur_mcp::handlers::{McpHandlerError, WorkerCallContext};
 
 #[derive(Default)]
 struct RecordingSink {

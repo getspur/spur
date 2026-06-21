@@ -17,8 +17,8 @@ use std::time::Duration;
 use serde_json::Value;
 use spur_acp::domain::delegation::{DelegationResult, DelegationStatus};
 use spur_acp::{BrainSessionId, SessionId};
-use spur_mcp::server::DetachedContinuationCtx;
-use spur_mcp::{McpCallbackServer, WorkerInfo};
+use spur_core::server::DetachedContinuationCtx;
+use spur_core::{McpCallbackServer, WorkerInfo};
 use tokio::time::Instant;
 
 mod common;
