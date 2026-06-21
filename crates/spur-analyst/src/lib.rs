@@ -749,8 +749,8 @@ fn query_recursive_context_path_rows(
         "WITH RECURSIVE traversable_edges AS ( \
            SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
            FROM edges \
-           WHERE relation IS DISTINCT FROM 'contains' \
-             AND (relation IS DISTINCT FROM 'imports' OR bind_method IS DISTINCT FROM 'external') \
+           WHERE relation = 'calls' \
+             AND edge_kind IN ('calls', 'calls_dyn', 'references_hof') \
          ), \
          walk(current_id, depth, node_path, sort_key) AS ( \
            SELECT ?1::VARCHAR AS current_id, 0::INTEGER AS depth, [?1::VARCHAR] AS node_path, ?1::VARCHAR AS sort_key \
@@ -834,8 +834,8 @@ fn query_recursive_undirected_context_path_rows(
         "WITH RECURSIVE traversable_edges AS ( \
             SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
             FROM edges \
-            WHERE relation IS DISTINCT FROM 'contains' \
-              AND (relation IS DISTINCT FROM 'imports' OR bind_method IS DISTINCT FROM 'external') \
+            WHERE relation = 'calls' \
+              AND edge_kind IN ('calls', 'calls_dyn', 'references_hof') \
          ), \
          edges_undirected AS ( \
             SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method, 'forward' AS direction FROM traversable_edges \
@@ -1321,13 +1321,163 @@ pub fn query_graph_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::format_query_vec_sql;
+    use std::path::PathBuf;
+
+    use duckdb::Connection;
     use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
+
+    use super::*;
 
     #[test]
     fn format_query_vec_sql_rejects_wrong_dimension() {
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS - 1])).is_none());
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS + 1])).is_none());
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS])).is_some());
+    }
+
+    fn context_path_fixture(edges_sql: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("analyst.duckdb");
+        let conn = Connection::open(&db_path).expect("open fixture db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE _meta (graph_content_hash VARCHAR);
+            INSERT INTO _meta VALUES ('fixture-hash');
+
+            CREATE TABLE edges (
+                source_stable_id VARCHAR,
+                target_stable_id VARCHAR,
+                relation VARCHAR,
+                edge_kind VARCHAR,
+                confidence VARCHAR,
+                bind_method VARCHAR
+            );
+            "#,
+        )
+        .expect("create path fixture schema");
+        conn.execute_batch(edges_sql)
+            .expect("insert path fixture edges");
+        drop(conn);
+        (temp_dir, db_path)
+    }
+
+    #[test]
+    fn query_context_paths_includes_calls_dyn_edges() {
+        let (_temp_dir, db_path) = context_path_fixture(
+            r#"
+            INSERT INTO edges VALUES
+                ('sym-source', 'sym-target', 'calls', 'calls_dyn', 'dynamic_dispatch', 'label_match');
+            "#,
+        );
+
+        let result = query_context_paths(
+            &db_path,
+            "sym-source",
+            "sym-target",
+            KnowledgePathOptions {
+                max_hops: 1,
+                max_paths: 4,
+                undirected: false,
+            },
+        )
+        .expect("query context paths");
+
+        assert_eq!(result.status, KnowledgePathStatus::PathFound);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].relation.as_deref(), Some("calls"));
+        assert_eq!(result.rows[0].edge_kind.as_deref(), Some("calls_dyn"));
+    }
+
+    #[test]
+    fn query_context_paths_includes_hof_edges_and_dedupes_sequences() {
+        let (_temp_dir, db_path) = context_path_fixture(
+            r#"
+            INSERT INTO edges VALUES
+                ('sym-source', 'sym-dyn', 'calls', 'calls_dyn', 'dynamic_dispatch', 'label_match'),
+                ('sym-source', 'sym-dyn', 'calls', 'calls_dyn', 'dynamic_dispatch', 'label_match'),
+                ('sym-dyn', 'sym-target', 'calls', 'references_hof', 'higher_order', 'label_match'),
+                ('sym-dyn', 'sym-target', 'calls', 'references_hof', 'higher_order', 'label_match'),
+                ('sym-source', 'sym-module', 'contains', 'references_other', 'syntax_exact', 'scope'),
+                ('sym-module', 'sym-target', 'imports', 'references_other', 'syntax_exact', 'external');
+            "#,
+        );
+
+        let result = query_context_paths(
+            &db_path,
+            "sym-source",
+            "sym-target",
+            KnowledgePathOptions {
+                max_hops: 2,
+                max_paths: 4,
+                undirected: true,
+            },
+        )
+        .expect("query context paths");
+
+        assert_eq!(result.status, KnowledgePathStatus::PathFound);
+        assert!(
+            result
+                .rows
+                .iter()
+                .all(|row| row.relation.as_deref() == Some("calls")
+                    && matches!(
+                        row.edge_kind.as_deref(),
+                        Some("calls_dyn" | "references_hof")
+                    )),
+            "path rows must exclude containment/import edges: {:?}",
+            result.rows
+        );
+        assert!(
+            result
+                .rows
+                .iter()
+                .any(|row| row.edge_kind.as_deref() == Some("calls_dyn")),
+            "dynamic-dispatch call edge should be visible: {:?}",
+            result.rows
+        );
+        assert!(
+            result
+                .rows
+                .iter()
+                .any(|row| row.edge_kind.as_deref() == Some("references_hof")),
+            "higher-order call edge should be visible: {:?}",
+            result.rows
+        );
+
+        let mut rows_by_path = std::collections::BTreeMap::new();
+        for row in &result.rows {
+            rows_by_path
+                .entry(row.path_index)
+                .or_insert_with(Vec::new)
+                .push(row);
+        }
+        let mut path_sequences = rows_by_path
+            .values()
+            .map(|rows| {
+                let mut sequence = rows
+                    .iter()
+                    .map(|row| row.source_stable_id.as_str())
+                    .collect::<Vec<_>>();
+                sequence.push(
+                    rows.last()
+                        .expect("path rows should not be empty")
+                        .target_stable_id
+                        .as_str(),
+                );
+                sequence
+            })
+            .collect::<Vec<_>>();
+        path_sequences.sort_unstable();
+        path_sequences.dedup();
+
+        assert_eq!(
+            path_sequences.len(),
+            rows_by_path.len(),
+            "duplicate full node-sequences must be collapsed before max_paths cap"
+        );
+        assert_eq!(
+            path_sequences,
+            vec![vec!["sym-source", "sym-dyn", "sym-target"]]
+        );
     }
 }
