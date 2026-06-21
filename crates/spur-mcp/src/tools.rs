@@ -1311,6 +1311,7 @@ mod worker_tools_subset_tests {
         "code_subgraph",
         "code_symbol_history",
         "doc_navigate",
+        "knowledge_context_pack",
         "knowledge_context_pack_2",
         "report_signal",
         "report_progress",
