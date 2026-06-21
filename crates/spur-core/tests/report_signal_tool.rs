@@ -23,7 +23,6 @@ fn report_signal_pm_lock() -> MutexGuard<'static, ()> {
 }
 
 #[tokio::test]
-#[ignore = "serial integration: heavy beads report_signal tests contend under full-suite parallel load (green standalone); run with `cargo test -p spur-core --test report_signal_tool -- --ignored`"]
 async fn report_signal_on_open_task_records_all_artifacts() {
     let _lock = report_signal_pm_lock();
     let (_dir, pm) = common::temp_beads_pm().await;
@@ -104,7 +103,6 @@ async fn report_signal_on_open_task_records_all_artifacts() {
 }
 
 #[tokio::test]
-#[ignore = "serial integration: heavy beads report_signal tests contend under full-suite parallel load (green standalone); run with `cargo test -p spur-core --test report_signal_tool -- --ignored`"]
 async fn report_signal_on_terminal_task_records_late_arrival() {
     let _lock = report_signal_pm_lock();
     let (_dir, pm) = common::temp_beads_pm().await;
@@ -187,7 +185,6 @@ async fn report_signal_on_terminal_task_records_late_arrival() {
 }
 
 #[tokio::test]
-#[ignore = "serial integration: heavy beads report_signal tests contend under full-suite parallel load (green standalone); run with `cargo test -p spur-core --test report_signal_tool -- --ignored`"]
 async fn report_signal_threads_worker_call_context() {
     let _lock = report_signal_pm_lock();
     let (_dir, pm) = common::temp_beads_pm().await;
