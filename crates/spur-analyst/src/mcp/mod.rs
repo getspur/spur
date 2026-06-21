@@ -139,48 +139,27 @@ fn doc_navigate_def() -> ToolDefinition {
 }
 
 fn knowledge_context_pack_def() -> ToolDefinition {
+    // Deprecated v1 alias: routes to v2 behavior and advertises the v2 input
+    // shape (main's knowledge_context_pack_2 first-class promotion).
     ToolDefinition {
         name: "knowledge_context_pack".into(),
-        description: "Builds a bounded evidence pack from BM25 candidates, scorecard signals, and exact graph grounding. Applies opportunistic Lance hybrid vector re-ranking when query embeddings and the sidecar respond; degrades to BM25-only on timeout or unavailability. Use code_read_symbol/code_callers/code_callees for exact follow-up.".into(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": { "type": "string", "minLength": 1 },
-                "intent": {
-                    "type": "string",
-                    "enum": ["explain", "change", "review", "debug", "plan"],
-                    "default": "explain"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["all", "docs", "code", "graph"],
-                    "default": "all"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 8
-                },
-                "include_tests": { "type": "boolean", "default": true },
-                "max_symbol_bodies": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 5,
-                    "default": 3
-                }
-            },
-            "additionalProperties": false
-        }),
+        description: "Deprecated alias for knowledge_context_pack_2; routes to v2 behavior. Use knowledge_context_pack_2 as the first-class canonical evidence pack.".into(),
+        input_schema: knowledge_context_pack_2_input_schema(),
     }
 }
 
 fn knowledge_context_pack_2_def() -> ToolDefinition {
     ToolDefinition {
         name: "knowledge_context_pack_2".into(),
-        description: "experimental v2 structured evidence pack for semantic answers; it does not generate final prose. Preserves knowledge_context_pack retrieval and exact grounding while adding DuckPGQ/Onager-backed graph_paths, risk_scorecard, community_context, temporal_context, and caveats as bounded graph-reasoning evidence.".into(),
-        input_schema: json!({
+        description: "First-class canonical structured evidence pack for semantic answers; it does not generate final prose. Preserves knowledge_context_pack retrieval and exact grounding while adding DuckPGQ/Onager-backed graph_paths, risk_scorecard, community_context, temporal_context, and caveats as bounded graph-reasoning evidence.".into(),
+        input_schema: knowledge_context_pack_2_input_schema(),
+    }
+}
+
+/// Shared v2 input schema for `knowledge_context_pack_2` and its deprecated
+/// `knowledge_context_pack` alias (which routes to v2 behavior).
+fn knowledge_context_pack_2_input_schema() -> serde_json::Value {
+    json!({
             "type": "object",
             "required": ["query"],
             "properties": {
@@ -245,6 +224,5 @@ fn knowledge_context_pack_2_def() -> ToolDefinition {
                 }
             },
             "additionalProperties": false
-        }),
-    }
+    })
 }
