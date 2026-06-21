@@ -903,13 +903,11 @@ mod schema_truthfulness_tests {
         let stale_ann_boundary = ["Lance ANN is", "not used by this MVP"].join(" ");
 
         assert!(
-            !def.description.contains(&stale_ann_boundary)
-                && def
-                    .description
-                    .contains("opportunistic Lance hybrid vector re-ranking")
-                && def.description.contains("degrades to BM25-only")
-                && def.description.contains("code_read_symbol/code_callers/code_callees"),
-            "knowledge_context_pack description must state opportunistic Lance fallback and exact graph follow-ups"
+            def.description.contains("Deprecated alias")
+                && def.description.contains("knowledge_context_pack_2")
+                && def.description.contains("v2 behavior")
+                && !def.description.contains(&stale_ann_boundary),
+            "knowledge_context_pack description must mark v1 as a deprecated alias to v2"
         );
         assert_eq!(def.input_schema.get("required"), Some(&json!(["query"])));
         assert_eq!(
@@ -921,6 +919,7 @@ mod schema_truthfulness_tests {
         assert_eq!(
             prop_names,
             vec![
+                "graph_reasoning",
                 "include_tests",
                 "intent",
                 "limit",
@@ -928,7 +927,7 @@ mod schema_truthfulness_tests {
                 "query",
                 "scope",
             ],
-            "knowledge_context_pack property set drifted",
+            "knowledge_context_pack alias must advertise the v2 input shape",
         );
         assert_eq!(
             props.get("query").and_then(|v| v.get("minLength")),
@@ -1000,7 +999,10 @@ mod schema_truthfulness_tests {
             .expect("properties");
 
         assert!(
-            def.description.contains("structured evidence pack")
+            def.description.contains("First-class")
+                && def.description.contains("canonical")
+                && !def.description.contains("experimental")
+                && def.description.contains("structured evidence pack")
                 && def.description.contains("semantic answers")
                 && def.description.contains("does not generate final prose")
                 && def.description.contains("DuckPGQ/Onager")
@@ -1309,7 +1311,6 @@ mod worker_tools_subset_tests {
         "code_subgraph",
         "code_symbol_history",
         "doc_navigate",
-        "knowledge_context_pack",
         "knowledge_context_pack_2",
         "report_signal",
         "report_progress",
