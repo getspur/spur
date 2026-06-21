@@ -7,6 +7,7 @@
 
 pub mod audit_sentinel;
 pub mod clobber_detector;
+pub(crate) mod continuation;
 pub mod labels;
 pub mod mutation;
 pub mod mutation_executor;
@@ -1136,11 +1137,11 @@ pub async fn derive_epic_plan(
         known_agents,
     )?;
 
-    crate::server::require_feature(
+    crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
-    .map_err(crate::server::feature_error_message)?;
+    .map_err(crate::feature::feature_error_message)?;
     if let Some(adv) = pm.advanced() {
         for task in &mut derived.plan_tasks {
             let Some(issue_id) = task.issue_id.as_deref() else {
@@ -1538,7 +1539,7 @@ pub async fn emit_dispatch_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1586,7 +1587,7 @@ pub async fn emit_worker_started_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1686,7 +1687,7 @@ pub async fn emit_completion_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return Ok(());
     };
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1755,7 +1756,7 @@ pub(crate) async fn emit_approval_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1833,7 +1834,7 @@ pub(crate) async fn emit_rejection_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1883,7 +1884,7 @@ pub(crate) async fn emit_review_feedback_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1934,7 +1935,7 @@ pub(crate) async fn emit_retry_requested_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return Ok(());
     };
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1982,7 +1983,7 @@ pub(crate) async fn emit_escalation_requested_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return Ok(());
     };
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -2469,7 +2470,7 @@ async fn persist_completion_result_with_retry_for_task(
 
     if !already_emitted && completion_state != CompletionState::Superseded {
         if completion_state == CompletionState::AwaitingReview
-            && crate::server::require_feature(
+            && crate::feature::require_feature(
                 spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
                 feature_gate,
             )
@@ -2705,7 +2706,7 @@ async fn derive_worker_completion_state(
     Option<Vec<crate::plan::audit_sentinel::AuditSentinelKind>>,
 )> {
     let baseline = completion_state_from_status(status);
-    if crate::server::require_feature(
+    if crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
@@ -2736,7 +2737,7 @@ async fn read_audits_if_advanced(
     feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
 ) -> anyhow::Result<Option<Vec<crate::plan::audit_sentinel::AuditSentinelKind>>> {
-    if crate::server::require_feature(
+    if crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
@@ -2793,7 +2794,7 @@ async fn persist_completion_inner(
             already_emitted,
         )
         .await?;
-        crate::server::notify_fast_forward(fast_forward);
+        crate::plan::continuation::notify_fast_forward(fast_forward);
         return Ok(None);
     }
 
@@ -2847,7 +2848,7 @@ async fn persist_completion_inner(
         task_id,
     )
     .await?;
-    crate::server::notify_fast_forward(fast_forward);
+    crate::plan::continuation::notify_fast_forward(fast_forward);
 
     let completion_state = match persistence_action {
         CompletionPersistenceAction::AutoRetried {
@@ -3014,7 +3015,7 @@ impl DeferredCompletionPush {
     pub async fn deliver(
         self,
         event_sink: Option<&dyn crate::events::McpEventSink>,
-        continuation_ctx: &crate::server::DetachedContinuationCtx,
+        continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
     ) {
         if let Some(payload) = self.event.as_ref() {
             emit_plan_task_notification_event(event_sink, payload);
@@ -3115,7 +3116,7 @@ fn emit_plan_task_escalated_event(
 }
 
 async fn materialize_and_push_detached_continuation(
-    continuation_ctx: &crate::server::DetachedContinuationCtx,
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
     result: &DelegationResult,
     delegation_id: &str,
@@ -3138,7 +3139,7 @@ async fn materialize_and_push_detached_continuation(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn push_plan_completed_continuation(
-    continuation_ctx: &crate::server::DetachedContinuationCtx,
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
     materializer: &crate::outcome_materializer::OutcomeMaterializer,
     brain_session_id: &BrainSessionId,
     plan_id: &str,
@@ -4613,11 +4614,11 @@ async fn review_beads_version(
     feature_gate: &spur_license::FeatureGate,
     issue_ids: &BTreeSet<String>,
 ) -> Result<ReviewBeadsVersion, String> {
-    crate::server::require_feature(
+    crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
-    .map_err(crate::server::feature_error_message)?;
+    .map_err(crate::feature::feature_error_message)?;
     let Some(advanced) = pm.advanced() else {
         return Err("non-advisory review writes require beads advanced read-back".to_string());
     };
@@ -4936,7 +4937,8 @@ pub mod test_support {
     use std::time::Duration;
     use tokio::sync::Mutex;
 
-    pub const ORPHAN_CLEAR_REASON_RESTART: &str = crate::server::ORPHAN_CLEAR_REASON_RESTART;
+    pub const ORPHAN_CLEAR_REASON_RESTART: &str =
+        crate::plan::continuation::ORPHAN_CLEAR_REASON_RESTART;
 
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_worker_completion_and_notify(
@@ -6519,7 +6521,7 @@ mod tests {
 
         let audits = vec![AuditSentinelKind::DispatchOrphanCleared {
             delegation_id: "del-A".into(),
-            reason: crate::server::ORPHAN_CLEAR_REASON_RESTART.into(),
+            reason: crate::plan::continuation::ORPHAN_CLEAR_REASON_RESTART.into(),
         }];
 
         assert!(super::completion_is_superseded("del-A", &audits));
@@ -8110,7 +8112,7 @@ mod tests {
 
         let continuation_count = Arc::new(AtomicUsize::new(0));
         let continuation_count_for_ctx = Arc::clone(&continuation_count);
-        let continuation_ctx = crate::server::DetachedContinuationCtx {
+        let continuation_ctx = crate::plan::continuation::DetachedContinuationCtx {
             on_complete: Arc::new(move |_, _| {
                 continuation_count_for_ctx.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async {})

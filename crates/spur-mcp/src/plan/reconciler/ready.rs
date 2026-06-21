@@ -6,11 +6,11 @@ use spur_pm::{IssueFilter, ReadyFilter};
 
 impl super::Reconciler {
     pub async fn observe_ready_summaries(&self) -> anyhow::Result<Vec<super::HydratedReady>> {
-        crate::server::require_feature(
+        crate::feature::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
         )
-        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
+        .map_err(|error| anyhow::anyhow!(crate::feature::feature_error_message(error)))?;
         let Some(adv) = self.pm.advanced() else {
             anyhow::bail!("reconciler: no advanced (beads) backend available");
         };

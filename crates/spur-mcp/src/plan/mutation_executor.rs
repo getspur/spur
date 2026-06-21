@@ -63,11 +63,11 @@ pub async fn apply_mutation(
     feature_gate: Arc<spur_license::FeatureGate>,
     batch: &MutationBatch,
 ) -> Result<Vec<String>> {
-    crate::server::require_feature(
+    crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate.as_ref(),
     )
-    .map_err(|error| anyhow!(crate::server::feature_error_message(error)))?;
+    .map_err(|error| anyhow!(crate::feature::feature_error_message(error)))?;
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow!("mutation requires beads backend"))?;
@@ -1052,7 +1052,7 @@ async fn rollback_mutation(
     executed_ops: &[ExecutedOp],
 ) -> RollbackReport {
     let mut report = RollbackReport::default();
-    if let Err(error) = crate::server::require_feature(
+    if let Err(error) = crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate.as_ref(),
     ) {
@@ -1061,7 +1061,7 @@ async fn rollback_mutation(
                 "rollback_setup",
                 executed_op_setup_id(op),
                 None,
-                crate::server::feature_error_message(error),
+                crate::feature::feature_error_message(error),
             );
         }
         return report;
@@ -1841,7 +1841,7 @@ mod tests {
 
     fn test_advanced(pm: &PmService) -> &dyn BeadsAdvanced {
         let gate = test_feature_gate();
-        crate::server::require_feature(
+        crate::feature::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             gate.as_ref(),
         )
