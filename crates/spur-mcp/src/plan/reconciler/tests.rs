@@ -38,7 +38,7 @@ fn test_completion_dispatch(
         materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         )),
-        continuation_ctx: Arc::new(crate::server::DetachedContinuationCtx {
+        continuation_ctx: Arc::new(crate::plan::continuation::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         }),
     }
@@ -322,7 +322,7 @@ async fn completion_collector_project_timeout_delivers_via_deferred_push() {
     let sink = Arc::new(RecordingEventSink::default());
     let continuation_count = Arc::new(AtomicUsize::new(0));
     let continuation_count_for_ctx = Arc::clone(&continuation_count);
-    let continuation_ctx = Arc::new(crate::server::DetachedContinuationCtx {
+    let continuation_ctx = Arc::new(crate::plan::continuation::DetachedContinuationCtx {
         on_complete: Arc::new(move |_, _| {
             let continuation_count = Arc::clone(&continuation_count_for_ctx);
             Box::pin(async move {
@@ -477,7 +477,7 @@ async fn completion_collector_project_timeout_without_deferred_warns_and_returns
         spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-timeout-none".into()));
     let captured = CapturedCompletionCollectorErrors::default();
     let sink = Arc::new(RecordingEventSink::default());
-    let continuation_ctx = Arc::new(crate::server::DetachedContinuationCtx {
+    let continuation_ctx = Arc::new(crate::plan::continuation::DetachedContinuationCtx {
         on_complete: Arc::new(|_, _| Box::pin(async {})),
     });
     let outcomes = Arc::new(tokio::sync::Mutex::new(OutcomeStore::default()));
@@ -574,7 +574,7 @@ fn reconciler_dispatch_ctx_can_be_cloned_for_server_startup() {
         materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         )),
-        continuation_ctx: Arc::new(crate::server::DetachedContinuationCtx {
+        continuation_ctx: Arc::new(crate::plan::continuation::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         }),
     };
@@ -915,7 +915,7 @@ fn test_dispatch_ctx(
         materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
         )),
-        continuation_ctx: Arc::new(crate::server::DetachedContinuationCtx {
+        continuation_ctx: Arc::new(crate::plan::continuation::DetachedContinuationCtx {
             on_complete: Arc::new(|_, _| Box::pin(async {})),
         }),
     }
@@ -1330,7 +1330,7 @@ async fn seed_ready_overlay_plan(
     empty.copy_db_to(&beads_dir);
     let pm = pm_for_beads_repo(repo).await;
     let feature_gate = pro_feature_gate();
-    crate::server::require_feature(
+    crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate.as_ref(),
     )
@@ -2207,7 +2207,7 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
     )
     .await
     .expect("persist plan");
-    crate::server::require_feature(
+    crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate.as_ref(),
     )
@@ -2276,7 +2276,7 @@ async fn tick_once_strips_plan_complete_when_plan_submit_audit_is_absent() {
         })
         .await
         .expect("create issue");
-    crate::server::require_feature(
+    crate::feature::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate.as_ref(),
     )

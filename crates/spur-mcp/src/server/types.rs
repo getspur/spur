@@ -79,7 +79,6 @@ pub(crate) const PERSIST_AS_EPIC_FALSE_REMOVED_MESSAGE: &str = "persist_as_epic=
 /// resumption of any sweep that was interrupted under the old value.
 pub(crate) const PLAN_PENDING_SWEEP_COMMENT_PREFIX: &str =
     "SPUR startup sweep quarantined stale pending plan";
-pub(crate) const ORPHAN_CLEAR_REASON_RESTART: &str = "restart-orphan-cleared";
 /// Idle-session watchdog for the streamable-HTTP MCP transport.
 ///
 /// rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 min, which is far too short
@@ -252,7 +251,6 @@ pub(crate) async fn pause_startup_recovery_if_probed() {
 
 #[cfg(test)]
 pub const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
-pub(crate) const MCP_NOT_LICENSED_ERROR_CODE: i32 = -32041;
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────
 
@@ -340,29 +338,6 @@ impl JsonRpcResponse {
             }),
         }
     }
-}
-
-pub(crate) fn require_feature(
-    key: FeatureKey,
-    feature_gate: &spur_license::FeatureGate,
-) -> Result<(), McpError> {
-    if feature_gate.has(key) {
-        return Ok(());
-    }
-
-    Err(McpError::new(
-        rmcp::model::ErrorCode(MCP_NOT_LICENSED_ERROR_CODE),
-        format!("not licensed for feature {}", key.as_str()),
-        Some(json!({
-            "reason": "not_licensed",
-            "feature": key.as_str(),
-            "required_tier": "pro"
-        })),
-    ))
-}
-
-pub(crate) fn feature_error_message(error: McpError) -> String {
-    error.message.into_owned()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -461,39 +436,6 @@ pub fn build_worker_info(cfg: &spur_acp::config::AgentConfig) -> WorkerInfo {
         output_shape: cfg.delegation.output_shape.clone(),
         cost_tier: Some(format!("{:?}", cfg.cost_tier).to_lowercase()),
     }
-}
-
-// ─── Detached continuation types ─────────────────────────────────────
-
-/// Boxed async callback invoked by `spawn_result_collector` when a detached
-/// delegation finishes.
-///
-/// Arguments:
-/// - `BrainContinuation` — the completed delegation result.
-/// - `String` — worker-session identifier (delegation UUID used as proxy for
-///   the `DelegationCompleted` UI event; unique per delegation).
-///
-/// Implementer routes the continuation back to the orchestrator ingress
-/// (emit UI event first, then try_send / overflow — INV-C3).
-pub type DetachedCompletionCallback = Arc<
-    dyn Fn(
-            spur_acp::domain::BrainContinuation,
-            String, // worker_session proxy
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-        + Send
-        + Sync,
->;
-
-/// Bundle of handles required to funnel detached delegation completions back
-/// into the orchestrator's ingress channel.
-///
-/// Uses a boxed async callback so that `spur-mcp` does not need to depend on
-/// `spur-core` (which would create a circular dependency).  `spur-core` wires
-/// the real `report_detached_completion` implementation in
-/// `Orchestrator::build_continuation_ctx`.
-pub struct DetachedContinuationCtx {
-    /// See [`DetachedCompletionCallback`] for the callback contract.
-    pub on_complete: DetachedCompletionCallback,
 }
 
 /// Why a delegation went detached (used to set `ContinuationSource`).
@@ -675,27 +617,6 @@ pub fn validate_parallel_args(args: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Build the embedded Community-tier feature gate used by fallback and tests.
-pub fn community_feature_gate() -> Arc<spur_license::FeatureGate> {
-    Arc::new(spur_license::FeatureGate::new(
-        spur_license::policy::PolicyResolver::embedded(),
-    ))
-}
-
-#[cfg(test)]
-pub(crate) fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
-    let gate = Arc::new(spur_license::FeatureGate::new(
-        spur_license::policy::PolicyResolver::embedded(),
-    ));
-    let features =
-        std::collections::BTreeSet::from([FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string()]);
-    gate.update_state(&spur_license::LicenseState::active_validated(
-        spur_license::Plan::Pro,
-        features,
-    ));
-    gate
-}
-
 /// Parse the `tasks` array from a `delegate_parallel` args payload into
 /// a list of partially-populated `DelegationRequest` skeletons. Public
 /// (crate-level) so integration tests can exercise the parse logic
@@ -751,15 +672,4 @@ pub(crate) fn append_review_warning(resp: &mut serde_json::Value, warning: Strin
             }
         }
     }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub fn unlicensed_feature_gate() -> Arc<spur_license::FeatureGate> {
-    let gate = community_feature_gate();
-    let mut snapshot = (**gate.snapshot()).clone();
-    snapshot
-        .features
-        .remove(&spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED);
-    gate.set_snapshot_for_test(snapshot);
-    gate
 }

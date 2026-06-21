@@ -11,11 +11,11 @@ impl Reconciler {
         &self,
         dispatch: &dyn ReconcilerDispatch,
     ) -> anyhow::Result<bool> {
-        crate::server::require_feature(
+        crate::feature::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
         )
-        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
+        .map_err(|error| anyhow::anyhow!(crate::feature::feature_error_message(error)))?;
         let Some(adv) = self.pm.advanced() else {
             return Ok(false);
         };
