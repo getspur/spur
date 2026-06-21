@@ -70,6 +70,13 @@ impl McpCallbackServer {
             Ok(name) => name.to_string(),
             Err(error) => return JsonRpcResponse::mcp_error(id, error),
         };
+        if crate::mcp::plan::is_plan_tool(&canonical_tool_name) {
+            return crate::mcp::plan::PlanMcpModule::new(
+                crate::mcp::plan::PlanMcpDeps::from_server(self),
+            )
+            .call_with_server(self, ctx, &canonical_tool_name, arguments)
+            .await;
+        }
         if crate::mcp::catalog::is_server_owned_tool(&canonical_tool_name) {
             return self
                 .handle_registered_tool_call(ctx, &canonical_tool_name, arguments)
@@ -90,9 +97,6 @@ impl McpCallbackServer {
         let id = ctx.request_id_value();
 
         match tool_name {
-            "merge_plan" => self.handle_merge_plan(id, arguments).await,
-            "resume_plan" => self.handle_resume_plan(id, arguments).await,
-            "force_reclaim_plan" => self.handle_force_reclaim_plan(id, arguments).await,
             "code_resolve" => self.handle_code_resolve(id, arguments).await,
             // `code_search` is the legacy alias for `code_symbol_search`.
             "code_symbol_search" | "code_search" => self.handle_code_search(id, arguments).await,
@@ -109,35 +113,6 @@ impl McpCallbackServer {
             tool if crate::mcp::catalog::is_analyst_tool(tool) => {
                 self.handle_analyst_tool(id, tool, arguments).await
             }
-            "submit_plan" => self.handle_submit_plan(id, arguments).await,
-            "execute_epic" => self.handle_execute_epic(id, arguments).await,
-            "get_plan_status" => self.handle_get_plan_status(id, arguments).await,
-            "get_reconciler_status" => self.handle_get_reconciler_status(id).await,
-            "get_task_diff" => self.handle_get_task_diff(id, arguments).await,
-            "preview_task_base" => self.handle_preview_task_base(id, arguments).await,
-            "plan_truncate_and_restart" => {
-                self.handle_plan_truncate_and_restart(id, arguments).await
-            }
-            "recover_orphaned_dispatch" => {
-                self.handle_recover_orphaned_dispatch(id, arguments).await
-            }
-            "review_task" => {
-                if let Some(plan_id) = arguments.get("plan_id").and_then(|v| v.as_str()) {
-                    if let Err((code, message)) =
-                        self.check_plan_owner_for_op(plan_id, "review_task").await
-                    {
-                        return JsonRpcResponse::error(id, code, message);
-                    }
-                }
-                match self.handle_review_task(&arguments).await {
-                    Ok(text) => JsonRpcResponse::success(
-                        id,
-                        json!({ "content": [{ "type": "text", "text": text }] }),
-                    ),
-                    Err(e) => JsonRpcResponse::internal_error(id, e),
-                }
-            }
-            "submit_plan_mutation" => self.handle_submit_plan_mutation(id, arguments).await,
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
         }
     }
