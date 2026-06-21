@@ -57,6 +57,13 @@ pub(crate) mod sync;
 pub(crate) mod test_helpers;
 pub(crate) mod types;
 
+pub use crate::feature::community_feature_gate;
+pub(crate) use crate::feature::{feature_error_message, require_feature};
+#[cfg(any(test, feature = "test-support"))]
+pub use crate::feature::{pro_feature_gate, unlicensed_feature_gate};
+pub use crate::git::run_git_capture;
+pub(crate) use crate::plan::continuation::{notify_fast_forward, ORPHAN_CLEAR_REASON_RESTART};
+pub use crate::plan::continuation::{DetachedCompletionCallback, DetachedContinuationCtx};
 pub(crate) use plan_builder::*;
 pub use plan_builder::{
     build_entries_with_task_map, build_epic_subgraph, emit_plan_submit_audit,
@@ -1475,12 +1482,6 @@ impl crate::handlers::PlanResolver for McpCallbackServer {
         plan_id: &str,
     ) -> Result<crate::handlers::ResolvedPlanState, String> {
         McpCallbackServer::load_or_project_plan_with_freshness(self, plan_id).await
-    }
-}
-
-pub(crate) fn notify_fast_forward(fast_forward: &Option<Arc<tokio::sync::Notify>>) {
-    if let Some(notify) = fast_forward {
-        notify.notify_one();
     }
 }
 

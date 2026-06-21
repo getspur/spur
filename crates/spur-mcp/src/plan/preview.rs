@@ -85,7 +85,7 @@ pub async fn preview_overlay(
 
     let mut overlays = Vec::with_capacity(overlay_sources.len());
     for (source_task_id, base_oid, worker_branch) in overlay_sources {
-        let tip_oid = crate::server::run_git_capture(
+        let tip_oid = crate::git::run_git_capture(
             repo_root,
             None,
             &["rev-parse", "--verify", worker_branch.as_str()],

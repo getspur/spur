@@ -78,7 +78,7 @@ pub async fn build_staging_branch(
             .as_ref()
             .expect("filtered for worker_branch")
             .clone();
-        let tip_oid = match crate::server::run_git_capture(
+        let tip_oid = match crate::git::run_git_capture(
             repo_root,
             None,
             &["rev-parse", "--verify", worker_branch.as_str()],
@@ -191,7 +191,7 @@ mod tests {
     use tempfile::TempDir;
 
     async fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
-        crate::server::run_git_capture(repo, None, args)
+        crate::git::run_git_capture(repo, None, args)
             .await
             .unwrap_or_else(|error| panic!("git {args:?} failed: {error}"))
     }
