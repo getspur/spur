@@ -690,8 +690,8 @@ mod tests {
         let fake = PathBuf::from("/nonexistent");
         let body = load_skill("code-explore", &fake).unwrap();
         assert!(
-            body.contains("knowledge_context_pack"),
-            "layer 1: skill must establish knowledge_context_pack as the orientation entry point"
+            body.contains("knowledge_context_pack_2"),
+            "layer 1: skill must establish knowledge_context_pack_2 as the orientation entry point"
         );
         assert!(
             body.contains("spur-analyst"),
@@ -702,8 +702,16 @@ mod tests {
             "skill must teach the selector hand-off from the pack into code_* tools"
         );
         assert!(
-            body.contains("confidence"),
-            "skill must warn that the pack's confidence field is miscalibrated"
+            body.contains("calibrated"),
+            "skill must document calibrated pack confidence"
+        );
+        assert!(
+            body.contains("label_inbound") && body.contains("inbound_unresolved"),
+            "skill must document resolved-vs-label caller evidence"
+        );
+        assert!(
+            body.contains("calls_dyn") && body.contains("references_hof"),
+            "skill must document dynamic/HOF path edge coverage"
         );
         assert!(
             body.contains("supporting_docs"),
@@ -716,7 +724,7 @@ mod tests {
         let raw = all_bundled_raw().get("code-explore").unwrap();
         let parsed = frontmatter::parse_source(raw);
         let desc = parsed.description.as_deref().unwrap_or("");
-        for keyword in ["knowledge_context_pack", "code_*", "spur-analyst"] {
+        for keyword in ["knowledge_context_pack_2", "code_*", "spur-analyst"] {
             assert!(
                 desc.contains(keyword),
                 "description must carry `{keyword}` so agents discover the skill for that layer, got: {desc}"

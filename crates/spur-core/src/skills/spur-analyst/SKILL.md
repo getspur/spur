@@ -30,7 +30,7 @@ Before writing any SQL against this database, run a schema discovery query first
 
 If the question is "show me one symbol's bytes" — use `code_read_symbol`. If it's "show me 20 symbols ranked by something" — use spur-analyst.
 
-This is **layer 3 of the retrieval stack** (see the code-explore skill): `knowledge_context_pack` orients, `code_*` works one symbol at a time, spur-analyst answers set-shaped questions. Hand-chaining many `code_callers`/`code_callees` calls to build a ranking, closure, or path is the signal to switch to SQL here.
+This is **layer 3 of the retrieval stack** (see the code-explore skill): `knowledge_context_pack_2` orients, `code_*` works one symbol at a time, spur-analyst answers set-shaped questions. Hand-chaining many `code_callers`/`code_callees` calls to build a ranking, closure, or path is the signal to switch to SQL here.
 
 ## Database inventory
 
