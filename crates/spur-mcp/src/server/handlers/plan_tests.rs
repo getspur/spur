@@ -755,6 +755,51 @@ mod reconciler_fast_forward_tests {
     }
 
     #[tokio::test]
+    async fn plan_mcp_deps_resolves_ephemeral_cache_when_unversioned() {
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let continuation_ctx = super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        };
+        let (server, _channel) = super::McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            continuation_ctx,
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
+        );
+        let plan = Arc::new(tokio::sync::Mutex::new(crate::plan::PlanState {
+            plan_id: "plan-1".into(),
+            tasks: Vec::new(),
+            brain_session_id: session_id.clone(),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: None,
+        }));
+        server.active_plans.lock().await.insert(
+            "plan-1".into(),
+            super::CachedPlan::new(Arc::clone(&plan), super::unknown_beads_version()),
+        );
+
+        let deps = server.plan_mcp_deps();
+        let resolver: &dyn crate::handlers::PlanResolver = &deps;
+        let resolved = resolver
+            .load_or_project_plan_with_freshness("plan-1")
+            .await
+            .expect("deps receiver should resolve through the shared cache");
+
+        assert!(Arc::ptr_eq(&resolved.state, &plan));
+        assert!(matches!(
+            resolved.freshness,
+            crate::handlers::PlanStateFreshness::Cache {
+                beads_version_verified: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn versioned_cache_rejects_ephemeral_cache_without_epic() {
         let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
         let continuation_ctx = super::DetachedContinuationCtx {

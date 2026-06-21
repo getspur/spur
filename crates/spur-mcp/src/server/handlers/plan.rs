@@ -1052,7 +1052,10 @@ impl McpCallbackServer {
             delegation_id: String::new(),
             brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
-        match crate::handlers::get_plan_status(self, &self.reconciler_outcomes, &ctx, args).await {
+        let plan_deps = self.plan_mcp_deps();
+        match crate::handlers::get_plan_status(&plan_deps, &self.reconciler_outcomes, &ctx, args)
+            .await
+        {
             Ok(status) => {
                 let text =
                     serde_json::to_string_pretty(&status).unwrap_or_else(|_| status.to_string());
@@ -1099,11 +1102,12 @@ impl McpCallbackServer {
             delegation_id: String::new(),
             brain_session_id: self.brain_session_id().as_session_id().0.clone(),
         };
+        let plan_deps = self.plan_mcp_deps();
         match crate::handlers::get_task_diff(
             self.pm_service.as_deref(),
             self.feature_gate.as_ref(),
             self.repo_root.as_deref(),
-            self,
+            &plan_deps,
             &ctx,
             args,
         )
