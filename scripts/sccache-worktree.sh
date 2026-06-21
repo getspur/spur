@@ -3,8 +3,14 @@
 #
 # rustc-wrapper that dynamically sets SCCACHE_BASEDIRS to the current git
 # worktree root so sccache normalizes workspace paths identically across all
-# worktrees and the main repo. Local macOS builds can opt into the shared GCS
-# backend with SPUR_SCCACHE_GCS=1.
+# worktrees and the main repo. Local builds can opt into a shared remote
+# backend:
+#   SPUR_SCCACHE_S3=1  → two-level cache L0=local disk, L1=AWS S3
+#                        (SCCACHE_MULTILEVEL_CHAIN=disk,s3). Default bucket
+#                        wiilearn-spur-sccache-apne1 in ap-northeast-1.
+#   SPUR_SCCACHE_GCS=1 → two-level cache L0=local disk, L1=GCS (macOS-gated).
+# S3 takes precedence when both are set. Each restarts the sccache server via
+# spur-cargo so the daemon picks up the multilevel config.
 #
 # Why: sccache 0.14.0 strips SCCACHE_BASEDIRS prefixes before hashing.
 # Without this wrapper, each worktree's unique subdirectory name remains in the
@@ -30,6 +36,39 @@ fi
 # shared artifacts normalize consistently.
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
 SPUR_ROOT="${SPUR_ROOT:-$REPO_ROOT}"
+
+# Two-level cache: L0=local disk (fast), L1=AWS S3 (shared, durable). sccache
+# 0.15+ implements this natively via SCCACHE_MULTILEVEL_CHAIN; on an L1 hit it
+# backfills L0. Returns 0 when activated, 1 when SPUR_SCCACHE_S3 is unset so the
+# caller can fall through to the GCS path.
+enable_spur_s3_cache() {
+    [[ "${SPUR_SCCACHE_S3:-0}" == "1" ]] || return 1
+
+    # L1: AWS S3. SCCACHE_REGION MUST match the bucket's region or S3 rejects
+    # the request. Bucket suffix apne1 == ap-northeast-1 (Tokyo).
+    export SCCACHE_BUCKET="${SCCACHE_BUCKET:-wiilearn-spur-sccache-apne1}"
+    export SCCACHE_REGION="${SCCACHE_REGION:-ap-northeast-1}"
+    export AWS_REGION="${AWS_REGION:-$SCCACHE_REGION}"
+    # Credentials resolve through the standard AWS chain (env vars, then the
+    # default profile in ~/.aws/credentials, then IMDS).
+
+    # L0: local disk. The `disk` level REQUIRES SCCACHE_DIR to be set explicitly
+    # ("Disk cache specified in levels but not configured"), so default it to the
+    # platform cache dir sccache already uses to reuse any existing local cache.
+    if [[ -z "${SCCACHE_DIR:-}" ]]; then
+        case "$(uname -s 2>/dev/null || echo "")" in
+            Darwin) export SCCACHE_DIR="$HOME/Library/Caches/Mozilla.sccache" ;;
+            *)      export SCCACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/sccache" ;;
+        esac
+    fi
+    export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
+
+    export SCCACHE_MULTILEVEL_CHAIN="${SCCACHE_MULTILEVEL_CHAIN:-disk,s3}"
+    # l0: only an L0 write failure is fatal; tolerate transient S3 write errors
+    # so a flaky network never reds a build.
+    export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY="${SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY:-l0}"
+    return 0
+}
 
 enable_spur_gcs_cache() {
     [[ "${SPUR_SCCACHE_GCS:-0}" == "1" ]] || return 0
@@ -65,7 +104,8 @@ else
     export SCCACHE_BASEDIRS="${SPUR_ROOT}"
 fi
 
-enable_spur_gcs_cache
+# S3 takes precedence; fall through to GCS only when S3 is not requested.
+enable_spur_s3_cache || enable_spur_gcs_cache
 
 IS_SCCACHE_CONTROL=0
 case "${1:-}" in

@@ -170,6 +170,72 @@ def test_sccache_worktree_enables_gcs_cache_on_darwin_when_requested(tmp_path):
     ]
 
 
+def test_sccache_worktree_enables_s3_cache_when_requested(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    uname = bin_dir / "uname"
+    uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n")
+    uname.chmod(0o755)
+
+    sccache_log = tmp_path / "sccache.log"
+    sccache = bin_dir / "sccache"
+    sccache.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'bucket=%s\\n' \"${{SCCACHE_BUCKET-}}\" > {shlex.quote(str(sccache_log))}",
+                f"printf 'region=%s\\n' \"${{SCCACHE_REGION-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'aws_region=%s\\n' \"${{AWS_REGION-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'chain=%s\\n' \"${{SCCACHE_MULTILEVEL_CHAIN-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'policy=%s\\n' \"${{SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'dir=%s\\n' \"${{SCCACHE_DIR-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'size=%s\\n' \"${{SCCACHE_CACHE_SIZE-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'gcs=%s\\n' \"${{SCCACHE_GCS_BUCKET-}}\" >> {shlex.quote(str(sccache_log))}",
+                f"printf 'basedirs=%s\\n' \"$SCCACHE_BASEDIRS\" >> {shlex.quote(str(sccache_log))}",
+            ]
+        )
+        + "\n"
+    )
+    sccache.chmod(0o755)
+
+    rustc = tmp_path / "rustc"
+    rustc.write_text("#!/bin/sh\nexit 3\n")
+    rustc.chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir()
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["HOME"] = str(home)
+    env["SPUR_ROOT"] = str(ROOT)
+    env["SPUR_SCCACHE_S3"] = "1"
+    env["SPUR_SCCACHE_GCS"] = "1"
+    env["SCCACHE_BUCKET"] = "spur-test-s3"
+    env.pop("CODEX_SANDBOX", None)
+
+    result = subprocess.run(
+        [str(WRAPPER), str(rustc), "-vV"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sccache_log.read_text().splitlines() == [
+        "bucket=spur-test-s3",
+        "region=ap-northeast-1",
+        "aws_region=ap-northeast-1",
+        "chain=disk,s3",
+        "policy=l0",
+        f"dir={home / 'Library' / 'Caches' / 'Mozilla.sccache'}",
+        "size=10G",
+        "gcs=",
+        f"basedirs={ROOT}",
+    ]
+
+
 def test_sccache_worktree_bypasses_sccache_in_codex_sandbox(tmp_path):
     bin_dir = make_isolated_bin(tmp_path)
 
@@ -342,6 +408,103 @@ def test_spur_cargo_disables_incremental_when_gcs_cache_is_requested(tmp_path):
     assert cargo_log.read_text().splitlines() == [
         "incremental=0",
         f"wrapper={WRAPPER}",
+    ]
+
+
+def test_spur_cargo_disables_incremental_when_s3_cache_is_requested(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    cargo_log = tmp_path / "cargo.log"
+    cargo = bin_dir / "cargo"
+    cargo.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'incremental=%s\\n' \"${{CARGO_INCREMENTAL-}}\" > {shlex.quote(str(cargo_log))}",
+                f"printf 'wrapper=%s\\n' \"${{RUSTC_WRAPPER-}}\" >> {shlex.quote(str(cargo_log))}",
+            ]
+        )
+        + "\n"
+    )
+    cargo.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["SPUR_SCCACHE_S3"] = "1"
+    env["CODEX_SANDBOX"] = "seatbelt"
+    env.pop("RUSTC_WRAPPER", None)
+    env.pop("CARGO_INCREMENTAL", None)
+
+    result = subprocess.run(
+        [str(SPUR_CARGO), "metadata", "--version"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert cargo_log.read_text().splitlines() == [
+        "incremental=0",
+        f"wrapper={WRAPPER}",
+    ]
+
+
+def test_spur_cargo_restarts_when_s3_cache_is_not_active(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    cargo_log = tmp_path / "cargo.log"
+    cargo = bin_dir / "cargo"
+    cargo.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'called\\n' > {shlex.quote(str(cargo_log))}",
+            ]
+        )
+        + "\n"
+    )
+    cargo.chmod(0o755)
+
+    sccache_log = tmp_path / "sccache.log"
+    sccache = bin_dir / "sccache"
+    sccache.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf '%s\\n' \"$1\" >> {shlex.quote(str(sccache_log))}",
+                'case "$1" in',
+                "  --show-stats) printf 'Cache location                  Multi-level (2 levels)\\n  L0 (disk)                     Local disk: test\\n  L1 (gcs)                      GCS: test\\n'; exit 0 ;;",
+                "  --stop-server) exit 0 ;;",
+                "  --start-server) exit 0 ;;",
+                "esac",
+                "exit 0",
+            ]
+        )
+        + "\n"
+    )
+    sccache.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["SPUR_SCCACHE_S3"] = "1"
+    env.pop("CODEX_SANDBOX", None)
+    env.pop("RUSTC_WRAPPER", None)
+
+    result = subprocess.run(
+        [str(SPUR_CARGO), "--version"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert cargo_log.exists()
+    assert sccache_log.read_text().splitlines() == [
+        "--show-stats",
+        "--stop-server",
+        "--start-server",
     ]
 
 
