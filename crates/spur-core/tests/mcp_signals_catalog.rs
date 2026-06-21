@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::json;
+use spur_core::mcp::plan::{PlanMcpDeps, PlanMcpModule};
 use spur_core::mcp::signals::{SignalMcpDeps, SignalMcpModule};
 use spur_license::policy::PolicyResolver;
 use spur_license::{FeatureGate, FeatureKey, LicenseState, Plan};
@@ -69,6 +70,10 @@ fn catalog_deps() -> SignalMcpDeps {
     }
 }
 
+fn plan_deps() -> PlanMcpDeps {
+    PlanMcpDeps::catalog_only()
+}
+
 #[test]
 fn signal_module_advertises_only_worker_signal_tools() {
     let module = SignalMcpModule::new(catalog_deps());
@@ -97,9 +102,36 @@ fn signal_module_advertises_only_worker_signal_tools() {
 }
 
 #[test]
+fn plan_module_advertises_exact_plan_review_reconciler_tools() {
+    let module = PlanMcpModule::new(plan_deps());
+    let names: Vec<String> = module.tools().into_iter().map(|tool| tool.name).collect();
+    let expected: Vec<String> = [
+        "merge_plan",
+        "resume_plan",
+        "force_reclaim_plan",
+        "submit_plan",
+        "execute_epic",
+        "get_plan_status",
+        "get_reconciler_status",
+        "get_task_diff",
+        "preview_task_base",
+        "plan_truncate_and_restart",
+        "recover_orphaned_dispatch",
+        "review_task",
+        "submit_plan_mutation",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    assert_eq!(names, expected, "plan module catalog order must not drift");
+}
+
+#[test]
 fn core_brain_registry_preserves_compatibility_catalog() {
     let registry = spur_core::mcp::brain_tool_registry(
         spur_core::mcp::delegation::DelegationMcpDeps::catalog_only(),
+        plan_deps(),
         catalog_deps(),
     )
     .expect("core-composed brain registry");

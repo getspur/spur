@@ -646,6 +646,7 @@ fn build_real_tools_graph_artifact(worktree: &Path) -> GraphIndexArtifact {
     let root = workspace_root();
     let files = [
         PathBuf::from("crates/spur-core/src/mcp/catalog.rs"),
+        PathBuf::from("crates/spur-core/src/mcp/plan.rs"),
         PathBuf::from("crates/spur-graph/src/mcp/mod.rs"),
         PathBuf::from("crates/spur-core/tests/rework_reuse_prior_worktree_e2e.rs"),
     ];
@@ -2287,7 +2288,7 @@ async fn code_resolve_prefers_real_submit_plan_mcp_tool_registration() {
     let artifact = build_real_tools_graph_artifact(worktree.path());
     let mcp_tool = symbol_by_file_entity_kind(
         &artifact,
-        "crates/spur-core/src/mcp/catalog.rs",
+        "crates/spur-core/src/mcp/plan.rs",
         "submit_plan",
         "mcp_tool",
     );
@@ -2316,7 +2317,7 @@ async fn code_resolve_prefers_real_submit_plan_mcp_tool_registration() {
     assert_eq!(candidates[0]["qualified_name"], "submit_plan");
     assert_eq!(
         candidates[0]["file_path"],
-        "crates/spur-core/src/mcp/catalog.rs"
+        "crates/spur-core/src/mcp/plan.rs"
     );
     assert_ne!(candidates[0]["id"], helper.stable_symbol_id);
 }
@@ -2887,7 +2888,7 @@ async fn code_search_recovers_macro_bodied_callees_for_tool_definitions() {
             json!({
                 "query": "_def",
                 "mode": "substring",
-                "file": "crates/spur-core/src/mcp/catalog.rs",
+                "file": "crates/spur-core/src/mcp/plan.rs",
                 "symbol_kind": "function",
                 "limit": 100
             }),
@@ -2901,23 +2902,20 @@ async fn code_search_recovers_macro_bodied_callees_for_tool_definitions() {
     assert!(names.contains("merge_plan_def"));
     assert!(names.contains("submit_plan_def"));
     assert!(
-        search["total_matches"].as_u64().expect("total_matches") >= 20,
-        "expected at least 20 *_def functions, got {}",
+        search["total_matches"].as_u64().expect("total_matches") >= 13,
+        "expected at least 13 plan *_def functions, got {}",
         search["total_matches"]
     );
-    let allowed_catalog_helpers = [
-        "analyst_tool_definition",
-        "graph_tool_definition",
+    let allowed_plan_helpers = [
         "plan_management_tool_definitions",
         "plan_remainder_tool_definitions",
-        "pm_tool_definition",
-        "pm_tool_definitions_by_names",
-        "server_tool_definitions",
+        "plan_tool_definition",
+        "plan_tool_definitions",
         "worker_tool_definitions",
     ];
     assert!(candidates.iter().all(|candidate| {
         let name = candidate["entity_name"].as_str().expect("entity_name");
-        name.ends_with("_def") || allowed_catalog_helpers.contains(&name)
+        name.ends_with("_def") || allowed_plan_helpers.contains(&name)
     }));
 
     let submit_tools = tool_body(
@@ -2936,7 +2934,7 @@ async fn code_search_recovers_macro_bodied_callees_for_tool_definitions() {
     assert!(submit_tool_candidates.iter().any(|candidate| {
         candidate["entity_name"] == "submit_plan"
             && candidate["symbol_kind"] == "mcp_tool"
-            && candidate["file_path"] == "crates/spur-core/src/mcp/catalog.rs"
+            && candidate["file_path"] == "crates/spur-core/src/mcp/plan.rs"
     }));
 }
 
@@ -2973,7 +2971,7 @@ async fn code_search_candidate_rows_include_enclosing_scope() {
     let artifact = build_real_tools_graph_artifact(worktree.path());
     let mcp_tool = symbol_by_file_entity_kind(
         &artifact,
-        "crates/spur-core/src/mcp/catalog.rs",
+        "crates/spur-core/src/mcp/plan.rs",
         "submit_plan",
         "mcp_tool",
     );
