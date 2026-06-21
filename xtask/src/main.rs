@@ -35,7 +35,7 @@ fn print_help() {
     eprintln!("             auto aliases green after the standalone notebook cutover");
     eprintln!("             green installs spur only and expects standalone getspur/spur-notebook");
     eprintln!(
-        "  --remote   build Linux release binaries on the GCP VM via scripts/gcp-build and fetch them back"
+        "  --remote   build Linux release binaries via scripts/cloud-build and fetch them back"
     );
     if cfg!(target_os = "linux") {
         eprintln!("             fetched into $CARGO_HOME/bin (native on this host)");
@@ -229,7 +229,7 @@ fn install_remote_linux_binaries(
     let mut build = remote_install_build_command(workspace_root, notebook_channel);
     run_status(
         &mut build,
-        "scripts/gcp-build/build.sh remote release build",
+        "scripts/cloud-build/build.sh remote release build",
     )?;
     let mut fetch = remote_install_fetch_command(workspace_root, &dest.dir, notebook_channel);
     run_status(&mut fetch, remote_install_fetch_label(notebook_channel))
@@ -239,10 +239,14 @@ fn remote_install_build_command(
     workspace_root: &Path,
     _notebook_channel: NotebookInstallChannel,
 ) -> Command {
-    let mut cmd = Command::new(workspace_root.join("scripts/gcp-build/build.sh"));
-    cmd.arg("--auto-spin")
-        .arg("--")
-        .args(["build", "--release", "-p", "spur-cli"]);
+    let mut cmd = Command::new(workspace_root.join("scripts/cloud-build/build.sh"));
+    cmd.arg("--auto-spin").arg("--").args([
+        "build",
+        "--release",
+        "-p",
+        "spur-cli",
+        "--no-default-features",
+    ]);
     cmd.arg("--locked").current_dir(workspace_root);
     cmd
 }
@@ -252,7 +256,7 @@ fn remote_install_fetch_command(
     dest_dir: &Path,
     _notebook_channel: NotebookInstallChannel,
 ) -> Command {
-    let mut cmd = Command::new(workspace_root.join("scripts/gcp-build/fetch.sh"));
+    let mut cmd = Command::new(workspace_root.join("scripts/cloud-build/fetch.sh"));
     cmd.arg("--to")
         .arg(dest_dir.join("spur"))
         .arg("target/release/spur");
@@ -261,7 +265,7 @@ fn remote_install_fetch_command(
 }
 
 fn remote_install_fetch_label(_notebook_channel: NotebookInstallChannel) -> &'static str {
-    "scripts/gcp-build/fetch.sh target/release/spur"
+    "scripts/cloud-build/fetch.sh target/release/spur"
 }
 
 fn report_remote_install(
@@ -478,7 +482,7 @@ mod tests {
 
         assert_eq!(
             command.get_program(),
-            root.join("scripts/gcp-build/build.sh").as_os_str()
+            root.join("scripts/cloud-build/build.sh").as_os_str()
         );
         assert_eq!(
             command_args(&command),
@@ -489,6 +493,7 @@ mod tests {
                 "--release".to_owned(),
                 "-p".to_owned(),
                 "spur-cli".to_owned(),
+                "--no-default-features".to_owned(),
                 "--locked".to_owned(),
             ]
         );
@@ -510,6 +515,7 @@ mod tests {
                 "--release".to_owned(),
                 "-p".to_owned(),
                 "spur-cli".to_owned(),
+                "--no-default-features".to_owned(),
                 "--locked".to_owned(),
             ]
         );
@@ -524,7 +530,7 @@ mod tests {
 
         assert_eq!(
             command.get_program(),
-            root.join("scripts/gcp-build/fetch.sh").as_os_str()
+            root.join("scripts/cloud-build/fetch.sh").as_os_str()
         );
         assert_eq!(
             command_args(&command),
@@ -559,10 +565,10 @@ mod tests {
     }
 
     #[test]
-    fn remote_install_fetch_label_uses_gcp_build() {
+    fn remote_install_fetch_label_uses_cloud_build() {
         assert_eq!(
             remote_install_fetch_label(NotebookInstallChannel::Auto),
-            "scripts/gcp-build/fetch.sh target/release/spur"
+            "scripts/cloud-build/fetch.sh target/release/spur"
         );
     }
 
