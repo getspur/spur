@@ -169,7 +169,7 @@ async fn project_completion_snapshot_and_deliver<F>(
     projection: F,
     outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
     event_sink: Option<&dyn crate::events::McpEventSink>,
-    continuation_ctx: &crate::server::DetachedContinuationCtx,
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
     deferred: Option<crate::plan::DeferredCompletionPush>,
     context: CompletionProjectionLogContext<'_>,
 ) where
@@ -627,7 +627,7 @@ struct SetupConflictContinuation<'a> {
     files: &'a [String],
     summary: &'static str,
     event_sink: Option<&'a dyn crate::events::McpEventSink>,
-    continuation_ctx: &'a crate::server::DetachedContinuationCtx,
+    continuation_ctx: &'a crate::plan::continuation::DetachedContinuationCtx,
 }
 
 async fn emit_setup_conflict_continuation(input: SetupConflictContinuation<'_>) {
@@ -700,7 +700,7 @@ pub struct ReconcilerDispatchCtx {
     pub brain_session_id: spur_acp::BrainSessionId,
     pub event_sink: Option<Arc<dyn crate::events::McpEventSink>>,
     pub materializer: Arc<crate::outcome_materializer::OutcomeMaterializer>,
-    pub continuation_ctx: Arc<crate::server::DetachedContinuationCtx>,
+    pub continuation_ctx: Arc<crate::plan::continuation::DetachedContinuationCtx>,
 }
 
 #[async_trait::async_trait]
@@ -714,7 +714,7 @@ pub trait ReconcilerDispatch: Send + Sync {
 
     fn materializer(&self) -> &Arc<crate::outcome_materializer::OutcomeMaterializer>;
 
-    fn continuation_ctx(&self) -> &Arc<crate::server::DetachedContinuationCtx>;
+    fn continuation_ctx(&self) -> &Arc<crate::plan::continuation::DetachedContinuationCtx>;
 
     fn brain_session_id(&self) -> &spur_acp::BrainSessionId;
 }
@@ -743,7 +743,7 @@ impl ReconcilerDispatch for ReconcilerDispatchCtx {
         &self.materializer
     }
 
-    fn continuation_ctx(&self) -> &Arc<crate::server::DetachedContinuationCtx> {
+    fn continuation_ctx(&self) -> &Arc<crate::plan::continuation::DetachedContinuationCtx> {
         &self.continuation_ctx
     }
 
@@ -1650,11 +1650,11 @@ impl Reconciler {
     }
 
     async fn run_index_hygiene_sweep(&self) -> anyhow::Result<bool> {
-        crate::server::require_feature(
+        crate::feature::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
         )
-        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
+        .map_err(|error| anyhow::anyhow!(crate::feature::feature_error_message(error)))?;
         let Some(adv) = self.pm.advanced() else {
             return Ok(false);
         };

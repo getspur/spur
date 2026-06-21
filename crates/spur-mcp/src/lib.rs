@@ -136,6 +136,8 @@
 )]
 
 pub mod events;
+pub mod feature;
+pub mod git;
 pub mod handlers;
 pub mod outcome_materializer;
 pub mod plan;
