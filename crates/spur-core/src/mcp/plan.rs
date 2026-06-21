@@ -7,11 +7,9 @@
 //! ~40 integration tests are mutually coupled). See
 //! `docs/superpowers/plans/2026-06-21-phase4-plan-reconciler-core-extraction.md`.
 //!
-//! This module is **Stage 0**: it defines the typed dependency bundle
-//! (`PlanMcpDeps`) that captures the orchestration-domain handles off
-//! `McpCallbackServer`. It mirrors `DelegationMcpDeps::from_server` and is the
-//! concrete input the staged engine migration (Stage 2+) consumes. It adds no
-//! behavior and changes no tool dispatch.
+//! Stage 4 makes this module the owner of the plan/review/reconciler MCP tool
+//! catalog and dispatch. The handlers still bridge to `McpCallbackServer`
+//! while the remaining server relocation stages complete.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,12 +19,204 @@ use crate::outcome_materializer::OutcomeMaterializer;
 use crate::plan::outcomes::OutcomeStore;
 use crate::plan::{PlanRegistry, PmLike};
 use crate::server::{CachedPlan, DetachedContinuationCtx, McpCallbackServer};
+use async_trait::async_trait;
+use rmcp::model::{ErrorCode, ErrorData as McpError};
+use serde_json::{json, Value};
 use spur_acp::BrainSessionId;
 use spur_blob_store::OutcomeStore as BlobOutcomeStore;
 use spur_license::FeatureGate;
-use spur_mcp::McpEventSink;
+use spur_mcp::{McpEventSink, ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
 use spur_pm::PmService;
 use tokio::sync::OnceCell;
+
+const PLAN_MANAGEMENT_TOOL_NAMES: &[&str] = &["merge_plan", "resume_plan", "force_reclaim_plan"];
+
+const PLAN_REMAINDER_TOOL_NAMES: &[&str] = &[
+    "submit_plan",
+    "execute_epic",
+    "get_plan_status",
+    "get_reconciler_status",
+    "get_task_diff",
+    "preview_task_base",
+    "plan_truncate_and_restart",
+    "recover_orphaned_dispatch",
+    "review_task",
+    "submit_plan_mutation",
+];
+
+const PLAN_TOOL_NAMES: &[&str] = &[
+    "merge_plan",
+    "resume_plan",
+    "force_reclaim_plan",
+    "submit_plan",
+    "execute_epic",
+    "get_plan_status",
+    "get_reconciler_status",
+    "get_task_diff",
+    "preview_task_base",
+    "plan_truncate_and_restart",
+    "recover_orphaned_dispatch",
+    "review_task",
+    "submit_plan_mutation",
+];
+
+#[derive(Debug, Clone, Copy)]
+enum PlanToolSection {
+    All,
+    Management,
+    Remainder,
+}
+
+/// Core-owned MCP module for plan/review/reconciler tools.
+#[derive(Clone)]
+pub struct PlanMcpModule {
+    deps: PlanMcpDeps,
+    section: PlanToolSection,
+}
+
+impl PlanMcpModule {
+    /// Advertise all plan/review/reconciler tools as a single module.
+    pub fn new(deps: PlanMcpDeps) -> Self {
+        Self {
+            deps,
+            section: PlanToolSection::All,
+        }
+    }
+
+    /// Advertise the legacy pre-graph plan-management block.
+    pub(crate) fn management(deps: PlanMcpDeps) -> Self {
+        Self {
+            deps,
+            section: PlanToolSection::Management,
+        }
+    }
+
+    /// Advertise the legacy post-analyst plan/review/reconciler block.
+    pub(crate) fn remainder(deps: PlanMcpDeps) -> Self {
+        Self {
+            deps,
+            section: PlanToolSection::Remainder,
+        }
+    }
+
+    pub(crate) async fn call_with_server(
+        &self,
+        server: &McpCallbackServer,
+        ctx: ToolCallContext<'_>,
+        tool_name: &str,
+        arguments: Value,
+    ) -> spur_mcp::JsonRpcResponse {
+        let _ = &self.deps;
+        let id = ctx.request_id_value();
+
+        match tool_name {
+            "merge_plan" => server.handle_merge_plan(id, arguments).await,
+            "resume_plan" => server.handle_resume_plan(id, arguments).await,
+            "force_reclaim_plan" => server.handle_force_reclaim_plan(id, arguments).await,
+            "submit_plan" => server.handle_submit_plan(id, arguments).await,
+            "execute_epic" => server.handle_execute_epic(id, arguments).await,
+            "get_plan_status" => server.handle_get_plan_status(id, arguments).await,
+            "get_reconciler_status" => server.handle_get_reconciler_status(id).await,
+            "get_task_diff" => server.handle_get_task_diff(id, arguments).await,
+            "preview_task_base" => server.handle_preview_task_base(id, arguments).await,
+            "plan_truncate_and_restart" => {
+                server.handle_plan_truncate_and_restart(id, arguments).await
+            }
+            "recover_orphaned_dispatch" => {
+                server.handle_recover_orphaned_dispatch(id, arguments).await
+            }
+            "review_task" => {
+                if let Some(plan_id) = arguments.get("plan_id").and_then(|v| v.as_str()) {
+                    if let Err((code, message)) =
+                        server.check_plan_owner_for_op(plan_id, "review_task").await
+                    {
+                        return spur_mcp::JsonRpcResponse::error(id, code, message);
+                    }
+                }
+                match server.handle_review_task(&arguments).await {
+                    Ok(text) => spur_mcp::JsonRpcResponse::success(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": text }] }),
+                    ),
+                    Err(e) => spur_mcp::JsonRpcResponse::internal_error(id, e),
+                }
+            }
+            "submit_plan_mutation" => server.handle_submit_plan_mutation(id, arguments).await,
+            _ => spur_mcp::JsonRpcResponse::error(id, -32601, format!("Unknown tool: {tool_name}")),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolModule for PlanMcpModule {
+    fn tools(&self) -> Vec<ToolDefinition> {
+        match self.section {
+            PlanToolSection::All => plan_tool_definitions(),
+            PlanToolSection::Management => plan_management_tool_definitions(),
+            PlanToolSection::Remainder => plan_remainder_tool_definitions(),
+        }
+    }
+
+    async fn call(
+        &self,
+        _ctx: ToolCallContext<'_>,
+        name: &str,
+        _args: Value,
+    ) -> Result<ToolResponse, McpError> {
+        Err(McpError::new(
+            ErrorCode(-32603),
+            format!("plan-owned tool {name} must be dispatched by spur-core"),
+            None,
+        ))
+    }
+}
+
+pub(crate) fn is_plan_tool(name: &str) -> bool {
+    PLAN_TOOL_NAMES.contains(&name)
+}
+
+pub(crate) fn worker_tool_definitions() -> Vec<ToolDefinition> {
+    vec![get_task_diff_def(), get_plan_status_def()]
+}
+
+fn plan_tool_definitions() -> Vec<ToolDefinition> {
+    let mut definitions = plan_management_tool_definitions();
+    definitions.extend(plan_remainder_tool_definitions());
+    definitions
+}
+
+fn plan_management_tool_definitions() -> Vec<ToolDefinition> {
+    PLAN_MANAGEMENT_TOOL_NAMES
+        .iter()
+        .map(|name| plan_tool_definition(name))
+        .collect()
+}
+
+fn plan_remainder_tool_definitions() -> Vec<ToolDefinition> {
+    PLAN_REMAINDER_TOOL_NAMES
+        .iter()
+        .map(|name| plan_tool_definition(name))
+        .collect()
+}
+
+fn plan_tool_definition(name: &str) -> ToolDefinition {
+    match name {
+        "merge_plan" => merge_plan_def(),
+        "resume_plan" => resume_plan_def(),
+        "force_reclaim_plan" => force_reclaim_plan_def(),
+        "submit_plan" => submit_plan_def(),
+        "execute_epic" => execute_epic_def(),
+        "get_plan_status" => get_plan_status_def(),
+        "get_reconciler_status" => get_reconciler_status_def(),
+        "get_task_diff" => get_task_diff_def(),
+        "preview_task_base" => preview_task_base_def(),
+        "plan_truncate_and_restart" => plan_truncate_and_restart_def(),
+        "recover_orphaned_dispatch" => recover_orphaned_dispatch_def(),
+        "review_task" => review_task_def(),
+        "submit_plan_mutation" => submit_plan_mutation_def(),
+        other => panic!("unknown plan MCP tool definition: {other}"),
+    }
+}
 
 /// Orchestration-domain handles for the plan/review/reconciler MCP tools.
 ///
@@ -79,6 +269,34 @@ pub struct PlanMcpDeps {
 }
 
 impl PlanMcpDeps {
+    pub fn catalog_only() -> Self {
+        let outcome_store = Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        Self {
+            brain_session_id: Arc::new(OnceCell::new()),
+            active_plans: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            plan_registry: Arc::new(tokio::sync::Mutex::new(PlanRegistry::default())),
+            plan_claim_lock: Arc::new(tokio::sync::Mutex::new(())),
+            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(OutcomeStore::default())),
+            pm_service: None,
+            pm_service_like: None,
+            version_churn_epic_for_test: Arc::new(tokio::sync::Mutex::new(None)),
+            feature_gate: crate::server::community_feature_gate(),
+            continuation_ctx: Arc::new(DetachedContinuationCtx {
+                on_complete: Arc::new(|_, _| Box::pin(async {})),
+            }),
+            materializer: OutcomeMaterializer::new(outcome_store.clone()),
+            outcome_store,
+            event_sink: None,
+            repo_root: None,
+            versioned_cache_serve: false,
+            nonadvisory_review_writes: false,
+            dispatch_lease_duration: Duration::from_secs(600),
+            auto_merge_approved_plans: false,
+            plan_pending_grace: Duration::from_secs(300),
+            reconciler_enabled: false,
+        }
+    }
+
     /// Capture the plan/reconciler orchestration handles off a brain server.
     ///
     /// The handles are `Arc`-shared with the server (see the `ptr_eq` test), so
@@ -107,6 +325,337 @@ impl PlanMcpDeps {
             plan_pending_grace: server.plan_pending_grace(),
             reconciler_enabled: server.reconciler_enabled(),
         }
+    }
+}
+
+fn merge_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "merge_plan".into(),
+        description: "Integrate a fully approved plan onto a dedicated plan-scoped branch. Cherry-picks approved worker branches in deterministic topological order without mutating the active checkout. On success, returns a `merge_branch` you can pass to `create_pr`. On conflict, returns the partial branch plus the conflicting task and files.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id returned by submit_plan or execute_epic"
+                }
+            },
+            "required": ["plan_id"]
+        }),
+    }
+}
+
+fn resume_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "resume_plan".into(),
+        description: "Explicitly claim or resume a persisted beads plan. MVP claims unowned plans and refuses plans with active owners; active handoff is not implemented.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The persisted beads plan_id to claim or resume"
+                }
+            },
+            "required": ["plan_id"]
+        }),
+    }
+}
+
+fn force_reclaim_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "force_reclaim_plan".into(),
+        description: "Operator-initiated force-takeover of plan ownership. Removes any existing `spur:plan-owner:*` labels and stamps the current brain as the owner. Intended only for stuck/dead owners or governance-driven takeover; clobbers any concurrent owner brain's in-flight state. Requires explicit `confirm: true`. See docs/multi-brain-operations.md.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id whose ownership to force-reclaim"
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be `true` to acknowledge that this clobbers any concurrent owner brain's in-flight state. `false` or missing returns an error."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional human-readable reason recorded in the audit sentinel for accountability"
+                }
+            },
+            "required": ["plan_id", "confirm"]
+        }),
+    }
+}
+
+fn submit_plan_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_plan".into(),
+        description: "Submit a structured execution plan with dependency ordering. The orchestrator dispatches tasks to workers automatically: independent tasks run in parallel, dependent tasks wait for predecessors to complete. Use graph_plan to get dependency-aware tracks, then enrich each item with agent assignment and task description. Returns a plan_id — poll with get_plan_status.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "Unique identifier for this task (use issue ID or descriptive slug)"
+                            },
+                            "agent": {
+                                "type": "string",
+                                "description": "Worker agent to execute this task"
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "Task description (CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT)"
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "task_ids that must complete before this task starts. Empty or omitted = ready immediately."
+                            },
+                            "issue_id": {
+                                "type": "string",
+                                "description": "Optional beads issue ID to auto-track"
+                            },
+                            "context_files": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Optional file paths for worker context"
+                            }
+                        },
+                        "required": ["task_id", "agent", "task"]
+                    },
+                    "description": "Tasks with dependency edges forming a DAG. Tasks with no depends_on are dispatched immediately."
+                },
+                "epic_title": {
+                    "type": "string",
+                    "description": "Epic title. Required when the first task description is empty or whitespace-only."
+                },
+                "epic_body": {
+                    "type": "string",
+                    "description": "Epic description / rationale. Optional."
+                },
+                "client_idempotency_key": {
+                    "type": "string",
+                    "description": "Optional caller-supplied idempotency key. When repeated with a beads-backed persisted submit_plan within the dedup TTL, returns the existing plan_id without creating another epic."
+                },
+                "base": {
+                    "description": "Optional explicit base for the plan. Omit (or pass {\"kind\":\"repo_main\"}) for legacy behavior — the plan engine snapshots the brain working tree HEAD. Pass {\"kind\":\"branch\",\"name\":\"<branch>\"} or {\"kind\":\"commit\",\"oid\":\"<oid>\"} to base the plan on a named ref instead; the brain working tree is not touched. Useful for stacking plans on a prior phase's integration branch.",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": { "kind": { "const": "repo_main" } },
+                            "required": ["kind"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "branch" },
+                                "name": { "type": "string" }
+                            },
+                            "required": ["kind", "name"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "commit" },
+                                "oid": { "type": "string" }
+                            },
+                            "required": ["kind", "oid"]
+                        }
+                    ]
+                }
+            },
+            "required": ["tasks"]
+        }),
+    }
+}
+
+fn get_plan_status_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_plan_status".into(),
+        description: "Get the current status of a submitted execution plan. Returns per-task status: pending (waiting for deps), ready, dispatched (running), completed, or failed. Non-blocking — returns immediately.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id returned by submit_plan"
+                }
+            },
+            "required": ["plan_id"]
+        }),
+    }
+}
+
+fn get_reconciler_status_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_reconciler_status".into(),
+        description: "Get the reconciler's in-memory observability state across all plans, including recent dispatch outcomes, stuck tasks, and last tick time.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }
+}
+
+fn get_task_diff_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_task_diff".to_string(),
+        description: "Get the full unified diff for a plan task. Use after \
+            get_plan_status shows tasks in awaiting_review, approved, rejected, or \
+            failed state. Returns the complete diff, worker branch name, task \
+            description, and summary for brain code review. Pass `attempt` to inspect \
+            prior iteration attempts (see entry.history)."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": { "type": "string", "description": "The plan_id returned by submit_plan" },
+                "task_id": { "type": "string", "description": "The task_id to inspect" },
+                "attempt": {
+                    "type": "integer",
+                    "description": "Optional: inspect a prior attempt (1..current-1). Omit for the latest attempt."
+                }
+            },
+            "required": ["plan_id", "task_id"]
+        }),
+    }
+}
+
+fn preview_task_base_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "preview_task_base".into(),
+        description: "Read-only: returns the overlay commits and predicted base OID for a given plan task without creating a worker worktree. Use this BEFORE approving a downstream task to surface integration conflicts early. Returns null `predicted_base_oid` and a `conflict` payload when overlays cannot be applied cleanly.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::PreviewTaskBaseInput>(),
+    }
+}
+
+fn plan_truncate_and_restart_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "plan_truncate_and_restart".into(),
+        description: "Recovery tool for plans blocked by overlay conflicts. Cherry-picks approved task tips in DAG order onto a fresh `spur/plan-staging/{plan_id}` branch, marks remaining tasks Superseded in the original plan, and submits a new plan whose tasks dispatch against the staging branch. Use after `BlockedOnSetupConflict` when the conflict is across approved siblings (i.e. cannot be unwound by re-dispatching a single upstream task).".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::PlanTruncateAndRestartInput>(),
+    }
+}
+
+fn recover_orphaned_dispatch_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "recover_orphaned_dispatch".into(),
+        description: "Brain-side recovery tool. Promote a stuck Dispatched beads task to AwaitingReview when the worker branch and dispatch base OID are known. Validates the task is still dispatched, the worker branch exists, and the branch contains exactly one commit over the dispatched base.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::RecoverOrphanedDispatchInput>(),
+    }
+}
+
+fn review_task_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "review_task".to_string(),
+        description: "Submit a review decision for a plan task awaiting review. \
+            Three decisions: 'approve' (task done, beads→closed), 'reject' (task \
+            dead, beads→closed with `spur:review-rejected`, dependent tasks \
+            auto-failed), or 'request_changes' (persist task back to open, clear \
+            review ownership, and let the reconciler redispatch when ready — max 3 \
+            attempts per task, requires `feedback`). Returns updated plan status \
+            with counts and ready_to_merge flag."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "The plan_id returned by submit_plan"
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "The task_id to review"
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": ["approve", "reject", "request_changes"],
+                    "description": "Review verdict. 'approve' → task marked done and persisted closed; newly-ready work is picked up by the reconciler. 'reject' → task terminal, pending/ready dependents cascaded to failed (dispatched/awaiting_review dependents flagged in warnings). 'request_changes' → task persisted back to open so the reconciler redispatch it later, bounded by max_attempts (3)."
+                },
+                "feedback": {
+                    "type": "string",
+                    "description": "Optional feedback. Recommended when decision is `request_changes` so the worker has context for the next attempt."
+                },
+                "reuse_prior_worktree": {
+                    "type": "boolean",
+                    "description": "When request_changes is the decision, opt in to having the prior rejected attempt's diff pre-applied as uncommitted changes in the next attempt's worktree."
+                }
+            },
+            "required": ["plan_id", "task_id", "decision"]
+        }),
+    }
+}
+
+fn submit_plan_mutation_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_plan_mutation".into(),
+        description: "Brain-side recovery tool. This is the 'Swiss Army knife' for \
+            the brain agent to fix escalated/failed running plans. Apply an \
+            atomic batch of plan-graph mutations to recover an escalated task: \
+            retry it as-is, rewrite its spec (task body, agent, context, deps), \
+            or abandon it. Wraps `apply_mutation` end-to-end with cycle \
+            detection + rollback. Clears `signal:escalated` from every \
+            affected issue on success."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["trigger_task_id", "ops"],
+            "properties": {
+                "trigger_task_id": {
+                    "type": "string",
+                    "description": "Beads issue id used as the audit anchor for the batch. Typically the escalated task."
+                },
+                "mutation_id": {
+                    "type": "string",
+                    "description": "Optional UUID; auto-generated when absent."
+                },
+                "ops": {
+                    "type": "array",
+                    "description": "Ordered list of `PlanMutationOp` JSON values. Supported tags: split_task, retry_task, modify_task_spec, abandon_task.",
+                    "items": { "type": "object" }
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "Free-form explanation for the audit trail."
+                }
+            }
+        }),
+    }
+}
+
+fn execute_epic_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "execute_epic".into(),
+        description: "Execute a beads epic: hydrate a plan from the epic's \
+            children subgraph and dispatch in dependency order. Agent routing \
+            comes from the `spur:agent:<name>` label on each child issue \
+            (inherited from the epic if unset, or from default_agent). Task \
+            text comes from issue.body. Rejects nested sub-epic children. External blocked_by \
+            references must already be `done`. After dispatch, the plan runs \
+            under the normal review engine — use get_plan_status / \
+            get_task_diff / review_task. Re-calling while a plan is active \
+            for the same epic returns the existing plan_id (idempotent). \
+            After terminal state, a new call starts a fresh plan."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "epic_id": {
+                    "type": "string",
+                    "description": "The beads ID of an issue with type=epic"
+                },
+                "default_agent": {
+                    "type": "string",
+                    "description": "Fallback agent when a child has no `spur:agent:<name>` label and the epic has no inherited label"
+                }
+            },
+            "required": ["epic_id"]
+        }),
     }
 }
 

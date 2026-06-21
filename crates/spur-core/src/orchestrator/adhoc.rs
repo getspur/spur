@@ -83,6 +83,7 @@ impl Orchestrator {
         let tool_registry = self
             .brain_tool_registry(
                 crate::mcp::delegation::DelegationMcpDeps::from_server(&mcp_server),
+                crate::mcp::plan::PlanMcpDeps::from_server(&mcp_server),
                 sink.clone(),
             )
             .context("Failed to compose brain MCP tool registry")?;

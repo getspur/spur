@@ -1047,6 +1047,7 @@ mod session_attach_guard_transfer_tests {
         let tool_registry = orchestrator
             .brain_tool_registry(
                 crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
+                crate::mcp::plan::PlanMcpDeps::from_server(&server),
                 None,
             )
             .expect("compose brain MCP tool registry");
@@ -1543,6 +1544,7 @@ impl Orchestrator {
         let tool_registry = self
             .brain_tool_registry(
                 crate::mcp::delegation::DelegationMcpDeps::from_server(&mcp_server),
+                crate::mcp::plan::PlanMcpDeps::from_server(&mcp_server),
                 sink.clone(),
             )
             .context("Failed to compose brain MCP tool registry")?;
@@ -1849,6 +1851,7 @@ impl Orchestrator {
         let tool_registry = self
             .brain_tool_registry(
                 crate::mcp::delegation::DelegationMcpDeps::from_server(&mcp_server),
+                crate::mcp::plan::PlanMcpDeps::from_server(&mcp_server),
                 sink.clone(),
             )
             .context("Failed to compose brain MCP tool registry")?;
