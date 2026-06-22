@@ -4,12 +4,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use duckdb::{params, Connection};
+use spur_context_service::knowledge::{
+    query_knowledge_context, KnowledgeContextOptions, KnowledgeScope,
+};
 use spur_context_service::query::read_symbol;
 use spur_context_service::translate::{translate_artifact_to_ducklake, TranslateOptions};
 
 const SOURCE: &str = "registry:crates-io";
 const PACKAGE: &str = "demo";
 const REVISION: &str = "1.2.3";
+const DIMENSIONS: usize = 768;
 
 #[test]
 fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
@@ -147,6 +151,54 @@ fn translated_artifact_read_symbol_returns_source_from_package_tree() -> Result<
     Ok(())
 }
 
+#[test]
+fn translated_artifact_vector_search_returns_ranked_symbol() -> Result<()> {
+    let root = unique_temp_dir("translate-vector-search")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+
+    translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        source_root: None,
+        catalog_dsn: catalog_dsn.clone(),
+    })?;
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let result = query_knowledge_context(
+        &conn,
+        &KnowledgeContextOptions {
+            query: "unmatched lexical query".to_owned(),
+            source: SOURCE.to_owned(),
+            package: PACKAGE.to_owned(),
+            revision: REVISION.to_owned(),
+            limit: 3,
+            scope: KnowledgeScope::Code,
+            query_vec: Some(unit_vector(0)),
+        },
+    )?;
+
+    let top = result
+        .primary_evidence
+        .first()
+        .context("expected vector evidence from translated artifact")?;
+    assert_eq!(top.stable_symbol_id.as_deref(), Some("sym-alpha"));
+    assert_eq!(top.grounding, "hybrid-code");
+    assert!(top.score > 0.99, "expected near-identical vector score");
+    assert!(result.supporting_docs.is_empty());
+    Ok(())
+}
+
 fn write_artifact_fixture(artifact_dir: &Path) -> Result<()> {
     fs::create_dir_all(artifact_dir.join("code_symbols.lance"))
         .context("create code symbol sidecar dir")?;
@@ -235,7 +287,7 @@ fn write_artifact_fixture(artifact_dir: &Path) -> Result<()> {
                 'alpha' AS entity_name,
                 'function' AS symbol_kind,
                 'pub fn alpha() {{}}' AS embed_text,
-                list_transform(range(0, 768), x -> 0.0::FLOAT) AS vector,
+                list_transform(range(0, 768), x -> CASE WHEN x = 0 THEN 1.0::FLOAT ELSE 0.0::FLOAT END) AS vector,
                 'code-hash' AS content_hash,
                 'embed-hash' AS embedding_input_hash,
                 'JinaEmbeddingsV2BaseCode' AS embedding_model
@@ -314,4 +366,10 @@ fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
         row.get(0)
     })
     .with_context(|| format!("count rows in {table}"))
+}
+
+fn unit_vector(index: usize) -> Vec<f32> {
+    let mut vector = vec![0.0; DIMENSIONS];
+    vector[index] = 1.0;
+    vector
 }
