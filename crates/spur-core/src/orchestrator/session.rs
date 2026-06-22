@@ -196,6 +196,62 @@ mod session_attach_guard_transfer_tests {
         }
     }
 
+    struct LoadSessionConnection {
+        response: Option<agent_client_protocol::schema::LoadSessionResponse>,
+    }
+
+    #[async_trait]
+    impl AgentConnection for LoadSessionConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+            panic!("LoadSessionConnection::initialize must not be called")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+            panic!("LoadSessionConnection::new_session must not be called")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn load_session(
+            &mut self,
+            _request: agent_client_protocol::schema::LoadSessionRequest,
+        ) -> anyhow::Result<(
+            agent_client_protocol::schema::LoadSessionResponse,
+            Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>,
+        )> {
+            let response = self
+                .response
+                .take()
+                .expect("load_session response should be consumed once");
+            Ok((response, Box::pin(futures::stream::empty())))
+        }
+    }
+
     #[tokio::test]
     async fn retire_session_cost_write_times_out_without_returning_resource() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -1010,6 +1066,107 @@ mod session_attach_guard_transfer_tests {
         assert!(caps.supports_set_model());
 
         brain.delegation_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn loaded_agent_session_emits_command_registry_dirty_with_caps() {
+        use agent_client_protocol::schema::{
+            InitializeResponse, LoadSessionResponse, ModelId, ModelInfo, ProtocolVersion,
+            SessionModelState,
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = SpurConfig::default();
+        config.cost.db_path = tmp.path().join("cost.db").display().to_string();
+        config.agents.entries = vec![spur_acp::AgentConfig::with_defaults("codex")];
+        let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+        let mut event_rx = orchestrator.subscribe();
+
+        let config_options = vec![
+            fixture_select_option(
+                "model",
+                "gpt-5-codex",
+                &[("gpt-5-codex", "GPT-5 Codex"), ("gpt-5", "GPT-5")],
+            ),
+            fixture_select_option(
+                "reasoning_effort",
+                "medium",
+                &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
+            ),
+        ];
+        let load_response = LoadSessionResponse::new()
+            .models(SessionModelState::new(
+                ModelId::new("gpt-5-codex"),
+                vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
+            ))
+            .config_options(config_options.clone());
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+
+        let (brain, _history_stream, _outcome) = orchestrator
+            .load_brain_session(
+                Box::new(LoadSessionConnection {
+                    response: Some(load_response),
+                }),
+                "codex".to_string(),
+                None,
+                "acp-loaded-caps".to_string(),
+                false,
+                false,
+                None,
+                false,
+                init,
+            )
+            .await
+            .expect("load_brain_session should restore session");
+
+        let session_id = brain.spur_session_id.clone();
+        let cached_options = brain.config_options.clone();
+        let cached_caps = brain.spur_agent_caps.clone();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut ready_caps_seen = false;
+        let mut dirty = None;
+        while tokio::time::Instant::now() < deadline && dirty.is_none() {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Ok(ev)) => match ev.body {
+                    SpurEventBody::AgentSessionReady {
+                        session,
+                        resumed,
+                        caps,
+                        ..
+                    } if session == session_id => {
+                        assert!(resumed);
+                        ready_caps_seen = caps.is_some();
+                    }
+                    SpurEventBody::CommandRegistryDirty {
+                        session,
+                        caps,
+                        config_options,
+                    } if session == session_id => {
+                        dirty = Some((caps, config_options));
+                    }
+                    _ => {}
+                },
+                _ => break,
+            }
+        }
+
+        brain.delegation_handle.abort();
+
+        let (dirty_caps, dirty_options) =
+            dirty.expect("loaded session must emit CommandRegistryDirty with advertised caps");
+        assert!(ready_caps_seen, "AgentSessionReady must carry loaded caps");
+        assert_eq!(cached_options, config_options);
+        let cached_caps = cached_caps.expect("BrainSession must cache loaded caps");
+        assert!(cached_caps.supports_set_model());
+        assert!(cached_caps
+            .config_options
+            .iter()
+            .any(|option| option.id.0.as_ref() == "model"));
+        let dirty_caps = dirty_caps.expect("CommandRegistryDirty must carry loaded caps");
+        assert!(dirty_caps.supports_set_model());
+        assert_eq!(dirty_options, config_options);
     }
 
     /// bd-3rvt: smoke-test that `apply_mcp_server_settings` runs cleanly and
@@ -1848,6 +2005,7 @@ impl Orchestrator {
                 history_stream,
                 resumed,
                 load_outcome,
+                wire_response,
                 brain_session_id,
                 session_id,
                 socket_nonce,
@@ -1874,7 +2032,7 @@ impl Orchestrator {
             // Try load_session first. If the agent doesn't support it (e.g. kiro-cli),
             // fall back to new_session so we have a working session for subsequent prompts.
             // The historical conversation is displayed from the disk fallback in either case.
-            let (final_acp_session_id, history_stream, resumed, load_outcome) =
+            let (final_acp_session_id, history_stream, resumed, load_outcome, wire_response) =
                 if force_new_session {
                     // Escalated reconnect: don't even try session/load — just spawn fresh.
                     let session_response = crate::skip_perm::new_session_with_bypass(
@@ -1892,6 +2050,7 @@ impl Orchestrator {
                         spur_acp::LoadOutcome::FellBackToNew {
                             reason: "escalated to fresh session after repeated failures".into(),
                         },
+                        LoadedSessionWireResponse::New(session_response),
                     )
                 } else {
                     match crate::skip_perm::load_session_with_bypass(
@@ -1903,13 +2062,14 @@ impl Orchestrator {
                     )
                     .await
                     {
-                        Ok(stream) => {
+                        Ok((load_response, stream)) => {
                             debug!(brain = %brain_name, "load_session succeeded");
                             (
                                 acp_session_id,
                                 Some(stream),
                                 true,
                                 spur_acp::LoadOutcome::Restored,
+                                LoadedSessionWireResponse::Loaded(load_response),
                             )
                         }
                         Err(e) => {
@@ -1930,6 +2090,7 @@ impl Orchestrator {
                                 spur_acp::LoadOutcome::FellBackToNew {
                                     reason: fallback_reason,
                                 },
+                                LoadedSessionWireResponse::New(session_response),
                             )
                         }
                     }
@@ -1957,6 +2118,7 @@ impl Orchestrator {
                 history_stream,
                 resumed,
                 load_outcome,
+                wire_response,
                 brain_session_id,
                 session_id,
                 socket_nonce,
@@ -2064,6 +2226,25 @@ impl Orchestrator {
             )
         });
 
+        let (config_options, spur_agent_caps) = match &wire_response {
+            LoadedSessionWireResponse::New(session_response) => (
+                session_response.config_options.clone().unwrap_or_default(),
+                Some(Arc::new(spur_acp::SpurAgentCaps::new(
+                    &init_response,
+                    session_response,
+                    brain_cfg.kind,
+                ))),
+            ),
+            LoadedSessionWireResponse::Loaded(load_response) => (
+                load_response.config_options.clone().unwrap_or_default(),
+                Some(Arc::new(spur_acp::SpurAgentCaps::from_loaded(
+                    &init_response,
+                    load_response,
+                    brain_cfg.kind,
+                ))),
+            ),
+        };
+
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
             session: session_id.clone(),
             acp_session_id: final_acp_session_id.clone(),
@@ -2071,8 +2252,20 @@ impl Orchestrator {
             resumed,
             cancel_mode: cancel_mode_for(brain_cfg.transport),
             fs_unsafe,
-            caps: None,
+            caps: spur_agent_caps.clone(),
         }));
+
+        if !config_options.is_empty()
+            || spur_agent_caps
+                .as_ref()
+                .is_some_and(|caps| caps.supports_set_model())
+        {
+            self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
+                session: session_id.clone(),
+                caps: spur_agent_caps.clone(),
+                config_options: config_options.clone(),
+            }));
+        }
 
         let brain_session = BrainSession {
             connection,
@@ -2087,18 +2280,8 @@ impl Orchestrator {
             started_at: std::time::Instant::now(),
             attach_guard,
             fs_unsafe,
-            // The current `load_session_with_bypass` path discards the
-            // `LoadSessionResponse.config_options` payload; they will be
-            // refreshed by the next `SetSessionConfigOption` response or
-            // by a `session/update.ConfigOptionUpdate` notification. The
-            // v2 plan extends the bypass helper to plumb this through.
-            config_options: Vec::new(),
-            // M8.A: load_session does not yet capture LoadSessionResponse
-            // (skip_perm helper bypasses it). Caps stay None until M9 wires
-            // the response through; downstream UI will see "no caps" and
-            // render disabled state. New sessions populate caps in
-            // `create_brain_session`.
-            spur_agent_caps: None,
+            config_options,
+            spur_agent_caps,
             session_info: None,
             init_response,
         };
