@@ -9867,6 +9867,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-context-service"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "duckdb",
+ "serde",
+ "serde_json",
+ "spur-analyst",
+ "tokio",
+]
+
+[[package]]
 name = "spur-core"
 version = "1.6.0"
 dependencies = [
@@ -10048,44 +10060,21 @@ dependencies = [
 name = "spur-mcp"
 version = "1.6.0"
 dependencies = [
- "agent-client-protocol",
  "anyhow",
  "async-trait",
  "axum",
  "base64ct",
- "chrono",
- "duckdb",
- "futures",
  "hmac",
- "madsim",
- "madsim-tokio",
- "parking_lot",
- "proptest",
- "proptest-state-machine",
- "rand 0.8.5",
- "reqwest 0.12.28",
  "rmcp",
- "rusqlite",
  "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha2",
  "spur-acp",
- "spur-analyst",
- "spur-blob-store",
- "spur-graph",
- "spur-license",
- "spur-mcp",
- "spur-pm",
- "spur-worktree",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "toml 0.8.2",
  "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
