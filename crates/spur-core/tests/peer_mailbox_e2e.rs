@@ -14,7 +14,7 @@ use spur_core::peer_mailbox::router::Acceptance;
 use spur_core::peer_mailbox::{
     InMemoryLedger, Limits, PeerMailboxBundle, PeerMailboxLedger, PeerMailboxRouter, RouterError,
 };
-use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
+use spur_core::plan::scope_snapshot::PlanScopeSnapshot;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;

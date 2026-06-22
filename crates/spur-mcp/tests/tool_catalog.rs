@@ -1,14 +1,11 @@
-//! Tool catalog snapshot test.
+//! Infrastructure-owned `spur-mcp` catalog snapshot.
 //!
-//! Guards INV-1 from the T1 contract-truthfulness spec: the set of tool
-//! names exposed via `tools/list` must not drift silently. Any addition
-//! or removal requires updating the `EXPECTED` list in this test in the
-//! same commit.
+//! The orchestration, PM, graph, analyst, delegation, signal, plan, and
+//! worker-read catalogs are composed by `spur-core`. `spur-mcp` owns only the
+//! registry and transport infrastructure, so its default catalogs must stay
+//! empty after the core extraction.
 
-use spur_mcp::tools::worker_tools_list;
-use spur_mcp::{tools_list, ToolDefinition};
-
-const EXPECTED: &[&str] = &[
+const CORE_OWNED_TOOL_NAMES: &[&str] = &[
     "delegate_to_worker",
     "delegate_parallel",
     "check_delegation_status",
@@ -40,6 +37,7 @@ const EXPECTED: &[&str] = &[
     "code_symbol_history",
     "doc_navigate",
     "knowledge_context_pack",
+    "knowledge_context_pack_2",
     "submit_plan",
     "execute_epic",
     "get_plan_status",
@@ -55,80 +53,52 @@ const EXPECTED: &[&str] = &[
 ];
 
 #[test]
-fn tool_catalog_matches_expected() {
-    let actual: Vec<String> = tools_list().iter().map(|t| t.name.clone()).collect();
-    let expected: Vec<String> = EXPECTED.iter().map(|s| s.to_string()).collect();
+fn spur_mcp_default_brain_catalog_contains_only_infra_owned_tools() {
+    let actual: Vec<String> = spur_mcp::tools_list()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+
     assert_eq!(
-        actual, expected,
-        "tool_catalog drift detected; update EXPECTED in tests/tool_catalog.rs if intentional",
+        actual,
+        Vec::<String>::new(),
+        "spur-mcp must not advertise core-owned brain tools from its default catalog",
     );
 }
 
 #[test]
-fn code_graph_tools_advertise_response_format_in_catalogs() {
-    for (catalog_name, tools) in [
-        ("tools_list", tools_list()),
-        ("worker_tools_list", worker_tools_list()),
-    ] {
-        for tool_name in [
-            "code_file_symbols",
-            "code_callers",
-            "code_callees",
-            "code_subgraph",
-        ] {
-            assert_response_format_enum(
-                catalog_name,
-                &tools,
-                tool_name,
-                &["full", "compact", "table"],
-            );
-        }
+fn spur_mcp_default_worker_catalog_contains_only_infra_owned_tools() {
+    let actual: Vec<String> = spur_mcp::tools::worker_tools_list()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
 
-        assert_response_format_enum(
-            catalog_name,
-            &tools,
-            "code_read_symbol",
-            &["full", "compact", "source"],
-        );
-    }
+    assert_eq!(
+        actual,
+        Vec::<String>::new(),
+        "spur-mcp must not advertise core-owned worker tools from its default catalog",
+    );
 }
 
-fn assert_response_format_enum(
-    catalog_name: &str,
-    tools: &[ToolDefinition],
-    tool_name: &str,
-    expected: &[&str],
-) {
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == tool_name)
-        .unwrap_or_else(|| panic!("{catalog_name} missing {tool_name}"));
-    let schema = &tool.input_schema["properties"]["response_format"];
-    assert!(
-        schema.is_object(),
-        "{catalog_name}.{tool_name} must define response_format in input schema: {}",
-        tool.input_schema
-    );
-    assert_eq!(
-        schema["type"], "string",
-        "{catalog_name}.{tool_name}.response_format must be a string schema"
-    );
-    let actual = schema["enum"]
-        .as_array()
-        .unwrap_or_else(|| {
-            panic!("{catalog_name}.{tool_name}.response_format must define enum values")
-        })
-        .iter()
-        .map(|value| value.as_str().expect("enum entries are strings"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        actual, expected,
-        "{catalog_name}.{tool_name}.response_format enum drift"
-    );
-    assert!(
-        schema["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("Output shape")),
-        "{catalog_name}.{tool_name}.response_format should explain the output shape"
-    );
+#[test]
+fn core_owned_tools_do_not_leak_back_into_spur_mcp_catalogs() {
+    let brain_names: Vec<String> = spur_mcp::tools_list()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    let worker_names: Vec<String> = spur_mcp::tools::worker_tools_list()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+
+    for tool_name in CORE_OWNED_TOOL_NAMES {
+        assert!(
+            !brain_names.iter().any(|name| name == tool_name),
+            "{tool_name} must be owned by spur-core, not spur-mcp's brain catalog",
+        );
+        assert!(
+            !worker_names.iter().any(|name| name == tool_name),
+            "{tool_name} must be owned by spur-core, not spur-mcp's worker catalog",
+        );
+    }
 }

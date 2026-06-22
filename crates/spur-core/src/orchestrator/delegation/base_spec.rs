@@ -1,4 +1,4 @@
-use spur_mcp::tools::{BaseSpec, BaseTarget};
+use crate::{BaseSpec, BaseTarget};
 
 /// Resolve a BaseSpec into the concrete ref passed to create_worktree.
 pub(in crate::orchestrator) fn resolve_base_branch(

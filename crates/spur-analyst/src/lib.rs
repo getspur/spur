@@ -1,5 +1,7 @@
 //! Shared Rust query layer over `.spur/analyst.duckdb`.
 
+pub mod mcp;
+
 use std::path::Path;
 
 use anyhow::{anyhow, Context as _, Result};

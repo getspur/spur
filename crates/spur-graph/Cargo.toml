@@ -12,6 +12,7 @@ dist = false
 
 [features]
 perf-gates = []
+test-support = []
 
 [lib]
 bench = false

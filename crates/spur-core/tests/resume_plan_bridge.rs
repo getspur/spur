@@ -243,8 +243,8 @@ async fn mcp_server_plan_owned_by_other_emits_plan_command_error() {
             title: "Epic for plan-owned-by-other".to_string(),
             issue_type: Some("epic".to_string()),
             labels: vec![
-                spur_mcp::plan::labels::plan_id(plan_id),
-                spur_mcp::plan::labels::plan_owner(other_session),
+                spur_core::plan::labels::plan_id(plan_id),
+                spur_core::plan::labels::plan_owner(other_session),
             ],
             ..Default::default()
         })
@@ -257,17 +257,17 @@ async fn mcp_server_plan_owned_by_other_emits_plan_command_error() {
     let current_session_id = SessionId("550e8400-e29b-41d4-a716-446655440000".into());
     let brain_session_id: spur_acp::BrainSessionId = current_session_id.clone().into();
 
-    let ctx = spur_mcp::server::DetachedContinuationCtx {
+    let ctx = spur_core::server::DetachedContinuationCtx {
         on_complete: Arc::new(|_, _| Box::pin(async {})),
     };
 
-    let (server, _channel) = spur_mcp::McpCallbackServer::new(
+    let (server, _channel) = spur_core::McpCallbackServer::new(
         Some(&brain_session_id),
         Some(Arc::clone(&pm)),
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        spur_core::server::community_feature_gate(),
     );
 
     // ── 6. Call bridge method — must return Err with ownership message ────────
@@ -279,7 +279,7 @@ async fn mcp_server_plan_owned_by_other_emits_plan_command_error() {
     );
 
     let error_msg = result.unwrap_err();
-    let expected_owner = spur_mcp::plan::labels::compact_label_component(other_session);
+    let expected_owner = spur_core::plan::labels::compact_label_component(other_session);
     let expected_fragment = format!(
         "resume_plan: plan {plan_id} is owned by {expected_owner}; active handoff is not supported"
     );
