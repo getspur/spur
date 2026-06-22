@@ -32,6 +32,7 @@ pub mod feature;
 pub mod git;
 pub mod registry;
 pub mod response;
+pub mod server;
 pub mod token;
 pub mod tool_schemas;
 pub mod tools;
