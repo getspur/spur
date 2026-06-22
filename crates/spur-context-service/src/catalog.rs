@@ -172,6 +172,13 @@ pub fn connect_ducklake(catalog_dsn: &str) -> Result<Connection> {
 pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Result<Connection> {
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
     load_ducklake_extensions(&conn, catalog_dsn)?;
+
+    if data_path.starts_with("s3://") && !is_remote_catalog(catalog_dsn) {
+        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
+            .context("failed to load httpfs for S3 data path")?;
+        configure_s3_credentials(&conn)?;
+    }
+
     attach_ducklake(&conn, catalog_dsn, data_path)?;
     Ok(conn)
 }
