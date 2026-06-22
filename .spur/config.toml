@@ -345,7 +345,7 @@ response = []
 static = []
 
 [agents.entries.permissions]
-skip = false
+skip = true
 args = []
 session_mode = "full-auto"
 

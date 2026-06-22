@@ -111,6 +111,12 @@ type NewBrainSessionBootstrap = (
     SessionId,
     String,
 );
+
+enum LoadedSessionWireResponse {
+    New(agent_client_protocol::schema::NewSessionResponse),
+    Loaded(agent_client_protocol::schema::LoadSessionResponse),
+}
+
 type LoadedBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
     Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
@@ -118,6 +124,7 @@ type LoadedBrainSessionBootstrap = (
     Option<std::pin::Pin<Box<dyn futures::Stream<Item = spur_acp::SessionNotification> + Send>>>,
     bool,
     spur_acp::LoadOutcome,
+    LoadedSessionWireResponse,
     spur_acp::BrainSessionId,
     SessionId,
     String,
