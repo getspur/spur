@@ -14,22 +14,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use axum::Router;
 use rmcp::{
     model::{
         object as rmcp_object, CallToolRequestParams, CallToolResult, Implementation,
         ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
-    transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-    },
     ErrorData as McpError, RoleServer, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
 use tokio::sync::{mpsc, OnceCell};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +42,9 @@ use crate::plan::reconciler::{
     Reconciler, ReconcilerConfig, ReconcilerDispatch, ReconcilerDispatchCtx,
 };
 use crate::plan::signal_watcher::SignalWatcher;
+use spur_mcp::server::{
+    bind_streamable_http_server, serve_streamable_http_server, StreamableHttpTransportConfig,
+};
 use spur_mcp::tools::{DelegationChannel, DelegationRequest};
 
 pub(crate) mod handlers;
@@ -811,22 +809,14 @@ impl McpCallbackServer {
                 self.request_startup_recovery();
             }
         }
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("Failed to bind TCP listener")?;
-
-        let addr = listener.local_addr()?;
-        let url = format!("http://{addr}/mcp");
-        let mut config = StreamableHttpServerConfig::default();
-        config.stateful_mode = true;
-        let mut session_manager_inner = LocalSessionManager::default();
-        session_manager_inner.session_config.keep_alive = mcp_session_keepalive();
-        let session_manager = Arc::new(session_manager_inner);
-        let service = {
+        let bound_transport = {
             let server = Arc::clone(&self);
-            StreamableHttpService::new(move || Ok(Arc::clone(&server)), session_manager, config)
+            bind_streamable_http_server(
+                move || Ok(Arc::clone(&server)),
+                StreamableHttpTransportConfig::default(),
+            )
+            .await?
         };
-        let router = Router::new().nest_service("/mcp", service);
 
         let mut signal_watcher_cancel_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
         let signal_watcher_task = if let Some(pm) = self.pm_service.as_ref() {
@@ -856,29 +846,19 @@ impl McpCallbackServer {
             None
         };
 
-        info!(url = %url, "MCP callback server listening (streamable HTTP)");
-
-        let (root_shutdown_tx, root_shutdown_rx) = tokio::sync::oneshot::channel();
-        let (root_done_tx, root_done_rx) = tokio::sync::oneshot::channel();
-        let root_handle = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    let _ = root_shutdown_rx.await;
-                })
-                .await
-            {
-                debug!(%error, "RMCP callback server exited");
-            }
+        let transport = serve_streamable_http_server(bound_transport, async move {
             if let Some(tx) = signal_watcher_cancel_tx {
                 let _ = tx.send(());
             }
             if let Some(sh) = signal_watcher_task {
                 let _ = sh.await;
             }
-            let _ = root_done_tx.send(());
         });
-        *self.root_shutdown_tx.lock().unwrap() = Some(root_shutdown_tx);
-        *self.root_handle.lock().unwrap() = Some(root_handle);
+        let url = transport.url.clone();
+        info!(url = %url, "MCP callback server listening (streamable HTTP)");
+
+        *self.root_shutdown_tx.lock().unwrap() = Some(transport.shutdown_tx);
+        *self.root_handle.lock().unwrap() = Some(transport.root_handle);
         Arc::clone(&self).spawn_startup_recovery_if_ready();
 
         let server_for_drop = Arc::clone(&self);
@@ -911,7 +891,7 @@ impl McpCallbackServer {
         };
         let handle = AbortOnDropHandle::new(tokio::spawn(async move {
             let _guard = drop_guard;
-            let _ = root_done_rx.await;
+            let _ = transport.done_rx.await;
         }));
 
         Ok((url, handle))

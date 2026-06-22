@@ -230,18 +230,15 @@ mod base_spec_tests {
         });
         let parsed: crate::tool_schemas::DelegateToWorkerInput =
             serde_json::from_value(json).unwrap();
-        match parsed.base {
-            Some(BaseSpec::WithOverlay {
-                ref base,
-                ref overlays,
-            }) => {
+        match &parsed.base {
+            Some(BaseSpec::WithOverlay { base, overlays }) => {
                 assert!(
                     matches!(base, BaseTarget::Branch { name } if name == "spur/plan-base-xyz")
                 );
                 assert_eq!(overlays.len(), 1);
                 assert_eq!(overlays[0].source_task_id, "T1");
             }
-            _ => panic!("expected WithOverlay, got {:?}", parsed.base),
+            other => panic!("expected WithOverlay, got {other:?}"),
         }
     }
 
@@ -271,7 +268,7 @@ mod base_spec_tests {
     #[test]
     fn basespec_string_form_commit() {
         let oid = "0123456789012345678901234567890123456789";
-        let v = Value::String(format!(r#"{{"kind":"commit","oid":"{}"}}"#, oid));
+        let v = Value::String(format!(r#"{{"kind":"commit","oid":"{oid}"}}"#));
         let parsed: BaseSpec = serde_json::from_value(v).unwrap();
         assert_eq!(parsed, BaseSpec::Commit { oid: oid.into() });
     }
@@ -287,7 +284,7 @@ mod base_spec_tests {
                 assert_eq!(base, BaseTarget::Branch { name: "x".into() });
                 assert!(overlays.is_empty());
             }
-            other => panic!("expected WithOverlay, got {:?}", other),
+            other => panic!("expected WithOverlay, got {other:?}"),
         }
     }
 
@@ -305,7 +302,7 @@ mod base_spec_tests {
                 assert_eq!(base, BaseTarget::Branch { name: "x".into() });
                 assert!(overlays.is_empty());
             }
-            other => panic!("expected WithOverlay, got {:?}", other),
+            other => panic!("expected WithOverlay, got {other:?}"),
         }
     }
 
@@ -316,8 +313,7 @@ mod base_spec_tests {
         let msg = err.to_string();
         assert!(
             msg.contains("expected") || msg.contains("invalid"),
-            "expected serde parse error, got: {}",
-            msg
+            "expected serde parse error, got: {msg}",
         );
     }
 
@@ -349,7 +345,7 @@ mod base_spec_tests {
     #[test]
     fn basetarget_string_form_commit() {
         let oid = "0123456789012345678901234567890123456789";
-        let v = Value::String(format!(r#"{{"kind":"commit","oid":"{}"}}"#, oid));
+        let v = Value::String(format!(r#"{{"kind":"commit","oid":"{oid}"}}"#));
         let parsed: BaseTarget = serde_json::from_value(v).unwrap();
         assert_eq!(parsed, BaseTarget::Commit { oid: oid.into() });
     }
