@@ -4744,6 +4744,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-serde"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f056c8559e3757392c8d091e796416e4649d8e49e88b8d76df6c002f05027fd"
+dependencies = [
+ "http",
+ "serde",
+]
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5527,6 +5537,50 @@ dependencies = [
  "arrayvec",
  "euclid",
  "smallvec",
+]
+
+[[package]]
+name = "lambda_runtime"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4de91395937cd37777dce2c98ed95060a6fbd7dfaefb7ae3cc5fec84bb8379d0"
+dependencies = [
+ "async-stream",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "http",
+ "http-body-util",
+ "http-serde",
+ "hyper",
+ "lambda_runtime_api_client",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "lambda_runtime_api_client"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5e9ffa99f1e87b21d42ac98fe7eac55f4cfb9ed14677a64a7dab4d8f44399a4"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -9867,6 +9921,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-context-service"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "duckdb",
+ "lambda_runtime",
+ "serde",
+ "serde_json",
+ "spur-analyst",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "spur-core"
 version = "1.6.0"
 dependencies = [
@@ -10048,44 +10116,21 @@ dependencies = [
 name = "spur-mcp"
 version = "1.6.0"
 dependencies = [
- "agent-client-protocol",
  "anyhow",
  "async-trait",
  "axum",
  "base64ct",
- "chrono",
- "duckdb",
- "futures",
  "hmac",
- "madsim",
- "madsim-tokio",
- "parking_lot",
- "proptest",
- "proptest-state-machine",
- "rand 0.8.5",
- "reqwest 0.12.28",
  "rmcp",
- "rusqlite",
  "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha2",
  "spur-acp",
- "spur-analyst",
- "spur-blob-store",
- "spur-graph",
- "spur-license",
- "spur-mcp",
- "spur-pm",
- "spur-worktree",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "toml 0.8.2",
  "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
