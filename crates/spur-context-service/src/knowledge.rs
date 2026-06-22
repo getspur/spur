@@ -302,7 +302,7 @@ fn query_vector_candidates(
                 stable_symbol_id,
                 qualified_name,
                 symbol_kind,
-                array_cosine_distance(embedding, {query_vec_sql}) AS distance
+                list_cosine_distance(embedding, {query_vec_sql}) AS distance
             FROM symbol_embeddings
             WHERE source = $1
               AND package = $2
@@ -630,9 +630,7 @@ fn format_query_vec_sql(query_vec: Option<&[f32]>) -> Option<String> {
         }
         sql.push_str(&value.to_string());
     }
-    sql.push_str("]::FLOAT[");
-    sql.push_str(&EMBEDDING_VECTOR_DIMENSIONS.to_string());
-    sql.push(']');
+    sql.push_str("]::FLOAT[]");
     Some(sql)
 }
 
