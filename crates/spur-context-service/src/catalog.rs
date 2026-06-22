@@ -37,10 +37,9 @@ impl CatalogResolver {
     }
 
     pub fn new_with_data_path(catalog_dsn: &str, data_path: &str) -> Result<Self> {
-        let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
-        load_ducklake_extensions(&conn, catalog_dsn)?;
-        attach_ducklake(&conn, catalog_dsn, data_path)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: connect_ducklake_with_data_path(catalog_dsn, data_path)?,
+        })
     }
 
     pub fn resolve(
@@ -148,6 +147,17 @@ impl CatalogResolver {
             "failed to resolve catalog revision",
         )
     }
+}
+
+pub fn connect_ducklake(catalog_dsn: &str) -> Result<Connection> {
+    connect_ducklake_with_data_path(catalog_dsn, DEFAULT_DATA_PATH)
+}
+
+pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Result<Connection> {
+    let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
+    load_ducklake_extensions(&conn, catalog_dsn)?;
+    attach_ducklake(&conn, catalog_dsn, data_path)?;
+    Ok(conn)
 }
 
 fn revision_info_from_row(row: &duckdb::Row<'_>) -> duckdb::Result<RevisionInfo> {
