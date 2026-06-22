@@ -117,8 +117,8 @@ pub fn query_knowledge_context(
         .context("failed to query BM25 knowledge candidates")?;
     let query_vec_sql = format_query_vec_sql(opts.query_vec.as_deref());
     let vector_candidates = match query_vec_sql {
-        Some(ref query_vec_sql) if !matches!(opts.scope, KnowledgeScope::Docs) => {
-            query_vector_candidates(db, opts, query_vec_sql, pool_limit)
+        Some(query_vec_sql) if !matches!(opts.scope, KnowledgeScope::Docs) => {
+            query_vector_candidates(db, opts, &query_vec_sql, pool_limit)
                 .context("failed to query vector knowledge candidates")?
         }
         _ => Vec::new(),
