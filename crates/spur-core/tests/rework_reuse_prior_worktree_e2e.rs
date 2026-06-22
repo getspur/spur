@@ -10,7 +10,7 @@ use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_core::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use spur_core::plan::PlanTask;
 use spur_core::McpCallbackServer;
-use spur_mcp::tools::{BaseSpec, DelegationRequest};
+use spur_core::{BaseSpec, DelegationRequest};
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
@@ -229,9 +229,9 @@ fn complete_worker_attempt(
         Some(BaseSpec::Commit { oid }) => oid.as_str(),
         Some(BaseSpec::RepoMain) | None => "HEAD",
         Some(BaseSpec::WithOverlay { base, .. }) => match base {
-            spur_mcp::tools::BaseTarget::RepoMain => "HEAD",
-            spur_mcp::tools::BaseTarget::Branch { name } => name.as_str(),
-            spur_mcp::tools::BaseTarget::Commit { oid } => oid.as_str(),
+            spur_core::BaseTarget::RepoMain => "HEAD",
+            spur_core::BaseTarget::Branch { name } => name.as_str(),
+            spur_core::BaseTarget::Commit { oid } => oid.as_str(),
         },
     };
     let dispatched_base_oid = run_git(repo, &["rev-parse", declared_base_ref]);

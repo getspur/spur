@@ -31,9 +31,9 @@ pub(super) async fn plan_dispatch_base_spec(
     plan_state: &crate::plan::PlanState,
     task_id: &str,
     repo_root: &Path,
-) -> anyhow::Result<spur_mcp::tools::BaseSpec> {
+) -> anyhow::Result<crate::BaseSpec> {
     if let Some(name) = single_parent_approved_worker_branch(plan_state, task_id) {
-        return Ok(spur_mcp::tools::BaseSpec::Branch { name });
+        return Ok(crate::BaseSpec::Branch { name });
     }
 
     let dep_closure = plan_state.approved_dep_closure(task_id);
@@ -53,15 +53,15 @@ pub(super) async fn plan_dispatch_base_spec(
             )
         })?;
         let tip_oid = git_rev_parse(repo_root, worker_branch).await?;
-        overlays.push(spur_mcp::tools::OverlayCommit {
+        overlays.push(crate::OverlayCommit {
             source_task_id: dep.spec.task_id.clone(),
             base_oid,
             tip_oid,
         });
     }
 
-    Ok(spur_mcp::tools::BaseSpec::WithOverlay {
-        base: spur_mcp::tools::BaseTarget::Branch {
+    Ok(crate::BaseSpec::WithOverlay {
+        base: crate::BaseTarget::Branch {
             name: plan_state
                 .base_snapshot_branch
                 .clone()

@@ -22,11 +22,11 @@ pub(super) async fn persist_setup_overlay_conflict(
     source_task_id: &str,
     files: &[String],
 ) -> anyhow::Result<()> {
-    spur_mcp::feature::require_feature(
+    crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
-    .map_err(|error| anyhow::anyhow!(spur_mcp::feature::feature_error_message(error)))?;
+    .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("setup conflict routing requires beads backend"))?;
@@ -89,11 +89,11 @@ async fn persist_predispatch_overlay_conflict(
     source_task_id: &str,
     files: &[String],
 ) -> anyhow::Result<()> {
-    spur_mcp::feature::require_feature(
+    crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
-    .map_err(|error| anyhow::anyhow!(spur_mcp::feature::feature_error_message(error)))?;
+    .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
     let adv = pm
         .advanced()
         .ok_or_else(|| anyhow::anyhow!("setup conflict routing requires beads backend"))?;

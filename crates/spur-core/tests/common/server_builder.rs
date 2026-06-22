@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use spur_acp::{BrainSessionId, SessionId};
 use spur_core::server::DetachedContinuationCtx;
+use spur_core::DelegationChannel;
 use spur_core::McpCallbackServer;
 use spur_license::policy::PolicyResolver;
 use spur_license::{FeatureGate, FeatureKey, LicenseState, Plan};
-use spur_mcp::DelegationChannel;
 
 pub fn continuation_ctx() -> DetachedContinuationCtx {
     DetachedContinuationCtx {

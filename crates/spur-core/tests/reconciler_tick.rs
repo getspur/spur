@@ -36,8 +36,8 @@ use spur_core::plan::reconciler::{
     PlanDispatchState, Reconciler, ReconcilerConfig, ReconcilerDispatchCtx,
 };
 use spur_core::plan::{labels, PlanTask};
+use spur_core::BaseSpec;
 use spur_core::{server::DetachedContinuationCtx, McpCallbackServer};
-use spur_mcp::tools::BaseSpec;
 use spur_mcp::McpEventSink;
 use tempfile::TempDir;
 use tokio::sync::Notify;

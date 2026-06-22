@@ -5,7 +5,7 @@
 use std::process::Command;
 
 use serde_json::{json, Value};
-use spur_mcp::tools::{BaseSpec, BaseTarget};
+use spur_core::{BaseSpec, BaseTarget};
 
 mod common;
 
