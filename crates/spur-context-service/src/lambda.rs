@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::env;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use duckdb::Connection;
 use lambda_runtime::{Error, LambdaEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -12,8 +11,7 @@ use serde_json::{json, Value};
 use crate::catalog::{self, CatalogResolver};
 use crate::mcp::{self, McpHandlerError};
 
-static DB_CONNECTION: OnceLock<Mutex<Option<Connection>>> = OnceLock::new();
-static CATALOG_RESOLVER: OnceLock<Mutex<Option<CatalogResolver>>> = OnceLock::new();
+pub static CATALOG_RESOLVER: OnceLock<Mutex<Option<CatalogResolver>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct ApiGatewayRequest {
@@ -50,10 +48,9 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
         Err(error) => return tool_error_response(error),
     };
 
-    let mut db_guard = db_connection()?;
     let mut catalog_guard = catalog_resolver()?;
-    let db = initialized_db(&mut db_guard)?;
     let catalog = initialized_catalog(&mut catalog_guard)?;
+    let db = catalog.connection();
     match mcp::handle_tool_sync(&request.tool, &request.args, db, catalog) {
         Ok(value) => json_response(200, &value),
         Err(McpHandlerError::Internal(message)) => json_response(
@@ -84,13 +81,6 @@ fn parse_tool_request(request: &ApiGatewayRequest) -> Result<ToolRequest, McpHan
     })
 }
 
-fn db_connection() -> Result<MutexGuard<'static, Option<Connection>>, Error> {
-    DB_CONNECTION
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .map_err(|error| lambda_error(format!("DuckDB connection cache is poisoned: {error}")))
-}
-
 fn catalog_resolver() -> Result<MutexGuard<'static, Option<CatalogResolver>>, Error> {
     CATALOG_RESOLVER
         .get_or_init(|| Mutex::new(None))
@@ -98,24 +88,13 @@ fn catalog_resolver() -> Result<MutexGuard<'static, Option<CatalogResolver>>, Er
         .map_err(|error| lambda_error(format!("catalog resolver cache is poisoned: {error}")))
 }
 
-fn initialized_db<'a>(
-    guard: &'a mut MutexGuard<'static, Option<Connection>>,
-) -> Result<&'a Connection, Error> {
-    if guard.is_none() {
-        let catalog_dsn = catalog_dsn()?;
-        **guard = Some(catalog::connect_ducklake(&catalog_dsn).map_err(Error::from)?);
-    }
-    guard
-        .as_ref()
-        .ok_or_else(|| lambda_error("DuckDB connection cache did not initialize"))
-}
-
 fn initialized_catalog<'a>(
     guard: &'a mut MutexGuard<'static, Option<CatalogResolver>>,
 ) -> Result<&'a CatalogResolver, Error> {
     if guard.is_none() {
         let catalog_dsn = catalog_dsn()?;
-        **guard = Some(CatalogResolver::new(&catalog_dsn).map_err(Error::from)?);
+        let conn = catalog::connect_ducklake(&catalog_dsn).map_err(Error::from)?;
+        **guard = Some(CatalogResolver::from_connection(conn));
     }
     guard
         .as_ref()
@@ -123,11 +102,13 @@ fn initialized_catalog<'a>(
 }
 
 fn catalog_dsn() -> Result<String, Error> {
-    env::var("SPUR_CATALOG_DSN").map_err(|error| {
-        lambda_error(format!(
-            "SPUR_CATALOG_DSN environment variable is required: {error}"
-        ))
-    })
+    env::var("SPUR_CATALOG_S3_URI")
+        .or_else(|_| env::var("SPUR_CATALOG_DSN"))
+        .map_err(|error| {
+            lambda_error(format!(
+                "SPUR_CATALOG_S3_URI (or SPUR_CATALOG_DSN) environment variable is required: {error}"
+            ))
+        })
 }
 
 fn tool_error_response(error: McpHandlerError) -> Result<ApiGatewayResponse, Error> {

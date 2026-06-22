@@ -1,7 +1,15 @@
+use std::env;
+
 use anyhow::{anyhow, Context as _, Result};
 use duckdb::{params, Connection};
 
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
+
+fn is_remote_catalog(catalog_dsn: &str) -> bool {
+    catalog_dsn.starts_with("s3://")
+        || catalog_dsn.starts_with("https://")
+        || catalog_dsn.starts_with("http://")
+}
 
 #[derive(Debug)]
 pub struct CatalogResolver {
@@ -40,6 +48,14 @@ impl CatalogResolver {
         Ok(Self {
             conn: connect_ducklake_with_data_path(catalog_dsn, data_path)?,
         })
+    }
+
+    pub fn from_connection(conn: Connection) -> Self {
+        Self { conn }
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     pub fn resolve(
@@ -187,7 +203,11 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
     conn.execute_batch("INSTALL ducklake; LOAD ducklake;")
         .context("failed to load ducklake extension")?;
 
-    if catalog_dsn.starts_with("sqlite:") || catalog_dsn.starts_with("ducklake:sqlite:") {
+    if is_remote_catalog(catalog_dsn) {
+        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
+            .context("failed to load httpfs extension for remote DuckLake catalog")?;
+        configure_s3_credentials(conn)?;
+    } else if catalog_dsn.starts_with("sqlite:") || catalog_dsn.starts_with("ducklake:sqlite:") {
         conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
             .context("failed to load sqlite extension for DuckLake catalog")?;
     } else if catalog_dsn.starts_with("postgres:")
@@ -204,19 +224,59 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
     Ok(())
 }
 
-fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
-    let attach_uri = if catalog_dsn.starts_with("ducklake:") {
-        catalog_dsn.to_owned()
-    } else {
-        format!("ducklake:{catalog_dsn}")
-    };
-
+fn configure_s3_credentials(conn: &Connection) -> Result<()> {
+    if let Ok(key) = env::var("AWS_ACCESS_KEY_ID") {
+        conn.execute_batch(&format!(
+            "SET s3_access_key_id = '{}';",
+            escape_sql_literal(&key)
+        ))
+        .context("failed to set s3_access_key_id")?;
+    }
+    if let Ok(secret) = env::var("AWS_SECRET_ACCESS_KEY") {
+        conn.execute_batch(&format!(
+            "SET s3_secret_access_key = '{}';",
+            escape_sql_literal(&secret)
+        ))
+        .context("failed to set s3_secret_access_key")?;
+    }
+    if let Ok(token) = env::var("AWS_SESSION_TOKEN") {
+        conn.execute_batch(&format!(
+            "SET s3_session_token = '{}';",
+            escape_sql_literal(&token)
+        ))
+        .context("failed to set s3_session_token")?;
+    }
+    let region = env::var("AWS_REGION")
+        .or_else(|_| env::var("AWS_DEFAULT_REGION"))
+        .unwrap_or_else(|_| "us-east-1".to_owned());
     conn.execute_batch(&format!(
-        "ATTACH '{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
-        escape_sql_literal(&attach_uri),
-        escape_sql_literal(data_path)
+        "SET s3_region = '{}';",
+        escape_sql_literal(&region)
     ))
-    .context("failed to attach DuckLake catalog")
+    .context("failed to set s3_region")?;
+    Ok(())
+}
+
+fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
+    if is_remote_catalog(catalog_dsn) {
+        conn.execute_batch(&format!(
+            "ATTACH '{}' AS spur_context (TYPE ducklake); USE spur_context;",
+            escape_sql_literal(catalog_dsn)
+        ))
+        .context("failed to attach remote DuckLake catalog")
+    } else {
+        let attach_uri = if catalog_dsn.starts_with("ducklake:") {
+            catalog_dsn.to_owned()
+        } else {
+            format!("ducklake:{catalog_dsn}")
+        };
+        conn.execute_batch(&format!(
+            "ATTACH '{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
+            escape_sql_literal(&attach_uri),
+            escape_sql_literal(data_path)
+        ))
+        .context("failed to attach DuckLake catalog")
+    }
 }
 
 fn escape_sql_literal(value: &str) -> String {
