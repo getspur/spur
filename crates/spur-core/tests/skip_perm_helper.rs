@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    InitializeRequest, InitializeResponse, LoadSessionRequest, McpServer, NewSessionResponse,
-    PromptRequest, SessionId, SessionMode, SessionModeId, SessionModeState, SessionNotification,
-    SetSessionModeRequest, SetSessionModeResponse,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    NewSessionResponse, PromptRequest, SessionId, SessionMode, SessionModeId, SessionModeState,
+    SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -89,12 +89,18 @@ impl AgentConnection for MockConn {
     async fn load_session(
         &mut self,
         req: LoadSessionRequest,
-    ) -> anyhow::Result<std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+    ) -> anyhow::Result<(
+        LoadSessionResponse,
+        std::pin::Pin<Box<dyn Stream<Item = SessionNotification> + Send>>,
+    )> {
         self.calls
             .lock()
             .unwrap()
             .push(("load_session".into(), req.session_id.0.to_string()));
-        Ok(Box::pin(futures::stream::empty()))
+        Ok((
+            LoadSessionResponse::new(),
+            Box::pin(futures::stream::empty()),
+        ))
     }
 }
 

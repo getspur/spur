@@ -52,9 +52,9 @@ use agent_client_protocol::schema::{
     ContentBlock, ContentChunk, CreateTerminalRequest, CreateTerminalResponse, ExtRequest,
     ExtResponse, FileSystemCapabilities, InitializeRequest, InitializeResponse,
     KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, McpServer, ModelId, NewSessionRequest, NewSessionResponse,
-    PermissionOptionId, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    LoadSessionRequest, LoadSessionResponse, McpServer, ModelId, NewSessionRequest,
+    NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId, SessionId, SessionModeId,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
@@ -140,7 +140,12 @@ enum AcpCommand {
     },
     LoadSession {
         request: LoadSessionRequest,
-        reply: oneshot::Sender<anyhow::Result<mpsc::UnboundedReceiver<SessionNotification>>>,
+        reply: oneshot::Sender<
+            anyhow::Result<(
+                LoadSessionResponse,
+                mpsc::UnboundedReceiver<SessionNotification>,
+            )>,
+        >,
     },
     ListSessions {
         request: ListSessionsRequest,
@@ -790,7 +795,10 @@ impl AgentConnection for NativeAcpConnection {
     async fn load_session(
         &mut self,
         request: LoadSessionRequest,
-    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+    ) -> anyhow::Result<(
+        LoadSessionResponse,
+        Pin<Box<dyn Stream<Item = SessionNotification> + Send>>,
+    )> {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
             anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
@@ -805,7 +813,7 @@ impl AgentConnection for NativeAcpConnection {
                 anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
             })?;
 
-        let notification_rx = reply_rx.await.map_err(|_| {
+        let (response, notification_rx) = reply_rx.await.map_err(|_| {
             anyhow::anyhow!(
                 "NativeAcpConnection '{}': ACP thread died during load_session setup",
                 self.agent_name
@@ -815,7 +823,7 @@ impl AgentConnection for NativeAcpConnection {
         let stream = unfold(notification_rx, |mut rx| async move {
             rx.recv().await.map(|notif| (notif, rx))
         });
-        Ok(Box::pin(stream))
+        Ok((response, Box::pin(stream)))
     }
 
     // ─── list_sessions ───────────────────────────────────────────────────
@@ -1887,7 +1895,7 @@ fn acp_thread_main(
                                                         session = %session_id_for_probe,
                                                         "NativeAcpConnection: load_session completed"
                                                     );
-                                                    let _ = reply.send(Ok(rx_empty));
+                                                    let _ = reply.send(Ok((response, rx_empty)));
                                                 }
                                                 Err(e) => {
                                                     tracing::warn!(
