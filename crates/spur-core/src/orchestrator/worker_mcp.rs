@@ -62,14 +62,22 @@ impl WorkerMcpFetcher {
                 let plan_resolver: Arc<dyn crate::handlers::PlanResolver> =
                     Arc::clone(&self.mcp_server) as Arc<dyn crate::handlers::PlanResolver>;
                 let reconciler_outcomes = self.mcp_server.reconciler_outcomes_handle();
+                let worker_read_sink = Arc::new(crate::mcp::worker::WorkerReadMcpModule::new(
+                    crate::mcp::worker::WorkerReadMcpDeps {
+                        pm_service: Some(Arc::clone(&pm)),
+                        feature_gate: Arc::clone(&gate),
+                        plan_resolver,
+                        reconciler_outcomes,
+                        outcome_store: Arc::clone(&self.outcome_store),
+                        repo_root: self.repo_root.clone(),
+                    },
+                ));
                 let deps = WorkerMcpDeps {
                     pm_service: pm,
                     feature_gate: gate,
                     funnel,
                     worker_signal_sink,
-                    plan_resolver,
-                    reconciler_outcomes,
-                    outcome_store: Arc::clone(&self.outcome_store),
+                    worker_read_sink,
                     repo_root: self.repo_root.clone(),
                 };
                 let server = WorkerMcpServer::start(brain.to_string(), deps)
