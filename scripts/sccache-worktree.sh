@@ -58,9 +58,11 @@ enable_spur_s3_cache() {
     use_spur_s3_sccache || return 1
 
     # L1: AWS S3. SCCACHE_REGION MUST match the bucket's region or S3 rejects
-    # the request. Bucket suffix apne1 == ap-northeast-1 (Tokyo).
-    export SCCACHE_BUCKET="${SCCACHE_BUCKET:-wiilearn-spur-sccache-apne1}"
-    export SCCACHE_REGION="${SCCACHE_REGION:-ap-northeast-1}"
+    # the request. Bucket suffix apse5 == ap-southeast-5 (Malaysia), matching
+    # the aws-my primary builder's cloud-build config so local and remote
+    # builds share the same S3 L1 cache.
+    export SCCACHE_BUCKET="${SCCACHE_BUCKET:-wiilearn-spur-sccache-apse5}"
+    export SCCACHE_REGION="${SCCACHE_REGION:-ap-southeast-5}"
     export AWS_REGION="${AWS_REGION:-$SCCACHE_REGION}"
     # Credentials resolve through the standard AWS chain (env vars, then the
     # default profile in ~/.aws/credentials, then IMDS).
