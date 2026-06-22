@@ -3,9 +3,9 @@
 //! See `docs/superpowers/specs/2026-04-27-acp-capability-aware-spur-design.md` §6.1.
 //!
 //! Wraps two wire facts: the agent's `AgentCapabilities` (from
-//! `InitializeResponse`) and the `NewSessionResponse` payload's
+//! `InitializeResponse`) and the per-session response payload's
 //! `modes` / `models` / `config_options`. Spur derives `set_*` support
-//! from session-create state because ACP 0.12 does not gate these
+//! from session state because ACP 0.12 does not gate these
 //! protocol-stable methods on `AgentCapabilities` flags.
 //!
 //! Named `SpurAgentCaps` (not `SessionCapabilities`) to avoid collision
@@ -13,15 +13,16 @@
 //! `AgentCapabilities`.
 
 use agent_client_protocol::schema::{
-    AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigKind,
-    SessionConfigOption, SessionConfigSelectOptions, SessionModeState, SessionModelState,
+    AgentCapabilities, InitializeResponse, LoadSessionResponse, NewSessionResponse,
+    SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions, SessionModeState,
+    SessionModelState,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::types::AgentKind;
 
-/// What the agent told spur during `initialize` + `session/new`.
-/// Captured ONCE per session at session-create and frozen for the
+/// What the agent told spur during `initialize` + `session/new` or `session/load`.
+/// Captured ONCE per session at create/load time and frozen for the
 /// session lifetime — ACP 0.12 has no protocol affordance for
 /// mid-session capability renegotiation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +55,23 @@ impl SpurAgentCaps {
             modes: new_session.modes.clone(),
             models: new_session.models.clone(),
             config_options: new_session.config_options.clone().unwrap_or_default(),
+            agent_kind,
+        }
+    }
+
+    /// Build from `initialize` plus the per-session state returned by
+    /// `session/load`.
+    #[must_use]
+    pub fn from_loaded(
+        initialize: &InitializeResponse,
+        load_session: &LoadSessionResponse,
+        agent_kind: AgentKind,
+    ) -> Self {
+        Self {
+            agent: initialize.agent_capabilities.clone(),
+            modes: load_session.modes.clone(),
+            models: load_session.models.clone(),
+            config_options: load_session.config_options.clone().unwrap_or_default(),
             agent_kind,
         }
     }
