@@ -15,6 +15,7 @@ members = [
     "crates/spur-bot",
     "crates/spur-cli",
     "crates/spur-analyst",
+    "crates/spur-context-service",
     "crates/spur-telemetry",
     "crates/spur-test-madsim",
     "crates/spur-context",
@@ -118,6 +119,7 @@ spur-tui = { path = "crates/spur-tui" }
 spur-interactive = { path = "crates/spur-interactive" }
 spur-bot = { path = "crates/spur-bot" }
 spur-context = { path = "crates/spur-context" }
+spur-context-service = { path = "crates/spur-context-service" }
 spur-graph = { path = "crates/spur-graph" }
 spur-analyst = { path = "crates/spur-analyst", default-features = false }
 

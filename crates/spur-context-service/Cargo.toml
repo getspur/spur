@@ -1,0 +1,29 @@
+[package]
+name = "spur-context-service"
+description = "Lambda-served DuckLake code context service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/getspur/spur-releases"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+analyst = ["dep:spur-analyst"]
+lambda = ["dep:lambda_runtime"]
+
+[dependencies]
+anyhow = { workspace = true }
+duckdb = { workspace = true, features = ["bundled"] }
+lambda_runtime = { version = "1.2.1", optional = true, features = ["concurrency-tokio"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+spur-analyst = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
