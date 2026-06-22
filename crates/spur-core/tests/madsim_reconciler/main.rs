@@ -290,7 +290,7 @@ fn print_seed(name: &'static str) {
 }
 
 struct SimDispatch {
-    delegation_tx: mpsc::Sender<spur_mcp::tools::DelegationRequest>,
+    delegation_tx: mpsc::Sender<spur_core::DelegationRequest>,
     brain_session_id: BrainSessionId,
     event_sink: Option<Arc<dyn McpEventSink>>,
     materializer: Arc<OutcomeMaterializer>,
@@ -299,10 +299,7 @@ struct SimDispatch {
 
 #[async_trait]
 impl ReconcilerDispatch for SimDispatch {
-    async fn send_delegation(
-        &self,
-        request: spur_mcp::tools::DelegationRequest,
-    ) -> anyhow::Result<()> {
+    async fn send_delegation(&self, request: spur_core::DelegationRequest) -> anyhow::Result<()> {
         self.delegation_tx
             .send(request)
             .await
@@ -333,8 +330,8 @@ impl ReconcilerDispatch for SimDispatch {
 struct Harness {
     pm: Arc<SimPm>,
     reconciler: Reconciler,
-    dispatch_tx: mpsc::Sender<spur_mcp::tools::DelegationRequest>,
-    dispatch_rx: Mutex<mpsc::Receiver<spur_mcp::tools::DelegationRequest>>,
+    dispatch_tx: mpsc::Sender<spur_core::DelegationRequest>,
+    dispatch_rx: Mutex<mpsc::Receiver<spur_core::DelegationRequest>>,
     fast_forward: Arc<Notify>,
     sink: Arc<RecordingEventSink>,
     continuations: Arc<AtomicUsize>,
@@ -418,12 +415,12 @@ impl Harness {
         }
     }
 
-    async fn tick_and_receive_dispatch(&self) -> spur_mcp::tools::DelegationRequest {
+    async fn tick_and_receive_dispatch(&self) -> spur_core::DelegationRequest {
         self.reconciler.tick_once().await.unwrap();
         self.recv_dispatch().await
     }
 
-    async fn recv_dispatch(&self) -> spur_mcp::tools::DelegationRequest {
+    async fn recv_dispatch(&self) -> spur_core::DelegationRequest {
         tokio::time::timeout(Duration::from_secs(1), async {
             self.dispatch_rx.lock().unwrap().recv().await.unwrap()
         })
@@ -442,7 +439,7 @@ impl Harness {
         );
     }
 
-    async fn complete_success(&self, request: spur_mcp::tools::DelegationRequest) {
+    async fn complete_success(&self, request: spur_core::DelegationRequest) {
         request
             .respond_to
             .send(DelegationResult {
@@ -1088,9 +1085,9 @@ impl BeadsAdvanced for SimPm {
     }
 }
 
-fn dummy_request() -> spur_mcp::tools::DelegationRequest {
+fn dummy_request() -> spur_core::DelegationRequest {
     let (respond_to, _rx) = oneshot::channel();
-    spur_mcp::tools::DelegationRequest {
+    spur_core::DelegationRequest {
         id: "dummy".to_string().into(),
         agent: "codex".to_string(),
         task: "dummy".to_string(),

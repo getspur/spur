@@ -10,7 +10,7 @@ use rmcp::{
 use serde_json::{json, Value};
 use spur_acp::{BrainSessionId, SessionId};
 use spur_core::{server::DetachedContinuationCtx, McpCallbackServer};
-use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
+use spur_core::{BaseSpec, BaseTarget, OverlayCommit};
 use std::sync::Arc;
 
 mod common;
@@ -22,7 +22,7 @@ fn json_object(value: Value) -> JsonObject {
         .expect("tool arguments must be a JSON object")
 }
 
-fn mock_server() -> (McpCallbackServer, spur_mcp::DelegationChannel) {
+fn mock_server() -> (McpCallbackServer, spur_core::DelegationChannel) {
     let brain_sid = BrainSessionId::new(SessionId::new());
     let (mut server, channel) = McpCallbackServer::new(
         Some(&brain_sid),
@@ -40,7 +40,7 @@ fn mock_server() -> (McpCallbackServer, spur_mcp::DelegationChannel) {
 
 /// Call delegate_to_worker via the rmcp trait and return the captured
 /// DelegationRequest from the delegation channel.
-async fn call_delegate_to_worker(args: Value) -> spur_mcp::tools::DelegationRequest {
+async fn call_delegate_to_worker(args: Value) -> spur_core::DelegationRequest {
     let (server, mut channel) = mock_server();
     let server = Arc::new(server);
     let (client_io, server_io) = tokio::io::duplex(16 * 1024);
