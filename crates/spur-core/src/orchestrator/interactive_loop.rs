@@ -3243,6 +3243,8 @@ mod phase5_orchestrator_finalization_tests {
     fn test_worker_deps(pm: Arc<spur_pm::PmService>) -> WorkerMcpDeps {
         let feature_gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
         let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(NullWorkerMcpEventSink);
+        let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
         let worker_signal_sink = Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
             crate::mcp::signals::SignalMcpDeps {
                 pm_service: Some(Arc::clone(&pm)),
@@ -3250,16 +3252,24 @@ mod phase5_orchestrator_finalization_tests {
                 feature_gate: Arc::clone(&feature_gate),
             },
         ));
+        let worker_read_sink = Arc::new(crate::mcp::worker::WorkerReadMcpModule::new(
+            crate::mcp::worker::WorkerReadMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                feature_gate: Arc::clone(&feature_gate),
+                plan_resolver: Arc::new(NullWorkerPlanResolver),
+                reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
+                    crate::plan::outcomes::OutcomeStore::default(),
+                )),
+                outcome_store,
+                repo_root: None,
+            },
+        ));
         WorkerMcpDeps {
             pm_service: pm,
             feature_gate,
             funnel,
             worker_signal_sink,
-            plan_resolver: Arc::new(NullWorkerPlanResolver),
-            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
-                crate::plan::outcomes::OutcomeStore::default(),
-            )),
-            outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            worker_read_sink,
             repo_root: None,
         }
     }
