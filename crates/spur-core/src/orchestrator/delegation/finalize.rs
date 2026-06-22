@@ -262,6 +262,8 @@ mod flush_ordering_tests {
         let pm = build_pm_service(repo).await;
         let feature_gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
         let event_sink = make_funnel_sink(funnel);
+        let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
         let worker_signal_sink = Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
             crate::mcp::signals::SignalMcpDeps {
                 pm_service: Some(Arc::clone(&pm)),
@@ -269,16 +271,24 @@ mod flush_ordering_tests {
                 feature_gate: Arc::clone(&feature_gate),
             },
         ));
+        let worker_read_sink = Arc::new(crate::mcp::worker::WorkerReadMcpModule::new(
+            crate::mcp::worker::WorkerReadMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                feature_gate: Arc::clone(&feature_gate),
+                plan_resolver: Arc::new(NullPlanResolver),
+                reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
+                    crate::plan::outcomes::OutcomeStore::default(),
+                )),
+                outcome_store,
+                repo_root: None,
+            },
+        ));
         let deps = WorkerMcpDeps {
             pm_service: pm,
             feature_gate,
             funnel: event_sink,
             worker_signal_sink,
-            plan_resolver: Arc::new(NullPlanResolver),
-            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
-                crate::plan::outcomes::OutcomeStore::default(),
-            )),
-            outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            worker_read_sink,
             repo_root: None,
         };
         let server = WorkerMcpServer::start(brain_session_id.to_string(), deps)

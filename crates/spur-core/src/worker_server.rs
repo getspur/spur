@@ -67,8 +67,7 @@ use axum::{
     Router,
 };
 
-use crate::handlers::{McpHandlerError, PlanResolver, WorkerCallContext};
-use crate::outcome_materializer::OutcomeMaterializer;
+use crate::handlers::{McpHandlerError, WorkerCallContext};
 use spur_mcp::events::McpEventSink;
 use spur_mcp::token::validate_token;
 
@@ -81,6 +80,27 @@ pub trait WorkerSignalSink: Send + Sync {
     ) -> Result<Value, McpHandlerError>;
 
     async fn report_progress(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError>;
+}
+
+#[async_trait]
+pub trait WorkerReadToolSink: Send + Sync {
+    async fn get_plan_status(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError>;
+
+    async fn get_task_diff(
+        &self,
+        ctx: &WorkerCallContext,
+        args: Value,
+    ) -> Result<Value, McpHandlerError>;
+
+    async fn fetch_outcome_artifact(
         &self,
         ctx: &WorkerCallContext,
         args: Value,
@@ -199,9 +219,7 @@ pub struct WorkerMcpDeps {
     pub feature_gate: Arc<spur_license::FeatureGate>,
     pub funnel: Arc<dyn McpEventSink>,
     pub worker_signal_sink: Arc<dyn WorkerSignalSink>,
-    pub plan_resolver: Arc<dyn PlanResolver>,
-    pub reconciler_outcomes: Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>>,
-    pub outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+    pub worker_read_sink: Arc<dyn WorkerReadToolSink>,
     /// Required by `get_task_diff` when reconstructing diffs from persisted
     /// worker branches; `None` disables that recovery branch.
     pub repo_root: Option<PathBuf>,
@@ -393,17 +411,13 @@ impl Drop for DelegationDispatchGuard {
     }
 }
 
-/// Internal bundle of the materialized handler dependencies. Mirrors
-/// [`WorkerMcpDeps`] plus the derived [`OutcomeMaterializer`].
+/// Internal bundle of the materialized handler dependencies.
 struct DispatcherDeps {
     pm_service: Arc<spur_pm::PmService>,
     feature_gate: Arc<spur_license::FeatureGate>,
     funnel: Arc<dyn McpEventSink>,
     worker_signal_sink: Arc<dyn WorkerSignalSink>,
-    plan_resolver: Arc<dyn PlanResolver>,
-    reconciler_outcomes: Arc<tokio::sync::Mutex<crate::plan::outcomes::OutcomeStore>>,
-    outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
-    materializer: OutcomeMaterializer,
+    worker_read_sink: Arc<dyn WorkerReadToolSink>,
     repo_root: Option<PathBuf>,
     /// Cached per-delegation context — populated by the orchestrator at
     /// dispatch time so gating checks are O(1) and PM-free.
@@ -637,34 +651,6 @@ struct FetchOutcomeArtifactParams {
     attempt: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     section: Option<OutcomeArtifactSection>,
-}
-
-pub(crate) fn fetch_outcome_artifact_tool_definition() -> spur_mcp::tools::ToolDefinition {
-    spur_mcp::tools::ToolDefinition {
-        name: "fetch_outcome_artifact".into(),
-        description: "Fetch the side-channel artifact (full or sectioned) for a completed delegation. Use when continuation.payload.artifact_id is Some(_) and you need fuller context. Sections let you pick what to fetch: pass 'status_only' for just status fields (~100B), 'summary' for the inline summary, 'diff_only' for full diff text, or 'full' for the entire DelegationResult JSON.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "delegation_id": {
-                    "type": "string",
-                    "description": "The delegation_id whose artifact you want to fetch."
-                },
-                "attempt": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Optional attempt number. Default: latest known attempt for this delegation. Pin a specific attempt for forensic queries on retried delegations."
-                },
-                "section": {
-                    "type": "string",
-                    "enum": ["status_only", "summary", "diff_only", "full"],
-                    "default": "full",
-                    "description": "Which section to fetch."
-                }
-            },
-            "required": ["delegation_id"]
-        }),
-    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -944,25 +930,6 @@ struct ReportProgressParams {
     percent: Option<f64>,
 }
 
-pub(crate) fn worker_signal_tool_definitions() -> Vec<spur_mcp::tools::ToolDefinition> {
-    vec![
-        spur_mcp::tools::ToolDefinition {
-            name: "report_signal".into(),
-            description: "Worker-facing. Record a typed WorkerSignal on a task. Brain-side watcher will inspect and may mutate the plan.".into(),
-            input_schema: serde_json::Value::Object(
-                crate::tool_schemas::schema_object::<ReportSignalParams>(),
-            ),
-        },
-        spur_mcp::tools::ToolDefinition {
-            name: "report_progress".into(),
-            description: "Worker-facing fire-and-forget progress emission. Sends a free-form `message` (and optional `percent`) to the brain as a `WorkerReportProgress` event. The handler returns `{ok: true}` on accept; the side effect IS the event. No PM writes, no audit sentinel - distinct from `report_signal` (which persists). Workers stream rich progress text without minting structured milestone names. Consumers (TUI / dashboards) decide how to render `percent` (no clamping).".into(),
-            input_schema: serde_json::Value::Object(
-                crate::tool_schemas::schema_object::<ReportProgressParams>(),
-            ),
-        },
-    ]
-}
-
 /// RMCP `ServerHandler` for the curated worker tool subset.
 struct WorkerToolHandler {
     deps: Arc<DispatcherDeps>,
@@ -1121,15 +1088,7 @@ impl WorkerToolHandler {
             context,
             Some(task_id),
             move |worker_ctx| async move {
-                crate::handlers::get_task_diff(
-                    Some(deps.pm_service.as_ref()),
-                    deps.feature_gate.as_ref(),
-                    deps.repo_root.as_deref(),
-                    deps.plan_resolver.as_ref(),
-                    &worker_ctx,
-                    args,
-                )
-                .await
+                deps.worker_read_sink.get_task_diff(&worker_ctx, args).await
             },
         )
         .await
@@ -1156,13 +1115,9 @@ impl WorkerToolHandler {
             context,
             Some(plan_id),
             move |worker_ctx| async move {
-                crate::handlers::get_plan_status(
-                    deps.plan_resolver.as_ref(),
-                    &deps.reconciler_outcomes,
-                    &worker_ctx,
-                    args,
-                )
-                .await
+                deps.worker_read_sink
+                    .get_plan_status(&worker_ctx, args)
+                    .await
             },
         )
         .await
@@ -1189,21 +1144,9 @@ impl WorkerToolHandler {
             context,
             Some(delegation_id),
             move |worker_ctx| async move {
-                if let Some(requested) = args.get("delegation_id").and_then(|v| v.as_str()) {
-                    if requested != worker_ctx.delegation_id {
-                        return Err(McpHandlerError::Unauthorized(format!(
-                            "delegation_id mismatch for bound session context (expected {}, got {requested})",
-                            worker_ctx.delegation_id
-                        )));
-                    }
-                }
-                crate::handlers::fetch_outcome_artifact(
-                    &deps.materializer,
-                    deps.outcome_store.as_ref(),
-                    &worker_ctx,
-                    args,
-                )
-                .await
+                deps.worker_read_sink
+                    .fetch_outcome_artifact(&worker_ctx, args)
+                    .await
             },
         )
         .await
@@ -1869,7 +1812,6 @@ impl WorkerMcpServer {
         let mut hmac_key = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut hmac_key);
 
-        let materializer = OutcomeMaterializer::new(Arc::clone(&deps.outcome_store));
         let delegations = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let delegation_worktree_roots =
             Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
@@ -1884,10 +1826,7 @@ impl WorkerMcpServer {
             feature_gate: deps.feature_gate,
             funnel: deps.funnel,
             worker_signal_sink: deps.worker_signal_sink,
-            plan_resolver: deps.plan_resolver,
-            reconciler_outcomes: deps.reconciler_outcomes,
-            outcome_store: deps.outcome_store,
-            materializer,
+            worker_read_sink: deps.worker_read_sink,
             repo_root: deps.repo_root,
             delegations: Arc::clone(&delegations),
             delegation_worktree_roots: Arc::clone(&delegation_worktree_roots),

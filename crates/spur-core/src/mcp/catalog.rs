@@ -54,6 +54,12 @@ enum ServerCatalogSection {
     Remainder,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum WorkerCatalogSection {
+    Prelude,
+    Remainder,
+}
+
 pub(crate) struct ServerCatalogMcpModule {
     section: ServerCatalogSection,
 }
@@ -72,7 +78,23 @@ impl ServerCatalogMcpModule {
     }
 }
 
-pub(crate) struct WorkerCatalogMcpModule;
+pub(crate) struct WorkerCatalogMcpModule {
+    section: WorkerCatalogSection,
+}
+
+impl WorkerCatalogMcpModule {
+    pub(crate) fn prelude() -> Self {
+        Self {
+            section: WorkerCatalogSection::Prelude,
+        }
+    }
+
+    pub(crate) fn remainder() -> Self {
+        Self {
+            section: WorkerCatalogSection::Remainder,
+        }
+    }
+}
 
 #[async_trait]
 impl ToolModule for ServerCatalogMcpModule {
@@ -100,7 +122,10 @@ impl ToolModule for ServerCatalogMcpModule {
 #[async_trait]
 impl ToolModule for WorkerCatalogMcpModule {
     fn tools(&self) -> Vec<ToolDefinition> {
-        worker_tool_definitions()
+        match self.section {
+            WorkerCatalogSection::Prelude => worker_prelude_tool_definitions(),
+            WorkerCatalogSection::Remainder => worker_remainder_tool_definitions(),
+        }
     }
 
     async fn call(
@@ -137,9 +162,12 @@ fn server_remainder_tool_definitions() -> Vec<ToolDefinition> {
     definitions
 }
 
-pub(crate) fn worker_tool_definitions() -> Vec<ToolDefinition> {
-    let mut definitions = pm_tool_definitions_by_names(&["get_issue", "list_issues"]);
-    definitions.extend(crate::mcp::plan::worker_tool_definitions());
+fn worker_prelude_tool_definitions() -> Vec<ToolDefinition> {
+    pm_tool_definitions_by_names(&["get_issue", "list_issues"])
+}
+
+fn worker_remainder_tool_definitions() -> Vec<ToolDefinition> {
+    let mut definitions = Vec::new();
     definitions.extend(
         spur_graph::mcp::tool_definitions()
             .into_iter()
@@ -150,8 +178,6 @@ pub(crate) fn worker_tool_definitions() -> Vec<ToolDefinition> {
             .into_iter()
             .map(analyst_tool_definition),
     );
-    definitions.push(crate::worker_server::fetch_outcome_artifact_tool_definition());
-    definitions.extend(crate::worker_server::worker_signal_tool_definitions());
     definitions
 }
 

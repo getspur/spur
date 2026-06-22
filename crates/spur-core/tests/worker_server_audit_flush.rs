@@ -69,17 +69,28 @@ impl PlanResolver for NullPlanResolver {
 
 fn test_deps(pm: Arc<PmService>) -> WorkerMcpDeps {
     let funnel: Arc<dyn McpEventSink> = Arc::new(NullSink);
+    let feature_gate = test_feature_gate();
+    let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
+        Arc::new(spur_blob_store::MemoryOutcomeStore::new());
     let worker_signal_sink = Arc::new(common::TestWorkerSignalSink::new(Arc::clone(&funnel)));
+    let worker_read_sink = Arc::new(spur_core::mcp::worker::WorkerReadMcpModule::new(
+        spur_core::mcp::worker::WorkerReadMcpDeps {
+            pm_service: Some(Arc::clone(&pm)),
+            feature_gate: Arc::clone(&feature_gate),
+            plan_resolver: Arc::new(NullPlanResolver),
+            reconciler_outcomes: Arc::new(TokioMutex::new(
+                spur_core::plan::outcomes::OutcomeStore::default(),
+            )),
+            outcome_store,
+            repo_root: None,
+        },
+    ));
     WorkerMcpDeps {
         pm_service: pm,
-        feature_gate: test_feature_gate(),
+        feature_gate,
         funnel,
         worker_signal_sink,
-        plan_resolver: Arc::new(NullPlanResolver),
-        reconciler_outcomes: Arc::new(TokioMutex::new(
-            spur_core::plan::outcomes::OutcomeStore::default(),
-        )),
-        outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+        worker_read_sink,
         repo_root: None,
     }
 }
