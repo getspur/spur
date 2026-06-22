@@ -10,6 +10,7 @@ use spur_context_service::mcp::{handle_tool, tool_definitions, McpHandlerError};
 
 const PACKAGE: &str = "demo";
 const REVISION: &str = "1.0.0";
+const DIMENSIONS: usize = 768;
 
 #[test]
 fn tool_definitions_match_external_context_surface() {
@@ -204,6 +205,40 @@ async fn external_knowledge_context_resolves_ref_and_returns_evidence_pack() -> 
         .iter()
         .any(|evidence| evidence["stable_symbol_id"] == "doc-parse"));
     assert!(response["confidence"].is_string());
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_knowledge_context_uses_precomputed_query_vector_for_hybrid_hits() -> Result<()> {
+    let fixture = McpFixture::new("knowledge-vector")?;
+
+    let response = handle_tool(
+        "external_knowledge_context",
+        &json!({
+            "query": "unmatched lexical query",
+            "package": PACKAGE,
+            "ref": "latest",
+            "scope": "code",
+            "limit": 3,
+            "query_vec": unit_vector(0)
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+
+    let top = response["primary_evidence"][0]
+        .as_object()
+        .context("expected vector primary evidence")?;
+    assert_eq!(
+        top["stable_symbol_id"],
+        "pkg:demo@1.0.0::demo::runtime::task_spawner"
+    );
+    assert_eq!(top["grounding"], "hybrid-code");
+    assert!(response["supporting_docs"]
+        .as_array()
+        .context("supporting_docs array")?
+        .is_empty());
     Ok(())
 }
 
@@ -436,6 +471,8 @@ fn seed_query_fixture(conn: &Connection) -> Result<()> {
         "pub fn dynamic_caller() {}\n",
         "\n",
         "pub fn hof_caller() {}\n",
+        "\n",
+        "pub fn task_spawner() {}\n",
     );
 
     conn.execute(
@@ -502,6 +539,15 @@ fn seed_query_fixture(conn: &Connection) -> Result<()> {
         17,
         17,
     )?;
+    insert_node(
+        conn,
+        "9999999999999999",
+        source_text,
+        "task_spawner",
+        "demo::runtime::task_spawner",
+        19,
+        19,
+    )?;
 
     insert_edge(
         conn,
@@ -559,6 +605,21 @@ fn seed_query_fixture(conn: &Connection) -> Result<()> {
         [],
     )
     .context("insert latest ref")?;
+
+    insert_embedding(
+        conn,
+        "9999999999999999",
+        "task_spawner",
+        "demo::runtime::task_spawner",
+        unit_vector(0),
+    )?;
+    insert_embedding(
+        conn,
+        "cccccccccccccccc",
+        "parse_config_loader",
+        "demo::parse_config_loader",
+        unit_vector(1),
+    )?;
     Ok(())
 }
 
@@ -648,6 +709,42 @@ fn insert_unresolved_edge(
     )
     .context("insert unresolved edge")?;
     Ok(())
+}
+
+fn insert_embedding(
+    conn: &Connection,
+    id: &str,
+    entity_name: &str,
+    qualified_name: &str,
+    vector: Vec<f32>,
+) -> Result<()> {
+    let sql = format!(
+        r"
+        INSERT INTO symbol_embeddings VALUES
+            ('{id}', 'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0,
+             'src/lib.rs', '{entity_name}', '{qualified_name}', 'function',
+             {}, 'JinaEmbeddingsV2BaseCode', 'hash-{id}', 'v2-jina-code')
+        ",
+        vector_sql(&vector)
+    );
+    conn.execute_batch(&sql)
+        .with_context(|| format!("insert embedding {id}"))?;
+    Ok(())
+}
+
+fn unit_vector(index: usize) -> Vec<f32> {
+    let mut vector = vec![0.0; DIMENSIONS];
+    vector[index] = 1.0;
+    vector
+}
+
+fn vector_sql(vector: &[f32]) -> String {
+    let values = vector
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{values}]::FLOAT[768]")
 }
 
 fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
