@@ -158,7 +158,7 @@ async fn emit_flush_failed_audit_sentinel(
     pm_service: Option<&Arc<PmService>>,
     delegation_id: &str,
     issue_id: Option<&str>,
-    error: &spur_mcp::worker_server::FlushDelegationError,
+    error: &crate::worker_server::FlushDelegationError,
 ) {
     let (Some(pm), Some(issue_id)) = (pm_service, issue_id) else {
         return;
@@ -166,14 +166,14 @@ async fn emit_flush_failed_audit_sentinel(
     let Some(adv) = pm.advanced() else {
         return;
     };
-    let kind = spur_mcp::plan::audit_sentinel::AuditSentinelKind::WorkerMcp {
+    let kind = crate::plan::audit_sentinel::AuditSentinelKind::WorkerMcp {
         delegation_id: delegation_id.to_string(),
-        subkind: spur_mcp::plan::audit_sentinel::WorkerMcpSubkind::FlushFailed,
+        subkind: crate::plan::audit_sentinel::WorkerMcpSubkind::FlushFailed,
         tool_name: None,
         target_issue_id: Some(issue_id.to_string()),
         error: Some(error.to_string()),
     };
-    let body = spur_mcp::plan::audit_sentinel::encode_comment(&kind);
+    let body = crate::plan::audit_sentinel::encode_comment(&kind);
     let timeout = std::time::Duration::from_secs(2);
     match tokio::time::timeout(timeout, adv.add_comment(issue_id, &body)).await {
         Ok(Ok(_)) => {}
@@ -212,12 +212,12 @@ mod flush_ordering_tests {
     //! into `"error"` again.
     use super::*;
 
+    use crate::handlers::PlanResolver;
+    use crate::plan::PlanState;
+    use crate::worker_server::{DelegationContext, WorkerMcpDeps, WorkerMcpServer};
     use spur_acp::SpurEventBody;
     use spur_license::policy::PolicyResolver;
     use spur_license::FeatureGate;
-    use spur_mcp::handlers::PlanResolver;
-    use spur_mcp::plan::PlanState;
-    use spur_mcp::worker_server::{DelegationContext, WorkerMcpDeps, WorkerMcpServer};
     use spur_mcp::McpEventSink;
     use std::time::Duration;
 
@@ -260,15 +260,35 @@ mod flush_ordering_tests {
         delegation_id: &str,
     ) -> Arc<WorkerMcpServer> {
         let pm = build_pm_service(repo).await;
+        let feature_gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
+        let event_sink = make_funnel_sink(funnel);
+        let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let worker_signal_sink = Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
+            crate::mcp::signals::SignalMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                event_sink: Some(Arc::clone(&event_sink)),
+                feature_gate: Arc::clone(&feature_gate),
+            },
+        ));
+        let worker_read_sink = Arc::new(crate::mcp::worker::WorkerReadMcpModule::new(
+            crate::mcp::worker::WorkerReadMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                feature_gate: Arc::clone(&feature_gate),
+                plan_resolver: Arc::new(NullPlanResolver),
+                reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
+                    crate::plan::outcomes::OutcomeStore::default(),
+                )),
+                outcome_store,
+                repo_root: None,
+            },
+        ));
         let deps = WorkerMcpDeps {
             pm_service: pm,
-            feature_gate: Arc::new(FeatureGate::new(PolicyResolver::embedded())),
-            funnel: make_funnel_sink(funnel),
-            plan_resolver: Arc::new(NullPlanResolver),
-            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
-                spur_mcp::plan::outcomes::OutcomeStore::default(),
-            )),
-            outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            feature_gate,
+            funnel: event_sink,
+            worker_signal_sink,
+            worker_read_sink,
             repo_root: None,
         };
         let server = WorkerMcpServer::start(brain_session_id.to_string(), deps)

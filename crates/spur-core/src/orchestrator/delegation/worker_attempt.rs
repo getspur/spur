@@ -148,12 +148,12 @@ async fn persist_dispatched_base_oid_label(
     let issue = pm.get_issue(issue_id).await.map_err(|e| {
         AttemptSetupError::WorktreeFailed(format!("persist dispatched base OID label: {e:#}"))
     })?;
-    let label = spur_mcp::plan::labels::dispatched_base_oid(dispatched_base_oid);
+    let label = crate::plan::labels::dispatched_base_oid(dispatched_base_oid);
     let remove_labels = issue
         .labels
         .iter()
         .filter(|existing| {
-            spur_mcp::plan::labels::parse_dispatched_base_oid(existing).is_some()
+            crate::plan::labels::parse_dispatched_base_oid(existing).is_some()
                 && existing.as_str() != label
         })
         .cloned()
@@ -371,8 +371,8 @@ pub(crate) async fn run_one_worker_attempt(
         &dispatched_base_oid,
         &overlays,
     );
-    spur_mcp::plan::emit_worker_started_audit(
-        ctx.pm_service.map(|pm| pm as &dyn spur_mcp::plan::PmLike),
+    crate::plan::emit_worker_started_audit(
+        ctx.pm_service.map(|pm| pm as &dyn crate::plan::PmLike),
         &ctx.issue_id,
         ctx.feature_gate,
         ctx.request_id,
@@ -887,12 +887,12 @@ mod format_worker_task_tests {
     #[test]
     fn multiple_paths_produce_ordered_bullets() {
         let files = vec![
-            "crates/spur-mcp/src/server.rs".to_string(),
+            "crates/spur-core/src/server/mod.rs".to_string(),
             "crates/spur-acp/src/adapter/claude.rs".to_string(),
         ];
         let out = format_worker_task("Go.", &files);
         let idx_first = out
-            .find("- crates/spur-mcp/src/server.rs")
+            .find("- crates/spur-core/src/server/mod.rs")
             .expect("first bullet");
         let idx_second = out
             .find("- crates/spur-acp/src/adapter/claude.rs")
