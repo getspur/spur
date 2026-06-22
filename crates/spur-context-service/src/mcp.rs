@@ -11,6 +11,7 @@ use crate::query::{self, SearchMode, SearchOptions};
 
 const DEFAULT_SOURCE: &str = "registry:crates-io";
 const DEFAULT_REF: &str = "latest";
+const KNOWLEDGE_QUERY_VECTOR_DIMENSIONS: usize = 768;
 
 /// Metadata for a single context-service MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,7 +165,7 @@ fn handle_knowledge_context(
             revision: resolved.revision,
             scope: args.scope.unwrap_or(KnowledgeScope::All),
             limit: args.limit.unwrap_or(8),
-            query_vec: None,
+            query_vec: args.query_vec,
         },
     )
     .map_err(internal_error("external_knowledge_context failed"))?;
@@ -232,13 +233,15 @@ struct KnowledgeContextArgs {
     ref_name: Option<String>,
     scope: Option<KnowledgeScope>,
     limit: Option<usize>,
+    query_vec: Option<Vec<f32>>,
 }
 
 impl KnowledgeContextArgs {
     fn validate(&self) -> Result<(), McpHandlerError> {
         validate_non_empty("query", &self.query)?;
         validate_non_empty("package", &self.package)?;
-        validate_revision_choice(self.revision.as_deref(), self.ref_name.as_deref())
+        validate_revision_choice(self.revision.as_deref(), self.ref_name.as_deref())?;
+        validate_query_vec(self.query_vec.as_deref())
     }
 
     fn source(&self) -> &str {
@@ -282,6 +285,24 @@ fn validate_revision_choice(
     if revision.is_some() && ref_name.is_some() {
         return Err(McpHandlerError::InvalidParams(
             "use either 'revision' or 'ref', not both".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_query_vec(query_vec: Option<&[f32]>) -> Result<(), McpHandlerError> {
+    let Some(query_vec) = query_vec else {
+        return Ok(());
+    };
+
+    if query_vec.len() != KNOWLEDGE_QUERY_VECTOR_DIMENSIONS {
+        return Err(McpHandlerError::InvalidParams(format!(
+            "field 'query_vec' must contain {KNOWLEDGE_QUERY_VECTOR_DIMENSIONS} floats"
+        )));
+    }
+    if query_vec.iter().any(|value| !value.is_finite()) {
+        return Err(McpHandlerError::InvalidParams(
+            "field 'query_vec' must contain only finite floats".to_owned(),
         ));
     }
     Ok(())
@@ -538,6 +559,13 @@ fn external_knowledge_context_def() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 20,
                     "default": 8
+                },
+                "query_vec": {
+                    "type": "array",
+                    "items": { "type": "number" },
+                    "minItems": KNOWLEDGE_QUERY_VECTOR_DIMENSIONS,
+                    "maxItems": KNOWLEDGE_QUERY_VECTOR_DIMENSIONS,
+                    "description": "Optional precomputed query embedding. When omitted, retrieval gracefully degrades to BM25-only."
                 }
             },
             "additionalProperties": false
