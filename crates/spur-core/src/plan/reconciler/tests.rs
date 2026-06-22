@@ -565,7 +565,7 @@ async fn projected_plan_for_ready_projects_when_unhydrated() {
 
 #[test]
 fn reconciler_dispatch_ctx_can_be_cloned_for_server_startup() {
-    let (tx, _rx) = tokio::sync::mpsc::channel::<spur_mcp::tools::DelegationRequest>(1);
+    let (tx, _rx) = tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
     let ctx = super::ReconcilerDispatchCtx {
         delegation_tx: tx,
         task_tracker: tokio_util::task::TaskTracker::new(),
@@ -904,7 +904,7 @@ fn create_worker_branch(repo: &std::path::Path, branch: &str, file: &str) -> Str
 }
 
 fn test_dispatch_ctx(
-    delegation_tx: tokio::sync::mpsc::Sender<spur_mcp::tools::DelegationRequest>,
+    delegation_tx: tokio::sync::mpsc::Sender<crate::DelegationRequest>,
     brain_session_id: spur_acp::BrainSessionId,
 ) -> ReconcilerDispatchCtx {
     ReconcilerDispatchCtx {
@@ -1109,7 +1109,7 @@ async fn global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_
         empty_plan_ids: HashSet::from(["P1".to_string()]),
     });
     let (delegation_tx, mut delegation_rx) =
-        tokio::sync::mpsc::channel::<spur_mcp::tools::DelegationRequest>(1);
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
     let reconciler = Reconciler::new_with_pm_like(
         ReconcilerConfig::default(),
         scripted_pm,
@@ -1170,7 +1170,7 @@ async fn global_reconciler_skips_other_brain_plan_without_emitting_no_ready() {
         empty_plan_ids: HashSet::from(["P1".to_string()]),
     });
     let (delegation_tx, mut delegation_rx) =
-        tokio::sync::mpsc::channel::<spur_mcp::tools::DelegationRequest>(1);
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
     let reconciler = Reconciler::new_with_pm_like(
         ReconcilerConfig::default(),
         scripted_pm,
@@ -1224,7 +1224,7 @@ async fn global_reconciler_status_reports_plans_enumerated_and_dispatched_per_ti
         empty_plan_ids: HashSet::from(["P1".to_string()]),
     });
     let (delegation_tx, mut delegation_rx) =
-        tokio::sync::mpsc::channel::<spur_mcp::tools::DelegationRequest>(1);
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
     let reconciler = Reconciler::new_with_pm_like(
         ReconcilerConfig::default(),
         scripted_pm,
@@ -1254,7 +1254,7 @@ async fn global_reconciler_status_reports_tasks_dispatched_per_tick() {
         empty_plan_ids: HashSet::new(),
     });
     let (delegation_tx, mut delegation_rx) =
-        tokio::sync::mpsc::channel::<spur_mcp::tools::DelegationRequest>(3);
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(3);
     let reconciler = Reconciler::new_with_pm_like(
         ReconcilerConfig::default(),
         scripted_pm,
@@ -1288,7 +1288,7 @@ async fn last_tick_counters_reset_between_ticks() {
         empty_plan_ids: HashSet::new(),
     });
     let (delegation_tx, mut delegation_rx) =
-        tokio::sync::mpsc::channel::<spur_mcp::tools::DelegationRequest>(3);
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(3);
     let reconciler = Reconciler::new_with_pm_like(
         ReconcilerConfig::default(),
         scripted_pm,
@@ -1330,7 +1330,7 @@ async fn seed_ready_overlay_plan(
     empty.copy_db_to(&beads_dir);
     let pm = pm_for_beads_repo(repo).await;
     let feature_gate = pro_feature_gate();
-    spur_mcp::feature::require_feature(
+    crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate.as_ref(),
     )
@@ -1488,7 +1488,7 @@ async fn tick_once_predicts_overlay_conflict_and_blocks_without_dispatch() {
     let (pm, _dep_issue_id, ready_issue_id) =
         seed_ready_overlay_plan(dir.path(), plan_id, &brain_session_id).await;
     let (delegation_tx, mut delegation_rx) =
-        tokio::sync::mpsc::channel::<spur_mcp::tools::DelegationRequest>(1);
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
     let config = ReconcilerConfig {
         repo_root: dir.path().to_path_buf(),
         predispatch_preview: super::PreviewStrategy::AlwaysConflict {
@@ -1543,7 +1543,7 @@ async fn tick_once_with_clean_preview_dispatches_normally() {
     let (pm, _dep_issue_id, ready_issue_id) =
         seed_ready_overlay_plan(dir.path(), plan_id, &brain_session_id).await;
     let (delegation_tx, mut delegation_rx) =
-        tokio::sync::mpsc::channel::<spur_mcp::tools::DelegationRequest>(1);
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
     let config = ReconcilerConfig {
         repo_root: dir.path().to_path_buf(),
         predispatch_preview: super::PreviewStrategy::AlwaysClean,
@@ -1565,7 +1565,7 @@ async fn tick_once_with_clean_preview_dispatches_normally() {
     assert_eq!(request.issue_id.as_deref(), Some(ready_issue_id.as_str()));
     assert!(matches!(
         request.base,
-        Some(spur_mcp::tools::BaseSpec::WithOverlay { .. })
+        Some(crate::BaseSpec::WithOverlay { .. })
     ));
 }
 
@@ -2207,7 +2207,7 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
     )
     .await
     .expect("persist plan");
-    spur_mcp::feature::require_feature(
+    crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate.as_ref(),
     )
@@ -2276,7 +2276,7 @@ async fn tick_once_strips_plan_complete_when_plan_submit_audit_is_absent() {
         })
         .await
         .expect("create issue");
-    spur_mcp::feature::require_feature(
+    crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate.as_ref(),
     )

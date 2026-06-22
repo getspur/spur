@@ -15,7 +15,7 @@ pub struct PlanSubmitAuditContext<'a> {
     pub base_snapshot_oid: Option<&'a str>,
     pub execution_mode: Option<&'a str>,
     pub brain_session_id: Option<&'a SessionId>,
-    pub explicit_base: Option<&'a spur_mcp::tools::BaseTarget>,
+    pub explicit_base: Option<&'a crate::BaseTarget>,
 }
 
 /// Compose a beads epic + child issues + dependency edges from a
@@ -544,31 +544,30 @@ pub(crate) fn topological_order(tasks: &[crate::plan::PlanTask]) -> Result<Vec<u
 
 pub(crate) async fn resolve_plan_base(
     repo_root: Option<&std::path::PathBuf>,
-    base_target: Option<&spur_mcp::tools::BaseTarget>,
+    base_target: Option<&crate::BaseTarget>,
 ) -> Result<PlanBaseSnapshot, String> {
     let Some(root) = repo_root.cloned() else {
         return Ok(PlanBaseSnapshot::default());
     };
     let manager = WorktreeManager::new(root);
 
-    let branch =
-        match base_target {
-            // Legacy / explicit RepoMain: snapshot the brain working tree.
-            None | Some(spur_mcp::tools::BaseTarget::RepoMain) => manager
-                .snapshot_brain_state()
-                .await
-                .map_err(|e| format!("failed to snapshot plan base: {e}"))?,
-            // Explicit branch: resolve the ref and create a snapshot ref pointed
-            // at the same OID. Brain working tree is never touched.
-            Some(spur_mcp::tools::BaseTarget::Branch { name }) => manager
-                .snapshot_at_ref(name)
-                .await
-                .map_err(|e| format!("failed to resolve plan base branch '{name}': {e}"))?,
-            Some(spur_mcp::tools::BaseTarget::Commit { oid }) => manager
-                .snapshot_at_ref(oid)
-                .await
-                .map_err(|e| format!("failed to resolve plan base commit '{oid}': {e}"))?,
-        };
+    let branch = match base_target {
+        // Legacy / explicit RepoMain: snapshot the brain working tree.
+        None | Some(crate::BaseTarget::RepoMain) => manager
+            .snapshot_brain_state()
+            .await
+            .map_err(|e| format!("failed to snapshot plan base: {e}"))?,
+        // Explicit branch: resolve the ref and create a snapshot ref pointed
+        // at the same OID. Brain working tree is never touched.
+        Some(crate::BaseTarget::Branch { name }) => manager
+            .snapshot_at_ref(name)
+            .await
+            .map_err(|e| format!("failed to resolve plan base branch '{name}': {e}"))?,
+        Some(crate::BaseTarget::Commit { oid }) => manager
+            .snapshot_at_ref(oid)
+            .await
+            .map_err(|e| format!("failed to resolve plan base commit '{oid}': {e}"))?,
+    };
 
     let oid = Some(
         run_git_capture(
@@ -593,7 +592,7 @@ pub(crate) struct PlanBaseSnapshot {
 #[derive(Debug)]
 pub(crate) struct SubmitPlanAsEpicInput {
     pub(crate) tasks: Vec<crate::plan::PlanTask>,
-    pub(crate) base: Option<spur_mcp::tools::BaseTarget>,
+    pub(crate) base: Option<crate::BaseTarget>,
     pub(crate) parent_epic_id: Option<String>,
     pub(crate) epic_title: Option<String>,
     pub(crate) epic_body: Option<String>,
@@ -613,7 +612,7 @@ pub(crate) struct SubmitPlanAsEpicResult {
 #[cfg(test)]
 mod resolve_plan_base_tests {
     use super::*;
-    use spur_mcp::tools::BaseTarget;
+    use crate::BaseTarget;
     use std::process::Command;
     use tempfile::TempDir;
 

@@ -397,7 +397,7 @@ fn dedupe(labels: Vec<String>) -> Vec<String> {
 }
 
 pub fn mock_worker_completion(
-    request: spur_mcp::DelegationRequest,
+    request: crate::DelegationRequest,
     result: DelegationResult,
     base_oid: &str,
 ) -> anyhow::Result<()> {

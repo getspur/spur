@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use spur_worktree::{manager::WorktreeError, WorktreeManager};
 
 use crate::tool_schemas::{PreviewConflict, PreviewTaskBaseOutput};
-use spur_mcp::tools::OverlayCommit;
+use crate::OverlayCommit;
 
 /// Compute the overlay preview for `task_id` in `plan_state`. The throwaway
 /// worktree and branch are always cleaned up before returning.

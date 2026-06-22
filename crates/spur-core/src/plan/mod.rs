@@ -1137,11 +1137,11 @@ pub async fn derive_epic_plan(
         known_agents,
     )?;
 
-    spur_mcp::feature::require_feature(
+    crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
-    .map_err(spur_mcp::feature::feature_error_message)?;
+    .map_err(crate::server::feature_error_message)?;
     if let Some(adv) = pm.advanced() {
         for task in &mut derived.plan_tasks {
             let Some(issue_id) = task.issue_id.as_deref() else {
@@ -1539,7 +1539,7 @@ pub async fn emit_dispatch_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = spur_mcp::feature::require_feature(
+    if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1587,7 +1587,7 @@ pub async fn emit_worker_started_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = spur_mcp::feature::require_feature(
+    if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1687,7 +1687,7 @@ pub async fn emit_completion_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return Ok(());
     };
-    if let Err(error) = spur_mcp::feature::require_feature(
+    if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1756,7 +1756,7 @@ pub(crate) async fn emit_approval_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = spur_mcp::feature::require_feature(
+    if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1834,7 +1834,7 @@ pub(crate) async fn emit_rejection_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = spur_mcp::feature::require_feature(
+    if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1884,7 +1884,7 @@ pub(crate) async fn emit_review_feedback_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return;
     };
-    if let Err(error) = spur_mcp::feature::require_feature(
+    if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1935,7 +1935,7 @@ pub(crate) async fn emit_retry_requested_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return Ok(());
     };
-    if let Err(error) = spur_mcp::feature::require_feature(
+    if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -1983,7 +1983,7 @@ pub(crate) async fn emit_escalation_requested_audit(
     let (Some(pm), Some(issue_id)) = (pm, issue_id.as_deref()) else {
         return Ok(());
     };
-    if let Err(error) = spur_mcp::feature::require_feature(
+    if let Err(error) = crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     ) {
@@ -2470,7 +2470,7 @@ async fn persist_completion_result_with_retry_for_task(
 
     if !already_emitted && completion_state != CompletionState::Superseded {
         if completion_state == CompletionState::AwaitingReview
-            && spur_mcp::feature::require_feature(
+            && crate::server::require_feature(
                 spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
                 feature_gate,
             )
@@ -2706,7 +2706,7 @@ async fn derive_worker_completion_state(
     Option<Vec<crate::plan::audit_sentinel::AuditSentinelKind>>,
 )> {
     let baseline = completion_state_from_status(status);
-    if spur_mcp::feature::require_feature(
+    if crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
@@ -2737,7 +2737,7 @@ async fn read_audits_if_advanced(
     feature_gate: &spur_license::FeatureGate,
     issue_id: &str,
 ) -> anyhow::Result<Option<Vec<crate::plan::audit_sentinel::AuditSentinelKind>>> {
-    if spur_mcp::feature::require_feature(
+    if crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
@@ -3588,7 +3588,7 @@ pub async fn review_task(
     state: &mut PlanState,
     pm: Option<&spur_pm::PmService>,
     sink: Option<&dyn spur_mcp::events::McpEventSink>,
-    _delegation_tx: Option<&tokio::sync::mpsc::Sender<spur_mcp::tools::DelegationRequest>>,
+    _delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
     _task_tracker: Option<&tokio_util::task::TaskTracker>,
     _plan_arc: Option<std::sync::Arc<tokio::sync::Mutex<PlanState>>>,
 ) -> Result<serde_json::Value, String> {
@@ -4228,7 +4228,7 @@ fn apply_decision_and_extract(
     reuse_prior_worktree: bool,
     state: &mut PlanState,
     pm_closed_status: Option<&str>,
-    _delegation_tx: Option<&tokio::sync::mpsc::Sender<spur_mcp::tools::DelegationRequest>>,
+    _delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
     _task_tracker: Option<&tokio_util::task::TaskTracker>,
     _plan_arc: Option<std::sync::Arc<tokio::sync::Mutex<PlanState>>>,
     _sink: Option<&dyn spur_mcp::events::McpEventSink>,
@@ -4588,7 +4588,7 @@ pub async fn handle_review_task(
     reuse_prior_worktree: bool,
     pm: Option<Arc<dyn PmLike>>,
     sink: Option<&dyn spur_mcp::events::McpEventSink>,
-    delegation_tx: Option<&tokio::sync::mpsc::Sender<spur_mcp::tools::DelegationRequest>>,
+    delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
     task_tracker: Option<&tokio_util::task::TaskTracker>,
     feature_gate: Arc<spur_license::FeatureGate>,
 ) -> Result<serde_json::Value, String> {
@@ -4614,11 +4614,11 @@ async fn review_beads_version(
     feature_gate: &spur_license::FeatureGate,
     issue_ids: &BTreeSet<String>,
 ) -> Result<ReviewBeadsVersion, String> {
-    spur_mcp::feature::require_feature(
+    crate::server::require_feature(
         spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
         feature_gate,
     )
-    .map_err(spur_mcp::feature::feature_error_message)?;
+    .map_err(crate::server::feature_error_message)?;
     let Some(advanced) = pm.advanced() else {
         return Err("non-advisory review writes require beads advanced read-back".to_string());
     };
@@ -4709,7 +4709,7 @@ pub async fn handle_review_task_with_write_mode(
     reuse_prior_worktree: bool,
     pm: Option<Arc<dyn PmLike>>,
     sink: Option<&dyn spur_mcp::events::McpEventSink>,
-    delegation_tx: Option<&tokio::sync::mpsc::Sender<spur_mcp::tools::DelegationRequest>>,
+    delegation_tx: Option<&tokio::sync::mpsc::Sender<crate::DelegationRequest>>,
     task_tracker: Option<&tokio_util::task::TaskTracker>,
     feature_gate: Arc<spur_license::FeatureGate>,
     write_mode: ReviewWriteMode,

@@ -11,7 +11,7 @@ use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus, SessionId};
 use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_core::plan::reconciler::{Reconciler, ReconcilerConfig, ReconcilerDispatchCtx};
 use spur_core::server::McpCallbackServer;
-use spur_mcp::tools::{BaseSpec, BaseTarget, DelegationRequest};
+use spur_core::{BaseSpec, BaseTarget, DelegationRequest};
 use tempfile::TempDir;
 use tokio::sync::{mpsc, Notify, OwnedMutexGuard};
 use tokio_util::task::TaskTracker;
