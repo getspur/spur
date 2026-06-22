@@ -309,32 +309,6 @@ fn worker_tool_authorization_error(name: &str) -> McpError {
     )
 }
 
-/// Future spur-core-owned MCP handles.
-///
-/// Owns active plans, plan registry, plan ownership locks, reconciler
-/// handles/outcomes, delegation lifecycle state, continuation context, and
-/// worker-signal lifecycle state.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct CoreMcpDeps {}
-
-/// Future worker-server handles for authenticated worker calls and progress.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct WorkerMcpDeps {}
-
-/// Future project-management handles for issue and PR tools.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct PmMcpDeps {}
-
-pub use spur_graph::mcp::GraphMcpDeps;
-
-/// Future analyst handles for DuckDB-backed evidence and graph reasoning.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct AnalystMcpDeps {}
-
 const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
     "delegate_to_worker",
     "delegate_parallel",

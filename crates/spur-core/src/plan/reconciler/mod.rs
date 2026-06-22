@@ -695,7 +695,7 @@ async fn emit_setup_conflict_continuation(input: SetupConflictContinuation<'_>) 
 
 #[derive(Clone)]
 pub struct ReconcilerDispatchCtx {
-    pub delegation_tx: tokio::sync::mpsc::Sender<spur_mcp::tools::DelegationRequest>,
+    pub delegation_tx: tokio::sync::mpsc::Sender<crate::DelegationRequest>,
     pub task_tracker: TaskTracker,
     pub brain_session_id: spur_acp::BrainSessionId,
     pub event_sink: Option<Arc<dyn spur_mcp::events::McpEventSink>>,
@@ -705,10 +705,7 @@ pub struct ReconcilerDispatchCtx {
 
 #[async_trait::async_trait]
 pub trait ReconcilerDispatch: Send + Sync {
-    async fn send_delegation(
-        &self,
-        request: spur_mcp::tools::DelegationRequest,
-    ) -> anyhow::Result<()>;
+    async fn send_delegation(&self, request: crate::DelegationRequest) -> anyhow::Result<()>;
 
     fn track_task(&self, fut: BoxFuture<'static, ()>);
 
@@ -723,10 +720,7 @@ pub trait ReconcilerDispatch: Send + Sync {
 
 #[async_trait::async_trait]
 impl ReconcilerDispatch for ReconcilerDispatchCtx {
-    async fn send_delegation(
-        &self,
-        request: spur_mcp::tools::DelegationRequest,
-    ) -> anyhow::Result<()> {
+    async fn send_delegation(&self, request: crate::DelegationRequest) -> anyhow::Result<()> {
         self.delegation_tx
             .send(request)
             .await
@@ -1239,7 +1233,7 @@ impl Reconciler {
             };
             let has_overlays = matches!(
                 &base_spec,
-                spur_mcp::tools::BaseSpec::WithOverlay { overlays, .. } if !overlays.is_empty()
+                crate::BaseSpec::WithOverlay { overlays, .. } if !overlays.is_empty()
             );
             let preview_outcome = if has_overlays {
                 match &self.config.predispatch_preview {
@@ -1379,7 +1373,7 @@ impl Reconciler {
             let (dispatched_base_oid_tx, dispatched_base_oid_rx) =
                 tokio::sync::watch::channel(None);
             let task_text = crate::plan::build_dispatch_task_text(task);
-            let request = spur_mcp::tools::DelegationRequest {
+            let request = crate::DelegationRequest {
                 id: delegation_id.clone().into(),
                 agent: task.spec.agent.clone(),
                 task: task_text,
@@ -1652,11 +1646,11 @@ impl Reconciler {
     }
 
     async fn run_index_hygiene_sweep(&self) -> anyhow::Result<bool> {
-        spur_mcp::feature::require_feature(
+        crate::server::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
         )
-        .map_err(|error| anyhow::anyhow!(spur_mcp::feature::feature_error_message(error)))?;
+        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
         let Some(adv) = self.pm.advanced() else {
             return Ok(false);
         };

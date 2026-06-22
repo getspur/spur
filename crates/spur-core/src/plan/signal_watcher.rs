@@ -74,11 +74,11 @@ impl<P: MutationProposer, S: MutationScorer> SignalWatcher<P, S> {
     }
 
     pub async fn tick_once(&self) -> anyhow::Result<()> {
-        spur_mcp::feature::require_feature(
+        crate::server::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             self.feature_gate.as_ref(),
         )
-        .map_err(|error| anyhow::anyhow!(spur_mcp::feature::feature_error_message(error)))?;
+        .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
         let adv = self
             .pm
             .advanced()
@@ -381,7 +381,7 @@ mod tests {
             spur_license::Plan::Pro,
             features,
         ));
-        spur_mcp::feature::require_feature(
+        crate::server::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             gate.as_ref(),
         )
@@ -427,7 +427,7 @@ mod tests {
             Arc::clone(&pm),
             PanicProposer,
             PanicScorer,
-            spur_mcp::feature::pro_feature_gate(),
+            crate::server::pro_feature_gate(),
         );
 
         watcher.tick_once().await.expect("watcher tick");
@@ -518,7 +518,7 @@ mod tests {
             spur_license::Plan::Pro,
             features,
         ));
-        spur_mcp::feature::require_feature(
+        crate::server::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
             gate.as_ref(),
         )
@@ -569,7 +569,7 @@ mod tests {
             Arc::clone(&pm),
             PanicProposer,
             PanicScorer,
-            spur_mcp::feature::pro_feature_gate(),
+            crate::server::pro_feature_gate(),
         );
 
         watcher.tick_once().await.expect("watcher tick");

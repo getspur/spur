@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use spur_acp::domain::{DelegationResult, DelegationStatus};
 use spur_acp::{BrainSessionId, CancelOutcome, CancellationControl, DelegationId, SessionId};
 use spur_blob_store::OutcomeStore;
-use spur_mcp::{DelegationRequest, ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
+use spur_mcp::{ToolCallContext, ToolDefinition, ToolModule, ToolResponse};
 use tokio::sync::{mpsc, OnceCell};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,7 @@ use tokio_util::task::TaskTracker;
 
 #[cfg(test)]
 use crate::server::{build_detached_continuation, community_feature_gate};
+use crate::DelegationRequest;
 
 #[cfg(test)]
 const PRODUCER_MAX_FIELD_BYTES: usize = 8192;
@@ -132,7 +133,7 @@ impl DelegationMcpModule {
         if let Err(error) = self.ensure_accepting_delegations() {
             return dispatch_error_response(error, id);
         }
-        let parsed: spur_mcp::tool_schemas::DelegateToWorkerInput =
+        let parsed: crate::tool_schemas::DelegateToWorkerInput =
             match serde_json::from_value(args.clone()) {
                 Ok(p) => p,
                 Err(e) => {
@@ -680,7 +681,7 @@ fn delegate_to_worker_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_to_worker".into(),
         description: "Delegate a task to a worker agent. Returns inline if the worker finishes within the inline-wait window (configurable via `delegation.inline_wait_ms`; default 0). Otherwise returns `{status: \"pending\", delegation_id}` and you will be re-prompted automatically when the worker completes — you do not need to poll. Pass a `delegation_plan` parameter (at minimum `{chosen, rationale}`; more for multi-step work). Structure the `task` field as CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT. `enable_worker_mcp` defaults to on — the worker receives the curated worker MCP server unless you pass `false`. `enable_worker_progress` defaults to off; opt in for progress events. Use `list_available_workers` when routing is ambiguous.".into(),
-        input_schema: spur_mcp::tool_schemas::schema_value::<spur_mcp::tool_schemas::DelegateToWorkerInput>(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateToWorkerInput>(),
     }
 }
 
@@ -688,7 +689,7 @@ fn delegate_parallel_def() -> ToolDefinition {
     ToolDefinition {
         name: "delegate_parallel".into(),
         description: "Delegate multiple tasks in parallel. Returns a response array of length N; each element is either an inline result or `{status: \"pending\", delegation_id}` with an automatic re-prompt when that task completes. Each task's per-task `delegation_plan` documents structured reasoning for reviewer mismatch checks. Per-task `enable_worker_mcp` defaults to on — each worker receives the curated worker MCP server unless explicitly set to `false`. `enable_worker_progress` defaults to off; opt in per task for progress events. Subtasks MUST be independent — no shared state, no sequential data dependencies. If unsure, use `delegate_to_worker` serially.".into(),
-        input_schema: spur_mcp::tool_schemas::schema_value::<spur_mcp::tool_schemas::DelegateParallelInput>(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::DelegateParallelInput>(),
     }
 }
 

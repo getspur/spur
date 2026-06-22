@@ -221,7 +221,7 @@ fn mock_dispatch_ctx(
     continuation_ctx: Arc<spur_core::server::DetachedContinuationCtx>,
 ) -> (
     ReconcilerDispatchCtx,
-    tokio::sync::mpsc::Receiver<spur_mcp::DelegationRequest>,
+    tokio::sync::mpsc::Receiver<spur_core::DelegationRequest>,
     tokio_util::task::TaskTracker,
 ) {
     let (delegation_tx, delegation_rx) = tokio::sync::mpsc::channel(4);

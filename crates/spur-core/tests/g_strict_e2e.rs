@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 use common::g_strict_harness::TestHarness;
 use serde_json::json;
-use spur_mcp::tools::BaseSpec;
+use spur_core::BaseSpec;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 static G_STRICT_TEST_MUTEX: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();

@@ -85,7 +85,7 @@ pub enum AuditSentinelKind {
         /// `None` for legacy submissions and for omitted-base submissions.
         /// Pure forensics — dispatch reads `base_snapshot_branch`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        explicit_base: Option<spur_mcp::tools::BaseTarget>,
+        explicit_base: Option<crate::BaseTarget>,
     },
     TaskSpec {
         task_id: String,
@@ -1276,7 +1276,7 @@ mod tests {
 #[cfg(test)]
 mod plan_submit_explicit_base_round_trip {
     use super::*;
-    use spur_mcp::tools::BaseTarget;
+    use crate::BaseTarget;
 
     #[test]
     fn plan_submit_with_explicit_base_round_trips() {
