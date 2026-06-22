@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use duckdb::{params, Connection};
+use spur_context_service::query::read_symbol;
 use spur_context_service::translate::{translate_artifact_to_ducklake, TranslateOptions};
 
 const SOURCE: &str = "registry:crates-io";
@@ -29,6 +30,7 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir: artifact_dir.clone(),
+        source_root: None,
         catalog_dsn: catalog_dsn.clone(),
     })?;
 
@@ -107,6 +109,44 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn translated_artifact_read_symbol_returns_source_from_package_tree() -> Result<()> {
+    let root = unique_temp_dir("translate-read")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(source_root.join("src")).context("create source src dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let source_text = "pub fn alpha() {}\n";
+    fs::write(source_root.join("src/lib.rs"), source_text).context("write source file")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+
+    translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        source_root: Some(source_root),
+        catalog_dsn: catalog_dsn.clone(),
+    })?;
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let source = read_symbol(&conn, "pkg:demo@1.2.3::demo::alpha", 0)?
+        .context("expected translated alpha source")?;
+
+    assert_eq!(source.file_path, "src/lib.rs");
+    assert_eq!(source.line_range, [1, 1]);
+    assert_eq!(source.source, source_text);
+    Ok(())
+}
+
 fn write_artifact_fixture(artifact_dir: &Path) -> Result<()> {
     fs::create_dir_all(artifact_dir.join("code_symbols.lance"))
         .context("create code symbol sidecar dir")?;
@@ -130,7 +170,7 @@ fn write_artifact_fixture(artifact_dir: &Path) -> Result<()> {
                 1::BIGINT AS node_id,
                 'src/lib.rs' AS file_path,
                 0::BIGINT AS byte_range_start,
-                13::BIGINT AS byte_range_end,
+                18::BIGINT AS byte_range_end,
                 1::INTEGER AS line_start,
                 1::INTEGER AS line_end,
                 'alpha' AS entity_name,
