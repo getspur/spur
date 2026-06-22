@@ -204,7 +204,7 @@ const BODY_HARD_CEILING_BYTES: usize = 64 * 1024;
 #[allow(clippy::too_many_arguments)]
 pub async fn interpret_peer_message(
     router: &std::sync::Arc<crate::peer_mailbox::router::PeerMailboxRouter>,
-    snapshot: &std::sync::Arc<spur_mcp::plan::scope_snapshot::PlanScopeSnapshot>,
+    snapshot: &std::sync::Arc<crate::plan::scope_snapshot::PlanScopeSnapshot>,
     source_delegation_id: spur_acp::domain::delegation::DelegationId,
     source_executor_id: String,
     source_issue_id: String,
@@ -427,9 +427,9 @@ mod tests {
         use crate::peer_mailbox::ledger::InMemoryLedger;
         use crate::peer_mailbox::limits::Limits;
         use crate::peer_mailbox::router::{Acceptance, PeerMailboxRouter};
+        use crate::plan::scope_snapshot::PlanScopeSnapshot;
         use spur_acp::domain::delegation::DelegationId;
         use spur_acp::domain::peer_message::{MessageKind, TerminalOutcome};
-        use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
         use std::collections::{HashMap, HashSet};
         use tokio::sync::mpsc::unbounded_channel;
 
@@ -576,13 +576,13 @@ mod tests {
 
     async fn helper_fixture() -> (
         std::sync::Arc<crate::peer_mailbox::router::PeerMailboxRouter>,
-        std::sync::Arc<spur_mcp::plan::scope_snapshot::PlanScopeSnapshot>,
+        std::sync::Arc<crate::plan::scope_snapshot::PlanScopeSnapshot>,
     ) {
         use crate::peer_mailbox::ledger::InMemoryLedger;
         use crate::peer_mailbox::limits::Limits;
         use crate::peer_mailbox::router::PeerMailboxRouter;
+        use crate::plan::scope_snapshot::PlanScopeSnapshot;
         use spur_acp::domain::delegation::DelegationId;
-        use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
         use std::collections::{HashMap, HashSet};
         use tokio::sync::mpsc::unbounded_channel;
 
@@ -613,7 +613,7 @@ mod tests {
 
     async fn helper_call(
         router: &std::sync::Arc<crate::peer_mailbox::router::PeerMailboxRouter>,
-        snapshot: &std::sync::Arc<spur_mcp::plan::scope_snapshot::PlanScopeSnapshot>,
+        snapshot: &std::sync::Arc<crate::plan::scope_snapshot::PlanScopeSnapshot>,
         payload: serde_json::Value,
     ) -> Result<crate::peer_mailbox::router::Acceptance, crate::peer_mailbox::router::RouterError>
     {
@@ -790,10 +790,10 @@ mod tests {
         use crate::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
         use crate::peer_mailbox::router::{Acceptance, PeerMailboxRouter};
         use crate::peer_mailbox::PeerMailboxBundle;
+        use crate::plan::scope_snapshot::PlanScopeSnapshot;
         use spur_acp::domain::delegation::DelegationId;
         use spur_acp::domain::events::SpurEventBody;
         use spur_acp::domain::peer_message::LedgerState;
-        use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
         use std::collections::{HashMap, HashSet};
         use tokio::sync::mpsc::unbounded_channel;
 
@@ -903,10 +903,10 @@ mod tests {
         use crate::peer_mailbox::prompt_builder::PeerPromptContextBuilder;
         use crate::peer_mailbox::router::{Acceptance, PeerMailboxRouter};
         use crate::peer_mailbox::PeerMailboxBundle;
+        use crate::plan::scope_snapshot::PlanScopeSnapshot;
         use spur_acp::domain::delegation::DelegationId;
         use spur_acp::domain::events::SpurEventBody;
         use spur_acp::domain::peer_message::LedgerState;
-        use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
         use std::collections::{HashMap, HashSet};
         use tokio::sync::mpsc::unbounded_channel;
 

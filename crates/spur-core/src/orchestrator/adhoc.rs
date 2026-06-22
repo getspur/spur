@@ -58,7 +58,7 @@ impl Orchestrator {
         let (mcp_server, delegation_channel) = McpCallbackServer::new(
             None,
             self.pm_service.clone(),
-            sink,
+            sink.clone(),
             adhoc_ctx,
             self.outcome_store.clone(),
             self.mcp_feature_gate(),
@@ -80,6 +80,14 @@ impl Orchestrator {
             self.config.delegation.inline_wait_ms,
         ));
         self.apply_mcp_server_settings(&mut mcp_server);
+        let tool_registry = self
+            .brain_tool_registry(
+                crate::mcp::delegation::DelegationMcpDeps::from_server(&mcp_server),
+                crate::mcp::plan::PlanMcpDeps::from_server(&mcp_server),
+                sink.clone(),
+            )
+            .context("Failed to compose brain MCP tool registry")?;
+        mcp_server.set_tool_registry(tool_registry);
 
         let mcp_server = Arc::new(mcp_server);
         let (mcp_url, mcp_handle) = mcp_server
@@ -120,7 +128,7 @@ impl Orchestrator {
 
             let acp_session_id = spur_acp::SessionId(session_response.session_id.to_string());
             let brain_session_id =
-                spur_mcp::plan::labels::derive_brain_session_id(&acp_session_id);
+                crate::plan::labels::derive_brain_session_id(&acp_session_id);
             mcp_server
                 .set_brain_session_id(brain_session_id.clone())
                 .expect("set once");

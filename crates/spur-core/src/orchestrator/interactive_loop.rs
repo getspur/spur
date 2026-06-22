@@ -492,7 +492,7 @@ impl Orchestrator {
                         };
 
                         let original_session_id = session_id.clone();
-                        let loading_session_id = spur_mcp::plan::labels::derive_brain_session_id(
+                        let loading_session_id = crate::plan::labels::derive_brain_session_id(
                             &spur_acp::SessionId(session_id.clone()),
                         )
                         .as_session_id()
@@ -1946,12 +1946,12 @@ mod peer_mailbox_drain_tests {
         prompt_builder::PeerPromptContextBuilder, InMemoryLedger, Limits, PeerMailboxBundle,
         PeerMailboxLedger, PeerMailboxRouter,
     };
+    use crate::plan::scope_snapshot::PlanScopeSnapshot;
     use spur_acp::domain::delegation::DelegationId;
     use spur_acp::domain::events::SpurEventBody;
     use spur_acp::domain::peer_message::{
         LedgerState, MessageKind, PeerMessageEnvelope, PeerMessageId, TerminalOutcome,
     };
-    use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::Duration;
@@ -2774,7 +2774,7 @@ mod base_spec_dispatch_tests {
         emit_dispatch_overlay_applied, extract_overlays, resolve_base_branch,
         snapshot_required_for_dispatch,
     };
-    use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
+    use crate::{BaseSpec, BaseTarget, OverlayCommit};
 
     #[test]
     fn snapshot_needed_for_none_and_repo_main() {
@@ -3117,7 +3117,10 @@ mod phase5_orchestrator_finalization_tests {
     use super::{commit_rendered_batch, session::retire_brain_session, TurnGuard};
     use crate::continuation_bridge::{new_overflow_buf, ContinuationEventSink, RenderOutcome};
     use crate::event_funnel::spawn_funnel;
+    use crate::handlers::PlanResolver;
+    use crate::plan::PlanState;
     use crate::scheduler::{BrainScheduler, ScheduledAction};
+    use crate::worker_server::{WorkerMcpDeps, WorkerMcpServer};
     use async_trait::async_trait;
     use chrono::Utc;
     use dashmap::DashMap;
@@ -3131,9 +3134,6 @@ mod phase5_orchestrator_finalization_tests {
     use spur_acp::types::SessionId;
     use spur_license::policy::PolicyResolver;
     use spur_license::FeatureGate;
-    use spur_mcp::handlers::PlanResolver;
-    use spur_mcp::plan::PlanState;
-    use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
     use spur_pm::test_workspace::TestBeadsWorkspace;
     use std::future::Future;
     use std::path::Path;
@@ -3241,15 +3241,35 @@ mod phase5_orchestrator_finalization_tests {
     }
 
     fn test_worker_deps(pm: Arc<spur_pm::PmService>) -> WorkerMcpDeps {
+        let feature_gate = Arc::new(FeatureGate::new(PolicyResolver::embedded()));
+        let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(NullWorkerMcpEventSink);
+        let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let worker_signal_sink = Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
+            crate::mcp::signals::SignalMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                event_sink: Some(Arc::clone(&funnel)),
+                feature_gate: Arc::clone(&feature_gate),
+            },
+        ));
+        let worker_read_sink = Arc::new(crate::mcp::worker::WorkerReadMcpModule::new(
+            crate::mcp::worker::WorkerReadMcpDeps {
+                pm_service: Some(Arc::clone(&pm)),
+                feature_gate: Arc::clone(&feature_gate),
+                plan_resolver: Arc::new(NullWorkerPlanResolver),
+                reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
+                    crate::plan::outcomes::OutcomeStore::default(),
+                )),
+                outcome_store,
+                repo_root: None,
+            },
+        ));
         WorkerMcpDeps {
             pm_service: pm,
-            feature_gate: Arc::new(FeatureGate::new(PolicyResolver::embedded())),
-            funnel: Arc::new(NullWorkerMcpEventSink),
-            plan_resolver: Arc::new(NullWorkerPlanResolver),
-            reconciler_outcomes: Arc::new(tokio::sync::Mutex::new(
-                spur_mcp::plan::outcomes::OutcomeStore::default(),
-            )),
-            outcome_store: Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            feature_gate,
+            funnel,
+            worker_signal_sink,
+            worker_read_sink,
             repo_root: None,
         }
     }
