@@ -39,8 +39,39 @@ SCRIPT_DIR="${SCRIPT_PATH%/*}"
 [[ "$SCRIPT_DIR" == "$SCRIPT_PATH" ]] && SCRIPT_DIR="."
 SCRIPT_DIR=$(cd "$SCRIPT_DIR" && pwd -P)
 WRAPPER="$SCRIPT_DIR/sccache-worktree.sh"
-REMOTE_BUILD_SH="$SCRIPT_DIR/cloud-build/build.sh"
 LEGACY_REMOTE_BUILD_SH="$SCRIPT_DIR/gcp-build/build.sh"
+
+resolve_remote_build_sh() {
+    local candidate git_toplevel repo_root notebook_repo
+
+    if [[ -n "${SPUR_CLOUD_BUILD_SH:-}" ]]; then
+        [[ -x "$SPUR_CLOUD_BUILD_SH" ]] && { printf '%s\n' "$SPUR_CLOUD_BUILD_SH"; return 0; }
+        return 1
+    fi
+
+    candidate="$SCRIPT_DIR/cloud-build/build.sh"
+    [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+
+    if [[ -n "${SPUR_NOTEBOOK_REPO:-}" ]]; then
+        candidate="$SPUR_NOTEBOOK_REPO/scripts/cloud-build/build.sh"
+        [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    fi
+
+    git_toplevel=$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)
+    [[ -n "$git_toplevel" ]] || return 1
+    if [[ "$git_toplevel" == *"/.spur/worktrees/"* ]]; then
+        repo_root="$(dirname "$(dirname "$(dirname "$git_toplevel")")")"
+    else
+        repo_root="$git_toplevel"
+    fi
+    notebook_repo="$(dirname "$repo_root")/spur-notebook"
+    candidate="$notebook_repo/scripts/cloud-build/build.sh"
+    [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+
+    return 1
+}
+
+REMOTE_BUILD_SH="$(resolve_remote_build_sh || true)"
 
 # ---- routing ---------------------------------------------------------------
 # Remote is the default for heavy compiles; lightweight subcommands auto-run
@@ -89,8 +120,8 @@ esac
 # re-running elsewhere.
 INFRA_UNAVAILABLE=200
 if [[ $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
-    PRIMARY_CLOUD="${SPUR_CLOUD:-aws}"
-    FALLBACK_CLOUD="${SPUR_CLOUD_FALLBACK-gcp}"
+    PRIMARY_CLOUD="${SPUR_CLOUD:-aws-my}"
+    FALLBACK_CLOUD="${SPUR_CLOUD_FALLBACK-aws}"
     REMOTE_CLOUDS=("$PRIMARY_CLOUD")
     if [[ -n "$FALLBACK_CLOUD" && "$FALLBACK_CLOUD" != "$PRIMARY_CLOUD" ]]; then
         REMOTE_CLOUDS+=("$FALLBACK_CLOUD")
