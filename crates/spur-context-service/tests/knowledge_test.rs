@@ -231,7 +231,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             entity_name VARCHAR,
             qualified_name VARCHAR,
             symbol_kind VARCHAR,
-            embedding FLOAT[768],
+            embedding FLOAT[],
             embedding_model VARCHAR,
             embedding_input_hash VARCHAR,
             embed_text_version VARCHAR
@@ -420,5 +420,5 @@ fn vector_sql(vector: &[f32]) -> String {
         .map(|value| value.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    format!("[{values}]::FLOAT[768]")
+    format!("[{values}]::FLOAT[]")
 }
