@@ -10,6 +10,11 @@ repository = "https://github.com/getspur/spur-releases"
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "spur-context-service"
+path = "src/main.rs"
+required-features = ["lambda"]
+
 [features]
 default = []
 analyst = ["dep:spur-analyst"]
