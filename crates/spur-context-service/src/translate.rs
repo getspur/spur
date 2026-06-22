@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
@@ -31,6 +31,7 @@ pub struct TranslateOptions {
     pub revision: String,
     pub revision_kind: String,
     pub artifact_dir: PathBuf,
+    pub source_root: Option<PathBuf>,
     pub catalog_dsn: String,
 }
 
@@ -145,6 +146,14 @@ fn validate_options(opts: &TranslateOptions) -> Result<()> {
             opts.artifact_dir.display()
         );
     }
+    if let Some(source_root) = &opts.source_root {
+        if !source_root.is_dir() {
+            bail!(
+                "source_root does not exist or is not a directory: {}",
+                source_root.display()
+            );
+        }
+    }
     if opts.catalog_dsn.trim().is_empty() {
         bail!("catalog_dsn must be non-empty");
     }
@@ -180,6 +189,7 @@ fn insert_structural_tables(
     let unresolved = required_artifact_file(&opts.artifact_dir, "edges_unresolved.parquet")?;
     let files = required_artifact_file(&opts.artifact_dir, "files.parquet")?;
     let file_manifests = required_artifact_file(&opts.artifact_dir, "file_manifests.parquet")?;
+    stage_source_files(conn, opts.source_root.as_deref(), &files)?;
 
     insert_from_source(
         conn,
@@ -300,6 +310,15 @@ fn insert_structural_tables(
         rows_inserted,
     )?;
 
+    let (source_text_expr, source_text_join) = if opts.source_root.is_some() {
+        (
+            "sf.source_text",
+            "LEFT JOIN __spur_context_source_files sf ON sf.file_path = artifact_files.file_path",
+        )
+    } else {
+        ("CAST(NULL AS VARCHAR)", "")
+    };
+
     insert_from_source(
         conn,
         "files",
@@ -312,9 +331,9 @@ fn insert_structural_tables(
                 semver_major, semver_minor, semver_patch
             )
             SELECT
-                stable_file_id,
-                file_path,
-                CAST(NULL AS VARCHAR) AS source_text,
+                artifact_files.stable_file_id,
+                artifact_files.file_path,
+                {source_text_expr} AS source_text,
                 {package} AS package,
                 {source} AS source,
                 {rev} AS revision,
@@ -322,8 +341,11 @@ fn insert_structural_tables(
                 {major} AS semver_major,
                 {minor} AS semver_minor,
                 {patch} AS semver_patch
-            FROM __SOURCE_SQL__
+            FROM __SOURCE_SQL__ AS artifact_files
+            {source_text_join}
             ",
+            source_text_expr = source_text_expr,
+            source_text_join = source_text_join,
             package = sql_string(&opts.package),
             source = sql_string(&opts.source),
             rev = sql_string(&opts.revision),
@@ -372,6 +394,76 @@ fn insert_structural_tables(
     )?;
 
     Ok(())
+}
+
+fn stage_source_files(conn: &Connection, source_root: Option<&Path>, files: &Path) -> Result<()> {
+    conn.execute_batch(
+        r"
+        DROP TABLE IF EXISTS __spur_context_source_files;
+        CREATE TEMP TABLE __spur_context_source_files (
+            file_path VARCHAR,
+            source_text VARCHAR
+        );
+        ",
+    )
+    .context("failed to initialize source file staging table")?;
+
+    let Some(source_root) = source_root else {
+        return Ok(());
+    };
+
+    let source_sql = read_parquet_source(files);
+    let query = format!("SELECT DISTINCT file_path FROM {source_sql} ORDER BY file_path");
+    let mut stmt = conn
+        .prepare(&query)
+        .context("failed to prepare artifact file path query")?;
+    let paths = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to read artifact file paths")?;
+    let mut insert = conn
+        .prepare(
+            r"
+            INSERT INTO __spur_context_source_files (file_path, source_text)
+            VALUES (?, ?)
+            ",
+        )
+        .context("failed to prepare source file staging insert")?;
+
+    for file_path in paths {
+        let source_path = source_file_path(source_root, &file_path)?;
+        let source_text = fs::read_to_string(&source_path).with_context(|| {
+            format!(
+                "failed to read source file `{}` for artifact path `{file_path}`",
+                source_path.display()
+            )
+        })?;
+        insert
+            .execute(params![file_path, source_text])
+            .with_context(|| format!("failed to stage source text for `{file_path}`"))?;
+    }
+
+    Ok(())
+}
+
+fn source_file_path(source_root: &Path, file_path: &str) -> Result<PathBuf> {
+    let relative = Path::new(file_path);
+    if relative.is_absolute() {
+        bail!("artifact file path must be relative: {file_path}");
+    }
+
+    let mut resolved = source_root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => resolved.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("artifact file path escapes source_root: {file_path}");
+            }
+        }
+    }
+
+    Ok(resolved)
 }
 
 fn insert_git_tables(
