@@ -52,7 +52,7 @@ use spur_core::orchestrator::InteractiveInput;
 use spur_core::scheduler::{BrainScheduler, ScheduledAction};
 use tokio::sync::{broadcast, mpsc};
 
-/// Build a continuation the way `spur_mcp::server::build_detached_continuation`
+/// Build a continuation the way `spur_core::server::build_detached_continuation`
 /// builds one: `brain_session` is stamped from the MCP server's
 /// `brain_session_id`, which is derived from the SPUR session id.
 fn mk_cont_stamped_with(brain_session: &SessionId) -> BrainContinuation {

@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::server::McpCallbackServer;
+use crate::worker_server::{WorkerMcpDeps, WorkerMcpServer};
 use agent_client_protocol::schema::{McpServer, McpServerHttp};
 use dashmap::DashMap;
 use spur_acp::DelegationDispatchError;
 use spur_blob_store::OutcomeStore;
-use spur_mcp::worker_server::{WorkerMcpDeps, WorkerMcpServer};
-use spur_mcp::McpCallbackServer;
 use spur_pm::PmService;
 
 /// Phase 5 / Task 26 — clonable bundle of orchestrator state needed to
@@ -51,16 +51,33 @@ impl WorkerMcpFetcher {
                     }
                 })?;
                 let funnel: Arc<dyn spur_mcp::McpEventSink> = Arc::new(self.funnel.clone());
-                let plan_resolver: Arc<dyn spur_mcp::handlers::PlanResolver> =
-                    Arc::clone(&self.mcp_server) as Arc<dyn spur_mcp::handlers::PlanResolver>;
+                let worker_signal_sink =
+                    Arc::new(crate::mcp::signals::WorkerSignalMcpToolModule::new(
+                        crate::mcp::signals::SignalMcpDeps {
+                            pm_service: Some(Arc::clone(&pm)),
+                            event_sink: Some(Arc::clone(&funnel)),
+                            feature_gate: Arc::clone(&gate),
+                        },
+                    ));
+                let plan_resolver: Arc<dyn crate::handlers::PlanResolver> =
+                    Arc::clone(&self.mcp_server) as Arc<dyn crate::handlers::PlanResolver>;
                 let reconciler_outcomes = self.mcp_server.reconciler_outcomes_handle();
+                let worker_read_sink = Arc::new(crate::mcp::worker::WorkerReadMcpModule::new(
+                    crate::mcp::worker::WorkerReadMcpDeps {
+                        pm_service: Some(Arc::clone(&pm)),
+                        feature_gate: Arc::clone(&gate),
+                        plan_resolver,
+                        reconciler_outcomes,
+                        outcome_store: Arc::clone(&self.outcome_store),
+                        repo_root: self.repo_root.clone(),
+                    },
+                ));
                 let deps = WorkerMcpDeps {
                     pm_service: pm,
                     feature_gate: gate,
                     funnel,
-                    plan_resolver,
-                    reconciler_outcomes,
-                    outcome_store: Arc::clone(&self.outcome_store),
+                    worker_signal_sink,
+                    worker_read_sink,
                     repo_root: self.repo_root.clone(),
                 };
                 let server = WorkerMcpServer::start(brain.to_string(), deps)

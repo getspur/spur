@@ -218,7 +218,7 @@ digraph code_explore {
 
 Two tools can exceed the inline response budget and save to an out-of-band file:
 
-- **`code_file_symbols`** on files > ~2k lines (e.g. `crates/spur-mcp/src/server/handlers/code_graph.rs` at 2404 lines returns 84KB).
+- **`code_file_symbols`** on files > ~2k lines (e.g. `crates/spur-core/src/server/handlers/code_graph.rs` at 2404 lines returns 84KB).
 - **`code_callers`/`code_callees`** on popular sinks (200+ callers / 2k+ lines).
 
 When this happens, do NOT chunk-read the saved file. Switch strategy:

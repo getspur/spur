@@ -101,7 +101,7 @@ async fn has_mark_noop_signal(pm_service: Option<&Arc<PmService>>, issue_id: Opt
         Ok(issue) => issue
             .labels
             .iter()
-            .any(|label| label == &spur_mcp::plan::labels::signal_kind("mark-noop")),
+            .any(|label| label == &crate::plan::labels::signal_kind("mark-noop")),
         Err(error) => {
             tracing::warn!(issue_id, "failed to inspect mark_noop signal: {error}");
             false
