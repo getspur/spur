@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
         // the load call so early replay items aren't missed.
         let load_notif_rx = conn.subscribe_session_notifications();
         match conn.load_session(load_req).await {
-            Ok(_load_stream) => {
+            Ok((_load_response, _load_stream)) => {
                 let mut replayed = 0usize;
                 let mut variant_counts: std::collections::HashMap<&'static str, usize> =
                     std::collections::HashMap::new();
