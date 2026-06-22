@@ -33,8 +33,8 @@ use futures::Stream;
 
 use agent_client_protocol::schema::{
     AuthenticateRequest, AuthenticateResponse, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, ModelId,
-    NewSessionResponse, PromptRequest, SessionId, SessionModeId, SessionNotification,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    ModelId, NewSessionResponse, PromptRequest, SessionId, SessionModeId, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse,
 };
@@ -148,7 +148,10 @@ pub trait AgentConnection: Send + Sync {
     async fn load_session(
         &mut self,
         request: LoadSessionRequest,
-    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+    ) -> anyhow::Result<(
+        LoadSessionResponse,
+        Pin<Box<dyn Stream<Item = SessionNotification> + Send>>,
+    )> {
         let _ = request;
         Err(anyhow::anyhow!(
             "load_session not supported by this transport"
