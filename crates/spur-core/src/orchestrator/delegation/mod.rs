@@ -46,7 +46,7 @@ fn maybe_spawn_dispatch_lease_heartbeat(
             }
 
             let expires_at = chrono::Utc::now().timestamp().saturating_add(lease_secs);
-            if let Err(error) = spur_mcp::plan::update_dispatch_lease(
+            if let Err(error) = crate::plan::update_dispatch_lease(
                 pm.as_ref(),
                 &issue_id,
                 &delegation_id,

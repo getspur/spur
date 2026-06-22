@@ -16,6 +16,20 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+fn install_core_delegation_registry(server: &mut spur_core::McpCallbackServer) {
+    let registry = spur_core::mcp::brain_tool_registry(
+        spur_core::mcp::delegation::DelegationMcpDeps::from_server(server),
+        spur_core::mcp::plan::PlanMcpDeps::from_server(server),
+        spur_core::mcp::signals::SignalMcpDeps {
+            pm_service: None,
+            event_sink: None,
+            feature_gate: spur_core::server::community_feature_gate(),
+        },
+    )
+    .expect("core delegation registry");
+    server.set_tool_registry(registry);
+}
+
 fn mk_cont(id: &str) -> BrainContinuation {
     BrainContinuation {
         delegation_id: id.into(),
@@ -158,8 +172,8 @@ fn autonomous_turn_is_self_describing() {
 async fn test_no_double_delivery_on_block_timeout() {
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::{BrainSessionId, DelegationResult};
-    use spur_mcp::server::DetachedContinuationCtx;
-    use spur_mcp::{McpCallbackServer, WorkerInfo};
+    use spur_core::server::DetachedContinuationCtx;
+    use spur_core::{McpCallbackServer, WorkerInfo};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::time::Duration;
@@ -189,13 +203,14 @@ async fn test_no_double_delivery_on_block_timeout() {
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        spur_core::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-slow".into(),
         tier: Some("generalist".into()),
         ..Default::default()
     }]);
+    install_core_delegation_registry(&mut server);
     let server = Arc::new(server);
 
     // Fake worker: consume the delegation request; send the oneshot reply
@@ -292,8 +307,8 @@ async fn test_no_double_delivery_on_fast_path() {
     use serde_json::Value;
     use spur_acp::domain::delegation::DelegationStatus;
     use spur_acp::{BrainSessionId, DelegationResult};
-    use spur_mcp::server::DetachedContinuationCtx;
-    use spur_mcp::{McpCallbackServer, WorkerInfo};
+    use spur_core::server::DetachedContinuationCtx;
+    use spur_core::{McpCallbackServer, WorkerInfo};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::time::Duration;
@@ -320,7 +335,7 @@ async fn test_no_double_delivery_on_fast_path() {
         None,
         ctx,
         Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-        spur_mcp::server::community_feature_gate(),
+        spur_core::server::community_feature_gate(),
     );
     server.set_workers(vec![WorkerInfo {
         name: "worker-fast".into(),
@@ -328,6 +343,7 @@ async fn test_no_double_delivery_on_fast_path() {
         ..Default::default()
     }]);
     server.set_inline_wait(Duration::from_millis(INLINE_WAIT_MS));
+    install_core_delegation_registry(&mut server);
     let server = Arc::new(server);
 
     let worker_handle = tokio::spawn(async move {
