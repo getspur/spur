@@ -3,3 +3,4 @@
 pub mod catalog;
 pub mod knowledge;
 pub mod query;
+pub mod translate;
