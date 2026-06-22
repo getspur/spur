@@ -79,30 +79,6 @@ pub(crate) const PERSIST_AS_EPIC_FALSE_REMOVED_MESSAGE: &str = "persist_as_epic=
 /// resumption of any sweep that was interrupted under the old value.
 pub(crate) const PLAN_PENDING_SWEEP_COMMENT_PREFIX: &str =
     "SPUR startup sweep quarantined stale pending plan";
-/// Idle-session watchdog for the streamable-HTTP MCP transport.
-///
-/// rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 min, which is far too short
-/// for brain↔spur sessions where a brain agent commonly idles between user
-/// turns (lunch, overnight, parallel work in another window). When the watchdog
-/// fires, the worker quits and rmcp's tower layer logs a cascading
-/// `Failed to close session ... Session service terminated` ERROR. 4 hours
-/// preserves cleanup of truly-orphaned sessions while accommodating realistic
-/// idle gaps. Override via `SPUR_MCP_SESSION_KEEPALIVE_SECS` (env var, secs;
-/// `0` disables the watchdog entirely).
-pub(crate) const MCP_SESSION_KEEPALIVE_DEFAULT: std::time::Duration =
-    std::time::Duration::from_secs(4 * 60 * 60);
-
-pub(crate) fn mcp_session_keepalive() -> Option<std::time::Duration> {
-    match std::env::var("SPUR_MCP_SESSION_KEEPALIVE_SECS") {
-        Ok(raw) => match raw.trim().parse::<u64>() {
-            Ok(0) => None,
-            Ok(secs) => Some(std::time::Duration::from_secs(secs)),
-            Err(_) => Some(MCP_SESSION_KEEPALIVE_DEFAULT),
-        },
-        Err(_) => Some(MCP_SESSION_KEEPALIVE_DEFAULT),
-    }
-}
-
 pub(crate) struct ReconcilerTaskHandle {
     pub(crate) cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) handle: AbortOnDropHandle<()>,
