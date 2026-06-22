@@ -39,8 +39,39 @@ SCRIPT_DIR="${SCRIPT_PATH%/*}"
 [[ "$SCRIPT_DIR" == "$SCRIPT_PATH" ]] && SCRIPT_DIR="."
 SCRIPT_DIR=$(cd "$SCRIPT_DIR" && pwd -P)
 WRAPPER="$SCRIPT_DIR/sccache-worktree.sh"
-REMOTE_BUILD_SH="$SCRIPT_DIR/cloud-build/build.sh"
 LEGACY_REMOTE_BUILD_SH="$SCRIPT_DIR/gcp-build/build.sh"
+
+resolve_remote_build_sh() {
+    local candidate git_toplevel repo_root notebook_repo
+
+    if [[ -n "${SPUR_CLOUD_BUILD_SH:-}" ]]; then
+        [[ -x "$SPUR_CLOUD_BUILD_SH" ]] && { printf '%s\n' "$SPUR_CLOUD_BUILD_SH"; return 0; }
+        return 1
+    fi
+
+    candidate="$SCRIPT_DIR/cloud-build/build.sh"
+    [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+
+    if [[ -n "${SPUR_NOTEBOOK_REPO:-}" ]]; then
+        candidate="$SPUR_NOTEBOOK_REPO/scripts/cloud-build/build.sh"
+        [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    fi
+
+    git_toplevel=$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)
+    [[ -n "$git_toplevel" ]] || return 1
+    if [[ "$git_toplevel" == *"/.spur/worktrees/"* ]]; then
+        repo_root="$(dirname "$(dirname "$(dirname "$git_toplevel")")")"
+    else
+        repo_root="$git_toplevel"
+    fi
+    notebook_repo="$(dirname "$repo_root")/spur-notebook"
+    candidate="$notebook_repo/scripts/cloud-build/build.sh"
+    [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+
+    return 1
+}
+
+REMOTE_BUILD_SH="$(resolve_remote_build_sh || true)"
 
 # ---- routing ---------------------------------------------------------------
 # Remote is the default for heavy compiles; lightweight subcommands auto-run
@@ -81,69 +112,6 @@ case "${SPUR_REMOTE:-}" in
         if [[ "$CLASS" == "heavy" || "$CLASS" == "run" ]]; then REMOTE_CAPABLE=1; fi ;;
 esac
 
-# ---- spur-core test thread pinning (applies to spur-core ONLY) ------------
-# spur-core's heavy beads/engine integration tests (the relocated plan and
-# mutation engine suites) each stand up isolated beads workspaces and deadlock
-# under libtest's default in-binary parallelism on multi-core build VMs. Pin
-# spur-core's tests to --test-threads=1 WITHOUT slowing any other crate:
-#   * `-p spur-core` (spur-core only)  -> append `-- --test-threads=1`.
-#   * `--workspace` / `--all`          -> split into "all crates except
-#     spur-core" (full parallelism) + "spur-core only" (serial), so the pin
-#     never touches another crate.
-# An explicit `--test-threads` disables the pin; SPUR_TEST_THREADS=<n> sets it.
-if [[ "$SUBCOMMAND" == "test" ]]; then
-    sc_ws=0; sc_core=0; sc_excl=0; sc_explicit=0; sc_prev=""
-    for sc_a in "$@"; do
-        case "$sc_a" in
-            --workspace|--all)                sc_ws=1 ;;
-            --test-threads|--test-threads=*)  sc_explicit=1 ;;
-            --package=spur-core|-p=spur-core) sc_core=1 ;;
-            --exclude=spur-core)              sc_excl=1 ;;
-            spur-core) [[ "$sc_prev" == "--exclude" ]] && sc_excl=1 || sc_core=1 ;;
-        esac
-        sc_prev="$sc_a"
-    done
-    sc_threads="${SPUR_TEST_THREADS:-1}"
-    if [[ $sc_excl -eq 1 || $sc_explicit -eq 1 ]]; then
-        : # spur-core excluded, or caller pinned threads explicitly -> leave as-is
-    elif [[ $sc_ws -eq 1 ]]; then
-        # Split a workspace run so the pin is spur-core-only. Recurse through
-        # this same wrapper: the spur-core leg re-enters and gets the pin; the
-        # other leg carries `--exclude spur-core` so it never re-splits.
-        shift                                       # drop the 'test' subcommand
-        sc_pre=(); sc_post=(); sc_dd=0              # partition args on first `--`
-        for sc_a in "$@"; do
-            if [[ $sc_dd -eq 0 && "$sc_a" == "--" ]]; then sc_dd=1; continue; fi
-            if [[ $sc_dd -eq 1 ]]; then sc_post+=("$sc_a")
-            else case "$sc_a" in --workspace|--all) ;; *) sc_pre+=("$sc_a") ;; esac
-            fi
-        done
-        set +e
-        if [[ ${#sc_post[@]} -gt 0 ]]; then
-            "$0" test --workspace --exclude spur-core ${sc_pre[@]+"${sc_pre[@]}"} -- "${sc_post[@]}"; sc_rc1=$?
-            "$0" test -p spur-core ${sc_pre[@]+"${sc_pre[@]}"} -- "${sc_post[@]}"; sc_rc2=$?
-        else
-            "$0" test --workspace --exclude spur-core ${sc_pre[@]+"${sc_pre[@]}"}; sc_rc1=$?
-            "$0" test -p spur-core ${sc_pre[@]+"${sc_pre[@]}"}; sc_rc2=$?
-        fi
-        set -e
-        [[ $sc_rc1 -ne 0 ]] && exit $sc_rc1
-        exit $sc_rc2
-    elif [[ $sc_core -eq 1 ]]; then
-        sc_args=(); sc_inserted=0
-        for sc_a in "$@"; do
-            if [[ "$sc_a" == "--" && $sc_inserted -eq 0 ]]; then
-                sc_args+=("--" "--test-threads=$sc_threads"); sc_inserted=1
-            else
-                sc_args+=("$sc_a")
-            fi
-        done
-        [[ $sc_inserted -eq 0 ]] && sc_args+=("--" "--test-threads=$sc_threads")
-        set -- "${sc_args[@]}"
-        echo "[spur-cargo] spur-core test: pinning --test-threads=$sc_threads (set SPUR_TEST_THREADS to override)" >&2
-    fi
-fi
-
 # ---- remote dispatch -------------------------------------------------------
 # build.sh exits with INFRA_UNAVAILABLE (200) only when the VM itself is
 # unreachable; cargo's own exit codes (1/100/101 for build/test failures)
@@ -152,8 +120,8 @@ fi
 # re-running elsewhere.
 INFRA_UNAVAILABLE=200
 if [[ $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
-    PRIMARY_CLOUD="${SPUR_CLOUD:-aws}"
-    FALLBACK_CLOUD="${SPUR_CLOUD_FALLBACK-gcp}"
+    PRIMARY_CLOUD="${SPUR_CLOUD:-aws-my}"
+    FALLBACK_CLOUD="${SPUR_CLOUD_FALLBACK-aws}"
     REMOTE_CLOUDS=("$PRIMARY_CLOUD")
     if [[ -n "$FALLBACK_CLOUD" && "$FALLBACK_CLOUD" != "$PRIMARY_CLOUD" ]]; then
         REMOTE_CLOUDS+=("$FALLBACK_CLOUD")
@@ -192,11 +160,23 @@ elif [[ $REMOTE_CAPABLE -eq 1 && -x "$LEGACY_REMOTE_BUILD_SH" ]]; then
 fi
 
 # ---- local fallback (original behavior) ------------------------------------
+use_spur_s3_sccache() {
+    case "${SPUR_SCCACHE_S3-__spur_unset__}" in
+        0|false|False|FALSE|no|No|NO|off|Off|OFF)
+            return 1 ;;
+        __spur_unset__)
+            [[ "${SPUR_SCCACHE_GCS:-0}" == "1" ]] && return 1
+            return 0 ;;
+        *)
+            return 0 ;;
+    esac
+}
+
 # Restart the sccache server so it picks up the two-level disk,s3 config. The
 # server reads the backend config once at start-server time, so a stale
 # local-only daemon must be bounced. Mirrors the GCS path below.
 ensure_spur_s3_sccache_server() {
-    [[ "${SPUR_SCCACHE_S3:-0}" == "1" ]] || return 0
+    use_spur_s3_sccache || return 0
     [[ -z "${CODEX_SANDBOX:-}" ]] || return 0
     command -v sccache >/dev/null 2>&1 || return 0
 
@@ -211,7 +191,7 @@ ensure_spur_s3_sccache_server() {
     fi
 
     if pgrep -f '/rustc[^ ]*$|/rustc ' >/dev/null 2>&1; then
-        echo "[spur-cargo] SPUR_SCCACHE_S3=1 but rustc is running; leaving existing sccache server unchanged" >&2
+        echo "[spur-cargo] S3 sccache requested but rustc is running; leaving existing sccache server unchanged" >&2
         return 0
     fi
 
@@ -219,7 +199,7 @@ ensure_spur_s3_sccache_server() {
     "$WRAPPER" --stop-server >/dev/null 2>&1 || true
     if ! SCCACHE_ERROR_LOG="$error_log" "$WRAPPER" --start-server >/dev/null 2>&1; then
         sccache --start-server >/dev/null 2>&1 || true
-        echo "[spur-cargo] failed to start S3 sccache server for SPUR_SCCACHE_S3=1" >&2
+        echo "[spur-cargo] failed to start S3 sccache server" >&2
         echo "[spur-cargo] see $error_log; verify AWS creds (aws sts get-caller-identity) and bucket region match SCCACHE_REGION" >&2
         exit 1
     fi
@@ -256,11 +236,13 @@ if [[ -z "${RUSTC_WRAPPER+x}" ]]; then
 fi
 # Incremental rustc invocations are non-cacheable; disable them so a remote
 # cache layer (GCS or S3) actually gets populated and hit.
-if [[ ( "${SPUR_SCCACHE_GCS:-0}" == "1" || "${SPUR_SCCACHE_S3:-0}" == "1" ) && -z "${CARGO_INCREMENTAL+x}" ]]; then
-    export CARGO_INCREMENTAL=0
+if [[ -z "${CARGO_INCREMENTAL+x}" ]]; then
+    if use_spur_s3_sccache || [[ "${SPUR_SCCACHE_GCS:-0}" == "1" ]]; then
+        export CARGO_INCREMENTAL=0
+    fi
 fi
 # S3 takes precedence; only one remote backend is configured per invocation.
-if [[ "${SPUR_SCCACHE_S3:-0}" == "1" ]]; then
+if use_spur_s3_sccache; then
     ensure_spur_s3_sccache_server
 else
     ensure_spur_gcs_sccache_server

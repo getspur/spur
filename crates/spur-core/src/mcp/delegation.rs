@@ -709,7 +709,7 @@ fn check_delegation_status_def() -> ToolDefinition {
     }
 }
 
-fn fetch_outcome_artifact_def() -> ToolDefinition {
+pub(crate) fn fetch_outcome_artifact_def() -> ToolDefinition {
     ToolDefinition {
         name: "fetch_outcome_artifact".into(),
         description: "Fetch the side-channel artifact (full or sectioned) for a completed delegation. Use when continuation.payload.artifact_id is Some(_) and you need fuller context. Sections let you pick what to fetch: pass 'status_only' for just status fields (~100B), 'summary' for the inline summary, 'diff_only' for full diff text, or 'full' for the entire DelegationResult JSON.".into(),
