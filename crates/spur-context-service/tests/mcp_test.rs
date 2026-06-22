@@ -433,7 +433,7 @@ fn create_query_schema(conn: &Connection) -> Result<()> {
             entity_name VARCHAR,
             qualified_name VARCHAR,
             symbol_kind VARCHAR,
-            embedding FLOAT[768],
+            embedding FLOAT[],
             embedding_model VARCHAR,
             embedding_input_hash VARCHAR,
             embed_text_version VARCHAR
