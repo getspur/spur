@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 use agent_client_protocol::schema::{
-    LoadSessionRequest, McpServer, NewSessionResponse, SessionId, SessionModeId,
-    SessionNotification, SetSessionModeRequest,
+    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionResponse, SessionId,
+    SessionModeId, SessionNotification, SetSessionModeRequest,
 };
 use futures::Stream;
 use spur_acp::config::AgentConfig;
@@ -120,13 +120,16 @@ pub async fn load_session_with_bypass(
     acp_session_id: String,
     cwd: PathBuf,
     mcp_servers: Vec<McpServer>,
-) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+) -> anyhow::Result<(
+    LoadSessionResponse,
+    Pin<Box<dyn Stream<Item = SessionNotification> + Send>>,
+)> {
     let session_id = SessionId::new(acp_session_id);
     let request = LoadSessionRequest::new(session_id.clone(), cwd).mcp_servers(mcp_servers);
-    let stream = conn.load_session(request).await?;
+    let (response, stream) = conn.load_session(request).await?;
     let advertised_modes = conn.advertised_session_modes(&session_id);
     apply_bypass_session_mode(conn, cfg, session_id, advertised_modes, "load_session").await;
-    Ok(stream)
+    Ok((response, stream))
 }
 
 #[cfg(test)]
