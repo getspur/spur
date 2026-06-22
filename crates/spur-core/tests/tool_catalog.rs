@@ -97,6 +97,31 @@ fn delegation_tools_are_owned_by_core_catalog() {
 }
 
 #[test]
+fn plan_tools_are_owned_by_core_catalog() {
+    let actual: Vec<String> = tools_list().iter().map(|t| t.name.clone()).collect();
+    for tool in [
+        "merge_plan",
+        "resume_plan",
+        "force_reclaim_plan",
+        "submit_plan",
+        "execute_epic",
+        "get_plan_status",
+        "get_reconciler_status",
+        "get_task_diff",
+        "preview_task_base",
+        "plan_truncate_and_restart",
+        "recover_orphaned_dispatch",
+        "review_task",
+        "submit_plan_mutation",
+    ] {
+        assert!(
+            actual.iter().any(|name| name == tool),
+            "{tool} must be owned by spur_core::mcp::plan"
+        );
+    }
+}
+
+#[test]
 fn pm_module_definitions_are_composed_into_brain_catalog() {
     let pm_module = spur_pm::mcp::PmMcpModule::new(Default::default());
     let module_defs = pm_module.tools();
