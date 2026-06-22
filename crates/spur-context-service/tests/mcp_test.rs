@@ -744,7 +744,7 @@ fn vector_sql(vector: &[f32]) -> String {
         .map(|value| value.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    format!("[{values}]::FLOAT[768]")
+    format!("[{values}]::FLOAT[]")
 }
 
 fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
