@@ -313,7 +313,7 @@ fn worker_tool_authorization_error(name: &str) -> McpError {
 ///
 /// Owns active plans, plan registry, plan ownership locks, reconciler
 /// handles/outcomes, delegation lifecycle state, continuation context, and
-/// worker-signal lifecycle state currently stored on `McpCallbackServer`.
+/// worker-signal lifecycle state.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct CoreMcpDeps {}
@@ -433,9 +433,8 @@ mod analyst_module_ownership_tests {
             );
 
             let ctx = ToolCallContext::new(ServerKind::Worker, ToolAuthority::Worker, None, None);
-            let err = match registry.call_tool(ctx, tool_name, json!({})).await {
-                Ok(_) => panic!("brain-only worker call must be rejected: {tool_name}"),
-                Err(err) => err,
+            let Err(err) = registry.call_tool(ctx, tool_name, json!({})).await else {
+                panic!("brain-only worker call must be rejected: {tool_name}");
             };
 
             assert_eq!(
