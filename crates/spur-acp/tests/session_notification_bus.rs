@@ -81,7 +81,7 @@ async fn delayed_available_commands_update_reaches_subscriber() {
     // Trigger `session/load`. The fixture will respond and then, after 50 ms,
     // emit the delayed `available_commands_update` notification.
     let cwd = std::env::current_dir().expect("cwd");
-    let _load_stream = conn
+    let (_load_response, _load_stream) = conn
         .load_session(LoadSessionRequest::new("test-session".to_string(), cwd))
         .await
         .expect("load_session should succeed against mock");
