@@ -1,4 +1,4 @@
-//! Build-pipeline translation from spur-graph artifacts into DuckLake tables.
+//! Build-pipeline translation from spur-graph artifacts into `DuckLake` tables.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -206,7 +206,7 @@ fn insert_structural_tables(
                 file_path, byte_range_start, byte_range_end,
                 line_start, line_end, entity_name, qualified_name,
                 symbol_kind, anchor_hash, enclosing_scope
-            FROM {{source_sql}}
+            FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
             source = sql_string(&opts.source),
@@ -247,7 +247,7 @@ fn insert_structural_tables(
                 relation, edge_kind, confidence,
                 confidence_score::DOUBLE AS confidence_score,
                 bind_method, receiver_text, scope_text
-            FROM {{source_sql}}
+            FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
             source = sql_string(&opts.source),
@@ -287,7 +287,7 @@ fn insert_structural_tables(
                 relation, edge_kind, confidence,
                 confidence_score::DOUBLE AS confidence_score,
                 bind_method, receiver_text, scope_text
-            FROM {{source_sql}}
+            FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
             source = sql_string(&opts.source),
@@ -322,7 +322,7 @@ fn insert_structural_tables(
                 {major} AS semver_major,
                 {minor} AS semver_minor,
                 {patch} AS semver_patch
-            FROM {{source_sql}}
+            FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
             source = sql_string(&opts.source),
@@ -358,7 +358,7 @@ fn insert_structural_tables(
                 {major} AS semver_major,
                 {minor} AS semver_minor,
                 {patch} AS semver_patch
-            FROM {{source_sql}}
+            FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
             source = sql_string(&opts.source),
@@ -408,7 +408,7 @@ fn insert_git_tables(
                     {major} AS semver_major,
                     {minor} AS semver_minor,
                     {patch} AS semver_patch
-                FROM {{source_sql}}
+                FROM __SOURCE_SQL__
                 ",
                 package = sql_string(&opts.package),
                 source = sql_string(&opts.source),
@@ -458,7 +458,7 @@ fn insert_git_tables(
                     [byte_range_start::INTEGER, byte_range_end::INTEGER] AS byte_range,
                     [line_range_start::INTEGER, line_range_end::INTEGER] AS line_range,
                     anchor_hash
-                FROM {{source_sql}}
+                FROM __SOURCE_SQL__
                 ",
                 package = sql_string(&opts.package),
                 source = sql_string(&opts.source),
@@ -513,7 +513,7 @@ fn insert_git_tables(
                     {major} AS semver_major,
                     {minor} AS semver_minor,
                     {patch} AS semver_patch
-                FROM {{source_sql}}
+                FROM __SOURCE_SQL__
                 ",
                 package = sql_string(&opts.package),
                 source = sql_string(&opts.source),
@@ -623,7 +623,7 @@ fn insert_symbol_embeddings(
             {model_expr} AS embedding_model,
             {input_hash_expr} AS embedding_input_hash,
             {embed_text_version} AS embed_text_version
-        FROM {{source_sql}}
+        FROM __SOURCE_SQL__
         ",
         package = sql_string(&opts.package),
         source = sql_string(&opts.source),
@@ -724,7 +724,7 @@ fn insert_section_bodies(
             body_text,
             {body_hash_expr} AS body_hash,
             {token_count_expr} AS token_count
-        FROM {{source_sql}}
+        FROM __SOURCE_SQL__
         ",
         section_id_expr = section_id_expr,
         package = sql_string(&opts.package),
@@ -823,7 +823,7 @@ fn insert_from_source(
 ) -> Result<()> {
     let count = count_source_rows(conn, source_sql)
         .with_context(|| format!("failed to count source rows for {table}"))?;
-    let sql = insert_template.replace("{source_sql}", source_sql);
+    let sql = insert_template.replace("__SOURCE_SQL__", source_sql);
     conn.execute_batch(&sql)
         .with_context(|| format!("failed to insert {table} rows"))?;
     rows_inserted.insert(table.to_owned(), count);
@@ -1037,7 +1037,7 @@ fn optional_artifact_source(
 
 fn glob_search_root(artifact_dir: &Path, glob: &str) -> PathBuf {
     let literal_prefix = glob
-        .find(|ch| ch == '*' || ch == '?')
+        .find(|ch| ['*', '?'].contains(&ch))
         .map(|index| &glob[..index])
         .unwrap_or(glob)
         .trim_end_matches('/');
