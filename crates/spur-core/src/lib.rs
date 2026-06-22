@@ -176,6 +176,11 @@ pub use continuation_bridge::{
     new_overflow_buf, report_detached_completion, ContinuationEventSink, OverflowBuf,
 };
 
+pub mod delegation_types;
+pub use delegation_types::{
+    BaseSpec, BaseTarget, DelegationChannel, DelegationRequest, OverlayCommit,
+};
+
 pub mod delegation_watchdog;
 pub mod scheduler;
 pub use scheduler::{BrainScheduler, ScheduledAction};
@@ -229,6 +234,5 @@ pub use session_synopsis::{SessionSynopsis, SessionSynopsisProjection, SynopsisE
 pub use spur_acp::{
     Artifact, DiffSummary, LifecycleState, ReviewDecision, ReviewKind, ReviewPayload, Role,
 };
-pub use spur_mcp::DelegationChannel;
 pub use upgrade::UpgradeBanner;
 pub use worktree_authority::{AuthorityConfig, SweepReport, WorktreeAuthority};

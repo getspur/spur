@@ -411,7 +411,7 @@ struct PersistedSubmitFixture {
     _dir: TempDir,
     pm: Arc<PmService>,
     server: McpCallbackServer,
-    channel: spur_mcp::tools::DelegationChannel,
+    channel: spur_core::DelegationChannel,
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
