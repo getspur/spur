@@ -74,6 +74,7 @@ ALTER TABLE edges_unresolved SET PARTITIONED BY (source, package);
 CREATE TABLE IF NOT EXISTS files (
     stable_file_id VARCHAR,
     file_path VARCHAR,
+    source_text VARCHAR,
     package VARCHAR,
     source VARCHAR,
     revision VARCHAR,
