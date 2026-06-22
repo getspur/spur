@@ -140,9 +140,9 @@ fn submitted_task_issue(response: &serde_json::Value, task_id: &str) -> String {
 
 async fn recv_reconciler_request(
     server: &Arc<McpCallbackServer>,
-    request_rx: &mut tokio::sync::mpsc::Receiver<spur_mcp::DelegationRequest>,
+    request_rx: &mut tokio::sync::mpsc::Receiver<spur_core::DelegationRequest>,
     timeout_message: &str,
-) -> spur_mcp::DelegationRequest {
+) -> spur_core::DelegationRequest {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             server.fast_forward_reconciler();

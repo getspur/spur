@@ -697,7 +697,7 @@ impl McpCallbackServer {
                     format!("submit_plan: failed to load parent epic {parent_epic_id}: {error}")
                 })?;
                 let branch = match input.base.as_ref() {
-                    Some(spur_mcp::tools::BaseTarget::Branch { name }) => name.as_str(),
+                    Some(crate::BaseTarget::Branch { name }) => name.as_str(),
                     _ => "unspecified base",
                 };
                 format!("{} ({branch})", parent.title)
@@ -941,9 +941,9 @@ impl McpCallbackServer {
 
         // Parse optional explicit base. Tolerant: `BaseTarget`'s manual
         // Deserialize accepts both `{"kind":...}` and JSON-stringified-object.
-        let explicit_base: Option<spur_mcp::tools::BaseTarget> = match args.get("base") {
+        let explicit_base: Option<crate::BaseTarget> = match args.get("base") {
             None | Some(serde_json::Value::Null) => None,
-            Some(v) => match serde_json::from_value::<spur_mcp::tools::BaseTarget>(v.clone()) {
+            Some(v) => match serde_json::from_value::<crate::BaseTarget>(v.clone()) {
                 Ok(target) => Some(target),
                 Err(e) => {
                     return JsonRpcResponse::invalid_params(
@@ -1357,7 +1357,7 @@ impl McpCallbackServer {
         let submitted = match self
             .submit_plan_as_epic_internal(SubmitPlanAsEpicInput {
                 tasks: new_tasks,
-                base: Some(spur_mcp::tools::BaseTarget::Branch {
+                base: Some(crate::BaseTarget::Branch {
                     name: build.branch.clone(),
                 }),
                 parent_epic_id: snapshot.epic_id.clone(),

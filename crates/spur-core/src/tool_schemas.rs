@@ -1,6 +1,9 @@
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use spur_acp::DelegationPlan;
+
+use crate::{BaseSpec, OverlayCommit};
 
 pub fn schema_value<T: JsonSchema>() -> Value {
     let schema = schema_for!(T);
@@ -50,6 +53,59 @@ fn rewrite_definitions_refs(value: &mut Value) {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct DelegateToWorkerInput {
+    /// Name of the worker agent to delegate to.
+    pub agent: String,
+    /// Task description for the worker.
+    pub task: String,
+    /// Optional supplementary file paths.
+    pub context_files: Option<Vec<String>>,
+    /// Structured reasoning for this delegation.
+    pub delegation_plan: Option<DelegationPlan>,
+    /// Optional beads issue ID to auto-track.
+    pub issue_id: Option<String>,
+    /// Optional explicit worker base. Omit for legacy RepoMain behavior.
+    pub base: Option<BaseSpec>,
+    /// Default-on worker MCP subset exposure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_worker_mcp: Option<bool>,
+    /// Opt in to worker progress events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_worker_progress: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateParallelTaskInput {
+    /// Worker agent name.
+    pub agent: String,
+    /// Task description.
+    pub task: String,
+    /// Optional supplementary file paths for this task.
+    pub context_files: Option<Vec<String>>,
+    /// Optional beads issue ID to auto-track for this task.
+    pub issue_id: Option<String>,
+    /// Per-task structured reasoning.
+    pub delegation_plan: Option<DelegationPlan>,
+    /// Optional explicit worker base. Omit for legacy RepoMain behavior.
+    pub base: Option<BaseSpec>,
+    /// Default-on worker MCP subset exposure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_worker_mcp: Option<bool>,
+    /// Opt in to worker progress events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_worker_progress: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateParallelInput {
+    /// List of tasks to delegate in parallel.
+    pub tasks: Vec<DelegateParallelTaskInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PreviewTaskBaseInput {
     pub plan_id: String,
     pub task_id: String,
@@ -57,7 +113,7 @@ pub struct PreviewTaskBaseInput {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PreviewTaskBaseOutput {
-    pub overlays: Vec<spur_mcp::tools::OverlayCommit>,
+    pub overlays: Vec<OverlayCommit>,
     /// HEAD after overlays applied, if clean. None if conflict.
     pub predicted_base_oid: Option<String>,
     pub conflict: Option<PreviewConflict>,
@@ -124,5 +180,20 @@ mod tests {
             error.to_string().contains("unknown field"),
             "expected unknown field error, got {error}"
         );
+    }
+
+    #[test]
+    fn delegate_input_omitted_enable_flags_deserialize_as_none() {
+        let json = r#"{"agent": "kimi", "task": "do work"}"#;
+        let input: DelegateToWorkerInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.enable_worker_mcp, None);
+        assert_eq!(input.enable_worker_progress, None);
+    }
+
+    #[test]
+    fn delegate_input_explicit_enable_worker_mcp() {
+        let json = r#"{"agent": "kimi", "task": "do work", "enable_worker_mcp": true}"#;
+        let input: DelegateToWorkerInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.enable_worker_mcp, Some(true));
     }
 }

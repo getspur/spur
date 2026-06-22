@@ -36,13 +36,13 @@ use agent_client_protocol::schema::{
 };
 
 use crate::worker_server::WorkerMcpServer;
+use crate::BaseSpec;
+use crate::{DelegationChannel, DelegationRequest};
 use spur_blob_store::{
     ContentType, MeasuredOutcomeStore, OutcomeKey, OutcomeMetadata, OutcomeStore,
 };
 use spur_cost::CostTracker;
 use spur_license::SpurLicense;
-use spur_mcp::tools::BaseSpec;
-use spur_mcp::{DelegationChannel, DelegationRequest};
 
 use dashmap::DashMap;
 use spur_pm::PmService;

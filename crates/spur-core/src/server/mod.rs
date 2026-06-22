@@ -32,7 +32,9 @@ use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{debug, error, info};
 
 use spur_acp::*;
-use spur_license::FeatureKey;
+use spur_license::{FeatureGate, FeatureKey};
+#[cfg(any(test, feature = "test-support"))]
+use spur_license::{LicenseState, Plan};
 use spur_pm::{IssueFilter, IssueSummary, IssueUpdate, PmService};
 use spur_worktree::WorktreeManager;
 
@@ -42,10 +44,10 @@ use crate::plan::reconciler::{
     Reconciler, ReconcilerConfig, ReconcilerDispatch, ReconcilerDispatchCtx,
 };
 use crate::plan::signal_watcher::SignalWatcher;
+use crate::{DelegationChannel, DelegationRequest};
 use spur_mcp::server::{
     bind_streamable_http_server, serve_streamable_http_server, StreamableHttpTransportConfig,
 };
-use spur_mcp::tools::{DelegationChannel, DelegationRequest};
 
 pub(crate) mod handlers;
 pub(crate) mod plan_builder;
@@ -64,14 +66,59 @@ pub use plan_builder::{
     plan_epic_issue_creates, EpicSubgraph, PlanSubmitAuditContext,
 };
 pub(crate) use recovery::{replay_awaiting_review_continuation, AwaitingReviewReplay};
-pub use spur_mcp::feature::community_feature_gate;
-pub(crate) use spur_mcp::feature::{feature_error_message, require_feature};
-#[cfg(any(test, feature = "test-support"))]
-pub use spur_mcp::feature::{pro_feature_gate, unlicensed_feature_gate};
 pub use spur_mcp::git::run_git_capture;
 pub(crate) use sync::*;
 pub use sync::{compensate_mutation_orphans, resolve_dispatch_orphan};
 pub use types::*;
+
+pub const MCP_NOT_LICENSED_ERROR_CODE: i32 = -32041;
+
+pub fn require_feature(key: FeatureKey, feature_gate: &FeatureGate) -> Result<(), McpError> {
+    if feature_gate.has(key) {
+        return Ok(());
+    }
+
+    Err(McpError::new(
+        rmcp::model::ErrorCode(MCP_NOT_LICENSED_ERROR_CODE),
+        format!("not licensed for feature {}", key.as_str()),
+        Some(json!({
+            "reason": "not_licensed",
+            "feature": key.as_str(),
+            "required_tier": "pro"
+        })),
+    ))
+}
+
+pub fn feature_error_message(error: McpError) -> String {
+    error.message.into_owned()
+}
+
+/// Build the embedded Community-tier feature gate used by fallback and tests.
+pub fn community_feature_gate() -> Arc<FeatureGate> {
+    Arc::new(FeatureGate::new(
+        spur_license::policy::PolicyResolver::embedded(),
+    ))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn pro_feature_gate() -> Arc<FeatureGate> {
+    let gate = Arc::new(FeatureGate::new(
+        spur_license::policy::PolicyResolver::embedded(),
+    ));
+    let features =
+        std::collections::BTreeSet::from([FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string()]);
+    gate.update_state(&LicenseState::active_validated(Plan::Pro, features));
+    gate
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn unlicensed_feature_gate() -> Arc<FeatureGate> {
+    let gate = community_feature_gate();
+    let mut snapshot = (**gate.snapshot()).clone();
+    snapshot.features.remove(&FeatureKey::PM_PRO_BEADS_ADVANCED);
+    gate.set_snapshot_for_test(snapshot);
+    gate
+}
 
 /// Brain/orchestrator MCP callback server.
 ///

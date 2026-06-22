@@ -524,7 +524,7 @@ pub fn parse_parallel_tasks(
         .ok_or_else(|| "Missing 'tasks' array".to_string())?;
     let mut out = Vec::with_capacity(tasks.len());
     for task_obj in tasks {
-        let task: spur_mcp::tool_schemas::DelegateParallelTaskInput =
+        let task: crate::tool_schemas::DelegateParallelTaskInput =
             serde_json::from_value(task_obj.clone())
                 .map_err(|e| format!("Invalid task arguments: {e}"))?;
         let (tx, _rx) = tokio::sync::oneshot::channel();

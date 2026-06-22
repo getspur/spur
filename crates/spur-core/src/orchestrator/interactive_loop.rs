@@ -2774,7 +2774,7 @@ mod base_spec_dispatch_tests {
         emit_dispatch_overlay_applied, extract_overlays, resolve_base_branch,
         snapshot_required_for_dispatch,
     };
-    use spur_mcp::tools::{BaseSpec, BaseTarget, OverlayCommit};
+    use crate::{BaseSpec, BaseTarget, OverlayCommit};
 
     #[test]
     fn snapshot_needed_for_none_and_repo_main() {

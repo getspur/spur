@@ -1,7 +1,7 @@
 use schemars::schema_for;
 use serde_json::json;
 use spur_core::mcp::tools_list;
-use spur_mcp::tool_schemas::{
+use spur_core::tool_schemas::{
     schema_value, DelegateParallelInput, DelegateParallelTaskInput, DelegateToWorkerInput,
 };
 

@@ -12,7 +12,7 @@ use serde_json::json;
 use spur_acp::{BrainSessionId, SessionId};
 use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_core::plan::PlanTask;
-use spur_mcp::tools::BaseTarget;
+use spur_core::BaseTarget;
 use tempfile::TempDir;
 
 mod common;
