@@ -7,7 +7,7 @@ use spur_core::orchestrator::Orchestrator;
 use spur_core::peer_mailbox::guard::GuardOutcome;
 use spur_core::peer_mailbox::router::Acceptance;
 use spur_core::peer_mailbox::RouterError;
-use spur_mcp::plan::scope_snapshot::PlanScopeSnapshot;
+use spur_core::plan::scope_snapshot::PlanScopeSnapshot;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

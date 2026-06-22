@@ -12,10 +12,28 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+arrow-array = { workspace = true }
 duckdb = { workspace = true, features = ["bundled"] }
+fastembed = { version = "4", default-features = false, optional = true }
+futures = { workspace = true }
+globset = "0.4"
+lance-index = { workspace = true }
+lancedb = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 spur-graph = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+[features]
+default = ["embed"]
+embed = [
+    "dep:fastembed",
+    "fastembed/hf-hub-native-tls",
+    "fastembed/ort-download-binaries",
+]
 
 [dev-dependencies]
 spur-cli = { path = "../spur-cli" }
