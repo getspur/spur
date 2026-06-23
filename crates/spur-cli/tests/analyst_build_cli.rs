@@ -72,7 +72,7 @@ fn analyst_build_skipped_by_env() {
 }
 
 #[test]
-fn analyst_build_soft_fails_when_duckdb_missing() {
+fn analyst_build_materializes_without_duckdb_on_path() {
     let dir = fixture_git_repo();
     // Build graph first (with analyst skipped so this test stays isolated).
     let pre = Command::new(spur_binary())
@@ -83,7 +83,8 @@ fn analyst_build_soft_fails_when_duckdb_missing() {
         .expect("spawn");
     assert!(pre.status.success());
 
-    // Now invoke `analyst build` with a PATH that has no duckdb.
+    // Now invoke `analyst build` with a PATH that has no duckdb. The build
+    // must use the bundled DuckDB library, not a system CLI.
     let empty_path = dir.path().join("empty-path");
     std::fs::create_dir_all(&empty_path).unwrap();
     let out = Command::new(spur_binary())
@@ -94,18 +95,21 @@ fn analyst_build_soft_fails_when_duckdb_missing() {
         .expect("spawn");
     assert!(
         out.status.success(),
-        "soft-fail should exit 0, stderr: {}",
+        "analyst build should exit 0, stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("duckdb"),
-        "expected duckdb-missing warning, got: {stderr}"
+        !stderr.contains("CLI not found"),
+        "build should not warn about a missing duckdb CLI, got: {stderr}"
     );
-    assert!(
-        !dir.path().join(".spur/analyst.duckdb").exists(),
-        "no DB should exist after soft-fail"
-    );
+    let db = dir.path().join(".spur/analyst.duckdb");
+    let meta = std::fs::metadata(&db).unwrap_or_else(|error| {
+        panic!(
+            "analyst DB should be materialized without duckdb on PATH: {error}; stderr: {stderr}"
+        )
+    });
+    assert!(meta.len() > 0, "analyst DB must be non-empty");
 }
 
 #[test]
@@ -171,21 +175,17 @@ fn analyst_build_atomic_under_duckdb_failure() {
     std::fs::write(&db_path, b"SENTINEL-BYTES-MUST-NOT-CHANGE").unwrap();
     let before = std::fs::read(&db_path).unwrap();
 
-    // Stage a fake `duckdb` that always exits non-zero.
-    let fake_bin_dir = dir.path().join("fake-bin");
-    std::fs::create_dir_all(&fake_bin_dir).unwrap();
-    let fake_duckdb = fake_bin_dir.join("duckdb");
-    std::fs::write(&fake_duckdb, "#!/bin/sh\necho 'fake duckdb' >&2\nexit 1\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake_duckdb, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let current = dir.path().join(".spur/graph/CURRENT");
+    let artifact_dir = std::fs::canonicalize(&current).expect("CURRENT resolves");
+    std::fs::write(artifact_dir.join("nodes.parquet"), b"not parquet").unwrap();
 
-    // Compose a PATH that has the fake duckdb but nothing else from the host.
-    let path_value = fake_bin_dir.display().to_string();
+    let empty_path = dir.path().join("empty-path");
+    std::fs::create_dir_all(&empty_path).unwrap();
 
     let out = Command::new(spur_binary())
         .current_dir(dir.path())
         .args(["analyst", "build"])
-        .env("PATH", path_value)
+        .env("PATH", &empty_path)
         .output()
         .expect("spawn");
     assert!(
@@ -229,33 +229,8 @@ fn analyst_build_concurrent_skip() {
         String::from_utf8_lossy(&pre.stderr)
     );
 
-    let duckdb_found = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join("duckdb").is_file()))
-        .unwrap_or(false);
-    if !duckdb_found {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-    let probe_db = dir.path().join(".spur/analyst.probe.duckdb");
-    let probe = Command::new(spur_binary())
-        .current_dir(dir.path())
-        .args(["analyst", "build", "--db-path"])
-        .arg(&probe_db)
-        .output()
-        .expect("spawn probe");
-    assert!(
-        probe.status.success(),
-        "probe stderr: {}",
-        String::from_utf8_lossy(&probe.stderr)
-    );
-    if !probe_db.is_file() {
-        eprintln!(
-            "skipping: duckdb CLI present but analyst init SQL did not produce a DB: {}",
-            String::from_utf8_lossy(&probe.stderr)
-        );
-        return;
-    }
-    let _ = std::fs::remove_file(&probe_db);
+    let empty_path = dir.path().join("empty-path");
+    std::fs::create_dir_all(&empty_path).unwrap();
 
     // Launch two `analyst build` invocations close enough in time that one
     // should observe the other's flock.
@@ -263,6 +238,7 @@ fn analyst_build_concurrent_skip() {
         Command::new(spur_binary())
             .current_dir(dir.path())
             .args(["analyst", "build"])
+            .env("PATH", &empty_path)
             .stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()

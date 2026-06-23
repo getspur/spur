@@ -619,6 +619,10 @@ fn duration_millis(duration: Duration) -> u64 {
 }
 
 #[cfg(not(feature = "embed"))]
+#[expect(
+    clippy::unused_async,
+    reason = "the disabled stub matches the embed-enabled async signature"
+)]
 async fn embed_query(_query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
     None
 }

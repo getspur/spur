@@ -1,8 +1,4 @@
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 
 use spur_cli::commands::analyst::{self, AnalystBuildOptions};
 use spur_graph::store::lance_sections::{
@@ -19,48 +15,68 @@ use spur_graph::{
 
 const INIT_SQL: &str = include_str!("../../spur-context/analyst/init.sql");
 
-fn duckdb_cli_present() -> bool {
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join("duckdb").is_file()))
-        .unwrap_or(false)
-}
-
 fn query_csv(db_path: &Path, sql: &str) -> String {
-    let output = Command::new("duckdb")
-        .args(["-csv", "-noheader"])
-        .arg(db_path)
-        .args(["-c", sql])
-        .output()
-        .expect("duckdb query");
-    assert!(
-        output.status.success(),
-        "duckdb query failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("duckdb stdout utf8")
+    let conn = duckdb::Connection::open(db_path).expect("open duckdb");
+    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
+    let _ = conn.execute_batch("INSTALL lance; LOAD lance;");
+    let _ = conn.execute_batch("INSTALL duckpgq FROM community; LOAD duckpgq;");
+    let mut stmt = conn.prepare(sql).expect("prepare query");
+    let mut rows = stmt.query([]).expect("query rows");
+    let column_count = rows.as_ref().expect("query result").column_count();
+    let mut lines = Vec::new();
+    while let Some(row) = rows.next().expect("read row") {
+        let mut fields = Vec::with_capacity(column_count);
+        for idx in 0..column_count {
+            fields.push(duckdb_value_to_csv(row.get_ref(idx).expect("read column")));
+        }
+        lines.push(fields.join(","));
+    }
+    lines.join("\n")
 }
 
 fn run_duckdb_sql(db_path: &Path, sql: &str) {
-    let mut child = Command::new("duckdb")
-        .arg(db_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn duckdb");
-    child
-        .stdin
-        .as_mut()
-        .expect("duckdb stdin")
-        .write_all(sql.as_bytes())
-        .expect("write duckdb sql");
+    let config = duckdb::Config::default()
+        .access_mode(duckdb::AccessMode::ReadWrite)
+        .expect("read-write duckdb config");
+    let conn = duckdb::Connection::open_with_flags(db_path, config).expect("open duckdb");
+    conn.execute_batch(sql).expect("duckdb init SQL");
+}
 
-    let output = child.wait_with_output().expect("duckdb wait");
-    assert!(
-        output.status.success(),
-        "duckdb init SQL failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn duckdb_value_to_csv(value: duckdb::types::ValueRef<'_>) -> String {
+    use duckdb::types::ValueRef;
+
+    match value {
+        ValueRef::Null => String::new(),
+        ValueRef::Boolean(value) => value.to_string(),
+        ValueRef::TinyInt(value) => value.to_string(),
+        ValueRef::SmallInt(value) => value.to_string(),
+        ValueRef::Int(value) => value.to_string(),
+        ValueRef::BigInt(value) => value.to_string(),
+        ValueRef::HugeInt(value) => value.to_string(),
+        ValueRef::UTinyInt(value) => value.to_string(),
+        ValueRef::USmallInt(value) => value.to_string(),
+        ValueRef::UInt(value) => value.to_string(),
+        ValueRef::UBigInt(value) => value.to_string(),
+        ValueRef::Float(value) => value.to_string(),
+        ValueRef::Double(value) => value.to_string(),
+        ValueRef::Decimal(value) => value.to_string(),
+        ValueRef::Timestamp(_, value) => value.to_string(),
+        ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned(),
+        ValueRef::Blob(value) => format!("{value:?}"),
+        ValueRef::Date32(value) => value.to_string(),
+        ValueRef::Time64(_, value) => value.to_string(),
+        ValueRef::Interval {
+            months,
+            days,
+            nanos,
+        } => format!("{months} months {days} days {nanos} nanos"),
+        ValueRef::List(_, _)
+        | ValueRef::Enum(_, _)
+        | ValueRef::Struct(_, _)
+        | ValueRef::Array(_, _)
+        | ValueRef::Map(_, _)
+        | ValueRef::Union(_, _) => format!("{value:?}"),
+    }
 }
 
 fn structural_init_sql_for_test(artifact_dir: &Path) -> String {
@@ -92,126 +108,101 @@ fn structural_init_sql_for_test(artifact_dir: &Path) -> String {
     filtered
 }
 
-fn build_analyst_or_skip(root: &Path, artifact_dir: &Path, db_path: &Path) -> bool {
-    analyst::build(
-        root,
-        AnalystBuildOptions {
-            artifact_dir: Some(artifact_dir.to_path_buf()),
-            db_path: Some(db_path.to_path_buf()),
-            quiet: true,
-        },
-    )
-    .expect("analyst build");
+fn build_analyst(root: &Path, artifact_dir: &Path, db_path: &Path) {
+    let options = AnalystBuildOptions {
+        artifact_dir: Some(artifact_dir.to_path_buf()),
+        db_path: Some(db_path.to_path_buf()),
+        quiet: true,
+    };
+    analyst::build(root, options.clone()).expect("analyst build");
 
     if !db_path.is_file() {
-        eprintln!("skipping: duckdb CLI present but analyst init SQL did not produce a DB");
-        return false;
+        analyst::build(
+            root,
+            AnalystBuildOptions {
+                quiet: false,
+                ..options
+            },
+        )
+        .expect("analyst build retry");
     }
-    true
-}
 
-fn fake_duckdb_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn find_duckdb_on_path(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
-    std::env::split_paths(path)
-        .map(|dir| dir.join("duckdb"))
-        .find(|candidate| candidate.is_file())
-}
-
-fn shell_single_quote(value: &str) -> String {
-    value.replace('\'', "'\\''")
-}
-
-fn build_analyst_with_fake_duckdb(
-    root: &Path,
-    artifact_dir: &Path,
-    db_path: &Path,
-    probe_row_count: usize,
-) -> String {
-    build_analyst_with_fake_duckdb_probe_counts(
-        root,
-        artifact_dir,
-        db_path,
-        probe_row_count,
-        probe_row_count,
-    )
-}
-
-fn build_analyst_with_fake_duckdb_probe_counts(
-    root: &Path,
-    artifact_dir: &Path,
-    db_path: &Path,
-    section_probe_row_count: usize,
-    code_symbol_probe_row_count: usize,
-) -> String {
-    let _guard = fake_duckdb_env_lock().lock().expect("fake duckdb env lock");
-    let original_path = std::env::var_os("PATH").unwrap_or_default();
-    let real_duckdb = find_duckdb_on_path(&original_path)
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let shim_dir = root.join("duckdb-shim");
-    let capture_path = root.join("captured-analyst.sql");
-    std::fs::create_dir_all(&shim_dir).expect("create shim dir");
-    let shim_path = shim_dir.join("duckdb");
-    let marker = shell_single_quote(&root.display().to_string());
-    let capture = shell_single_quote(&capture_path.display().to_string());
-    let real = shell_single_quote(&real_duckdb);
-    let script = format!(
-        "#!/bin/sh\n\
-         case \" $* \" in\n\
-           *'{marker}'*)\n\
-             case \" $* \" in\n\
-               *' -c '*)\n\
-                 case \" $* \" in\n\
-                   *'code_symbols'*) printf '{code_symbol_probe_row_count}\\n' ;;\n\
-                   *) printf '{section_probe_row_count}\\n' ;;\n\
-                 esac\n\
-                 exit 0\n\
-                 ;;\n\
-               *) cat > '{capture}'; : > \"$1\"; exit 0 ;;\n\
-             esac\n\
-             ;;\n\
-         esac\n\
-         if [ -n '{real}' ]; then exec '{real}' \"$@\"; fi\n\
-         exit 127\n"
-    );
-    std::fs::write(&shim_path, script).expect("write duckdb shim");
-    std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod duckdb shim");
-    let joined_path = std::env::join_paths(
-        std::iter::once(shim_dir.clone()).chain(std::env::split_paths(&original_path)),
-    )
-    .expect("join PATH");
-    std::env::set_var("PATH", joined_path);
-
-    let build_result = analyst::build(
-        root,
-        AnalystBuildOptions {
-            artifact_dir: Some(artifact_dir.to_path_buf()),
-            db_path: Some(db_path.to_path_buf()),
-            quiet: true,
-        },
-    );
-
-    std::env::set_var("PATH", original_path);
-    build_result.expect("analyst build with fake duckdb");
     assert!(
         db_path.is_file(),
-        "fake duckdb should leave a materialized DB placeholder"
+        "analyst build should materialize {}",
+        db_path.display()
     );
-    std::fs::read_to_string(&capture_path).expect("read captured analyst SQL")
+}
+
+fn temporal_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
+    let mut artifact = structural_artifact(graph_content_hash);
+    let snapshot = SnapshotKey {
+        stable_symbol_id: "sym-main".to_string(),
+        commit: "c1".to_string(),
+    };
+
+    artifact.symbols.push(GraphSymbolArtifact {
+        stable_symbol_id: "sym-main".to_string(),
+        file_path: "src/lib.rs".to_string(),
+        byte_range: [0, 10],
+        line_range: [1, 1],
+        entity_name: "main".to_string(),
+        qualified_name: "main".to_string(),
+        symbol_kind: "function".to_string(),
+        anchor_hash: "anchor-main".to_string(),
+        enclosing_scope: None,
+    });
+    artifact.symbol_node_ids.push(NodeId(2));
+
+    artifact.commits.push(CommitArtifact {
+        sha: "c1".to_string(),
+        parents: Vec::new(),
+        author_time: 1_700_000_001,
+        author_name: String::new(),
+        author_email: String::new(),
+        summary: "initial import".to_string(),
+    });
+    artifact.symbol_snapshots.push(SymbolSnapshotArtifact {
+        key: snapshot.clone(),
+        file_path: "src/lib.rs".into(),
+        entity_name: "main".to_string(),
+        symbol_kind: "function".to_string(),
+        enclosing_scope: None,
+        byte_range: [0, 10],
+        line_range: [1, 1],
+        anchor_hash: "anchor-main".to_string(),
+        tokens: vec!["main".to_string()],
+    });
+    artifact.temporal_edges.push(TemporalEdgeArtifact {
+        source: EdgeEndpoint::Commit {
+            sha: "c1".to_string(),
+        },
+        target: EdgeEndpoint::Snapshot {
+            key: snapshot.clone(),
+        },
+        relation: RelationKind::Touches,
+        parent: None,
+        change_kind: Some(ChangeKind::Added),
+    });
+    artifact.temporal_edges.push(TemporalEdgeArtifact {
+        source: EdgeEndpoint::Snapshot {
+            key: snapshot.clone(),
+        },
+        target: EdgeEndpoint::Snapshot {
+            key: snapshot.clone(),
+        },
+        relation: RelationKind::Touches,
+        parent: None,
+        change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(snapshot))),
+    });
+    artifact
+        .diagnostics
+        .push("parse_failed path=src/lib.rs".to_string());
+    artifact
 }
 
 #[test]
 fn analyst_build_emits_temporal_and_diagnostics_views_when_parquets_exist() {
-    if !duckdb_cli_present() {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = temporal_artifact("analyst-temporal-views");
     let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
@@ -223,9 +214,7 @@ fn analyst_build_emits_temporal_and_diagnostics_views_when_parquets_exist() {
     .expect("write artifact");
     let db_path = tempdir.path().join("analyst.duckdb");
 
-    if !build_analyst_or_skip(tempdir.path(), &artifact_dir, &db_path) {
-        return;
-    }
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
     let counts = query_csv(
         &db_path,
@@ -246,11 +235,6 @@ fn analyst_build_emits_temporal_and_diagnostics_views_when_parquets_exist() {
 
 #[test]
 fn analyst_build_skips_temporal_and_diagnostics_views_without_optional_parquets() {
-    if !duckdb_cli_present() {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = structural_artifact("analyst-structural-only");
     let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
@@ -262,9 +246,7 @@ fn analyst_build_skips_temporal_and_diagnostics_views_without_optional_parquets(
     .expect("write artifact");
     let db_path = tempdir.path().join("analyst.duckdb");
 
-    if !build_analyst_or_skip(tempdir.path(), &artifact_dir, &db_path) {
-        return;
-    }
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
     let optional_views = query_csv(
         &db_path,
@@ -278,11 +260,6 @@ fn analyst_build_skips_temporal_and_diagnostics_views_without_optional_parquets(
 
 #[test]
 fn analyst_build_emits_external_dependency_surface_views() {
-    if !duckdb_cli_present() {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = external_dependency_artifact("analyst-external-dependencies");
     let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
@@ -294,9 +271,7 @@ fn analyst_build_emits_external_dependency_surface_views() {
     .expect("write artifact");
     let db_path = tempdir.path().join("analyst.duckdb");
 
-    if !build_analyst_or_skip(tempdir.path(), &artifact_dir, &db_path) {
-        return;
-    }
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
     let dependency_views = query_csv(
         &db_path,
@@ -343,17 +318,12 @@ fn analyst_build_emits_external_dependency_surface_views() {
     );
     assert_eq!(
         pgq_imports.trim(),
-        "alloc::vec::Vec\ncore::fmt::Formatter\nserde::Serialize\nstd::fmt::Debug"
+        "alloc::vec::Vec\ncore::fmt::Formatter\nserde::Serialize\nserde::Serialize\nstd::fmt::Debug"
     );
 }
 
 #[test]
 fn analyst_build_emits_cross_crate_call_surface_views() {
-    if !duckdb_cli_present() {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = cross_crate_call_artifact("analyst-cross-crate-calls");
     let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
@@ -408,11 +378,6 @@ fn analyst_build_emits_cross_crate_call_surface_views() {
 
 #[test]
 fn analyst_build_rejects_low_direct_symbol_snapshot_coverage() {
-    if !duckdb_cli_present() {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = divergent_symbol_id_artifact("analyst-low-direct-coverage");
     let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
@@ -442,11 +407,6 @@ fn analyst_build_rejects_low_direct_symbol_snapshot_coverage() {
 
 #[test]
 fn analyst_views_map_temporal_churn_by_direct_symbol_ids() {
-    if !duckdb_cli_present() {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = direct_symbol_id_artifact("analyst-direct-symbol-views");
     let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
@@ -458,9 +418,7 @@ fn analyst_views_map_temporal_churn_by_direct_symbol_ids() {
     .expect("write artifact");
     let db_path = tempdir.path().join("analyst.duckdb");
 
-    if !build_analyst_or_skip(tempdir.path(), &artifact_dir, &db_path) {
-        return;
-    }
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
     let coverage = query_csv(
         &db_path,
@@ -491,7 +449,7 @@ fn analyst_views_map_temporal_churn_by_direct_symbol_ids() {
 #[test]
 fn analyst_build_uses_complete_lance_sidecar_for_hybrid_search() {
     let tempdir = tempfile::Builder::new()
-        .prefix("fake-duckdb-complete-sidecar")
+        .prefix("bundled-duckdb-complete-sidecar")
         .tempdir()
         .expect("tempdir");
     write_section_fixture_source(tempdir.path());
@@ -525,19 +483,24 @@ fn analyst_build_uses_complete_lance_sidecar_for_hybrid_search() {
     .expect("stamp sidecar complete");
     let db_path = tempdir.path().join("analyst.duckdb");
 
-    let sql = build_analyst_with_fake_duckdb(tempdir.path(), &artifact_dir, &db_path, 1);
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
-    assert!(sql.contains("ATTACH '"));
-    assert!(sql.contains("sections.lancedb"));
-    assert!(sql.contains("lance_ns.section_bodies"));
-    assert!(sql.contains("search_context_candidates_hybrid"));
-    assert!(sql.contains("lance_hybrid_search("));
+    let section_count = query_csv(&db_path, "SELECT count(*) FROM sections;");
+    assert_eq!(section_count.trim(), "1");
+
+    let hybrid_macro_count = query_csv(
+        &db_path,
+        "SELECT count(*)
+         FROM duckdb_functions()
+         WHERE function_name = 'search_context_candidates_hybrid';",
+    );
+    assert_eq!(hybrid_macro_count.trim(), "1");
 }
 
 #[test]
 fn analyst_build_degrades_to_bm25_when_sidecar_manifest_incomplete() {
     let tempdir = tempfile::Builder::new()
-        .prefix("fake-duckdb-incomplete-sidecar")
+        .prefix("bundled-duckdb-incomplete-sidecar")
         .tempdir()
         .expect("tempdir");
     write_section_fixture_source(tempdir.path());
@@ -568,19 +531,24 @@ fn analyst_build_degrades_to_bm25_when_sidecar_manifest_incomplete() {
     .expect("stamp sidecar incomplete");
     let db_path = tempdir.path().join("analyst.duckdb");
 
-    let sql = build_analyst_with_fake_duckdb(tempdir.path(), &artifact_dir, &db_path, 1);
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
-    assert!(!sql.contains("ATTACH '"));
-    assert!(!sql.contains("lance_ns.section_bodies"));
-    assert!(sql.contains("search_context_candidates"));
-    assert!(!sql.contains("search_context_candidates_hybrid"));
-    assert!(!sql.contains("lance_hybrid_search("));
+    let section_count = query_csv(&db_path, "SELECT count(*) FROM sections;");
+    assert_eq!(section_count.trim(), "0");
+
+    let hybrid_macro_count = query_csv(
+        &db_path,
+        "SELECT count(*)
+         FROM duckdb_functions()
+         WHERE function_name = 'search_context_candidates_hybrid';",
+    );
+    assert_eq!(hybrid_macro_count.trim(), "0");
 }
 
 #[test]
 fn analyst_build_degrades_to_bm25_when_complete_sidecar_dir_is_empty() {
     let tempdir = tempfile::Builder::new()
-        .prefix("fake-duckdb-empty-sidecar")
+        .prefix("bundled-duckdb-empty-sidecar")
         .tempdir()
         .expect("tempdir");
     write_section_fixture_source(tempdir.path());
@@ -607,19 +575,24 @@ fn analyst_build_degrades_to_bm25_when_complete_sidecar_dir_is_empty() {
     .expect("stamp sidecar complete");
     let db_path = tempdir.path().join("analyst.duckdb");
 
-    let sql = build_analyst_with_fake_duckdb(tempdir.path(), &artifact_dir, &db_path, 0);
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
-    assert!(!sql.contains("ATTACH '"));
-    assert!(!sql.contains("lance_ns.section_bodies"));
-    assert!(sql.contains("search_context_candidates"));
-    assert!(!sql.contains("search_context_candidates_hybrid"));
-    assert!(!sql.contains("lance_hybrid_search("));
+    let section_count = query_csv(&db_path, "SELECT count(*) FROM sections;");
+    assert_eq!(section_count.trim(), "0");
+
+    let hybrid_macro_count = query_csv(
+        &db_path,
+        "SELECT count(*)
+         FROM duckdb_functions()
+         WHERE function_name = 'search_context_candidates_hybrid';",
+    );
+    assert_eq!(hybrid_macro_count.trim(), "0");
 }
 
 #[test]
 fn analyst_build_degrades_to_bm25_when_code_symbols_sidecar_missing() {
     let tempdir = tempfile::Builder::new()
-        .prefix("fake-duckdb-missing-code-symbol-sidecar")
+        .prefix("bundled-duckdb-missing-code-symbol-sidecar")
         .tempdir()
         .expect("tempdir");
     write_section_fixture_source(tempdir.path());
@@ -655,69 +628,18 @@ fn analyst_build_degrades_to_bm25_when_code_symbols_sidecar_missing() {
     .expect("stamp sidecar with missing code symbols");
     let db_path = tempdir.path().join("analyst.duckdb");
 
-    let sql =
-        build_analyst_with_fake_duckdb_probe_counts(tempdir.path(), &artifact_dir, &db_path, 1, 0);
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
 
-    assert!(!sql.contains("ATTACH '"));
-    assert!(!sql.contains("lance_ns.section_bodies"));
-    assert!(!sql.contains("code_symbols.lance"));
-    assert!(sql.contains("search_context_candidates"));
-    assert!(!sql.contains("search_context_candidates_hybrid"));
-    assert!(!sql.contains("lance_hybrid_search("));
-}
+    let section_count = query_csv(&db_path, "SELECT count(*) FROM sections;");
+    assert_eq!(section_count.trim(), "0");
 
-fn temporal_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
-    let mut artifact = structural_artifact(graph_content_hash);
-    let snapshot = SnapshotKey {
-        stable_symbol_id: "sym-main".to_string(),
-        commit: "c1".to_string(),
-    };
-
-    artifact.commits.push(CommitArtifact {
-        sha: "c1".to_string(),
-        parents: Vec::new(),
-        author_time: 1_700_000_001,
-        author_name: String::new(),
-        author_email: String::new(),
-        summary: "initial import".to_string(),
-    });
-    artifact.symbol_snapshots.push(SymbolSnapshotArtifact {
-        key: snapshot.clone(),
-        file_path: "src/lib.rs".into(),
-        entity_name: "main".to_string(),
-        symbol_kind: "function".to_string(),
-        enclosing_scope: None,
-        byte_range: [0, 10],
-        line_range: [1, 1],
-        anchor_hash: "anchor-main".to_string(),
-        tokens: vec!["main".to_string()],
-    });
-    artifact.temporal_edges.push(TemporalEdgeArtifact {
-        source: EdgeEndpoint::Commit {
-            sha: "c1".to_string(),
-        },
-        target: EdgeEndpoint::Snapshot {
-            key: snapshot.clone(),
-        },
-        relation: RelationKind::Touches,
-        parent: None,
-        change_kind: Some(ChangeKind::Added),
-    });
-    artifact.temporal_edges.push(TemporalEdgeArtifact {
-        source: EdgeEndpoint::Snapshot {
-            key: snapshot.clone(),
-        },
-        target: EdgeEndpoint::Snapshot {
-            key: snapshot.clone(),
-        },
-        relation: RelationKind::Touches,
-        parent: None,
-        change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(snapshot))),
-    });
-    artifact
-        .diagnostics
-        .push("parse_failed path=src/lib.rs".to_string());
-    artifact
+    let hybrid_macro_count = query_csv(
+        &db_path,
+        "SELECT count(*)
+         FROM duckdb_functions()
+         WHERE function_name = 'search_context_candidates_hybrid';",
+    );
+    assert_eq!(hybrid_macro_count.trim(), "0");
 }
 
 fn external_dependency_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
@@ -1048,6 +970,8 @@ const SECTION_FIXTURE_BODY: &str = "# Guide\n\nUse the analyst search fixture.\n
 fn write_section_fixture_source(root: &Path) {
     std::fs::create_dir_all(root.join("docs")).expect("create docs");
     std::fs::write(root.join("docs/guide.md"), SECTION_FIXTURE_BODY).expect("write guide");
+    std::fs::create_dir_all(root.join("src")).expect("create src");
+    std::fs::write(root.join("src/lib.rs"), "pub fn main() -> u32 { 42 }\n").expect("write lib");
 }
 
 fn structural_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
