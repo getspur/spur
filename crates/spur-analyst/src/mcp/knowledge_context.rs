@@ -13,10 +13,9 @@ use crate::{
 };
 use futures::future::join_all;
 use serde_json::{json, Value};
-use spur_graph::{
-    resolve_worktree_root_from, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
-    EMBED_MODEL_ENV,
-};
+use spur_graph::{resolve_worktree_root_from, EMBEDDING_VECTOR_DIMENSIONS};
+#[cfg(feature = "embed")]
+use spur_graph::{EmbeddingModelSelection, EMBED_MODEL_ENV};
 
 use super::McpHandlerError;
 
@@ -2047,8 +2046,10 @@ mod tests {
         fs::create_dir_all(repo.join(".spur")).expect("create .spur");
         let db_path = repo.join(".spur").join("analyst.duckdb");
         let conn = Connection::open(&db_path).expect("open fixture db");
-        conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu;")
-            .expect("load fixture extensions");
+        conn.execute_batch(
+            "INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;",
+        )
+        .expect("load fixture extensions");
         conn.execute_batch(
             r#"
             CREATE TABLE _meta (graph_content_hash VARCHAR);
@@ -2327,8 +2328,10 @@ pub fn lexical_signal_anchor() {
 
         let db_path = temp_dir.path().join("analyst.duckdb");
         let conn = Connection::open(&db_path).expect("open fixture db");
-        conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu; INSTALL lance; LOAD lance;")
-            .expect("load fixture extensions");
+        conn.execute_batch(
+            "INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;",
+        )
+        .expect("load fixture extensions");
         conn.execute_batch(&format!(
             "ATTACH '{}' AS lance_ns (TYPE LANCE);",
             sql_escape_path(&artifact_dir.join(SECTIONS_DATASET_DIR))
