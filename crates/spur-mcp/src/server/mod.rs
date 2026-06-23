@@ -165,7 +165,7 @@ fn normalize_transport_path(path: String) -> String {
 /// Serve an rmcp server over the process's stdin/stdout.
 ///
 /// This is the transport standalone MCP servers use when launched directly by
-/// an MCP client (Claude Code, OpenCode, etc.) via `command`/`args`. The future
+/// an MCP client (Claude Code, `OpenCode`, etc.) via `command`/`args`. The future
 /// resolves when the client disconnects or the stdio streams close.
 ///
 /// `service` is typically a [`RegistryServerHandler`] wrapping a composed
