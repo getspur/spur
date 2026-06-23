@@ -329,6 +329,12 @@ enum Commands {
         #[command(subcommand)]
         command: GraphCommands,
     },
+    /// Run a standalone MCP server over stdio. With no subcommand, serves a
+    /// bundled read-only server (code-graph + analyst query tools). For
+    /// isolated per-domain servers use `spur graph mcp` or `spur analyst mcp`.
+    /// Wire directly into an MCP client via `command: "spur", args: ["mcp"]`.
+    /// All logging goes to stderr; stdout carries the JSON-RPC stream.
+    Mcp,
     /// Garbage-collect outcome blobs
     Gc {
         #[command(subcommand)]
@@ -447,6 +453,34 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_graph_mcp_subcommand() {
+        let matches = Cli::command()
+            .try_get_matches_from(["spur", "graph", "mcp"])
+            .expect("graph mcp should parse");
+        assert_eq!(matches.subcommand_name(), Some("graph"));
+        let (_, sub) = matches.subcommand().expect("graph subcommand");
+        assert_eq!(sub.subcommand_name(), Some("mcp"));
+    }
+
+    #[test]
+    fn cli_accepts_analyst_mcp_subcommand() {
+        let matches = Cli::command()
+            .try_get_matches_from(["spur", "analyst", "mcp"])
+            .expect("analyst mcp should parse");
+        assert_eq!(matches.subcommand_name(), Some("analyst"));
+        let (_, sub) = matches.subcommand().expect("analyst subcommand");
+        assert_eq!(sub.subcommand_name(), Some("mcp"));
+    }
+
+    #[test]
+    fn cli_accepts_top_level_mcp_command() {
+        let matches = Cli::command()
+            .try_get_matches_from(["spur", "mcp"])
+            .expect("spur mcp should parse");
+        assert_eq!(matches.subcommand_name(), Some("mcp"));
+    }
+
+    #[test]
     fn cli_accepts_graph_build_with_temporal_flag() {
         Cli::command()
             .try_get_matches_from([
@@ -562,6 +596,12 @@ enum AnalystCommands {
         #[arg(long)]
         quiet: bool,
     },
+    /// Run the analyst MCP server over stdio, exposing
+    /// `knowledge_context_pack`, `knowledge_context_pack_2`, and
+    /// `doc_navigate` against the `.spur/analyst.duckdb` index. Wire directly
+    /// into an MCP client via `command: "spur", args: ["analyst", "mcp"]`.
+    /// All logging goes to stderr; stdout carries the JSON-RPC stream.
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -599,6 +639,12 @@ enum GraphCommands {
         #[arg(long, hide = true, default_value_t = 5_000, value_name = "N")]
         temporal_max_commits_per_shard: usize,
     },
+    /// Run the code-graph MCP server over stdio, exposing the `code_*` tools
+    /// (resolve/search/read/callers/callees/subgraph/history) against the
+    /// `.spur/graph` index. Wire directly into an MCP client via
+    /// `command: "spur", args: ["graph", "mcp"]`. All logging goes to stderr;
+    /// stdout carries the JSON-RPC stream.
+    Mcp,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1070,6 +1116,7 @@ async fn run() -> Result<()> {
                     },
                 )
             }
+            AnalystCommands::Mcp => commands::mcp::run_analyst_server().await,
         },
         Commands::Graph { command } => match command {
             GraphCommands::Build {
@@ -1101,7 +1148,9 @@ async fn run() -> Result<()> {
                     commands::graph::build(options)
                 }
             }
+            GraphCommands::Mcp => commands::mcp::run_graph_server().await,
         },
+        Commands::Mcp => commands::mcp::run_bundled_server().await,
         Commands::Gc {
             cmd:
                 GcCmd::Outcomes {

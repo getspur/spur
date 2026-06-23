@@ -56,7 +56,7 @@ impl McpCallbackServer {
 
     async fn handle_graph_tool(&self, id: Value, name: &str, args: Value) -> JsonRpcResponse {
         let module = spur_graph::mcp::GraphMcpModule::new(self.graph_mcp_deps.clone());
-        code_graph_response(id, module.call(name, args).await).await
+        code_graph_response(id, module.dispatch(name, args).await).await
     }
 }
 

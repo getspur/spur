@@ -165,7 +165,7 @@ impl McpCallbackServer {
         args: Value,
     ) -> JsonRpcResponse {
         let module = spur_analyst::mcp::AnalystMcpModule::new();
-        match module.call(tool_name, args).await {
+        match module.dispatch(tool_name, args).await {
             Ok(body) => {
                 let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
                 JsonRpcResponse::success(
