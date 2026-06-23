@@ -89,7 +89,10 @@ impl GraphMcpModule {
         tool_definitions()
     }
 
-    pub async fn call(&self, name: &str, args: Value) -> CodeGraphResult {
+    /// Dispatch a tool call by name. This is the inherent entry point used by
+    /// the legacy spur-core dispatcher; the `spur_mcp::ToolModule` impl below
+    /// delegates here.
+    pub async fn dispatch(&self, name: &str, args: Value) -> CodeGraphResult {
         match name {
             "code_resolve" => {
                 code_resolve_response(&args, Arc::clone(&self.deps.rebuild_coordinator)).await
@@ -123,6 +126,51 @@ impl GraphMcpModule {
                 "unknown code graph MCP tool: {other}"
             ))
             .into()),
+        }
+    }
+}
+
+/// `spur_mcp::ToolModule` adapter for the code graph module.
+///
+/// This is the standalone-composition surface: any MCP server (the `spur graph
+/// mcp` standalone server, the bundled `spur mcp` server, or future
+/// compositions) can register `GraphMcpModule` into a `spur_mcp::ToolRegistry`
+/// and dispatch the `code_*` tools without going through spur-core's brain
+/// server. The inherent [`GraphMcpModule::dispatch`] does the real work; this
+/// impl only maps local types onto the shared `ToolModule` contract and wraps
+/// results as MCP text content.
+#[async_trait::async_trait]
+impl spur_mcp::ToolModule for GraphMcpModule {
+    fn tools(&self) -> Vec<spur_mcp::ToolDefinition> {
+        tool_definitions()
+            .into_iter()
+            .map(|definition| spur_mcp::ToolDefinition {
+                name: definition.name,
+                description: definition.description,
+                input_schema: definition.input_schema,
+            })
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        ctx: spur_mcp::ToolCallContext<'_>,
+        name: &str,
+        args: Value,
+    ) -> Result<spur_mcp::ToolResponse, spur_mcp::McpError> {
+        match self.dispatch(name, args).await {
+            Ok(body) => Ok(spur_mcp::ToolResponse::json_text(
+                ctx.request_id_value(),
+                body,
+            )),
+            Err(error) => {
+                let response = error.into_error_response().await;
+                Err(spur_mcp::McpError::new(
+                    spur_mcp::ErrorCode(response.code as i32),
+                    response.message,
+                    response.data,
+                ))
+            }
         }
     }
 }

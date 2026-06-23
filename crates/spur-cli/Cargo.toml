@@ -30,10 +30,12 @@ telegram-bot = ["dep:spur-bot"]
 [dependencies]
 spur-acp = { workspace = true }
 spur-blob-store = { workspace = true }
+spur-analyst = { workspace = true }
 spur-core = { workspace = true }
 spur-cost = { workspace = true }
 spur-context = { workspace = true }
 spur-graph = { workspace = true }
+spur-mcp = { workspace = true }
 spur-pm = { workspace = true }
 spur-license = { workspace = true }
 spur-tui = { workspace = true }
