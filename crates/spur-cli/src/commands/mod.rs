@@ -6,6 +6,7 @@ pub mod config_show;
 pub mod flags;
 pub mod graph;
 pub mod init;
+pub mod mcp;
 pub mod pm_ingest;
 pub mod profile;
 pub mod telemetry;
