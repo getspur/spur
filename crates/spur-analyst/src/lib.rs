@@ -8,6 +8,10 @@ use anyhow::{anyhow, Context as _, Result};
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 
 static LANCE_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+// duckpgq is distributed via DuckDB's community repo (not the core repo) and is
+// only published for DuckDB <= 1.4.4. Install it once per process; the LOAD is
+// best-effort and the caller falls back to recursive SQL on failure.
+static DUCKPGQ_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 const MAX_CONTEXT_CANDIDATES: usize = 40;
 const MAX_GRAPH_CANDIDATES: usize = 30;
@@ -260,7 +264,7 @@ pub fn query_symbol_risk_community<S: AsRef<str>>(
     // extension. Without it, scorecard enrichment fails to bind. Keep it
     // best-effort (mirrors query_context_candidates) and let preparation surface
     // any genuine failure as a caveat.
-    let _ = conn.execute_batch("LOAD icu;");
+    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
 
     let (inputs, mut caveats, truncated) = bounded_symbol_inputs(stable_symbol_ids);
     let mut result = SymbolRiskCommunityResult {
@@ -346,7 +350,7 @@ pub fn query_context_candidates(
     // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
     // live in DuckDB's ICU extension. Docs-only queries can still work without it,
     // so keep this best-effort and let query preparation surface real failures.
-    let _ = conn.execute_batch("LOAD icu;");
+    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
     // Hybrid retrieval uses DuckDB's Lance extension when available. Keep this
     // best-effort so missing extension binaries degrade to the BM25 macro below.
     LANCE_INSTALLED.get_or_init(|| {
@@ -655,6 +659,9 @@ fn query_duckpgq_direct_paths(
     target_stable_id: &str,
     max_paths: usize,
 ) -> Result<Vec<KnowledgePathRow>> {
+    DUCKPGQ_INSTALLED.get_or_init(|| {
+        let _ = conn.execute_batch("INSTALL duckpgq FROM community;");
+    });
     conn.execute_batch("LOAD duckpgq;")
         .context("failed to load DuckPGQ extension")?;
     let source_sql = sql_string_literal(source_stable_id);
@@ -709,6 +716,9 @@ fn query_duckpgq_shortest_hops(
     target_stable_id: &str,
     max_hops: usize,
 ) -> Result<Option<usize>> {
+    DUCKPGQ_INSTALLED.get_or_init(|| {
+        let _ = conn.execute_batch("INSTALL duckpgq FROM community;");
+    });
     conn.execute_batch("LOAD duckpgq;")
         .context("failed to load DuckPGQ extension")?;
     let source_sql = sql_string_literal(source_stable_id);
@@ -1275,7 +1285,7 @@ pub fn query_graph_candidates(
     // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
     // live in DuckDB's ICU extension. Docs-only queries can still work without it,
     // so keep this best-effort and let query preparation surface real failures.
-    let _ = conn.execute_batch("LOAD icu;");
+    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
 
     let graph_content_hash = conn
         .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))

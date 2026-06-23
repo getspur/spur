@@ -22,7 +22,7 @@ fn context_candidates_return_stable_ids_for_docs_and_code() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
     let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
         .expect("load fixture extensions");
     conn.execute_batch(
         r#"
@@ -114,7 +114,7 @@ fn context_candidates_accept_query_vector_and_degrade_to_bm25() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
     let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
         .expect("load fixture extensions");
     conn.execute_batch(
         r#"
@@ -242,7 +242,7 @@ fn context_candidates_surface_semantic_only_docs_via_hybrid_fusion() {
 
     let db_path = dir.path().join("analyst.duckdb");
     let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu; INSTALL lance; LOAD lance;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
         .expect("load fixture extensions");
     conn.execute_batch(&format!(
         "ATTACH '{}' AS lance_ns (TYPE LANCE);",
@@ -351,7 +351,7 @@ fn graph_candidates_return_primary_and_neighbor_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("analyst.duckdb");
     let conn = duckdb::Connection::open(&db_path).expect("open fixture db");
-    conn.execute_batch("INSTALL fts; LOAD fts; LOAD icu;")
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
         .expect("load fixture extensions");
     conn.execute_batch(
         r#"
@@ -564,7 +564,7 @@ fn symbol_risk_community_enriches_scorecard_with_timestamptz_arithmetic() {
     // subtraction only binds when DuckDB's ICU extension is loaded. Load it here
     // so CREATE VIEW succeeds; the read-only query path under test must load it
     // too, or scorecard enrichment fails with a binder error.
-    conn.execute_batch("LOAD icu;")
+    conn.execute_batch("INSTALL icu; LOAD icu;")
         .expect("load icu for fixture view creation");
     conn.execute_batch(
         r#"
