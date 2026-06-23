@@ -80,7 +80,13 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 # Version pinned here; the `bundled` feature is opted into per-consumer such as
 # spur-context and spur-analyst. `vtab` remains pinned at the workspace baseline
 # so every remaining workspace consumer resolves duckdb to one feature set.
-duckdb = { version = "1.10502.0", features = ["vtab"] }
+#
+# Pinned EXACTLY to =1.4.4 (the workspace standard): this is the newest DuckDB
+# engine where the ducklake (core repo) AND duckpgq + onager (community repo)
+# extensions all coexist. Do NOT relax to a caret (`1.4.4`) — that resolves to
+# 1.4.5, where duckpgq/onager community builds 404. See
+# docs/spikes/duckdb-145-ducklake-duckpgq-probe/VERDICT.md.
+duckdb = { version = "=1.4.4", features = ["vtab"] }
 
 # Logging
 tracing = "0.1"
