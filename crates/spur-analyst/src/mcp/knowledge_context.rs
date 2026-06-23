@@ -769,7 +769,7 @@ fn parse_anchor_array_v2(
         .collect()
 }
 
-fn analyst_db_path() -> Result<PathBuf, McpHandlerError> {
+pub(crate) fn analyst_db_path() -> Result<PathBuf, McpHandlerError> {
     Ok(current_repo_root()?.join(".spur").join("analyst.duckdb"))
 }
 
