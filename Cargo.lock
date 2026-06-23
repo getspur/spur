@@ -10028,6 +10028,7 @@ dependencies = [
  "chrono",
  "clap",
  "directories",
+ "duckdb",
  "file-rotate",
  "indicatif 0.18.4",
  "lancedb",
