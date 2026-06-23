@@ -1,16 +1,16 @@
-//! Standalone indexer: builds DuckLake catalog from spur-graph artifacts.
+//! Standalone indexer: builds `DuckLake` catalog from spur-graph artifacts.
 //!
 //! Usage:
 //!   index --package serde --revision 1.0.197 \
 //!     --artifact-dir /path/to/.spur/graph \
 //!     --source-root /path/to/serde/source \
 //!     --catalog index.ducklake \
-//!     --upload-s3 s3://spur-context/catalog/catalog.ducklake
+//!     --upload-s3 <s3://spur-context/catalog/catalog.ducklake>
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use clap::{Arg, ArgAction, Command};
+use anyhow::{Context as _, Result};
+use clap::{Arg, Command};
 
 use spur_context_service::translate::{translate_artifact_to_ducklake, TranslateOptions};
 
@@ -46,11 +46,7 @@ fn main() -> Result<()> {
         source: source.clone(),
         package: package.clone(),
         revision: revision.clone(),
-        revision_kind: if revision.contains('.') {
-            "semver".to_owned()
-        } else {
-            "git".to_owned()
-        },
+        revision_kind: revision_kind_for_revision(revision).to_owned(),
         artifact_dir: artifact_dir.clone(),
         source_root,
         catalog_dsn: catalog.clone(),
@@ -61,7 +57,9 @@ fn main() -> Result<()> {
         .with_context(|| format!("translate failed for {package}@{revision}"))?;
 
     eprintln!("[index] snapshot_id={}", stats.snapshot_id);
-    for (table, rows) in &stats.rows_inserted {
+    let mut row_counts = stats.rows_inserted.iter().collect::<Vec<_>>();
+    row_counts.sort_by_key(|(table, _)| table.as_str());
+    for (table, rows) in row_counts {
         if *rows > 0 {
             eprintln!("[index]   {table}: {rows} rows");
         }
@@ -83,6 +81,14 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn revision_kind_for_revision(revision: &str) -> &'static str {
+    if revision.contains('.') {
+        "semver"
+    } else {
+        "git_sha"
+    }
 }
 
 #[cfg(test)]
