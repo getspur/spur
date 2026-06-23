@@ -84,3 +84,17 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revision_kind_for_git_sha_uses_translate_supported_value() {
+        assert_eq!(revision_kind_for_revision("1.0.197"), "semver");
+        assert_eq!(
+            revision_kind_for_revision("b7c851407ac5d0b8eb3ef2bc597be79340f29038"),
+            "git_sha"
+        );
+    }
+}
