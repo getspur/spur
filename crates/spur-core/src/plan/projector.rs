@@ -55,10 +55,15 @@ pub fn collect_sorted_audits_for_issue(
         match crate::plan::audit_sentinel::parse_comment(&comment.body) {
             Some(Ok(kind)) => audits.push(kind),
             Some(Err(crate::plan::audit_sentinel::ParseError::Critical { kind, source })) => {
-                return Err(anyhow::anyhow!(
-                    "critical audit sentinel parse failed for issue {issue_id}, comment {} (kind={kind}): {source}",
-                    comment.id
-                ));
+                tracing::warn!(
+                    target: "spur.audit.parse_failure",
+                    metric = "critical_sentinel_dropped",
+                    issue_id = %issue_id,
+                    comment_id = %comment.id,
+                    kind = %kind,
+                    error = %source,
+                    "critical audit sentinel parse failed; comment dropped from projection",
+                );
             }
             Some(Err(error @ crate::plan::audit_sentinel::ParseError::Informational { .. })) => {
                 tracing::warn!(
@@ -72,7 +77,25 @@ pub fn collect_sorted_audits_for_issue(
             None => {}
         }
     }
+    backfill_legacy_completion_delegation_ids(&mut audits);
     Ok(audits)
+}
+
+fn backfill_legacy_completion_delegation_ids(audits: &mut [AuditSentinelKind]) {
+    let mut last_dispatch: Option<String> = None;
+    for audit in audits.iter_mut() {
+        match audit {
+            AuditSentinelKind::Dispatch { delegation_id, .. } => {
+                last_dispatch = Some(delegation_id.clone());
+            }
+            AuditSentinelKind::Completion { delegation_id, .. } if delegation_id.is_empty() => {
+                if let Some(dispatch_id) = last_dispatch.clone() {
+                    *delegation_id = dispatch_id;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 pub fn project_attempt_facts(audits: &[AuditSentinelKind]) -> (u32, Option<String>) {
@@ -1691,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn projector_errors_on_corrupt_completion_sentinel() {
+    fn projector_drops_critical_completion_sentinel_and_keeps_later_audits() {
         let comments = vec![
             comment(
                 "c-1",
@@ -1712,23 +1735,43 @@ mod tests {
                 ),
                 1,
             ),
+            comment(
+                "c-3",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Approval {
+                        delegation_id: "del-A".into(),
+                    },
+                ),
+                2,
+            ),
         ];
 
         let (result, warnings) = capture_warnings(|| {
             super::collect_sorted_audits_for_issue("bd-task-critical", comments)
         });
-        let error = result.expect_err("malformed completion sentinel should fail projection");
-        assert!(
-            error
-                .to_string()
-                .contains("critical audit sentinel parse failed"),
-            "unexpected error: {error:#}"
-        );
-        assert!(warnings.is_empty());
+        let audits = result.expect("malformed completion sentinel should be dropped");
+
+        let kinds: Vec<&str> = audits.iter().map(AuditSentinelKind::kind_str).collect();
+        assert_eq!(kinds, vec!["dispatch", "approval"]);
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert_eq!(warning.target, "spur.audit.parse_failure");
+        assert!(warning
+            .fields
+            .get("metric")
+            .is_some_and(|metric| metric.contains("critical_sentinel_dropped")));
+        assert!(warning
+            .fields
+            .get("kind")
+            .is_some_and(|kind| kind.contains("completion")));
+        assert!(warning
+            .fields
+            .get("comment_id")
+            .is_some_and(|comment_id| comment_id.contains("c-2")));
     }
 
     #[test]
-    fn projector_errors_on_corrupt_review_feedback_sentinel() {
+    fn projector_drops_critical_review_feedback_sentinel() {
         let comments = vec![comment(
             "c-1",
             format!(
@@ -1741,14 +1784,136 @@ mod tests {
         let (result, warnings) = capture_warnings(|| {
             super::collect_sorted_audits_for_issue("bd-task-critical", comments)
         });
-        let error = result.expect_err("malformed review-feedback sentinel should fail projection");
-        assert!(
-            error
-                .to_string()
-                .contains("critical audit sentinel parse failed"),
-            "unexpected error: {error:#}"
-        );
-        assert!(warnings.is_empty());
+        let audits = result.expect("malformed review-feedback sentinel should be dropped");
+
+        assert!(audits.is_empty());
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert_eq!(warning.target, "spur.audit.parse_failure");
+        assert!(warning
+            .fields
+            .get("metric")
+            .is_some_and(|metric| metric.contains("critical_sentinel_dropped")));
+        assert!(warning
+            .fields
+            .get("kind")
+            .is_some_and(|kind| kind.contains("review-feedback")));
+    }
+
+    #[test]
+    fn collect_sorted_audits_backfills_legacy_completion_and_promotes_awaiting_review() {
+        let comments = vec![
+            comment(
+                "c-1",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                        delegation_id: "del-X".into(),
+                        worker: "codex".into(),
+                        attempt: 1,
+                    },
+                ),
+                0,
+            ),
+            comment(
+                "c-2",
+                format!(
+                    "{}\n{{\"kind\":\"completion\",\"completion_state\":\"awaiting_review\",\"worker_branch\":\"spur/worker-x\",\"result_summary\":\"ready\"}}",
+                    crate::plan::audit_sentinel::SENTINEL_PREFIX
+                ),
+                1,
+            ),
+        ];
+
+        let audits = super::collect_sorted_audits_for_issue("bd-38e", comments)
+            .expect("legacy completion should parse and backfill");
+
+        assert_eq!(audits.len(), 2);
+        assert!(matches!(
+            &audits[1],
+            AuditSentinelKind::Completion { delegation_id, .. } if delegation_id == "del-X"
+        ));
+        let issue = issue("bd-38e", "open", Vec::new(), Vec::new());
+        let status = super::project_status_for_issue(&issue, &audits, false, "closed");
+        assert!(matches!(
+            status,
+            PlanTaskStatus::AwaitingReview { summary } if summary.as_deref() == Some("ready")
+        ));
+    }
+
+    #[test]
+    fn collect_sorted_audits_preserves_explicit_completion_delegation_ids() {
+        let comments = vec![
+            comment(
+                "c-1",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                        delegation_id: "del-A".into(),
+                        worker: "codex".into(),
+                        attempt: 1,
+                    },
+                ),
+                0,
+            ),
+            comment(
+                "c-2",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                        delegation_id: "del-A".into(),
+                        completion_state: CompletionState::AwaitingReview,
+                        superseded: false,
+                        worker_branch: Some("spur/worker-a".into()),
+                        result_summary: Some("ready".into()),
+                        artifact_uri: None,
+                        dispatched_base_oid: None,
+                    },
+                ),
+                1,
+            ),
+            comment(
+                "c-3",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+                        delegation_id: "del-B".into(),
+                        worker: "codex".into(),
+                        attempt: 2,
+                    },
+                ),
+                2,
+            ),
+            comment(
+                "c-4",
+                crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                        delegation_id: "del-other".into(),
+                        completion_state: CompletionState::AwaitingReview,
+                        superseded: false,
+                        worker_branch: Some("spur/worker-other".into()),
+                        result_summary: Some("other".into()),
+                        artifact_uri: None,
+                        dispatched_base_oid: None,
+                    },
+                ),
+                3,
+            ),
+        ];
+
+        let audits = super::collect_sorted_audits_for_issue("bd-explicit", comments)
+            .expect("valid completion comments should parse");
+
+        assert!(matches!(
+            &audits[1],
+            AuditSentinelKind::Completion { delegation_id, .. } if delegation_id == "del-A"
+        ));
+        assert!(matches!(
+            &audits[3],
+            AuditSentinelKind::Completion { delegation_id, .. } if delegation_id == "del-other"
+        ));
+        let issue = issue("bd-explicit", "open", Vec::new(), Vec::new());
+        let status = super::project_status_for_issue(&issue, &audits[..2], false, "closed");
+        assert!(matches!(
+            status,
+            PlanTaskStatus::AwaitingReview { summary } if summary.as_deref() == Some("ready")
+        ));
     }
 
     /// Two Dispatch sentinels project as `attempt = 2` (count of dispatches).
