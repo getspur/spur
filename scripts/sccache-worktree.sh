@@ -122,6 +122,35 @@ fi
 # S3 takes precedence; fall through to GCS only when S3 is not requested.
 enable_spur_s3_cache || enable_spur_gcs_cache
 
+# ---- per-repo namespace: share the L1 S3 cache with the cloud-build remote --
+# The remote builder (scripts/cloud-build/build.sh) writes objects under an S3
+# key prefix == the repo namespace (basename of the MAIN repo root, e.g.
+# `spur`, `spur-notebook`; see DEFAULT_REMOTE_NAMESPACE there). Mirroring that
+# prefix locally makes a repo's local build READ/WRITE the same S3 keys the VM
+# produced — genuine local↔remote reuse — while keeping different repos isolated.
+#
+# sccache bakes SCCACHE_S3_KEY_PREFIX into the server at start-server time, so a
+# single shared daemon would apply repo A's prefix to repo B. We therefore give
+# each namespace its own server (UDS socket). L0 disk (SCCACHE_DIR) is
+# content-addressed and safely shared across namespaces.
+if use_spur_s3_sccache && [[ -n "$GIT_ROOT" ]]; then
+    NS_MAIN_ROOT=""
+    NS_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || echo "")
+    if [[ -n "$NS_COMMON_DIR" ]]; then
+        [[ "$NS_COMMON_DIR" != /* ]] && NS_COMMON_DIR="$GIT_ROOT/$NS_COMMON_DIR"
+        NS_MAIN_ROOT=$(cd "$NS_COMMON_DIR/.." && pwd -P 2>/dev/null || echo "")
+    fi
+    [[ -n "$NS_MAIN_ROOT" ]] || NS_MAIN_ROOT="$GIT_ROOT"
+
+    SPUR_NS="${SPUR_SCCACHE_NAMESPACE:-$(basename "$NS_MAIN_ROOT")}"
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-$SPUR_NS}"
+    if [[ -z "${SCCACHE_SERVER_UDS:-}" && -z "${SCCACHE_SERVER_PORT:-}" ]]; then
+        SPUR_SRV_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
+        mkdir -p "$SPUR_SRV_DIR" 2>/dev/null || true
+        export SCCACHE_SERVER_UDS="$SPUR_SRV_DIR/srv-$SPUR_NS.sock"
+    fi
+fi
+
 IS_SCCACHE_CONTROL=0
 case "${1:-}" in
     --show-stats|--show-adv-stats|--start-server|--stop-server|--zero-stats|\
