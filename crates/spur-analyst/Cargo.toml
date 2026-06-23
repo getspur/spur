@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 arrow-array = { workspace = true }
+async-trait = { workspace = true }
 duckdb = { workspace = true, features = ["bundled"] }
 fastembed = { version = "4", default-features = false, optional = true }
 futures = { workspace = true }
@@ -22,6 +23,7 @@ lancedb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 spur-graph = { workspace = true }
+spur-mcp = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -79,7 +79,10 @@ impl AnalystMcpModule {
         tool_definitions()
     }
 
-    pub async fn call(&self, name: &str, args: Value) -> Result<Value, McpHandlerError> {
+    /// Dispatch a tool call by name. This is the inherent entry point used by
+    /// the legacy spur-core dispatcher; the `spur_mcp::ToolModule` impl below
+    /// delegates here.
+    pub async fn dispatch(&self, name: &str, args: Value) -> Result<Value, McpHandlerError> {
         match name {
             "doc_navigate" => doc_navigate(&args).await,
             "knowledge_context_pack" => knowledge_context_pack(&args).await,
@@ -87,6 +90,49 @@ impl AnalystMcpModule {
             other => Err(McpHandlerError::InvalidParams(format!(
                 "unknown analyst MCP tool: {other}"
             ))),
+        }
+    }
+}
+
+/// `spur_mcp::ToolModule` adapter for the analyst module.
+///
+/// This is the standalone-composition surface: any MCP server (the
+/// `spur analyst mcp` standalone server, the bundled `spur mcp` server, or
+/// future compositions) can register `AnalystMcpModule` into a
+/// `spur_mcp::ToolRegistry` and dispatch the analyst tools without going
+/// through spur-core's brain server. The inherent
+/// [`AnalystMcpModule::dispatch`] does the real work; this impl only maps local
+/// types onto the shared `ToolModule` contract and wraps results as MCP text
+/// content.
+#[async_trait::async_trait]
+impl spur_mcp::ToolModule for AnalystMcpModule {
+    fn tools(&self) -> Vec<spur_mcp::ToolDefinition> {
+        tool_definitions()
+            .into_iter()
+            .map(|definition| spur_mcp::ToolDefinition {
+                name: definition.name,
+                description: definition.description,
+                input_schema: definition.input_schema,
+            })
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        ctx: spur_mcp::ToolCallContext<'_>,
+        name: &str,
+        args: Value,
+    ) -> Result<spur_mcp::ToolResponse, spur_mcp::McpError> {
+        match self.dispatch(name, args).await {
+            Ok(body) => Ok(spur_mcp::ToolResponse::json_text(
+                ctx.request_id_value(),
+                body,
+            )),
+            Err(error) => Err(spur_mcp::McpError::new(
+                spur_mcp::ErrorCode(error.json_rpc_code()),
+                error.to_string(),
+                None,
+            )),
         }
     }
 }
