@@ -515,16 +515,7 @@ fn graph_build_rejects_legacy_json_output_path() {
 }
 
 #[test]
-fn graph_build_triggers_analyst_rebuild_when_duckdb_present() {
-    // Skip if duckdb isn't on PATH - soft-fail path is covered separately.
-    let duckdb_found = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join("duckdb").is_file()))
-        .unwrap_or(false);
-    if !duckdb_found {
-        eprintln!("skipping: duckdb CLI not on PATH");
-        return;
-    }
-
+fn graph_build_triggers_analyst_rebuild() {
     let dir = fixture_git_repo();
     let pre = Command::new(spur_binary())
         .current_dir(dir.path())
@@ -537,27 +528,6 @@ fn graph_build_triggers_analyst_rebuild_when_duckdb_present() {
         "stderr: {}",
         String::from_utf8_lossy(&pre.stderr)
     );
-
-    let probe_db = dir.path().join(".spur/analyst.probe.duckdb");
-    let probe = Command::new(spur_binary())
-        .current_dir(dir.path())
-        .args(["analyst", "build", "--db-path"])
-        .arg(&probe_db)
-        .output()
-        .expect("spawn probe");
-    assert!(
-        probe.status.success(),
-        "probe stderr: {}",
-        String::from_utf8_lossy(&probe.stderr)
-    );
-    if !probe_db.is_file() {
-        eprintln!(
-            "skipping: duckdb CLI present but analyst init SQL did not produce a DB: {}",
-            String::from_utf8_lossy(&probe.stderr)
-        );
-        return;
-    }
-    let _ = std::fs::remove_file(&probe_db);
 
     let out = Command::new(spur_binary())
         .current_dir(dir.path())

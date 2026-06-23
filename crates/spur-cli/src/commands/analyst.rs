@@ -4,9 +4,7 @@
 //! See: `docs/superpowers/specs/2026-05-22-analyst-db-graph-sync-design.md`.
 
 use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -27,6 +25,18 @@ const LANCE_ATTACH_PLACEHOLDER: &str = "__SPUR_LANCE_ATTACH_SQL__";
 const SECTIONS_SOURCE_PLACEHOLDER: &str = "__SPUR_SECTIONS_SOURCE_SQL__";
 const LANCE_HYBRID_START: &str = "-- __SPUR_LANCE_HYBRID_START__";
 const LANCE_HYBRID_END: &str = "-- __SPUR_LANCE_HYBRID_END__";
+const BUILD_EXTENSION_BOOTSTRAP_SQL: &str = "\
+INSTALL duckpgq FROM community;
+INSTALL onager FROM community;
+INSTALL lance;
+INSTALL fts;
+INSTALL icu;
+LOAD duckpgq;
+LOAD onager;
+LOAD lance;
+LOAD fts;
+LOAD icu;
+";
 
 /// Compiled-in parquet schema version this analyst build understands.
 ///
@@ -64,18 +74,6 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     verify_required_files(&artifact_dir)?;
     let want_temporal = temporal_files_present(&artifact_dir);
     let want_diag = diagnostics_present(&artifact_dir);
-
-    if !duckdb_cli_present() {
-        if !quiet {
-            eprintln!(
-                "[spur] warning: 'duckdb' CLI not found on PATH - skipping analyst DB refresh"
-            );
-            eprintln!(
-                "[spur] hint: brew install duckdb (or set SPUR_GRAPH_SKIP_ANALYST=1 to silence)"
-            );
-        }
-        return Ok(());
-    }
 
     let db_path = options
         .db_path
@@ -186,34 +184,12 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     let sql = render_artifact_path_placeholders(&sql_template, &artifact_dir)
         .replace(LANCE_ATTACH_PLACEHOLDER, &lance_attach_sql);
 
-    let mut child = Command::new("duckdb")
-        .arg(&tmp_db)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| "failed to spawn duckdb subprocess")?;
-    {
-        let stdin = child.stdin.as_mut().expect("piped stdin");
-        stdin
-            .write_all(sql.as_bytes())
-            .context("failed to write init.sql to duckdb stdin")?;
-    }
-    let output = child
-        .wait_with_output()
-        .context("failed to wait on duckdb subprocess")?;
+    let build_result = execute_build_script(&tmp_db, &sql);
 
-    if !output.status.success() {
+    if let Err(err) = build_result {
         let _ = std::fs::remove_file(&tmp_db);
         if !quiet {
-            eprintln!(
-                "[spur] warning: duckdb exited non-zero (status: {}); previous analyst DB preserved",
-                output.status
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                eprintln!("[spur] duckdb stderr: {}", stderr.trim());
-            }
+            eprintln!("[spur] warning: duckdb init failed: {err:#}; previous analyst DB preserved");
         }
         return Ok(());
     }
@@ -238,7 +214,7 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     }
 
     if !quiet {
-        let lance_version = lance_extension_version(&db_path).unwrap_or_else(|| "<unknown>".into());
+        let lance_version = lance_extension_version().unwrap_or_else(|| "<unknown>".into());
         // Surface the schema/content hash from the manifest we already validated.
         let observed_hash = std::fs::read(artifact_dir.join("manifest.json"))
             .ok()
@@ -271,6 +247,169 @@ pub fn build_default(root: &Path, quiet: bool) -> Result<()> {
             ..Default::default()
         },
     )
+}
+
+fn execute_build_script(db_path: &Path, sql: &str) -> Result<()> {
+    let config = duckdb::Config::default()
+        .access_mode(duckdb::AccessMode::ReadWrite)
+        .context("failed to configure read-write duckdb")?;
+    let conn = duckdb::Connection::open_with_flags(db_path, config).with_context(|| {
+        format!(
+            "failed to open analyst DuckDB read-write at {}",
+            db_path.display()
+        )
+    })?;
+    // Bootstrap first so extension parser hooks are registered before parsing
+    // init SQL statements such as CREATE PROPERTY GRAPH.
+    conn.execute_batch(BUILD_EXTENSION_BOOTSTRAP_SQL)
+        .context("failed to initialize duckdb analyst extensions")?;
+    execute_duckdb_script(&conn, sql)
+}
+
+fn execute_duckdb_script(conn: &duckdb::Connection, sql: &str) -> Result<()> {
+    // duckdb-rs execute_batch uses duckdb_query_arrow for the whole script, which
+    // does not expose inter-statement catalog visibility. prepare() extracts the
+    // script, but still prepares each DDL statement before executing it; in
+    // 1.4.4 that fails for FTS pragmas/macros referencing tables created earlier
+    // in the script. Keep the rendered SQL bytes/order intact and execute each
+    // statement through the bundled connection after SQL-aware statement
+    // boundary detection.
+    for (idx, statement) in split_sql_statements(sql).into_iter().enumerate() {
+        conn.execute_batch(statement)
+            .with_context(|| format!("failed to execute analyst init SQL statement {}", idx + 1))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlScanState {
+    Normal,
+    SingleQuoted,
+    DoubleQuoted,
+    LineComment,
+    BlockComment,
+}
+
+fn split_sql_statements(sql: &str) -> Vec<&str> {
+    let bytes = sql.as_bytes();
+    let mut statements = Vec::new();
+    let mut state = SqlScanState::Normal;
+    let mut start = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match state {
+            SqlScanState::Normal => match bytes[i] {
+                b'\'' => {
+                    state = SqlScanState::SingleQuoted;
+                    i += 1;
+                }
+                b'"' => {
+                    state = SqlScanState::DoubleQuoted;
+                    i += 1;
+                }
+                b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                    state = SqlScanState::LineComment;
+                    i += 2;
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    state = SqlScanState::BlockComment;
+                    i += 2;
+                }
+                b';' => {
+                    let statement = &sql[start..=i];
+                    if statement_has_sql(statement) {
+                        statements.push(statement);
+                    }
+                    start = i + 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            },
+            SqlScanState::SingleQuoted => {
+                if bytes[i] == b'\'' {
+                    if bytes.get(i + 1) == Some(&b'\'') {
+                        i += 2;
+                    } else {
+                        state = SqlScanState::Normal;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::DoubleQuoted => {
+                if bytes[i] == b'"' {
+                    if bytes.get(i + 1) == Some(&b'"') {
+                        i += 2;
+                    } else {
+                        state = SqlScanState::Normal;
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::LineComment => {
+                if bytes[i] == b'\n' {
+                    state = SqlScanState::Normal;
+                }
+                i += 1;
+            }
+            SqlScanState::BlockComment => {
+                if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    state = SqlScanState::Normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    let statement = &sql[start..];
+    if statement_has_sql(statement) {
+        statements.push(statement);
+    }
+    statements
+}
+
+fn statement_has_sql(statement: &str) -> bool {
+    let bytes = statement.as_bytes();
+    let mut state = SqlScanState::Normal;
+    let mut i = 0;
+    while i < bytes.len() {
+        match state {
+            SqlScanState::Normal => match bytes[i] {
+                b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                    state = SqlScanState::LineComment;
+                    i += 2;
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    state = SqlScanState::BlockComment;
+                    i += 2;
+                }
+                b if b.is_ascii_whitespace() || b == b';' => i += 1,
+                _ => return true,
+            },
+            SqlScanState::LineComment => {
+                if bytes[i] == b'\n' {
+                    state = SqlScanState::Normal;
+                }
+                i += 1;
+            }
+            SqlScanState::BlockComment => {
+                if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    state = SqlScanState::Normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            SqlScanState::SingleQuoted | SqlScanState::DoubleQuoted => return true,
+        }
+    }
+    false
 }
 
 fn short_hash(hash: &str) -> String {
@@ -400,29 +539,22 @@ fn lance_dataset_row_count(dataset_dir: &Path, table_name: &str) -> Result<usize
     let dataset_dir_sql = sql_escape_path(dataset_dir);
     let sql = format!(
         "INSTALL lance; LOAD lance;\n\
-         ATTACH '{dataset_dir_sql}' AS lance_probe (TYPE LANCE);\n\
-         SELECT count(*) FROM lance_probe.{table_name};"
+         ATTACH '{dataset_dir_sql}' AS lance_probe (TYPE LANCE);"
     );
-    let output = Command::new("duckdb")
-        .args(["-csv", "-noheader", ":memory:", "-c", &sql])
-        .output()
-        .with_context(|| "failed to spawn duckdb Lance sidecar probe")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "duckdb Lance sidecar probe exited {}: {}",
-            output.status,
-            stderr.trim()
-        ));
-    }
-    let stdout = String::from_utf8(output.stdout).context("duckdb probe stdout was not UTF-8")?;
-    stdout
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .parse::<usize>()
-        .with_context(|| format!("failed to parse Lance sidecar row count from {stdout:?}"))
+    let conn = duckdb::Connection::open_in_memory()
+        .context("failed to open in-memory duckdb Lance sidecar probe")?;
+    conn.execute_batch(&sql)
+        .context("failed to initialize duckdb Lance sidecar probe")?;
+    conn.query_row(
+        &format!("SELECT count(*) FROM lance_probe.{table_name};"),
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .with_context(|| format!("failed to query Lance sidecar row count for {table_name}"))
+    .and_then(|count| {
+        usize::try_from(count)
+            .with_context(|| format!("Lance sidecar row count was negative: {count}"))
+    })
 }
 
 fn render_init_search_sql(lance_available: bool) -> Result<String> {
@@ -617,41 +749,23 @@ pub(crate) fn diagnostics_present(artifact_dir: &Path) -> bool {
     artifact_dir.join("diagnostics.parquet").is_file()
 }
 
-pub(crate) fn duckdb_cli_present() -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    for entry in std::env::split_paths(&paths) {
-        let candidate = entry.join("duckdb");
-        if candidate.is_file() {
-            return true;
-        }
-    }
-    false
-}
-
-fn lance_extension_version(db_path: &Path) -> Option<String> {
-    let output = Command::new("duckdb")
-        .args(["-csv", "-noheader"])
-        .arg(db_path)
-        .args([
-            "-c",
-            "LOAD lance;
-             SELECT COALESCE(extension_version, '<unknown>')
-             FROM duckdb_extensions()
-             WHERE extension_name = 'lance';",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8(output.stdout).ok()?;
-    value.lines().next().map(str::trim).and_then(|line| {
-        if line.is_empty() {
+fn lance_extension_version() -> Option<String> {
+    let conn = duckdb::Connection::open_in_memory().ok()?;
+    conn.execute_batch("INSTALL lance; LOAD lance;").ok()?;
+    conn.query_row(
+        "SELECT COALESCE(extension_version, '<unknown>')
+         FROM duckdb_extensions()
+         WHERE extension_name = 'lance';",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|value| {
+        let value = value.trim();
+        if value.is_empty() {
             None
         } else {
-            Some(line.to_owned())
+            Some(value.to_owned())
         }
     })
 }
@@ -670,6 +784,48 @@ mod tests {
 
     fn temp_root() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    #[test]
+    fn split_sql_statements_ignores_semicolons_in_literals_and_comments() {
+        let statements = split_sql_statements(
+            "SELECT ';' AS literal; -- ignored ;\n\
+             /* ignored ; */\n\
+             CREATE TABLE \"semi;colon\"(value VARCHAR DEFAULT 'a; b')",
+        );
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0], "SELECT ';' AS literal;");
+        assert!(statements[1].contains("CREATE TABLE \"semi;colon\""));
+    }
+
+    #[test]
+    fn execute_duckdb_script_handles_fts_forward_reference() {
+        let conn = duckdb::Connection::open_in_memory().expect("open duckdb");
+        conn.execute_batch("INSTALL fts; LOAD fts;")
+            .expect("load fts");
+
+        execute_duckdb_script(
+            &conn,
+            "CREATE OR REPLACE TABLE sections AS
+             SELECT 'section-1' AS stable_symbol_id, 'delegation text' AS body_text;
+             CREATE OR REPLACE TABLE sections_search AS
+             SELECT stable_symbol_id, body_text FROM sections;
+             PRAGMA create_fts_index('sections_search', 'stable_symbol_id', 'body_text', overwrite=1);",
+        )
+        .expect("execute fts script");
+
+        let hit_count: i64 = conn
+            .query_row(
+                "SELECT count(*)
+                 FROM sections_search s
+                 WHERE fts_main_sections_search.match_bm25(s.stable_symbol_id, 'delegation')
+                       IS NOT NULL;",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query fts hits");
+        assert_eq!(hit_count, 1);
     }
 
     #[test]
@@ -897,87 +1053,6 @@ mod tests {
     }
 
     #[test]
-    fn lance_hybrid_available_probes_code_symbols_from_artifact_database() {
-        let _env_guard = env_lock();
-        let dir = temp_root();
-        let artifact_dir = dir.path().join("artifact.parquet");
-        fs::create_dir_all(artifact_dir.join(SECTIONS_DATASET_DIR)).unwrap();
-        fs::create_dir_all(artifact_dir.join(CODE_SYMBOLS_DATASET_DIR)).unwrap();
-        std::fs::write(
-            artifact_dir.join("manifest.json"),
-            r#"{
-              "sidecar_complete": true,
-              "sidecar_row_counts": {
-                "section_bodies": 4323,
-                "code_symbols": 8742
-              }
-            }"#,
-        )
-        .unwrap();
-
-        let bin_dir = dir.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let duckdb = bin_dir.join("duckdb");
-        std::fs::write(
-            &duckdb,
-            r#"#!/bin/sh
-sql=''
-prev=''
-for arg in "$@"; do
-  if [ "$prev" = "-c" ]; then
-    sql=$arg
-    break
-  fi
-  prev=$arg
-done
-
-case "$sql" in
-  *"sections.lancedb"*".section_bodies"*)
-    echo 4323
-    exit 0
-    ;;
-  *"code_symbols.lance"*)
-    echo "code symbol probe attached code_symbols.lance directly" >&2
-    exit 1
-    ;;
-  *"$SPUR_TEST_ARTIFACT_DIR"*".code_symbols"*)
-    echo 8742
-    exit 0
-    ;;
-  *)
-    echo "unexpected SQL: $sql" >&2
-    exit 1
-    ;;
-esac
-"#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&duckdb, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let prev_path = std::env::var_os("PATH");
-        let prev_artifact = std::env::var_os("SPUR_TEST_ARTIFACT_DIR");
-        std::env::set_var("PATH", &bin_dir);
-        std::env::set_var("SPUR_TEST_ARTIFACT_DIR", &artifact_dir);
-
-        let available = lance_hybrid_available(&artifact_dir, true);
-
-        match prev_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        match prev_artifact {
-            Some(value) => std::env::set_var("SPUR_TEST_ARTIFACT_DIR", value),
-            None => std::env::remove_var("SPUR_TEST_ARTIFACT_DIR"),
-        }
-
-        assert!(
-            available,
-            "code symbol sidecar probe must attach the artifact database, not code_symbols.lance"
-        );
-    }
-
-    #[test]
     fn init_views_sql_guards_direct_symbol_snapshot_coverage_without_bridge() {
         let bridge_view_name = ["v", "symbol", "id", "bridge"].join("_");
 
@@ -1175,42 +1250,9 @@ esac
     }
 
     #[test]
-    fn duckdb_cli_present_returns_some_when_on_path() {
-        let _env_guard = env_lock();
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let dir = temp_root();
-        let shim = dir.path().join("duckdb");
-        std::fs::write(&shim, "#!/bin/sh\nexit 0\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        std::env::set_var("PATH", dir.path());
-        let found = duckdb_cli_present();
-        std::env::set_var("PATH", path);
-
-        assert!(found, "shim was not found via PATH");
-    }
-
-    #[test]
-    fn duckdb_cli_present_returns_false_when_absent() {
-        let _env_guard = env_lock();
-        let prev = std::env::var_os("PATH").unwrap_or_default();
-        let dir = temp_root();
-        std::env::set_var("PATH", dir.path());
-        let found = duckdb_cli_present();
-        std::env::set_var("PATH", prev);
-
-        assert!(!found);
-    }
-
-    #[test]
     #[cfg(unix)]
-    fn build_happy_path_against_real_duckdb_if_present() {
+    fn build_happy_path_against_bundled_duckdb_if_artifact_present() {
         let _env_guard = env_lock();
-        if !duckdb_cli_present() {
-            eprintln!("skipping: duckdb CLI not on PATH");
-            return;
-        }
         // Real artifacts are required; this test piggybacks on the
         // repo's own .spur/graph/CURRENT if available, otherwise skips.
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1218,20 +1260,30 @@ esac
             .unwrap()
             .parent()
             .unwrap();
+        let artifact_manifest_present =
+            |path: &std::path::Path| path.join("manifest.json").is_file();
+        let copied_artifact = repo_root.join("real-artifact/current.parquet");
+        let artifact_dir = std::env::var_os("SPUR_GRAPH_ARTIFACT_DIR")
+            .map(PathBuf::from)
+            .filter(|path| artifact_manifest_present(path))
+            .or_else(|| artifact_manifest_present(&copied_artifact).then_some(copied_artifact));
         let current = repo_root.join(".spur/graph/CURRENT");
-        if !current.exists() {
-            eprintln!("skipping: no .spur/graph/CURRENT in repo");
+        if artifact_dir.is_none() && !artifact_manifest_present(&current) {
+            eprintln!(
+                "skipping: no SPUR_GRAPH_ARTIFACT_DIR, real-artifact/current.parquet, or .spur/graph/CURRENT in repo"
+            );
             return;
         }
         let tmp_db = repo_root
             .join(".spur")
             .join(format!("analyst.test-{}.duckdb", std::process::id()));
         let _ = std::fs::remove_file(&tmp_db);
+        let _ = std::fs::remove_file(fingerprint_path(&tmp_db));
 
         let opts = AnalystBuildOptions {
+            artifact_dir,
             db_path: Some(tmp_db.clone()),
             quiet: true,
-            ..Default::default()
         };
         build(repo_root, opts).expect("build");
 
@@ -1240,6 +1292,28 @@ esac
             "db file not created at {}",
             tmp_db.display()
         );
+        let db_size = std::fs::metadata(&tmp_db).expect("db metadata").len();
+        assert!(db_size > 0, "db file is empty at {}", tmp_db.display());
+
+        let conn = duckdb::Connection::open(&tmp_db).expect("open real-artifact analyst db");
+        conn.execute_batch("INSTALL fts; LOAD fts;")
+            .expect("load fts");
+        let fts_hit_count: i64 = conn
+            .query_row(
+                "SELECT count(*)
+                 FROM sections_search s
+                 WHERE fts_main_sections_search.match_bm25(s.stable_symbol_id, 'delegation')
+                       IS NOT NULL;",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query sections_search FTS hits");
+        assert!(
+            fts_hit_count > 0,
+            "expected real artifact FTS query to return hits"
+        );
+        eprintln!("real-artifact analyst db_size_bytes={db_size} fts_hit_count={fts_hit_count}");
         let _ = std::fs::remove_file(&tmp_db);
+        let _ = std::fs::remove_file(fingerprint_path(&tmp_db));
     }
 }
