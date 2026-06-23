@@ -117,6 +117,7 @@ pub enum AuditSentinelKind {
         reason: String,
     },
     Completion {
+        #[serde(default)]
         delegation_id: String,
         completion_state: CompletionState,
         #[serde(default)]
