@@ -1,10 +1,8 @@
 //! Analyst-owned MCP tools.
-//!
-//! `duckdb_*` tool extraction is a separate follow-up from the ownership plan;
-//! this phase owns the knowledge-context packs and documentation navigation.
 
 mod doc_navigate;
 mod knowledge_context;
+mod query;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -14,6 +12,7 @@ use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 
 pub use doc_navigate::doc_navigate;
 pub use knowledge_context::{knowledge_context_pack, knowledge_context_pack_2, warm_embed_model};
+pub use query::query;
 
 /// Metadata for a single analyst-owned MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +86,7 @@ impl AnalystMcpModule {
             "doc_navigate" => doc_navigate(&args).await,
             "knowledge_context_pack" => knowledge_context_pack(&args).await,
             "knowledge_context_pack_2" => knowledge_context_pack_2(&args).await,
+            "query" => query(&args).await,
             other => Err(McpHandlerError::InvalidParams(format!(
                 "unknown analyst MCP tool: {other}"
             ))),
@@ -142,6 +142,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         doc_navigate_def(),
         knowledge_context_pack_def(),
         knowledge_context_pack_2_def(),
+        query_def(),
     ]
 }
 
@@ -199,6 +200,24 @@ fn knowledge_context_pack_2_def() -> ToolDefinition {
         name: "knowledge_context_pack_2".into(),
         description: "First-class canonical structured evidence pack for semantic answers; it does not generate final prose. Preserves knowledge_context_pack retrieval and exact grounding while adding DuckPGQ/Onager-backed graph_paths, risk_scorecard, community_context, temporal_context, and caveats as bounded graph-reasoning evidence.".into(),
         input_schema: knowledge_context_pack_2_input_schema(),
+    }
+}
+
+fn query_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "query".into(),
+        description: "Execute read-only DuckDB SQL against .spur/analyst.duckdb and return columns, rows, row_count, and truncation metadata.".into(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "DuckDB SQL to execute read-only."
+                }
+            }
+        }),
     }
 }
 
