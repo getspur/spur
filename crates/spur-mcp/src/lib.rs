@@ -30,4 +30,10 @@ pub use registry::{
     ToolRegistryError, ToolResponse,
 };
 pub use response::{JsonRpcError, JsonRpcResponse};
+// Re-export the rmcp error primitives so domain crates can `impl ToolModule`
+// without taking a direct `rmcp` dependency. `McpError` is the `Err` type of
+// `ToolModule::call`; `ErrorCode` lets domain modules map their local error
+// kinds onto JSON-RPC codes.
+pub use rmcp::model::{ErrorCode, ErrorData as McpError};
+pub use server::{serve_stdio_server, RegistryServerHandler};
 pub use tools::{tools_list, ToolDefinition};

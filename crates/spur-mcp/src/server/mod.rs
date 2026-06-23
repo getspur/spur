@@ -8,7 +8,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::Router;
 use rmcp::{
-    service::{RoleServer, Service},
+    self,
+    service::{serve_server, RoleServer, Service},
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
@@ -17,6 +18,9 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::debug;
+
+pub mod registry_server;
+pub use registry_server::RegistryServerHandler;
 
 /// Idle-session watchdog for SPUR's streamable-HTTP MCP transports.
 ///
@@ -156,4 +160,29 @@ fn normalize_transport_path(path: String) -> String {
     } else {
         format!("/{path}")
     }
+}
+
+/// Serve an rmcp server over the process's stdin/stdout.
+///
+/// This is the transport standalone MCP servers use when launched directly by
+/// an MCP client (Claude Code, OpenCode, etc.) via `command`/`args`. The future
+/// resolves when the client disconnects or the stdio streams close.
+///
+/// `service` is typically a [`RegistryServerHandler`] wrapping a composed
+/// [`crate::ToolRegistry`], but any rmcp `ServerHandler` (which blanket-impls
+/// `Service<RoleServer>`) is accepted.
+pub async fn serve_stdio_server<S>(service: S) -> Result<()>
+where
+    S: Service<RoleServer>,
+{
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+    let running = serve_server(service, (stdin, stdout))
+        .await
+        .context("failed to start stdio MCP server")?;
+    running
+        .waiting()
+        .await
+        .context("stdio MCP server exited unexpectedly")?;
+    Ok(())
 }
