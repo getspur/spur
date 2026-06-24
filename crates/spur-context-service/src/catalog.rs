@@ -193,7 +193,13 @@ pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Re
 }
 
 fn ensure_index_jobs_table(conn: &Connection) -> Result<()> {
-    match conn.execute_batch(INDEX_JOBS_SQL) {
+    // The DuckLake catalog may be attached READ_ONLY; index_jobs is an
+    // operational table that lives in the local in-memory database, not in
+    // the attached catalog. Switch to the default database before creating,
+    // then switch back to the catalog.
+    let _ = conn.execute_batch("USE memory;");
+
+    let result = match conn.execute_batch(INDEX_JOBS_SQL) {
         Ok(()) => Ok(()),
         Err(error) if is_ducklake_constraint_error(&error) => {
             eprintln!(
@@ -204,7 +210,11 @@ fn ensure_index_jobs_table(conn: &Connection) -> Result<()> {
                 .context("failed to execute DuckLake-compatible index_jobs DDL")
         }
         Err(error) => Err(error).context("failed to execute index_jobs DDL"),
-    }
+    };
+
+    // Restore the catalog as the default database for query tools.
+    let _ = conn.execute_batch("USE spur_context;");
+    result
 }
 
 fn is_ducklake_constraint_error(error: &duckdb::Error) -> bool {

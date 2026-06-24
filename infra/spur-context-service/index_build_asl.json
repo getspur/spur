@@ -8,7 +8,6 @@
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
-        "LaunchType": "FARGATE",
         "CapacityProviderStrategy": [
           {
             "CapacityProvider": "FARGATE_SPOT",
@@ -95,7 +94,6 @@
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
-        "LaunchType": "FARGATE",
         "CapacityProviderStrategy": [
           {
             "CapacityProvider": "FARGATE",
