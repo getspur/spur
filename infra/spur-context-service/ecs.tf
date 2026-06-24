@@ -27,7 +27,8 @@ resource "aws_ecs_cluster_capacity_providers" "indexing" {
   default_capacity_strategy {
     capacity_provider = "FARGATE"
     weight            = 1
-  }}
+  }
+}
 
 # CloudWatch log group for worker task output.
 resource "aws_cloudwatch_log_group" "worker" {
