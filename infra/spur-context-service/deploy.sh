@@ -90,7 +90,7 @@ build_and_push_worker_image() {
     # AL2023 base + the static binary + git/curl/tar/unzip for source fetch.
     cat > "$BUILD_DIR/Dockerfile" <<'DOCKERFILE'
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023
-RUN dnf install -y git curl tar unzip && dnf clean all
+RUN dnf install -y --allowerasing git curl tar unzip && dnf clean all
 WORKDIR /workspace
 COPY worker-bin /usr/local/bin/spur-context-worker
 ENTRYPOINT ["/usr/local/bin/spur-context-worker"]

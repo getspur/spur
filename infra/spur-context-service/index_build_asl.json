@@ -1,5 +1,4 @@
 {
-  "comment": "On-demand context indexing pipeline. Triggered by external_index MCP tool via StartExecution.",
   "StartAt": "RunBuild",
   "States": {
     "RunBuild": {
