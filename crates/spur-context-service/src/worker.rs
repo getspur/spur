@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+use crate::abuse;
 use crate::catalog::connect_ducklake;
 use crate::jobs::{update_status, JobStatus};
 use crate::translate::{translate_artifact_to_ducklake, TranslateOptions, TranslateStats};
@@ -219,6 +220,18 @@ pub fn fetch_source(
     revision: &str,
     dest: &Path,
 ) -> Result<PathBuf, WorkerError> {
+    if !matches!(
+        optional_env("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE").as_deref(),
+        Some("1")
+    ) {
+        let parsed =
+            abuse::validate(source_url, &abuse::ValidateOptions::default()).map_err(|error| {
+                WorkerError::Fetch(format!("source_url abuse re-validation failed: {error}"))
+            })?;
+        abuse::resolve_and_check_dns(&parsed)
+            .map_err(|error| WorkerError::Fetch(format!("source_url DNS check failed: {error}")))?;
+    }
+
     match source_kind.trim().to_ascii_lowercase().as_str() {
         "git" => fetch_git(source_url, revision, dest),
         "tarball" => fetch_tarball(source_url, dest),
