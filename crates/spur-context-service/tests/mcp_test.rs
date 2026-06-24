@@ -11,8 +11,9 @@ use serde_json::{json, Value};
 use spur_context_service::catalog::CatalogResolver;
 use spur_context_service::jobs::{insert, InsertParams};
 use spur_context_service::mcp::{
-    handle_tool, route_index, route_index_status, tool_definitions, IndexExecutionRequest,
-    IndexExecutionStarter, McpHandlerError,
+    handle_tool, route_index, route_index_status, route_index_status_with_reconciliation,
+    tool_definitions, ExecutionOutcome, ExecutionOutcomeStatus, ExecutionStatusChecker,
+    IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
 };
 
 const PACKAGE: &str = "demo";
@@ -331,6 +332,75 @@ async fn external_index_status_returns_not_found_for_unknown_job() -> Result<()>
     let response = route_index_status(&json!({ "job_id": "missing-job" }), &fixture.conn)?;
 
     assert_eq!(response, json!({ "status": "not_found" }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_status_reconciles_succeeded_execution() -> Result<()> {
+    let fixture = McpFixture::new("index-status-succeeded")?;
+    let job = seed_queued_job(&fixture.conn, "arn:success")?;
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Succeeded,
+        output: Some(json!({
+            "snapshot_id": 777,
+            "rows_inserted": {
+                "nodes": 5,
+                "edges": 4
+            }
+        })),
+        error: None,
+    }));
+
+    let response = route_index_status_with_reconciliation(
+        &json!({ "job_id": job.job_id }),
+        &fixture.conn,
+        Some(&checker),
+    )?;
+
+    assert_eq!(response["status"], "complete");
+    assert_eq!(response["snapshot_id"], 777);
+    assert_eq!(response["row_counts"], json!({ "nodes": 5, "edges": 4 }));
+    assert_eq!(checker.described_arns(), ["arn:success"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_status_reconciles_failed_execution() -> Result<()> {
+    let fixture = McpFixture::new("index-status-failed")?;
+    let job = seed_queued_job(&fixture.conn, "arn:failed")?;
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Failed,
+        output: None,
+        error: Some("fetch: clone failed".to_owned()),
+    }));
+
+    let response = route_index_status_with_reconciliation(
+        &json!({ "job_id": job.job_id }),
+        &fixture.conn,
+        Some(&checker),
+    )?;
+
+    assert_eq!(response["status"], "failed");
+    assert_eq!(response["error"]["code"], "fetch");
+    assert_eq!(response["error"]["detail"], "clone failed");
+    assert_eq!(checker.described_arns(), ["arn:failed"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_status_without_checker_returns_stale_job() -> Result<()> {
+    let fixture = McpFixture::new("index-status-no-checker")?;
+    let job = seed_queued_job(&fixture.conn, "arn:stale")?;
+
+    let response = route_index_status_with_reconciliation(
+        &json!({ "job_id": job.job_id }),
+        &fixture.conn,
+        None,
+    )?;
+
+    assert_eq!(response["status"], "queued");
+    assert!(response.get("snapshot_id").is_none());
+    assert!(response.get("error").is_none());
     Ok(())
 }
 
@@ -1021,5 +1091,51 @@ impl IndexExecutionStarter for StubIndexExecutionStarter {
             self.started.lock().unwrap().push(request);
             Ok(format!("arn:stub:{job_id}"))
         })
+    }
+}
+
+fn seed_queued_job(
+    conn: &Connection,
+    execution_arn: &str,
+) -> Result<spur_context_service::jobs::JobRow> {
+    insert(
+        conn,
+        InsertParams {
+            source: "git:custom".to_owned(),
+            package: PACKAGE.to_owned(),
+            revision: "main".to_owned(),
+            source_url: SOURCE_URL.to_owned(),
+            source_url_hash: source_url_hash(SOURCE_URL),
+            execution_arn: Some(execution_arn.to_owned()),
+        },
+    )
+    .context("seed queued job")
+}
+
+struct StubExecutionStatusChecker {
+    outcome: Option<ExecutionOutcome>,
+    described_arns: Mutex<Vec<String>>,
+}
+
+impl StubExecutionStatusChecker {
+    fn new(outcome: Option<ExecutionOutcome>) -> Self {
+        Self {
+            outcome,
+            described_arns: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn described_arns(&self) -> Vec<String> {
+        self.described_arns.lock().unwrap().clone()
+    }
+}
+
+impl ExecutionStatusChecker for StubExecutionStatusChecker {
+    fn describe_execution(
+        &self,
+        arn: &str,
+    ) -> std::result::Result<Option<ExecutionOutcome>, McpHandlerError> {
+        self.described_arns.lock().unwrap().push(arn.to_owned());
+        Ok(self.outcome.clone())
     }
 }
