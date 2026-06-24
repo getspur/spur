@@ -17,7 +17,7 @@ INFRA_DIR="$SCRIPT_DIR"
 BUILD_DIR=$(mktemp -d)
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-DUCKDB_VERSION="1.5.2"
+DUCKDB_VERSION="1.4.4"
 EXT_PLATFORM="linux_arm64"
 EXTENSIONS=("httpfs" "ducklake")
 
@@ -37,16 +37,24 @@ download_extensions() {
 }
 
 build_binary() {
-    log "building on remote Graviton4 VM..."
+    log "building on remote Graviton4 VM (portable arm64 for Lambda: neoverse-n1)..."
     cd "$REPO_ROOT"
-    scripts/spur-cargo build -p spur-context-service --features lambda --release
+    # AWS Lambda arm64 is a fixed, non-selectable Graviton generation (Graviton2
+    # or 3 — not the builder's Graviton4). A binary built with the VM's default
+    # -Ctarget-cpu=neoverse-v2 / -mcpu=native faults (SIGILL) on Lambda's older
+    # hosts. Build the bootstrap for the neoverse-n1 (Graviton2) baseline so it
+    # runs on every Lambda arm64 host. These overrides apply to THIS build only;
+    # the dev/builder default stays neoverse-v2.
+    AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
+    CFLAGS="-mcpu=neoverse-n1 -O2" \
+    CXXFLAGS="-mcpu=neoverse-n1 -O2" \
+        scripts/spur-cargo build -p spur-context-service --features lambda --release
     scripts/cloud-build/fetch.sh --to "$BUILD_DIR/bootstrap" target/release/spur-context-service
 }
 
 package_zip() {
     local zip_path="$1"
     log "packaging Lambda zip..."
-    cp "$BUILD_DIR/bootstrap" "$BUILD_DIR/bootstrap"
     cd "$BUILD_DIR"
     zip -r "$zip_path" bootstrap .duckdb/ -x "*.gz"
     log "zip size: $(du -h "$zip_path" | cut -f1)"
