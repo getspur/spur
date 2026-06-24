@@ -181,10 +181,11 @@ pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Re
     load_ducklake_extensions(&conn, catalog_dsn)?;
 
     if data_path.starts_with("s3://") && !is_remote_catalog(catalog_dsn) {
-        conn.execute_batch(
+        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+        conn.execute_batch(&format!(
             "INSTALL httpfs; LOAD httpfs; \
-             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain);",
-        )
+             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
+        ))
         .context("failed to load httpfs for S3 data path")?;
     }
 
@@ -260,10 +261,11 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
         .context("failed to load ducklake extension")?;
 
     if is_remote_catalog(catalog_dsn) {
-        conn.execute_batch(
+        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+        conn.execute_batch(&format!(
             "INSTALL httpfs; LOAD httpfs; \
-             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain);",
-        )
+             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
+        ))
         .context("failed to load httpfs extension for remote DuckLake catalog")?;
     } else if catalog_dsn.starts_with("sqlite:") || catalog_dsn.starts_with("ducklake:sqlite:") {
         conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
