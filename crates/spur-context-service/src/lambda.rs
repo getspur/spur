@@ -191,8 +191,9 @@ fn sfn_client() -> Result<SfnIndexExecutionStarter, Error> {
     let region = env::var("AWS_REGION")
         .or_else(|_| env::var("AWS_DEFAULT_REGION"))
         .unwrap_or_else(|_| "us-east-1".to_owned());
-    let mut config =
-        aws_sdk_sfn::Config::builder().region(aws_sdk_sfn::config::Region::new(region));
+    let mut config = aws_sdk_sfn::Config::builder()
+        .behavior_version(aws_sdk_sfn::config::BehaviorVersion::latest())
+        .region(aws_sdk_sfn::config::Region::new(region));
 
     if let (Ok(access_key), Ok(secret_key)) = (
         env::var("AWS_ACCESS_KEY_ID"),

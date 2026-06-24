@@ -70,9 +70,14 @@ package_zip() {
 }
 
 build_worker() {
-    log "building worker binary (--features worker, x86_64 for Fargate)..."
+    log "building worker binary (--features worker, arm64 neoverse-n1 for Fargate)..."
     cd "$REPO_ROOT"
-    scripts/spur-cargo build -p spur-context-service --features worker --release
+    # Fargate ARM64 runs on Graviton2 (neoverse-n1). The build VM's default
+    # neoverse-v2 produces SIGILL on Fargate. Match the Lambda build flags.
+    AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
+    CFLAGS="-mcpu=neoverse-n1 -O2" \
+    CXXFLAGS="-mcpu=neoverse-n1 -O2" \
+        scripts/spur-cargo build -p spur-context-service --features worker --release
     scripts/cloud-build/fetch.sh --to "$BUILD_DIR/spur-context-worker" target/release/spur-context-worker
 }
 
@@ -89,8 +94,8 @@ build_and_push_worker_image() {
     # Build context: Dockerfile + worker binary.  The Dockerfile is minimal —
     # AL2023 base + the static binary + git/curl/tar/unzip for source fetch.
     cat > "$BUILD_DIR/Dockerfile" <<'DOCKERFILE'
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023
-RUN dnf install -y --allowerasing git curl tar unzip && dnf clean all
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 COPY worker-bin /usr/local/bin/spur-context-worker
 ENTRYPOINT ["/usr/local/bin/spur-context-worker"]
