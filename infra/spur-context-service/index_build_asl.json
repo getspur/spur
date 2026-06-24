@@ -16,7 +16,7 @@
           },
           {
             "CapacityProvider": "FARGATE",
-            "Base": 1,
+            "Base": 0,
             "Weight": 1
           }
         ],
