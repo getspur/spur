@@ -12,6 +12,13 @@ resource "aws_ecs_cluster" "indexing" {
   }
 }
 
+# Associate FARGATE + FARGATE_SPOT capacity providers with the cluster.
+# The ASL's CapacityProviderStrategy per-RunTask call controls the actual mix.
+resource "aws_ecs_cluster_capacity_providers" "indexing" {
+  cluster_name       = aws_ecs_cluster.indexing.name
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+}
+
 # CloudWatch log group for worker task output.
 resource "aws_cloudwatch_log_group" "worker" {
   name              = "/ecs/spur-context-worker"
@@ -27,6 +34,11 @@ resource "aws_ecs_task_definition" "worker" {
   network_mode            = "awsvpc"
   cpu                      = "4096"
   memory                   = "30720"
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
 
   execution_role_arn = aws_iam_role.ecs_task_execution.arn
   task_role_arn      = aws_iam_role.ecs_task.arn

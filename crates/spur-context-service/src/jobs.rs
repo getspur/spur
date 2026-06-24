@@ -88,7 +88,7 @@ pub fn insert(conn: &Connection, params: InsertParams) -> Result<JobRow> {
 
     let result = conn.execute(
         r"
-        INSERT INTO index_jobs (
+        INSERT INTO memory.index_jobs (
             job_id,
             source,
             package,
@@ -192,7 +192,7 @@ pub fn update_status(
     let row_counts_json = row_counts.map(|value| value.to_string());
     let changed = conn.execute(
         r"
-        UPDATE index_jobs
+        UPDATE memory.index_jobs
         SET status = ?,
             snapshot_id = ?,
             error = ?,
@@ -250,7 +250,7 @@ fn select_jobs_sql() -> &'static str {
         CAST(row_counts AS VARCHAR),
         CAST(created_at AS VARCHAR),
         CAST(updated_at AS VARCHAR)
-    FROM index_jobs
+    FROM memory.index_jobs
     "
 }
 
