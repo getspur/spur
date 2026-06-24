@@ -33,6 +33,8 @@ pub struct ApiGatewayRequestContext {
     #[serde(default)]
     pub authorizer: Option<ApiGatewayAuthorizer>,
     #[serde(default)]
+    pub http: Option<ApiGatewayHttp>,
+    #[serde(default)]
     pub identity: Option<ApiGatewayIdentity>,
 }
 
@@ -40,6 +42,20 @@ pub struct ApiGatewayRequestContext {
 pub struct ApiGatewayAuthorizer {
     #[serde(rename = "principalId", default)]
     pub principal_id: Option<String>,
+    #[serde(default)]
+    pub jwt: Option<JwtAuthorizer>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JwtAuthorizer {
+    #[serde(default)]
+    pub claims: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApiGatewayHttp {
+    #[serde(rename = "sourceIp", default)]
+    pub source_ip: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,23 +225,47 @@ fn caller_id(request: &ApiGatewayRequest) -> String {
             context
                 .authorizer
                 .as_ref()
-                .and_then(|authorizer| authorizer.principal_id.as_deref())
+                .and_then(jwt_caller_id)
                 .or_else(|| {
                     context
-                        .identity
+                        .authorizer
                         .as_ref()
-                        .and_then(|identity| identity.user_arn.as_deref())
+                        .and_then(|authorizer| non_blank(authorizer.principal_id.as_deref()))
+                })
+                .or_else(|| {
+                    context
+                        .http
+                        .as_ref()
+                        .and_then(|http| non_blank(http.source_ip.as_deref()))
                 })
                 .or_else(|| {
                     context
                         .identity
                         .as_ref()
-                        .and_then(|identity| identity.source_ip.as_deref())
+                        .and_then(|identity| non_blank(identity.user_arn.as_deref()))
+                })
+                .or_else(|| {
+                    context
+                        .identity
+                        .as_ref()
+                        .and_then(|identity| non_blank(identity.source_ip.as_deref()))
                 })
         })
-        .filter(|caller| !caller.trim().is_empty())
         .unwrap_or("anonymous")
         .to_owned()
+}
+
+fn jwt_caller_id(authorizer: &ApiGatewayAuthorizer) -> Option<&str> {
+    let claims = authorizer.jwt.as_ref()?.claims.as_ref()?;
+    claim_str(claims, "sub").or_else(|| claim_str(claims, "principal_id"))
+}
+
+fn claim_str<'a>(claims: &'a Value, key: &str) -> Option<&'a str> {
+    non_blank(claims.get(key).and_then(Value::as_str))
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 struct SfnIndexExecutionStarter {
@@ -289,4 +329,70 @@ fn json_headers() -> BTreeMap<String, String> {
 
 fn lambda_error(message: impl Into<String>) -> Error {
     Box::new(std::io::Error::other(message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_from_context(request_context: Value) -> ApiGatewayRequest {
+        serde_json::from_value(json!({
+            "body": "{}",
+            "requestContext": request_context
+        }))
+        .expect("API Gateway request should deserialize")
+    }
+
+    #[test]
+    fn caller_id_prefers_http_api_v2_jwt_subject() {
+        let request = request_from_context(json!({
+            "authorizer": {
+                "principalId": "rest-principal",
+                "jwt": {
+                    "claims": {
+                        "sub": "jwt-subject"
+                    }
+                }
+            },
+            "http": {
+                "sourceIp": "203.0.113.24"
+            },
+            "identity": {
+                "userArn": "arn:aws:iam::123456789012:user/rest",
+                "sourceIp": "198.51.100.10"
+            }
+        }));
+
+        assert_eq!(caller_id(&request), "jwt-subject");
+    }
+
+    #[test]
+    fn caller_id_uses_http_api_v2_source_ip_before_rest_identity() {
+        let request = request_from_context(json!({
+            "http": {
+                "sourceIp": "203.0.113.24"
+            },
+            "identity": {
+                "userArn": "arn:aws:iam::123456789012:user/rest",
+                "sourceIp": "198.51.100.10"
+            }
+        }));
+
+        assert_eq!(caller_id(&request), "203.0.113.24");
+    }
+
+    #[test]
+    fn caller_id_keeps_rest_api_v1_principal_fallback() {
+        let request = request_from_context(json!({
+            "authorizer": {
+                "principalId": "rest-principal"
+            },
+            "identity": {
+                "userArn": "arn:aws:iam::123456789012:user/rest",
+                "sourceIp": "198.51.100.10"
+            }
+        }));
+
+        assert_eq!(caller_id(&request), "rest-principal");
+    }
 }

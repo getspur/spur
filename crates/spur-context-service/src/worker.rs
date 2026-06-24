@@ -12,10 +12,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use aws_sdk_s3::primitives::ByteStream;
+use duckdb::Connection;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use thiserror::Error;
 
+use crate::abuse;
+use crate::catalog::connect_ducklake;
+use crate::jobs::{update_status, JobStatus};
 use crate::translate::{translate_artifact_to_ducklake, TranslateOptions, TranslateStats};
 
 const DEFAULT_ARTIFACT_DIR: &str = "/tmp/artifact";
@@ -106,11 +110,20 @@ pub async fn run_job_and_report(env: &JobEnv) -> Result<(), WorkerError> {
         result = run => {
             match result {
                 Ok(stats) => {
+                    update_job_status(
+                        env,
+                        JobStatus::Complete,
+                        Some(stats.snapshot_id),
+                        None,
+                        Some(json!(&stats.rows_inserted)),
+                    );
                     send_task_success(env, &stats).await?;
                     Ok(())
                 }
                 Err(error) => {
-                    send_task_failure(env, &failure_error_code(&error), &error.to_string()).await?;
+                    let error_detail = error.to_string();
+                    update_job_status(env, JobStatus::Failed, None, Some(&error_detail), None);
+                    send_task_failure(env, &failure_error_code(&error), &error_detail).await?;
                     Err(error)
                 }
             }
@@ -118,7 +131,9 @@ pub async fn run_job_and_report(env: &JobEnv) -> Result<(), WorkerError> {
         signal_result = wait_for_sigterm() => {
             if let Err(error) = signal_result {
                 let worker_error = WorkerError::SfnSend(error.to_string());
-                send_task_failure(env, &failure_error_code(&worker_error), &worker_error.to_string()).await?;
+                let error_detail = worker_error.to_string();
+                update_job_status(env, JobStatus::Failed, None, Some(&error_detail), None);
+                send_task_failure(env, &failure_error_code(&worker_error), &error_detail).await?;
                 return Err(worker_error);
             }
             handle_spot_interruption(env, &stage.get()).await?;
@@ -129,6 +144,41 @@ pub async fn run_job_and_report(env: &JobEnv) -> Result<(), WorkerError> {
 
 pub async fn run_job(env: &JobEnv) -> Result<TranslateStats, WorkerError> {
     run_job_with_stage(env.clone(), StageTracker::new()).await
+}
+
+pub fn update_job_status(
+    env: &JobEnv,
+    status: JobStatus,
+    snapshot_id: Option<i64>,
+    error: Option<&str>,
+    row_counts: Option<Value>,
+) {
+    let status_label = status.to_string();
+    let result = (|| -> Result<()> {
+        let conn = connect_ducklake(&env.catalog_dsn)
+            .with_context(|| format!("connect catalog for index job `{}`", env.job_id))?;
+        update_job_status_with_connection(&conn, env, status, snapshot_id, error, row_counts)
+            .with_context(|| format!("update index_jobs for job `{}`", env.job_id))?;
+        Ok(())
+    })();
+
+    if let Err(update_error) = result {
+        eprintln!(
+            "[worker] warning: failed to update index_jobs status to `{status_label}` for job `{}`: {update_error:#}",
+            env.job_id
+        );
+    }
+}
+
+pub fn update_job_status_with_connection(
+    conn: &Connection,
+    env: &JobEnv,
+    status: JobStatus,
+    snapshot_id: Option<i64>,
+    error: Option<&str>,
+    row_counts: Option<Value>,
+) -> crate::jobs::Result<()> {
+    update_status(conn, &env.job_id, status, snapshot_id, error, row_counts)
 }
 
 async fn run_job_with_stage(
@@ -170,6 +220,18 @@ pub fn fetch_source(
     revision: &str,
     dest: &Path,
 ) -> Result<PathBuf, WorkerError> {
+    if !matches!(
+        optional_env("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE").as_deref(),
+        Some("1")
+    ) {
+        let parsed =
+            abuse::validate(source_url, &abuse::ValidateOptions::default()).map_err(|error| {
+                WorkerError::Fetch(format!("source_url abuse re-validation failed: {error}"))
+            })?;
+        abuse::resolve_and_check_dns(&parsed)
+            .map_err(|error| WorkerError::Fetch(format!("source_url DNS check failed: {error}")))?;
+    }
+
     match source_kind.trim().to_ascii_lowercase().as_str() {
         "git" => fetch_git(source_url, revision, dest),
         "tarball" => fetch_tarball(source_url, dest),
