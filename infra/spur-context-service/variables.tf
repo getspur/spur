@@ -39,3 +39,20 @@ variable "concurrent_warm_instances" {
   type        = number
   default     = 0
 }
+
+# ─── On-Demand Indexing ──────────────────────────────────────────────────────
+
+variable "vpc_id" {
+  description = "VPC ID for the ECS worker tasks (needs S3/RDS/SFN egress)"
+  type        = string
+}
+
+variable "worker_subnets" {
+  description = "Subnets for ECS worker tasks (need NAT gateway or VPC endpoints for S3/SFN)"
+  type        = list(string)
+}
+
+variable "worker_ecr_image" {
+  description = "ECR image URI for the spur-context-worker container (e.g. <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker:latest)"
+  type        = string
+}
