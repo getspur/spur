@@ -1,0 +1,161 @@
+{
+  "comment": "On-demand context indexing pipeline. Triggered by external_index MCP tool via StartExecution.",
+  "StartAt": "RunBuild",
+  "States": {
+    "RunBuild": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "Cluster": "${cluster_arn}",
+        "TaskDefinition": "${worker_taskdef_arn}",
+        "LaunchType": "FARGATE",
+        "CapacityProviderStrategy": [
+          {
+            "CapacityProvider": "FARGATE_SPOT",
+            "Weight": 4
+          },
+          {
+            "CapacityProvider": "FARGATE",
+            "Base": 1,
+            "Weight": 1
+          }
+        ],
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": ${subnets_json},
+            "SecurityGroups": ${security_groups_json},
+            "AssignPublicIp": "ENABLED"
+          }
+        },
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "worker",
+              "Environment": [
+                {
+                  "Name": "TASK_TOKEN",
+                  "Value.$": "$$.Task.Token"
+                },
+                {
+                  "Name": "JOB_ID",
+                  "Value.$": "$.job_id"
+                },
+                {
+                  "Name": "PACKAGE",
+                  "Value.$": "$.package"
+                },
+                {
+                  "Name": "REVISION",
+                  "Value.$": "$.revision"
+                },
+                {
+                  "Name": "SOURCE",
+                  "Value.$": "$.source"
+                },
+                {
+                  "Name": "SOURCE_URL",
+                  "Value.$": "$.source_url"
+                },
+                {
+                  "Name": "SOURCE_KIND",
+                  "Value.$": "$.source_kind"
+                },
+                {
+                  "Name": "SPUR_CATALOG_S3_URI",
+                  "Value": "${catalog_s3_uri}"
+                }
+              ]
+            }
+          ]
+        },
+        "PropagateTags": "TASK_DEFINITION"
+      },
+      "ResultPath": "$.buildStats",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0,
+          "MaxDelaySeconds": 30
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "FallbackBuild",
+          "ResultPath": "$.buildError"
+        }
+      ],
+      "Next": "Done"
+    },
+    "FallbackBuild": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "Cluster": "${cluster_arn}",
+        "TaskDefinition": "${worker_taskdef_arn}",
+        "LaunchType": "FARGATE",
+        "CapacityProviderStrategy": [
+          {
+            "CapacityProvider": "FARGATE",
+            "Weight": 1
+          }
+        ],
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": ${subnets_json},
+            "SecurityGroups": ${security_groups_json},
+            "AssignPublicIp": "ENABLED"
+          }
+        },
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "worker",
+              "Environment": [
+                {
+                  "Name": "TASK_TOKEN",
+                  "Value.$": "$$.Task.Token"
+                },
+                {
+                  "Name": "JOB_ID",
+                  "Value.$": "$.job_id"
+                },
+                {
+                  "Name": "PACKAGE",
+                  "Value.$": "$.package"
+                },
+                {
+                  "Name": "REVISION",
+                  "Value.$": "$.revision"
+                },
+                {
+                  "Name": "SOURCE",
+                  "Value.$": "$.source"
+                },
+                {
+                  "Name": "SOURCE_URL",
+                  "Value.$": "$.source_url"
+                },
+                {
+                  "Name": "SOURCE_KIND",
+                  "Value.$": "$.source_kind"
+                },
+                {
+                  "Name": "SPUR_CATALOG_S3_URI",
+                  "Value": "${catalog_s3_uri}"
+                }
+              ]
+            }
+          ]
+        },
+        "PropagateTags": "TASK_DEFINITION"
+      },
+      "ResultPath": "$.buildStats",
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed"
+    }
+  }
+}

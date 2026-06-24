@@ -1,0 +1,23 @@
+# Example terraform.tfvars — copy to terraform.tfvars and fill in.
+#
+# Lambda configuration
+lambda_memory_mb          = 2048
+lambda_timeout_sec        = 30
+concurrent_warm_instances = 1
+
+# On-demand indexing — required for v2
+# VPC with NAT gateway or VPC endpoints for S3 + Step Functions API egress.
+vpc_id = "vpc-xxxxxxxx"
+
+# Private subnets with NAT egress (NOT public subnets — worker tasks don't
+# need inbound, and AssignPublicIp=ENABLED in the ASL gives them outbound).
+worker_subnets = [
+  "subnet-xxxxxxxx",
+  "subnet-yyyyyyyy",
+]
+
+# ECR image for the worker container.  Built and pushed by deploy.sh, or
+# manually:
+#   docker build -t <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker:latest .
+#   docker push <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker:latest
+worker_ecr_image = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker:latest"
