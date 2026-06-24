@@ -1,4 +1,4 @@
-//! index_jobs table CRUD and status transitions.
+//! `index_jobs` table CRUD and status transitions.
 
 use std::{error::Error as StdError, fmt};
 
@@ -46,7 +46,7 @@ impl fmt::Display for JobStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JobRow {
     pub job_id: String,
     pub source: String,
