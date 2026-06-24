@@ -3,7 +3,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
+use std::time::Duration;
 
+use aws_sdk_sfn::types::ExecutionStatus as AwsExecutionStatus;
 use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,6 +22,7 @@ const DEFAULT_INDEX_SOURCE: &str = "git:custom";
 const DEFAULT_REF: &str = "latest";
 const KNOWLEDGE_QUERY_VECTOR_DIMENSIONS: usize = 768;
 const RATE_LIMIT_RETRY_AFTER_SECONDS: u64 = 60;
+const DESCRIBE_EXECUTION_TIMEOUT: Duration = Duration::from_secs(2);
 
 static INDEX_RATE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
@@ -43,6 +46,73 @@ pub trait IndexExecutionStarter {
         &'a self,
         request: IndexExecutionRequest,
     ) -> Pin<Box<dyn Future<Output = Result<String, McpHandlerError>> + Send + 'a>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionOutcomeStatus {
+    Succeeded,
+    Failed,
+    Running,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionOutcome {
+    pub status: ExecutionOutcomeStatus,
+    pub output: Option<Value>,
+    pub error: Option<String>,
+}
+
+pub trait ExecutionStatusChecker {
+    fn describe_execution(&self, arn: &str) -> Result<Option<ExecutionOutcome>, McpHandlerError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct SfnExecutionStatusChecker {
+    client: aws_sdk_sfn::Client,
+    timeout: Duration,
+}
+
+impl SfnExecutionStatusChecker {
+    pub fn new(client: aws_sdk_sfn::Client) -> Self {
+        Self {
+            client,
+            timeout: DESCRIBE_EXECUTION_TIMEOUT,
+        }
+    }
+
+    pub fn with_timeout(client: aws_sdk_sfn::Client, timeout: Duration) -> Self {
+        Self { client, timeout }
+    }
+}
+
+impl ExecutionStatusChecker for SfnExecutionStatusChecker {
+    fn describe_execution(&self, arn: &str) -> Result<Option<ExecutionOutcome>, McpHandlerError> {
+        let client = self.client.clone();
+        let arn = arn.to_owned();
+        let timeout = self.timeout;
+        let output = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+                McpHandlerError::Internal(format!(
+                    "DescribeExecution runtime creation failed: {error}"
+                ))
+            })?;
+            runtime.block_on(async move {
+                tokio::time::timeout(
+                    timeout,
+                    client.describe_execution().execution_arn(arn).send(),
+                )
+                .await
+                .map_err(|error| {
+                    McpHandlerError::Internal(format!("DescribeExecution timed out: {error}"))
+                })?
+                .map_err(|error| McpHandlerError::Internal(format!("DescribeExecution: {error}")))
+            })
+        })
+        .join()
+        .map_err(|_| McpHandlerError::Internal("DescribeExecution thread panicked".to_owned()))??;
+
+        sfn_execution_outcome(output).map(Some)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -316,6 +386,14 @@ pub async fn route_index(
 }
 
 pub fn route_index_status(args: &Value, db: &Connection) -> Result<Value, McpHandlerError> {
+    route_index_status_with_reconciliation(args, db, None)
+}
+
+pub fn route_index_status_with_reconciliation(
+    args: &Value,
+    db: &Connection,
+    checker: Option<&dyn ExecutionStatusChecker>,
+) -> Result<Value, McpHandlerError> {
     let args: ExternalIndexStatusArgs = parse_args(args)?;
     args.validate()?;
     let Some(row) = jobs::lookup(db, &args.job_id)
@@ -324,6 +402,7 @@ pub fn route_index_status(args: &Value, db: &Connection) -> Result<Value, McpHan
         return Ok(json!({ "status": "not_found" }));
     };
 
+    let row = update_stale_job(db, row, checker)?;
     Ok(index_status_response(&row))
 }
 
@@ -671,6 +750,132 @@ where
     serde_json::to_value(value).map_err(|error| {
         McpHandlerError::Internal(format!("failed to serialize response: {error}"))
     })
+}
+
+fn update_stale_job(
+    db: &Connection,
+    row: JobRow,
+    checker: Option<&dyn ExecutionStatusChecker>,
+) -> Result<JobRow, McpHandlerError> {
+    if !matches!(row.status, JobStatus::Queued | JobStatus::Running) {
+        return Ok(row);
+    }
+
+    let Some(checker) = checker else {
+        return Ok(row);
+    };
+    let Some(execution_arn) = row.execution_arn.as_deref() else {
+        return Ok(row);
+    };
+
+    let outcome = match checker.describe_execution(execution_arn) {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) | Err(_) => return Ok(row),
+    };
+
+    match outcome.status {
+        ExecutionOutcomeStatus::Running => Ok(row),
+        ExecutionOutcomeStatus::Succeeded => {
+            let snapshot_id = outcome
+                .output
+                .as_ref()
+                .and_then(|output| output.get("snapshot_id"))
+                .and_then(Value::as_i64);
+            let row_counts = outcome
+                .output
+                .as_ref()
+                .and_then(|output| {
+                    output
+                        .get("rows_inserted")
+                        .or_else(|| output.get("row_counts"))
+                })
+                .cloned();
+
+            jobs::update_status(
+                db,
+                &row.job_id,
+                JobStatus::Complete,
+                snapshot_id,
+                None,
+                row_counts,
+            )
+            .map_err(jobs_error("external_index_status update complete failed"))?;
+            lookup_updated_job(db, &row.job_id)
+        }
+        ExecutionOutcomeStatus::Failed => {
+            let error = outcome
+                .error
+                .as_deref()
+                .filter(|error| !error.trim().is_empty())
+                .unwrap_or("execution: failed");
+            jobs::update_status(db, &row.job_id, JobStatus::Failed, None, Some(error), None)
+                .map_err(jobs_error(
+                    "external_index_status update failed status failed",
+                ))?;
+            lookup_updated_job(db, &row.job_id)
+        }
+    }
+}
+
+fn lookup_updated_job(db: &Connection, job_id: &str) -> Result<JobRow, McpHandlerError> {
+    jobs::lookup(db, job_id)
+        .map_err(jobs_error(
+            "external_index_status refresh updated job failed",
+        ))?
+        .ok_or_else(|| {
+            McpHandlerError::Internal(format!(
+                "external_index_status updated job disappeared: {job_id}"
+            ))
+        })
+}
+
+fn sfn_execution_outcome(
+    output: aws_sdk_sfn::operation::describe_execution::DescribeExecutionOutput,
+) -> Result<ExecutionOutcome, McpHandlerError> {
+    let status = match output.status() {
+        AwsExecutionStatus::Succeeded => ExecutionOutcomeStatus::Succeeded,
+        AwsExecutionStatus::Running | AwsExecutionStatus::PendingRedrive => {
+            ExecutionOutcomeStatus::Running
+        }
+        AwsExecutionStatus::Failed | AwsExecutionStatus::Aborted | AwsExecutionStatus::TimedOut => {
+            ExecutionOutcomeStatus::Failed
+        }
+        other => match other.as_str() {
+            "SUCCEEDED" => ExecutionOutcomeStatus::Succeeded,
+            "RUNNING" | "PENDING_REDRIVE" => ExecutionOutcomeStatus::Running,
+            _ => ExecutionOutcomeStatus::Failed,
+        },
+    };
+    let output_value = output
+        .output()
+        .map(|raw| {
+            serde_json::from_str(raw).map_err(|error| {
+                McpHandlerError::Internal(format!("DescribeExecution output JSON: {error}"))
+            })
+        })
+        .transpose()?;
+    let error = execution_error_message(&status, &output);
+
+    Ok(ExecutionOutcome {
+        status,
+        output: output_value,
+        error,
+    })
+}
+
+fn execution_error_message(
+    status: &ExecutionOutcomeStatus,
+    output: &aws_sdk_sfn::operation::describe_execution::DescribeExecutionOutput,
+) -> Option<String> {
+    match (output.error(), output.cause()) {
+        (Some(error), Some(cause)) if !cause.trim().is_empty() => Some(format!("{error}: {cause}")),
+        (Some(error), _) => Some(error.to_owned()),
+        (None, Some(cause)) if !cause.trim().is_empty() => Some(format!("execution: {cause}")),
+        (None, _) if *status == ExecutionOutcomeStatus::Failed => {
+            Some(format!("execution: {}", output.status().as_str()))
+        }
+        _ => None,
+    }
 }
 
 fn source_url_hash(source_url: &str) -> String {
