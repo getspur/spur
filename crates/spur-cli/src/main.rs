@@ -333,8 +333,15 @@ enum Commands {
     /// bundled read-only server (code-graph + analyst query tools). For
     /// isolated per-domain servers use `spur graph mcp` or `spur analyst mcp`.
     /// Wire directly into an MCP client via `command: "spur", args: ["mcp"]`.
+    /// Pass `--root <path>` to bind all tool calls to a worktree; when omitted,
+    /// SPUR_WORKTREE is used before falling back to the client launch directory.
     /// All logging goes to stderr; stdout carries the JSON-RPC stream.
-    Mcp,
+    Mcp {
+        /// Worktree root for all tool calls. Defaults to SPUR_WORKTREE, then
+        /// the MCP client launch directory.
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+    },
     /// Garbage-collect outcome blobs
     Gc {
         #[command(subcommand)]
@@ -454,30 +461,39 @@ mod cli_parse_tests {
 
     #[test]
     fn cli_accepts_graph_mcp_subcommand() {
+        let root = PathBuf::from(".");
         let matches = Cli::command()
-            .try_get_matches_from(["spur", "graph", "mcp"])
+            .try_get_matches_from(["spur", "graph", "mcp", "--root", "."])
             .expect("graph mcp should parse");
         assert_eq!(matches.subcommand_name(), Some("graph"));
         let (_, sub) = matches.subcommand().expect("graph subcommand");
         assert_eq!(sub.subcommand_name(), Some("mcp"));
+        let (_, mcp) = sub.subcommand().expect("graph mcp subcommand");
+        assert_eq!(mcp.get_one::<PathBuf>("root"), Some(&root));
     }
 
     #[test]
     fn cli_accepts_analyst_mcp_subcommand() {
+        let root = PathBuf::from(".");
         let matches = Cli::command()
-            .try_get_matches_from(["spur", "analyst", "mcp"])
+            .try_get_matches_from(["spur", "analyst", "mcp", "--root", "."])
             .expect("analyst mcp should parse");
         assert_eq!(matches.subcommand_name(), Some("analyst"));
         let (_, sub) = matches.subcommand().expect("analyst subcommand");
         assert_eq!(sub.subcommand_name(), Some("mcp"));
+        let (_, mcp) = sub.subcommand().expect("analyst mcp subcommand");
+        assert_eq!(mcp.get_one::<PathBuf>("root"), Some(&root));
     }
 
     #[test]
     fn cli_accepts_top_level_mcp_command() {
+        let root = PathBuf::from(".");
         let matches = Cli::command()
-            .try_get_matches_from(["spur", "mcp"])
+            .try_get_matches_from(["spur", "mcp", "--root", "."])
             .expect("spur mcp should parse");
         assert_eq!(matches.subcommand_name(), Some("mcp"));
+        let (_, mcp) = matches.subcommand().expect("mcp subcommand");
+        assert_eq!(mcp.get_one::<PathBuf>("root"), Some(&root));
     }
 
     #[test]
@@ -600,8 +616,15 @@ enum AnalystCommands {
     /// `knowledge_context_pack`, `knowledge_context_pack_2`, and
     /// `doc_navigate` against the `.spur/analyst.duckdb` index. Wire directly
     /// into an MCP client via `command: "spur", args: ["analyst", "mcp"]`.
+    /// Pass `--root <path>` to bind all tool calls to a worktree; when omitted,
+    /// SPUR_WORKTREE is used before falling back to the client launch directory.
     /// All logging goes to stderr; stdout carries the JSON-RPC stream.
-    Mcp,
+    Mcp {
+        /// Worktree root for all tool calls. Defaults to SPUR_WORKTREE, then
+        /// the MCP client launch directory.
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -642,9 +665,16 @@ enum GraphCommands {
     /// Run the code-graph MCP server over stdio, exposing the `code_*` tools
     /// (resolve/search/read/callers/callees/subgraph/history) against the
     /// `.spur/graph` index. Wire directly into an MCP client via
-    /// `command: "spur", args: ["graph", "mcp"]`. All logging goes to stderr;
-    /// stdout carries the JSON-RPC stream.
-    Mcp,
+    /// `command: "spur", args: ["graph", "mcp"]`. Pass `--root <path>` to
+    /// bind all tool calls to a worktree; when omitted, SPUR_WORKTREE is used
+    /// before falling back to the client launch directory. All logging goes to
+    /// stderr; stdout carries the JSON-RPC stream.
+    Mcp {
+        /// Worktree root for all tool calls. Defaults to SPUR_WORKTREE, then
+        /// the MCP client launch directory.
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1116,7 +1146,7 @@ async fn run() -> Result<()> {
                     },
                 )
             }
-            AnalystCommands::Mcp => commands::mcp::run_analyst_server().await,
+            AnalystCommands::Mcp { root } => commands::mcp::run_analyst_server(root).await,
         },
         Commands::Graph { command } => match command {
             GraphCommands::Build {
@@ -1148,9 +1178,9 @@ async fn run() -> Result<()> {
                     commands::graph::build(options)
                 }
             }
-            GraphCommands::Mcp => commands::mcp::run_graph_server().await,
+            GraphCommands::Mcp { root } => commands::mcp::run_graph_server(root).await,
         },
-        Commands::Mcp => commands::mcp::run_bundled_server().await,
+        Commands::Mcp { root } => commands::mcp::run_bundled_server(root).await,
         Commands::Gc {
             cmd:
                 GcCmd::Outcomes {
