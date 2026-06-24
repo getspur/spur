@@ -14,7 +14,7 @@ use duckdb::Connection;
 use serde_json::{json, Value};
 use spur_context_service::jobs::{lookup, JobStatus};
 use spur_context_service::worker::{
-    fetch_source, handle_spot_interruption, update_job_status_with_connection, JobEnv,
+    fetch_source, handle_spot_interruption, update_job_status_with_connection, JobEnv, WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -54,6 +54,8 @@ fn job_env_from_env_reads_catalog_dsn() -> Result<()> {
 
 #[test]
 fn fetch_source_downloads_and_extracts_tarball() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE", "1")]);
     let root = unique_temp_dir("worker-tarball")?;
     let fixture = root.join("fixture").join("demo-0.1.0");
     fs::create_dir_all(fixture.join("src")).context("create fixture")?;
@@ -75,6 +77,30 @@ fn fetch_source_downloads_and_extracts_tarball() -> Result<()> {
         fs::read_to_string(fetched.join("src/lib.rs")).context("read fetched lib")?,
         "pub fn demo() {}\n"
     );
+    Ok(())
+}
+
+#[test]
+fn fetch_source_rejects_localhost_url_without_escape_hatch() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE", "0")]);
+    let root = unique_temp_dir("worker-localhost-rejected")?;
+
+    let err = fetch_source(
+        "https://127.0.0.1/archive.tar.gz",
+        "tarball",
+        "0.1.0",
+        &root.join("fetch"),
+    )
+    .unwrap_err();
+
+    match err {
+        WorkerError::Fetch(detail) => {
+            assert!(detail.contains("source_url abuse re-validation failed"));
+            assert!(detail.contains("localhost"));
+        }
+        other => panic!("expected fetch error, got {other:?}"),
+    }
     Ok(())
 }
 
@@ -146,6 +172,8 @@ fn update_job_status_marks_job_complete_in_catalog() -> Result<()> {
 #[test]
 #[ignore = "requires git on PATH; run with: scripts/spur-cargo test -p spur-context-service --features worker --test worker_test fetch_source_clones_git_repo -- --ignored"]
 fn fetch_source_clones_git_repo() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE", "1")]);
     let root = unique_temp_dir("worker-git")?;
     let repo = root.join("repo");
     fs::create_dir_all(repo.join("src")).context("create repo")?;
