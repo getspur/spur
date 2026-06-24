@@ -1,15 +1,23 @@
 use std::fs;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use duckdb::{params, Connection};
 use serde_json::{json, Value};
 use spur_context_service::catalog::CatalogResolver;
-use spur_context_service::mcp::{handle_tool, tool_definitions, McpHandlerError};
+use spur_context_service::jobs::{insert, InsertParams};
+use spur_context_service::mcp::{
+    handle_tool, route_index, route_index_status, tool_definitions, IndexExecutionRequest,
+    IndexExecutionStarter, McpHandlerError,
+};
 
 const PACKAGE: &str = "demo";
 const REVISION: &str = "1.0.0";
+const SOURCE_URL: &str = "https://1.1.1.1/example/demo";
 const DIMENSIONS: usize = 768;
 
 #[test]
@@ -28,6 +36,8 @@ fn tool_definitions_match_external_context_surface() {
             "external_code_callers",
             "external_code_callees",
             "external_knowledge_context",
+            "external_index",
+            "external_index_status",
         ]
     );
 
@@ -56,6 +66,24 @@ fn tool_definitions_match_external_context_surface() {
         json!(["code", "docs", "all"])
     );
     assert_eq!(knowledge_schema["properties"]["limit"]["default"], 8);
+
+    let index_schema = schema_for(&definitions, "external_index");
+    assert_eq!(
+        required(index_schema),
+        ["package", "revision", "source_url"]
+    );
+    assert_eq!(
+        index_schema["properties"]["source"]["default"],
+        "git:custom"
+    );
+    assert_eq!(
+        index_schema["properties"]["source_kind"]["enum"],
+        json!(["git", "tarball"])
+    );
+    assert_eq!(index_schema["properties"]["force"]["default"], false);
+
+    let status_schema = schema_for(&definitions, "external_index_status");
+    assert_eq!(required(status_schema), ["job_id"]);
 }
 
 #[tokio::test]
@@ -273,6 +301,130 @@ async fn handler_reports_unknown_tool_missing_args_and_missing_package() -> Resu
     Ok(())
 }
 
+#[tokio::test]
+async fn external_index_rejects_missing_source_url() -> Result<()> {
+    let fixture = McpFixture::new("index-missing-source-url")?;
+    let sfn = StubIndexExecutionStarter::default();
+
+    let error = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": REVISION,
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &sfn,
+        "caller-missing-source-url",
+    )
+    .await
+    .expect_err("missing source_url should fail validation");
+
+    assert!(matches!(error, McpHandlerError::InvalidParams(_)));
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_status_returns_not_found_for_unknown_job() -> Result<()> {
+    let fixture = McpFixture::new("index-status-not-found")?;
+
+    let response = route_index_status(&json!({ "job_id": "missing-job" }), &fixture.conn)?;
+
+    assert_eq!(response, json!({ "status": "not_found" }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_returns_complete_for_warm_catalog_hit() -> Result<()> {
+    let fixture = McpFixture::new("index-warm")?;
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": REVISION,
+            "source_url": SOURCE_URL,
+            "source": "registry:crates-io"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &sfn,
+        "caller-warm",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "complete");
+    assert_eq!(response["snapshot_id"], 100);
+    assert_eq!(response["revision"], REVISION);
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_returns_existing_active_job_for_dedup_hit() -> Result<()> {
+    let fixture = McpFixture::new("index-dedup")?;
+    let sfn = StubIndexExecutionStarter::default();
+    let existing = insert(
+        &fixture.conn,
+        InsertParams {
+            source: "git:custom".to_owned(),
+            package: PACKAGE.to_owned(),
+            revision: "main".to_owned(),
+            source_url: SOURCE_URL.to_owned(),
+            source_url_hash: source_url_hash(SOURCE_URL),
+            execution_arn: Some("arn:existing".to_owned()),
+        },
+    )
+    .context("seed active job")?;
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": SOURCE_URL,
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &sfn,
+        "caller-dedup",
+    )
+    .await?;
+
+    assert_eq!(response["job_id"], existing.job_id);
+    assert_eq!(response["status"], "queued");
+    assert_eq!(response["execution_arn"], "arn:existing");
+    assert_eq!(response["revision"], "main");
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_rejects_localhost_source_url_before_starting_job() -> Result<()> {
+    let fixture = McpFixture::new("index-abuse")?;
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": "https://localhost/example/demo",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &sfn,
+        "caller-abuse",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "rejected");
+    assert!(response["reason"]
+        .as_str()
+        .context("reason string")?
+        .contains("source_url targets localhost"));
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
 fn schema_for<'a>(
     definitions: &'a [spur_context_service::mcp::ToolDefinition],
     name: &str,
@@ -445,6 +597,23 @@ fn create_query_schema(conn: &Connection) -> Result<()> {
             ref_name VARCHAR,
             revision VARCHAR,
             updated_at TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS index_jobs (
+            job_id TEXT PRIMARY KEY,
+            source TEXT,
+            package TEXT,
+            revision TEXT,
+            source_url TEXT,
+            source_url_hash TEXT,
+            status TEXT,
+            execution_arn TEXT,
+            error TEXT,
+            snapshot_id BIGINT,
+            row_counts JSON,
+            created_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ,
+            UNIQUE(source, package, revision, source_url_hash)
         );
         ",
     )
@@ -785,6 +954,7 @@ fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
         INSERT INTO refs VALUES
             ('registry:crates-io', 'demo', 'latest', '1.0.0',
              TIMESTAMP '2026-06-22 00:05:00');
+
         "#,
     )
     .context("seed catalog fixture")?;
@@ -818,4 +988,38 @@ fn unique_temp_dir(name: &str) -> Result<PathBuf> {
 
 fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn source_url_hash(source_url: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in source_url.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+#[derive(Default)]
+struct StubIndexExecutionStarter {
+    started: Mutex<Vec<IndexExecutionRequest>>,
+}
+
+impl StubIndexExecutionStarter {
+    fn started_count(&self) -> usize {
+        self.started.lock().unwrap().len()
+    }
+}
+
+impl IndexExecutionStarter for StubIndexExecutionStarter {
+    fn start_execution<'a>(
+        &'a self,
+        request: IndexExecutionRequest,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<String, McpHandlerError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let job_id = request.name.clone();
+            self.started.lock().unwrap().push(request);
+            Ok(format!("arn:stub:{job_id}"))
+        })
+    }
 }
