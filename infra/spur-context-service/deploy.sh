@@ -102,8 +102,8 @@ DOCKERFILE
     aws ecr get-login-password --region "$AWS_REGION_VAL" \
         | docker login --username AWS --password-stdin "$ecr_uri" >&2
 
-    docker build -t "$full_tag" . >&2
-    docker push "$full_tag" >&2
+    docker build -t "$full_tag" . >&2 || { log "docker build failed"; return 1; }
+    docker push "$full_tag" >&2 || { log "docker push failed"; return 1; }
     log "worker image pushed: $full_tag"
     echo "$full_tag"
 }
