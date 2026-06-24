@@ -1,7 +1,7 @@
 # ECS cluster for the on-demand indexing worker.
-# Capacity providers: FARGATE_SPOT (primary, cheaper) with FARGATE (on-demand)
-# base=1 fallback. The SF state machine's CapacityProviderStrategy controls
-# the actual mix per task; the cluster just needs both providers associated.
+# FARGATE and FARGATE_SPOT are AWS-managed capacity providers available on all
+# clusters by default. The SF state machine's ASL specifies the
+# CapacityProviderStrategy per RunTask call, so no cluster-level default needed.
 
 resource "aws_ecs_cluster" "indexing" {
   name = "spur-context-indexing"
@@ -9,24 +9,6 @@ resource "aws_ecs_cluster" "indexing" {
   setting {
     name  = "containerInsights"
     value = "enabled"
-  }
-}
-
-resource "aws_ecs_cluster_capacity_providers" "indexing" {
-  cluster_name = aws_ecs_cluster.indexing.name
-
-  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
-
-  default_capacity_strategy {
-    capacity_provider = "FARGATE_SPOT"
-    weight            = 4
-
-    base = 0
-  }
-
-  default_capacity_strategy {
-    capacity_provider = "FARGATE"
-    weight            = 1
   }
 }
 
