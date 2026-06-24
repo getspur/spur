@@ -1,9 +1,9 @@
-//! URL validation and abuse prevention for external_index source_url.
+//! URL validation and abuse prevention for `external_index` `source_url`.
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs as _};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -104,7 +104,7 @@ pub fn validate(source_url: &str, opts: &ValidateOptions) -> Result<ParsedSource
     Ok(ParsedSourceUrl {
         source_kind,
         hostname: raw.hostname,
-        url: source_url.to_string(),
+        url: source_url.to_owned(),
     })
 }
 
@@ -116,7 +116,7 @@ pub fn resolve_and_check_dns(parsed: &ParsedSourceUrl) -> Result<(), AbuseError>
 
     let addrs = (parsed.hostname.as_str(), 443)
         .to_socket_addrs()
-        .map_err(|_| AbuseError::ForbiddenIpRange)?;
+        .map_err(|_error| AbuseError::ForbiddenIpRange)?;
 
     let mut saw_addr = false;
     for addr in addrs {
@@ -169,7 +169,7 @@ impl RateLimiter {
         let capacity = f64::from(self.calls_per_minute);
         let mut buckets = self.buckets.lock().expect("rate limiter mutex poisoned");
         let bucket = buckets
-            .entry(caller_id.to_string())
+            .entry(caller_id.to_owned())
             .or_insert_with(|| TokenBucket {
                 tokens: capacity,
                 last_refill: now,
@@ -232,9 +232,7 @@ fn parse_source_url(source_url: &str) -> Result<RawSourceUrl<'_>, AbuseError> {
         return Err(AbuseError::ForbiddenScheme);
     }
 
-    let authority_end = rest
-        .find(|ch| matches!(ch, '/' | '?' | '#'))
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     let hostname = extract_hostname(authority)?;
     let tail_without_fragment = rest[authority_end..]
@@ -334,7 +332,7 @@ fn check_size_hint(
         }
         let size = value
             .parse::<u64>()
-            .map_err(|_| AbuseError::SizeCapExceeded)?;
+            .map_err(|_error| AbuseError::SizeCapExceeded)?;
         if size > cap {
             return Err(AbuseError::SizeCapExceeded);
         }

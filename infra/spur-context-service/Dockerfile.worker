@@ -1,0 +1,9 @@
+FROM arm64v8/debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY worker-bin /usr/local/bin/spur-context-worker
+ENTRYPOINT ["/usr/local/bin/spur-context-worker"]

@@ -161,7 +161,9 @@ fn catalog_from_connection_creates_index_jobs_table_if_missing() -> Result<()> {
 
     let count: i64 = resolver
         .connection()
-        .query_row("SELECT COUNT(*) FROM index_jobs", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM memory.index_jobs", [], |row| {
+            row.get(0)
+        })
         .context("query index_jobs after catalog initialization")?;
     assert_eq!(count, 0);
     Ok(())
