@@ -29,7 +29,6 @@ resource "aws_iam_role_policy" "s3_access" {
       Action = [
         "s3:GetObject",
         "s3:GetObjectVersion",
-        "s3:HeadObject",
         "s3:ListBucket"
       ]
       Resource = [
@@ -50,11 +49,17 @@ resource "aws_iam_role_policy" "lambda_sfn" {
     Statement = [{
       Effect = "Allow"
       Action = [
-        "states:StartExecution",
+        "states:StartExecution"
+      ]
+      Resource = aws_sfn_state_machine.index_build.arn
+    },
+    {
+      Effect = "Allow"
+      Action = [
         "states:DescribeExecution",
         "states:StopExecution"
       ]
-      Resource = aws_sfn_state_machine.index_build.arn
+      Resource = "*"
     }]
   })
 }
@@ -86,7 +91,7 @@ resource "aws_iam_role_policy" "sfn_ecs" {
         Effect = "Allow"
         Action = ["ecs:RunTask"]
         Resource = [
-          aws_ecs_task_definition.worker.arn_without_revision
+          "${aws_ecs_task_definition.worker.arn_without_revision}:*"
         ]
         Condition = {
           StringEquals = {
@@ -167,7 +172,6 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
         Action = [
           "s3:GetObject",
           "s3:PutObject",
-          "s3:HeadObject",
           "s3:ListBucket",
           "s3:DeleteObject"
         ]
