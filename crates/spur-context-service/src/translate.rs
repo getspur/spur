@@ -2,14 +2,102 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
+use serde::Deserialize;
 
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "JinaEmbeddingsV2BaseCode";
 const DEFAULT_EMBED_TEXT_VERSION: &str = "v2-jina-code";
+const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
+
+#[derive(Debug)]
+struct AwsCredentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+    provider: &'static str,
+}
+
+/// Fetches AWS credentials from env vars or the ECS credentials endpoint.
+/// On Fargate, the ECS endpoint at http://169.254.170.2 provides temporary
+/// credentials via the task IAM role. DuckDB's credential_chain provider
+/// may not support this endpoint, so we resolve credentials explicitly.
+fn fetch_aws_credentials() -> Option<AwsCredentials> {
+    if let (Some(key), Some(secret)) = (
+        std::env::var("AWS_ACCESS_KEY_ID")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        std::env::var("AWS_SECRET_ACCESS_KEY")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    ) {
+        return Some(AwsCredentials {
+            access_key_id: key,
+            secret_access_key: secret,
+            session_token: std::env::var("AWS_SESSION_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            provider: "env",
+        });
+    }
+
+    let relative_uri = std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").ok()?;
+    let url = format!("http://169.254.170.2{relative_uri}");
+    let body = http_get(&url, 64 * 1024).ok()?;
+    let creds: EcsCredentials = serde_json::from_slice(&body).ok()?;
+    Some(AwsCredentials {
+        access_key_id: creds.access_key_id,
+        secret_access_key: creds.secret_access_key,
+        session_token: creds.token,
+        provider: "ecs",
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct EcsCredentials {
+    #[serde(rename = "AccessKeyId")]
+    access_key_id: String,
+    #[serde(rename = "SecretAccessKey")]
+    secret_access_key: String,
+    #[serde(rename = "Token")]
+    token: Option<String>,
+}
+
+fn http_get(url: &str, body_cap: usize) -> std::result::Result<Vec<u8>, String> {
+    let rest = url.strip_prefix("http://").ok_or("not http")?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, format!("/{p}")),
+        None => (rest, "/".to_owned()),
+    };
+    let mut stream = TcpStream::connect((authority, 80)).map_err(|e| format!("connect: {e}"))?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let n = stream.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..n]);
+        if response.len() > body_cap + 64 * 1024 {
+            return Err("response too large".into());
+        }
+    }
+    let header_end = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .ok_or("no header end")?;
+    Ok(response[header_end..].to_vec())
+}
 
 const REVISION_TABLES: &[&str] = &[
     "nodes",
@@ -72,8 +160,9 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     let data_path = ducklake_data_path(&opts.catalog_dsn)?;
 
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
-    load_ducklake_extensions(&conn, &opts.catalog_dsn)?;
+    load_ducklake_extensions(&conn, &opts.catalog_dsn, &data_path)?;
     attach_ducklake(&conn, &opts.catalog_dsn, &data_path)?;
+    ensure_catalog_schema(&conn)?;
 
     let mut rows_inserted = HashMap::new();
     let embeddings_translated = run_transaction(&conn, || {
@@ -94,6 +183,14 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
         &rows_inserted,
     )
     .context("failed to update package catalog metadata")?;
+
+    // Force DuckLake to flush all buffered data to the DATA_PATH.
+    // Without this, INSERTs may be buffered in memory and not persisted
+    // to S3 before the connection drops.
+    conn.execute_batch("CALL ducklake_flush_inlined_data('spur_context');")
+        .context("failed to flush inlined DuckLake data")?;
+    conn.execute_batch("CHECKPOINT;")
+        .context("failed to checkpoint DuckLake")?;
 
     Ok(TranslateStats {
         rows_inserted,
@@ -916,8 +1013,30 @@ fn insert_from_source(
     let count = count_source_rows(conn, source_sql)
         .with_context(|| format!("failed to count source rows for {table}"))?;
     let sql = insert_template.replace("__SOURCE_SQL__", source_sql);
-    conn.execute_batch(&sql)
+
+    // Use prepare().execute() instead of execute_batch() — the Rust duckdb
+    // crate's execute_batch does not trigger DuckLake's INSERT handler,
+    // so data stays in DuckDB's buffer and is never written to parquet files
+    // on the data path. Prepared statement execution goes through the correct
+    // DuckDB API path that DuckLake intercepts.
+    let mut stmt = conn
+        .prepare(&sql)
+        .with_context(|| format!("failed to prepare {table} insert"))?;
+    stmt.execute([])
         .with_context(|| format!("failed to insert {table} rows"))?;
+
+    // Verify the data actually landed in the DuckLake table
+    let verify_count: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*)::BIGINT FROM {table}"),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(-1);
+    eprintln!(
+        "[translate] {table}: inserted {count} source rows, table now has {verify_count} rows"
+    );
+
     rows_inserted.insert(table.to_owned(), count);
     Ok(())
 }
@@ -1202,16 +1321,59 @@ fn sqlite_catalog_path(catalog_dsn: &str) -> Option<PathBuf> {
     (path != ":memory:").then(|| PathBuf::from(path))
 }
 
-fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> {
+fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
     conn.execute_batch("INSTALL ducklake; LOAD ducklake;")
         .context("failed to load ducklake extension")?;
 
-    if is_remote_catalog(catalog_dsn) {
-        conn.execute_batch(
-            "INSTALL httpfs; LOAD httpfs; \
-             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain);",
-        )
-        .context("failed to load httpfs extension for remote DuckLake catalog")?;
+    // Always load httpfs + S3 credentials when either the catalog OR the data
+    // path is on S3. The catalog may be local (downloaded via CatalogDownload)
+    // while the data path is still s3:// — without S3 creds, DuckLake's INSERT
+    // fails with HTTP 403 writing parquet data files to S3.
+    let needs_s3 = is_remote_catalog(catalog_dsn) || data_path.starts_with("s3://");
+    if needs_s3 {
+        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+
+        // Resolve AWS credentials. On Fargate, the credential_chain provider
+        // may not support the ECS credentials endpoint, so we fetch explicit
+        // credentials and create an S3 secret with them.
+        let creds = fetch_aws_credentials();
+        match creds {
+            Some(c) => {
+                eprintln!(
+                    "[translate] using explicit AWS credentials (provider={})",
+                    c.provider
+                );
+                let token_clause = if c.session_token.is_some() {
+                    format!(
+                        ", SESSION_TOKEN '{}'",
+                        c.session_token.as_ref().unwrap().replace('\'', "''")
+                    )
+                } else {
+                    String::new()
+                };
+                conn.execute_batch(&format!(
+                    "INSTALL httpfs; LOAD httpfs; \
+                     CREATE OR REPLACE SECRET s3_creds (TYPE s3, \
+                     KEY_ID '{}', SECRET '{}', REGION '{}'{});",
+                    c.access_key_id.replace('\'', "''"),
+                    c.secret_access_key.replace('\'', "''"),
+                    region,
+                    token_clause,
+                ))
+                .context("failed to load httpfs with explicit S3 credentials")?;
+            }
+            None => {
+                eprintln!(
+                    "[translate] no explicit AWS creds found, falling back to credential_chain"
+                );
+                conn.execute_batch(&format!(
+                    "INSTALL httpfs; LOAD httpfs; \
+                     CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{}');",
+                    region,
+                ))
+                .context("failed to load httpfs extension for S3 access")?;
+            }
+        }
     } else if is_sqlite_catalog(catalog_dsn) {
         conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
             .context("failed to load sqlite extension for DuckLake catalog")?;
@@ -1235,12 +1397,25 @@ fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Res
         format!("ducklake:{catalog_dsn}")
     };
 
+    // OVERRIDE_DATA_PATH TRUE allows the ATTACH to use a different DATA_PATH
+    // than what's stored in the catalog metadata. This is needed for the
+    // download-modify-upload pattern where the worker uses a local data path
+    // during translate and uploads data files to S3 afterwards.
     conn.execute_batch(&format!(
-        "ATTACH '{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
+        "ATTACH '{}' AS spur_context (DATA_PATH '{}', OVERRIDE_DATA_PATH TRUE); USE spur_context;",
         escape_sql_literal(&attach_uri),
         escape_sql_literal(data_path)
     ))
     .context("failed to attach DuckLake catalog")
+}
+
+/// Ensures all expected catalog tables exist. The catalog may have been
+/// created with a partial schema (e.g. only `nodes`), so we run the full DDL
+/// with CREATE TABLE IF NOT EXISTS to add any missing tables before translate.
+fn ensure_catalog_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(CATALOG_TABLES_SQL)
+        .context("failed to ensure catalog schema (CREATE TABLE IF NOT EXISTS)")?;
+    Ok(())
 }
 
 fn is_remote_catalog(catalog_dsn: &str) -> bool {

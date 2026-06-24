@@ -191,6 +191,7 @@ async fn run_job_with_stage(
 ) -> Result<TranslateStats, WorkerError> {
     // DuckLake cannot open S3 catalog metadata for read-write, so download
     // the catalog locally, translate with the local path, then upload back.
+    // Data files go directly to S3 via httpfs (the catalog's stored data_path).
     let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
         .await
         .map_err(|e| WorkerError::Translate(format!("download catalog: {e:#}")))?;
@@ -198,10 +199,9 @@ async fn run_job_with_stage(
     let local_env: JobEnv = if let Some(ref dl) = catalog_dl {
         let mut local = env.clone();
         local.catalog_dsn = dl.local_path.to_string_lossy().to_string();
-        // Data files still go to S3 via httpfs (supports multipart upload writes).
-        if std::env::var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH").is_err() {
-            std::env::set_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH", "s3://spur-context/data/");
-        }
+        // Data files go directly to S3 — the translate step uses FORCE CHECKPOINT
+        // to flush all data to S3 before the connection drops.
+        std::env::set_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH", "s3://spur-context/data/");
         local
     } else {
         env.clone()
@@ -591,14 +591,47 @@ fn translate_with_source_root(
         source_root: source_root.map(Path::to_path_buf),
         catalog_dsn: env.catalog_dsn.clone(),
     };
-    translate_artifact_to_ducklake(&opts)
-        .map_err(|error| WorkerError::Translate(format!("{error:#}")))
-}
+    let stats = translate_artifact_to_ducklake(&opts)
+        .map_err(|error| WorkerError::Translate(format!("{error:#}")))?;
 
+    // Diagnostic: verify data files exist on S3 by querying ducklake_table_info
+    // via the CLI. This helps isolate whether the Rust crate vs CLI handles
+    // DuckLake S3 writes differently.
+    eprintln!("[worker] translate complete, verifying via CLI...");
+    let verify_sql = format!(
+        "INSTALL ducklake; LOAD ducklake;
+INSTALL httpfs; LOAD httpfs;
+CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{}');
+ATTACH 'ducklake:{}' AS spur_context (DATA_PATH 's3://spur-context/data/', OVERRIDE_DATA_PATH TRUE);
+USE spur_context;
+SELECT table_name, file_count FROM ducklake_table_info('spur_context') ORDER BY table_name;
+SELECT 'nodes_total' as what, COUNT(*) as cnt FROM nodes;
+SELECT 'nodes_git_custom' as what, COUNT(*) as cnt FROM nodes WHERE source = 'git:custom' AND package = 'serde';",
+        std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
+        env.catalog_dsn.replace('\'', "''"),
+    );
+    let cli_result = Command::new("duckdb").arg("-c").arg(&verify_sql).output();
+    match cli_result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("[worker] CLI verify stdout: {stdout}");
+            if !output.status.success() {
+                eprintln!("[worker] CLI verify stderr: {stderr}");
+            }
+        }
+        Err(e) => {
+            eprintln!("[worker] CLI verify failed to run: {e}");
+        }
+    }
+
+    Ok(stats)
+}
 /// Downloads the DuckLake catalog from S3 to a local file so it can be
 /// opened in read-write mode. DuckLake cannot open S3 catalog metadata
 /// files for writing ("Cannot open an HTTP file for both reading and
 /// writing"), so we download → modify locally → upload back.
+/// Data files go directly to S3 via httpfs during translate.
 struct CatalogDownload {
     local_path: PathBuf,
     s3_bucket: String,
