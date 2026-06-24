@@ -363,6 +363,8 @@ fn download_tarball(source_url: &str, archive: &Path) -> Result<(), WorkerError>
             "--show-error",
             "--max-filesize",
             &cap.to_string(),
+            "-H",
+            "User-Agent: spur-context-service/1.0",
             "--output",
         ])
         .arg(archive)
@@ -793,7 +795,7 @@ fn http_get_bytes(
     let mut stream = TcpStream::connect((parsed.host.as_str(), parsed.port))
         .map_err(|error| format!("connect to {}:{} failed: {error}", parsed.host, parsed.port))?;
     let mut request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: spur-context-service/1.0\r\nConnection: close\r\n",
         parsed.path, parsed.authority
     );
     for (name, value) in headers {
