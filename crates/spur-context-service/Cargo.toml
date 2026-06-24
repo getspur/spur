@@ -33,7 +33,6 @@ worker = ["dep:spur-cli"]
 [dependencies]
 anyhow = { workspace = true }
 aws-config = "1"
-aws-credential-types = "1"
 aws-sdk-s3 = "1"
 aws-sdk-sfn = "1"
 clap = { workspace = true }
