@@ -1,17 +1,27 @@
 //! MCP tool definitions and handlers for the external code context service.
 
-use duckdb::Connection;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::OnceLock;
+
+use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+use crate::abuse::{self, RateLimiter, SourceKind, ValidateOptions};
 use crate::catalog::{CatalogResolver, ResolvedRevision};
+use crate::jobs::{self, InsertParams, JobRow, JobStatus, JobsError};
 use crate::knowledge::{self, KnowledgeContextOptions, KnowledgeScope};
 use crate::query::{self, SearchMode, SearchOptions};
 
 const DEFAULT_SOURCE: &str = "registry:crates-io";
+const DEFAULT_INDEX_SOURCE: &str = "git:custom";
 const DEFAULT_REF: &str = "latest";
 const KNOWLEDGE_QUERY_VECTOR_DIMENSIONS: usize = 768;
+const RATE_LIMIT_RETRY_AFTER_SECONDS: u64 = 60;
+
+static INDEX_RATE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 /// Metadata for a single context-service MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +30,19 @@ pub struct ToolDefinition {
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexExecutionRequest {
+    pub name: String,
+    pub input: Value,
+}
+
+pub trait IndexExecutionStarter {
+    fn start_execution<'a>(
+        &'a self,
+        request: IndexExecutionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<String, McpHandlerError>> + Send + 'a>>;
 }
 
 #[derive(Debug, Error)]
@@ -49,6 +72,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         external_code_callers_def(),
         external_code_callees_def(),
         external_knowledge_context_def(),
+        external_index_def(),
+        external_index_status_def(),
     ]
 }
 
@@ -78,6 +103,8 @@ pub fn handle_tool_sync(
         "external_code_callers" => handle_code_callers(args, db, catalog),
         "external_code_callees" => handle_code_callees(args, db, catalog),
         "external_knowledge_context" => handle_knowledge_context(args, db, catalog),
+        "external_index" => handle_index_requires_lambda(args),
+        "external_index_status" => route_index_status(args, db),
         other => Err(McpHandlerError::InvalidParams(format!(
             "unknown context-service MCP tool: {other}"
         ))),
@@ -172,6 +199,134 @@ fn handle_knowledge_context(
     json_value(result)
 }
 
+fn handle_index_requires_lambda(args: &Value) -> Result<Value, McpHandlerError> {
+    let args: ExternalIndexArgs = parse_args(args)?;
+    args.validate()?;
+    Err(McpHandlerError::Internal(
+        "external_index requires Lambda routing with a Step Functions client".to_owned(),
+    ))
+}
+
+pub async fn route_index(
+    args: &Value,
+    db: &Connection,
+    catalog: &CatalogResolver,
+    sfn_client: &impl IndexExecutionStarter,
+    caller_id: &str,
+) -> Result<Value, McpHandlerError> {
+    let args: ExternalIndexArgs = parse_args(args)?;
+    args.validate()?;
+
+    let parsed_url =
+        match abuse::validate(&args.source_url, &ValidateOptions::default()).and_then(|parsed| {
+            abuse::resolve_and_check_dns(&parsed)?;
+            Ok(parsed)
+        }) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Ok(json!({
+                    "status": "rejected",
+                    "reason": format!("source_url: {error}")
+                }));
+            }
+        };
+
+    if INDEX_RATE_LIMITER
+        .get_or_init(RateLimiter::default)
+        .check(caller_id)
+        .is_err()
+    {
+        return Ok(json!({
+            "status": "rejected",
+            "reason": "rate_limit",
+            "retry_after_seconds": RATE_LIMIT_RETRY_AFTER_SECONDS
+        }));
+    }
+
+    let source = args.source();
+    let revision = args.revision.trim();
+    let source_url_hash = source_url_hash(&args.source_url);
+    let source_kind = args.source_kind(parsed_url.source_kind);
+
+    if !args.force.unwrap_or(false) {
+        if let Some(resolved) =
+            lookup_complete_catalog_revision(catalog, source, &args.package, revision)?
+        {
+            return Ok(json!({
+                "status": "complete",
+                "snapshot_id": resolved.snapshot_id,
+                "revision": resolved.revision
+            }));
+        }
+    }
+
+    if let Some(existing) = jobs::find_active(db, source, &args.package, revision, &source_url_hash)
+        .map_err(jobs_error("external_index find_active failed"))?
+    {
+        return Ok(active_job_response(&existing));
+    }
+
+    let inserted = match jobs::insert(
+        db,
+        InsertParams {
+            source: source.to_owned(),
+            package: args.package.clone(),
+            revision: revision.to_owned(),
+            source_url: args.source_url.clone(),
+            source_url_hash: source_url_hash.clone(),
+            execution_arn: None,
+        },
+    ) {
+        Ok(row) => row,
+        Err(JobsError::Conflict) => {
+            let existing = jobs::find_active(db, source, &args.package, revision, &source_url_hash)
+                .map_err(jobs_error("external_index reselect active job failed"))?
+                .ok_or_else(|| {
+                    McpHandlerError::Internal(
+                        "external_index insert conflict had no active job to return".to_owned(),
+                    )
+                })?;
+            return Ok(active_job_response(&existing));
+        }
+        Err(error) => return Err(jobs_error("external_index insert failed")(error)),
+    };
+
+    let payload = json!({
+        "job_id": inserted.job_id,
+        "source": source,
+        "package": args.package,
+        "revision": revision,
+        "source_url": args.source_url,
+        "source_kind": source_kind_label(source_kind),
+        "caller_id": caller_id
+    });
+    let execution_arn = sfn_client
+        .start_execution(IndexExecutionRequest {
+            name: inserted.job_id.clone(),
+            input: payload,
+        })
+        .await?;
+
+    Ok(json!({
+        "job_id": inserted.job_id,
+        "status": "queued",
+        "execution_arn": execution_arn,
+        "revision": inserted.revision
+    }))
+}
+
+pub fn route_index_status(args: &Value, db: &Connection) -> Result<Value, McpHandlerError> {
+    let args: ExternalIndexStatusArgs = parse_args(args)?;
+    args.validate()?;
+    let Some(row) = jobs::lookup(db, &args.job_id)
+        .map_err(jobs_error("external_index_status lookup failed"))?
+    else {
+        return Ok(json!({ "status": "not_found" }));
+    };
+
+    Ok(index_status_response(&row))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodeSearchArgs {
@@ -253,6 +408,60 @@ impl KnowledgeContextArgs {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExternalIndexArgs {
+    package: String,
+    revision: String,
+    source_url: String,
+    source_kind: Option<ExternalIndexSourceKind>,
+    source: Option<String>,
+    force: Option<bool>,
+}
+
+impl ExternalIndexArgs {
+    fn validate(&self) -> Result<(), McpHandlerError> {
+        validate_non_empty("package", &self.package)?;
+        validate_non_empty("revision", &self.revision)?;
+        validate_non_empty("source_url", &self.source_url)?;
+        if let Some(source) = self.source.as_deref() {
+            validate_non_empty("source", source)?;
+        }
+        Ok(())
+    }
+
+    fn source(&self) -> &str {
+        self.source.as_deref().unwrap_or(DEFAULT_INDEX_SOURCE)
+    }
+
+    fn source_kind(&self, inferred: SourceKind) -> SourceKind {
+        match self.source_kind {
+            Some(ExternalIndexSourceKind::Git) => SourceKind::Git,
+            Some(ExternalIndexSourceKind::Tarball) => SourceKind::Tarball,
+            None => inferred,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ExternalIndexSourceKind {
+    Git,
+    Tarball,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExternalIndexStatusArgs {
+    job_id: String,
+}
+
+impl ExternalIndexStatusArgs {
+    fn validate(&self) -> Result<(), McpHandlerError> {
+        validate_non_empty("job_id", &self.job_id)
+    }
+}
+
 #[derive(Debug)]
 struct ParsedExternalSelector {
     package: String,
@@ -320,6 +529,46 @@ fn resolve_revision(
         .map_err(catalog_error(format!(
             "{source}/{package}@{revision_or_ref}"
         )))
+}
+
+fn lookup_complete_catalog_revision(
+    catalog: &CatalogResolver,
+    source: &str,
+    package: &str,
+    revision: &str,
+) -> Result<Option<ResolvedRevision>, McpHandlerError> {
+    let resolved = match catalog.resolve(source, package, revision) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            let message = format!("{error:#}");
+            if message.contains("not found") {
+                return Ok(None);
+            }
+            return Err(McpHandlerError::Internal(format!(
+                "{source}/{package}@{revision}: {message}"
+            )));
+        }
+    };
+
+    let status: Option<String> = optional_no_rows(
+        catalog.connection().query_row(
+            r"
+            SELECT index_status
+            FROM package_catalog
+            WHERE source = ? AND package = ? AND revision = ?
+            LIMIT 1
+            ",
+            params![source, package, resolved.revision.as_str()],
+            |row| row.get(0),
+        ),
+        "external_index catalog status lookup failed",
+    )?;
+
+    if status.as_deref() == Some("complete") {
+        Ok(Some(resolved))
+    } else {
+        Ok(None)
+    }
 }
 
 fn normalize_selector(
@@ -396,12 +645,93 @@ fn internal_error(context: &'static str) -> impl FnOnce(anyhow::Error) -> McpHan
     move |error| McpHandlerError::Internal(format!("{context}: {error:#}"))
 }
 
+fn jobs_error(context: &'static str) -> impl FnOnce(JobsError) -> McpHandlerError {
+    move |error| match error {
+        JobsError::NotFound => McpHandlerError::NotFound(format!("{context}: {error}")),
+        JobsError::Conflict => McpHandlerError::Internal(format!("{context}: {error}")),
+        JobsError::Db(error) => McpHandlerError::Internal(format!("{context}: {error}")),
+    }
+}
+
+fn optional_no_rows<T>(
+    result: duckdb::Result<T>,
+    context: &'static str,
+) -> Result<Option<T>, McpHandlerError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(McpHandlerError::Internal(format!("{context}: {error}"))),
+    }
+}
+
 fn json_value<T>(value: T) -> Result<Value, McpHandlerError>
 where
     T: Serialize,
 {
     serde_json::to_value(value).map_err(|error| {
         McpHandlerError::Internal(format!("failed to serialize response: {error}"))
+    })
+}
+
+fn source_url_hash(source_url: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in source_url.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn source_kind_label(source_kind: SourceKind) -> &'static str {
+    match source_kind {
+        SourceKind::Git => "git",
+        SourceKind::Tarball => "tarball",
+    }
+}
+
+fn active_job_response(row: &JobRow) -> Value {
+    json!({
+        "job_id": row.job_id,
+        "status": row.status.to_string(),
+        "execution_arn": row.execution_arn,
+        "revision": row.revision
+    })
+}
+
+fn index_status_response(row: &JobRow) -> Value {
+    let mut response = json!({
+        "job_id": row.job_id,
+        "status": row.status.to_string(),
+        "revision": row.revision,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at
+    });
+
+    if let Some(snapshot_id) = row.snapshot_id {
+        response["snapshot_id"] = json!(snapshot_id);
+    }
+    if let Some(row_counts) = row.row_counts.as_ref() {
+        response["row_counts"] = row_counts.clone();
+    }
+    if row.status == JobStatus::Failed {
+        if let Some(error) = row.error.as_deref() {
+            response["error"] = job_error_response(error);
+        }
+    }
+
+    response
+}
+
+fn job_error_response(error: &str) -> Value {
+    let (code, detail) = error
+        .split_once(':')
+        .map_or((error.trim(), ""), |(code, detail)| {
+            (code.trim(), detail.trim())
+        });
+    json!({
+        "code": code,
+        "detail": detail,
+        "retriable": matches!(code, "fetch" | "commit" | "spot_interrupted" | "timeout")
     })
 }
 
@@ -566,6 +896,65 @@ fn external_knowledge_context_def() -> ToolDefinition {
                     "minItems": KNOWLEDGE_QUERY_VECTOR_DIMENSIONS,
                     "maxItems": KNOWLEDGE_QUERY_VECTOR_DIMENSIONS,
                     "description": "Optional precomputed query embedding. When omitted, retrieval gracefully degrades to BM25-only."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn external_index_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "external_index".to_owned(),
+        description: "Queue on-demand indexing for a fetchable external package source.".to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["package", "revision", "source_url"],
+            "properties": {
+                "package": {
+                    "type": "string",
+                    "description": "Package name, for example serde or tokio."
+                },
+                "revision": {
+                    "type": "string",
+                    "description": "Version, branch, tag, or SHA to index."
+                },
+                "source_url": {
+                    "type": "string",
+                    "description": "Fetchable git or tarball URL for the source."
+                },
+                "source_kind": {
+                    "type": "string",
+                    "enum": ["git", "tarball"],
+                    "description": "Optional source fetch strategy. When omitted it is inferred from source_url."
+                },
+                "source": {
+                    "type": "string",
+                    "default": DEFAULT_INDEX_SOURCE,
+                    "description": "Catalog source namespace for this package revision."
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Bypass the warm-path catalog hit check."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn external_index_status_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "external_index_status".to_owned(),
+        description: "Return the queued indexing job status for a job_id.".to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["job_id"],
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "Job identifier returned by external_index."
                 }
             },
             "additionalProperties": false
