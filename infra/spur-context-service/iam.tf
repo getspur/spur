@@ -29,6 +29,7 @@ resource "aws_iam_role_policy" "s3_access" {
       Action = [
         "s3:GetObject",
         "s3:GetObjectVersion",
+        "s3:PutObject",
         "s3:ListBucket"
       ]
       Resource = [
@@ -117,6 +118,19 @@ resource "aws_iam_role_policy" "sfn_ecs" {
         Resource = [
           "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:rule/StepFunctionsGetEventsForECSTaskRule"
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = ["iam:PassRole"]
+        Resource = [
+          aws_iam_role.ecs_task_execution.arn,
+          aws_iam_role.ecs_task.arn
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "ecs-tasks.amazonaws.com"
+          }
+        }
       }
     ]
   })

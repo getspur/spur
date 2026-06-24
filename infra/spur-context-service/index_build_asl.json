@@ -4,7 +4,8 @@
   "States": {
     "RunBuild": {
       "Type": "Task",
-      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
+      "TimeoutSeconds": 900,
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
@@ -90,7 +91,8 @@
     },
     "FallbackBuild": {
       "Type": "Task",
-      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
+      "TimeoutSeconds": 900,
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
