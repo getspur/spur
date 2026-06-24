@@ -74,15 +74,16 @@ build_worker() {
     cd "$REPO_ROOT"
     # Fargate ARM64 runs on Graviton2 (neoverse-n1). The build VM's default
     # neoverse-v2 produces SIGILL on Fargate. Match the Lambda build flags.
+    # The binary stays on the VM — build_and_push_worker_image() builds the
+    # Docker image remotely using docker-build.sh, so no local fetch needed.
     AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
     CFLAGS="-mcpu=neoverse-n1 -O2" \
     CXXFLAGS="-mcpu=neoverse-n1 -O2" \
         scripts/spur-cargo build -p spur-context-service --features worker --release
-    scripts/cloud-build/fetch.sh --to "$BUILD_DIR/spur-context-worker" target/release/spur-context-worker
 }
 
 build_and_push_worker_image() {
-    log "building Docker image for spur-context-worker..."
+    log "building Docker image for spur-context-worker (remote Docker build on VM)..."
 
     # Ensure ECR repo exists.
     aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
@@ -91,24 +92,21 @@ build_and_push_worker_image() {
     local ecr_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${WORKER_ECR_REPO}"
     local full_tag="${ecr_uri}:${WORKER_IMAGE_TAG}"
 
-    # Build context: Dockerfile + worker binary.  The Dockerfile is minimal —
-    # AL2023 base + the static binary + git/curl/tar/unzip for source fetch.
-    cat > "$BUILD_DIR/Dockerfile" <<'DOCKERFILE'
-FROM debian:bookworm-slim
+    # Build the Docker image entirely on the remote VM and push to ECR — no
+    # local Docker or binary fetch needed. The VM has Docker installed via
+    # startup-aws.sh and ECR push permissions via the spur-ecr-push IAM policy.
+    # The --binary flag points at the worker binary already built on the VM's
+    # target dir by build_worker() above.
+    cd "$REPO_ROOT"
+    scripts/cloud-build/docker-build.sh \
+        --binary target/release/spur-context-worker \
+        --dockerfile-inline 'FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
-COPY worker-bin /usr/local/bin/spur-context-worker
-ENTRYPOINT ["/usr/local/bin/spur-context-worker"]
-DOCKERFILE
+COPY spur-context-worker /usr/local/bin/spur-context-worker
+ENTRYPOINT ["/usr/local/bin/spur-context-worker"]' \
+        --tag "$full_tag"
 
-    cp "$BUILD_DIR/spur-context-worker" "$BUILD_DIR/worker-bin"
-    cd "$BUILD_DIR"
-
-    aws ecr get-login-password --region "$AWS_REGION_VAL" \
-        | docker login --username AWS --password-stdin "$ecr_uri" >&2
-
-    docker build -t "$full_tag" . >&2 || { log "docker build failed"; return 1; }
-    docker push "$full_tag" >&2 || { log "docker push failed"; return 1; }
     log "worker image pushed: $full_tag"
     echo "$full_tag"
 }
