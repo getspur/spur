@@ -92,18 +92,18 @@ build_and_push_worker_image() {
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023
 RUN dnf install -y git curl tar unzip && dnf clean all
 WORKDIR /workspace
-COPY spur-context-worker /usr/local/bin/spur-context-worker
+COPY worker-bin /usr/local/bin/spur-context-worker
 ENTRYPOINT ["/usr/local/bin/spur-context-worker"]
 DOCKERFILE
 
-    cp "$BUILD_DIR/spur-context-worker" "$BUILD_DIR/"
+    cp "$BUILD_DIR/spur-context-worker" "$BUILD_DIR/worker-bin"
     cd "$BUILD_DIR"
 
     aws ecr get-login-password --region "$AWS_REGION_VAL" \
-        | docker login --username AWS --password-stdin "$ecr_uri"
+        | docker login --username AWS --password-stdin "$ecr_uri" >&2
 
-    docker build -t "$full_tag" .
-    docker push "$full_tag"
+    docker build -t "$full_tag" . >&2
+    docker push "$full_tag" >&2
     log "worker image pushed: $full_tag"
     echo "$full_tag"
 }
