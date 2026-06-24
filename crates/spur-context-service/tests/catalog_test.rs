@@ -19,6 +19,11 @@ fn init_catalog_sql_creates_expected_nodes_schema() -> Result<()> {
     let sql = include_str!("../sql/init_catalog.sql")
         .replace("INSTALL postgres;", "INSTALL sqlite;")
         .replace("LOAD postgres;", "LOAD sqlite;")
+        .replace("job_id TEXT PRIMARY KEY,", "job_id TEXT,")
+        .replace(
+            ",\n    UNIQUE(source, package, revision, source_url_hash)",
+            "",
+        )
         .replace("__CATALOG_DSN__", &escape_sql_literal(&catalog_dsn))
         .replace("s3://spur-context/data/", &escape_sql_literal(&data_path));
 
@@ -136,6 +141,29 @@ fn missing_revision_reports_not_found() -> Result<()> {
         format!("{error:#}").contains("revision not found"),
         "unexpected error: {error:#}"
     );
+    Ok(())
+}
+
+#[test]
+fn catalog_from_connection_creates_index_jobs_table_if_missing() -> Result<()> {
+    let root = unique_temp_dir("index-jobs")?;
+    fs::create_dir_all(root.join("data")).context("create ducklake data dir")?;
+
+    let catalog_path = root.join("catalog.sqlite");
+    let data_path = root.join("data");
+    let catalog_dsn = format!("sqlite:{}", catalog_path.display());
+    let data_path = data_path.display().to_string();
+
+    let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
+    attach_ducklake(&conn, &catalog_dsn, &data_path)?;
+
+    let resolver = CatalogResolver::from_connection(conn);
+
+    let count: i64 = resolver
+        .connection()
+        .query_row("SELECT COUNT(*) FROM index_jobs", [], |row| row.get(0))
+        .context("query index_jobs after catalog initialization")?;
+    assert_eq!(count, 0);
     Ok(())
 }
 
