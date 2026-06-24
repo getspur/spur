@@ -19,21 +19,31 @@ required-features = ["lambda"]
 name = "spur-context-indexer"
 path = "src/bin/index.rs"
 
+[[bin]]
+name = "spur-context-worker"
+path = "src/bin/worker.rs"
+required-features = ["worker"]
+
 [features]
 default = []
 analyst = ["dep:spur-analyst"]
 lambda = ["dep:lambda_runtime"]
+worker = ["dep:spur-cli"]
 
 [dependencies]
 anyhow = { workspace = true }
+aws-sdk-s3 = "1"
+aws-sdk-sfn = "1"
 clap = { workspace = true }
 duckdb = { workspace = true, features = ["bundled"] }
 lambda_runtime = { version = "1.2.1", optional = true, features = ["concurrency-tokio"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 spur-analyst = { workspace = true, optional = true }
+spur-cli = { path = "../spur-cli", optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true
