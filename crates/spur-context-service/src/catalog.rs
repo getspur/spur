@@ -1,8 +1,6 @@
 use anyhow::{anyhow, Context as _, Result};
 use duckdb::{params, Connection};
 
-use crate::s3_credentials::resolve_and_set_s3_credentials_blocking;
-
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 const INDEX_JOBS_SQL: &str = include_str!("../sql/index_jobs.sql");
 
@@ -183,16 +181,18 @@ pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Re
     load_ducklake_extensions(&conn, catalog_dsn)?;
 
     if data_path.starts_with("s3://") && !is_remote_catalog(catalog_dsn) {
-        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
-            .context("failed to load httpfs for S3 data path")?;
-        resolve_and_set_s3_credentials_blocking(&conn)?;
+        conn.execute_batch(
+            "INSTALL httpfs; LOAD httpfs; \
+             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain);",
+        )
+        .context("failed to load httpfs for S3 data path")?;
     }
 
     attach_ducklake(&conn, catalog_dsn, data_path)?;
     Ok(conn)
 }
 
-fn ensure_index_jobs_table(conn: &Connection) -> Result<()> {
+pub fn ensure_index_jobs_table(conn: &Connection) -> Result<()> {
     // The DuckLake catalog may be attached READ_ONLY; index_jobs is an
     // operational table that lives in the local in-memory database, not in
     // the attached catalog. Switch to the default database before creating,
@@ -260,9 +260,11 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
         .context("failed to load ducklake extension")?;
 
     if is_remote_catalog(catalog_dsn) {
-        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
-            .context("failed to load httpfs extension for remote DuckLake catalog")?;
-        resolve_and_set_s3_credentials_blocking(conn)?;
+        conn.execute_batch(
+            "INSTALL httpfs; LOAD httpfs; \
+             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain);",
+        )
+        .context("failed to load httpfs extension for remote DuckLake catalog")?;
     } else if catalog_dsn.starts_with("sqlite:") || catalog_dsn.starts_with("ducklake:sqlite:") {
         conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
             .context("failed to load sqlite extension for DuckLake catalog")?;

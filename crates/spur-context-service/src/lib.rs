@@ -8,7 +8,6 @@ pub mod knowledge;
 pub mod lambda;
 pub mod mcp;
 pub mod query;
-mod s3_credentials;
 pub mod translate;
 #[cfg(feature = "worker")]
 pub mod worker;

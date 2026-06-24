@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::abuse;
-use crate::catalog::connect_ducklake;
+use crate::catalog::{connect_ducklake, ensure_index_jobs_table};
 use crate::jobs::{update_status, JobStatus};
 use crate::translate::{translate_artifact_to_ducklake, TranslateOptions, TranslateStats};
 
@@ -121,10 +121,13 @@ pub async fn run_job_and_report(env: &JobEnv) -> Result<(), WorkerError> {
                     Ok(())
                 }
                 Err(error) => {
-                    let error_detail = error.to_string();
+                    let error_detail = format!("{error:#}");
+                    eprintln!("[worker] job failed: {error_detail}");
                     update_job_status(env, JobStatus::Failed, None, Some(&error_detail), None);
-                    send_task_failure(env, &failure_error_code(&error), &error_detail).await?;
-                    Err(error)
+                    if let Err(sfn_err) = send_task_failure(env, &failure_error_code(&error), &error_detail).await {
+                        eprintln!("[worker] SendTaskFailure also failed: {sfn_err:#}");
+                    }
+                    return Err(error);
                 }
             }
         }
@@ -157,6 +160,7 @@ pub fn update_job_status(
     let result = (|| -> Result<()> {
         let conn = connect_ducklake(&env.catalog_dsn)
             .with_context(|| format!("connect catalog for index job `{}`", env.job_id))?;
+        let _ = ensure_index_jobs_table(&conn);
         update_job_status_with_connection(&conn, env, status, snapshot_id, error, row_counts)
             .with_context(|| format!("update index_jobs for job `{}`", env.job_id))?;
         Ok(())
@@ -185,9 +189,39 @@ async fn run_job_with_stage(
     env: JobEnv,
     stage: StageTracker,
 ) -> Result<TranslateStats, WorkerError> {
-    tokio::task::spawn_blocking(move || run_job_blocking(&env, &stage))
+    // DuckLake cannot open S3 catalog metadata for read-write, so download
+    // the catalog locally, translate with the local path, then upload back.
+    let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
         .await
-        .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))?
+        .map_err(|e| WorkerError::Translate(format!("download catalog: {e:#}")))?;
+
+    let local_env: JobEnv = if let Some(ref dl) = catalog_dl {
+        let mut local = env.clone();
+        local.catalog_dsn = dl.local_path.to_string_lossy().to_string();
+        // Data files still go to S3 via httpfs (supports multipart upload writes).
+        if std::env::var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH").is_err() {
+            std::env::set_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH", "s3://spur-context/data/");
+        }
+        local
+    } else {
+        env.clone()
+    };
+
+    let stage_clone = stage.clone();
+    let result = tokio::task::spawn_blocking(move || run_job_blocking(&local_env, &stage_clone))
+        .await
+        .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))?;
+
+    // Upload catalog back to S3 only on success.
+    if result.is_ok() {
+        if let Some(ref dl) = catalog_dl {
+            dl.upload()
+                .await
+                .map_err(|e| WorkerError::Translate(format!("upload catalog: {e:#}")))?;
+        }
+    }
+
+    result
 }
 
 fn run_job_blocking(env: &JobEnv, stage: &StageTracker) -> Result<TranslateStats, WorkerError> {
@@ -557,7 +591,90 @@ fn translate_with_source_root(
         source_root: source_root.map(Path::to_path_buf),
         catalog_dsn: env.catalog_dsn.clone(),
     };
-    translate_artifact_to_ducklake(&opts).map_err(|error| WorkerError::Translate(error.to_string()))
+    translate_artifact_to_ducklake(&opts)
+        .map_err(|error| WorkerError::Translate(format!("{error:#}")))
+}
+
+/// Downloads the DuckLake catalog from S3 to a local file so it can be
+/// opened in read-write mode. DuckLake cannot open S3 catalog metadata
+/// files for writing ("Cannot open an HTTP file for both reading and
+/// writing"), so we download → modify locally → upload back.
+struct CatalogDownload {
+    local_path: PathBuf,
+    s3_bucket: String,
+    s3_key: String,
+}
+
+impl CatalogDownload {
+    async fn fetch(catalog_dsn: &str) -> Result<Option<Self>> {
+        if !catalog_dsn.starts_with("s3://") {
+            return Ok(None);
+        }
+        let parsed = parse_s3_uri(catalog_dsn).map_err(|e| anyhow!("{e}"))?;
+        let bucket = parsed.bucket;
+        let key = parsed.key;
+        let local_path = PathBuf::from("/tmp/catalog.ducklake");
+
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new(
+                std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
+            ))
+            .load()
+            .await;
+        let client = aws_sdk_s3::Client::new(&config);
+
+        eprintln!("[worker] downloading catalog from s3://{bucket}/{key}");
+        let resp = client
+            .get_object()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await
+            .context("failed to download DuckLake catalog from S3")?;
+        let body = resp
+            .body
+            .collect()
+            .await
+            .context("failed to read catalog body")?;
+        fs::write(&local_path, body.into_bytes())
+            .with_context(|| format!("failed to write catalog to {}", local_path.display()))?;
+
+        Ok(Some(Self {
+            local_path,
+            s3_bucket: bucket,
+            s3_key: key,
+        }))
+    }
+
+    async fn upload(&self) -> Result<()> {
+        let data = fs::read(&self.local_path).with_context(|| {
+            format!("failed to read catalog from {}", self.local_path.display())
+        })?;
+
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new(
+                std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
+            ))
+            .load()
+            .await;
+        let client = aws_sdk_s3::Client::new(&config);
+
+        eprintln!(
+            "[worker] uploading catalog ({} bytes) to s3://{}/{}",
+            data.len(),
+            self.s3_bucket,
+            self.s3_key
+        );
+        client
+            .put_object()
+            .bucket(&self.s3_bucket)
+            .key(&self.s3_key)
+            .body(ByteStream::from(data))
+            .send()
+            .await
+            .context("failed to upload DuckLake catalog to S3")?;
+        Ok(())
+    }
 }
 
 async fn write_checkpoint(env: &JobEnv, last_completed_stage: &str) -> Result<(), WorkerError> {
