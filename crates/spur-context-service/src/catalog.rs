@@ -1,7 +1,7 @@
-use std::env;
-
 use anyhow::{anyhow, Context as _, Result};
 use duckdb::{params, Connection};
+
+use crate::s3_credentials::resolve_and_set_s3_credentials_blocking;
 
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 const INDEX_JOBS_SQL: &str = include_str!("../sql/index_jobs.sql");
@@ -57,7 +57,7 @@ impl CatalogResolver {
         match ensure_index_jobs_table(&resolver.conn) {
             Ok(()) => eprintln!("[catalog] ensured index_jobs table exists"),
             Err(error) => {
-                eprintln!("[catalog] warning: failed to ensure index_jobs table exists: {error:#}")
+                eprintln!("[catalog] warning: failed to ensure index_jobs table exists: {error:#}");
             }
         }
         resolver
@@ -185,7 +185,7 @@ pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Re
     if data_path.starts_with("s3://") && !is_remote_catalog(catalog_dsn) {
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
             .context("failed to load httpfs for S3 data path")?;
-        configure_s3_credentials(&conn)?;
+        resolve_and_set_s3_credentials_blocking(&conn)?;
     }
 
     attach_ducklake(&conn, catalog_dsn, data_path)?;
@@ -262,7 +262,7 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
     if is_remote_catalog(catalog_dsn) {
         conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
             .context("failed to load httpfs extension for remote DuckLake catalog")?;
-        configure_s3_credentials(conn)?;
+        resolve_and_set_s3_credentials_blocking(conn)?;
     } else if catalog_dsn.starts_with("sqlite:") || catalog_dsn.starts_with("ducklake:sqlite:") {
         conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
             .context("failed to load sqlite extension for DuckLake catalog")?;
@@ -277,39 +277,6 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
             .context("failed to load postgres extension for DuckLake catalog")?;
     }
 
-    Ok(())
-}
-
-fn configure_s3_credentials(conn: &Connection) -> Result<()> {
-    if let Ok(key) = env::var("AWS_ACCESS_KEY_ID") {
-        conn.execute_batch(&format!(
-            "SET s3_access_key_id = '{}';",
-            escape_sql_literal(&key)
-        ))
-        .context("failed to set s3_access_key_id")?;
-    }
-    if let Ok(secret) = env::var("AWS_SECRET_ACCESS_KEY") {
-        conn.execute_batch(&format!(
-            "SET s3_secret_access_key = '{}';",
-            escape_sql_literal(&secret)
-        ))
-        .context("failed to set s3_secret_access_key")?;
-    }
-    if let Ok(token) = env::var("AWS_SESSION_TOKEN") {
-        conn.execute_batch(&format!(
-            "SET s3_session_token = '{}';",
-            escape_sql_literal(&token)
-        ))
-        .context("failed to set s3_session_token")?;
-    }
-    let region = env::var("AWS_REGION")
-        .or_else(|_| env::var("AWS_DEFAULT_REGION"))
-        .unwrap_or_else(|_| "us-east-1".to_owned());
-    conn.execute_batch(&format!(
-        "SET s3_region = '{}';",
-        escape_sql_literal(&region)
-    ))
-    .context("failed to set s3_region")?;
     Ok(())
 }
 
