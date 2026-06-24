@@ -7,8 +7,6 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
 
-use crate::s3_credentials::resolve_and_set_s3_credentials_blocking;
-
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "JinaEmbeddingsV2BaseCode";
 const DEFAULT_EMBED_TEXT_VERSION: &str = "v2-jina-code";
@@ -1209,9 +1207,11 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
         .context("failed to load ducklake extension")?;
 
     if is_remote_catalog(catalog_dsn) {
-        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
-            .context("failed to load httpfs extension for remote DuckLake catalog")?;
-        resolve_and_set_s3_credentials_blocking(conn)?;
+        conn.execute_batch(
+            "INSTALL httpfs; LOAD httpfs; \
+             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain);",
+        )
+        .context("failed to load httpfs extension for remote DuckLake catalog")?;
     } else if is_sqlite_catalog(catalog_dsn) {
         conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
             .context("failed to load sqlite extension for DuckLake catalog")?;
