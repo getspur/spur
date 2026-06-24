@@ -35,7 +35,7 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexExecutionRequest {
     pub name: String,
     pub input: Value,
@@ -55,7 +55,7 @@ pub enum ExecutionOutcomeStatus {
     Running,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOutcome {
     pub status: ExecutionOutcomeStatus,
     pub output: Option<Value>,
@@ -109,7 +109,9 @@ impl ExecutionStatusChecker for SfnExecutionStatusChecker {
             })
         })
         .join()
-        .map_err(|_| McpHandlerError::Internal("DescribeExecution thread panicked".to_owned()))??;
+        .map_err(|_panic| {
+            McpHandlerError::Internal("DescribeExecution thread panicked".to_owned())
+        })??;
 
         sfn_execution_outcome(output).map(Some)
     }
@@ -277,6 +279,10 @@ fn handle_index_requires_lambda(args: &Value) -> Result<Value, McpHandlerError> 
     ))
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "handler borrows a DuckDB connection, which is intentionally not Sync"
+)]
 pub async fn route_index(
     args: &Value,
     db: &Connection,
@@ -768,9 +774,8 @@ fn update_stale_job(
         return Ok(row);
     };
 
-    let outcome = match checker.describe_execution(execution_arn) {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) | Err(_) => return Ok(row),
+    let Ok(Some(outcome)) = checker.describe_execution(execution_arn) else {
+        return Ok(row);
     };
 
     match outcome.status {
@@ -928,11 +933,10 @@ fn index_status_response(row: &JobRow) -> Value {
 }
 
 fn job_error_response(error: &str) -> Value {
-    let (code, detail) = error
-        .split_once(':')
-        .map_or((error.trim(), ""), |(code, detail)| {
-            (code.trim(), detail.trim())
-        });
+    let (code, detail) = error.split_once(':').map_or_else(
+        || (error.trim(), ""),
+        |(code, detail)| (code.trim(), detail.trim()),
+    );
     json!({
         "code": code,
         "detail": detail,

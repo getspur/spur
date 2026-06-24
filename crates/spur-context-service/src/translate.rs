@@ -7,6 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
 
+use crate::s3_credentials::resolve_and_set_s3_credentials_blocking;
+
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "JinaEmbeddingsV2BaseCode";
 const DEFAULT_EMBED_TEXT_VERSION: &str = "v2-jina-code";
@@ -1206,7 +1208,11 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
     conn.execute_batch("INSTALL ducklake; LOAD ducklake;")
         .context("failed to load ducklake extension")?;
 
-    if is_sqlite_catalog(catalog_dsn) {
+    if is_remote_catalog(catalog_dsn) {
+        conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
+            .context("failed to load httpfs extension for remote DuckLake catalog")?;
+        resolve_and_set_s3_credentials_blocking(conn)?;
+    } else if is_sqlite_catalog(catalog_dsn) {
         conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
             .context("failed to load sqlite extension for DuckLake catalog")?;
     } else if is_postgres_catalog(catalog_dsn) {
@@ -1235,6 +1241,11 @@ fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Res
         escape_sql_literal(data_path)
     ))
     .context("failed to attach DuckLake catalog")
+}
+
+fn is_remote_catalog(catalog_dsn: &str) -> bool {
+    let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
+    dsn.starts_with("s3://") || dsn.starts_with("https://") || dsn.starts_with("http://")
 }
 
 fn is_sqlite_catalog(catalog_dsn: &str) -> bool {

@@ -324,6 +324,11 @@ fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
     let sql = include_str!("../sql/init_catalog.sql")
         .replace("INSTALL postgres;", "INSTALL sqlite;")
         .replace("LOAD postgres;", "LOAD sqlite;")
+        .replace("job_id TEXT PRIMARY KEY,", "job_id TEXT,")
+        .replace(
+            ",\n    UNIQUE(source, package, revision, source_url_hash)",
+            "",
+        )
         .replace("__CATALOG_DSN__", &escape_sql_literal(catalog_dsn))
         .replace("s3://spur-context/data/", &escape_sql_literal(data_path));
     conn.execute_batch(&sql).context("execute init catalog sql")
