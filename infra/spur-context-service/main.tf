@@ -2,11 +2,67 @@ resource "aws_s3_bucket" "data" {
   bucket = var.bucket_name
 }
 
+resource "aws_s3_bucket_versioning" "data" {
+  bucket = aws_s3_bucket.data.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_ownership_controls" "data" {
   bucket = aws_s3_bucket.data.id
 
   rule {
     object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_dynamodb_table" "index_jobs" {
+  name         = var.index_jobs_table_name
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+
+resource "aws_dynamodb_table" "catalog_leases" {
+  name         = var.catalog_leases_table_name
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  ttl {
+    attribute_name = "expires_at_unix_secs"
+    enabled        = true
   }
 }
 
@@ -37,14 +93,16 @@ resource "aws_lambda_function" "service" {
   architectures = ["arm64"]
   handler       = "bootstrap"
 
-  role    = aws_iam_role.lambda.arn
-  timeout = var.lambda_timeout_sec
+  role        = aws_iam_role.lambda.arn
+  timeout     = var.lambda_timeout_sec
   memory_size = var.lambda_memory_mb
 
   environment {
     variables = {
       SPUR_CATALOG_S3_URI          = var.catalog_s3_uri
       SPUR_INDEX_STATE_MACHINE_ARN = aws_sfn_state_machine.index_build.arn
+      SPUR_INDEX_JOBS_TABLE        = aws_dynamodb_table.index_jobs.name
+      SPUR_CATALOG_LEASES_TABLE    = aws_dynamodb_table.catalog_leases.name
     }
   }
 
