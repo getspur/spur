@@ -287,7 +287,7 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
 fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
     if is_remote_catalog(catalog_dsn) {
         conn.execute_batch(&format!(
-            "ATTACH '{}' AS spur_context (TYPE ducklake); USE spur_context;",
+            "ATTACH '{}' AS spur_context (TYPE ducklake, AUTOMATIC_MIGRATION TRUE); USE spur_context;",
             escape_sql_literal(catalog_dsn)
         ))
         .context("failed to attach remote DuckLake catalog")
