@@ -2,7 +2,6 @@ use anyhow::{anyhow, Context as _, Result};
 use duckdb::{params, Connection};
 
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
-const INDEX_JOBS_SQL: &str = include_str!("../sql/index_jobs.sql");
 
 fn is_remote_catalog(catalog_dsn: &str) -> bool {
     catalog_dsn.starts_with("s3://")
@@ -51,14 +50,7 @@ impl CatalogResolver {
     }
 
     pub fn from_connection(conn: Connection) -> Self {
-        let resolver = Self { conn };
-        match ensure_index_jobs_table(&resolver.conn) {
-            Ok(()) => eprintln!("[catalog] ensured index_jobs table exists"),
-            Err(error) => {
-                eprintln!("[catalog] warning: failed to ensure index_jobs table exists: {error:#}");
-            }
-        }
-        resolver
+        Self { conn }
     }
 
     pub fn connection(&self) -> &Connection {
@@ -197,46 +189,6 @@ pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Re
     attach_ducklake(&conn, catalog_dsn, data_path)?;
 
     Ok(conn)
-}
-
-pub fn ensure_index_jobs_table(conn: &Connection) -> Result<()> {
-    // The DuckLake catalog may be attached READ_ONLY; index_jobs is an
-    // operational table that lives in the local in-memory database, not in
-    // the attached catalog. Switch to the default database before creating,
-    // then switch back to the catalog.
-    let _ = conn.execute_batch("USE memory;");
-
-    let result = match conn.execute_batch(INDEX_JOBS_SQL) {
-        Ok(()) => Ok(()),
-        Err(error) if is_ducklake_constraint_error(&error) => {
-            eprintln!(
-                "[catalog] warning: bundled index_jobs DDL failed; retrying without DuckLake-unsupported constraints: {error:#}"
-            );
-            let fallback_sql = ducklake_compatible_index_jobs_sql();
-            conn.execute_batch(&fallback_sql)
-                .context("failed to execute DuckLake-compatible index_jobs DDL")
-        }
-        Err(error) => Err(error).context("failed to execute index_jobs DDL"),
-    };
-
-    // Restore the catalog as the default database for query tools.
-    let _ = conn.execute_batch("USE spur_context;");
-    result
-}
-
-fn is_ducklake_constraint_error(error: &duckdb::Error) -> bool {
-    error
-        .to_string()
-        .contains("PRIMARY KEY/UNIQUE constraints are not supported in DuckLake")
-}
-
-fn ducklake_compatible_index_jobs_sql() -> String {
-    INDEX_JOBS_SQL
-        .replace("job_id TEXT PRIMARY KEY,", "job_id TEXT,")
-        .replace(
-            ",\n    UNIQUE(source, package, revision, source_url_hash)",
-            "",
-        )
 }
 
 fn revision_info_from_row(row: &duckdb::Row<'_>) -> duckdb::Result<RevisionInfo> {
