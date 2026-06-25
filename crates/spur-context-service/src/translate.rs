@@ -205,13 +205,12 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     )
     .context("failed to update package catalog metadata")?;
 
-    // Force DuckLake to flush all buffered data to the DATA_PATH.
-    // Without this, INSERTs may be buffered in memory and not persisted
-    // to S3 before the connection drops.
+    // Force DuckLake to flush all inlined data to parquet files on the data path.
+    // DuckLake 1.0 inlines small inserts (<10 rows) into the catalog metadata.
+    // Flushing moves them to parquet files so they're accessible to read-only
+    // consumers (Lambda) that open the catalog without the same inlining state.
     conn.execute_batch("CALL ducklake_flush_inlined_data('spur_context');")
         .context("failed to flush inlined DuckLake data")?;
-    conn.execute_batch("CHECKPOINT;")
-        .context("failed to checkpoint DuckLake")?;
 
     Ok(TranslateStats {
         rows_inserted,
@@ -1423,7 +1422,7 @@ fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Res
     // download-modify-upload pattern where the worker uses a local data path
     // during translate and uploads data files to S3 afterwards.
     conn.execute_batch(&format!(
-        "ATTACH '{}' AS spur_context (DATA_PATH '{}', OVERRIDE_DATA_PATH TRUE); USE spur_context;",
+        "ATTACH '{}' AS spur_context (DATA_PATH '{}', OVERRIDE_DATA_PATH TRUE, AUTOMATIC_MIGRATION TRUE); USE spur_context;",
         escape_sql_literal(&attach_uri),
         escape_sql_literal(data_path)
     ))

@@ -15,12 +15,18 @@ members = [
     "crates/spur-bot",
     "crates/spur-cli",
     "crates/spur-analyst",
-    "crates/spur-context-service",
     "crates/spur-telemetry",
     "crates/spur-test-madsim",
     "crates/spur-context",
     "crates/spur-graph",
     "xtask",
+]
+# spur-context-service is excluded — it uses duckdb v1.5.4 (DuckLake 1.0)
+# independently from the workspace's duckdb v1.4.4 (needed by spur-analyst
+# for DuckPGQ). Build it separately:
+#   cargo build -p spur-context-service --features worker --release
+exclude = [
+    "crates/spur-context-service",
 ]
 [workspace.package]
 version = "1.6.0"
