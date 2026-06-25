@@ -786,6 +786,11 @@ fn insert_symbol_embeddings(
         "CAST(NULL AS VARCHAR)".to_owned()
     };
 
+    let filtered_source_sql = format!(
+        "(SELECT * FROM {} WHERE {embedding_expr} IS NOT NULL)",
+        source.sql()
+    );
+
     let template = format!(
         r"
         INSERT INTO symbol_embeddings (
@@ -829,11 +834,15 @@ fn insert_symbol_embeddings(
     match insert_from_source(
         conn,
         "symbol_embeddings",
-        source.sql(),
+        &filtered_source_sql,
         &template,
         rows_inserted,
     ) {
-        Ok(()) => Ok(true),
+        Ok(()) => Ok(rows_inserted
+            .get("symbol_embeddings")
+            .copied()
+            .unwrap_or_default()
+            > 0),
         Err(error) if source.is_lance() => {
             warn_skip_sidecar(&sidecar_path, &error);
             rows_inserted.insert("symbol_embeddings".to_owned(), 0);
