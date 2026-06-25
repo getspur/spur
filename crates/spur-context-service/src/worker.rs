@@ -29,6 +29,7 @@ const HTTP_HEADER_CAP_BYTES: usize = 64 * 1024;
 const ECS_CREDENTIALS_CAP_BYTES: usize = 64 * 1024;
 const JINA_CODE_EMBED_MODEL_NAME: &str = "JinaEmbeddingsV2BaseCode";
 const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
+const GRAPH_SKIP_SECTION_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobEnv {
@@ -301,6 +302,7 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
         artifact_dir.display()
     );
     let status = Command::new("spur")
+        .env(GRAPH_SKIP_SECTION_EMBEDDINGS_ENV, "1")
         .args([
             "graph", "build",
             "--root", &source_path.to_string_lossy(),
