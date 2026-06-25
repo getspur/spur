@@ -67,6 +67,16 @@ if [[ -z "$GIT_TOPLEVEL" ]]; then
     log "Not inside a git repo. Aborting."
     exit 2
 fi
+LOCAL_CWD=$(pwd -P)
+if [[ "$LOCAL_CWD" == "$GIT_TOPLEVEL" ]]; then
+    WORKDIR_REL="."
+elif [[ "$LOCAL_CWD" == "$GIT_TOPLEVEL/"* ]]; then
+    WORKDIR_REL="${LOCAL_CWD#"$GIT_TOPLEVEL"/}"
+else
+    log "Current directory is outside git root: $LOCAL_CWD"
+    exit 2
+fi
+WORKDIR_REL_ESCAPED="$(printf '%q' "$WORKDIR_REL")"
 
 if [[ "$GIT_TOPLEVEL" == *"/.spur/worktrees/"* ]]; then
     WORKTREE_UUID=$(basename "$GIT_TOPLEVEL")
@@ -90,6 +100,9 @@ REMOTE_RUN_DIR="/mnt/cargo/spur-runs/$WORKTREE_FILE_KEY.$$.$(date +%s)"
 JOBS="${SPUR_BUILD_JOBS:-8}"
 log "Worktree: $WORKTREE_KEY  (local=$GIT_TOPLEVEL)"
 log "Remote:   ~/$REMOTE_DIR   target=$REMOTE_TARGET   -j$JOBS"
+if [[ "$WORKDIR_REL" != "." ]]; then
+    log "Cargo cwd: $WORKDIR_REL"
+fi
 
 # ---- local FIFO admission control -----------------------------------------
 # The builder VM is shared by every local agent/session. Without admission
@@ -561,7 +574,7 @@ run_payload() {
         # quotes). Path patterns MUST use escaped double quotes, not single
         # quotes — a literal ' would close the bash -lc wrapper early and the
         # pattern would glob-expand on the VM (CWD has target/), breaking find.
-        run_capture_cmd="find . -type f -newer \"$REMOTE_RUN_MARKER\" -not -path \"./target/*\" -not -path \"./.git/*\" -not -path \"./.spur/worktrees/*\" -printf \"%P\\0\" > \"$REMOTE_RUN_CHANGED\" || true"
+        run_capture_cmd="(cd \"$REMOTE_RUN_DIR\" && find . -type f -newer \"$REMOTE_RUN_MARKER\" -not -path \"./target/*\" -not -path \"./.git/*\" -not -path \"./.spur/worktrees/*\" -printf \"%P\\0\" > \"$REMOTE_RUN_CHANGED\") || true"
     fi
     remote_ssh \
         --command="bash -lc '
@@ -586,6 +599,10 @@ run_payload() {
             sccache --start-server >/dev/null 2>&1 || true
             cargo_log=/tmp/spur-cargo-output.$WORKTREE_FILE_KEY.log
             $run_setup_cmd
+            remote_workdir_rel=$WORKDIR_REL_ESCAPED
+            if [[ \"\$remote_workdir_rel\" != \".\" ]]; then
+                cd \"\$remote_workdir_rel\"
+            fi
             $run_marker_cmd
             if [[ $capture_cargo_output -eq 1 ]]; then
                 set +e
