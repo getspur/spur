@@ -164,27 +164,6 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     attach_ducklake(&conn, &opts.catalog_dsn, &data_path)?;
     ensure_catalog_schema(&conn)?;
 
-    // DIAGNOSTIC: Test basic S3 write via execute_batch
-    eprintln!("[translate] DIAGNOSTIC: testing S3 write...");
-    match conn.execute_batch("CREATE TABLE IF NOT EXISTS __diag (val VARCHAR); INSERT INTO __diag VALUES ('test1'), ('test2');") {
-        Ok(_) => {
-            let c: i64 = conn.query_row("SELECT COUNT(*) FROM __diag", [], |r| r.get(0)).unwrap_or(-1);
-            eprintln!("[translate] DIAGNOSTIC: execute_batch insert OK, count={c}");
-        }
-        Err(e) => eprintln!("[translate] DIAGNOSTIC: execute_batch insert FAILED: {e}"),
-    }
-    // Check if the diag table data is on S3
-    match conn.query_row(
-        "SELECT file_count FROM ducklake_table_info('spur_context') WHERE table_name = '__diag'",
-        [],
-        |r| r.get::<_, i64>(0),
-    ) {
-        Ok(fc) => eprintln!("[translate] DIAGNOSTIC: __diag file_count={fc}"),
-        Err(e) => eprintln!("[translate] DIAGNOSTIC: can't read __diag file_count: {e}"),
-    }
-    // Clean up
-    let _ = conn.execute_batch("DROP TABLE __diag;");
-
     let mut rows_inserted = HashMap::new();
     let embeddings_translated = run_transaction(&conn, || {
         delete_existing_revision_rows(&conn, opts)?;
@@ -1034,11 +1013,10 @@ fn insert_from_source(
         .with_context(|| format!("failed to count source rows for {table}"))?;
     let sql = insert_template.replace("__SOURCE_SQL__", source_sql);
 
-    // Use prepare().execute() instead of execute_batch() — the Rust duckdb
-    // crate's execute_batch does not trigger DuckLake's INSERT handler,
-    // so data stays in DuckDB's buffer and is never written to parquet files
-    // on the data path. Prepared statement execution goes through the correct
-    // DuckDB API path that DuckLake intercepts.
+    // Use the single-statement prepared path for DuckLake DML. In duckdb-rs
+    // 1.10504.0, execute_batch is a no-params multi-statement convenience path
+    // backed by duckdb_query_arrow, which is not the same path as CLI execution
+    // or prepared execution. DuckLake writes are validated after commit/flush.
     let mut stmt = conn
         .prepare(&sql)
         .with_context(|| format!("failed to prepare {table} insert"))?;
