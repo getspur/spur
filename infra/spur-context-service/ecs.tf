@@ -31,7 +31,7 @@ resource "aws_cloudwatch_log_group" "worker" {
 resource "aws_ecs_task_definition" "worker" {
   family                   = "spur-context-worker"
   requires_compatibilities = ["FARGATE"]
-  network_mode            = "awsvpc"
+  network_mode             = "awsvpc"
   cpu                      = "4096"
   memory                   = "30720"
 
@@ -64,6 +64,22 @@ resource "aws_ecs_task_definition" "worker" {
         {
           name  = "AWS_REGION"
           value = var.aws_region
+        },
+        {
+          name  = "SPUR_INDEX_JOBS_TABLE"
+          value = aws_dynamodb_table.index_jobs.name
+        },
+        {
+          name  = "SPUR_CATALOG_LEASES_TABLE"
+          value = aws_dynamodb_table.catalog_leases.name
+        },
+        {
+          name  = "SPUR_CATALOG_S3_URI"
+          value = var.catalog_s3_uri
+        },
+        {
+          name  = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH"
+          value = local.context_ducklake_data_path
         }
       ]
     }
