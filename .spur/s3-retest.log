@@ -1,0 +1,1711 @@
+## retest tip 6e899fb42 start 14:02:22
+
+######## START [clippy-core-tests] 14:02:22 ########
++ env SPUR_REMOTE=1 ./scripts/spur-cargo clippy -p spur-core --tests -- -D warnings
+[spur-cargo] remote (clippy) → aws VM
+[build] Worktree: spur/worktrees/s3-verify  (local=/Volumes/Projects/spur/.spur/worktrees/s3-verify)
+[build] Remote:   ~/spur/worktrees/s3-verify   target=/mnt/cargo/targets/spur/worktrees/s3-verify   -j16
+[build] Remote build queue: admitted as ticket 173 (slot 2/3).
+[build] SSH transport: SSH-over-SSM (instance i-0406d803bae198035)
+[build] Enumerating git-tracked files...
+[build]   2658 files
+[build] Syncing to i-0406d803bae198035:~/spur/worktrees/s3-verify ...
+[build] Re-stamping 1 synced path(s) to VM clock...
+[build] Reconciling remote workspace (pruning locally-deleted files)...
+[prune] no files removed locally since last sync
+[build] Configuring remote git auth for private getspur/spur deps...
+[build] WARNING: failed to set remote git auth; private dep fetch may fail.
+[build] Running: cargo --config build.rustflags=\[\"-Ctarget-cpu=neoverse-v1\"\,\"-Ctarget-feature=+lse\"\,\"-Clinker=clang\"\,\"-Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld\"\] clippy -p spur-core --tests -- -D warnings  -j16  provider-rustflags=-Ctarget-cpu=neoverse-v1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld
+   Compiling libc v0.2.184
+   Compiling rustix v0.38.44
+    Checking simdutf8 v0.1.5
+    Checking hashbrown v0.15.5
+   Compiling rustls v0.23.38
+    Checking bytemuck v1.25.0
+    Checking bit-vec v0.8.0
+    Checking num-iter v0.1.45
+    Checking rgb v0.8.53
+   Compiling spur-license v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-license)
+    Checking plotters-backend v0.3.7
+    Checking ciborium-io v0.2.2
+    Checking quick-error v1.2.3
+    Checking itertools v0.10.5
+    Checking unarray v0.1.4
+    Checking tinytemplate v1.2.1
+   Compiling tracing-test-macro v0.2.6
+    Checking anes v0.1.6
+    Checking oorandom v11.1.5
+    Checking petgraph v0.8.3
+    Checking imara-diff v0.1.8
+    Checking roaring v0.11.4
+    Checking qoi v0.4.1
+    Checking hashlink v0.10.0
+    Checking ciborium-ll v0.2.2
+    Checking bit-set v0.8.0
+    Checking plotters-svg v0.3.7
+    Checking parking_lot_core v0.9.12
+    Checking getrandom v0.2.17
+    Checking errno v0.3.14
+    Checking mio v1.2.0
+    Checking getrandom v0.3.4
+    Checking socket2 v0.6.3
+    Checking cpufeatures v0.2.17
+    Checking getrandom v0.4.2
+    Checking rand_core v0.6.4
+    Checking ring v0.17.14
+    Checking memmap2 v0.9.10
+    Checking parking_lot v0.12.5
+    Checking signal-hook-registry v1.4.8
+    Checking dashmap v6.1.0
+    Checking openssl-sys v0.9.116
+    Checking rand_core v0.9.5
+    Checking ahash v0.8.12
+    Checking num_cpus v1.17.0
+    Checking tempfile v3.27.0
+    Checking uuid v1.23.0
+    Checking crypto-common v0.1.7
+    Checking signal-hook v0.3.18
+    Checking rand_chacha v0.9.0
+    Checking filetime v0.2.27
+    Checking ff v0.13.1
+    Checking tokio v1.51.1
+    Checking prodash v30.0.1
+    Checking time v0.3.47
+    Checking crypto-bigint v0.5.5
+    Checking rand_chacha v0.3.1
+    Checking rand v0.9.4
+    Checking digest v0.10.7
+    Checking arrow-array v58.1.0
+    Checking lz4-sys v1.11.1+lz4-1.10.0
+    Checking signal-hook-mio v0.2.5
+    Checking group v0.13.0
+    Checking openssl v0.10.80
+    Checking gix-features v0.45.2
+    Checking tar v0.4.45
+    Checking rand v0.8.5
+    Checking moka v0.12.15
+    Checking matrixmultiply v0.3.10
+    Checking sha2 v0.10.9
+    Checking md-5 v0.10.6
+    Checking twox-hash v2.1.2
+    Checking crossterm v0.28.1
+    Checking blake2 v0.10.6
+    Checking sha1 v0.10.6
+    Checking jsonb v0.5.6
+    Checking signature v2.2.0
+    Checking hmac v0.12.1
+    Checking curve25519-dalek v4.1.3
+    Checking lz4_flex v0.13.1
+    Checking lz4 v1.28.1
+    Checking console v0.16.3
+    Checking comfy-table v7.1.2
+    Checking sha1-checked v0.10.0
+    Checking ed25519 v2.2.3
+    Checking gix-fs v0.18.2
+    Checking hkdf v0.12.4
+    Checking gix-glob v0.23.0
+    Checking rfc6979 v0.4.0
+    Checking dirs-sys v0.5.0
+    Checking ed25519-dalek v2.2.0
+    Checking elliptic-curve v0.13.8
+    Checking io-uring v0.7.12
+    Checking native-tls v0.2.18
+    Checking gix-hash v0.21.2
+    Checking rustls-webpki v0.103.12
+    Checking indicatif v0.18.4
+    Checking gix-tempfile v20.0.1
+    Checking ndarray v0.16.1
+    Checking dirs v6.0.0
+    Checking num-bigint-dig v0.8.6
+    Checking plist v1.8.0
+    Checking primeorder v0.13.6
+    Checking ecdsa v0.16.9
+    Checking gix-attributes v0.29.0
+    Checking rand_distr v0.5.1
+    Checking random_word v0.5.2
+    Checking rand_xoshiro v0.7.0
+    Checking gix-hashtable v0.11.0
+    Checking gix-commitgraph v0.31.0
+    Checking gix-lock v20.0.1
+    Checking gix-sec v0.12.2
+    Checking dirs-sys v0.4.1
+    Checking p384 v0.13.1
+    Checking p256 v0.13.2
+    Checking rsa v0.9.10
+    Checking simple_asn1 v0.6.4
+    Checking gix-object v0.54.1
+    Checking crossterm v0.29.0
+    Checking fancy-regex v0.17.0
+    Checking stdio-override v0.2.0
+    Checking os_pipe v1.2.3
+    Checking backtrace v0.3.76
+    Checking fs2 v0.4.3
+    Checking gix-url v0.34.0
+    Checking rand v0.10.1
+    Checking gix-config-value v0.16.0
+    Checking syntect v5.3.0
+    Checking jsonwebtoken v10.4.0
+    Checking directories v5.0.1
+    Checking gix-ignore v0.18.0
+    Checking cipher v0.4.4
+    Checking universal-hash v0.5.1
+    Checking sysinfo v0.30.13
+    Checking rav1e v0.8.1
+    Checking socks v0.3.4
+    Checking console v0.15.11
+    Checking gix-shallow v0.7.0
+    Checking arrow-select v58.1.0
+    Checking arrow-row v58.1.0
+    Checking arrow-arith v58.1.0
+    Checking fsst v6.0.0
+    Checking gix-transport v0.52.1
+    Checking gix-pathspec v0.14.0
+    Checking ureq v2.12.1
+    Checking polyval v0.6.2
+    Checking tracing-appender v0.2.4
+    Checking indicatif v0.17.11
+    Checking ctr v0.9.2
+    Checking ghash v0.5.1
+    Checking aes v0.8.4
+    Checking ort v2.0.0-rc.9
+    Checking tokenizers v0.21.4
+    Checking aead v0.5.2
+    Checking gix-revwalk v0.25.0
+    Checking gix-ref v0.57.0
+    Checking gix-pack v0.64.1
+    Checking gix-filter v0.24.1
+    Checking dirs v5.0.1
+    Checking aes-gcm v0.10.3
+    Checking hostname v0.4.2
+    Checking wait-timeout v0.2.1
+    Checking rand_xorshift v0.4.0
+    Checking criterion-plot v0.5.0
+    Checking ciborium v0.2.2
+    Checking plotters v0.3.7
+    Checking is-terminal v0.4.17
+    Checking gix-traverse v0.51.1
+    Checking gix-revision v0.39.0
+    Checking rich_rust v0.2.1
+    Checking rusty-fork v0.3.1
+    Checking arrow-ord v58.1.0
+    Checking arrow-ipc v58.1.0
+    Checking arrow-string v58.1.0
+    Checking tracing-test v0.2.6
+    Checking gix-index v0.45.1
+    Checking proptest v1.11.0
+    Checking gix-refspec v0.35.0
+    Checking gix-config v0.50.0
+    Checking gix-discover v0.45.0
+    Checking gix-protocol v0.55.0
+    Checking gix-odb v0.74.0
+    Checking arrow-cast v58.1.0
+    Checking object_store v0.13.2
+    Checking tokio-util v0.7.18
+    Checking async-compression v0.4.19
+    Checking tokio-rustls v0.26.4
+    Checking datafusion-common-runtime v53.1.0
+    Checking tokio-native-tls v0.3.1
+    Checking object_store v0.12.5
+    Checking lindera-dictionary v0.44.1
+    Checking gix-worktree v0.46.0
+    Checking criterion v0.5.1
+    Checking parquet v58.1.0
+    Checking gix-submodule v0.24.0
+    Checking gix-diff v0.57.1
+    Checking h2 v0.4.14
+    Checking tower v0.5.3
+    Checking tokio-stream v0.1.18
+    Checking beads_rust v0.1.14 (https://github.com/getspur/beads_rust?rev=beff256b491e20508eab0319b23547ff145cfd04#beff256b)
+    Checking arrow-json v58.1.0
+    Checking arrow-csv v58.1.0
+    Checking lance-arrow v6.0.0
+    Checking lindera v0.44.1
+    Checking gix v0.77.0
+    Checking lance-testing v6.0.0
+    Checking proptest-state-machine v0.8.0
+    Checking tower-http v0.6.8
+    Checking lance-tokenizer v6.0.0
+    Checking ravif v0.13.0
+    Checking arrow v58.1.0
+    Checking datafusion-common v53.1.0
+    Checking lance-datagen v6.0.0
+    Checking duckdb v1.10502.0
+    Checking image v0.25.10
+    Checking hyper v1.9.0
+    Checking datafusion-expr-common v53.1.0
+    Checking hyper-util v0.1.20
+    Checking datafusion-physical-expr-common v53.1.0
+    Checking datafusion-functions-window-common v53.1.0
+    Checking datafusion-functions-aggregate-common v53.1.0
+    Checking hyper-rustls v0.27.9
+    Checking hyper-tls v0.6.0
+    Checking hyper-timeout v0.5.2
+    Checking reqwest v0.13.2
+    Checking axum v0.8.9
+    Checking datafusion-expr v53.1.0
+    Checking reqwest v0.12.28
+    Checking octocrab v0.50.0
+    Checking rmcp v1.5.0
+    Checking lance-namespace-reqwest-client v0.7.7
+    Checking hf-hub v0.4.3
+    Checking licenseseat v0.5.3
+    Checking fastembed v4.9.1
+    Checking datafusion-physical-expr v53.1.0
+    Checking datafusion-execution v53.1.0
+    Checking datafusion-functions v53.1.0
+    Checking datafusion-functions-aggregate v53.1.0
+    Checking datafusion-functions-window v53.1.0
+    Checking datafusion-optimizer v53.1.0
+    Checking datafusion-physical-plan v53.1.0
+    Checking datafusion-physical-expr-adapter v53.1.0
+    Checking datafusion-functions-nested v53.1.0
+    Checking datafusion-sql v53.1.0
+    Checking agent-client-protocol v0.11.1
+    Checking lance-core v6.0.0
+    Checking datafusion-session v53.1.0
+    Checking datafusion-datasource v53.1.0
+    Checking lance-namespace v6.0.0
+    Checking lance-encoding v6.0.0
+    Checking lance-linalg v6.0.0
+    Checking lance-io v6.0.0
+    Checking datafusion-catalog v53.1.0
+    Checking datafusion-pruning v53.1.0
+    Checking datafusion-datasource-json v53.1.0
+    Checking datafusion-datasource-csv v53.1.0
+    Checking datafusion-datasource-arrow v53.1.0
+    Checking datafusion-physical-optimizer v53.1.0
+    Checking lance-file v6.0.0
+    Checking spur-pm v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-pm)
+    Checking lance-table v6.0.0
+    Checking spur-acp v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-acp)
+    Checking spur-blob-store v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-blob-store)
+    Checking spur-cost v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-cost)
+    Checking spur-worktree v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-worktree)
+    Checking datafusion-catalog-listing v53.1.0
+    Checking datafusion-functions-table v53.1.0
+    Checking datafusion v53.1.0
+    Checking lance-datafusion v6.0.0
+    Checking lance-index v6.0.0
+    Checking lance v6.0.0
+    Checking lance-namespace-impls v6.0.0
+    Checking lancedb v0.29.0
+    Checking spur-graph v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-graph)
+    Checking spur-analyst v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-analyst)
+    Checking spur-mcp v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-mcp)
+    Checking spur-core v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-core)
+error: item in documentation is missing backticks
+ --> crates/spur-core/tests/retry_reflexion.rs:4:15
+  |
+4 | //! Exercises render_retry_context directly — the integration path
+  |               ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#doc_markdown
+  = note: `-D clippy::doc-markdown` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(clippy::doc_markdown)]`
+help: try
+  |
+4 - //! Exercises render_retry_context directly — the integration path
+4 + //! Exercises `render_retry_context` directly — the integration path
+  |
+
+error: item in documentation is missing backticks
+ --> crates/spur-core/tests/retry_reflexion.rs:5:10
+  |
+5 | //! from execute_delegation into the worker prompt is covered by
+  |          ^^^^^^^^^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#doc_markdown
+help: try
+  |
+5 - //! from execute_delegation into the worker prompt is covered by
+5 + //! from `execute_delegation` into the worker prompt is covered by
+  |
+
+error: could not compile `spur-core` (test "retry_reflexion") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: this `continue` expression is redundant
+  --> crates/spur-core/tests/peer_mailbox_production_wireup.rs:60:64
+   |
+60 |             Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+   |                                                                ^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_continue
+   = note: `-D clippy::needless-continue` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::needless_continue)]`
+
+error: #[allow] attribute found
+  --> crates/spur-core/tests/init_agents.rs:31:3
+   |
+31 | #[allow(clippy::await_holding_lock)]
+   |   ^^^^^ help: replace it with: `expect`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#allow_attributes
+   = note: `-D clippy::allow-attributes` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::allow_attributes)]`
+
+error: #[allow] attribute found
+  --> crates/spur-core/tests/init_agents.rs:60:3
+   |
+60 | #[allow(clippy::await_holding_lock)]
+   |   ^^^^^ help: replace it with: `expect`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#allow_attributes
+
+error: #[allow] attribute found
+  --> crates/spur-core/tests/init_agents.rs:87:3
+   |
+87 | #[allow(clippy::await_holding_lock)]
+   |   ^^^^^ help: replace it with: `expect`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#allow_attributes
+
+error: future cannot be sent between threads safely
+  --> crates/spur-core/tests/peer_mailbox_production_wireup.rs:71:2
+   |
+71 | ) {
+   |  ^ future returned by `wait_for_state` is not `Send`
+   |
+note: future is not `Send` as this value is used across an await
+  --> crates/spur-core/tests/peer_mailbox_production_wireup.rs:79:14
+   |
+68 |     orchestrator: &Orchestrator,
+   |     ------------ has type `&spur_core::Orchestrator` which is not `Send`
+...
+79 |             .await
+   |              ^^^^^ await occurs here, with `orchestrator` maybe used later
+   = note: `std::cell::RefCell<rusqlite::inner_connection::InnerConnection>` doesn't implement `std::marker::Sync`
+note: future is not `Send` as this value is used across an await
+  --> crates/spur-core/tests/peer_mailbox_production_wireup.rs:79:14
+   |
+68 |     orchestrator: &Orchestrator,
+   |     ------------ has type `&spur_core::Orchestrator` which is not `Send`
+...
+79 |             .await
+   |              ^^^^^ await occurs here, with `orchestrator` maybe used later
+   = note: `std::cell::RefCell<hashlink::lru_cache::LruCache<std::sync::Arc<str>, rusqlite::raw_statement::RawStatement>>` doesn't implement `std::marker::Sync`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#future_not_send
+   = note: `-D clippy::future-not-send` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::future_not_send)]`
+
+error: future cannot be sent between threads safely
+  --> crates/spur-core/tests/peer_mailbox_production_wireup.rs:96:6
+   |
+96 | ) -> Option<Result<Acceptance, RouterError>> {
+   |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ future returned by `emit_peer_message` is not `Send`
+   |
+note: captured value is not `Send` because `&` references cannot be sent unless their referent is `Sync`
+  --> crates/spur-core/tests/peer_mailbox_production_wireup.rs:93:5
+   |
+93 |     orchestrator: &Orchestrator,
+   |     ^^^^^^^^^^^^ has type `&spur_core::Orchestrator` which is not `Send`, because `spur_core::Orchestrator` is not `Sync`
+   = note: `std::cell::RefCell<rusqlite::inner_connection::InnerConnection>` doesn't implement `std::marker::Sync`
+note: captured value is not `Send` because `&` references cannot be sent unless their referent is `Sync`
+  --> crates/spur-core/tests/peer_mailbox_production_wireup.rs:93:5
+   |
+93 |     orchestrator: &Orchestrator,
+   |     ^^^^^^^^^^^^ has type `&spur_core::Orchestrator` which is not `Send`, because `spur_core::Orchestrator` is not `Sync`
+   = note: `std::cell::RefCell<hashlink::lru_cache::LruCache<std::sync::Arc<str>, rusqlite::raw_statement::RawStatement>>` doesn't implement `std::marker::Sync`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#future_not_send
+
+error: this pattern matching can be expressed using `matches!`
+   --> crates/spur-core/tests/peer_mailbox_production_wireup.rs:114:8
+    |
+114 |     if let Acceptance::AlreadyAccepted = acceptance {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `matches!(acceptance, Acceptance::AlreadyAccepted)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#equatable_if_let
+    = note: `-D clippy::equatable-if-let` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::equatable_if_let)]`
+
+error: wildcard matches only a single variant and will also match any future added variants
+   --> crates/spur-core/tests/scheduler_properties.rs:146:17
+    |
+146 |                 _ => (),
+    |                 ^ help: try: `ScheduledAction::IdleUntil { .. }`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#match_wildcard_for_single_variants
+    = note: `-D clippy::match-wildcard-for-single-variants` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::match_wildcard_for_single_variants)]`
+
+error: item in documentation is missing backticks
+ --> crates/spur-core/tests/init_agents.rs:6:5
+  |
+6 | //! seed_agents.toml).
+  |     ^^^^^^^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#doc_markdown
+  = note: `-D clippy::doc-markdown` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(clippy::doc_markdown)]`
+help: try
+  |
+6 - //! seed_agents.toml).
+6 + //! `seed_agents.toml`).
+  |
+
+error: could not compile `spur-core` (test "peer_mailbox_production_wireup") due to 4 previous errors
+error: importing trait that is only used anonymously
+  --> crates/spur-core/tests/init_agents.rs:12:24
+   |
+12 | use std::os::unix::fs::PermissionsExt;
+   |                        ^^^^^^^^^^^^^^ help: use: `PermissionsExt as _`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unused_trait_names
+   = note: `-D clippy::unused-trait-names` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::unused_trait_names)]`
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/init_agents.rs:54:14
+   |
+54 |         vec!["kiro".to_string()],
+   |              ^^^^^^^^^^^^^^^^^^ help: try: `"kiro".to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+   = note: `-D clippy::str-to-string` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::str_to_string)]`
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/shutdown_mcp_server_bounded.rs:46:29
+   |
+46 |     let session = SessionId("under-test".to_string());
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"under-test".to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+   = note: `-D clippy::str-to-string` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::str_to_string)]`
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/shutdown_mcp_server_bounded.rs:79:29
+   |
+79 |     let session = SessionId("under-test-none-server".to_string());
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"under-test-none-server".to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: could not compile `spur-core` (test "scheduler_properties") due to 1 previous error
+error: this `MutexGuard` is held across an await point
+   --> crates/spur-core/tests/doc_navigate.rs:112:9
+    |
+112 |     let _lock = CWD_LOCK.lock().expect("cwd lock");
+    |         ^^^^^
+    |
+    = help: consider using an async-aware `Mutex` type or ensuring the `MutexGuard` is dropped before calling `await`
+note: these are all the await points this lock is held through
+   --> crates/spur-core/tests/doc_navigate.rs:133:6
+    |
+133 |     .await;
+    |      ^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#await_holding_lock
+    = note: `-D clippy::await-holding-lock` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::await_holding_lock)]`
+
+error: could not compile `spur-core` (test "shutdown_mcp_server_bounded") due to 2 previous errors
+error: could not compile `spur-core` (test "init_agents") due to 6 previous errors
+error: using `.clone()` on a ref-counted pointer
+  --> crates/spur-core/tests/peer_mailbox_concurrency.rs:92:9
+   |
+92 |         ledger.clone(),
+   |         ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::InMemoryLedger>::clone(&ledger)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+   = note: `-D clippy::clone-on-ref-ptr` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::clone_on_ref_ptr)]`
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:109:9
+    |
+109 |         ledger.clone(),
+    |         ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<dyn spur_core::peer_mailbox::PeerMailboxLedger>::clone(&ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:114:58
+    |
+114 |     let builder = Arc::new(PeerPromptContextBuilder::new(ledger.clone()));
+    |                                                          ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<dyn spur_core::peer_mailbox::PeerMailboxLedger>::clone(&ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: this pattern matching can be expressed using `matches!`
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:141:8
+    |
+141 |     if let Acceptance::AlreadyAccepted = acceptance {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `matches!(acceptance, Acceptance::AlreadyAccepted)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#equatable_if_let
+    = note: `-D clippy::equatable-if-let` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::equatable_if_let)]`
+
+error: could not compile `spur-core` (test "doc_navigate") due to 1 previous error
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:165:22
+    |
+165 |         let router = router.clone();
+    |                      ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::PeerMailboxRouter>::clone(&router)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:166:24
+    |
+166 |         let snapshot = snapshot.clone();
+    |                        ^^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::plan::scope_snapshot::PlanScopeSnapshot>::clone(&snapshot)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:167:23
+    |
+167 |         let barrier = barrier.clone();
+    |                       ^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<tokio::sync::Barrier>::clone(&barrier)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: assert without any message
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:185:5
+    |
+185 |     assert_eq!(created, n);
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider describing why the failing assert is problematic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#missing_assert_message
+    = note: `-D clippy::missing-assert-message` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::missing_assert_message)]`
+
+error: assert without any message
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:191:5
+    |
+191 |     assert_eq!(entries.len(), n);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider describing why the failing assert is problematic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#missing_assert_message
+
+error: assert without any message
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:198:5
+    |
+198 |     assert_eq!(actual, expected);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider describing why the failing assert is problematic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#missing_assert_message
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:213:22
+    |
+213 |         let router = router.clone();
+    |                      ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::PeerMailboxRouter>::clone(&router)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:214:24
+    |
+214 |         let snapshot = snapshot.clone();
+    |                        ^^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::plan::scope_snapshot::PlanScopeSnapshot>::clone(&snapshot)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:216:23
+    |
+216 |         let barrier = barrier.clone();
+    |                       ^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<tokio::sync::Barrier>::clone(&barrier)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: this pattern matching can be expressed using `matches!`
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:231:12
+    |
+231 |         if let Acceptance::AlreadyAccepted = acceptance {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `matches!(acceptance, Acceptance::AlreadyAccepted)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#equatable_if_let
+
+error: item in documentation is missing backticks
+ --> crates/spur-core/tests/worktree_authority.rs:1:22
+  |
+1 | //! End-to-end test: SelfHeldSet maintenance prevents authority from
+  |                      ^^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#doc_markdown
+  = note: `-D clippy::doc-markdown` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(clippy::doc_markdown)]`
+help: try
+  |
+1 - //! End-to-end test: SelfHeldSet maintenance prevents authority from
+1 + //! End-to-end test: `SelfHeldSet` maintenance prevents authority from
+  |
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:295:22
+    |
+295 |         let ledger = ledger.clone();
+    |                      ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::InMemoryLedger>::clone(&ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:296:23
+    |
+296 |         let barrier = barrier.clone();
+    |                       ^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<tokio::sync::Barrier>::clone(&barrier)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:297:25
+    |
+297 |         let err_count = err_count.clone();
+    |                         ^^^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<std::sync::atomic::AtomicUsize>::clone(&err_count)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:363:22
+    |
+363 |         let ledger = ledger.clone();
+    |                      ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::InMemoryLedger>::clone(&ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:369:23
+    |
+369 |         let barrier = barrier.clone();
+    |                       ^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<tokio::sync::Barrier>::clone(&barrier)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:423:22
+    |
+423 |         let ledger = ledger.clone();
+    |                      ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::InMemoryLedger>::clone(&ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:424:23
+    |
+424 |         let barrier = barrier.clone();
+    |                       ^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<tokio::sync::Barrier>::clone(&barrier)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:458:32
+    |
+458 |         PeerMailboxRouter::new(ledger.clone(), funnel.clone(), recon_tx, Limits::default());
+    |                                ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::InMemoryLedger>::clone(&ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: this pattern matching can be expressed using `matches!`
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:478:12
+    |
+478 |         if let Acceptance::AlreadyAccepted = &acceptance {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `matches!(&acceptance, Acceptance::AlreadyAccepted)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#equatable_if_let
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:522:22
+    |
+522 |         let router = router.clone();
+    |                      ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::PeerMailboxRouter>::clone(&router)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:523:23
+    |
+523 |         let barrier = barrier.clone();
+    |                       ^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<tokio::sync::Barrier>::clone(&barrier)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:557:18
+    |
+557 |     let router = bundle.router.clone();
+    |                  ^^^^^^^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::PeerMailboxRouter>::clone(&bundle.router)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:558:18
+    |
+558 |     let ledger = bundle.ledger.clone();
+    |                  ^^^^^^^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<dyn spur_core::peer_mailbox::PeerMailboxLedger>::clone(&bundle.ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:565:22
+    |
+565 |         let router = router.clone();
+    |                      ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::peer_mailbox::PeerMailboxRouter>::clone(&router)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:566:22
+    |
+566 |         let ledger = ledger.clone();
+    |                      ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<dyn spur_core::peer_mailbox::PeerMailboxLedger>::clone(&ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:567:24
+    |
+567 |         let snapshot = snapshot.clone();
+    |                        ^^^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::plan::scope_snapshot::PlanScopeSnapshot>::clone(&snapshot)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:568:21
+    |
+568 |         let ready = ready.clone();
+    |                     ^^^^^^^^^^^^^ help: try: `std::sync::Arc::<tokio::sync::Barrier>::clone(&ready)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/peer_mailbox_concurrency.rs:603:9
+    |
+603 |         ledger.clone(),
+    |         ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<dyn spur_core::peer_mailbox::PeerMailboxLedger>::clone(&ledger)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: importing trait that is only used anonymously
+   --> crates/spur-core/tests/worktree_authority.rs:262:22
+    |
+262 |     use fs4::fs_std::FileExt;
+    |                      ^^^^^^^ help: use: `FileExt as _`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unused_trait_names
+    = note: `-D clippy::unused-trait-names` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unused_trait_names)]`
+
+error: could not compile `spur-core` (test "peer_mailbox_concurrency") due to 32 previous errors
+error: could not compile `spur-core` (test "worktree_authority") due to 2 previous errors
+error: static `LOOPBACK_BINDABLE` is never used
+  --> crates/spur-core/tests/common/mod.rs:27:8
+   |
+27 | static LOOPBACK_BINDABLE: OnceCell<bool> = OnceCell::const_new();
+   |        ^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: struct `TestWorkerSignalSink` is never constructed
+  --> crates/spur-core/tests/common/mod.rs:29:12
+   |
+29 | pub struct TestWorkerSignalSink {
+   |            ^^^^^^^^^^^^^^^^^^^^
+
+error: associated function `new` is never used
+  --> crates/spur-core/tests/common/mod.rs:34:12
+   |
+33 | impl TestWorkerSignalSink {
+   | ------------------------- associated function in this implementation
+34 |     pub fn new(funnel: Arc<dyn McpEventSink>) -> Self {
+   |            ^^^
+
+error: function `loopback_bindable` is never used
+  --> crates/spur-core/tests/common/mod.rs:75:14
+   |
+75 | pub async fn loopback_bindable() -> bool {
+   |              ^^^^^^^^^^^^^^^^^
+
+error: function `pro_feature_gate` is never used
+   --> crates/spur-core/tests/common/mod.rs:110:8
+    |
+110 | pub fn pro_feature_gate() -> Arc<FeatureGate> {
+    |        ^^^^^^^^^^^^^^^^
+
+error: function `community_feature_gate` is never used
+   --> crates/spur-core/tests/common/mod.rs:117:8
+    |
+117 | pub fn community_feature_gate() -> Arc<FeatureGate> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+error: function `install_core_brain_registry` is never used
+   --> crates/spur-core/tests/common/mod.rs:121:8
+    |
+121 | pub fn install_core_brain_registry(server: &mut McpCallbackServer) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: function `beads_pm` is never used
+   --> crates/spur-core/tests/common/mod.rs:134:14
+    |
+134 | pub async fn beads_pm(repo: &Path) -> Arc<PmService> {
+    |              ^^^^^^^^
+
+error: function `temp_beads_pm` is never used
+   --> crates/spur-core/tests/common/mod.rs:148:14
+    |
+148 | pub async fn temp_beads_pm() -> (TempDir, Arc<PmService>) {
+    |              ^^^^^^^^^^^^^
+
+error: function `create_task` is never used
+   --> crates/spur-core/tests/common/mod.rs:154:14
+    |
+154 | pub async fn create_task(pm: &PmService, title: &str) -> String {
+    |              ^^^^^^^^^^^
+
+error: function `close_task` is never used
+   --> crates/spur-core/tests/common/mod.rs:164:14
+    |
+164 | pub async fn close_task(pm: &PmService, task_id: &str) {
+    |              ^^^^^^^^^^
+
+error: function `comment_texts` is never used
+   --> crates/spur-core/tests/common/mod.rs:176:14
+    |
+176 | pub async fn comment_texts(pm: &PmService, issue_id: &str) -> Vec<String> {
+    |              ^^^^^^^^^^^^^
+
+error: function `issue_labels` is never used
+   --> crates/spur-core/tests/common/mod.rs:187:14
+    |
+187 | pub async fn issue_labels(pm: &PmService, issue_id: &str) -> Vec<String> {
+    |              ^^^^^^^^^^^^
+
+error: function `scope_drift_signal` is never used
+   --> crates/spur-core/tests/common/mod.rs:191:8
+    |
+191 | pub fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
+    |        ^^^^^^^^^^^^^^^^^^
+
+error: function `init_beads_pm` is never used
+  --> crates/spur-core/tests/common/beads.rs:21:14
+   |
+21 | pub async fn init_beads_pm(repo: &Path) -> (TestBeadsWorkspace, Arc<spur_pm::PmService>) {
+   |              ^^^^^^^^^^^^^
+
+error: importing trait that is only used anonymously
+ --> crates/spur-core/tests/common/beads.rs:5:36
+  |
+5 | use rusqlite::{params, Connection, OptionalExtension};
+  |                                    ^^^^^^^^^^^^^^^^^ help: use: `OptionalExtension as _`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unused_trait_names
+  = note: `-D clippy::unused-trait-names` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(clippy::unused_trait_names)]`
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/common/beads.rs:63:26
+   |
+63 |     let mut issue_type = "task".to_string();
+   |                          ^^^^^^^^^^^^^^^^^^ help: try: `"task".to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+   = note: `-D clippy::str-to-string` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::str_to_string)]`
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/common/beads.rs:77:36
+   |
+77 |                     .ok_or_else(|| "missing issue type".to_string())?
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing issue type".to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/common/beads.rs:84:40
+   |
+84 |                         .ok_or_else(|| "missing issue title".to_string())?
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing issue title".to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/common/beads.rs:92:36
+   |
+92 |                     .ok_or_else(|| "missing priority".to_string())?
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing priority".to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:100:36
+    |
+100 |                     .ok_or_else(|| "missing label".to_string())?
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing label".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:106:30
+    |
+106 |                 title = Some(value.to_string());
+    |                              ^^^^^^^^^^^^^^^^^ help: try: `value.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:113:41
+    |
+113 |     let title = title.unwrap_or_else(|| "test issue".to_string());
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"test issue".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:148:36
+    |
+148 |         *args.get(4).ok_or_else(|| "missing label".to_string())?
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing label".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:229:54
+    |
+229 |             let issue_id = args.get(2).ok_or_else(|| "missing issue id".to_string())?;
+    |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing issue id".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:232:32
+    |
+232 |                 .ok_or_else(|| "missing comment body".to_string())?;
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing comment body".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:244:54
+    |
+244 |             let issue_id = args.get(2).ok_or_else(|| "missing issue id".to_string())?;
+    |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing issue id".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:274:46
+    |
+274 |     let issue_id = args.get(1).ok_or_else(|| "missing issue id".to_string())?;
+    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"missing issue id".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: struct `TestWorkerSignalSink` is never constructed
+  --> crates/spur-core/tests/common/mod.rs:29:12
+   |
+29 | pub struct TestWorkerSignalSink {
+   |            ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:397:20
+    |
+397 |         return Err("Validation failed: label: cannot be empty".to_string());
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"Validation failed: label: cannot be empty".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:400:20
+    |
+400 |         return Err("Validation failed: label: exceeds 50 characters".to_string());
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"Validation failed: label: exceeds 50 characters".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/beads.rs:407:13
+    |
+407 | /             "Validation failed: label: invalid characters (only alphanumeric, hyphen, underscore, colon allowed)"
+408 | |                 .to_string(),
+    | |____________________________^ help: try: `"Validation failed: label: invalid characters (only alphanumeric, hyphen, underscore, colon allowed)".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/common/g_strict_harness.rs:39:5
+   |
+39 |     String::from_utf8_lossy(&output.stdout).trim().to_string()
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `String::from_utf8_lossy(&output.stdout).trim().to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/common/g_strict_harness.rs:86:5
+   |
+86 | /     text.lines()
+87 | |         .find_map(|line| line.trim().strip_prefix("plan_id: "))
+88 | |         .unwrap_or_else(|| panic!("submit_plan response must include plan_id: {text}"))
+89 | |         .to_string()
+   | |____________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+help: try
+   |
+86 ~     text.lines()
+87 +         .find_map(|line| line.trim().strip_prefix("plan_id: "))
+88 +         .unwrap_or_else(|| panic!("submit_plan response must include plan_id: {text}")).to_owned()
+   |
+
+error: importing trait that is only used anonymously
+ --> crates/spur-core/tests/rmcp_streamable_http.rs:3:84
+  |
+3 | use rmcp::{model::CallToolRequestParams, transport::StreamableHttpClientTransport, ServiceExt};
+  |                                                                                    ^^^^^^^^^^ help: use: `ServiceExt as _`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unused_trait_names
+  = note: `-D clippy::unused-trait-names` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(clippy::unused_trait_names)]`
+
+error: use the `?` operator instead of an `and_then` call
+   --> crates/spur-core/tests/common/g_strict_harness.rs:104:5
+    |
+104 | /     status["tasks"].as_array().and_then(|tasks| {
+105 | |         tasks
+106 | |             .iter()
+107 | |             .find(|task| task["task_id"] == task_id)
+108 | |             .and_then(|task| task["status"].as_str())
+109 | |             .map(str::to_string)
+110 | |     })
+    | |______^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#return_and_then
+    = note: `-D clippy::return-and-then` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::return_and_then)]`
+help: try
+    |
+104 ~     let tasks = status["tasks"].as_array()?;
+105 +     tasks
+106 +                 .iter()
+107 +                 .find(|task| task["task_id"] == task_id)
+108 +                 .and_then(|task| task["status"].as_str())
+109 +                 .map(str::to_string)
+    |
+
+error: importing trait that is only used anonymously
+ --> crates/spur-core/tests/common/beads.rs:5:36
+  |
+5 | use rusqlite::{params, Connection, OptionalExtension};
+  |                                    ^^^^^^^^^^^^^^^^^ help: use: `OptionalExtension as _`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unused_trait_names
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/g_strict_harness.rs:419:30
+    |
+419 |         let worker_task_id = task_id.to_string();
+    |                              ^^^^^^^^^^^^^^^^^^^ help: try: `task_id.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: consider adding a `;` to the last statement for consistent formatting
+   --> crates/spur-core/tests/common/g_strict_harness.rs:422:13
+    |
+422 |             run_mock_worker_sync(&repo, &worker_task_id, request, worker)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `run_mock_worker_sync(&repo, &worker_task_id, request, worker);`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#semicolon_if_nothing_returned
+    = note: `-D clippy::semicolon-if-nothing-returned` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::semicolon_if_nothing_returned)]`
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/g_strict_harness.rs:485:23
+    |
+485 |         let task_id = task_id.to_string();
+    |                       ^^^^^^^^^^^^^^^^^^^ help: try: `task_id.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: consider adding a `;` to the last statement for consistent formatting
+   --> crates/spur-core/tests/common/g_strict_harness.rs:488:13
+    |
+488 |             run_mock_worker_until_oid_send(&repo, &task_id, request, hooks)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `run_mock_worker_until_oid_send(&repo, &task_id, request, hooks);`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#semicolon_if_nothing_returned
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/g_strict_harness.rs:505:34
+    |
+505 |                         .map(|s| (*s).to_string())
+    |                                  ^^^^^^^^^^^^^^^^ help: try: `(*s).to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/g_strict_harness.rs:508:32
+    |
+508 |             .unwrap_or_else(|| "unknown panic payload".to_string());
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"unknown panic payload".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: unused `self` argument
+   --> crates/spur-core/tests/common/g_strict_harness.rs:556:34
+    |
+556 |     pub fn task_status_entry<'a>(&self, status: &'a Value, task_id: &str) -> Option<&'a Value> {
+    |                                  ^^^^^
+    |
+    = help: consider refactoring to an associated function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#unused_self
+    = note: `-D clippy::unused-self` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unused_self)]`
+
+error: use the `?` operator instead of an `and_then` call
+   --> crates/spur-core/tests/common/g_strict_harness.rs:557:9
+    |
+557 | /         status["tasks"]
+558 | |             .as_array()
+559 | |             .and_then(|tasks| tasks.iter().find(|task| task["task_id"] == task_id))
+    | |___________________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#return_and_then
+help: try
+    |
+557 ~         let tasks = status["tasks"]
+558 +             .as_array()?;
+559 +         tasks.iter().find(|task| task["task_id"] == task_id)
+    |
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/g_strict_harness.rs:781:33
+    |
+781 |         BaseTarget::RepoMain => "HEAD".to_string(),
+    |                                 ^^^^^^^^^^^^^^^^^^ help: try: `"HEAD".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/common/server_builder.rs:29:36
+   |
+29 |     let features = BTreeSet::from([FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string()]);
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/mod.rs:112:36
+    |
+112 |     let features = BTreeSet::from([FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_string()]);
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `FeatureKey::PM_PRO_BEADS_ADVANCED.as_str().to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/mod.rs:156:16
+    |
+156 |         title: title.to_string(),
+    |                ^^^^^^^^^^^^^^^^^ help: try: `title.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/common/mod.rs:168:26
+    |
+168 |             status: Some(pm.closed_status().to_string()),
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `pm.closed_status().to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/audit_sentinel_round_trip.rs:17:5
+   |
+17 | /     v.get("id")
+18 | |         .and_then(|x| x.as_str())
+19 | |         .expect("id")
+20 | |         .to_string()
+   | |____________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+help: try
+   |
+17 ~     v.get("id")
+18 +         .and_then(|x| x.as_str())
+19 +         .expect("id").to_owned()
+   |
+
+error: this parameter is a mutable reference but is not used mutably
+   --> crates/spur-core/tests/common/g_strict_harness.rs:410:9
+    |
+410 |         &mut self,
+    |         ^----^^^^
+    |          |
+    |          help: consider removing this `mut`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_pass_by_ref_mut
+    = note: `-D clippy::needless-pass-by-ref-mut` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_pass_by_ref_mut)]`
+
+error: could not compile `spur-core` (test "audit_sentinel_round_trip") due to 49 previous errors
+error: using `.clone()` on a ref-counted pointer
+  --> crates/spur-core/tests/rmcp_streamable_http.rs:33:25
+   |
+33 |     let (url, handle) = server.clone().start().await?;
+   |                         ^^^^^^^^^^^^^^ help: try: `std::sync::Arc::<spur_core::McpCallbackServer>::clone(&server)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+   = note: `-D clippy::clone-on-ref-ptr` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::clone_on_ref_ptr)]`
+
+error: could not compile `spur-core` (test "rmcp_streamable_http") due to 48 previous errors
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/pending_sweep.rs:98:32
+   |
+98 |     let mut epic_labels = vec![labels::PLAN_PENDING.to_string()];
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::PLAN_PENDING.to_owned()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/pending_sweep.rs:104:20
+    |
+104 |             title: title.to_string(),
+    |                    ^^^^^^^^^^^^^^^^^ help: try: `title.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/pending_sweep.rs:105:30
+    |
+105 |             issue_type: Some("epic".to_string()),
+    |                              ^^^^^^^^^^^^^^^^^^ help: try: `"epic".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/pending_sweep.rs:122:34
+    |
+122 |                 issue_type: Some("task".to_string()),
+    |                                  ^^^^^^^^^^^^^^^^^^ help: try: `"task".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/pending_sweep.rs:220:26
+    |
+220 |             status: Some(pm.closed_status().to_string()),
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `pm.closed_status().to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: could not compile `spur-core` (test "pending_sweep") due to 51 previous errors
+error: `to_string()` called on a `&str`
+  --> crates/spur-core/tests/persisted_authority_flip.rs:51:5
+   |
+51 | /     serde_json::from_str::<serde_json::Value>(json)
+52 | |         .expect("json")
+53 | |         .get("id")
+54 | |         .and_then(|value| value.as_str())
+55 | |         .expect("id")
+56 | |         .to_string()
+   | |____________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+help: try
+   |
+51 ~     serde_json::from_str::<serde_json::Value>(json)
+52 +         .expect("json")
+53 +         .get("id")
+54 +         .and_then(|value| value.as_str())
+55 +         .expect("id").to_owned()
+   |
+
+error: use the `?` operator instead of an `and_then` call
+  --> crates/spur-core/tests/persisted_authority_flip.rs:88:29
+   |
+88 |         .filter_map(|entry| entry.get("text").and_then(|value| value.as_str()))
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#return_and_then
+help: try
+   |
+88 ~         .filter_map(|entry| {
+89 +             let value = entry.get("text")?;
+90 +             value.as_str()
+91 ~         })
+   |
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:122:5
+    |
+122 | /     submit_response_text(response)
+123 | |         .lines()
+124 | |         .find_map(|line| line.strip_prefix("plan_id: "))
+125 | |         .expect("submit response includes plan_id")
+126 | |         .to_string()
+    | |____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+help: try
+    |
+122 ~     submit_response_text(response)
+123 +         .lines()
+124 +         .find_map(|line| line.strip_prefix("plan_id: "))
+125 +         .expect("submit response includes plan_id").to_owned()
+    |
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:135:5
+    |
+135 | /     task_map[task_id]
+136 | |         .as_str()
+137 | |         .expect("task issue id")
+138 | |         .to_string()
+    | |____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+help: try
+    |
+135 ~     task_map[task_id]
+136 +         .as_str()
+137 +         .expect("task issue id").to_owned()
+    |
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:184:25
+    |
+184 |             .map(|path| (*path).to_string())
+    |                         ^^^^^^^^^^^^^^^^^^^ help: try: `(*path).to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:333:30
+    |
+333 |             add_labels: vec![labels::READY_FOR_REVIEW.to_string()],
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::READY_FOR_REVIEW.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:459:30
+    |
+459 |             add_labels: vec![labels::READY_FOR_REVIEW.to_string()],
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::READY_FOR_REVIEW.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:560:36
+    |
+560 |     assert!(issue.labels.contains(&labels::READY_FOR_REVIEW.to_string()));
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::READY_FOR_REVIEW.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:582:30
+    |
+582 |             add_labels: vec![labels::READY_FOR_REVIEW.to_string()],
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::READY_FOR_REVIEW.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/persisted_authority_flip.rs:618:52
+    |
+618 |     let pm_arc: Arc<dyn spur_core::plan::PmLike> = pm.clone();
+    |                                                    ^^^^^^^^^^ help: try: `std::sync::Arc::<spur_pm::PmService>::clone(&pm)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+    = note: `-D clippy::clone-on-ref-ptr` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::clone_on_ref_ptr)]`
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:637:36
+    |
+637 |     assert!(issue.labels.contains(&labels::REVIEW_REJECTED.to_string()));
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::REVIEW_REJECTED.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:638:37
+    |
+638 |     assert!(!issue.labels.contains(&labels::READY_FOR_REVIEW.to_string()));
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::READY_FOR_REVIEW.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:667:11
+    |
+667 |         &[labels::READY_FOR_REVIEW.to_string()],
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::READY_FOR_REVIEW.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: using `.clone()` on a ref-counted pointer
+   --> crates/spur-core/tests/persisted_authority_flip.rs:700:52
+    |
+700 |     let pm_arc: Arc<dyn spur_core::plan::PmLike> = pm.clone();
+    |                                                    ^^^^^^^^^^ help: try: `std::sync::Arc::<spur_pm::PmService>::clone(&pm)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_ref_ptr
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:761:13
+    |
+761 |             labels::READY_FOR_REVIEW.to_string(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `labels::READY_FOR_REVIEW.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:821:24
+    |
+821 |             .contains(&spur_core::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()),
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `spur_core::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:855:14
+    |
+855 |         vec!["docs/spec.md".to_string(), "src/lib.rs".to_string()]
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"docs/spec.md".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:855:42
+    |
+855 |         vec!["docs/spec.md".to_string(), "src/lib.rs".to_string()]
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"src/lib.rs".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:894:14
+    |
+894 |         vec!["docs/spec.md".to_string(), "src/lib.rs".to_string()]
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"docs/spec.md".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+   --> crates/spur-core/tests/persisted_authority_flip.rs:894:42
+    |
+894 |         vec!["docs/spec.md".to_string(), "src/lib.rs".to_string()]
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `"src/lib.rs".to_owned()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: `to_string()` called on a `&str`
+    --> crates/spur-core/tests/persisted_authority_flip.rs:1151:31
+     |
+1151 |     let fresh_delegation_id = request.id.as_str().to_string();
+     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `request.id.as_str().to_owned()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#str_to_string
+
+error: could not compile `spur-core` (test "persisted_authority_flip") due to 67 previous errors
+error: unnecessary hashes around raw string literal
+   --> crates/spur-core/src/orchestrator/connection.rs:878:13
+    |
+878 | /             r#"
+879 | |             CREATE TABLE session (
+880 | |                 id TEXT PRIMARY KEY,
+881 | |                 project_id TEXT NOT NULL,
+...   |
+902 | |             );
+903 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#needless_raw_string_hashes
+    = note: `-D clippy::needless-raw-string-hashes` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_raw_string_hashes)]`
+help: remove all the hashes around the string literal
+    |
+878 ~             r"
+879 |             CREATE TABLE session (
+...
+902 |             );
+903 ~             ",
+    |
+
+error: unsafe block missing a safety comment
+   --> crates/spur-core/src/orchestrator/delegation/diff_artifact.rs:285:9
+    |
+285 |         unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", "1234") };
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider adding a safety comment on the preceding line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#undocumented_unsafe_blocks
+    = note: `-D clippy::undocumented-unsafe-blocks` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::undocumented_unsafe_blocks)]`
+
+error: unsafe block missing a safety comment
+   --> crates/spur-core/src/orchestrator/delegation/diff_artifact.rs:288:24
+    |
+288 |             Some(v) => unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", v) },
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider adding a safety comment on the preceding line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#undocumented_unsafe_blocks
+
+error: unsafe block missing a safety comment
+   --> crates/spur-core/src/orchestrator/delegation/diff_artifact.rs:289:21
+    |
+289 |             None => unsafe { std::env::remove_var("SPUR_SUMMARY_MAX_BYTES") },
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider adding a safety comment on the preceding line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#undocumented_unsafe_blocks
+
+error: unsafe block missing a safety comment
+   --> crates/spur-core/src/orchestrator/delegation/diff_artifact.rs:298:9
+    |
+298 |         unsafe { std::env::remove_var("SPUR_SUMMARY_MAX_BYTES") };
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider adding a safety comment on the preceding line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#undocumented_unsafe_blocks
+
+error: unsafe block missing a safety comment
+   --> crates/spur-core/src/orchestrator/delegation/diff_artifact.rs:301:13
+    |
+301 |             unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", v) };
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider adding a safety comment on the preceding line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#undocumented_unsafe_blocks
+
+error: unsafe block missing a safety comment
+   --> crates/spur-core/src/orchestrator/delegation/diff_artifact.rs:314:9
+    |
+314 |         unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", "50") };
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider adding a safety comment on the preceding line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#undocumented_unsafe_blocks
+
+error: unsafe block missing a safety comment
+   --> crates/spur-core/src/orchestrator/delegation/diff_artifact.rs:324:24
+    |
+324 |             Some(v) => unsafe { std::env::set_var("SPUR_SUMMARY_MAX_BYTES", v) },
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider adding a safety comment on the preceding line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#undocumented_unsafe_blocks
+
+error: unsafe block missing a safety comment
+   --> crates/spur-core/src/orchestrator/delegation/diff_artifact.rs:325:21
+    |
+325 |             None => unsafe { std::env::remove_var("SPUR_SUMMARY_MAX_BYTES") },
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider adding a safety comment on the preceding line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#undocumented_unsafe_blocks
+
+error: only a `panic!` in `if`-then statement
+   --> crates/spur-core/src/orchestrator/delegation/worker_attempt.rs:989:9
+    |
+989 | /         if !out.status.success() {
+990 | |             panic!(
+991 | |                 "git {:?} failed: {}",
+992 | |                 args,
+993 | |                 String::from_utf8_lossy(&out.stderr)
+994 | |             );
+995 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_assert
+    = note: `-D clippy::manual-assert` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_assert)]`
+help: replace `if`-then-`panic!` with `assert!`
+    |
+989 ~         assert!(out.status.success(), 
+990 +             "git {:?} failed: {}",
+991 +             args,
+992 +             String::from_utf8_lossy(&out.stderr)
+993 +         );
+    |
+
+error: wildcard matches only a single variant and will also match any future added variants
+   --> crates/spur-core/src/plan/audit_sentinel.rs:641:13
+    |
+641 |             other => panic!("expected critical error, got: {other:?}"),
+    |             ^^^^^ help: try: `other @ ParseError::Informational { .. }`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#match_wildcard_for_single_variants
+    = note: `-D clippy::match-wildcard-for-single-variants` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::match_wildcard_for_single_variants)]`
+
+error: wildcard matches only a single variant and will also match any future added variants
+   --> crates/spur-core/src/plan/audit_sentinel.rs:653:13
+    |
+653 |             other => panic!("expected critical error, got: {other:?}"),
+    |             ^^^^^ help: try: `other @ ParseError::Informational { .. }`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#match_wildcard_for_single_variants
+
+error: this looks like a formatting argument but it is not part of a formatting macro
+    --> crates/spur-core/src/plan/projector.rs:2217:72
+     |
+2217 |             "degraded task must be preserved in PlanState with Approved{{summary:None}} status and dispatched_base_oid=None"
+     |                                                                        ^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#literal_string_with_formatting_args
+     = note: `-D clippy::literal-string-with-formatting-args` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::literal_string_with_formatting_args)]`
+
+error: empty String is being created manually
+   --> crates/spur-core/src/plan/proposers.rs:269:34
+    |
+269 |                     description: "".into(),
+    |                                  ^^^^^^^^^ help: consider using: `String::new()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#manual_string_new
+    = note: `-D clippy::manual-string-new` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_string_new)]`
+
+error: this `MutexGuard` is held across an await point
+   --> crates/spur-core/src/plan/reconciler/tests.rs:418:9
+    |
+418 |     let emitted_events = sink.events.lock().expect("events lock");
+    |         ^^^^^^^^^^^^^^
+    |
+    = help: consider using an async-aware `Mutex` type or ensuring the `MutexGuard` is dropped before calling `await`
+note: these are all the await points this lock is held through
+   --> crates/spur-core/src/plan/reconciler/tests.rs:441:14
+    |
+441 |             .await
+    |              ^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#await_holding_lock
+    = note: `-D clippy::await-holding-lock` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::await_holding_lock)]`
+
+error: single-character string constant used as pattern
+   --> crates/spur-core/src/server/handlers/plan_tests.rs:460:48
+    |
+460 |             .find(|issue| issue.title.contains("B"))
+    |                                                ^^^ help: consider using a `char`: `'B'`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#single_char_pattern
+    = note: `-D clippy::single-char-pattern` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::single_char_pattern)]`
+
+error: single-character string constant used as pattern
+   --> crates/spur-core/src/server/handlers/plan_tests.rs:464:48
+    |
+464 |             .find(|issue| issue.title.contains("C"))
+    |                                                ^^^ help: consider using a `char`: `'C'`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#single_char_pattern
+
+error: could not compile `spur-core` (lib test) due to 17 previous errors
+[build] Remote build queue: released ticket 00000000000000000173.
+[spur-cargo] remote cargo exited 101 on aws — propagating (not a VM-availability issue)
+######## FAIL  [clippy-core-tests] rc=101 (316s) ########
+
+@@@@@@@@ RETEST DONE overall_rc=101 14:07:38 @@@@@@@@
