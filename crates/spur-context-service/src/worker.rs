@@ -8,7 +8,7 @@ use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use aws_sdk_s3::primitives::ByteStream;
@@ -230,20 +230,26 @@ fn run_job_blocking(env: &JobEnv, stage: &StageTracker) -> Result<TranslateStats
     let artifact_base = artifact_dir();
 
     stage.set("fetch_source");
+    let stage_started = log_stage_started("fetch_source");
     let source_path = fetch_source(
         &env.source_url,
         &env.source_kind,
         &env.revision,
         &source_dest,
     )?;
+    log_stage_completed("fetch_source", stage_started);
 
     stage.set("build_graph");
+    let stage_started = log_stage_started("build_graph");
     prepare_artifact_dir(&artifact_base)?;
     build_graph(&source_path, &artifact_base)?;
     let artifact_dir = resolve_graph_artifact_dir(&artifact_base)?;
+    log_stage_completed("build_graph", stage_started);
 
     stage.set("translate");
+    let stage_started = log_stage_started("translate");
     let stats = translate_with_source_root(&artifact_dir, Some(&source_path), env)?;
+    log_stage_completed("translate", stage_started);
     stage.set("complete");
     Ok(stats)
 }
@@ -288,27 +294,51 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
     // spur-cli's duckdb v1.4.4 (for DuckPGQ in spur-analyst) in the same Docker image.
     let _embed_model = EnvVarGuard::set(EMBED_MODEL_ENV, JINA_CODE_EMBED_MODEL_NAME);
 
-    let output = Command::new("spur")
+    let started = Instant::now();
+    eprintln!(
+        "[worker] running spur graph build root={} output={}",
+        source_path.display(),
+        artifact_dir.display()
+    );
+    let status = Command::new("spur")
         .args([
             "graph", "build",
             "--root", &source_path.to_string_lossy(),
             "--output", &artifact_dir.to_string_lossy(),
-            "--quiet",
             "--no-analyst",
         ])
-        .output()
+        .status()
         .map_err(|error| WorkerError::Build(format!("failed to run `spur graph build`: {error}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if !status.success() {
         return Err(WorkerError::Build(format!(
-            "`spur graph build` failed (exit {:?}): {stderr}\n{stdout}",
-            output.status.code()
+            "`spur graph build` failed (exit {:?}) after {}",
+            status.code(),
+            format_duration(started.elapsed())
         )));
     }
 
+    eprintln!(
+        "[worker] spur graph build completed in {}",
+        format_duration(started.elapsed())
+    );
     Ok(())
+}
+
+fn log_stage_started(stage: &str) -> Instant {
+    eprintln!("[worker] stage {stage} started");
+    Instant::now()
+}
+
+fn log_stage_completed(stage: &str, started: Instant) {
+    eprintln!(
+        "[worker] stage {stage} completed in {}",
+        format_duration(started.elapsed())
+    );
+}
+
+fn format_duration(duration: Duration) -> String {
+    format!("{}.{:03}s", duration.as_secs(), duration.subsec_millis())
 }
 
 pub fn translate(artifact_dir: &Path, env: &JobEnv) -> Result<TranslateStats, WorkerError> {

@@ -53,7 +53,7 @@ build_binary() {
     AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
     CFLAGS="-mcpu=neoverse-n1 -O2" \
     CXXFLAGS="-mcpu=neoverse-n1 -O2" \
-        scripts/spur-cargo run --workdir crates/spur-context-service -- cargo build --features lambda --release
+        scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release
     scripts/cloud-build/fetch.sh --to "$BUILD_DIR/bootstrap" crates/spur-context-service/target/release/spur-context-service
 }
 
@@ -75,7 +75,7 @@ build_worker() {
     AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
     CFLAGS="-mcpu=neoverse-n1 -O2" \
     CXXFLAGS="-mcpu=neoverse-n1 -O2" \
-        scripts/spur-cargo build -p spur-context-service --features worker --release
+        scripts/spur-cargo --workdir crates/spur-context-service build --features worker --release
 }
 
 build_and_push_worker_image() {
