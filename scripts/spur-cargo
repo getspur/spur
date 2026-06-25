@@ -30,6 +30,10 @@
 #   SPUR_REMOTE=1   → force remote (any compile-capable subcommand, incl.
 #                     clippy and run; run additionally syncs outputs back)
 #
+# Wrapper options:
+#   --workdir <dir> → run cargo from <dir>, resolved relative to the caller's
+#                     current directory. Defaults to the caller's cwd.
+#
 # See: docs/rca/2026-04-27-sccache-worktree-cache-miss.md
 #      scripts/cloud-build/ — centralized remote build pipeline
 set -euo pipefail
@@ -72,6 +76,48 @@ resolve_remote_build_sh() {
 }
 
 REMOTE_BUILD_SH="$(resolve_remote_build_sh || true)"
+
+# ---- wrapper options -------------------------------------------------------
+# Keep wrapper-specific flags out of Cargo's argv. Only leading wrapper options
+# are consumed; once the first Cargo arg is seen, the rest is forwarded exactly.
+ORIGINAL_PWD=$(pwd -P)
+WORKDIR="$ORIGINAL_PWD"
+CARGO_ARGV=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --workdir)
+            if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                echo "[spur-cargo] --workdir requires a directory" >&2
+                exit 2
+            fi
+            WORKDIR="$2"
+            shift 2
+            ;;
+        --workdir=*)
+            WORKDIR="${1#--workdir=}"
+            if [[ -z "$WORKDIR" ]]; then
+                echo "[spur-cargo] --workdir requires a directory" >&2
+                exit 2
+            fi
+            shift
+            ;;
+        *)
+            CARGO_ARGV=("$@")
+            break
+            ;;
+    esac
+done
+set -- "${CARGO_ARGV[@]}"
+
+if [[ "$WORKDIR" != /* ]]; then
+    WORKDIR="$ORIGINAL_PWD/$WORKDIR"
+fi
+if [[ ! -d "$WORKDIR" ]]; then
+    echo "[spur-cargo] --workdir directory does not exist: $WORKDIR" >&2
+    exit 2
+fi
+WORKDIR=$(cd "$WORKDIR" && pwd -P)
+cd "$WORKDIR"
 
 # ---- routing ---------------------------------------------------------------
 # Remote is the default for heavy compiles; lightweight subcommands auto-run
