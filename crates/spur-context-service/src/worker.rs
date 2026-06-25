@@ -294,7 +294,7 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
             "--root", &source_path.to_string_lossy(),
             "--output", &artifact_dir.to_string_lossy(),
             "--quiet",
-            "--skip-analyst",
+            "--no-analyst",
         ])
         .output()
         .map_err(|error| WorkerError::Build(format!("failed to run `spur graph build`: {error}")))?;
