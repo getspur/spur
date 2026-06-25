@@ -1,0 +1,643 @@
+## retest3 tip 6e899fb42 start 15:02:10 (streamed)
+
+######## START [test-spur-core-1] 15:02:10 ########
+[spur-cargo] remote (test) → aws VM
+[build] Worktree: spur/worktrees/s3-verify  (local=/Volumes/Projects/spur/.spur/worktrees/s3-verify)
+[build] Remote:   ~/spur/worktrees/s3-verify   target=/mnt/cargo/targets/spur/worktrees/s3-verify   -j16
+[build] Remote build queue: admitted as ticket 175 (slot 1/3).
+[build] AWS: SSH-over-SSM to i-083e53392b5b2beac not reachable — falling back to next cloud/local.
+[build] Remote build queue: released ticket 00000000000000000175.
+[spur-cargo] remote aws VM unavailable (exit 200) — trying next cloud/local
+[spur-cargo] remote (test) → gcp VM
+[build] Worktree: spur/worktrees/s3-verify  (local=/Volumes/Projects/spur/.spur/worktrees/s3-verify)
+[build] Remote:   ~/spur/worktrees/s3-verify   target=/mnt/cargo/targets/spur/worktrees/s3-verify   -j16
+[build] Remote build queue: admitted as ticket 4 (slot 1/3).
+[build] VM spur-builder missing — spinning a fresh one...
+[build] Creating spot VM spur-builder (c4d-standard-16-lssd) in asia-southeast1-a...
+ERROR: (gcloud.compute.instances.create) There was a problem refreshing your current auth tokens: Reauthentication failed. cannot prompt during non-interactive execution.
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+[build] create failed and VM is MISSING
+[build] Remote build queue: released ticket 00000000000000000004.
+[spur-cargo] remote gcp VM unavailable (exit 200) — trying next cloud/local
+[spur-cargo] all remote clouds unavailable — falling back to local cargo
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.0
+   Compiling libc v0.2.184
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.1
+   Compiling itoa v1.0.18
+   Compiling bitflags v2.11.0
+   Compiling equivalent v1.0.2
+   Compiling scopeguard v1.2.0
+   Compiling serde_core v1.0.228
+   Compiling parking_lot_core v0.9.12
+   Compiling errno v0.3.14
+   Compiling libm v0.2.16
+   Compiling regex-syntax v0.8.10
+   Compiling zeroize v1.8.2
+   Compiling log v0.4.29
+   Compiling lock_api v0.4.14
+   Compiling thiserror v2.0.18
+   Compiling aho-corasick v1.1.4
+   Compiling hashbrown v0.17.0
+   Compiling parking_lot v0.12.5
+   Compiling num-traits v0.2.19
+   Compiling getrandom v0.2.17
+   Compiling bytes v1.11.1
+   Compiling regex-automata v0.4.14
+   Compiling stable_deref_trait v1.2.1
+   Compiling indexmap v2.14.0
+   Compiling pin-project-lite v0.2.17
+   Compiling core-foundation-sys v0.8.7
+   Compiling crossbeam-utils v0.8.21
+   Compiling zmij v1.0.21
+   Compiling zerocopy v0.8.48
+   Compiling subtle v2.6.1
+   Compiling rand_core v0.6.4
+   Compiling typenum v1.19.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.0
+   Compiling fastrand v2.4.1
+   Compiling foldhash v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling futures-core v0.3.32
+   Compiling same-file v1.0.6
+   Compiling const-oid v0.9.6
+   Compiling num-integer v0.1.46
+   Compiling generic-array v0.14.7
+   Compiling walkdir v2.5.0
+   Compiling iana-time-zone v0.1.65
+   Compiling hashbrown v0.16.1
+   Compiling futures-io v0.3.32
+   Compiling futures-sink v0.3.32
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling getrandom v0.3.4
+   Compiling num-bigint v0.4.6
+   Compiling futures-channel v0.3.32
+   Compiling tracing-core v0.1.36
+   Compiling digest v0.10.7
+   Compiling slab v0.4.12
+   Compiling futures-task v0.3.32
+   Compiling socket2 v0.6.3
+   Compiling base64 v0.22.1
+   Compiling tracing v0.1.44
+   Compiling rustix v1.1.4
+   Compiling futures-util v0.3.32
+   Compiling zerofrom v0.1.7
+   Compiling tokio v1.51.1
+   Compiling percent-encoding v2.3.2
+   Compiling yoke v0.8.2
+   Compiling cpufeatures v0.2.17
+   Compiling ryu v1.0.23
+   Compiling rand_core v0.10.1
+   Compiling crc32fast v1.5.0
+   Compiling http v1.4.0
+   Compiling zerovec v0.11.6
+   Compiling getrandom v0.4.2
+   Compiling rand_core v0.9.5
+   Compiling litemap v0.8.2
+   Compiling writeable v0.6.3
+   Compiling zerotrie v0.2.4
+   Compiling unicode-width v0.2.0
+   Compiling siphasher v1.0.2
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.2.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling icu_properties_data v2.2.0
+   Compiling tempfile v3.27.0
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling either v1.15.0
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling form_urlencoded v1.2.2
+   Compiling num-complex v0.4.6
+   Compiling chrono v0.4.44
+   Compiling signal-hook v0.3.18
+   Compiling phf_shared v0.12.1
+   Compiling regex v1.12.3
+   Compiling phf v0.12.1
+   Compiling signal-hook-mio v0.2.5
+   Compiling rustix v0.38.44
+   Compiling crossbeam-channel v0.5.15
+   Compiling arrow-schema v58.1.0
+   Compiling lexical-util v1.0.7
+   Compiling icu_provider v2.2.0
+   Compiling crossterm v0.28.1
+   Compiling byteorder v1.5.0
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling strum v0.26.3
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling chrono-tz v0.10.4
+   Compiling lexical-write-float v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling comfy-table v7.1.2
+   Compiling zstd-safe v7.2.4
+   Compiling idna_adapter v1.2.1
+   Compiling lexical-core v1.0.6
+   Compiling itertools v0.14.0
+   Compiling idna v1.1.0
+   Compiling atoi v2.0.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling ahash v0.8.12
+   Compiling rand_chacha v0.9.0
+   Compiling arrow-buffer v58.1.0
+   Compiling url v2.5.8
+   Compiling csv-core v0.1.13
+   Compiling zstd v0.13.3
+   Compiling flatbuffers v25.12.19
+   Compiling rand v0.9.4
+   Compiling arrow-data v58.1.0
+   Compiling csv v1.4.0
+   Compiling futures-executor v0.3.32
+   Compiling hashbrown v0.14.5
+   Compiling twox-hash v2.1.2
+   Compiling futures v0.3.32
+   Compiling simdutf8 v0.1.5
+   Compiling lz4_flex v0.13.1
+   Compiling tinyvec_macros v0.1.1
+   Compiling dashmap v6.1.0
+   Compiling tinyvec v1.11.0
+   Compiling arrayvec v0.7.6
+   Compiling simd-adler32 v0.3.9
+   Compiling sha2 v0.10.9
+   Compiling unicode-normalization v0.1.25
+   Compiling bstr v1.12.1
+   Compiling humantime v2.3.0
+   Compiling fnv v1.0.7
+   Compiling adler2 v2.0.1
+   Compiling sqlparser v0.61.0
+   Compiling fixedbitset v0.5.7
+   Compiling foldhash v0.1.5
+   Compiling uuid v1.23.0
+   Compiling miniz_oxide v0.8.9
+   Compiling gix-trace v0.1.19
+   Compiling hashbrown v0.15.5
+   Compiling flate2 v1.1.9
+   Compiling gix-validate v0.10.1
+   Compiling gix-utils v0.3.2
+   Compiling crossbeam-epoch v0.9.18
+   Compiling jiff v0.2.24
+   Compiling datafusion-doc v53.1.0
+   Compiling http-body v1.0.1
+   Compiling unicode-segmentation v1.13.2
+   Compiling petgraph v0.8.3
+   Compiling gix-path v0.10.22
+   Compiling prodash v30.0.1
+   Compiling zlib-rs v0.5.5
+   Compiling tower-service v0.3.3
+   Compiling try-lock v0.2.5
+   Compiling atomic-waker v1.1.2
+   Compiling arrayref v0.3.9
+   Compiling want v0.3.1
+   Compiling httparse v1.10.1
+   Compiling system-configuration-sys v0.6.0
+   Compiling object_store v0.13.2
+   Compiling tokio-util v0.7.18
+   Compiling gix-features v0.45.2
+   Compiling core-foundation v0.9.4
+   Compiling httpdate v1.0.3
+   Compiling hex v0.4.3
+   Compiling constant_time_eq v0.4.2
+   Compiling system-configuration v0.7.0
+   Compiling h2 v0.4.14
+   Compiling http-body-util v0.1.3
+   Compiling blake3 v1.8.5
+   Compiling md-5 v0.10.6
+   Compiling blake2 v0.10.6
+   Compiling rustls-pki-types v1.14.0
+   Compiling ipnet v2.12.0
+   Compiling sync_wrapper v1.0.2
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling tower-layer v0.3.3
+   Compiling untrusted v0.9.0
+   Compiling hash32 v0.3.1
+   Compiling security-framework v3.7.0
+   Compiling tower v0.5.3
+   Compiling ring v0.17.14
+   Compiling hyper v1.9.0
+   Compiling heapless v0.8.0
+   Compiling async-compression v0.4.19
+   Compiling iri-string v0.7.12
+   Compiling parking v2.2.1
+   Compiling rustls-webpki v0.103.12
+   Compiling hyper-util v0.1.20
+   Compiling faster-hex v0.10.0
+   Compiling anyhow v1.0.102
+   Compiling rustls v0.23.38
+   Compiling tower-http v0.6.8
+   Compiling portable-atomic v1.13.1
+   Compiling webpki-roots v1.0.7
+   Compiling crossbeam-deque v0.8.6
+   Compiling memmap2 v0.9.10
+   Compiling unicase v2.9.0
+   Compiling sha1 v0.10.6
+   Compiling rayon-core v1.13.0
+   Compiling rustls-native-certs v0.8.3
+   Compiling tokio-rustls v0.26.4
+   Compiling serde_urlencoded v0.7.1
+   Compiling sha1-checked v0.10.0
+   Compiling encoding_rs v0.8.35
+   Compiling dyn-clone v1.0.20
+   Compiling base64ct v1.8.3
+   Compiling gix-hash v0.21.2
+   Compiling hyper-rustls v0.27.9
+   Compiling pem-rfc7468 v0.7.0
+   Compiling pin-project v1.1.11
+   Compiling tokio-stream v0.1.18
+   Compiling nom v8.0.0
+   Compiling der v0.7.10
+   Compiling rayon v1.12.0
+   Compiling ref-cast v1.0.25
+   Compiling gix-date v0.12.1
+   Compiling spki v0.7.3
+   Compiling winnow v0.7.15
+   Compiling glob v0.3.3
+   Compiling schemars v1.2.1
+   Compiling pkcs8 v0.10.2
+   Compiling gix-hashtable v0.11.0
+   Compiling native-tls v0.2.18
+   Compiling datafusion-common-runtime v53.1.0
+   Compiling concurrent-queue v2.5.0
+   Compiling mime v0.3.17
+   Compiling option-ext v0.2.0
+   Compiling gix-actor v0.37.1
+   Compiling spin v0.9.8
+   Compiling event-listener v5.4.1
+   Compiling num_cpus v1.17.0
+   Compiling lazy_static v1.5.0
+   Compiling bytemuck v1.25.0
+   Compiling event-listener-strategy v0.5.4
+   Compiling tokio-native-tls v0.3.1
+   Compiling gix-object v0.54.1
+   Compiling ordered-float v5.3.0
+   Compiling fast-float2 v0.2.3
+   Compiling ethnum v1.5.3
+   Compiling hyper-tls v0.6.0
+   Compiling mime_guess v2.0.5
+   Compiling bigdecimal v0.4.10
+   Compiling async-lock v3.4.2
+   Compiling jsonb v0.5.6
+   Compiling gix-fs v0.18.2
+   Compiling reqwest v0.12.28
+   Compiling prost v0.14.3
+   Compiling arrow-array v58.1.0
+   Compiling serde_with v3.18.0
+   Compiling num-rational v0.4.2
+   Compiling signature v2.2.0
+   Compiling powerfmt v0.2.0
+   Compiling tagptr v0.2.0
+   Compiling unsafe-libyaml v0.2.11
+   Compiling encoding_index_tests v0.1.4
+   Compiling moka v0.12.15
+   Compiling deranged v0.5.8
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling snafu v0.9.0
+   Compiling deepsize v0.2.0
+   Compiling roaring v0.11.4
+   Compiling object_store v0.12.5
+   Compiling itertools v0.13.0
+   Compiling hmac v0.12.1
+   Compiling gix-chunk v0.4.12
+   Compiling num_threads v0.1.7
+   Compiling filetime v0.2.27
+   Compiling time-core v0.1.8
+   Compiling num-conv v0.2.1
+   Compiling mock_instant v0.6.0
+   Compiling onig_sys v69.9.1
+   Compiling arrow-select v58.1.0
+   Compiling arrow-row v58.1.0
+   Compiling arrow-arith v58.1.0
+   Compiling time v0.3.47
+   Compiling gix-tempfile v20.0.1
+   Compiling gix-quote v0.6.2
+   Compiling ff v0.13.1
+   Compiling static_assertions v1.1.0
+   Compiling base16ct v0.2.0
+   Compiling semver v1.0.28
+   Compiling utf8parse v0.2.2
+   Compiling rustc-hash v2.1.2
+   Compiling anstyle-parse v1.0.0
+   Compiling sec1 v0.7.3
+   Compiling group v0.13.0
+   Compiling gix-lock v20.0.1
+   Compiling onig v6.5.1
+   Compiling hkdf v0.12.4
+   Compiling gix-glob v0.23.0
+   Compiling crypto-bigint v0.5.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling anstyle-query v1.1.5
+   Compiling colorchoice v1.0.5
+   Compiling gix-commitgraph v0.31.0
+   Compiling alloc-stdlib v0.2.2
+   Compiling elliptic-curve v0.13.8
+   Compiling tree-sitter-language v0.1.7
+   Compiling anstream v1.0.0
+   Compiling derive_builder v0.20.2
+   Compiling arc-swap v1.9.1
+   Compiling unicode-bom v2.0.3
+   Compiling clap_lex v1.1.0
+   Compiling bit-vec v0.8.0
+   Compiling strsim v0.11.1
+   Compiling gix-revwalk v0.25.0
+   Compiling lance-namespace-reqwest-client v0.7.7
+   Compiling bit-set v0.8.0
+   Compiling equator v0.4.2
+   Compiling clap_builder v4.6.0
+   Compiling brotli-decompressor v5.0.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling lz4-sys v1.11.1+lz4-1.10.0
+   Compiling derive_more v2.1.1
+   Compiling arrow-ord v58.1.0
+   Compiling arrow-ipc v58.1.0
+   Compiling arrow-string v58.1.0
+   Compiling rfc6979 v0.4.0
+   Compiling encoding-index-japanese v1.20141219.5
+   Compiling encoding-index-korean v1.20141219.5
+   Compiling encoding-index-simpchinese v1.20141219.5
+   Compiling encoding-index-tradchinese v1.20141219.5
+   Compiling encoding-index-singlebyte v1.20141219.5
+   Compiling ed25519 v2.2.3
+   Compiling sharded-slab v0.1.7
+   Compiling rand_chacha v0.3.1
+   Compiling thread-tree v0.3.3
+   Compiling tracing-serde v0.2.0
+   Compiling xattr v1.6.1
+   Compiling tracing-log v0.2.0
+   Compiling matchers v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling std_prelude v0.2.12
+   Compiling stfu8 v0.2.7
+   Compiling rawpointer v0.2.1
+   Compiling unty v0.0.4
+   Compiling nu-ansi-term v0.50.3
+   Compiling matrixmultiply v0.3.10
+   Compiling bincode v2.0.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling path_abs v0.5.1
+   Compiling snafu v0.8.9
+   Compiling clap v4.6.0
+   Compiling strum v0.27.2
+   Compiling tar v0.4.45
+   Compiling rand v0.8.5
+   Compiling encoding v0.2.33
+   Compiling ed25519-dalek v2.2.0
+   Compiling ecdsa v0.16.9
+   Compiling lz4 v1.28.1
+   Compiling brotli v8.0.2
+   Compiling aligned-vec v0.6.4
+   Compiling lance-bitpacking v6.0.0
+   Compiling primeorder v0.13.6
+   Compiling kstring v2.0.2
+   Compiling fsst v6.0.0
+   Compiling prost-types v0.14.3
+   Compiling dirs-sys v0.5.0
+   Compiling encoding_rs_io v0.1.7
+   Compiling hyperloglogplus v0.4.1
+   Compiling console v0.16.3
+   Compiling phf_shared v0.13.1
+   Compiling num-iter v0.1.45
+   Compiling quick-xml v0.38.4
+   Compiling xxhash-rust v0.8.15
+   Compiling yada v0.5.1
+   Compiling fallible-iterator v0.3.0
+   Compiling linked-hash-map v0.5.6
+   Compiling bitflags v1.3.2
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling gimli v0.32.3
+   Compiling unit-prefix v0.5.2
+   Compiling md5 v0.8.0
+   Compiling yaml-rust v0.4.5
+   Compiling kanaria v0.2.0
+   Compiling indicatif v0.18.4
+   Compiling lindera-dictionary v0.44.1
+   Compiling plist v1.8.0
+   Compiling num-bigint-dig v0.8.6
+   Compiling arrow-cast v58.1.0
+   Compiling phf v0.13.1
+   Compiling addr2line v0.25.1
+   Compiling random_word v0.5.2
+   Compiling dirs v6.0.0
+   Compiling gix-attributes v0.29.0
+   Compiling v_frame v0.3.9
+   Compiling object v0.37.3
+   Compiling ndarray v0.16.1
+   Compiling dirs-sys v0.4.1
+   Compiling pkcs1 v0.7.5
+   Compiling rand_distr v0.5.1
+   Compiling bincode v1.3.3
+   Compiling getopts v0.2.24
+   Compiling rand_xoshiro v0.7.0
+   Compiling as-slice v0.2.1
+   Compiling gix-sec v0.12.2
+   Compiling cedarwood v0.4.6
+   Compiling pulldown-cmark-escape v0.11.0
+   Compiling rustc-demangle v0.1.27
+   Compiling tap v1.0.1
+   Compiling shell-words v1.1.1
+   Compiling fixedbitset v0.4.2
+   Compiling shlex v1.3.0
+   Compiling is_executable v1.0.5
+   Compiling unicode-blocks v0.1.9
+   Compiling gix-command v0.6.5
+   Compiling petgraph v0.6.5
+   Compiling syntect v5.3.0
+   Compiling lindera v0.44.1
+   Compiling clap_complete v4.6.3
+   Compiling wyz v0.5.1
+   Compiling backtrace v0.3.76
+   Compiling pulldown-cmark v0.13.3
+   Compiling jieba-rs v0.9.0
+   Compiling aligned v0.4.3
+   Compiling rsa v0.9.10
+   Compiling libsqlite3-sys v0.36.0
+   Compiling radium v0.7.0
+   Compiling crossterm v0.29.0
+   Compiling crunchy v0.2.4
+   Compiling p256 v0.13.2
+   Compiling p384 v0.13.1
+   Compiling fancy-regex v0.17.0
+   Compiling simple_asn1 v0.6.4
+   Compiling gix-ref v0.57.0
+   Compiling gix-packetline v0.20.0
+   Compiling rust-stemmers v1.2.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling chacha20 v0.10.0
+   Compiling pem v3.0.6
+   Compiling lru v0.16.3
+   Compiling hashlink v0.11.0
+   Compiling fs2 v0.4.3
+   Compiling stdio-override v0.2.0
+   Compiling os_pipe v1.2.3
+   Compiling no_std_io2 v0.9.4
+   Compiling utf8-ranges v1.0.5
+   Compiling rangemap v1.7.1
+   Compiling y4m v0.8.0
+   Compiling funty v2.0.0
+   Compiling arrow-json v58.1.0
+   Compiling arrow-csv v58.1.0
+   Compiling lance-arrow v6.0.0
+   Compiling quick-error v2.0.1
+   Compiling bitvec v1.0.1
+   Compiling av-scenechange v0.14.1
+   Compiling fst v0.4.7
+   Compiling lance-tokenizer v6.0.0
+   Compiling bitstream-io v4.10.0
+   Compiling rich_rust v0.2.1
+   Compiling profiling v1.0.18
+   Compiling rusqlite v0.38.0
+   Compiling strum v0.28.0
+   Compiling jsonwebtoken v10.4.0
+   Compiling rand v0.10.1
+   Compiling schemars v0.8.22
+   Compiling bitpacking v0.9.3
+   Compiling toon_rust v0.1.1 (https://github.com/Dicklesworthstone/toon_rust.git?rev=788589d#788589d7)
+   Compiling arrow v58.1.0
+   Compiling datafusion-common v53.1.0
+   Compiling lance-datagen v6.0.0
+   Compiling av1-grain v0.2.5
+   Compiling gix-traverse v0.51.1
+   Compiling async-channel v2.5.0
+   Compiling maybe-rayon v0.1.1
+   Compiling reqwest v0.13.2
+   Compiling hyper-timeout v0.5.2
+   Compiling futures-lite v2.6.1
+   Compiling gix-url v0.34.0
+   Compiling sse-stream v0.2.2
+   Compiling gix-config-value v0.16.0
+   Compiling toml_datetime v0.6.3
+   Compiling serde_spanned v0.6.9
+   Compiling inout v0.1.4
+   Compiling crossbeam-queue v0.3.12
+   Compiling secrecy v0.10.3
+   Compiling gix-bitmap v0.2.16
+   Compiling imgref v1.12.1
+   Compiling minimal-lexical v0.2.1
+   Compiling dunce v1.0.5
+   Compiling zune-core v0.5.1
+   Compiling web-time v1.1.0
+   Compiling weezl v0.1.12
+   Compiling winnow v0.5.40
+   Compiling new_debug_unreachable v1.0.6
+   Compiling zune-jpeg v0.5.15
+   Compiling octocrab v0.50.0
+   Compiling rav1e v0.8.1
+   Compiling toml_edit v0.20.2
+   Compiling gix-index v0.45.1
+   Compiling rmcp v1.5.0
+   Compiling nom v7.1.3
+   Compiling beads_rust v0.1.14 (https://github.com/getspur/beads_rust?rev=beff256b491e20508eab0319b23547ff145cfd04#beff256b)
+   Compiling loop9 v0.1.5
+   Compiling cipher v0.4.4
+   Compiling futures-concurrency v7.7.1
+   Compiling agent-client-protocol-schema v0.12.0
+   Compiling datafusion-expr-common v53.1.0
+   Compiling directories v5.0.1
+   Compiling gix-revision v0.39.0
+   Compiling gix-ignore v0.18.0
+   Compiling sysinfo v0.30.13
+   Compiling webpki-roots v0.26.11
+   Compiling crossbeam-skiplist v0.1.3
+   Compiling fdeflate v0.3.7
+   Compiling zune-inflate v0.2.54
+   Compiling uluru v3.1.0
+   Compiling avif-serialize v0.8.9
+   Compiling datafusion-physical-expr-common v53.1.0
+   Compiling socks v0.3.4
+   Compiling jsonrpcmsg v0.1.2
+   Compiling console v0.15.11
+   Compiling universal-hash v0.5.1
+   Compiling clru v0.6.3
+   Compiling castaway v0.2.4
+   Compiling color_quant v1.1.0
+   Compiling rgb v0.8.53
+   Compiling byteorder-lite v0.1.0
+   Compiling datafusion-functions-window-common v53.1.0
+   Compiling datafusion-functions-aggregate-common v53.1.0
+   Compiling fax v0.2.7
+   Compiling bit_field v0.10.3
+   Compiling lebe v0.5.3
+   Compiling base64 v0.13.1
+   Compiling async_cell v0.2.3
+   Compiling number_prefix v0.4.0
+   Compiling opaque-debug v0.3.1
+   Compiling permutation v0.4.1
+   Compiling pxfm v0.1.28
+   Compiling polyval v0.6.2
+   Compiling indicatif v0.17.11
+   Compiling spm_precompiled v0.1.4
+   Compiling moxcms v0.8.1
+   Compiling exr v1.74.0
+   Compiling tiff v0.11.3
+   Compiling datafusion-expr v53.1.0
+   Compiling ravif v0.13.0
+   Compiling image-webp v0.2.4
+   Compiling compact_str v0.9.0
+   Compiling gif v0.14.2
+   Compiling macro_rules_attribute v0.2.2
+   Compiling monostate v0.1.18
+   Compiling gix-pack v0.64.1
+   Compiling ureq v2.12.1
+   Compiling png v0.18.1
+   Compiling gix-refspec v0.35.0
+   Compiling gix-worktree v0.46.0
+error: failed to build archive at `/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libureq-37bd3e9256acf522.rlib`: No space left on device (os error 28)
+
+error: could not compile `ureq` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: could not compile `rmcp` (lib)
+
+Caused by:
+  process didn't exit successfully: `/Volumes/Projects/spur/.spur/worktrees/s3-verify/scripts/sccache-worktree.sh /Users/kevintruong/.rustup/toolchains/1.94.1-aarch64-apple-darwin/bin/rustc --crate-name rmcp --edition=2024 /Users/kevintruong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rmcp-1.5.0/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked '--warn=clippy::exhaustive_structs' '--warn=clippy::exhaustive_enums' --cfg 'feature="__reqwest"' --cfg 'feature="base64"' --cfg 'feature="client"' --cfg 'feature="client-side-sse"' --cfg 'feature="default"' --cfg 'feature="macros"' --cfg 'feature="schemars"' --cfg 'feature="server"' --cfg 'feature="server-side-http"' --cfg 'feature="tower"' --cfg 'feature="transport-async-rw"' --cfg 'feature="transport-io"' --cfg 'feature="transport-streamable-http-client"' --cfg 'feature="transport-streamable-http-client-reqwest"' --cfg 'feature="transport-streamable-http-server"' --cfg 'feature="transport-streamable-http-server-session"' --cfg 'feature="transport-worker"' --cfg 'feature="uuid"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("__reqwest", "auth", "auth-client-credentials-jwt", "base64", "client", "client-side-sse", "default", "elicitation", "local", "macros", "reqwest", "reqwest-native-tls", "reqwest-tls-no-provider", "schemars", "server", "server-side-http", "tower", "transport-async-rw", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-streamable-http-client-unix-socket", "transport-streamable-http-server", "transport-streamable-http-server-session", "transport-worker", "uuid", "which-command"))' -C metadata=d68b1321a85e3cce -C extra-filename=-9325678c32519acb --out-dir /Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps -L dependency=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps --extern async_trait=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libasync_trait-fb2bad6cb0bccf5b.dylib --extern base64=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libbase64-ded11cb11e05a27b.rmeta --extern bytes=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libbytes-eac92c27d8be35ea.rmeta --extern chrono=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libchrono-c327fd950b1d0f8a.rmeta --extern futures=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libfutures-9303ed21b33f334a.rmeta --extern http=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libhttp-9c53a85654bbcfb2.rmeta --extern http_body=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libhttp_body-a8a31e15f56ed357.rmeta --extern http_body_util=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libhttp_body_util-6fd5710f5f43ef95.rmeta --extern pastey=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libpastey-f203184ecf178faf.dylib --extern pin_project_lite=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libpin_project_lite-1c6b94186ea8cf28.rmeta --extern rand=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/librand-fd079c7ef03fe5f1.rmeta --extern reqwest=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libreqwest-8c744f99ca01557e.rmeta --extern rmcp_macros=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/librmcp_macros-191495ebad50f895.dylib --extern schemars=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libschemars-8bf5190f4ecebd98.rmeta --extern serde=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libserde-59d0c517e9c216fb.rmeta --extern serde_json=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libserde_json-2e29236dae17c7ad.rmeta --extern sse_stream=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libsse_stream-a8109c686a4534e8.rmeta --extern thiserror=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libthiserror-58fd6fc141969b58.rmeta --extern tokio=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libtokio-cebdd858942d8ca2.rmeta --extern tokio_stream=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libtokio_stream-9d94d8fb5ffef654.rmeta --extern tokio_util=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libtokio_util-2beb4f30af2ef843.rmeta --extern tower_service=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libtower_service-153f8d4beea7bbf3.rmeta --extern tracing=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libtracing-3d81f52fdad81ec4.rmeta --extern uuid=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libuuid-9d05f96730e78285.rmeta --cap-lints allow -C force-frame-pointers=yes -C force-frame-pointers=yes` (exit status: 101)
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: could not compile `datafusion-expr` (lib)
+
+Caused by:
+  process didn't exit successfully: `/Volumes/Projects/spur/.spur/worktrees/s3-verify/scripts/sccache-worktree.sh /Users/kevintruong/.rustup/toolchains/1.94.1-aarch64-apple-darwin/bin/rustc --crate-name datafusion_expr --edition=2024 /Users/kevintruong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/datafusion-expr-53.1.0/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked '--warn=clippy::used_underscore_binding' --deny=unused_qualifications '--warn=clippy::unnecessary_lazy_evaluations' '--warn=clippy::uninlined_format_args' --warn=unexpected_cfgs '--warn=clippy::or_fun_call' '--warn=clippy::needless_pass_by_value' '--warn=clippy::large_futures' '--warn=clippy::inefficient_to_string' '--warn=clippy::allow_attributes' --check-cfg 'cfg(datafusion_coop, values("tokio", "tokio_fallback", "per_stream"))' --check-cfg 'cfg(tarpaulin)' --check-cfg 'cfg(tarpaulin_include)' --cfg 'feature="default"' --cfg 'feature="sql"' --cfg 'feature="sqlparser"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "recursive_protection", "sql", "sqlparser"))' -C metadata=cd8a65d9d429d023 -C extra-filename=-419c64820ca812d8 --out-dir /Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps -L dependency=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps --extern arrow=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libarrow-c39db2d7019589e1.rmeta --extern async_trait=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libasync_trait-fb2bad6cb0bccf5b.dylib --extern chrono=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libchrono-c327fd950b1d0f8a.rmeta --extern datafusion_common=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libdatafusion_common-218038830152d4fa.rmeta --extern datafusion_doc=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libdatafusion_doc-681d47d81d546abf.rmeta --extern datafusion_expr_common=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libdatafusion_expr_common-88296e3294afc5b2.rmeta --extern datafusion_functions_aggregate_common=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libdatafusion_functions_aggregate_common-04d2470fd11cf97c.rmeta --extern datafusion_functions_window_common=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libdatafusion_functions_window_common-0c7e6cb70e539be0.rmeta --extern datafusion_physical_expr_common=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libdatafusion_physical_expr_common-d6c2f5a967eaac46.rmeta --extern indexmap=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libindexmap-64338e3cba92d925.rmeta --extern itertools=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libitertools-9442db76b55c9be6.rmeta --extern paste=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libpaste-3145e0b2499391d4.dylib --extern serde_json=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libserde_json-2e29236dae17c7ad.rmeta --extern sqlparser=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libsqlparser-8965a04370ee9056.rmeta --cap-lints allow -C force-frame-pointers=yes -C force-frame-pointers=yes -L native=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/build/zstd-sys-da67b3d288cc1d57/out` (exit status: 101)
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: could not compile `beads_rust` (lib)
+
+Caused by:
+  process didn't exit successfully: `/Volumes/Projects/spur/.spur/worktrees/s3-verify/scripts/sccache-worktree.sh /Users/kevintruong/.rustup/toolchains/1.94.1-aarch64-apple-darwin/bin/rustc --crate-name beads_rust --edition=2024 /Users/kevintruong/.cargo/git/checkouts/beads_rust-e72c9aff4c0e3d5e/beff256/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked '--deny=clippy::pedantic' '--deny=clippy::nursery' --forbid=unsafe_code '--allow=clippy::useless_let_if_seq' '--allow=clippy::uninlined_format_args' '--allow=clippy::missing_const_for_fn' '--allow=clippy::format_push_string' '--allow=clippy::doc_markdown' '--allow=clippy::cast_precision_loss' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "self_update"))' -C metadata=4ea31a126c9a1f0a -C extra-filename=-7db5af933100aeb7 --out-dir /Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps -L dependency=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps --extern anyhow=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libanyhow-368351a534667b8a.rmeta --extern chrono=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libchrono-c327fd950b1d0f8a.rmeta --extern clap=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libclap-f151e79bd4d7546c.rmeta --extern clap_complete=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libclap_complete-6b6b2b3441a908ca.rmeta --extern crossterm=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libcrossterm-813b29944e703d73.rmeta --extern dunce=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libdunce-b450b6a5725be72f.rmeta --extern indicatif=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libindicatif-1496cfa5c33d730e.rmeta --extern once_cell=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libonce_cell-0b31056ac33a1d5f.rmeta --extern regex=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libregex-5701a449a01e9dda.rmeta --extern rich_rust=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/librich_rust-6270df02751f2af6.rmeta --extern rusqlite=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/librusqlite-6e69a368084b44e4.rmeta --extern schemars=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libschemars-45f3a0070ef6015e.rmeta --extern semver=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libsemver-be5ff5fcece1c5ff.rmeta --extern serde=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libserde-59d0c517e9c216fb.rmeta --extern serde_json=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libserde_json-2e29236dae17c7ad.rmeta --extern serde_yaml=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libserde_yaml-3dd0d8881b7f300a.rmeta --extern sha2=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libsha2-a7f11be6c5c6ba8f.rmeta --extern thiserror=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libthiserror-58fd6fc141969b58.rmeta --extern toon_rust=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libtoon_rust-73ffbe53f794c459.rmeta --extern tracing=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libtracing-3d81f52fdad81ec4.rmeta --extern tracing_subscriber=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libtracing_subscriber-64095283b402fbda.rmeta --extern unicode_width=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libunicode_width-83292eab66c0df7c.rmeta --cap-lints allow -C force-frame-pointers=yes -C force-frame-pointers=yes -L native=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/build/onig_sys-b431a97307bf439c/out -L native=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/build/libsqlite3-sys-76431bca479fad8f/out` (exit status: 101)
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: could not compile `gix-worktree` (lib)
+
+Caused by:
+  process didn't exit successfully: `/Volumes/Projects/spur/.spur/worktrees/s3-verify/scripts/sccache-worktree.sh /Users/kevintruong/.rustup/toolchains/1.94.1-aarch64-apple-darwin/bin/rustc --crate-name gix_worktree --edition=2021 /Users/kevintruong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-worktree-0.46.0/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked '--warn=clippy::pedantic' '--allow=clippy::wildcard_imports' '--allow=clippy::used_underscore_binding' '--allow=clippy::unused_self' '--allow=clippy::unreadable_literal' '--allow=clippy::unnecessary_wraps' '--allow=clippy::unnecessary_join' '--allow=clippy::trivially_copy_pass_by_ref' '--allow=clippy::transmute_ptr_to_ptr' '--allow=clippy::too_many_lines' '--allow=clippy::too_long_first_doc_paragraph' '--allow=clippy::struct_field_names' '--allow=clippy::struct_excessive_bools' '--allow=clippy::stable_sort_primitive' '--allow=clippy::single_match_else' '--allow=clippy::similar_names' '--allow=clippy::should_panic_without_expect' '--allow=clippy::return_self_not_must_use' '--allow=clippy::result_large_err' '--allow=clippy::redundant_else' '--allow=clippy::range_plus_one' '--allow=clippy::option_option' '--allow=clippy::no_effect_underscore_binding' '--allow=clippy::needless_raw_string_hashes' '--allow=clippy::needless_pass_by_value' '--allow=clippy::needless_for_each' '--allow=clippy::needless_continue' '--allow=clippy::naive_bytecount' '--allow=clippy::mut_mut' '--allow=clippy::must_use_candidate' '--allow=clippy::module_name_repetitions' '--allow=clippy::missing_panics_doc' '--allow=clippy::missing_errors_doc' '--allow=clippy::match_wildcard_for_single_variants' '--allow=clippy::match_wild_err_arm' '--allow=clippy::match_same_arms' '--allow=clippy::match_bool' '--allow=clippy::many_single_char_names' '--allow=clippy::manual_string_new' '--allow=clippy::manual_let_else' '--allow=clippy::manual_is_variant_and' '--allow=clippy::manual_assert' '--allow=clippy::large_stack_arrays' '--allow=clippy::large_enum_variant' '--allow=clippy::iter_without_into_iter' '--allow=clippy::iter_not_returning_iterator' '--allow=clippy::items_after_statements' '--allow=clippy::inline_always' '--allow=clippy::inefficient_to_string' '--allow=clippy::inconsistent_struct_constructor' '--allow=clippy::implicit_clone' '--allow=clippy::ignored_unit_patterns' '--allow=clippy::if_not_else' '--allow=clippy::from_iter_instead_of_collect' '--allow=clippy::fn_params_excessive_bools' '--allow=clippy::filter_map_next' '--allow=clippy::explicit_iter_loop' '--allow=clippy::explicit_into_iter_loop' '--allow=clippy::explicit_deref_methods' '--allow=clippy::enum_glob_use' '--allow=clippy::empty_docs' '--allow=clippy::doc_markdown' '--allow=clippy::default_trait_access' '--allow=clippy::copy_iterator' '--allow=clippy::checked_conversions' '--allow=clippy::cast_sign_loss' '--allow=clippy::cast_precision_loss' '--allow=clippy::cast_possible_wrap' '--allow=clippy::cast_possible_truncation' '--allow=clippy::cast_lossless' '--allow=clippy::borrow_as_ptr' '--allow=clippy::bool_to_int_with_if' --cfg 'feature="attributes"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("attributes", "default", "document-features", "serde"))' -C metadata=7703ff6dddab01f8 -C extra-filename=-18103f6b3627f1b3 --out-dir /Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps -L dependency=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps --extern bstr=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libbstr-89bf900f66eb1a62.rmeta --extern gix_attributes=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_attributes-af7ad0c31609561a.rmeta --extern gix_features=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_features-c60ed3aa7d1b41ef.rmeta --extern gix_fs=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_fs-9c5caa281226fc32.rmeta --extern gix_glob=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_glob-73e74c840b87bc35.rmeta --extern gix_hash=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_hash-4181c87b44a58d7d.rmeta --extern gix_ignore=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_ignore-ed8b508842c7c46a.rmeta --extern gix_index=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_index-e10f0e673cc91d57.rmeta --extern gix_object=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_object-dbc2f7d6b0222f7d.rmeta --extern gix_path=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_path-31c9fc707e5108a9.rmeta --extern gix_validate=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_validate-7902c5ce251355f0.rmeta --cap-lints allow -C force-frame-pointers=yes -C force-frame-pointers=yes` (exit status: 101)
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: could not compile `gix-refspec` (lib)
+
+Caused by:
+  process didn't exit successfully: `/Volumes/Projects/spur/.spur/worktrees/s3-verify/scripts/sccache-worktree.sh /Users/kevintruong/.rustup/toolchains/1.94.1-aarch64-apple-darwin/bin/rustc --crate-name gix_refspec --edition=2021 /Users/kevintruong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-refspec-0.35.0/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked '--warn=clippy::pedantic' '--allow=clippy::wildcard_imports' '--allow=clippy::used_underscore_binding' '--allow=clippy::unused_self' '--allow=clippy::unreadable_literal' '--allow=clippy::unnecessary_wraps' '--allow=clippy::unnecessary_join' '--allow=clippy::trivially_copy_pass_by_ref' '--allow=clippy::transmute_ptr_to_ptr' '--allow=clippy::too_many_lines' '--allow=clippy::too_long_first_doc_paragraph' '--allow=clippy::struct_field_names' '--allow=clippy::struct_excessive_bools' '--allow=clippy::stable_sort_primitive' '--allow=clippy::single_match_else' '--allow=clippy::similar_names' '--allow=clippy::should_panic_without_expect' '--allow=clippy::return_self_not_must_use' '--allow=clippy::result_large_err' '--allow=clippy::redundant_else' '--allow=clippy::range_plus_one' '--allow=clippy::option_option' '--allow=clippy::no_effect_underscore_binding' '--allow=clippy::needless_raw_string_hashes' '--allow=clippy::needless_pass_by_value' '--allow=clippy::needless_for_each' '--allow=clippy::needless_continue' '--allow=clippy::naive_bytecount' '--allow=clippy::mut_mut' '--allow=clippy::must_use_candidate' '--allow=clippy::module_name_repetitions' '--allow=clippy::missing_panics_doc' '--allow=clippy::missing_errors_doc' '--allow=clippy::match_wildcard_for_single_variants' '--allow=clippy::match_wild_err_arm' '--allow=clippy::match_same_arms' '--allow=clippy::match_bool' '--allow=clippy::many_single_char_names' '--allow=clippy::manual_string_new' '--allow=clippy::manual_let_else' '--allow=clippy::manual_is_variant_and' '--allow=clippy::manual_assert' '--allow=clippy::large_stack_arrays' '--allow=clippy::large_enum_variant' '--allow=clippy::iter_without_into_iter' '--allow=clippy::iter_not_returning_iterator' '--allow=clippy::items_after_statements' '--allow=clippy::inline_always' '--allow=clippy::inefficient_to_string' '--allow=clippy::inconsistent_struct_constructor' '--allow=clippy::implicit_clone' '--allow=clippy::ignored_unit_patterns' '--allow=clippy::if_not_else' '--allow=clippy::from_iter_instead_of_collect' '--allow=clippy::fn_params_excessive_bools' '--allow=clippy::filter_map_next' '--allow=clippy::explicit_iter_loop' '--allow=clippy::explicit_into_iter_loop' '--allow=clippy::explicit_deref_methods' '--allow=clippy::enum_glob_use' '--allow=clippy::empty_docs' '--allow=clippy::doc_markdown' '--allow=clippy::default_trait_access' '--allow=clippy::copy_iterator' '--allow=clippy::checked_conversions' '--allow=clippy::cast_sign_loss' '--allow=clippy::cast_precision_loss' '--allow=clippy::cast_possible_wrap' '--allow=clippy::cast_possible_truncation' '--allow=clippy::cast_lossless' '--allow=clippy::borrow_as_ptr' '--allow=clippy::bool_to_int_with_if' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=7bd4873f5d165ef7 -C extra-filename=-5bb835a8443f9c54 --out-dir /Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps -L dependency=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps --extern bstr=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libbstr-89bf900f66eb1a62.rmeta --extern gix_glob=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_glob-73e74c840b87bc35.rmeta --extern gix_hash=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_hash-4181c87b44a58d7d.rmeta --extern gix_revision=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_revision-68fd1afae3e6125e.rmeta --extern gix_validate=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libgix_validate-7902c5ce251355f0.rmeta --extern smallvec=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libsmallvec-231a3a0c1ed341b2.rmeta --extern thiserror=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libthiserror-58fd6fc141969b58.rmeta --cap-lints allow -C force-frame-pointers=yes -C force-frame-pointers=yes` (exit status: 101)
+error: couldn't create a temp dir: No space left on device (os error 28) at path "/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/rmetaiGU1QK"
+
+error: could not compile `octocrab` (lib) due to 1 previous error
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: could not compile `lance-bitpacking` (lib)
+
+Caused by:
+  process didn't exit successfully: `/Volumes/Projects/spur/.spur/worktrees/s3-verify/scripts/sccache-worktree.sh /Users/kevintruong/.rustup/toolchains/1.94.1-aarch64-apple-darwin/bin/rustc --crate-name lance_bitpacking --edition=2024 /Users/kevintruong/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-bitpacking-6.0.0/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=line-tables-only -C split-debuginfo=unpacked '--deny=clippy::style' '--deny=clippy::cargo' '--deny=clippy::all' '--deny=clippy::use_self' --allow=unsafe_op_in_unsafe_fn --warn=unexpected_cfgs '--deny=clippy::trait_duplication_in_bounds' '--deny=clippy::string_lit_as_bytes' '--deny=clippy::string_add_assign' '--deny=clippy::string_add' '--allow=clippy::single_range_in_vec_init' '--deny=clippy::redundant_pub_crate' '--deny=clippy::redundant_clone' '--deny=clippy::print_stdout' '--deny=clippy::print_stderr' '--allow=clippy::multiple-crate-versions' '--deny=clippy::manual_let_else' '--deny=clippy::large_futures' '--deny=clippy::fallible_impl_from' '--deny=clippy::disallowed_macros' '--deny=clippy::dbg_macro' --check-cfg 'cfg(coverage,coverage_nightly)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=443d9a03c88f97cf -C extra-filename=-2cd95c78e9bc7739 --out-dir /Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps -L dependency=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps --extern arrayref=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libarrayref-3995fc1d2b720e07.rmeta --extern paste=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libpaste-3145e0b2499391d4.dylib --extern seq_macro=/Volumes/Projects/spur/.spur/worktrees/s3-verify/target/debug/deps/libseq_macro-018d2feb8f1eacf2.dylib --cap-lints allow -C force-frame-pointers=yes -C force-frame-pointers=yes` (exit status: 101)
+######## FAIL  [test-spur-core-1] rc=101 (150s) ########
+
+@@@@@@@@ RETEST3 DONE overall_rc=101 15:04:40 @@@@@@@@
