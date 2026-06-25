@@ -1,0 +1,144 @@
+## buildrun tip 6e899fb42 start 16:41:24
+
+######## START [build-workspace] 16:41:24 ########
+[spur-cargo] remote (build) → aws VM
+[build] Worktree: spur/worktrees/s3-verify  (local=/Volumes/Projects/spur/.spur/worktrees/s3-verify)
+[build] Remote:   ~/spur/worktrees/s3-verify   target=/mnt/cargo/targets/spur/worktrees/s3-verify   -j16
+[build] Remote build queue: admitted as ticket 3 (slot 2/3).
+[build] SSH transport: SSH-over-SSM (instance i-0b9b64ba8a34d0ea2)
+[build] Enumerating git-tracked files...
+[build]   2658 files
+[build] Syncing to i-0b9b64ba8a34d0ea2:~/spur/worktrees/s3-verify ...
+[build] Reconciling remote workspace (pruning locally-deleted files)...
+[prune] no files removed locally since last sync
+[build] Configuring remote git auth for private getspur/spur deps...
+[build] Running: cargo --config build.rustflags=\[\"-Ctarget-cpu=neoverse-v1\"\,\"-Ctarget-feature=+lse\"\,\"-Clinker=clang\"\,\"-Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld\"\] build --workspace  -j16  provider-rustflags=-Ctarget-cpu=neoverse-v1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld
+[build] No source content delta; capturing cargo output on VM (set SPUR_CAPTURE_FRESH_CARGO_OUTPUT=0 to stream).
+   Compiling datafusion-datasource-csv v53.1.0
+   Compiling datafusion-datasource-arrow v53.1.0
+   Compiling datafusion-datasource-json v53.1.0
+   Compiling datafusion-physical-optimizer v53.1.0
+   Compiling lance-namespace v6.0.0
+   Compiling lance-encoding v6.0.0
+   Compiling lance-linalg v6.0.0
+   Compiling lance-io v6.0.0
+   Compiling spur-blob-store v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-blob-store)
+   Compiling spur-cost v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-cost)
+   Compiling spur-worktree v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-worktree)
+   Compiling spur-context v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-context)
+   Compiling lance-file v6.0.0
+   Compiling lance-table v6.0.0
+   Compiling datafusion-catalog-listing v53.1.0
+   Compiling datafusion-functions-table v53.1.0
+   Compiling datafusion v53.1.0
+   Compiling lance-datafusion v6.0.0
+   Compiling lance-index v6.0.0
+   Compiling lance v6.0.0
+   Compiling lance-namespace-impls v6.0.0
+   Compiling lancedb v0.29.0
+   Compiling spur-graph v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-graph)
+   Compiling spur-analyst v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-analyst)
+   Compiling spur-mcp v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-mcp)
+   Compiling spur-core v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-core)
+   Compiling spur-interactive v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-interactive)
+   Compiling spur-tui v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-tui)
+   Compiling spur-bot v1.6.0 (/home/admin/spur/worktrees/s3-verify/crates/spur-bot)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 56s
+
+--- sccache stats (spur/worktrees/s3-verify) ---
+Compile requests                     776
+Compile requests executed            710
+Cache hits                           555
+Cache hits (Assembler)                98
+Cache hits (C/C++)                   266
+Cache hits (Rust)                    191
+Cache misses                         155
+Cache misses (Rust)                  155
+Cache hits rate                    78.17 %
+Cache hits rate (Assembler)       100.00 %
+Cache hits rate (C/C++)           100.00 %
+Cache hits rate (Rust)             55.20 %
+Cache timeouts                         0
+Cache read errors                      0
+Forced recaches                        0
+Cache write errors                     0
+Cache errors                           0
+Compilations                         155
+Compilation failures                   0
+Non-cacheable compilations             0
+[build] Done. target lives at i-0b9b64ba8a34d0ea2:/mnt/cargo/targets/spur/worktrees/s3-verify — use scripts/cloud-build/fetch.sh to pull artifacts.
+[build] Remote build queue: released ticket 00000000000000000003.
+######## PASS  [build-workspace] rc=0 (330s) ########
+
+######## START [run-cli-help] 16:46:54 ########
+[spur-cargo] remote (run) → aws VM
+[build] Worktree: spur/worktrees/s3-verify  (local=/Volumes/Projects/spur/.spur/worktrees/s3-verify)
+[build] Remote:   ~/spur/worktrees/s3-verify   target=/mnt/cargo/targets/spur/worktrees/s3-verify   -j16
+[build] Remote build queue: admitted as ticket 4 (slot 2/3).
+[build] SSH transport: SSH-over-SSM (instance i-0b9b64ba8a34d0ea2)
+[build] Enumerating git-tracked files...
+[build]   2658 files
+[build] Syncing to i-0b9b64ba8a34d0ea2:~/spur/worktrees/s3-verify ...
+[build] Reconciling remote workspace (pruning locally-deleted files)...
+[prune] no files removed locally since last sync
+[build] Configuring remote git auth for private getspur/spur deps...
+[build] Running: cargo --config build.rustflags=\[\"-Ctarget-cpu=neoverse-v1\"\,\"-Ctarget-feature=+lse\"\,\"-Clinker=clang\"\,\"-Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld\"\] run -p spur-cli -- --help  -j16  provider-rustflags=-Ctarget-cpu=neoverse-v1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld
+[build] No source content delta; capturing cargo output on VM (set SPUR_CAPTURE_FRESH_CARGO_OUTPUT=0 to stream).
+Multi-agent orchestrator — issue in, PR out
+
+Usage: spur <COMMAND>
+
+Commands:
+  init       Initialize SPUR: detect agents, create config
+  skills     Install SpurPower skills into adapter directories
+  agents     List and manage registered agents
+  run        Run an ad-hoc task through the brain agent
+  exec       Execute a task directly on a specific agent (no brain, no delegation)
+  sessions   List and manage active sessions
+  cost       Show cost summary
+  connect    Authenticate with a PM tool
+  auth       Manage commercial licensing
+  upgrade    Check for and apply SPUR CLI upgrades
+  workflow   Manage workflows
+  config     Validate .spur/config.toml shape
+  flags      List and inspect runtime feature flags
+  telemetry  Manage telemetry configuration and lifecycle
+  analyst    Manage the .spur/analyst.duckdb (DuckDB-backed query surface over the graph)
+  graph      Build and inspect the code graph index
+  gc         Garbage-collect outcome blobs
+  tui        Launch interactive TUI dashboard [aliases: watch]
+  profile    Performance profiling and monitoring
+  pm         Project-management backend commands (beads)
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+--- sccache stats (spur/worktrees/s3-verify) ---
+Compile requests                     820
+Compile requests executed            750
+Cache hits                           555
+Cache hits (Assembler)                98
+Cache hits (C/C++)                   266
+Cache hits (Rust)                    191
+Cache misses                         195
+Cache misses (Rust)                  195
+Cache hits rate                    74.00 %
+Cache hits rate (Assembler)       100.00 %
+Cache hits rate (C/C++)           100.00 %
+Cache hits rate (Rust)             49.48 %
+Cache timeouts                         0
+Cache read errors                      0
+Forced recaches                        0
+Cache write errors                     0
+Cache errors                           0
+Compilations                         195
+Compilation failures                   0
+Non-cacheable compilations             0
+[build] Done. target lives at i-0b9b64ba8a34d0ea2:/mnt/cargo/targets/spur/worktrees/s3-verify — use scripts/cloud-build/fetch.sh to pull artifacts.
+[build] Run sync-back: binary wrote no worktree files.
+[build] Remote build queue: released ticket 00000000000000000004.
+######## PASS  [run-cli-help] rc=0 (226s) ########
+
+@@@@@@@@ BUILDRUN DONE overall_rc=0 16:50:40 @@@@@@@@
