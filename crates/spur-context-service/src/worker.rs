@@ -2,7 +2,9 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
+use std::future::Future;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
@@ -11,15 +13,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context as _, Result};
+use async_trait::async_trait;
+use aws_sdk_dynamodb::{types::AttributeValue, Client as DynamoDbClient};
 use aws_sdk_s3::primitives::ByteStream;
-use duckdb::Connection;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::abuse;
-use crate::catalog::{connect_ducklake, ensure_index_jobs_table};
-use crate::jobs::{update_status, JobStatus};
+use crate::jobs::{DynamoDbJobStore, JobStatus, JobStore};
 use crate::translate::{translate_artifact_to_ducklake, TranslateOptions, TranslateStats};
 
 const DEFAULT_ARTIFACT_DIR: &str = "/tmp/artifact";
@@ -30,6 +34,9 @@ const ECS_CREDENTIALS_CAP_BYTES: usize = 64 * 1024;
 const JINA_CODE_EMBED_MODEL_NAME: &str = "JinaEmbeddingsV2BaseCode";
 const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
 const GRAPH_SKIP_SECTION_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
+const DEFAULT_CATALOG_LEASES_TABLE: &str = "spur-context-catalog-leases";
+const CATALOG_LEASE_DURATION_SECS: i64 = 10 * 60;
+const CATALOG_LEASE_RENEW_INTERVAL_SECS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobEnv {
@@ -76,25 +83,72 @@ pub enum WorkerError {
     SfnSend(String),
 }
 
-#[derive(Debug, Clone)]
-struct StageTracker(Arc<Mutex<String>>);
+#[derive(Clone)]
+pub struct StageTracker {
+    current: Arc<Mutex<String>>,
+    reporter: Option<StageReporter>,
+}
 
 impl StageTracker {
-    fn new() -> Self {
-        Self(Arc::new(Mutex::new("starting".to_owned())))
+    pub fn new() -> Self {
+        Self {
+            current: Arc::new(Mutex::new("starting".to_owned())),
+            reporter: None,
+        }
     }
 
-    fn set(&self, stage: &str) {
-        if let Ok(mut current) = self.0.lock() {
+    pub fn with_job_store(job_id: impl Into<String>, jobs: Arc<dyn JobStore>) -> Self {
+        Self {
+            current: Arc::new(Mutex::new("starting".to_owned())),
+            reporter: Some(StageReporter {
+                job_id: job_id.into(),
+                jobs,
+                handle: tokio::runtime::Handle::current(),
+            }),
+        }
+    }
+
+    pub fn set(&self, stage: &str) {
+        self.set_current(stage);
+        if let Some(reporter) = &self.reporter {
+            reporter.record(stage);
+        }
+    }
+
+    fn set_current(&self, stage: &str) {
+        if let Ok(mut current) = self.current.lock() {
             *current = stage.to_owned();
         }
     }
 
-    fn get(&self) -> String {
-        self.0
+    pub fn get(&self) -> String {
+        self.current
             .lock()
             .map(|stage| stage.clone())
             .unwrap_or_else(|_| "unknown".to_owned())
+    }
+}
+
+#[derive(Clone)]
+struct StageReporter {
+    job_id: String,
+    jobs: Arc<dyn JobStore>,
+    handle: tokio::runtime::Handle,
+}
+
+impl StageReporter {
+    fn record(&self, stage: &str) {
+        let result = self.handle.block_on(self.jobs.update_stage(
+            &self.job_id,
+            JobStatus::Running,
+            stage,
+        ));
+        if let Err(error) = result {
+            eprintln!(
+                "[worker] warning: failed to record stage `{stage}` for job `{}`: {error:#}",
+                self.job_id
+            );
+        }
     }
 }
 
@@ -104,27 +158,37 @@ pub async fn run_from_env() -> Result<(), WorkerError> {
 }
 
 pub async fn run_job_and_report(env: &JobEnv) -> Result<(), WorkerError> {
-    let stage = StageTracker::new();
-    let run = run_job_with_stage(env.clone(), stage.clone());
+    let dynamodb = dynamodb_client();
+    let jobs = Arc::new(DynamoDbJobStore::new(dynamodb.clone()));
+    let leases = Arc::new(DynamoDbCatalogLeaseStore::new(dynamodb));
+    run_job_and_report_with_services(env, jobs, leases).await
+}
+
+pub async fn run_job_and_report_with_services(
+    env: &JobEnv,
+    jobs: Arc<dyn JobStore>,
+    leases: Arc<dyn CatalogLeaseStore>,
+) -> Result<(), WorkerError> {
+    let stage = StageTracker::with_job_store(env.job_id.clone(), jobs.clone());
+    let run = run_job_with_stage(env.clone(), stage.clone(), jobs.clone(), leases);
 
     tokio::select! {
         result = run => {
             match result {
                 Ok(stats) => {
-                    update_job_status(
-                        env,
-                        JobStatus::Complete,
-                        Some(stats.snapshot_id),
-                        None,
-                        Some(json!(&stats.rows_inserted)),
-                    );
                     send_task_success(env, &stats).await?;
                     Ok(())
                 }
                 Err(error) => {
                     let error_detail = format!("{error:#}");
                     eprintln!("[worker] job failed: {error_detail}");
-                    update_job_status(env, JobStatus::Failed, None, Some(&error_detail), None);
+                    mark_job_failed_best_effort(
+                        jobs.as_ref(),
+                        env,
+                        &failure_error_code(&error),
+                        &error_detail,
+                    )
+                    .await;
                     if let Err(sfn_err) = send_task_failure(env, &failure_error_code(&error), &error_detail).await {
                         eprintln!("[worker] SendTaskFailure also failed: {sfn_err:#}");
                     }
@@ -136,7 +200,13 @@ pub async fn run_job_and_report(env: &JobEnv) -> Result<(), WorkerError> {
             if let Err(error) = signal_result {
                 let worker_error = WorkerError::SfnSend(error.to_string());
                 let error_detail = worker_error.to_string();
-                update_job_status(env, JobStatus::Failed, None, Some(&error_detail), None);
+                mark_job_failed_best_effort(
+                    jobs.as_ref(),
+                    env,
+                    &failure_error_code(&worker_error),
+                    &error_detail,
+                )
+                .await;
                 send_task_failure(env, &failure_error_code(&worker_error), &error_detail).await?;
                 return Err(worker_error);
             }
@@ -147,85 +217,116 @@ pub async fn run_job_and_report(env: &JobEnv) -> Result<(), WorkerError> {
 }
 
 pub async fn run_job(env: &JobEnv) -> Result<TranslateStats, WorkerError> {
-    run_job_with_stage(env.clone(), StageTracker::new()).await
+    let dynamodb = dynamodb_client();
+    let jobs = Arc::new(DynamoDbJobStore::new(dynamodb.clone()));
+    let leases = Arc::new(DynamoDbCatalogLeaseStore::new(dynamodb));
+    run_job_with_services(env, jobs, leases).await
 }
 
-pub fn update_job_status(
+pub async fn run_job_with_services(
     env: &JobEnv,
-    status: JobStatus,
-    snapshot_id: Option<i64>,
-    error: Option<&str>,
-    row_counts: Option<Value>,
-) {
-    let status_label = status.to_string();
-    let result = (|| -> Result<()> {
-        let conn = connect_ducklake(&env.catalog_dsn)
-            .with_context(|| format!("connect catalog for index job `{}`", env.job_id))?;
-        let _ = ensure_index_jobs_table(&conn);
-        update_job_status_with_connection(&conn, env, status, snapshot_id, error, row_counts)
-            .with_context(|| format!("update index_jobs for job `{}`", env.job_id))?;
-        Ok(())
-    })();
-
-    if let Err(update_error) = result {
-        eprintln!(
-            "[worker] warning: failed to update index_jobs status to `{status_label}` for job `{}`: {update_error:#}",
-            env.job_id
-        );
-    }
-}
-
-pub fn update_job_status_with_connection(
-    conn: &Connection,
-    env: &JobEnv,
-    status: JobStatus,
-    snapshot_id: Option<i64>,
-    error: Option<&str>,
-    row_counts: Option<Value>,
-) -> crate::jobs::Result<()> {
-    update_status(conn, &env.job_id, status, snapshot_id, error, row_counts)
+    jobs: Arc<dyn JobStore>,
+    leases: Arc<dyn CatalogLeaseStore>,
+) -> Result<TranslateStats, WorkerError> {
+    let stage = StageTracker::with_job_store(env.job_id.clone(), jobs.clone());
+    run_job_with_stage(env.clone(), stage, jobs, leases).await
 }
 
 async fn run_job_with_stage(
     env: JobEnv,
     stage: StageTracker,
+    jobs: Arc<dyn JobStore>,
+    leases: Arc<dyn CatalogLeaseStore>,
 ) -> Result<TranslateStats, WorkerError> {
-    // DuckLake cannot open S3 catalog metadata for read-write, so download
-    // the catalog locally, translate with the local path, then upload back.
-    // Data files go directly to S3 via httpfs (the catalog's stored data_path).
-    let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
-        .await
-        .map_err(|e| WorkerError::Translate(format!("download catalog: {e:#}")))?;
-
-    let local_env: JobEnv = if let Some(ref dl) = catalog_dl {
-        let mut local = env.clone();
-        local.catalog_dsn = dl.local_path.to_string_lossy().to_string();
-        // Data files go directly to S3 — the translate step uses FORCE CHECKPOINT
-        // to flush all data to S3 before the connection drops.
-        std::env::set_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH", "s3://spur-context/data/");
-        local
-    } else {
-        env.clone()
-    };
-
+    let blocking_env = env.clone();
     let stage_clone = stage.clone();
-    let result = tokio::task::spawn_blocking(move || run_job_blocking(&local_env, &stage_clone))
+    let prepared = tokio::task::spawn_blocking(move || {
+        prepare_job_blocking(&blocking_env, &stage_clone)
+    })
         .await
-        .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))?;
+        .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))??;
 
-    // Upload catalog back to S3 only on success.
-    if result.is_ok() {
-        if let Some(ref dl) = catalog_dl {
-            dl.upload()
+    let mut lease = None;
+    if env.catalog_dsn.starts_with("s3://") {
+        record_job_stage_best_effort(jobs.as_ref(), &env.job_id, "waiting_catalog_lease").await;
+        lease = Some(
+            leases
+                .acquire(&env.catalog_dsn, &env.job_id)
                 .await
-                .map_err(|e| WorkerError::Translate(format!("upload catalog: {e:#}")))?;
+                .map_err(|error| WorkerError::Translate(format!("acquire catalog lease: {error:#}")))?,
+        );
+    }
+
+    let result = async {
+        // DuckLake cannot open S3 catalog metadata for read-write, so download
+        // the catalog locally, translate with the local path, then upload back.
+        // Data files go directly to S3 via httpfs (the catalog's stored data_path).
+        let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
+            .await
+            .map_err(|e| WorkerError::Translate(format!("download catalog: {e:#}")))?;
+
+        let local_env: JobEnv = if let Some(ref dl) = catalog_dl {
+            let mut local = env.clone();
+            local.catalog_dsn = dl.local_path.to_string_lossy().to_string();
+            // Data files go directly to S3 — the translate step uses FORCE CHECKPOINT
+            // to flush all data to S3 before the connection drops.
+            std::env::set_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH", "s3://spur-context/data/");
+            local
+        } else {
+            env.clone()
+        };
+
+        stage.set_current("translate");
+        record_job_stage_best_effort(jobs.as_ref(), &env.job_id, "translate").await;
+        let translate_stage = stage.clone();
+        let translate_task = tokio::task::spawn_blocking(move || {
+            translate_prepared_blocking(&local_env, &translate_stage, &prepared)
+        });
+        let (stats, renewed_lease) =
+            await_translate_with_lease_renewal(translate_task, leases.clone(), lease.clone()).await?;
+        if renewed_lease.is_some() {
+            lease = renewed_lease;
+        }
+
+        if let Some(ref dl) = catalog_dl {
+            if let Some(current_lease) = lease.as_mut() {
+                *current_lease = leases
+                    .renew(current_lease)
+                    .await
+                    .map_err(|error| {
+                        WorkerError::Translate(format!("renew catalog lease before upload: {error:#}"))
+                    })?;
+                upload_with_owned_catalog_lease(leases.as_ref(), current_lease, || dl.upload())
+                    .await
+                    .map_err(|error| WorkerError::Translate(format!("upload catalog: {error:#}")))?;
+            } else {
+                dl.upload()
+                    .await
+                    .map_err(|e| WorkerError::Translate(format!("upload catalog: {e:#}")))?;
+            }
+        }
+        stage.set_current("complete");
+        Ok(stats)
+    }
+    .await;
+
+    if let Ok(stats) = &result {
+        mark_job_complete_best_effort(jobs.as_ref(), &env, stats).await;
+    }
+
+    if let Some(ref current_lease) = lease {
+        if let Err(error) = leases.release(current_lease).await {
+            eprintln!(
+                "[worker] warning: failed to release catalog lease for job `{}`: {error:#}",
+                env.job_id
+            );
         }
     }
 
     result
 }
 
-fn run_job_blocking(env: &JobEnv, stage: &StageTracker) -> Result<TranslateStats, WorkerError> {
+fn prepare_job_blocking(env: &JobEnv, stage: &StageTracker) -> Result<PreparedJob, WorkerError> {
     let workspace = TempWorkspace::new(&env.job_id)?;
     let source_dest = workspace.path.join("source");
     let artifact_base = artifact_dir();
@@ -247,11 +348,23 @@ fn run_job_blocking(env: &JobEnv, stage: &StageTracker) -> Result<TranslateStats
     let artifact_dir = resolve_graph_artifact_dir(&artifact_base)?;
     log_stage_completed("build_graph", stage_started);
 
-    stage.set("translate");
+    Ok(PreparedJob {
+        _workspace: workspace,
+        source_path,
+        artifact_dir,
+    })
+}
+
+fn translate_prepared_blocking(
+    env: &JobEnv,
+    stage: &StageTracker,
+    prepared: &PreparedJob,
+) -> Result<TranslateStats, WorkerError> {
+    stage.set_current("translate");
     let stage_started = log_stage_started("translate");
-    let stats = translate_with_source_root(&artifact_dir, Some(&source_path), env)?;
+    let stats = translate_with_source_root(&prepared.artifact_dir, Some(&prepared.source_path), env)?;
     log_stage_completed("translate", stage_started);
-    stage.set("complete");
+    stage.set_current("complete");
     Ok(stats)
 }
 
@@ -660,124 +773,189 @@ fn translate_with_source_root(
         .map_err(|e| WorkerError::Translate(format!("{e:#}")))
 }
 
-fn generate_translate_sql(
-    artifact: &Path,
-    env: &JobEnv,
-    revision_kind: &str,
-    region: &str,
-) -> String {
-    let catalog_path = env.catalog_dsn.replace('\'', "''");
-    let package = env.package.replace('\'', "''");
-    let source = env.source.replace('\'', "''");
-    let revision = env.revision.replace('\'', "''");
-    let artifact_path = artifact.to_string_lossy().replace('\'', "''");
-    let secret_sql = resolve_s3_secret_sql(region);
-    let (major, minor, patch) = parse_semver(&env.revision, revision_kind);
-
-    format!(
-        r#"
-INSTALL ducklake; LOAD ducklake;
-INSTALL httpfs; LOAD httpfs;
-{secret_sql}
-
-ATTACH 'ducklake:{catalog_path}' AS spur_context (DATA_PATH 's3://spur-context/data/', OVERRIDE_DATA_PATH TRUE, AUTOMATIC_MIGRATION TRUE);
-USE spur_context;
-
-{schema_sql}
-
-BEGIN TRANSACTION;
-
-DELETE FROM nodes WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM edges WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM edges_unresolved WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM files WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM file_manifests WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM section_bodies WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM symbol_embeddings WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-
-INSERT INTO nodes (stable_symbol_id, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch, file_path, byte_range_start, byte_range_end, line_start, line_end, entity_name, qualified_name, symbol_kind, anchor_hash, enclosing_scope)
-SELECT stable_symbol_id, '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}, file_path, byte_range_start, byte_range_end, line_start, line_end, entity_name, qualified_name, symbol_kind, anchor_hash, enclosing_scope
-FROM read_parquet('{artifact_path}/nodes.parquet');
-
-INSERT INTO edges (source_stable_id, target_stable_id, target_package, target_label, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch, relation, edge_kind, confidence, confidence_score, bind_method, receiver_text, scope_text)
-SELECT source_stable_id, target_stable_id, CAST(NULL AS VARCHAR), target_label, '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}, relation, edge_kind, confidence, confidence_score::DOUBLE, bind_method, receiver_text, scope_text
-FROM read_parquet('{artifact_path}/edges.parquet');
-
-INSERT INTO edges_unresolved (source_stable_id, target_label, target_package, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch, relation, edge_kind, confidence, confidence_score, bind_method, receiver_text, scope_text)
-SELECT source_stable_id, target_label, import_path, '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}, relation, edge_kind, confidence, confidence_score::DOUBLE, bind_method, receiver_text, scope_text
-FROM read_parquet('{artifact_path}/edges_unresolved.parquet');
-
-INSERT INTO files (stable_file_id, file_path, source_text, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch)
-SELECT stable_file_id, file_path, CAST(NULL AS VARCHAR), '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}
-FROM read_parquet('{artifact_path}/files.parquet');
-
-INSERT INTO file_manifests (stable_file_id, path, content_oid, node_ids, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch)
-SELECT stable_file_id, path, content_oid, list_transform(node_ids, node_id -> CAST(node_id AS VARCHAR)), '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}
-FROM read_parquet('{artifact_path}/file_manifests.parquet');
-
-COMMIT;
-
-BEGIN TRANSACTION;
-DELETE FROM package_catalog WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-INSERT INTO package_catalog (source, package, revision, revision_kind, semver_major, semver_minor, semver_patch, snapshot_id, indexed_at, index_status, embeddings_status, row_counts)
-VALUES ('{source}', '{package}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}, 0, CURRENT_TIMESTAMP, 'complete', 'skipped', '{{}}');
-COMMIT;
-
-CALL ducklake_flush_inlined_data('spur_context');
-CHECKPOINT;
-"#,
-        secret_sql = secret_sql,
-        catalog_path = catalog_path,
-        schema_sql = include_str!("../sql/catalog_tables.sql"),
-        source = source,
-        package = package,
-        revision = revision,
-        revision_kind = revision_kind,
-        major = major,
-        minor = minor,
-        patch = patch,
-        artifact_path = artifact_path,
-    )
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogLease {
+    pub catalog_uri: String,
+    pub owner_job_id: String,
+    pub lease_token: String,
+    pub expires_at_unix_secs: i64,
+    pub fencing_counter: i64,
 }
 
-fn resolve_s3_secret_sql(region: &str) -> String {
-    if let (Some(key), Some(secret)) = (
-        std::env::var("AWS_ACCESS_KEY_ID").ok().filter(|s| !s.is_empty()),
-        std::env::var("AWS_SECRET_ACCESS_KEY").ok().filter(|s| !s.is_empty()),
-    ) {
-        let token = std::env::var("AWS_SESSION_TOKEN").unwrap_or_default();
-        return format!(
-            "CREATE OR REPLACE SECRET s3_creds (TYPE s3, KEY_ID '{}', SECRET '{}', REGION '{}'{});",
-            key.replace('\'', "''"), secret.replace('\'', "''"), region,
-            if token.is_empty() { String::new() } else { format!(", SESSION_TOKEN '{}'", token.replace('\'', "''")) },
-        );
+#[async_trait]
+pub trait CatalogLeaseStore: Send + Sync {
+    async fn acquire(&self, catalog_uri: &str, owner_job_id: &str) -> Result<CatalogLease>;
+    async fn renew(&self, lease: &CatalogLease) -> Result<CatalogLease>;
+    async fn assert_owned(&self, lease: &CatalogLease) -> Result<()>;
+    async fn release(&self, lease: &CatalogLease) -> Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct DynamoDbCatalogLeaseStore {
+    client: DynamoDbClient,
+    table_name: String,
+}
+
+impl DynamoDbCatalogLeaseStore {
+    pub fn new(client: DynamoDbClient) -> Self {
+        let table_name = env::var("SPUR_CATALOG_LEASES_TABLE")
+            .unwrap_or_else(|_| DEFAULT_CATALOG_LEASES_TABLE.to_owned());
+        Self { client, table_name }
     }
-    if let Some(uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").ok().filter(|s| !s.is_empty()) {
-        let url = format!("http://169.254.170.2{uri}");
-        if let Ok(body) = http_get_bytes(&url, 64 * 1024, &[]) {
-            if let Ok(c) = serde_json::from_slice::<EcsCredentials>(&body) {
-                return format!(
-                    "CREATE OR REPLACE SECRET s3_creds (TYPE s3, KEY_ID '{}', SECRET '{}', REGION '{}'{});",
-                    c.access_key_id.replace('\'', "''"), c.secret_access_key.replace('\'', "''"), region,
-                    c.token.as_ref().map(|t| format!(", SESSION_TOKEN '{}'", t.replace('\'', "''"))).unwrap_or_default(),
-                );
-            }
+
+    pub fn with_table_name(client: DynamoDbClient, table_name: impl Into<String>) -> Self {
+        Self {
+            client,
+            table_name: table_name.into(),
         }
     }
-    format!("CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{}');", region)
+
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    async fn update_lease(
+        &self,
+        catalog_uri: &str,
+        owner_job_id: &str,
+        lease_token: &str,
+        condition_expression: &str,
+    ) -> Result<CatalogLease> {
+        let now = unix_secs_i64();
+        let expires_at = now + CATALOG_LEASE_DURATION_SECS;
+        let output = self
+            .client
+            .update_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(catalog_lease_pk(catalog_uri)))
+            .update_expression(
+                "SET #catalog_uri = :catalog_uri, \
+                 #owner_job_id = :owner_job_id, \
+                 #lease_token = :lease_token, \
+                 #expires_at = :expires_at, \
+                 #updated_at = :now, \
+                 #created_at = if_not_exists(#created_at, :now), \
+                 #fencing_counter = if_not_exists(#fencing_counter, :zero) + :one",
+            )
+            .condition_expression(condition_expression)
+            .expression_attribute_names("#catalog_uri", "catalog_uri")
+            .expression_attribute_names("#owner_job_id", "owner_job_id")
+            .expression_attribute_names("#lease_token", "lease_token")
+            .expression_attribute_names("#expires_at", "expires_at_unix_secs")
+            .expression_attribute_names("#updated_at", "updated_at_unix_secs")
+            .expression_attribute_names("#created_at", "created_at_unix_secs")
+            .expression_attribute_names("#fencing_counter", "fencing_counter")
+            .expression_attribute_values(":catalog_uri", AttributeValue::S(catalog_uri.to_owned()))
+            .expression_attribute_values(":owner_job_id", AttributeValue::S(owner_job_id.to_owned()))
+            .expression_attribute_values(":lease_token", AttributeValue::S(lease_token.to_owned()))
+            .expression_attribute_values(":expires_at", AttributeValue::N(expires_at.to_string()))
+            .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+            .expression_attribute_values(":zero", AttributeValue::N("0".to_owned()))
+            .expression_attribute_values(":one", AttributeValue::N("1".to_owned()))
+            .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
+            .send()
+            .await
+            .with_context(|| format!("update catalog lease for {catalog_uri}"))?;
+        let attributes = output
+            .attributes
+            .ok_or_else(|| anyhow!("DynamoDB catalog lease update returned no attributes"))?;
+        catalog_lease_from_item(&attributes)
+    }
 }
 
-fn parse_semver(revision: &str, revision_kind: &str) -> (String, String, String) {
-    if revision_kind == "git_sha" {
-        return ("NULL".to_owned(), "NULL".to_owned(), "NULL".to_owned());
+#[async_trait]
+impl CatalogLeaseStore for DynamoDbCatalogLeaseStore {
+    async fn acquire(&self, catalog_uri: &str, owner_job_id: &str) -> Result<CatalogLease> {
+        let token = Uuid::new_v4().to_string();
+        let now = unix_secs_i64();
+        self.update_lease(
+            catalog_uri,
+            owner_job_id,
+            &token,
+            "attribute_not_exists(pk) OR #expires_at < :now",
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "catalog lease for {catalog_uri} is held by another worker at {now}"
+            )
+        })
     }
-    let v = revision.strip_prefix('v').unwrap_or(revision);
-    let mut p = v.split('.');
-    let major = p.next().unwrap_or("0").to_owned();
-    let minor = p.next().unwrap_or("0").to_owned();
-    let patch_raw = p.next().unwrap_or("0");
-    let patch: String = patch_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
-    (major, minor, if patch.is_empty() { "0".to_owned() } else { patch })
+
+    async fn renew(&self, lease: &CatalogLease) -> Result<CatalogLease> {
+        self.update_lease(
+            &lease.catalog_uri,
+            &lease.owner_job_id,
+            &lease.lease_token,
+            "#owner_job_id = :owner_job_id AND #lease_token = :lease_token",
+        )
+        .await
+    }
+
+    async fn assert_owned(&self, lease: &CatalogLease) -> Result<()> {
+        let output = self
+            .client
+            .get_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(catalog_lease_pk(&lease.catalog_uri)))
+            .consistent_read(true)
+            .send()
+            .await
+            .with_context(|| format!("read catalog lease for {}", lease.catalog_uri))?;
+        let item = output
+            .item
+            .ok_or_else(|| anyhow!("catalog lease no longer exists for {}", lease.catalog_uri))?;
+        let current = catalog_lease_from_item(&item)?;
+        if current.owner_job_id != lease.owner_job_id || current.lease_token != lease.lease_token {
+            bail!("catalog lease lost for {}", lease.catalog_uri);
+        }
+        if current.expires_at_unix_secs <= unix_secs_i64() {
+            bail!("catalog lease expired for {}", lease.catalog_uri);
+        }
+        Ok(())
+    }
+
+    async fn release(&self, lease: &CatalogLease) -> Result<()> {
+        let result = self
+            .client
+            .delete_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(catalog_lease_pk(&lease.catalog_uri)))
+            .condition_expression("#owner_job_id = :owner_job_id AND #lease_token = :lease_token")
+            .expression_attribute_names("#owner_job_id", "owner_job_id")
+            .expression_attribute_names("#lease_token", "lease_token")
+            .expression_attribute_values(":owner_job_id", AttributeValue::S(lease.owner_job_id.clone()))
+            .expression_attribute_values(":lease_token", AttributeValue::S(lease.lease_token.clone()))
+            .send()
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) if is_dynamodb_conditional_error(&error) => Ok(()),
+            Err(error) => Err(anyhow!("release catalog lease: {error}")),
+        }
+    }
+}
+
+pub async fn upload_with_owned_catalog_lease<F, Fut>(
+    lease_store: &dyn CatalogLeaseStore,
+    lease: &CatalogLease,
+    upload: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    lease_store.assert_owned(lease).await?;
+    upload().await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogUploadCondition {
+    IfMatch {
+        e_tag: String,
+        version_id: Option<String>,
+    },
+    IfNoneMatch,
 }
 
 /// Downloads the DuckLake catalog from S3 to a local file so it can be
@@ -785,14 +963,15 @@ fn parse_semver(revision: &str, revision_kind: &str) -> (String, String, String)
 /// files for writing ("Cannot open an HTTP file for both reading and
 /// writing"), so we download → modify locally → upload back.
 /// Data files go directly to S3 via httpfs during translate.
-struct CatalogDownload {
+pub struct CatalogDownload {
     local_path: PathBuf,
     s3_bucket: String,
     s3_key: String,
+    upload_condition: CatalogUploadCondition,
 }
 
 impl CatalogDownload {
-    async fn fetch(catalog_dsn: &str) -> Result<Option<Self>> {
+    pub async fn fetch(catalog_dsn: &str) -> Result<Option<Self>> {
         if !catalog_dsn.starts_with("s3://") {
             return Ok(None);
         }
@@ -801,13 +980,7 @@ impl CatalogDownload {
         let key = parsed.key;
         let local_path = PathBuf::from("/tmp/catalog.ducklake");
 
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_sdk_s3::config::Region::new(
-                std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
-            ))
-            .load()
-            .await;
-        let client = aws_sdk_s3::Client::new(&config);
+        let client = s3_client();
 
         eprintln!("[worker] downloading catalog from s3://{bucket}/{key}");
         let resp = client
@@ -817,6 +990,14 @@ impl CatalogDownload {
             .send()
             .await
             .context("failed to download DuckLake catalog from S3")?;
+        let e_tag = resp.e_tag().map(str::to_owned);
+        let version_id = resp.version_id().map(str::to_owned);
+        let upload_condition = match e_tag {
+            Some(e_tag) => CatalogUploadCondition::IfMatch { e_tag, version_id },
+            None => bail!(
+                "downloaded S3 catalog had no ETag; refusing to allow unconditional upload"
+            ),
+        };
         let body = resp
             .body
             .collect()
@@ -829,21 +1010,26 @@ impl CatalogDownload {
             local_path,
             s3_bucket: bucket,
             s3_key: key,
+            upload_condition,
         }))
     }
 
-    async fn upload(&self) -> Result<()> {
+    pub fn local_path(&self) -> &Path {
+        &self.local_path
+    }
+
+    pub fn upload_condition(&self) -> &CatalogUploadCondition {
+        &self.upload_condition
+    }
+
+    pub async fn upload(&self) -> Result<()> {
+        self.upload_with_client(&s3_client()).await
+    }
+
+    pub async fn upload_with_client(&self, client: &aws_sdk_s3::Client) -> Result<()> {
         let data = fs::read(&self.local_path).with_context(|| {
             format!("failed to read catalog from {}", self.local_path.display())
         })?;
-
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_sdk_s3::config::Region::new(
-                std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
-            ))
-            .load()
-            .await;
-        let client = aws_sdk_s3::Client::new(&config);
 
         eprintln!(
             "[worker] uploading catalog ({} bytes) to s3://{}/{}",
@@ -851,16 +1037,143 @@ impl CatalogDownload {
             self.s3_bucket,
             self.s3_key
         );
-        client
+        let request = client
             .put_object()
             .bucket(&self.s3_bucket)
             .key(&self.s3_key)
-            .body(ByteStream::from(data))
+            .body(ByteStream::from(data));
+        let request = match &self.upload_condition {
+            CatalogUploadCondition::IfMatch { e_tag, .. } => request.if_match(e_tag),
+            CatalogUploadCondition::IfNoneMatch => request.if_none_match("*"),
+        };
+        request
             .send()
             .await
             .context("failed to upload DuckLake catalog to S3")?;
         Ok(())
     }
+}
+
+async fn await_translate_with_lease_renewal(
+    mut translate_task: tokio::task::JoinHandle<Result<TranslateStats, WorkerError>>,
+    leases: Arc<dyn CatalogLeaseStore>,
+    mut lease: Option<CatalogLease>,
+) -> Result<(TranslateStats, Option<CatalogLease>), WorkerError> {
+    let Some(mut current_lease) = lease.take() else {
+        let stats = translate_task
+            .await
+            .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))??;
+        return Ok((stats, None));
+    };
+
+    let mut interval = tokio::time::interval(Duration::from_secs(CATALOG_LEASE_RENEW_INTERVAL_SECS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut translate_task => {
+                let stats = result
+                    .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))??;
+                return Ok((stats, Some(current_lease)));
+            }
+            _ = interval.tick() => {
+                current_lease = leases.renew(&current_lease).await.map_err(|error| {
+                    WorkerError::Translate(format!("renew catalog lease while translating: {error:#}"))
+                })?;
+            }
+        }
+    }
+}
+
+async fn record_job_stage_best_effort(jobs: &dyn JobStore, job_id: &str, stage: &str) {
+    if let Err(error) = jobs.update_stage(job_id, JobStatus::Running, stage).await {
+        eprintln!(
+            "[worker] warning: failed to record stage `{stage}` for job `{job_id}`: {error:#}"
+        );
+    }
+}
+
+async fn mark_job_complete_best_effort(jobs: &dyn JobStore, env: &JobEnv, stats: &TranslateStats) {
+    if let Err(error) = jobs
+        .mark_complete(&env.job_id, stats.snapshot_id, json!(&stats.rows_inserted))
+        .await
+    {
+        eprintln!(
+            "[worker] warning: failed to mark job `{}` complete in JobStore: {error:#}",
+            env.job_id
+        );
+    }
+}
+
+async fn mark_job_failed_best_effort(
+    jobs: &dyn JobStore,
+    env: &JobEnv,
+    error_code: &str,
+    error_detail: &str,
+) {
+    if let Err(error) = jobs
+        .mark_failed(&env.job_id, error_code, error_detail)
+        .await
+    {
+        eprintln!(
+            "[worker] warning: failed to mark job `{}` failed in JobStore: {error:#}",
+            env.job_id
+        );
+    }
+}
+
+fn catalog_lease_pk(catalog_uri: &str) -> String {
+    format!("CATALOG#{}", sha256_hex(catalog_uri))
+}
+
+fn sha256_hex(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn catalog_lease_from_item(
+    item: &std::collections::HashMap<String, AttributeValue>,
+) -> Result<CatalogLease> {
+    Ok(CatalogLease {
+        catalog_uri: dynamodb_string_attr(item, "catalog_uri")?,
+        owner_job_id: dynamodb_string_attr(item, "owner_job_id")?,
+        lease_token: dynamodb_string_attr(item, "lease_token")?,
+        expires_at_unix_secs: dynamodb_i64_attr(item, "expires_at_unix_secs")?,
+        fencing_counter: dynamodb_i64_attr(item, "fencing_counter")?,
+    })
+}
+
+fn dynamodb_string_attr(
+    item: &std::collections::HashMap<String, AttributeValue>,
+    name: &str,
+) -> Result<String> {
+    match item.get(name) {
+        Some(AttributeValue::S(value)) => Ok(value.clone()),
+        Some(_) => bail!("DynamoDB catalog lease attribute `{name}` is not a string"),
+        None => bail!("DynamoDB catalog lease missing string attribute `{name}`"),
+    }
+}
+
+fn dynamodb_i64_attr(
+    item: &std::collections::HashMap<String, AttributeValue>,
+    name: &str,
+) -> Result<i64> {
+    match item.get(name) {
+        Some(AttributeValue::N(value)) => value
+            .parse()
+            .with_context(|| format!("parse DynamoDB catalog lease number `{name}`")),
+        Some(_) => bail!("DynamoDB catalog lease attribute `{name}` is not a number"),
+        None => bail!("DynamoDB catalog lease missing number attribute `{name}`"),
+    }
+}
+
+fn is_dynamodb_conditional_error(error: &impl std::fmt::Display) -> bool {
+    let message = error.to_string();
+    message.contains("ConditionalCheckFailed") || message.contains("TransactionCanceledException")
 }
 
 async fn write_checkpoint(env: &JobEnv, last_completed_stage: &str) -> Result<(), WorkerError> {
@@ -983,7 +1296,7 @@ fn s3_client() -> aws_sdk_s3::Client {
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
         .region(aws_sdk_s3::config::Region::new(aws_region()));
     if let Some(endpoint) = aws_endpoint_url("S3") {
-        builder = builder.endpoint_url(endpoint);
+        builder = builder.endpoint_url(endpoint).force_path_style(true);
     }
     if let Some(credentials) = aws_credentials_for_s3() {
         builder = builder.credentials_provider(credentials);
@@ -997,6 +1310,27 @@ fn s3_client() -> aws_sdk_s3::Client {
         ));
     }
     aws_sdk_s3::Client::from_conf(builder.build())
+}
+
+fn dynamodb_client() -> DynamoDbClient {
+    let mut builder = aws_sdk_dynamodb::Config::builder()
+        .behavior_version(aws_sdk_dynamodb::config::BehaviorVersion::latest())
+        .region(aws_sdk_dynamodb::config::Region::new(aws_region()));
+    if let Some(endpoint) = aws_endpoint_url("DYNAMODB") {
+        builder = builder.endpoint_url(endpoint);
+    }
+    if let Some(credentials) = aws_credentials_for_dynamodb() {
+        builder = builder.credentials_provider(credentials);
+    } else if aws_endpoint_url("DYNAMODB").is_some() {
+        builder = builder.credentials_provider(aws_sdk_dynamodb::config::Credentials::new(
+            "test",
+            "test",
+            None,
+            None,
+            "LocalEndpoint",
+        ));
+    }
+    DynamoDbClient::from_conf(builder.build())
 }
 
 fn aws_credentials_for_sfn() -> Option<aws_sdk_sfn::config::Credentials> {
@@ -1014,6 +1348,18 @@ fn aws_credentials_for_sfn() -> Option<aws_sdk_sfn::config::Credentials> {
 fn aws_credentials_for_s3() -> Option<aws_sdk_s3::config::Credentials> {
     credential_parts().map(|parts| {
         aws_sdk_s3::config::Credentials::new(
+            parts.access_key_id,
+            parts.secret_access_key,
+            parts.session_token,
+            None,
+            parts.provider_name,
+        )
+    })
+}
+
+fn aws_credentials_for_dynamodb() -> Option<aws_sdk_dynamodb::config::Credentials> {
+    credential_parts().map(|parts| {
+        aws_sdk_dynamodb::config::Credentials::new(
             parts.access_key_id,
             parts.secret_access_key,
             parts.session_token,
@@ -1210,14 +1556,6 @@ fn tarball_size_cap_bytes() -> usize {
         .unwrap_or(DEFAULT_TARBALL_SIZE_CAP_BYTES)
 }
 
-fn revision_kind_for_revision(revision: &str) -> &'static str {
-    if revision.contains('.') {
-        "semver"
-    } else {
-        "git_sha"
-    }
-}
-
 fn failure_error_code(error: &WorkerError) -> String {
     match error {
         WorkerError::Fetch(detail) => format!("fetch:{detail}"),
@@ -1250,6 +1588,10 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn unix_secs_i64() -> i64 {
+    i64::try_from(unix_secs()).unwrap_or(i64::MAX)
+}
+
 fn command_stderr(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if stderr.is_empty() {
@@ -1257,6 +1599,13 @@ fn command_stderr(output: &std::process::Output) -> String {
     } else {
         stderr
     }
+}
+
+#[derive(Debug)]
+struct PreparedJob {
+    _workspace: TempWorkspace,
+    source_path: PathBuf,
+    artifact_dir: PathBuf,
 }
 
 #[derive(Debug)]
