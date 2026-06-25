@@ -5,6 +5,8 @@
 **Scope:** Agent-triggered indexing pipeline for `crates/spur-context-service`. Adds a Step Functions + Fargate Spot build layer and two new MCP tools (`external_index`, `external_index_status`) to the existing Lambda-served query surface.
 **Builds on:** `2026-06-22-code-context-service-design.md` (the serve layer + DuckLake catalog model).
 
+**Production hardening update (2026-06-25):** mutable job/status/dedupe/lease state lives in DynamoDB. DuckLake/S3 stores only indexed package data, catalog metadata, refs, and Parquet artifacts. Status repair uses Step Functions `DescribeExecution`, and the worker image contains both `spur-context-worker` and `spur`.
+
 ## Problem
 
 The v1 context service design (2026-06-22) shipped a Lambda-served MCP query layer for external packages but explicitly listed on-demand indexing as **Out of Scope (v1)**:
@@ -64,16 +66,16 @@ An agent can request indexing of any fetchable source — `(package, revision, s
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  STEP FUNCTIONS STATE MACHINE (index_build_v1)                          │
 │                                                                          │
-│  One execution per UUID job_id (from index_jobs row).                   │
-│  Concurrent identical requests dedup via UNIQUE constraint              │
-│  on (source, package, revision, source_url_hash).                       │
+│  One execution per UUID job_id from a DynamoDB job record.              │
+│  Concurrent identical requests dedup via a DynamoDB DEDUP# pointer      │
+│  keyed by (source, package, revision, source_url_hash).                 │
 │                                                                          │
 │  ┌────────────┐    ┌──────────────────────┐    ┌──────────────┐         │
 │  │ RecordJob  │───▶│ RunBuild             │───▶│ CommitCatalog│         │
 │  │ (Lambda)   │    │  (ecs:runTask.sync)  │    │ (Lambda)     │         │
 │  │ write      │    │  capacity strategy:  │    │ UPDATE       │         │
-│  │ index_jobs │    │   FARGATE_SPOT w=4   │    │ package_     │         │
-│  │ row        │    │   FARGATE  base=1,w=1│    │ catalog;     │         │
+│  │ DynamoDB   │    │   FARGATE_SPOT w=4   │    │ package_     │         │
+│  │ job state  │    │   FARGATE  base=1,w=1│    │ catalog;     │         │
 │  │            │    │                      │    │ refs          │         │
 │  │            │    │  Catch:              │    └──────┬───────┘         │
 │  │            │    │   Retry 2x on spot   │           ▼                  │
@@ -106,7 +108,7 @@ An agent can request indexing of any fetchable source — `(package, revision, s
 
 - **Cold path (new index):** agent → `/index` → SF execution → Fargate worker → DuckLake commit → agent polls → agent queries.
 - **Warm path (already indexed):** agent → `/index` → serve Lambda queries `package_catalog` first → returns `{status: "complete", ...}` without ever starting an SF execution. No job created, no cost.
-- **Dedup (concurrent identical):** two simultaneous `external_index` calls for the same `(source, package, revision, source_url)` race to INSERT into `index_jobs`; the UNIQUE constraint rejects the loser, which re-SELECTs and returns the winner's `job_id`. Exactly one SF execution runs.
+- **Dedup (concurrent identical):** two simultaneous `external_index` calls for the same `(source, package, revision, source_url)` race to create the same DynamoDB dedupe item; the loser reads the pointed active job and returns the winner's `job_id`. Exactly one SF execution runs.
 - **Spot interruption:** worker receives SIGTERM + 2-min window → writes checkpoint to S3 + `SendTaskFailure` → SF `Catch` retries up to 2x on spot, then routes to `FallbackBuild` (FARGATE on-demand only).
 - **Future pollers** (the "shared queue" property): crates.io / git pollers simply call `StartExecution` against the same state machine — zero new infra.
 
@@ -152,7 +154,7 @@ crates/spur-context-service/
                                   + abuse pre-check + dedup check before StartExecution
     abuse.rs     (NEW)          URL allow/deny list, link-local & metadata
                                   block, size cap, rate-limit-per-caller
-    jobs.rs      (NEW)          index_jobs table CRUD; status enum:
+    jobs.rs      (NEW)          DynamoDB JobStore; status enum:
                                     queued | running | complete | failed | partial
     worker.rs    (NEW)          FetchSource + spur_cli::graph::build +
                                   translate_artifact_to_ducklake + SendTaskSuccess
@@ -162,41 +164,31 @@ crates/spur-context-service/
                                 feature-gated behind "worker"
 
 sql/
-  init_catalog.sql              + index_jobs table DDL
-  + index_jobs.sql   (NEW)      CREATE TABLE index_jobs (
-                                    job_id TEXT PRIMARY KEY,           -- = SF exec ARN suffix
-                                    source TEXT, package TEXT,
-                                    revision TEXT, source_url TEXT,
-                                    source_url_hash TEXT,              -- for dedup
-                                    status TEXT,                       -- queued|running|complete|failed|partial
-                                    execution_arn TEXT,                -- SF execution ARN
-                                    error TEXT, snapshot_id BIGINT,
-                                    row_counts JSON,
-                                    created_at TIMESTAMPTZ,
-                                    updated_at TIMESTAMPTZ,
-                                    UNIQUE(source, package, revision, source_url_hash)
-                                  );
+  init_catalog.sql              DuckLake package data/catalog schema only;
+                                  no job/status control-plane tables.
 
 infra/spur-context-service/     + state machine (ASL JSON)
                                   + ECS cluster + Fargate SPOT/on-demand
                                     capacity providers
                                   + worker task definition (ECR image)
+                                  + DynamoDB jobs and catalog lease tables
                                   + new Lambda routes /index, /index_status
                                   + IAM: Lambda → SF:StartExecution,
-                                    SF → ECS:RunTask, ECS → S3/RDS/SF:SendTask*
+                                    Lambda/ECS → DynamoDB,
+                                    SF → ECS:RunTask, ECS → S3/SF:SendTask*
 ```
 
 ### Component decisions
 
 1. **Worker lives in `spur-context-service` as a second `[[bin]]`**, gated by a `worker` feature. Shares `translate.rs` and `catalog.rs` with the serve path; avoids a new crate that just re-exports them. The feature gate keeps the heavy `spur-cli` dep (tree-sitter, embedding runtime) out of the Lambda image.
 
-2. **`index_jobs` lives in the existing catalog PostgreSQL** (RDS), not DynamoDB. One DB to operate; we already pay for it; query volume is low (one row per build, not per query); and `package_catalog` UPDATEs in the same transaction as `index_jobs` gives atomic status transitions.
+2. **Job/status/dedupe/lease state lives in DynamoDB**, not DuckDB, DuckLake, or PostgreSQL. DuckLake/S3 remains the data plane for indexed package rows and catalog metadata. DynamoDB owns the mutable control plane so Lambda cold starts and ECS worker processes share one durable job view.
 
 3. **`external_index` and `external_index_status` are added to the same `mcp.rs`** as the five existing query tools — same Lambda, same `tool_definitions()`, same catalog connection. The agent sees one MCP server with seven tools, not two.
 
 4. **Abuse prevention is a pure module** (`abuse.rs`) called by the Lambda handler before `StartExecution`. v2 MVP rule set: deny link-local (`169.254.0.0/16`), deny AWS metadata (`fd00:ec2::`), deny localhost, enforce size cap (default 500 MB tarball / 2 GB git clone depth-bounded), rate-limit per caller identity (API Gateway authorizer principal). Allow-list is a config table the operator can extend.
 
-5. **Container image** is published to ECR; both `spur-cli` and `spur-context-service` baked in. Heavy (~hundreds of MB with tree-sitter + Jina runtime), built once per release, tagged by git SHA. ECS pulls on task start.
+5. **Container image** is published to ECR and contains both `/usr/local/bin/spur-context-worker` and `/usr/local/bin/spur`. The canonical deploy path smoke-tests `spur --version` and the worker binary before updating Terraform-managed task definitions.
 
 ## State Machine Data Flow
 
@@ -306,22 +298,22 @@ infra/spur-context-service/     + state machine (ASL JSON)
 
 | State | Runs in | Does | Failure mode |
 |---|---|---|---|
-| `RecordJob` | Lambda (`spur-context-jobs`) | UPDATE `index_jobs` (status=`running`, execution_arn). The row was already INSERTed with status=`queued` by the serve-Lambda routing (which needed the row for UNIQUE-constraint dedup before `StartExecution`). If a future poller calls `StartExecution` directly without the routing, RecordJob UPSERTs the row instead. | Lambda retries (SF default ×3) |
-| `RunBuild` | Fargate worker | Fetch source → `spur_cli::graph::build` → `translate_artifact_to_ducklake` → `SendTaskSuccess(TranslateStats)`. DuckLake snapshot committed here. | Spot SIGTERM → checkpoint to `s3://spur-context/jobs/<job_id>/` + `SendTaskFailure` |
+| `RecordJob` | Serve Lambda before `StartExecution` | Create the DynamoDB `JOB#...` record and `DEDUP#...` pointer, then persist the Step Functions execution ARN. Future pollers must use the same `JobStore` contract. | Lambda returns an internal error; if `StartExecution` already succeeded but ARN persistence fails, mark the job failed and alarm for the orphan execution. |
+| `RunBuild` | Fargate worker | Mark DynamoDB job stages, fetch source → `spur graph build` → acquire catalog lease → `translate_artifact_to_ducklake` → conditional catalog upload → `SendTaskSuccess(TranslateStats)`. DuckLake snapshot committed here. | Spot SIGTERM → checkpoint to `s3://spur-context/jobs/<job_id>/` + best-effort DynamoDB failure update + `SendTaskFailure` |
 | `Retry` (on `RunBuild`) | SF runtime | Re-runs `RunBuild`. Idempotent — DuckLake detects duplicate revision INSERTs, second run is mostly a no-op except for re-fetch. | Exhausts → `FallbackBuild` |
-| `FallbackBuild` | Fargate (on-demand) | Same as `RunBuild`, FARGATE capacity only. Guaranteed capacity after spot flakiness. | Hard failure → SM fails → `index_jobs.status = failed` via Catch on `States.ALL` at SM top level |
-| `CommitCatalog` | Lambda (`spur-context-commit`) | UPDATE `package_catalog` (status=complete, snapshot_id, row_counts) + UPSERT `refs` (`latest`→revision if newest semver). Atomic in one PG transaction. | Lambda retries; if persistently failing, DuckLake snapshot already exists → operator can manually backfill `package_catalog` |
-| `MarkComplete` | Lambda (`spur-context-jobs`) | UPDATE `index_jobs` (status=complete). Idempotent — if SM redrive runs this twice, second is a no-op. | Lambda retries |
+| `FallbackBuild` | Fargate (on-demand) | Same as `RunBuild`, FARGATE capacity only. Guaranteed capacity after spot flakiness. | Hard failure → worker/repair path marks the DynamoDB job failed |
+| `CommitCatalog` | Worker under catalog lease | UPDATE `package_catalog` (status=complete, snapshot_id, row_counts) + UPSERT `refs` (`latest`→revision if newest semver) through DuckLake. Serialized by the DynamoDB catalog lease and S3 conditional upload. | Worker reports failure; if persistently failing, no unconditional catalog overwrite occurs |
+| `MarkComplete` | Worker / status repair | Mark the DynamoDB job complete with `snapshot_id` and `row_counts`, then release the active dedupe pointer. Idempotent — if SF redrive runs this twice, second is a no-op. | DynamoDB retry/error is visible through status repair and logs |
 
 ### Execution name + dedup
 
 Each `external_index` call generates a fresh UUID `job_id`. The SF execution name is set to this `job_id` for traceability (SF execution ARN embeds the name) — **not** as the dedup mechanism.
 
-Dedup is application-layer, via the `index_jobs` UNIQUE constraint on `(source, package, revision_as_given, source_url_hash)` plus race handling in the routing logic. SF execution names cannot be reused within 90 days (even after the prior execution terminates), so a name-based dedup strategy would block retry-after-failure; UUID-per-call avoids that entirely.
+Dedup is application-layer, via a DynamoDB `DEDUP#<source>#<package>#<revision_as_given>#<source_url_hash>` item created in the same transaction as the job item. SF execution names cannot be reused within 90 days (even after the prior execution terminates), so a name-based dedup strategy would block retry-after-failure; UUID-per-call avoids that entirely.
 
 ### Top-level Catch
 
-Each state has its own catch routing to a `MarkFailed` terminal Lambda that sets `index_jobs.status = failed` with the error message, so the agent's `external_index_status` poll always gets a definitive answer.
+Worker failures mark the DynamoDB job failed when possible, and `external_index_status` can repair stale active jobs by calling Step Functions `DescribeExecution(execution_arn)`. Terminal `FAILED`, `TIMED_OUT`, or `ABORTED` executions become failed job records; terminal `SUCCEEDED` executions become complete job records.
 
 ## MCP Tool Surface
 
@@ -387,7 +379,7 @@ Applied in `abuse.rs` before `StartExecution`:
 
 ### Revision resolution edge case (git)
 
-The agent may pass a branch name, tag, or SHA. Worker runs `git rev-parse <revision>` after clone to get the SHA, and stores **both** in `index_jobs` and `package_catalog` (revision column = SHA, ref_name = the original). This matches the catalog schema from the original spec (`refs` table holds symbolic → SHA mapping).
+The agent may pass a branch name, tag, or SHA. Worker runs `git rev-parse <revision>` after clone to get the SHA, and stores the control-plane job metadata in DynamoDB while keeping the indexed package revision and symbolic ref mapping in DuckLake `package_catalog`/`refs`.
 
 ### Routing decision in serve Lambda
 
@@ -403,15 +395,13 @@ The `/index` handler performs these steps before any SF call:
 4. catalog::lookup(source, package, resolved_revision.unwrap_or(revision_as_given))
    → if row exists with index_status='complete' && !force:
        return {status: "complete", snapshot_id, revision}
-5. jobs::existing(source, package, revision_as_given, source_url_hash)
-   → if row exists in queued|running:
+5. jobs.create_or_get_active_job(source, package, revision_as_given, source_url_hash)
+   → if existing active DynamoDB job exists:
        return {job_id: existing, status: <current>, execution_arn: existing}
-   → if row exists in failed|partial:
-       UPSERT will replace this row in step 6; proceed
-6. jobs::insert(job_id = new UUID, status = queued, ...)
-   → on UNIQUE violation (concurrent identical request won the race):
-       re-SELECT, return {job_id: existing, status: <current>, execution_arn: existing}
-7. StartExecution(index_build_v1, name = job_id, payload)
+   → if created:
+       continue
+6. StartExecution(index_build_v1, name = job_id, payload)
+7. jobs.record_execution_started(job_id, execution_arn)
 8. return {job_id, status: "queued", execution_arn}
 ```
 
@@ -419,9 +409,9 @@ Note step 3 — for git sources, the serve Lambda **cannot** resolve the SHA (wo
 
 ### Retry-after-failure
 
-The routing step 5 does not short-circuit on `failed` or `partial` rows, so a retry falls through to step 6. The `jobs::insert` UPSERTs over the prior failed/partial row (UNIQUE constraint on `(source, package, revision, source_url_hash)`), generating a fresh `job_id` for the new attempt. This is why the SF execution name is a per-call UUID rather than a deterministic hash — SF rejects name reuse within 90 days even for terminal executions, so a fresh UUID per attempt sidesteps that entirely.
+Failed jobs release their DynamoDB dedupe pointer, so a retry creates a fresh `JOB#...` record and fresh Step Functions execution. This is why the SF execution name is a per-call UUID rather than a deterministic hash — SF rejects name reuse within 90 days even for terminal executions, so a fresh UUID per attempt sidesteps that entirely.
 
-For active-job dedup, the routing step 5 short-circuits before `StartExecution`, and the UNIQUE-constraint race handling in step 6 covers the SELECT-then-INSERT window. Two callers hitting an in-flight job will see exactly one SF execution.
+For active-job dedup, the DynamoDB transaction covers the race window before `StartExecution`. Two callers hitting an in-flight job will see exactly one SF execution.
 
 ### Tool definitions in `mcp.rs`
 
@@ -432,19 +422,19 @@ Added to the existing `tool_definitions()` vec alongside `external_code_search`,
 | Failure | Detected by | Recovery | Agent-visible result |
 |---|---|---|---|
 | **Already indexed** (warm path) | Serve Lambda queries `package_catalog` before `StartExecution` | None — return immediately | `{status: "complete", revision, snapshot_id}` |
-| **Concurrent identical request** | `jobs::insert` UNIQUE constraint on `(source, package, revision, source_url_hash)` rejects the second INSERT; loser re-SELECTs and returns the in-flight `job_id` | None — both callers share one execution | Both agents get same `job_id`; both poll to completion |
+| **Concurrent identical request** | DynamoDB dedupe item already points at an active job | None — both callers share one execution | Both agents get same `job_id`; both poll to completion |
 | **Source URL abuse** (link-local, AWS metadata, localhost, deny-listed, size cap exceeded) | `abuse.rs` in serve Lambda before `StartExecution` | Reject; never start SM | `{status: "rejected", reason: "source_url: <detail>"}` |
-| **Rate limit exceeded** (per-caller) | Serve Lambda (token bucket in PG or API Gateway usage plan) | Reject with retry-after | `{status: "rejected", reason: "rate_limit", retry_after_seconds: N}` |
+| **Rate limit exceeded** (per-caller) | Serve Lambda (API Gateway usage plan or durable control-plane bucket) | Reject with retry-after | `{status: "rejected", reason: "rate_limit", retry_after_seconds: N}` |
 | **Source fetch failure** (git clone timeout, tarball 404, auth required, size cap during fetch) | Worker `FetchSource` step | `SendTaskFailure(reason="fetch:<detail>")` → SF `Catch` → `MarkFailed` terminal | `{status: "failed", error: "fetch:<detail>", retriable: true}` — agent may retry with corrected URL |
 | **`spur-cli graph build` failure** (tree-sitter fatal, OOM, embedding model load fail) | Worker after `graph::build` returns Err | Distinguish two paths (below) | See below |
 | ↳ **Embedding model load fail only** (structural extraction succeeded) | Worker catches the specific error variant from `graph::build` | Continue: translate runs, writes structural tables; `package_catalog.embeddings_status = 'pending'`; row_counts include zero embeddings | `{status: "complete", embeddings_status: "pending", note: "structural queries available; vector search degraded"}` |
 | ↳ **Hard build failure** (tree-sitter panic, OOM, all models fail) | Worker `SendTaskFailure(reason="build:<detail>")` | SF `Catch` → `FallbackBuild` (same taskdef, FARGATE on-demand capacity only — taskdef is already sized at Fargate's upper end, 4 vCPU / 30 GB, to fit tokio-sized crates in either capacity) → if still failing, `MarkFailed` | `{status: "failed", error: "build:<detail>", retriable: false}` |
 | **Spot interruption** | Worker receives SIGTERM + 2-min window (Fargate Spot termination notice) | Worker: (1) flush in-flight DuckLake writes, (2) write checkpoint to `s3://spur-context/jobs/<job_id>/checkpoint.json` with `last_completed_stage`, (3) `SendTaskFailure(reason="spot_interrupted")`. SF `Retry` ×2 on `States.TaskFailed`. v2 MVP: retry reruns from scratch (DuckLake dedupes revision INSERT). Checkpoint is observability-only — not used for resume in v2. | Transparent — agent sees `running` throughout. If retries exhaust and fallback also fails → `failed` |
-| **DuckLake commit conflict** (concurrent workers committing different revisions of same package) | DuckLake snapshot serialization — second commit waits, does not corrupt | DuckLake handles internally (PostgreSQL catalog row lock) | None — both eventually `complete` |
+| **DuckLake catalog write conflict** (concurrent workers committing different revisions of same package) | DynamoDB catalog lease plus S3 conditional catalog upload | Worker loses lease or conditional upload fails, marks job failed/retryable; Step Functions retry may recover | None if retry succeeds; otherwise `{status: "failed", error: "catalog_write_conflict", retriable: true}` |
 | **DuckLake commit hard failure** (S3 write fail, catalog DB unreachable) | `translate_artifact_to_ducklake` returns Err | Worker `SendTaskFailure` → SF retries; if persistent → `MarkFailed`. No catalog corruption (snapshot is atomic) | `{status: "failed", error: "commit:<detail>", retriable: true}` |
-| **Orchestration Lambda failure** (RecordJob / CommitCatalog / MarkComplete) | SF Lambda task fails | SF default retry ×3 with backoff. If `CommitCatalog` persistently fails, the DuckLake snapshot already exists → operator runbook to manually backfill `package_catalog` from `index_jobs.buildStats` | Agent sees `running` until SM terminal; on terminal-fail, sees `failed` with `error: "commit:<detail>"` |
+| **Execution status stale** (Lambda/worker died after Step Functions terminal state) | `external_index_status` sees stale active DynamoDB job with `execution_arn` | Call `DescribeExecution`; mark complete or failed from terminal SF state; return DynamoDB state if describe is transiently unavailable | Agent sees repaired `complete`/`failed`, or the last known active status during transient AWS errors |
 | **Worker exceeds task timeout** (configurable, default 15 min — covers tokio-sized crates on slow spot capacity) | ECS task timeout | Task stopped → SF sees `States.Timeout` → routed through same `Catch` → `FallbackBuild` | Transparent or `failed` if fallback also times out |
-| **Agent polls unknown `job_id`** | Serve Lambda `index_jobs` lookup returns empty | None | `{status: "not_found"}` with HTTP 200 (not an error) |
+| **Agent polls unknown `job_id`** | DynamoDB job lookup returns empty | None | `{status: "not_found"}` with HTTP 200 (not an error) |
 
 ### Spot interruption sequence (detailed)
 
@@ -490,10 +480,10 @@ The `retriable` flag tells the agent whether to call `external_index` again with
 | Tier | Test | What it verifies |
 |---|---|---|
 | **Unit** (`tests/abuse_test.rs`) | URL validation matrix: link-local, AWS metadata, RFC1918, https-only, scheme rejection, size cap, allow-list | `abuse::validate` rejects/accepts correctly |
-| **Unit** (`tests/jobs_test.rs`) | CRUD on `index_jobs` against embedded DuckDB/PG; dedup UNIQUE constraint; concurrent INSERT race; status transitions | `jobs::*` correct; idempotency holds |
+| **Unit** (`tests/jobs_test.rs`) | `JobStore` contract with in-memory fake: active dedupe, failed-job retry release, execution ARN persistence, complete response fields | DynamoDB control-plane behavior stays stable without AWS credentials |
 | **Unit** (`tests/worker_test.rs`) | `worker::run_job` with a fixture crate: tempdir source, mock catalog DSN, assert `graph::build` artifact → `translate` → DuckLake snapshot. Covers happy path + each failure injection (bad source URL, missing revision, embedding model load fail simulated via env override) | Worker pipeline correctness without AWS |
 | **Unit** (`tests/mcp_test.rs` — extend existing) | `external_index` and `external_index_status` arg parsing, validation, routing decision logic (warm-path catalog hit, dedup hit, StartExecution mock) | MCP handlers; serve-Lambda routing |
-| **Integration** (`tests/state_machine_test.rs`) | LocalStack Step Functions + ECS + S3 + RDS (or PG in container). Submit `external_index` for a tiny fixture crate, poll `external_index_status` to `complete`, then call `external_code_search` against the freshly indexed revision | End-to-end happy path through real SF + real worker container |
+| **Integration** (`tests/state_machine_test.rs`) | LocalStack Step Functions + ECS + S3 + DynamoDB. Submit `external_index` for a tiny fixture crate, poll `external_index_status` to `complete`, then call `external_code_search` against the freshly indexed revision | End-to-end happy path through real SF + real worker container |
 | **Integration** | LocalStack with worker container killed mid-build (ECS `StopTask`) → assert SF `Retry` fires, second task succeeds, final status `complete` | Spot-interruption path |
 | **Integration** | Concurrent identical `external_index` from two callers → assert single SF execution, both `job_id`s equal, single DuckLake snapshot | Dedup |
 | **Integration** | Abuse cases against LocalStack: link-local URL, oversized tarball, rate-limit burst → assert `rejected` without `StartExecution` | Abuse prevention |
@@ -526,10 +516,9 @@ They document the manual steps + expected output for verification before/after d
 
 **New:**
 - `crates/spur-context-service/src/abuse.rs` — URL/rate-limit validation
-- `crates/spur-context-service/src/jobs.rs` — `index_jobs` CRUD
+- `crates/spur-context-service/src/jobs.rs` — DynamoDB-backed `JobStore`
 - `crates/spur-context-service/src/worker.rs` — fetch + build + translate pipeline
 - `crates/spur-context-service/src/bin/worker.rs` — Fargate entry binary (feature-gated)
-- `crates/spur-context-service/sql/index_jobs.sql` — `index_jobs` DDL
 - `crates/spur-context-service/tests/abuse_test.rs`, `jobs_test.rs`, `worker_test.rs`, `state_machine_test.rs`
 - `infra/spur-context-service/` — Step Functions ASL, ECS cluster + capacity providers, worker task def, IAM roles
 - `docs/superpowers/specs/2026-06-24-context-service-on-demand-indexing-design.md` — this file
@@ -539,10 +528,10 @@ They document the manual steps + expected output for verification before/after d
 - `crates/spur-context-service/src/lib.rs` — module exports for `abuse`, `jobs`, `worker`
 - `crates/spur-context-service/src/mcp.rs` — two new tool handlers + definitions
 - `crates/spur-context-service/src/lambda.rs` — `/index`, `/index_status` routes + routing logic
-- `crates/spur-context-service/sql/init_catalog.sql` — append `index_jobs` DDL
+- `crates/spur-context-service/sql/init_catalog.sql` — DuckLake package data/catalog schema
 - `crates/spur-context-service/tests/mcp_test.rs` — extend for new tools
 
 **Unchanged:**
-- `crates/spur-context-service/src/catalog.rs`, `translate.rs`, `query.rs`, `knowledge.rs`
+- `crates/spur-context-service/src/translate.rs`, `query.rs`, `knowledge.rs`
 - `crates/spur-context-service/src/bin/index.rs`
 - `crates/spur-graph/`, `crates/spur-analyst/`, `crates/spur-mcp/`
