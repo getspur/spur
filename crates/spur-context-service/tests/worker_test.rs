@@ -14,7 +14,8 @@ use duckdb::Connection;
 use serde_json::{json, Value};
 use spur_context_service::jobs::{lookup, JobStatus};
 use spur_context_service::worker::{
-    fetch_source, handle_spot_interruption, update_job_status_with_connection, JobEnv, WorkerError,
+    build_graph, fetch_source, handle_spot_interruption, update_job_status_with_connection, JobEnv,
+    WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -166,6 +167,49 @@ fn update_job_status_marks_job_complete_in_catalog() -> Result<()> {
     assert_eq!(row.snapshot_id, Some(42));
     assert_eq!(row.error, None);
     assert_eq!(row.row_counts, Some(json!({ "nodes": 3, "edges": 2 })));
+    Ok(())
+}
+
+#[test]
+fn build_graph_invokes_spur_with_progress_visible() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = unique_temp_dir("worker-build-graph")?;
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).context("create fake bin dir")?;
+    let record = root.join("spur-args.txt");
+    let fake_spur = bin_dir.join("spur");
+    fs::write(
+        &fake_spur,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > {}\n",
+            record.display()
+        ),
+    )
+    .context("write fake spur")?;
+    let mut perms = fs::metadata(&fake_spur)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        perms.set_mode(0o755);
+    }
+    fs::set_permissions(&fake_spur, perms).context("chmod fake spur")?;
+
+    let source = root.join("source");
+    fs::create_dir_all(&source).context("create source")?;
+    let artifact = root.join("artifact");
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let _env = EnvGuard::set_all([("PATH", path.as_str())]);
+
+    build_graph(&source, &artifact)?;
+
+    let args = fs::read_to_string(&record).context("read fake spur args")?;
+    assert!(args.contains("graph build"));
+    assert!(args.contains("--no-analyst"));
+    assert!(!args.contains("--quiet"));
     Ok(())
 }
 
