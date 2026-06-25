@@ -22,6 +22,24 @@ variable "catalog_s3_uri" {
   default     = "s3://spur-context/catalog/catalog.ducklake"
 }
 
+variable "context_ducklake_data_path" {
+  description = "DuckLake data path used by worker translate jobs. Defaults to s3://<bucket_name>/data/."
+  type        = string
+  default     = null
+}
+
+variable "index_jobs_table_name" {
+  description = "DynamoDB table name for context-service index job records and dedupe pointers"
+  type        = string
+  default     = "spur-context-index-jobs"
+}
+
+variable "catalog_leases_table_name" {
+  description = "DynamoDB table name for context-service catalog write leases"
+  type        = string
+  default     = "spur-context-catalog-leases"
+}
+
 variable "lambda_memory_mb" {
   description = "Lambda memory allocation"
   type        = number
@@ -55,4 +73,9 @@ variable "worker_subnets" {
 variable "worker_ecr_image" {
   description = "ECR image URI for the spur-context-worker container (e.g. <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker:latest)"
   type        = string
+}
+
+locals {
+  context_ducklake_data_path     = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/data/")
+  worker_checkpoint_uri_template = "s3://${var.bucket_name}/jobs/{}/checkpoint.json"
 }
