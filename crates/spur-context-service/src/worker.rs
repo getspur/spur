@@ -629,7 +629,6 @@ fn translate_with_source_root(
     env: &JobEnv,
 ) -> Result<TranslateStats, WorkerError> {
     let revision_kind = if env.revision.contains('.') { "semver" } else { "git_sha" };
-    let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
 
     let actual_artifact = if artifact_dir.join("nodes.parquet").is_file() {
         artifact_dir.to_path_buf()
@@ -646,39 +645,19 @@ fn translate_with_source_root(
 
     eprintln!("[worker] artifact: {}", actual_artifact.display());
 
-    // Use DuckDB CLI for the translate step. The Rust duckdb crate (both
-    // execute_batch and prepare().execute() paths) does NOT flush DuckLake
-    // INSERT...SELECT data to S3 parquet files on linux_arm64. The CLI binary
-    // uses a different internal code path that handles S3 writes correctly.
-    let sql = generate_translate_sql(&actual_artifact, env, revision_kind, &region);
+    let opts = TranslateOptions {
+        source: env.source.clone(),
+        package: env.package.clone(),
+        revision: env.revision.clone(),
+        revision_kind: revision_kind.to_owned(),
+        artifact_dir: actual_artifact,
+        source_root: source_root.map(|p| p.to_path_buf()),
+        catalog_dsn: env.catalog_dsn.clone(),
+    };
 
-    let sql_path = PathBuf::from("/tmp/translate.sql");
-    fs::write(&sql_path, &sql)
-        .map_err(|e| WorkerError::Translate(format!("write SQL file: {e}")))?;
-
-    eprintln!("[worker] running DuckDB CLI translate...");
-    let result = Command::new("duckdb")
-        .arg("-f")
-        .arg(&sql_path)
-        .output()
-        .map_err(|e| WorkerError::Translate(format!("failed to run duckdb CLI: {e}")))?;
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-
-    if !result.status.success() {
-        return Err(WorkerError::Translate(format!(
-            "duckdb CLI failed (exit {:?}): {stderr}\n{stdout}",
-            result.status.code()
-        )));
-    }
-
-    eprintln!("[worker] CLI translate completed");
-
-    Ok(TranslateStats {
-        rows_inserted: std::collections::HashMap::new(),
-        snapshot_id: 0,
-    })
+    eprintln!("[worker] running Rust API translate...");
+    translate_artifact_to_ducklake(&opts)
+        .map_err(|e| WorkerError::Translate(format!("{e:#}")))
 }
 
 fn generate_translate_sql(
