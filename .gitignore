@@ -1,4 +1,7 @@
 /target
+# Per-crate target dirs (for excluded workspace members like spur-context-service)
+crates/*/target
+*.ducklake
 .spur/worktrees/
 .worktrees/
 *.db
@@ -79,3 +82,4 @@ spur.log.*
 
 # local pnpm store (created when spur-pnpm falls back to local mode; use the VM store)
 /.pnpm-store/
+crates/spur-context-service/Cargo.lock
