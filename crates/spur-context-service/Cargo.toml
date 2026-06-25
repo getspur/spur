@@ -32,7 +32,9 @@ worker = []
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 aws-config = "1"
+aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
 aws-sdk-sfn = "1"
 clap = { version = "4", features = ["derive", "env"] }
