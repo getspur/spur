@@ -40,9 +40,8 @@ resource "aws_iam_role_policy" "s3_access" {
   })
 }
 
-# Lambda → Step Functions: StartExecution for on-demand indexing.
-resource "aws_iam_role_policy" "lambda_sfn" {
-  name = "StepFunctionsStartExecution"
+resource "aws_iam_role_policy" "lambda_dynamodb" {
+  name = "DynamoDbControlPlaneAccess"
   role = aws_iam_role.lambda.id
 
   policy = jsonencode({
@@ -50,18 +49,44 @@ resource "aws_iam_role_policy" "lambda_sfn" {
     Statement = [{
       Effect = "Allow"
       Action = [
-        "states:StartExecution"
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:TransactWriteItems"
       ]
-      Resource = aws_sfn_state_machine.index_build.arn
-    },
-    {
-      Effect = "Allow"
-      Action = [
-        "states:DescribeExecution",
-        "states:StopExecution"
+      Resource = [
+        aws_dynamodb_table.index_jobs.arn,
+        aws_dynamodb_table.catalog_leases.arn
       ]
-      Resource = "*"
     }]
+  })
+}
+
+# Lambda → Step Functions: StartExecution for on-demand indexing.
+resource "aws_iam_role_policy" "lambda_sfn" {
+  name = "StepFunctionsStartExecution"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = aws_sfn_state_machine.index_build.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "states:DescribeExecution",
+          "states:StopExecution"
+        ]
+        Resource = "*"
+      }
+    ]
   })
 }
 
@@ -185,6 +210,7 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
         Effect = "Allow"
         Action = [
           "s3:GetObject",
+          "s3:GetObjectVersion",
           "s3:PutObject",
           "s3:ListBucket",
           "s3:DeleteObject"
@@ -195,6 +221,29 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
         ]
       }
     ]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task_dynamodb" {
+  name = "DynamoDbControlPlaneAccess"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:TransactWriteItems"
+      ]
+      Resource = [
+        aws_dynamodb_table.index_jobs.arn,
+        aws_dynamodb_table.catalog_leases.arn
+      ]
+    }]
   })
 }
 

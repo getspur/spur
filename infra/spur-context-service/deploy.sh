@@ -5,6 +5,7 @@
 #   ./deploy.sh                    # build Lambda + worker, terraform apply
 #   ./deploy.sh --local-zip path   # skip Lambda build, use existing zip
 #   ./deploy.sh --skip-worker      # skip worker image build/push
+#   ./deploy.sh --worker-image-only # build/push worker image, print image URI
 #
 # Prerequisites:
 #   - scripts/spur-cargo (remote Graviton4 VM)
@@ -52,8 +53,14 @@ remote_worktree_path() {
     echo "/home/${AWS_SSH_USER:-admin}/$(remote_worktree_key)/$rel_path"
 }
 
-fetch_remote_worktree_file() {
-    local remote_rel_path="$1"
+remote_target_path() {
+    local rel_path="$1"
+    rel_path="${rel_path#target/}"
+    echo "/mnt/cargo/targets/$(remote_worktree_key)/$rel_path"
+}
+
+fetch_remote_file() {
+    local remote_path="$1"
     local local_dest="$2"
     local cloud_dir="$REPO_ROOT/scripts/cloud-build"
 
@@ -64,8 +71,20 @@ fetch_remote_worktree_file() {
         # shellcheck disable=SC1090
         source "$SCRIPT_DIR/provider-${SPUR_CLOUD}.sh"
         provider_choose_transport
-        provider_fetch "$(remote_worktree_path "$remote_rel_path")" "$local_dest"
+        provider_fetch "$remote_path" "$local_dest"
     )
+}
+
+fetch_remote_worktree_file() {
+    local remote_rel_path="$1"
+    local local_dest="$2"
+    fetch_remote_file "$(remote_worktree_path "$remote_rel_path")" "$local_dest"
+}
+
+fetch_remote_target_file() {
+    local remote_rel_path="$1"
+    local local_dest="$2"
+    fetch_remote_file "$(remote_target_path "$remote_rel_path")" "$local_dest"
 }
 
 download_extensions() {
@@ -91,6 +110,15 @@ build_binary() {
     CXXFLAGS="-mcpu=neoverse-n1 -O2" \
         scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release
     fetch_remote_worktree_file crates/spur-context-service/target/release/spur-context-service "$BUILD_DIR/bootstrap"
+}
+
+build_spur_cli() {
+    log "building spur CLI (portable arm64 neoverse-n1 for worker image)..."
+    cd "$REPO_ROOT"
+    AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
+    CFLAGS="-mcpu=neoverse-n1 -O2" \
+    CXXFLAGS="-mcpu=neoverse-n1 -O2" \
+        scripts/spur-cargo build -p spur-cli --release
 }
 
 package_zip() {
@@ -123,45 +151,93 @@ build_and_push_worker_image() {
 
     local ecr_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${WORKER_ECR_REPO}"
     local full_tag="${ecr_uri}:${WORKER_IMAGE_TAG}"
-
-    # Build the Docker image entirely on the remote VM and push to ECR — no
-    # local Docker or binary fetch needed. The VM has Docker installed via
-    # startup-aws.sh and ECR push permissions via the spur-ecr-push IAM policy.
-    # The --remote-binary flag points at the worker binary already built in the
-    # standalone crate's target dir by build_worker() above.
-    cd "$REPO_ROOT"
-    scripts/cloud-build/docker-build.sh \
-        --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker)" \
-        --dockerfile-inline 'FROM debian:bookworm-slim
+    local worker_context="$BUILD_DIR/worker-image"
+    mkdir -p "$worker_context"
+    fetch_remote_target_file target/release/spur "$worker_context/spur"
+    chmod +x "$worker_context/spur"
+    cat > "$worker_context/Dockerfile" <<'DOCKERFILE'
+FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 COPY spur-context-worker /usr/local/bin/spur-context-worker
-ENTRYPOINT ["/usr/local/bin/spur-context-worker"]' \
+COPY spur /usr/local/bin/spur
+RUN /usr/local/bin/spur --version
+RUN /usr/local/bin/spur-context-worker || true
+CMD ["/usr/local/bin/spur-context-worker"]
+DOCKERFILE
+
+    # Build the Docker image entirely on the remote VM and push to ECR — no
+    # local Docker needed. The VM has Docker installed via startup-aws.sh and
+    # ECR push permissions via the spur-ecr-push IAM policy.
+    # The --remote-binary flag points at the worker binary already built in the
+    # standalone crate's target dir by build_worker() above. The local context
+    # contributes the workspace spur CLI binary and canonical Dockerfile.
+    cd "$REPO_ROOT"
+    scripts/cloud-build/docker-build.sh \
+        --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker)" \
+        --context-dir "$worker_context" \
+        --dockerfile Dockerfile \
         --tag "$full_tag"
+
+    smoke_worker_image "$full_tag"
 
     log "worker image pushed: $full_tag"
     WORKER_IMAGE_URI="$full_tag"
+}
+
+smoke_worker_image() {
+    local full_tag="$1"
+    local cloud_dir="$REPO_ROOT/scripts/cloud-build"
+    local smoke_command
+    smoke_command=$(cat <<EOF
+docker run --rm "$full_tag" /usr/local/bin/spur --version
+docker run --rm "$full_tag" /usr/local/bin/spur-context-worker || true
+EOF
+)
+
+    log "running worker image smoke checks on remote VM..."
+    (
+        SCRIPT_DIR="$cloud_dir"
+        # shellcheck disable=SC1091
+        source "$SCRIPT_DIR/config.env"
+        # shellcheck disable=SC1090
+        source "$SCRIPT_DIR/provider-${SPUR_CLOUD}.sh"
+        provider_choose_transport
+        provider_remote_ssh --command="$smoke_command"
+    )
 }
 
 main() {
     local zip_path="$REPO_ROOT/target/lambda/spur-context-service.zip"
     local local_zip=""
     local skip_worker=false
+    local worker_image_only=false
     local worker_image_uri=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --local-zip)   local_zip="$2"; shift 2 ;;
             --skip-worker) skip_worker=true; shift ;;
+            --worker-image-only) worker_image_only=true; shift ;;
             *) break ;;
         esac
     done
 
     # Build + push worker container image (unless --skip-worker).
     if [[ "$skip_worker" == "false" ]]; then
+        build_spur_cli
         build_worker
         build_and_push_worker_image
         worker_image_uri="$WORKER_IMAGE_URI"
+    fi
+
+    if [[ "$worker_image_only" == "true" ]]; then
+        if [[ -z "$worker_image_uri" ]]; then
+            log "--worker-image-only requires worker image build; do not combine it with --skip-worker"
+            exit 2
+        fi
+        echo "$worker_image_uri"
+        exit 0
     fi
 
     # Build or reuse Lambda zip.

@@ -19,11 +19,6 @@ fn init_catalog_sql_creates_expected_nodes_schema() -> Result<()> {
     let sql = include_str!("../sql/init_catalog.sql")
         .replace("INSTALL postgres;", "INSTALL sqlite;")
         .replace("LOAD postgres;", "LOAD sqlite;")
-        .replace("job_id TEXT PRIMARY KEY,", "job_id TEXT,")
-        .replace(
-            ",\n    UNIQUE(source, package, revision, source_url_hash)",
-            "",
-        )
         .replace("__CATALOG_DSN__", &escape_sql_literal(&catalog_dsn))
         .replace("s3://spur-context/data/", &escape_sql_literal(&data_path));
 
@@ -145,7 +140,7 @@ fn missing_revision_reports_not_found() -> Result<()> {
 }
 
 #[test]
-fn catalog_from_connection_creates_index_jobs_table_if_missing() -> Result<()> {
+fn catalog_resolver_does_not_create_memory_index_jobs() -> Result<()> {
     let root = unique_temp_dir("index-jobs")?;
     fs::create_dir_all(root.join("data")).context("create ducklake data dir")?;
 
@@ -159,13 +154,16 @@ fn catalog_from_connection_creates_index_jobs_table_if_missing() -> Result<()> {
 
     let resolver = CatalogResolver::from_connection(conn);
 
-    let count: i64 = resolver
+    let error = resolver
         .connection()
         .query_row("SELECT COUNT(*) FROM memory.index_jobs", [], |row| {
-            row.get(0)
+            row.get::<_, i64>(0)
         })
-        .context("query index_jobs after catalog initialization")?;
-    assert_eq!(count, 0);
+        .expect_err("catalog initialization must not create memory.index_jobs");
+    assert!(
+        error.to_string().contains("index_jobs") || error.to_string().contains("does not exist"),
+        "unexpected error after querying absent memory.index_jobs: {error}"
+    );
     Ok(())
 }
 
