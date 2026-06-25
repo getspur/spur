@@ -21,10 +21,12 @@ def test_spur_does_not_vendor_cloud_build_provider_scripts():
 def test_spur_cargo_routes_remote_builds_through_centralized_cloud_build():
     script = SPUR_CARGO.read_text()
 
-    assert 'REMOTE_BUILD_SH="$SCRIPT_DIR/cloud-build/build.sh"' in script
+    assert "resolve_remote_build_sh()" in script
+    assert 'candidate="$SCRIPT_DIR/cloud-build/build.sh"' in script
+    assert 'REMOTE_BUILD_SH="$(resolve_remote_build_sh || true)"' in script
     assert 'LEGACY_REMOTE_BUILD_SH="$SCRIPT_DIR/gcp-build/build.sh"' in script
-    assert 'PRIMARY_CLOUD="${SPUR_CLOUD:-aws}"' in script
-    assert 'FALLBACK_CLOUD="${SPUR_CLOUD_FALLBACK-gcp}"' in script
+    assert 'PRIMARY_CLOUD="${SPUR_CLOUD:-aws-my}"' in script
+    assert 'FALLBACK_CLOUD="${SPUR_CLOUD_FALLBACK-aws}"' in script
     assert 'SPUR_REMOTE_NAMESPACE=spur SPUR_CLOUD="$cloud" "$REMOTE_BUILD_SH" --auto-spin -- "$@"' in script
     assert "remote $cloud VM unavailable" in script
     assert "remote cargo exited $REMOTE_EXIT" in script
