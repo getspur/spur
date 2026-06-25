@@ -1,0 +1,2558 @@
+## wrap-e2e tip 75532c3fc start 17:22:13 — bare 'spur-cargo test -p spur-core'
+[spur-cargo] spur-core test: pinning --test-threads=1 (set SPUR_TEST_THREADS to override)
+[spur-cargo] remote (test) → aws VM
+[build] Worktree: spur/worktrees/s3-verify  (local=/Volumes/Projects/spur/.spur/worktrees/s3-verify)
+[build] Remote:   ~/spur/worktrees/s3-verify   target=/mnt/cargo/targets/spur/worktrees/s3-verify   -j16
+[build] Remote build queue: admitted as ticket 8 (slot 3/3).
+[build] SSH transport: SSH-over-SSM (instance i-0b9b64ba8a34d0ea2)
+[build] Enumerating git-tracked files...
+[build]   2658 files
+[build] Syncing to i-0b9b64ba8a34d0ea2:~/spur/worktrees/s3-verify ...
+[build] Re-stamping 1 synced path(s) to VM clock...
+[build] Reconciling remote workspace (pruning locally-deleted files)...
+[prune] no files removed locally since last sync
+[build] Configuring remote git auth for private getspur/spur deps...
+[build] Running: cargo --config build.rustflags=\[\"-Ctarget-cpu=neoverse-v1\"\,\"-Ctarget-feature=+lse\"\,\"-Clinker=clang\"\,\"-Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld\"\] test -p spur-core -- --test-threads=1  -j16  provider-rustflags=-Ctarget-cpu=neoverse-v1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld
+warning: static `LOOPBACK_BINDABLE` is never used
+  --> crates/spur-core/tests/common/mod.rs:27:8
+   |
+27 | static LOOPBACK_BINDABLE: OnceCell<bool> = OnceCell::const_new();
+   |        ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `TestWorkerSignalSink` is never constructed
+  --> crates/spur-core/tests/common/mod.rs:29:12
+   |
+29 | pub struct TestWorkerSignalSink {
+   |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> crates/spur-core/tests/common/mod.rs:34:12
+   |
+33 | impl TestWorkerSignalSink {
+   | ------------------------- associated function in this implementation
+34 |     pub fn new(funnel: Arc<dyn McpEventSink>) -> Self {
+   |            ^^^
+
+warning: function `loopback_bindable` is never used
+  --> crates/spur-core/tests/common/mod.rs:75:14
+   |
+75 | pub async fn loopback_bindable() -> bool {
+   |              ^^^^^^^^^^^^^^^^^
+
+warning: function `beads_pm` is never used
+   --> crates/spur-core/tests/common/mod.rs:134:14
+    |
+134 | pub async fn beads_pm(repo: &Path) -> Arc<PmService> {
+    |              ^^^^^^^^
+
+warning: function `temp_beads_pm` is never used
+   --> crates/spur-core/tests/common/mod.rs:148:14
+    |
+148 | pub async fn temp_beads_pm() -> (TempDir, Arc<PmService>) {
+    |              ^^^^^^^^^^^^^
+
+warning: function `create_task` is never used
+   --> crates/spur-core/tests/common/mod.rs:154:14
+    |
+154 | pub async fn create_task(pm: &PmService, title: &str) -> String {
+    |              ^^^^^^^^^^^
+
+warning: function `close_task` is never used
+   --> crates/spur-core/tests/common/mod.rs:164:14
+    |
+164 | pub async fn close_task(pm: &PmService, task_id: &str) {
+    |              ^^^^^^^^^^
+
+warning: function `comment_texts` is never used
+   --> crates/spur-core/tests/common/mod.rs:176:14
+    |
+176 | pub async fn comment_texts(pm: &PmService, issue_id: &str) -> Vec<String> {
+    |              ^^^^^^^^^^^^^
+
+warning: function `issue_labels` is never used
+   --> crates/spur-core/tests/common/mod.rs:187:14
+    |
+187 | pub async fn issue_labels(pm: &PmService, issue_id: &str) -> Vec<String> {
+    |              ^^^^^^^^^^^^
+
+warning: function `scope_drift_signal` is never used
+   --> crates/spur-core/tests/common/mod.rs:191:8
+    |
+191 | pub fn scope_drift_signal(signal_id: Uuid) -> WorkerSignal {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `init_beads_pm` is never used
+  --> crates/spur-core/tests/common/beads.rs:21:14
+   |
+21 | pub async fn init_beads_pm(repo: &Path) -> (TestBeadsWorkspace, Arc<spur_pm::PmService>) {
+   |              ^^^^^^^^^^^^^
+
+warning: function `pro_feature_gate` is never used
+   --> crates/spur-core/tests/common/mod.rs:110:8
+    |
+110 | pub fn pro_feature_gate() -> Arc<FeatureGate> {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `community_feature_gate` is never used
+   --> crates/spur-core/tests/common/mod.rs:117:8
+    |
+117 | pub fn community_feature_gate() -> Arc<FeatureGate> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `install_core_brain_registry` is never used
+   --> crates/spur-core/tests/common/mod.rs:121:8
+    |
+121 | pub fn install_core_brain_registry(server: &mut McpCallbackServer) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition name: `madsim`
+ --> crates/spur-core/tests/session_pump_retire_madsim.rs:1:8
+  |
+1 | #![cfg(madsim)]
+  |        ^^^^^^
+  |
+  = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(madsim)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(madsim)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: requested on the command line with `-W unexpected-cfgs`
+
+warning: `spur-core` (test "mcp_delegate_to_worker_fields") generated 12 warnings
+warning: `spur-core` (test "mutation_write_ahead") generated 15 warnings (12 duplicates)
+warning: `spur-core` (test "signal_late_arrival") generated 7 warnings (7 duplicates)
+warning: `spur-core` (test "submit_plan_persist") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "session_pump_retire_madsim") generated 1 warning
+warning: `spur-core` (test "g_strict_e2e") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "e2e_closure_v0e") generated 15 warnings (15 duplicates)
+warning: struct `TestWorkerSignalSink` is never constructed
+  --> crates/spur-core/tests/common/mod.rs:29:12
+   |
+29 | pub struct TestWorkerSignalSink {
+   |            ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `pro_feature_gate` is never used
+   --> crates/spur-core/tests/common/mod.rs:110:8
+    |
+110 | pub fn pro_feature_gate() -> Arc<FeatureGate> {
+    |        ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `spur-core` (test "plan_ownership") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "signal_dedup") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "mutation_pagination") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "worker_server_lifecycle") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "advanced_gating_handlers") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "reconciler_tick") generated 13 warnings (12 duplicates)
+warning: `spur-core` (test "rework_reuse_prior_worktree_e2e") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "handlers_get_task_diff") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "mutation_split") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "plan_complete_marker") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "code_graph_e2e") generated 10 warnings (9 duplicates)
+warning: `spur-core` (test "audit_sentinel_round_trip") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "submit_plan_explicit_base") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "get_task_diff_restart_recovery") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "submit_plan_idempotency") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "mutation_phase_2c") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "mutation_acyclicity") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "reconciler_late_enable") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "server_start_pidfile") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "plan_audit_coverage") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "plan_snapshot_events") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "epic_completion") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "merge_plan_restart_recovery") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "plan_cache_projection") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "worker_server_audit_flush") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "plan_cancelled_task_semantics") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "g_strict_restart_recovery") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "pm_module_routes") generated 14 warnings (14 duplicates)
+warning: `spur-core` (test "handlers_create_issue_event") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "worker_server_audit") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "persisted_authority_flip") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "request_changes_feedback_roundtrip") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "labels_br_round_trip") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "submit_plan_audit") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "report_signal_tool") generated 7 warnings (7 duplicates)
+warning: `spur-core` (test "mutation_phase_2e") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "worker_server_dispatch") generated 15 warnings (15 duplicates)
+warning: unexpected `cfg` condition name: `madsim`
+ --> crates/spur-core/tests/delegation_watchdog_madsim.rs:1:8
+  |
+1 | #![cfg(madsim)]
+  |        ^^^^^^
+  |
+  = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(madsim)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(madsim)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: requested on the command line with `-W unexpected-cfgs`
+
+warning: `spur-core` (test "startup_recovery") generated 12 warnings (12 duplicates)
+warning: `spur-core` (test "reconciler_shutdown") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "mutation_rollback_compensation") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "delegation_watchdog_madsim") generated 1 warning
+warning: `spur-core` (test "rmcp_streamable_http") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "worker_server_token") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "pending_sweep") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "pidfile_single_brain") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "handlers_update_issue") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "cec4a975_concurrent_hang_simulator") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "mcp_parallel_response_shape") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "mcp_shutdown_bounded_with_pending_collectors") generated 13 warnings (13 duplicates)
+warning: `spur-core` (test "orchestrator_panic_recovery") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "submit_plan_id_collision") generated 15 warnings (15 duplicates)
+warning: unexpected `cfg` condition name: `madsim`
+ --> crates/spur-core/tests/notification_drain_madsim.rs:1:8
+  |
+1 | #![cfg(madsim)]
+  |        ^^^^^^
+  |
+  = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(madsim)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(madsim)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: requested on the command line with `-W unexpected-cfgs`
+
+warning: `spur-core` (test "notification_drain_madsim") generated 1 warning
+warning: `spur-core` (test "handlers_get_issue") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "review_task_nonadvisory_writes") generated 15 warnings (15 duplicates)
+warning: `spur-core` (test "mcp_delegate_parallel_fields") generated 12 warnings (12 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
+
+running 981 tests
+test continuation_bridge::tests::overflow_buf_stores_on_try_send_full ...      Running unittests src/lib.rs (target/debug/deps/spur_core-483be9215986ca7b)
+ok
+test continuation_bridge::tests::report_detached_completion_waits_for_capacity_and_wakes_idle_consumer ... ok
+test continuation_bridge::tests::test_clip_with_ellipsis_utf8_safe ... ok
+test continuation_bridge::tests::test_render_autonomous_marker_and_action_hint ... ok
+test continuation_bridge::tests::test_render_autonomous_same_budget_as_merged ... ok
+test continuation_bridge::tests::test_render_merged_best_fit_skips_oversized_but_packs_later_small ... ok
+test continuation_bridge::tests::test_render_merged_oversized_goes_to_dropped ... ok
+test continuation_bridge::tests::test_render_merged_spill_carries_defer_reason_with_budget ... ok
+test continuation_bridge::tests::test_render_merged_user_blocks_byte_exact ... ok
+test continuation_bridge::tests::test_wire_json_artifact_ref_serialized ... ok
+test continuation_bridge::tests::test_wire_json_attempt_1_based ... ok
+test continuation_bridge::tests::test_wire_json_created_at_wall_present_mono_absent ... ok
+test continuation_bridge::tests::test_wire_json_schema_version_3 ... ok
+test continuation_bridge::tests::test_wire_json_snake_case_source ... ok
+test continuation_bridge::tests::v3_emits_v2_compatible_json_when_new_fields_are_none ... ok
+test event_funnel::tests::funnel_orders_concurrent_emits ... ok
+test event_funnel::tests::funnel_stamps_monotonic_seq ... ok
+test event_funnel::tests::lineage_snapshot_includes_prior_funnel_events ... ok
+test event_replay::tests::collect_ordered_files_breaks_pid_tie_deterministically ... ok
+test event_replay::tests::collect_ordered_files_returns_empty_for_missing_dir ... ok
+test event_replay::tests::collect_ordered_files_skips_directories_with_matching_names ... ok
+test event_replay::tests::collect_ordered_files_skips_pid_and_sorts_by_ts_then_seq ... ok
+test event_replay::tests::parse_segment_name_rejects_garbage ... ok
+test event_replay::tests::parse_segment_name_well_formed ... ok
+test event_replay::tests::replay_config_default_uses_current_pid ... ok
+test event_replay::tests::replay_events_applies_in_order_skipping_current_pid ... ok
+test event_replay::tests::replay_events_horizon_filter_drops_old_events ... ok
+test event_replay::tests::replay_events_over_cap_line_does_not_eat_subsequent_events ... ok
+test event_replay::tests::replay_events_returns_empty_stats_for_missing_dir ... ok
+test event_replay::tests::replay_events_skips_malformed_json_continues ... ok
+test event_replay::tests::replay_stats_default_is_zero ... ok
+test event_sink::tests::enforces_max_total_bytes_after_rotation ... ok
+test event_sink::tests::open_with_caps_deletes_oldest_until_effective_headroom_cap ... ok
+test event_sink::tests::open_with_caps_enforces_max_total_bytes_before_writes ... ok
+test event_sink::tests::open_with_caps_keeps_existing_files_when_total_cap_has_headroom ... ok
+test event_sink::tests::open_with_caps_skips_startup_gc_when_cap_cannot_fit_headroom ... ok
+test event_sink::tests::rotates_on_size_threshold ... ok
+test event_sink::tests::writes_events_to_file ... ok
+test handlers::tests::handler_error_to_jsonrpc_response ... ok
+test handlers::tests::upstream_pm_failure_maps_to_internal_error ... ok
+test handlers::tests::worker_call_context_construction ... ok
+test license_runtime::tests::convert_state_maps_core_fields ... ok
+test license_runtime::tests::spawn_emits_initial_snapshot ... ok
+test lineage::projection::tests::executor_id_for_delegation_returns_node_id_when_present ... ok
+test lineage::types::attempt_elapsed_tests::executor_node_elapsed_secs_freezes_when_first_attempt_ended ... ok
+test lineage::types::attempt_elapsed_tests::executor_node_elapsed_secs_ticks_for_retried_running_executor ... ok
+test lineage::types::attempt_elapsed_tests::finished_attempt_elapsed_uses_ended_at ... ok
+test lineage::types::attempt_elapsed_tests::negative_skew_is_zero ... ok
+test lineage::types::attempt_elapsed_tests::running_attempt_elapsed_uses_now ... ok
+test mcp::delegation::cancel_delegation_tests::cancel_returns_cancelled_then_not_found ... ok
+test mcp::delegation::cancel_delegation_tests::cancel_unknown_id_returns_not_found ... ok
+test mcp::delegation::cancel_delegation_tests::remove_cleans_up_without_cancelling ... ok
+test mcp::delegation::continuation_producer_tests::build_detached_continuation_populates_artifact_id_via_materializer ... ok
+test mcp::delegation::continuation_producer_tests::test_continuation_construction_brain_session_attempt_created_at ... ok
+test mcp::delegation::continuation_producer_tests::test_producer_diff_summary_handled ... ok
+test mcp::delegation::continuation_producer_tests::test_producer_materializes_oversized_summary_with_fetch_hint ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_completed_delegations_are_per_session ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_pins_specific_attempt ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_rejects_empty_delegation_id ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_rejects_invalid_attempt_arg ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_rejects_unknown_section_cleanly ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_returns_clean_error_for_unknown_delegation ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_returns_diff_only_section ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_returns_internal_error_on_corrupted_blob ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_returns_persisted_blob_text ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_returns_status_only_section ... ok
+test mcp::delegation::fetch_outcome_artifact_tests::fetch_outcome_artifact_returns_summary_section ... ok
+test mcp::delegation::inline_completion_materialization_tests::delegate_parallel_inline_completions_write_result_json_to_outcome_store ... ok
+test mcp::delegation::inline_completion_materialization_tests::inline_completion_writes_result_json_to_outcome_store ... ok
+test mcp::delegation::retirement_state_tests::test_server_cancel_in_flight_signals_token ... ok
+test mcp::delegation::retirement_state_tests::test_server_force_abort_after_shutdown_partial_progress ... ok
+test mcp::delegation::retirement_state_tests::test_server_force_abort_idempotent ... ok
+test mcp::delegation::retirement_state_tests::test_server_mark_retiring_rejects_new_delegations ... ok
+test mcp::delegation::retirement_state_tests::test_server_shutdown_signals_root_listener ... ok
+test mcp::plan::tests::from_server_captures_orchestration_state ... ok
+test notebook::tests::notebook_binary_path_accepts_channel_values ... ok
+test notebook::tests::notebook_binary_path_auto_keeps_sibling_blue_before_external_green ... ok
+test notebook::tests::notebook_binary_path_auto_reports_cargo_home_install_as_blue ... ok
+test notebook::tests::notebook_binary_path_blue_reports_cargo_home_install_as_blue ... ok
+test notebook::tests::notebook_binary_path_green_missing_error_lists_attempted_external_paths ... ok
+test notebook::tests::notebook_binary_path_green_missing_returns_install_error ... ok
+test notebook::tests::notebook_binary_path_green_resolves_external_cargo_install ... ok
+test notebook::tests::notebook_binary_path_green_resolves_external_path_install_without_source_tree ... ok
+test notebook::tests::notebook_binary_path_legacy_path_helper_returns_selected_path ... ok
+test notebook::tests::notebook_binary_path_prefers_spur_notebook_bin_before_green_lookup ... ok
+test notebook::tests::notebook_binary_path_prefers_spur_notebook_bin_before_invalid_channel ... ok
+test notebook::tests::notebook_binary_path_rejects_invalid_channel_value ... ok
+test notebook::tests::notebook_mcp_server_returns_missing_green_resolver_error ... ok
+test notebook::tests::notebook_mcp_server_uses_green_resolver_selected_binary ... ok
+test orchestrator::connection::tests::claude_preserves_order_user_assistant_user ... ok
+test orchestrator::connection::tests::codex_preserves_order_across_event_msg_and_response_item ... ok
+test orchestrator::connection::tests::find_claude_session_path_locates_file_in_first_matching_project ... ok
+test orchestrator::connection::tests::find_claude_session_path_returns_none_when_uuid_missing ... ok
+test orchestrator::connection::tests::find_codex_session_path_locates_jsonl_under_year_month_day ... ok
+test orchestrator::connection::tests::find_codex_session_path_returns_none_when_uuid_missing ... ok
+test orchestrator::connection::tests::find_opencode_db_path_locates_db_under_home ... ok
+test orchestrator::connection::tests::find_opencode_db_path_returns_none_when_missing ... ok
+test orchestrator::connection::tests::missing_kimi_session_returns_empty_history ... ok
+test orchestrator::connection::tests::opencode_extracts_user_and_assistant_text_parts ... ok
+test orchestrator::connection::tests::opencode_returns_empty_for_missing_db ... ok
+test orchestrator::connection::tests::opencode_returns_empty_for_missing_session ... ok
+test orchestrator::connection::tests::opencode_skips_non_text_parts_and_blank_text ... ok
+test orchestrator::connection::tests::parses_claude_assistant_text_blocks ... ok
+test orchestrator::connection::tests::parses_claude_user_string_content_as_history ... ok
+test orchestrator::connection::tests::parses_codex_event_msg_user_message ... ok
+test orchestrator::connection::tests::parses_codex_response_item_assistant_with_output_text_blocks ... ok
+test orchestrator::connection::tests::parses_codex_response_item_user_with_input_text_block ... ok
+test orchestrator::connection::tests::parses_codex_string_content_payload ... ok
+test orchestrator::connection::tests::parses_real_codex_rollout_fixture_shape ... ok
+test orchestrator::connection::tests::reads_claude_history_when_only_claude_path_exists ... ok
+test orchestrator::connection::tests::reads_codex_history_when_only_codex_path_exists_real_shape ... ok
+test orchestrator::connection::tests::reads_kimi_assistant_multiple_text_blocks ... ok
+test orchestrator::connection::tests::reads_kimi_assistant_text_and_skips_think_blocks ... ok
+test orchestrator::connection::tests::reads_kimi_mixed_file_and_skips_tools_and_metadata ... ok
+test orchestrator::connection::tests::reads_kimi_user_message_from_context ... ok
+test orchestrator::connection::tests::reads_opencode_history_via_read_session_history_from_disk ... ok
+test orchestrator::connection::tests::skips_blank_and_malformed_claude_lines ... ok
+test orchestrator::connection::tests::skips_claude_user_meta_entries ... ok
+test orchestrator::connection::tests::skips_claude_user_tool_result_arrays ... ok
+test orchestrator::connection::tests::skips_codex_blank_and_malformed_lines ... ok
+test orchestrator::connection::tests::skips_codex_developer_role ... ok
+test orchestrator::connection::tests::skips_codex_response_item_with_non_message_payload_type ... ok
+test orchestrator::connection::tests::skips_codex_session_meta_and_unknown_event_msg ... ok
+test orchestrator::delegation::cleanup::tests::approved_cleanup_preserves_branch_when_detach_fails ... ok
+test orchestrator::delegation::cleanup::tests::no_op_with_mark_noop_is_quiet ... ok
+test orchestrator::delegation::cleanup::tests::no_op_without_mark_noop_warns ... ok
+test orchestrator::delegation::cleanup::tests::squashed_normalization_warning_mentions_intermediate_commit_count ... ok
+test orchestrator::delegation::diff_artifact::artifact_decision_tests::failure_with_persist_err_preserves_original_error_and_annotates ... ok
+test orchestrator::delegation::diff_artifact::artifact_decision_tests::failure_with_persist_ok_preserves_original_error_and_carries_artifact ... ok
+test orchestrator::delegation::diff_artifact::artifact_decision_tests::outcome_sha256_hex_uses_lowercase_content_digest ... ok
+test orchestrator::delegation::diff_artifact::artifact_decision_tests::success_with_persist_err_escalates_to_failed ... ok
+test orchestrator::delegation::diff_artifact::artifact_decision_tests::success_with_persist_ok_is_success_and_carries_artifact ... ok
+test orchestrator::delegation::diff_artifact::artifact_decision_tests::under_cap_path_is_unchanged ... ok
+test orchestrator::delegation::diff_artifact::build_diff_summary_tests::binary_file_is_counted_but_numbers_stay_zero ... ok
+test orchestrator::delegation::diff_artifact::build_diff_summary_tests::clean_worktree_returns_zero_summary ... ok
+test orchestrator::delegation::diff_artifact::build_diff_summary_tests::modified_file_produces_expected_stats ... ok
+test orchestrator::delegation::diff_artifact::build_diff_summary_tests::renamed_file_reports_destination_path ... ok
+test orchestrator::delegation::diff_artifact::truncate_summary_tests::empty_input_returns_empty ... ok
+test orchestrator::delegation::diff_artifact::truncate_summary_tests::env_var_overrides_default_cap ... ok
+test orchestrator::delegation::diff_artifact::truncate_summary_tests::exact_cap_returns_unchanged ... ok
+test orchestrator::delegation::diff_artifact::truncate_summary_tests::over_cap_preserves_head_and_tail_with_marker ... ok
+test orchestrator::delegation::diff_artifact::truncate_summary_tests::summary_cap_bytes_defaults_to_4000_when_unset ... ok
+test orchestrator::delegation::diff_artifact::truncate_summary_tests::summary_cap_bytes_respects_env_var ... ok
+test orchestrator::delegation::diff_artifact::truncate_summary_tests::under_cap_returns_unchanged ... ok
+test orchestrator::delegation::diff_artifact::truncate_summary_tests::utf8_boundary_does_not_panic ... ok
+test orchestrator::delegation::execute::retry_context_tests::apply_bloat_cap_drops_oldest_first ... ok
+test orchestrator::delegation::execute::retry_context_tests::apply_bloat_cap_is_noop_when_under_cap ... ok
+test orchestrator::delegation::execute::retry_context_tests::render_handles_empty_history ... ok
+test orchestrator::delegation::execute::retry_context_tests::render_includes_original_task_and_all_attempts_and_current_feedback ... ok
+test orchestrator::delegation::finalize::flush_ordering_tests::abort_path_emits_summary_before_delegation_completed ... ok
+test orchestrator::delegation::finalize::flush_ordering_tests::finalize_emits_summary_before_delegation_completed ... ok
+test orchestrator::delegation::finalize::flush_ordering_tests::finalize_prepends_normalization_warning_to_summary ... ok
+test orchestrator::delegation::finalize::flush_ordering_tests::outcome_for_status_is_four_way ... ok
+test orchestrator::delegation::worker_attempt::attempt_setup_error_chain_visibility_tests::worktree_failed_display_preserves_source_chain ... ok
+test orchestrator::delegation::worker_attempt::context_files_wiring_tests::format_worker_task_is_available_in_orchestrator_module ... ok
+test orchestrator::delegation::worker_attempt::format_worker_task_tests::empty_list_passes_task_through_unchanged ... ok
+test orchestrator::delegation::worker_attempt::format_worker_task_tests::multiple_paths_produce_ordered_bullets ... ok
+test orchestrator::delegation::worker_attempt::format_worker_task_tests::single_path_prepends_relevant_files_section ... ok
+test orchestrator::delegation::worker_attempt::format_worker_task_tests::whitespace_task_body_still_gets_section_when_files_nonempty ... ok
+test orchestrator::delegation::worker_attempt::prior_branch_preapply_tests::conflict_path_scrubs_partial_apply_state ... ok
+test orchestrator::delegation::worker_attempt::prior_branch_preapply_tests::happy_path_applies_prior_diff_as_dirty_worktree_edits ... ok
+test orchestrator::delegation::worker_attempt::prior_branch_preapply_tests::missing_branch_leaves_worktree_clean ... ok
+test orchestrator::interactive_loop::base_spec_dispatch_tests::dispatch_overlay_applied_event_includes_base_and_overlay_ids ... ok
+test orchestrator::interactive_loop::base_spec_dispatch_tests::extract_overlays_returns_all_for_with_overlay ... ok
+test orchestrator::interactive_loop::base_spec_dispatch_tests::extract_overlays_returns_empty_for_non_overlay ... ok
+test orchestrator::interactive_loop::base_spec_dispatch_tests::resolve_base_branch_falls_back_for_repo_main ... ok
+test orchestrator::interactive_loop::base_spec_dispatch_tests::resolve_base_branch_unwraps_with_overlay ... ok
+test orchestrator::interactive_loop::base_spec_dispatch_tests::snapshot_needed_for_none_and_repo_main ... ok
+test orchestrator::interactive_loop::base_spec_dispatch_tests::snapshot_not_needed_for_branch_or_commit ... ok
+test orchestrator::interactive_loop::cancel_stream_variant_tests::cancel_stream_variant_constructs ... ok
+test orchestrator::interactive_loop::interactive_input_tests::system_continuation_variant_constructs ... ok
+test orchestrator::interactive_loop::interactive_input_tests::warm_connect_variant_constructs ... ok
+test orchestrator::interactive_loop::list_sessions_tests::emits_synopsis_seed_once_per_session ... ok
+test orchestrator::interactive_loop::list_sessions_tests::list_sessions_queries_repo_root_then_broad_and_merges_by_session_id ... ok
+test orchestrator::interactive_loop::list_sessions_tests::pagination_breaks_on_non_progressing_cursor ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_cap_hit_emits_only_drain_capped_out ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_completes_after_quiet_window_with_no_acks ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_forces_delivered_inflight_messages_to_ignored_after_timeout ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_forces_only_delegations_target_messages_not_unrelated_messages ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_hits_cap_under_ack_flood ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_late_ack_after_timeout_is_safely_swallowed ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_quiet_exit_under_normal_flow ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_resets_quiet_window_on_each_ack ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_returns_immediately_when_sender_drops_with_no_pending ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_started_emits_with_candidates_at_start ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_timed_out_emits_when_quiet_window_exits_with_remaining ... ok
+test orchestrator::interactive_loop::peer_mailbox_drain_tests::drain_timed_out_not_emitted_on_clean_exit ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_dispatch_merged_commits_on_ok ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_dispatch_merged_oversized_dropped_via_commit_partial ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_dispatch_merged_rollbacks_on_err ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_dispatch_merged_turn_guard_clears_on_panic ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_retire_brain_session_clean_shutdown ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_retire_brain_session_emits_mcp_shutdown_timeout_event ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_retire_brain_session_note_session_swap_called_with_overflow ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_retire_brain_session_shuts_down_worker_mcp_server ... ok
+test orchestrator::interactive_loop::phase5_orchestrator_finalization_tests::test_retire_brain_session_timeout_force_aborts ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::brain_delegation_skill_contains_canonical_example ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::brain_delegation_skill_contains_dispatch_procedure ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::brain_delegation_skill_contains_plan_requirement ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::brain_delegation_skill_contains_task_structure ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::per_agent_skill_exists_for_known_brains ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::unknown_agent_skill_returns_none ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::workers_block_excludes_empty_good_for_agents ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::workers_block_is_deterministic_for_same_input ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::workers_block_lists_agents_with_non_empty_good_for ... ok
+test orchestrator::interactive_loop::prompt_v1_tests::workers_block_says_none_when_all_excluded ... ok
+test orchestrator::plan_ops::plan_summary_warning_tests::canonicalizes_duplicate_plan_epics_and_warns_about_stale_aliases ... ok
+test orchestrator::pm_bridge::issue_graph_handler_tests::get_issue_graph_emits_command_error_when_bv_unavailable ... ok
+test orchestrator::pm_bridge::issue_graph_handler_tests::get_issue_graph_emits_command_error_when_pm_missing ... ok
+test orchestrator::pm_bridge::issue_graph_handler_tests::get_issue_graph_emits_command_error_when_subgraph_fails ... ok
+test orchestrator::pm_bridge::issue_graph_handler_tests::get_issue_graph_emits_issue_subgraph_loaded ... ok
+test orchestrator::prompt::tests::brain_prompt_header_contains_working_surface_guidance ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::apply_mcp_server_settings_is_callable_and_idempotent ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::dispatch_set_session_model_calls_connection_set_session_model ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::fresh_agent_session_ready_event_carries_caps ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::load_brain_session_dispatches_ready_tasks ... ignored, requires beads DB fixture + ACP transport stub; see bd-3rvt
+test orchestrator::session::session_attach_guard_transfer_tests::reconnect_already_attached_maps_to_attach_rejected_event ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::replace_session_config_options_emits_none_caps_for_resumed_session ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::replace_session_config_options_updates_cache_and_emits_event ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::retire_active_brain_dispatches_one_best_effort_cancel_for_acp_transport ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::retire_active_brain_moves_attach_guard_to_active_connection ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::retire_active_brain_skips_cancel_for_process_kill_transport ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::retire_active_brain_swallows_best_effort_cancel_error ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::retire_session_cost_write_times_out_without_returning_resource ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::shutdown_active_brain_emits_brain_retired_shutdown ... ok
+test orchestrator::session::session_attach_guard_transfer_tests::spur_agent_caps_getter_returns_cached_arc_or_none ... ok
+test orchestrator::session_discovery::tests::classifies_sessions_into_brain_and_worker ... ok
+test orchestrator::session_discovery::tests::claude_discovery_reads_jsonl_sessions ... ok
+test orchestrator::session_discovery::tests::codex_disk_walk_respects_scan_limit ... ok
+test orchestrator::session_discovery::tests::discovery_for_kind_maps_expected_variants ... ok
+test orchestrator::session_discovery::tests::kimi_discovery_reads_state_and_context ... ok
+test orchestrator::session_discovery::tests::kimi_discovery_skips_archived_sessions ... ok
+test orchestrator::session_discovery::tests::kiro_discovery_reads_json_sessions ... ok
+test orchestrator::session_discovery::tests::opencode_discovery_reads_sqlite_sessions ... ok
+test orchestrator::session_discovery::tests::parse_codex_session_header_rejects_missing_required_fields ... ok
+test orchestrator::session_discovery::tests::parses_codex_rollout_headers_from_newest_day_dirs ... ok
+test orchestrator::util::beads_startup_warning_tests::beads_startup_warning_disabled_beads_config_suppresses_warning ... ok
+test orchestrator::util::beads_startup_warning_tests::beads_startup_warning_entitled_tier_with_missing_br_emits_install_hint ... ok
+test orchestrator::util::beads_startup_warning_tests::beads_startup_warning_entitled_tier_with_present_br_uses_generic_backend_copy ... ok
+test orchestrator::util::beads_startup_warning_tests::beads_startup_warning_existing_pm_service_suppresses_warning ... ok
+test orchestrator::util::beads_startup_warning_tests::beads_startup_warning_free_tier_with_missing_br_emits_install_hint ... ok
+test orchestrator::util::beads_startup_warning_tests::beads_startup_warning_missing_beads_basic_entitlement_suppresses_warning ... ok
+test orchestrator::util::beads_startup_warning_tests::beads_startup_warning_missing_feature_gate_suppresses_warning ... ok
+test orchestrator::util::cancel_deadline_arm_tests::arm_cancel_deadline_overwrites_existing ... ok
+test orchestrator::util::cancel_deadline_arm_tests::arm_cancel_deadline_sets_5s_from_now ... ok
+test orchestrator::util::cancel_mode_helper_tests::acp_transport_is_acp_soft ... ok
+test orchestrator::util::cancel_mode_helper_tests::subprocess_transports_are_process_kill ... ok
+test orchestrator::util::is_connection_death_tests::is_connection_death_detects_known_patterns ... ok
+test orchestrator::util::normalize_tests::distinct_agents_do_not_collide ... ok
+test orchestrator::util::normalize_tests::lowercases ... ok
+test orchestrator::util::normalize_tests::mismatch_detection_chosen_vs_dispatched_strings ... ok
+test orchestrator::util::normalize_tests::same_agent_matches_across_variants ... ok
+test orchestrator::util::normalize_tests::strips_acp_suffix ... ok
+test orchestrator::util::normalize_tests::strips_cli_suffix ... ok
+test orchestrator::util::normalize_tests::trims_whitespace ... ok
+test orchestrator::worker_mcp::worker_mcp_cache_tests::dead_cached_entry_evicted_and_rebooted ... ok
+test orchestrator::worker_mcp::worker_mcp_cache_tests::distinct_keys_get_distinct_values ... ok
+test orchestrator::worker_mcp::worker_mcp_cache_tests::double_call_returns_same_arc_and_starts_once ... ok
+test orchestrator::worker_mcp::worker_mcp_cache_tests::start_failure_does_not_populate_cache ... ok
+test orchestrator::worker_mcp::worker_mcp_dispatch_tests::flag_none_defaults_on_and_runs_fetch ... ok
+test orchestrator::worker_mcp::worker_mcp_dispatch_tests::flag_some_false_emits_zero_entries_and_skips_fetch ... ok
+test orchestrator::worker_mcp::worker_mcp_dispatch_tests::flag_some_true_emits_one_entry_with_token_in_url ... ok
+test orchestrator::worker_mcp::worker_mcp_dispatch_tests::flag_some_true_propagates_fetch_error ... ok
+test outcome_materializer::tests::fallback_preserves_failed_status_at_last_resort ... ok
+test outcome_materializer::tests::materialize_clips_diff_files_and_steers_fetch_hint ... ok
+test outcome_materializer::tests::materialize_clips_oversized_status_error ... ok
+test outcome_materializer::tests::materialize_falls_back_on_backend_error ... ok
+test outcome_materializer::tests::materialize_falls_back_on_content_mismatch ... ok
+test outcome_materializer::tests::materialize_falls_back_on_io_error ... ok
+test outcome_materializer::tests::materialize_falls_back_on_too_large_error ... ok
+test outcome_materializer::tests::materialize_falls_back_when_inner_store_panics ... ok
+test outcome_materializer::tests::materialize_omits_base_hint_when_worker_branch_absent ... ok
+test outcome_materializer::tests::materialize_persists_full_result_to_store ... ok
+test outcome_materializer::tests::materialize_populates_base_hint_when_worker_branch_present ... ok
+test outcome_materializer::tests::materialize_records_max_attempt_per_delegation ... ok
+test outcome_materializer::tests::materialize_success_populates_artifact_id ... ok
+test peer_mailbox::guard::tests::drop_after_receiver_closed_does_not_panic ... ok
+test peer_mailbox::guard::tests::drop_without_finalize_enqueues_stranded ... ok
+test peer_mailbox::guard::tests::finalize_prevents_stranded_enqueue ... ok
+test peer_mailbox::ledger::tests::accept_after_terminal_returns_already_terminal_error ... ok
+test peer_mailbox::ledger::tests::accept_distinguishes_created_from_already_accepted ... ok
+test peer_mailbox::ledger::tests::pending_for_target_excludes_terminal_states ... ok
+test peer_mailbox::ledger::tests::record_injection_on_missing_id_returns_not_found ... ok
+test peer_mailbox::ledger::tests::record_injection_returns_typed_outcome ... ok
+test peer_mailbox::ledger::tests::transition_accepted_to_consumed_is_legal_after_relaxation ... ok
+test peer_mailbox::ledger::tests::transition_accepted_to_ignored_is_legal_after_relaxation ... ok
+test peer_mailbox::ledger::tests::transition_accepted_to_queued_is_valid ... ok
+test peer_mailbox::ledger::tests::transition_accepted_to_rejected_is_invalid ... ok
+test peer_mailbox::ledger::tests::transition_delivered_inflight_to_consumed_is_legal_after_relaxation ... ok
+test peer_mailbox::ledger::tests::transition_delivered_inflight_to_delivered_is_valid ... ok
+test peer_mailbox::ledger::tests::transition_delivered_inflight_to_ignored_is_legal_after_relaxation ... ok
+test peer_mailbox::ledger::tests::transition_delivered_inflight_to_queued_is_valid ... ok
+test peer_mailbox::ledger::tests::transition_delivered_to_accepted_is_invalid ... ok
+test peer_mailbox::ledger::tests::transition_from_terminal_state_is_invalid ... ok
+test peer_mailbox::ledger::tests::transition_on_missing_id_returns_not_found ... ok
+test peer_mailbox::ledger::tests::transition_queued_to_consumed_is_still_rejected ... ok
+test peer_mailbox::ledger::tests::transition_queued_to_ignored_is_invalid ... ok
+test peer_mailbox::ledger::tests::transition_reports_changed_vs_unchanged ... ok
+test peer_mailbox::ledger::tests::transition_returns_invalid_transition_with_terminal_from_when_message_already_consumed ... ok
+test peer_mailbox::ledger::tests::transition_terminal_state_rejects_any_outgoing ... ok
+test peer_mailbox::limits::tests::budget_is_10pct_under_64k ... ok
+test peer_mailbox::limits::tests::budget_is_5pct_at_or_above_128k ... ok
+test peer_mailbox::limits::tests::budget_is_7pct_at_64k_to_128k ... ok
+test peer_mailbox::limits::tests::effective_max_message_size_is_min_of_configured_and_derived ... ok
+test peer_mailbox::prompt_builder::tests::builder_does_not_panic_on_multibyte_utf8_truncation ... ok
+test peer_mailbox::prompt_builder::tests::builder_fences_worker_body_so_injection_text_cannot_pose_as_instructions ... ok
+test peer_mailbox::prompt_builder::tests::builder_generates_unique_target_prompt_id_per_call ... ok
+test peer_mailbox::prompt_builder::tests::builder_isolates_targets ... ok
+test peer_mailbox::prompt_builder::tests::builder_orders_messages_by_source_then_sequence ... ok
+test peer_mailbox::prompt_builder::tests::builder_returns_pending_messages_within_budget ... ok
+test peer_mailbox::prompt_builder::tests::builder_truncates_oversized_messages_to_per_msg_cap ... ok
+test peer_mailbox::reconciler::tests::reconcile_emits_audit_failed_when_transition_fails_non_terminally ... ok
+test peer_mailbox::reconciler::tests::reconcile_emits_stranded_event_for_inflight_without_injections ... ok
+test peer_mailbox::reconciler::tests::reconcile_forces_inflight_with_injection_to_delivered ... ok
+test peer_mailbox::reconciler::tests::reconcile_handles_mixed_non_terminal_states_in_single_pass ... ok
+test peer_mailbox::reconciler::tests::reconcile_increments_already_delivered_when_race_observes_unchanged ... ok
+test peer_mailbox::router::tests::accept_replay_returns_already_accepted_without_fresh_guard ... ok
+test peer_mailbox::router::tests::accept_succeeds_for_allowed_edge ... ok
+test peer_mailbox::router::tests::body_size_check_runs_before_dag_check ... ok
+test peer_mailbox::router::tests::record_terminal_emits_lifecycle_event_once ... ok
+test peer_mailbox::router::tests::record_terminal_emits_undeliverable_with_reason ... ok
+test peer_mailbox::router::tests::record_terminal_on_unknown_message_returns_ledger_error ... ok
+test peer_mailbox::router::tests::rejects_oversized_body_before_any_validation ... ok
+test peer_mailbox::router::tests::rejects_when_not_in_dag ... ok
+test peer_mailbox::router::tests::router_error_preserves_ledger_already_terminal_typed ... ok
+test peer_mailbox::router::tests::router_error_preserves_ledger_invalid_transition_typed ... ok
+test peer_mailbox::transitions::tests::transition_with_audit_emits_audit_failed_on_invalid_non_terminal_transition ... ok
+test peer_mailbox::transitions::tests::transition_with_audit_returns_changed_on_normal_path ... ok
+test peer_mailbox::transitions::tests::transition_with_audit_returns_terminal_skip_when_already_terminal ... ok
+test peer_mailbox::transitions::tests::transition_with_audit_returns_unchanged_on_idempotent_target ... ok
+test plan::approved_dep_closure_tests::approved_dep_closure_filters_pending_diamond_branch ... ok
+test plan::approved_dep_closure_tests::approved_dep_closure_returns_linear_chain_in_topo_order ... ok
+test plan::approved_dep_closure_tests::approved_dep_closure_returns_parallel_siblings_after_shared_root ... ok
+test plan::approved_dep_closure_tests::topo_ordered_tasks_orders_equal_rank_by_task_id ... ok
+test plan::approved_dep_closure_tests::topo_ordered_tasks_respects_dependencies ... ok
+test plan::audit_sentinel::plan_submit_explicit_base_round_trip::legacy_plan_submit_without_explicit_base_field_decodes ... ok
+test plan::audit_sentinel::plan_submit_explicit_base_round_trip::plan_submit_omitting_explicit_base_round_trips ... ok
+test plan::audit_sentinel::plan_submit_explicit_base_round_trip::plan_submit_with_explicit_base_round_trips ... ok
+test plan::audit_sentinel::tests::completion_kind_parses_legacy_comment_without_dispatched_base_oid ... ok
+test plan::audit_sentinel::tests::completion_kind_round_trips_dispatched_base_oid ... ok
+test plan::audit_sentinel::tests::completion_state_and_dispatch_orphan_cleared_round_trip ... ok
+test plan::audit_sentinel::tests::completion_variant_omits_artifact_uri_when_none ... ok
+test plan::audit_sentinel::tests::completion_variant_parses_v2_comments_without_artifact_uri ... ok
+test plan::audit_sentinel::tests::completion_variant_round_trips_artifact_uri ... ok
+test plan::audit_sentinel::tests::encode_then_parse_round_trips_all_variants ... ok
+test plan::audit_sentinel::tests::epic_completion_variant_round_trips ... ok
+test plan::audit_sentinel::tests::escalation_requested_variant_round_trips ... ok
+test plan::audit_sentinel::tests::invariant_violation_round_trips ... ok
+test plan::audit_sentinel::tests::kind_str_matches_serde_tag ... ok
+test plan::audit_sentinel::tests::kind_str_unknown_returns_expected_string ... ok
+test plan::audit_sentinel::tests::late_signal_round_trips ... ok
+test plan::audit_sentinel::tests::mutation_commit_round_trips_op_tags_and_affected_task_ids ... ok
+test plan::audit_sentinel::tests::mutation_plan_and_commit_round_trip ... ok
+test plan::audit_sentinel::tests::parse_empty_after_prefix_errors ... ok
+test plan::audit_sentinel::tests::parse_known_variant_with_extra_field_tolerates ... ok
+test plan::audit_sentinel::tests::parse_malformed_completion_is_critical_error ... ok
+test plan::audit_sentinel::tests::parse_malformed_dispatch_is_informational_error ... ok
+test plan::audit_sentinel::tests::parse_malformed_review_feedback_is_critical_error ... ok
+test plan::audit_sentinel::tests::parse_missing_kind_errors ... ok
+test plan::audit_sentinel::tests::parse_missing_kind_field_is_informational_error ... ok
+test plan::audit_sentinel::tests::parse_null_kind_errors ... ok
+test plan::audit_sentinel::tests::parse_returns_err_for_malformed_sentinel ... ok
+test plan::audit_sentinel::tests::parse_returns_none_for_non_sentinel_comment ... ok
+test plan::audit_sentinel::tests::parse_tolerates_leading_whitespace ... ok
+test plan::audit_sentinel::tests::parse_unknown_future_variant_returns_unknown_not_error ... ok
+test plan::audit_sentinel::tests::parse_unknown_kind_is_informational_error_when_shape_invalid ... ok
+test plan::audit_sentinel::tests::plan_force_reclaimed_variant_round_trips ... ok
+test plan::audit_sentinel::tests::read_aggregate_sentinel_round_trip ... ok
+test plan::audit_sentinel::tests::retry_requested_variant_round_trips ... ok
+test plan::audit_sentinel::tests::review_feedback_omits_optional_fields_when_none ... ok
+test plan::audit_sentinel::tests::review_feedback_round_trips_reuse_prior_worktree_true ... ok
+test plan::audit_sentinel::tests::review_feedback_variant_round_trips ... ok
+test plan::audit_sentinel::tests::signal_variant_round_trips ... ok
+test plan::audit_sentinel::tests::worker_mcp_sentinel_round_trip ... ok
+test plan::audit_sentinel::tests::worker_mcp_subkind_kebab_case_serialization ... ok
+test plan::audit_sentinel::tests::worker_write_sentinel_round_trip ... ok
+test plan::clobber_detector::tests::detector_emits_one_signal_per_clobbering_prior ... ok
+test plan::clobber_detector::tests::detector_flags_overlapping_nontrivial_file ... ok
+test plan::clobber_detector::tests::detector_ignores_disjoint_files ... ok
+test plan::clobber_detector::tests::detector_ignores_identical_content ... ok
+test plan::clobber_detector::tests::detector_ignores_trivial_files ... ok
+test plan::labels::tests::compact_label_component_rejects_br_illegal_characters ... ok
+test plan::labels::tests::constructors_emit_br_legal_labels ... ok
+test plan::labels::tests::constructors_produce_expected_strings ... ok
+test plan::labels::tests::delegation_and_review_labels_use_spur_namespace ... ok
+test plan::labels::tests::delegation_id_label_under_50_chars_for_minted_id ... ok
+test plan::labels::tests::derive_brain_session_id_distinguishes_different_inputs ... ok
+test plan::labels::tests::derive_brain_session_id_is_deterministic ... ok
+test plan::labels::tests::derive_brain_session_id_label_under_50_chars_and_br_legal ... ok
+test plan::labels::tests::integration_pending_label_is_br_legal ... ok
+test plan::labels::tests::is_br_legal_matches_empirical_grammar ... ok
+test plan::labels::tests::lease_expires_at_label_fits_create_time_cap ... ok
+test plan::labels::tests::mint_delegation_id_format_pads_zeros_and_pins_version_nibble ... ok
+test plan::labels::tests::mint_delegation_id_returns_16_hex_chars ... ok
+test plan::labels::tests::mutation_and_signal_labels_round_trip_br_grammar ... ok
+test plan::labels::tests::parsers_invert_constructors ... ok
+test plan::labels::tests::peer_message_label_is_under_50_chars_and_uses_compact_uuid ... ok
+test plan::labels::tests::plan_owner_labels_normalize_uuid_components ... ok
+test plan::labels::tests::plan_owner_parsers_invert_constructors ... ok
+test plan::labels::tests::plan_owner_token_documents_update_path_length ... ok
+test plan::labels::tests::plan_task_id_label_round_trips_hierarchical_beads_ids ... ok
+test plan::labels::tests::source_issue_label_round_trips_hierarchical_beads_ids ... ok
+test plan::mutation::tests::split_task_round_trips ... ok
+test plan::mutation_executor::tests::apply_issue_scan_page_advances_after_full_page ... ok
+test plan::mutation_executor::tests::apply_issue_scan_page_handles_empty_page ... ok
+test plan::mutation_executor::tests::apply_issue_scan_page_stops_after_tail_page ... ok
+test plan::mutation_executor::tests::barrier_rewire_replaces_parent_for_all_downstreams ... ok
+test plan::mutation_executor::tests::executor_iterates_executed_ops_in_reverse_for_rollback ... ok
+test plan::mutation_executor::tests::existing_split_task_apply_rollback_unchanged ... ok
+test plan::mutation_executor::tests::explicit_rewire_validates_child_index ... ok
+test plan::mutation_executor::tests::same_signal_id_creates_children_only_once ... ok
+test plan::mutation_executor::tests::synthetic_noop_in_test_only_completes_via_reversible_trait ... ok
+test plan::outcomes::tests::blocker_set_change_is_state_change ... ok
+test plan::outcomes::tests::blocker_set_order_does_not_change_state ... ok
+test plan::outcomes::tests::buffer_routes_missing_plan_id_skip_to_transition_ring ... ok
+test plan::outcomes::tests::buffer_routes_no_ready_to_transition_ring ... ok
+test plan::outcomes::tests::buffer_routes_task_skip_to_latest_per_task ... ok
+test plan::outcomes::tests::cross_plan_recent_outcomes_keep_same_task_id_per_plan ... ok
+test plan::outcomes::tests::cross_plan_status_returns_stuck_tasks_from_each_plan ... ok
+test plan::outcomes::tests::dispatch_resets_stuck_tracking ... ok
+test plan::outcomes::tests::drop_plan_clears_all_skip_observations_for_plan_only ... ok
+test plan::outcomes::tests::drop_plan_is_noop_for_absent_plan ... ok
+test plan::outcomes::tests::drop_plan_removes_only_that_plan_and_preserves_global ... ok
+test plan::outcomes::tests::global_recent_outcomes_is_capped_across_plans ... ok
+test plan::outcomes::tests::last_tick_at_is_reported ... ok
+test plan::outcomes::tests::last_tick_tasks_dispatched_counts_dispatched_tasks ... ok
+test plan::outcomes::tests::latest_per_task_overwrites_duplicate_key ... ok
+test plan::outcomes::tests::orphan_outcome_is_global_not_per_plan ... ok
+test plan::outcomes::tests::prune_task_is_noop_for_absent_plan_or_task ... ok
+test plan::outcomes::tests::prune_task_removes_only_that_task_from_that_plan ... ok
+test plan::outcomes::tests::prune_task_removes_skip_observation_for_target_task_only ... ok
+test plan::outcomes::tests::reason_variant_change_is_state_change ... ok
+test plan::outcomes::tests::same_skip_reason_emits_info_once ... ok
+test plan::outcomes::tests::skip_reason_base_spec_build_failed_dedup_collapses_distinct_errors ... ok
+test plan::outcomes::tests::skip_reason_base_spec_build_failed_records_without_error_in_key ... ok
+test plan::outcomes::tests::skip_reason_dispatch_send_failed_records ... ok
+test plan::outcomes::tests::skip_reason_duplicate_issue_id_records ... ok
+test plan::outcomes::tests::skip_reason_epic_not_open_records ... ok
+test plan::outcomes::tests::skip_reason_hydration_get_issue_failed_dedup_collapses_distinct_errors ... ok
+test plan::outcomes::tests::skip_reason_hydration_get_issue_failed_records_without_error_in_key ... ok
+test plan::outcomes::tests::skip_reason_missing_dispatch_lease_expiry_records ... ok
+test plan::outcomes::tests::skip_reason_missing_issue_id_records ... ok
+test plan::outcomes::tests::skip_reason_missing_plan_id_records_as_global_transition ... ok
+test plan::outcomes::tests::skip_reason_persist_dispatch_intent_failed_dedup_collapses_distinct_errors ... ok
+test plan::outcomes::tests::skip_reason_persist_dispatch_intent_failed_records_without_error_in_key ... ok
+test plan::outcomes::tests::skip_reason_persist_error_records_without_message_in_key ... ok
+test plan::outcomes::tests::skip_reason_plan_allows_dispatch_failed_dedup_collapses_distinct_errors ... ok
+test plan::outcomes::tests::skip_reason_plan_allows_dispatch_failed_records_without_error_in_key ... ok
+test plan::outcomes::tests::skip_reason_plan_has_pending_epic_records ... ok
+test plan::outcomes::tests::skip_reason_plan_missing_complete_epic_records ... ok
+test plan::outcomes::tests::skip_reason_projector_failed_records_without_error_in_key ... ok
+test plan::outcomes::tests::skip_reason_task_missing_from_projection_records ... ok
+test plan::outcomes::tests::skip_reason_task_status_not_ready_records_blockers ... ok
+test plan::outcomes::tests::skip_reason_unsupported_ready_issue_type_records ... ok
+test plan::outcomes::tests::snapshot_sorts_oldest_to_newest_across_routes ... ok
+test plan::outcomes::tests::stuck_warn_refires_after_reason_change ... ok
+test plan::outcomes::tests::stuck_warn_uses_wall_clock_and_fires_once ... ok
+test plan::outcomes::tests::transition_ring_capacity_rolls_over_oldest_entries ... ok
+test plan::ownership::tests::detects_other_session ... ok
+test plan::ownership::tests::duplicate_owner_labels_are_not_ambiguous ... ok
+test plan::ownership::tests::matches_current_session ... ok
+test plan::ownership::tests::missing_owner_is_unowned ... ok
+test plan::ownership::tests::mixed_owner_labels_are_ambiguous_and_sorted ... ok
+test plan::projector::tests::awaiting_review_from_audits_escalation_for_current_delegation_clears_flag ... ok
+test plan::projector::tests::awaiting_review_from_audits_idempotent ... ok
+test plan::projector::tests::awaiting_review_from_audits_monotonicity_prefix_consistent ... ok
+test plan::projector::tests::closed_task_with_failed_completion_projects_failed ... ok
+test plan::projector::tests::closed_task_with_rejection_audit_projects_rejected ... ok
+test plan::projector::tests::collect_sorted_audits_skips_non_audit_comments ... ok
+test plan::projector::tests::count_based_projection_returns_dispatch_count ... ok
+test plan::projector::tests::current_delegation_from_audits_clears_on_dispatch_orphan_cleared ... ok
+test plan::projector::tests::current_delegation_from_audits_idempotent ... ok
+test plan::projector::tests::current_delegation_from_audits_monotonicity_prefix_consistent ... ok
+test plan::projector::tests::current_delegation_from_audits_prefers_latest_dispatch_lifecycle ... ok
+test plan::projector::tests::epic_completion_outcome_summary_derives_all_approved_from_durable_audit ... ok
+test plan::projector::tests::epic_completion_outcome_summary_derives_terminal_with_failures_from_durable_audit ... ok
+test plan::projector::tests::epic_completion_outcome_summary_returns_none_when_missing ... ok
+test plan::projector::tests::epic_completion_outcome_summary_uses_latest_matching_audit ... ok
+test plan::projector::tests::escalated_from_audits_dispatch_after_escalation_clears_flag ... ok
+test plan::projector::tests::escalated_from_audits_idempotent ... ok
+test plan::projector::tests::escalated_from_audits_monotonicity_prefix_consistent ... ok
+test plan::projector::tests::escalated_from_audits_uses_latest_terminal_state ... ok
+test plan::projector::tests::helper_wrappers_match_shared_projection ... ok
+test plan::projector::tests::latest_completion_carries_state_branch_and_summary ... ok
+test plan::projector::tests::open_task_audit_dispatched_with_delegation_label_drift_projects_dispatched_and_emits_counter ... ok
+test plan::projector::tests::open_task_audit_dispatched_with_matching_delegation_label_does_not_emit_drift_counter ... ok
+test plan::projector::tests::open_task_awaiting_review_with_conflict_label_projects_blocked_without_panic ... ok
+test plan::projector::tests::open_task_awaiting_review_with_ready_label_does_not_emit_drift_counter ... ok
+test plan::projector::tests::open_task_awaiting_review_with_stale_delegation_label_projects_awaiting_review ... ok
+test plan::projector::tests::open_task_awaiting_review_without_ready_label_projects_awaiting_review_and_emits_counter ... ok
+test plan::projector::tests::open_task_label_only_delegation_emits_drift_counter ... ok
+test plan::projector::tests::open_task_label_only_escalated_emits_drift_counter ... ok
+test plan::projector::tests::open_task_label_only_integration_conflict_emits_drift_counter ... ok
+test plan::projector::tests::open_task_label_only_ready_for_review_emits_drift_counter ... ok
+test plan::projector::tests::open_task_stale_delegation_label_with_escalation_label_projects_escalated_without_panic ... ok
+test plan::projector::tests::open_task_terminal_approval_with_delegation_label_emits_suppressed_drift_counter ... ok
+test plan::projector::tests::open_task_terminal_approval_with_delegation_label_projects_dispatched_for_assert_safety ... ok
+test plan::projector::tests::open_task_terminal_cancelled_with_ready_label_emits_suppressed_drift_counter ... ok
+test plan::projector::tests::open_task_terminal_cancelled_with_ready_label_projects_awaiting_review_for_assert_safety ... ok
+test plan::projector::tests::open_task_terminal_failed_with_delegation_label_projects_dispatched_for_assert_safety ... ok
+test plan::projector::tests::open_task_terminal_failed_with_ready_label_emits_suppressed_drift_counter ... ok
+test plan::projector::tests::open_task_terminal_failed_with_ready_label_projects_awaiting_review_for_assert_safety ... ok
+test plan::projector::tests::open_task_terminal_rejection_with_ready_label_projects_awaiting_review_for_assert_safety ... ok
+test plan::projector::tests::open_task_with_delegation_label_projects_dispatched ... ok
+test plan::projector::tests::open_task_with_ready_for_review_projects_awaiting_review ... ok
+test plan::projector::tests::open_task_with_terminal_audit_projects_terminal_status ... ok
+test plan::projector::tests::partial_compare_status_exact_match ... ok
+test plan::projector::tests::partial_compare_status_from_same_audit_stream_is_never_mismatch ... ok
+test plan::projector::tests::partial_compare_status_mismatch ... ok
+test plan::projector::tests::partial_compare_status_superseded_label_only_partial_match ... ok
+test plan::projector::tests::plan_submit_audit_reconstructs_base_snapshot_branch ... ok
+test plan::projector::tests::plan_submit_audit_reconstructs_brain_session_id ... ok
+test plan::projector::tests::project_attempt_facts_last_delegation_id_tracks_most_recent ... ok
+test plan::projector::tests::project_attempt_facts_legacy_correct_field_ignored ... ok
+test plan::projector::tests::project_attempt_facts_returns_count_not_field ... ok
+test plan::projector::tests::project_attempt_facts_returns_one_for_no_dispatch ... ok
+test plan::projector::tests::project_attempt_history_empty_when_no_review_feedback ... ok
+test plan::projector::tests::project_attempt_history_preserves_reuse_prior_worktree_none ... ok
+test plan::projector::tests::project_attempt_history_preserves_reuse_prior_worktree_true ... ok
+test plan::projector::tests::project_attempt_history_reconstructs_from_review_feedback_sentinels ... ok
+test plan::projector::tests::project_plan_from_beads_does_not_panic_on_zero_audit_closed_task ... ok
+test plan::projector::tests::project_status_for_open_issue_with_signal_escalated_returns_escalated_to_brain ... ok
+test plan::projector::tests::projector_completion_failed_after_retry_requested_falls_back_to_failed ... ok
+test plan::projector::tests::projector_errors_on_corrupt_completion_sentinel ... ok
+test plan::projector::tests::projector_errors_on_corrupt_review_feedback_sentinel ... ok
+test plan::projector::tests::projector_handles_mix_of_valid_and_corrupt_sentinels ... ok
+test plan::projector::tests::projector_recovers_pending_after_retry_requested_sentinel ... ok
+test plan::projector::tests::projector_warns_and_drops_corrupt_audit_sentinel ... ok
+test plan::projector::tests::recompute_open_statuses_marks_unblocked_pending_tasks_ready ... ok
+test plan::projector::tests::shadow_projector_suppresses_superseded_status_partial_match_only ... ok
+test plan::projector::tests::sort_projection_comments_orders_by_created_at_then_id ... ok
+test plan::projector::tests::sort_projection_comments_orders_numeric_string_ids_by_numeric_value ... ok
+test plan::projector::tests::superseded_from_audits_dispatch_then_awaiting_review_overwrites_superseded ... ok
+test plan::projector::tests::superseded_from_audits_idempotent ... ok
+test plan::projector::tests::superseded_from_audits_monotonicity_prefix_consistent ... ok
+test plan::projector::tests::superseded_from_audits_uses_latest_terminal_state ... ok
+test plan::projector::tests::terminal_status_from_audits_idempotent ... ok
+test plan::projector::tests::terminal_status_from_audits_monotonicity_prefix_consistent ... ok
+test plan::projector::tests::worker_started_does_not_advance_attempt_projection ... ok
+test plan::projector::tests::zero_audit_closed_task_derives_approved_without_dispatched_base_oid ... ok
+test plan::projector_conflict_test::test_conflict_panic ... ok
+test plan::proposers::tests::composite_proposer_fans_out_to_each_inner_and_flattens ... ok
+test plan::proposers::tests::retry_exhausted_proposer_returns_empty_on_escalated_issue ... ok
+test plan::proposers::tests::retry_exhausted_proposer_v0_proposes_retry_task_under_cap ... ok
+test plan::proposers::tests::retry_exhausted_proposer_v0_returns_empty_at_max_attempts ... ok
+test plan::proposers::tests::scope_drift_above_threshold_emits_barrier_split ... ok
+test plan::proposers::tests::scope_drift_below_threshold_proposes_nothing ... ok
+test plan::reconciler::tests::agent_reconcile_converges_idempotently ... ok
+test plan::reconciler::tests::auto_merge_config_off_produces_zero_actions ... ok
+test plan::reconciler::tests::auto_pr_params_include_plan_id_and_summary ... ok
+test plan::reconciler::tests::biased_select_cancel_preempts_pending_tick ... ok
+test plan::reconciler::tests::cadence_backoff_formula ... ok
+test plan::reconciler::tests::classify_epic_completion_reports_all_approved ... ok
+test plan::reconciler::tests::classify_epic_completion_reports_terminal_failures ... ok
+test plan::reconciler::tests::completion_collector_logs_panic_with_structured_context ... ok
+test plan::reconciler::tests::completion_collector_project_timeout_delivers_via_deferred_push ... ok
+test plan::reconciler::tests::completion_collector_project_timeout_without_deferred_warns_and_returns ... ok
+test plan::reconciler::tests::delegation_id_reconcile_converges_idempotently ... ok
+test plan::reconciler::tests::expected_plan_id_from_parent_epic_is_deterministic_when_blocked_by_reversed ... ok
+test plan::reconciler::tests::failed_epic_completion_audit_suppresses_automation ... ok
+test plan::reconciler::tests::global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_plan ... ok
+test plan::reconciler::tests::global_reconciler_skips_other_brain_plan_without_emitting_no_ready ... ok
+test plan::reconciler::tests::global_reconciler_status_reports_plans_enumerated_and_dispatched_per_tick ... ok
+test plan::reconciler::tests::global_reconciler_status_reports_tasks_dispatched_per_tick ... ok
+test plan::reconciler::tests::hybrid_journal_probe_disables_itself_when_missing ... ok
+test plan::reconciler::tests::journal_monitor_exits_on_abort_without_hang ... ok
+test plan::reconciler::tests::last_tick_counters_reset_between_ticks ... ok
+test plan::reconciler::tests::monitor_journal_appends_survives_transient_metadata_error ... ok
+test plan::reconciler::tests::plan_complete_reconcile_missing_emits_drift_then_noops ... ok
+test plan::reconciler::tests::plan_id_reconcile_converges_idempotently ... ok
+test plan::reconciler::tests::plan_pending_reconcile_stale_emits_drift_then_noops ... ok
+test plan::reconciler::tests::plan_task_id_reconcile_converges_idempotently ... ok
+test plan::reconciler::tests::prior_branch_for_reuse_uses_last_attempt_only_when_reuse_requested ... ok
+test plan::reconciler::tests::projected_plan_for_ready_projects_when_unhydrated ... ok
+test plan::reconciler::tests::projected_plan_for_ready_reuses_hydrated_state_without_projecting ... ok
+test plan::reconciler::tests::reconciler_dispatch_ctx_can_be_cloned_for_server_startup ... ok
+test plan::reconciler::tests::tick_once_predicts_overlay_conflict_and_blocks_without_dispatch ... ok
+test plan::reconciler::tests::tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task ... ok
+test plan::reconciler::tests::tick_once_strips_plan_complete_when_plan_submit_audit_is_absent ... ok
+test plan::reconciler::tests::tick_once_with_clean_preview_dispatches_normally ... ok
+test plan::reconciler::topology::tests::compile_topology_marks_tip_flattened_when_cumulative_diff_contains_transitive_deps ... ok
+test plan::reconciler::topology::tests::parse_diff_stat_summary_no_changes ... ok
+test plan::reconciler::topology::tests::parse_diff_stat_summary_parses_all_components ... ok
+test plan::reconciler::topology::tests::parse_diff_stat_summary_single_file ... ok
+test plan::scope_snapshot::tests::allowed_edge_returns_allowed ... ok
+test plan::scope_snapshot::tests::edge_not_in_dag_blocks_communication ... ok
+test plan::scope_snapshot::tests::missing_source_returns_source_missing ... ok
+test plan::scope_snapshot::tests::superseded_target_blocks_edge ... ok
+test plan::scope_snapshot_integration_tests::snapshot_for_peer_projects_dag_edges_and_dispatched_delegations ... ok
+test plan::scope_snapshot_integration_tests::version_changes_when_task_text_changes ... ok
+test plan::scope_snapshot_integration_tests::version_is_stable_under_repeated_calls ... ok
+test plan::shadow_projector::tests::bd334_reproducer_shadow_keeps_prior_worker_branch ... ok
+test plan::shadow_projector::tests::parity_with_legacy_when_latest_completion_fields_are_present ... ok
+test plan::signal_watcher::tests::escalate_signal_routes_to_brain_escalation_without_proposer ... ok
+test plan::signal_watcher::tests::scope_drift_routes_to_brain_escalation_without_proposer ... ok
+test plan::signals::tests::encode_then_parse_round_trips ... ok
+test plan::signals::tests::escalate_round_trips_and_has_label ... ok
+test plan::signals::tests::parse_returns_err_for_malformed_sentinel ... ok
+test plan::signals::tests::parse_returns_none_for_non_sentinel_comment ... ok
+test plan::signals::tests::parse_tolerates_leading_whitespace ... ok
+test plan::signals::tests::potential_clobber_round_trips_and_has_label ... ok
+test plan::signals::tests::signal_id_accessor_returns_value ... ok
+test plan::snapshot::tests::blocked_by_treats_superseded_dependencies_as_satisfied ... ok
+test plan::snapshot::tests::build_plan_snapshot_omits_owner_for_persisted_plan_fallback ... ok
+test plan::snapshot::tests::build_plan_snapshot_populates_owner_brain_session_id_from_state ... ok
+test plan::snapshot::tests::build_plan_snapshot_preserves_superseded_metadata_and_diff_summary ... ok
+test plan::staging::tests::build_staging_branch_cherry_picks_approved_tips_in_dag_order ... ok
+test plan::staging::tests::build_staging_branch_stops_on_first_conflict_and_keeps_partial_branch ... ok
+test plan::staging::tests::shape_new_plan_excludes_approved_includes_pending_and_blocked ... ok
+test plan::tests::apply_issue_update_batches_label_changes_in_single_call ... ok
+test plan::tests::apply_sibling_overlaps_idempotent_on_existing_edge ... ok
+test plan::tests::apply_sibling_overlaps_injects_edges_and_preserves_originals ... ok
+test plan::tests::apply_sibling_overlaps_keeps_validate_plan_passing ... ok
+test plan::tests::assert_dispatched_base_oid_for_active_status_logs_instead_of_panics_when_oid_missing ... ok
+test plan::tests::attempt_record_round_trips_reuse_prior_worktree_true ... ok
+test plan::tests::auto_retry_amended_prompt_includes_failure_reason_and_branch_state ... ok
+test plan::tests::auto_retry_completion_emits_event_without_brain_continuation ... ok
+test plan::tests::awaiting_review_completion_rechecks_audits_before_writing_duplicate ... ok
+test plan::tests::br_77i_diamond_dag_orchestrator_rs_serializes_three_siblings ... ok
+test plan::tests::build_failure_recovery_task_uses_worker_frame_not_brain_feedback ... ok
+test plan::tests::build_plan_status_points_to_create_pr_after_merge_success ... ok
+test plan::tests::build_plan_status_points_to_merge_plan_before_integration ... ok
+test plan::tests::build_task_diff_fields_emits_diff_when_present ... ok
+test plan::tests::build_task_diff_fields_emits_marker_when_diff_none ... ok
+test plan::tests::build_task_diff_fields_includes_artifact_when_present ... ok
+test plan::tests::build_task_diff_fields_omits_artifact_when_absent ... ok
+test plan::tests::clear_dispatch_intent_strips_lease_label ... ok
+test plan::tests::clear_dispatch_intent_update_scrubs_stale_delegation_labels ... ok
+test plan::tests::completion_is_superseded_when_matching_orphan_clear_exists ... ok
+test plan::tests::completion_writeback_notifies_fast_forward_channel ... ok
+test plan::tests::cycle_rejected ... ok
+test plan::tests::dangling_dep_rejected ... ok
+test plan::tests::derive_allows_done_external_dep ... ok
+test plan::tests::derive_cycle_rejected ... ok
+test plan::tests::derive_epic_plan_resolves_agents_and_deps ... ok
+test plan::tests::derive_falls_back_to_default_agent ... ok
+test plan::tests::derive_inherits_agent_from_epic_label ... ok
+test plan::tests::derive_rejects_empty_agent_label ... ok
+test plan::tests::derive_rejects_empty_children ... ok
+test plan::tests::derive_rejects_missing_agent ... ok
+test plan::tests::derive_rejects_nested_epic_child ... ok
+test plan::tests::derive_rejects_non_epic_issue ... ok
+test plan::tests::derive_rejects_unknown_agent ... ok
+test plan::tests::derive_rejects_unsatisfied_external_dep ... ok
+test plan::tests::derive_skips_parent_child_edge_in_blocked_by ... ok
+test plan::tests::derive_uses_child_body_as_task_text ... ok
+test plan::tests::dispatch_intent_update_scrubs_stale_delegation_labels ... ok
+test plan::tests::display_name_trims_and_caps ... ok
+test plan::tests::display_name_utf8_safe ... ok
+test plan::tests::duplicate_id_rejected ... ok
+test plan::tests::emit_completion_audit_accepts_single_commit_worker_output ... ok
+test plan::tests::emit_completion_audit_populates_dispatched_base_oid ... ok
+test plan::tests::emit_completion_audit_preserves_awaiting_review_for_multi_commit_output ... ok
+test plan::tests::emit_completion_audit_returns_err_when_add_comment_fails ... ok
+test plan::tests::emit_completion_audit_skips_commit_count_without_dispatched_base_oid ... ok
+test plan::tests::emit_completion_audit_skips_invariant_for_failed_state ... ok
+test plan::tests::emit_completion_audit_unlicensed_returns_ok ... ok
+test plan::tests::emit_epic_completion_audit_returns_err_when_add_comment_fails ... ok
+test plan::tests::emit_task_spec_audit_records_agent_and_non_empty_context_files ... ok
+test plan::tests::emit_task_spec_audit_records_agent_with_empty_context_files ... ok
+test plan::tests::emit_worker_started_audit_records_branch_session_and_base ... ok
+test plan::tests::empty_plan_rejected ... ok
+test plan::tests::enriched_task_empty_history_omits_previous_attempts_section ... ok
+test plan::tests::enriched_task_includes_original_history_and_feedback ... ok
+test plan::tests::enriched_task_omits_git_show_hint_when_no_branches ... ok
+test plan::tests::escalated_task_keeps_beads_issue_open_and_signal_escalated_label ... ok
+test plan::tests::escalated_to_brain_blocks_recompute_open_statuses_promotion ... ok
+test plan::tests::find_sibling_overlaps_detects_unrelated_pair_sharing_file ... ok
+test plan::tests::find_sibling_overlaps_diamond_dag_three_siblings ... ok
+test plan::tests::find_sibling_overlaps_handles_empty_context_files ... ok
+test plan::tests::find_sibling_overlaps_skips_disjoint_files ... ok
+test plan::tests::find_sibling_overlaps_skips_pairs_with_existing_transitive_dep ... ok
+test plan::tests::format_request_changes_comment_includes_attempt_feedback_branch ... ok
+test plan::tests::format_request_changes_comment_no_branch ... ok
+test plan::tests::format_request_changes_comment_reports_reviewed_attempt_not_new ... ok
+test plan::tests::immediate_send_failure_compensation_removes_dispatch_label ... ok
+test plan::tests::is_terminal_plan_status_matches_all_terminal_states ... ok
+test plan::tests::label_value_finds_prefix ... ok
+test plan::tests::legacy_plan_task_entry_without_dispatched_base_oid_deserializes ... ok
+test plan::tests::max_attempts_is_three ... ok
+test plan::tests::persist_completion_result_audit_failure_aborts_mutation ... ok
+test plan::tests::persist_completion_result_combined_update_clears_lease_and_delegation_label_in_one_pass ... ok
+test plan::tests::persist_completion_result_idempotent_after_audit_success_mutate_failure ... ok
+test plan::tests::persist_dispatch_intent_update_removes_legacy_labels ... ok
+test plan::tests::persist_worker_completion_and_notify_materializes_artifact_uri_in_audit ... ok
+test plan::tests::plan_registry_empty_has_no_entries ... ok
+test plan::tests::plan_registry_insert_and_lookup ... ok
+test plan::tests::plan_task_entry_serializes_dispatched_base_oid ... ok
+test plan::tests::reconciler_dispatch_picks_enriched_template_for_review_feedback_history ... ok
+test plan::tests::reconciler_dispatch_picks_failure_recovery_template_for_worker_failure_history ... ok
+test plan::tests::reconciler_dispatch_reuse_prompt_guides_git_status_for_preapply_outcomes ... ok
+test plan::tests::registry_entry_replaced_on_reinsert ... ok
+test plan::tests::registry_sentinel_constant_is_distinct_from_valid_plan_id ... ok
+test plan::tests::registry_tracks_active_plan_per_epic ... ok
+test plan::tests::rejection_cascade_marks_descendants_failed ... ok
+test plan::tests::request_changes_at_3_dispatches_auto_rejects ... ok
+test plan::tests::request_changes_at_max_attempts_auto_rejects ... ok
+test plan::tests::request_changes_reuse_prior_worktree_requires_worker_branch ... ok
+test plan::tests::request_changes_reuse_prior_worktree_round_trips_attempt_record_and_sentinel ... ok
+test plan::tests::self_cycle_rejected ... ok
+test plan::tests::strip_spur_labels_drops_machine_prefix ... ok
+test plan::tests::submit_plan_normalize_tasks_propagates_validate_errors ... ok
+test plan::tests::submit_plan_normalize_tasks_returns_injected_overlaps ... ok
+test plan::tests::success_completion_update_sets_ready_for_review ... ok
+test plan::tests::superseded_is_terminal ... ok
+test plan::tests::superseded_status_serializes_with_mutation_id ... ok
+test plan::tests::terminal_completion_update_closes_issue ... ok
+test plan::tests::three_node_cycle_rejected ... ok
+test plan::tests::valid_diamond_plan ... ok
+test plan::tests::valid_linear_plan ... ok
+test plan::tests::zero_commit_output_does_not_auto_retry_after_normalization_design ... ok
+test project_root::tests::discover_at_root_with_spur_dir ... ok
+test project_root::tests::discover_climbs_ancestors_to_spur_marker ... ok
+test project_root::tests::discover_falls_back_to_start_dir ... ok
+test project_root::tests::discover_rejects_root_with_spur_component_belt_and_suspenders ... ok
+test project_root::tests::discover_strips_spur_events_ancestor ... ok
+test project_root::tests::discover_strips_when_inside_spur_events_not_worktrees ... ok
+test project_root::tests::strip_spur_preserves_path_before_spur ... ok
+test project_root::tests::strip_spur_returns_empty_when_only_component_is_spur ... ok
+test project_root::tests::warn_on_nested_layout_detects_nested_events_tree ... ok
+test project_root::tests::worktree_resolves_to_own_root_not_parent_project ... ok
+test scheduler::tests::grace_cleared_when_user_arrives_during_in_flight_turn ... ok
+test scheduler::tests::new_scheduler_is_empty ... ok
+test scheduler::tests::next_coalesces_multiple_continuations_fifo ... ok
+test scheduler::tests::next_fires_continuation_only_when_idle_and_no_user_pending ... ok
+test scheduler::tests::next_is_idle_when_everything_empty ... ok
+test scheduler::tests::next_returns_idle_while_turn_in_flight_even_if_user_queued ... ok
+test scheduler::tests::next_returns_user_prompt_when_user_queued_and_idle ... ok
+test scheduler::tests::next_suppresses_continuation_during_cancel_grace ... ok
+test scheduler::tests::next_user_beats_continuation_when_both_queued ... ok
+test scheduler::tests::test_commit_moves_to_delivered_ids ... ok
+test scheduler::tests::test_commit_partial_delivered_and_terminal_disjoint ... ok
+test scheduler::tests::test_commit_partial_three_way_partition ... ok
+test scheduler::tests::test_drained_batch_leaked_channel_full_emits_dropped ... ok
+test scheduler::tests::test_drained_batch_leaked_requeues_on_drop ... ok
+test scheduler::tests::test_idle_until_grace_deadline_returned ... ok
+test scheduler::tests::test_note_session_swap_clears_delivered_ids ... ok
+test scheduler::tests::test_note_session_swap_drains_pending_and_overflow ... ok
+test scheduler::tests::test_push_continuation_already_delivered_emits ... ok
+test scheduler::tests::test_push_continuation_pending_dup_silent ... ok
+test scheduler::tests::test_push_continuation_session_match_accepts ... ok
+test scheduler::tests::test_push_continuation_session_mismatch_emits_stale_session ... ok
+test scheduler::tests::test_requeue_depth_bounded ... ok
+test scheduler::tests::test_rollback_drops_terminal_and_requeues_remainder ... ok
+test scheduler::tests::test_rollback_requeues_all_with_defer_event ... ok
+test scheduler::tests::test_turn_guard_clears_flag_on_drop ... ok
+test scheduler::tests::test_turn_guard_scheduler_callable_while_armed ... ok
+test scheduler::tests::test_v3_1_delivered_keys_duplicate ... ok
+test scheduler::tests::test_v3_1_dropped_terminal_duplicate_key ... ok
+test server::handlers::plan::plan_truncate_and_restart_tests::handle_plan_truncate_and_restart_happy_path ... ok
+test server::handlers::plan::plan_truncate_and_restart_tests::handle_plan_truncate_and_restart_preserves_parent_state_when_submission_fails ... ok
+test server::handlers::plan::plan_truncate_and_restart_tests::handle_plan_truncate_and_restart_returns_conflict_when_cherry_pick_fails ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::detector_reclaims_when_plan_submit_lacks_bootstrap_metadata ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::detector_skips_reclaim_when_all_epics_have_rev1_metadata ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::discover_plan_ids_collects_unique_prefix_values ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::execution_label_replacement_does_not_strip_already_correct_agent_label ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::execution_label_replacement_removes_old_plan_and_agent_labels ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::fast_forward_reconciler_uses_configured_notify ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::fast_forward_reconciler_uses_default_notify_when_enabled_without_config ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::install_projected_plan_replaces_stale_cache_entry ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::legacy_reclaim_needed_when_rev1_bootstrap_metadata_is_missing ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::legacy_reclaim_skipped_when_rev1_bootstrap_metadata_exists ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::load_or_project_plan_serves_ephemeral_cache_when_unversioned ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::mutation_orphan_ids_require_terminal_companion_breadcrumb ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::notify_fast_forward_wakes_waiter ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::ordinary_epic_can_still_be_executed ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::persisted_plan_epic_blocks_execute_epic_relabeling ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::plan_mcp_deps_resolves_ephemeral_cache_when_unversioned ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::reclaim_persisted_plans_hydrates_empty_cache ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::reclaim_replaces_existing_cache_entry_instead_of_merging ... ok
+test server::handlers::plan::reconciler_fast_forward_tests::versioned_cache_rejects_ephemeral_cache_without_epic ... ok
+test server::plan_builder::resolve_plan_base_tests::resolve_plan_base_branch_target_skips_stash_and_uses_named_branch ... ok
+test server::plan_builder::resolve_plan_base_tests::resolve_plan_base_commit_target_uses_oid ... ok
+test server::plan_builder::resolve_plan_base_tests::resolve_plan_base_none_falls_back_to_brain_snapshot ... ok
+test server::plan_builder::resolve_plan_base_tests::resolve_plan_base_unknown_branch_fails_loudly ... ok
+test server::plan_builder::topo_tests::cycle_is_detected ... ok
+test server::plan_builder::topo_tests::diamond_respects_all_parents ... ok
+test server::plan_builder::topo_tests::linear_chain_is_ordered ... ok
+test server::tests::build_worker_info_tests::build_worker_info_handles_empty_descriptor ... ok
+test server::tests::build_worker_info_tests::build_worker_info_populates_all_fields ... ok
+test server::tests::clobber_review_tests::clobber_detector_for_review_uses_approved_branch_tip_not_dispatched_base_oid ... ok
+test server::tests::merge_plan_tests::comment_lookup_returns_false_when_advanced_feature_unlicensed ... ok
+test server::tests::merge_plan_tests::get_task_diff_historical_attempts_remain_summary_only ... ok
+test server::tests::merge_plan_tests::get_task_diff_rehydrates_latest_attempt_when_cache_missing ... ok
+test server::tests::merge_plan_tests::get_task_diff_uses_dispatched_base_oid_when_present ... ok
+test server::tests::merge_plan_tests::get_task_diff_warns_and_falls_back_for_legacy_task ... ok
+test server::tests::merge_plan_tests::integrate_plan_branches_reports_conflict_and_keeps_partial_branch ... ok
+test server::tests::merge_plan_tests::integrate_plan_branches_succeeds_without_touching_active_checkout ... ok
+test server::tests::merge_plan_tests::merge_plan_clears_integration_pending_on_success ... ok
+test server::tests::merge_plan_tests::merge_plan_rehydrates_when_cache_missing ... ok
+test server::tests::merge_plan_tests::reconstruct_historical_attempts_classifies_retry_requested_as_worker_failure_recovery ... ok
+test server::tests::merge_plan_tests::resolve_plan_base_captures_oid ... ok
+test server::tests::recover_orphaned_dispatch_tests::brain_attach_rediscovery_replays_awaiting_review_task_once ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_accepts_legacy_delegation_label ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_prefers_dispatched_base_oid_label ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_reemits_already_awaiting_review_without_new_audit ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_reemits_legacy_already_awaiting_review_delegation ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_rejects_label_only_delegation_without_audit ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_rejects_missing_branch ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_rejects_missing_plan_id ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_rejects_more_than_one_commit ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_rejects_non_ancestor_base ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_rejects_zero_commits ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_uses_audit_delegation_when_label_mismatches ... ok
+test server::tests::recover_orphaned_dispatch_tests::recover_orphaned_dispatch_with_split_dispatched_base_oid_labels ... ignored, pinned residual; requires deterministic-recovery follow-up
+test server::tests::sync_tests::resolve_dispatch_orphan_proceeds_when_ready_label_is_label_only ... ok
+test server::tests::sync_tests::resolve_dispatch_orphan_skips_when_delegation_label_has_no_audit ... ok
+test server::tests::versioned_cache_tests::derive_beads_version_advances_through_bd334_task_audit_sequence ... ok
+test server::tests::versioned_cache_tests::derive_beads_version_does_not_collide_across_plan_restart_same_plan_id ... ok
+test server::tests::versioned_cache_tests::derive_beads_version_includes_malformed_task_audit_sentinel ... ok
+test session_synopsis::projection::tests::agent_reply_caps_at_100_chars ... ok
+test session_synopsis::projection::tests::agent_reply_fills_only_newest_exchange_and_does_not_overwrite_already_filled ... ok
+test session_synopsis::projection::tests::agent_reply_not_attributed_when_only_slash_command_user_history ... ok
+test session_synopsis::projection::tests::agent_thought_or_tool_call_does_not_split_agent_reply ... ok
+test session_synopsis::projection::tests::brain_retired_flushes_pending ... ok
+test session_synopsis::projection::tests::claude_code_command_wrapper_is_treated_as_slash_command ... ok
+test session_synopsis::projection::tests::duplicate_seeds_are_idempotent ... ok
+test session_synopsis::projection::tests::empty_chunk_then_real_chunk_commits_only_real_text ... ok
+test session_synopsis::projection::tests::first_agent_reply_captured_after_first_user_turn_completes ... ok
+test session_synopsis::projection::tests::first_user_chunk_is_buffered_then_flushed_on_agent_reply ... ok
+test session_synopsis::projection::tests::get_committed_synopsis_preferred_over_pending ... ok
+test session_synopsis::projection::tests::get_does_not_promote_slash_command_to_first_user_msg_via_read_fallback ... ok
+test session_synopsis::projection::tests::get_exposes_pending_buffer_when_no_committed_last_msg ... ok
+test session_synopsis::projection::tests::multi_chunk_agent_reply_accumulates_then_flushes_as_one ... ok
+test session_synopsis::projection::tests::multi_chunk_user_message_accumulates_then_flushes_as_one ... ok
+test session_synopsis::projection::tests::projection_starts_empty ... ok
+test session_synopsis::projection::tests::ring_caps_user_at_100_and_agent_at_200 ... ok
+test session_synopsis::projection::tests::ring_captures_exchanges_in_order_and_evicts_oldest_on_fourth ... ok
+test session_synopsis::projection::tests::ring_not_mutated_per_chunk_only_on_flush ... ok
+test session_synopsis::projection::tests::second_user_message_in_same_session_updates_last_only ... ok
+test session_synopsis::projection::tests::seed_clears_stale_pending ... ok
+test session_synopsis::projection::tests::seed_does_not_overwrite_committed ... ok
+test session_synopsis::projection::tests::seed_event_leaves_ring_empty ... ok
+test session_synopsis::projection::tests::seed_populates_empty_projection ... ok
+test session_synopsis::projection::tests::seed_skips_slash_command_for_first_user_msg ... ok
+test session_synopsis::projection::tests::seed_with_both_none_is_noop ... ok
+test session_synopsis::projection::tests::session_completed_flushes_pending ... ok
+test session_synopsis::projection::tests::session_history_all_slash_commands_leaves_first_user_msg_none ... ok
+test session_synopsis::projection::tests::session_history_captures_agent_replies_for_first_and_last ... ok
+test session_synopsis::projection::tests::session_history_drops_pending_buffer ... ok
+test session_synopsis::projection::tests::session_history_empty_entries_is_noop ... ok
+test session_synopsis::projection::tests::session_history_handles_missing_trailing_assistant_reply ... ok
+test session_synopsis::projection::tests::session_history_populates_first_and_last_user_msg ... ok
+test session_synopsis::projection::tests::session_history_rebuilds_ring_from_last_3_pairs ... ok
+test session_synopsis::projection::tests::session_history_skips_leading_slash_command_for_first_user_msg ... ok
+test session_synopsis::projection::tests::session_history_trailing_user_without_assistant_gets_agent_none ... ok
+test session_synopsis::projection::tests::session_history_with_no_user_entries_is_noop ... ok
+test session_synopsis::projection::tests::slash_command_first_message_does_not_become_first_user_msg ... ok
+test session_synopsis::projection::tests::slash_command_still_updates_last_user_msg_when_most_recent ... ok
+test session_synopsis::projection::tests::synopsis_default_has_no_messages ... ok
+test session_synopsis::projection::tests::turn_complete_flushes_pending_buffer ... ok
+test session_synopsis::projection::tests::turn_without_agent_reply_yields_exchange_with_agent_none ... ok
+test session_synopsis::projection::tests::unrelated_event_variants_are_ignored ... ok
+test session_synopsis::projection::tests::user_msg_caps_at_200_chars ... ok
+test session_synopsis::projection::tests::whitespace_only_flush_pushes_nothing_to_ring ... ok
+test session_synopsis::projection::tests::whitespace_only_user_message_does_not_commit_synopsis ... ok
+test skills::adapters::tests::adapter_all_has_eight_unique ... ok
+test skills::adapters::tests::adapter_render_all_variants ... ok
+test skills::adapters::tests::agentskills_render_is_deterministic ... ok
+test skills::adapters::tests::agentskills_render_no_prefix ... ok
+test skills::adapters::tests::agentskills_render_with_spurpower_prefix ... ok
+test skills::adapters::tests::codex_render_has_frontmatter_and_marker ... ok
+test skills::adapters::tests::cursor_render_mdc_with_alwaysapply ... ok
+test skills::adapters::tests::kiro_steering_pointer_renders_once ... ok
+test skills::frontmatter::tests::empty_description_is_empty_string ... ok
+test skills::frontmatter::tests::ignores_unknown_role ... ok
+test skills::frontmatter::tests::no_frontmatter_returns_raw_body ... ok
+test skills::frontmatter::tests::parses_bundled_skill_with_frontmatter ... ok
+test skills::frontmatter::tests::parses_escaped_double_quoted_description ... ok
+test skills::frontmatter::tests::parses_folded_description ... ok
+test skills::frontmatter::tests::parses_frontmatter_after_generated_comment ... ok
+test skills::frontmatter::tests::parses_override_with_marker ... ok
+test skills::frontmatter::tests::parses_role_frontmatter ... ok
+test skills::frontmatter::tests::parses_worker_role ... ok
+test skills::installer::tests::atomic_write_creates_missing_dirs_and_file ... ok
+test skills::installer::tests::atomic_write_replaces_existing_file ... ok
+test skills::installer::tests::decide_create_when_absent ... ok
+test skills::installer::tests::decide_noop_when_bytes_identical ... ok
+test skills::installer::tests::decide_skip_user_edited_when_body_hash_mismatch ... ok
+test skills::installer::tests::decide_skip_usermarker_absent ... ok
+test skills::installer::tests::decide_update_legacy_generated_spur_override ... ok
+test skills::installer::tests::decide_update_when_marker_body_hash_matches_but_bytes_differ ... ok
+test skills::installer::tests::marker_roundtrip ... ok
+test skills::installer::tests::parse_marker_accepts_reserved_pointer_id ... ok
+test skills::installer::tests::parse_marker_rejects_garbage ... ok
+test skills::installer::tests::run_cleans_up_dir_after_removing_stale_managed_file ... ok
+test skills::installer::tests::run_cleans_up_empty_dir_left_by_brain_role_transition ... ok
+test skills::installer::tests::run_creates_all_eight_adapter_files_for_one_skill ... ok
+test skills::installer::tests::run_preserves_non_empty_user_dir_for_brain_only_skill ... ok
+test skills::installer::tests::run_skips_worker_adapters_for_brain_only_skill ... ok
+test skills::installer::tests::sha256_hex_format ... ok
+test skills::installer::tests::summary_display_empty_run ... ok
+test skills::installer::tests::summary_display_reports_skips ... ok
+test skills::tests::beads_lifecycle_skill_contains_status_fsm ... ok
+test skills::tests::brain_review_gate_skill_contains_checklist ... ok
+test skills::tests::brainstorming_description_contains_trigger_phrases ... ok
+test skills::tests::brainstorming_skill_contains_beads_epic_creation ... ok
+test skills::tests::bundled_skills_parse_and_strip_frontmatter ... ok
+test skills::tests::claude_code_deprecated_alias_resolves ... ok
+test skills::tests::code_explore_description_names_all_three_layers ... ok
+test skills::tests::code_explore_skill_establishes_three_layer_stack ... ok
+test skills::tests::list_active_skills_ignores_unedited_spur_managed_skill_files ... ok
+test skills::tests::list_active_skills_override_wins ... ok
+test skills::tests::list_active_skills_rejects_invalid_override_id ... ok
+test skills::tests::list_active_skills_returns_bundled_when_no_overrides ... ok
+test skills::tests::load_skill_ignores_legacy_generated_override ... ok
+test skills::tests::load_skill_ignores_unedited_spur_managed_override ... ok
+test skills::tests::load_skill_prefers_user_override ... ok
+test skills::tests::load_skill_returns_bundled_when_no_override ... ok
+test skills::tests::load_skill_returns_none_for_unknown ... ok
+test skills::tests::open_design_critique_has_artifact_deck_checks ... ok
+test skills::tests::open_design_critique_has_deck_checks ... ok
+test skills::tests::open_design_deck_artifact_track ... ok
+test skills::tests::open_design_deck_mode_lists_ported_themes ... ok
+test skills::tests::open_design_deck_mode_native_flow ... ok
+test skills::tests::open_design_description_contains_trigger_phrases ... ok
+test skills::tests::open_design_directions_reference_lists_all_five ... ok
+test skills::tests::open_design_references_design_system_library ... ok
+test skills::tests::open_design_skill_covers_full_loop ... ok
+test skills::tests::open_design_skill_is_bundled_and_loadable ... ok
+test skills::tests::plan_task_discipline_skill_contains_dag_rules ... ok
+test skills::tests::spur_analyst_skill_is_bundled_and_loadable ... ok
+test skills::tests::spur_way_skill_contains_beads_first_invariant ... ok
+test skills::tests::strip_frontmatter_eof_no_trailing_newline ... ok
+test skills::tests::strip_frontmatter_no_frontmatter ... ok
+test skills::tests::strip_frontmatter_normal ... ok
+test skills::tests::strip_frontmatter_value_containing_dashes ... ok
+test skills::tests::validate_id_accepts_standard_names ... ok
+test skills::tests::validate_id_enforces_length_cap ... ok
+test skills::tests::validate_id_rejects_bad_names ... ok
+test skills::tests::worker_mention_routing_skill_contains_hierarchy ... ok
+test skills::tests::worker_signals_skill_contains_exact_format ... ok
+test skills::tests::writing_plans_description_contains_trigger_phrases ... ok
+test skills::tests::writing_plans_skill_contains_dag_and_beads_integration ... ok
+test skip_perm::tests::applies_set_session_mode_when_requested_mode_advertised ... ok
+test skip_perm::tests::skips_set_session_mode_when_no_advertisement ... ok
+test skip_perm::tests::skips_set_session_mode_when_requested_mode_not_advertised ... ok
+test skip_perm::tests::skips_set_session_mode_when_skip_permissions_false ... ok
+test spur_ext_interp::tests::cap_reason_bounds_cardinality_strictly ... ok
+test spur_ext_interp::tests::cap_reason_collapses_oversized_string_to_other_oversized ... ok
+test spur_ext_interp::tests::cap_reason_collapses_unknown_short_string_to_other ... ok
+test spur_ext_interp::tests::cap_reason_passes_allowlist_through ... ok
+test spur_ext_interp::tests::consumed_helper_records_terminal_and_signals_ack ... ok
+test spur_ext_interp::tests::file_touched_parses_kind ... ok
+test spur_ext_interp::tests::helper_rejects_missing_required_fields ... ok
+test spur_ext_interp::tests::helper_rejects_missing_schema ... ok
+test spur_ext_interp::tests::helper_rejects_oversized_body_before_allocation ... ok
+test spur_ext_interp::tests::helper_rejects_unknown_message_kind ... ok
+test spur_ext_interp::tests::helper_rejects_unknown_schema_version ... ok
+test spur_ext_interp::tests::ignored_helper_records_terminal_reason_and_signals_ack ... ok
+test spur_ext_interp::tests::peer_message_consumed_method_emits_passthrough ... ok
+test spur_ext_interp::tests::peer_message_ignored_method_emits_passthrough ... ok
+test spur_ext_interp::tests::peer_message_method_routes_to_router ... ok
+test spur_ext_interp::tests::progress_milestone_synthesizes_event ... ok
+test spur_ext_interp::tests::terminal_helper_emits_malformed_event_on_bad_message_id ... ok
+test spur_ext_interp::tests::terminal_helper_emits_malformed_event_on_missing_message_id ... ok
+test spur_ext_interp::tests::unknown_method_does_not_emit ... ok
+test tool_schemas::tests::plan_truncate_and_restart_input_rejects_unknown_fields ... ok
+test worker_server::tests::compute_p99_latency_ms_matches_spec ... ok
+test worker_server::tests::delegation_dispatch_guard_drop_emits_summary_via_try_emit ... ok
+test worker_server::tests::emit_worker_write_audit_inner_logs_warning_on_failure ... ok
+test worker_server::tests::emit_worker_write_audit_inner_noop_when_advanced_none ... ok
+test worker_server::tests::emit_worker_write_audit_inner_times_out_and_warns ... ok
+test worker_server::tests::emit_worker_write_audit_inner_writes_sentinel_comment ... ok
+test worker_server::tests::knowledge_context_root_falls_back_to_repo_db_when_worker_db_missing ... ok
+test worker_server::tests::knowledge_context_root_prefers_worker_db_when_present ... ok
+test worktree_authority::tests::authority_error_from_io_error ... ok
+test worktree_authority::tests::default_config_has_sane_values ... ok
+test worktree_authority::tests::new_constructs_with_funnel ... ok
+test worktree_authority::tests::owned_branch_brain_session_id_accepts_v2_and_skips_legacy_branches ... ok
+test worktree_authority::tests::owned_branch_brain_session_id_rejects_malformed_uuid ... ok
+test worktree_authority::tests::spawn_periodic_returns_abortable_handle ... ok
+test worktree_authority::tests::sweep_reclaims_v2_worktree_when_session_lock_missing ... ok
+test worktree_authority::tests::sweep_report_default_is_all_zero ... ok
+test worktree_authority::tests::sweep_respects_quarantine_grace ... ok
+test worktree_authority::tests::sweep_salvages_dirty_v2_worktree_before_deleting_branch ... ok
+test worktree_authority::tests::sweep_short_circuits_when_fs_unsafe_detected ... ok
+test worktree_authority::tests::sweep_skips_legacy_branches_per_i7 ... ok
+test worktree_authority::tests::sweep_skips_self_held_session ... ok
+test worktree_authority::tests::sweep_skips_unrecognized_branches ... ok
+
+test result: ok. 979 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 22.72s
+
+     Running tests/advanced_gating_handlers.rs (target/debug/deps/advanced_gating_handlers-98eda63af1460aec)
+
+running 2 tests
+test submit_plan_persist_as_epic_proceeds_for_community_gate ... ok
+test submit_plan_persist_as_epic_proceeds_for_pro_gate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/advanced_gating_static_guard.rs (target/debug/deps/advanced_gating_static_guard-94f9e18be9f1cea7)
+
+running 1 test
+test every_advanced_callsite_is_pm_pro_gated ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/audit_sentinel_round_trip.rs (target/debug/deps/audit_sentinel_round_trip-b407d4169f646adb)
+
+running 1 test
+test every_audit_sentinel_variant_round_trips_through_br_comments ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/block_timeout_continuation.rs (target/debug/deps/block_timeout_continuation-d80d782d27206f62)
+
+running 2 tests
+test test_attempt_threaded_into_continuation ... ok
+test test_block_timeout_fires_continuation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/brain_error_session_correlation.rs (target/debug/deps/brain_error_session_correlation-0a6252fdb2dc8156)
+
+running 1 test
+test brain_error_on_resume_connect_failure_carries_requested_session_id ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cancellation.rs (target/debug/deps/cancellation-c6990979fca338ae)
+
+running 5 tests
+test cancel_emits_delegation_completed ... ok
+test cancel_wins_over_slow_worker ... ok
+test normal_completion_removes_token ... ok
+test test_cancel_during_detached_path_continuation_delivers_cancelled ... ok
+test test_cancel_during_inline_window_fast_arm_wins ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/cec4a975_concurrent_hang_simulator.rs (target/debug/deps/cec4a975_concurrent_hang_simulator-4527b3dc1cfa711c)
+
+running 4 tests
+test cec4a975_concurrent_completions_alone_does_not_hang_or_hangs ... ignored, diagnostic reproducer; run explicitly while investigating cec4a975
+test cec4a975_concurrent_completions_plus_reads_does_not_hang_or_hangs ... ignored, diagnostic reproducer; run explicitly while investigating cec4a975
+test cec4a975_concurrent_completions_plus_reconciler_tick_does_not_hang_or_hangs ... ignored, diagnostic reproducer; run explicitly while investigating cec4a975
+test cec4a975_concurrent_completions_plus_writes_does_not_hang_or_hangs ... ignored, diagnostic reproducer; run explicitly while investigating cec4a975
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/code_graph_e2e.rs (target/debug/deps/code_graph_e2e-a0434f311e936e7a)
+
+running 47 tests
+test code_callers_and_callees_table_format_returns_rows_and_counts ... ok
+test code_file_symbols_returns_candidate_rows_for_worktree_relative_file ... ok
+test code_file_symbols_table_format_interns_file_paths_and_reduces_size ... ok
+test code_file_symbols_uses_symbol_uri_selector_for_legacy_empty_qualified_name ... ok
+test code_graph_compact_metadata_omits_healthy_defaults ... ok
+test code_graph_compact_metadata_preserves_stale_dirty_status ... ok
+test code_graph_response_format_invalid_returns_invalid_params ... ok
+test code_graph_response_format_omitted_keeps_full_metadata ... ok
+test code_graph_source_format_is_invalid_for_non_read_symbol_tools ... ok
+test code_graph_tools_accept_real_sixteen_hex_legacy_symbol_id ... ok
+test code_graph_tools_resolve_requested_symbol_as_of_historical_commit ... ok
+test code_graph_tools_traverse_artifact_built_from_real_rust_fixture ... ok
+test code_read_symbol_clamps_and_echoes_context_lines ... ok
+test code_read_symbol_marks_stale_but_returns_indexed_source ... ok
+test code_read_symbol_reads_source_by_path_name_tuple ... ok
+test code_read_symbol_reads_source_by_stable_symbol_id ... ok
+test code_read_symbol_returns_candidates_for_ambiguous_path_name_tuple ... ok
+test code_read_symbol_source_format_ambiguous_request_returns_compact_candidates ... ok
+test code_read_symbol_source_format_by_path_name_tuple_preserves_context_indicator ... ok
+test code_read_symbol_source_format_by_stable_symbol_id_is_source_first ... ok
+test code_read_symbol_source_format_preserves_stale_indexed_source_signal ... ok
+test code_resolve_prefers_real_submit_plan_mcp_tool_registration ... ok
+test code_resolve_returns_candidate_rows_without_traversal_payloads ... ok
+test code_search_candidate_rows_include_enclosing_scope ... ok
+test code_search_concurrent_dirty_requests_use_overlay_without_rebuild ... ok
+test code_search_echoes_requested_limit_when_clamped ... ok
+test code_search_ignores_untracked_non_source_scratch_file ... ok
+test code_search_overlay_ignores_rebuild_budget ... ok
+test code_search_recovers_macro_bodied_callees_for_tool_definitions ... ok
+test code_search_unrelated_edit_does_not_rebuild ... ok
+test code_search_uses_overlay_for_committed_unindexed_source_without_rebuild ... ok
+test code_search_uses_overlay_for_unsaved_edit_without_rebuild ... ok
+test code_search_uses_overlay_for_untracked_source_without_rebuild ... ok
+test code_subgraph_frontier_start_nodes_resume_budgeted_exploration ... ok
+test code_subgraph_returns_deleted_with_last_seen ... ok
+test code_subgraph_table_format_returns_node_edge_tables_and_unresolved_edges ... ok
+test code_symbol_history_reports_missing_commit_index_cleanly ... ok
+test code_symbol_history_returns_empty_when_no_snapshots ... ok
+test code_symbol_history_returns_rename_chain_for_parquet_and_in_memory_backends ... ok
+test code_symbol_history_uses_parquet_temporal_index_cache ... ok
+test code_symbol_info_returns_single_symbol_metadata ... ok
+test linked_worktree_cold_open_modified_file_awaits_overlay_past_latency_budget ... ok
+test linked_worktree_without_self_graph_overlays_modified_file_for_code_search_and_callers ... ok
+test linked_worktree_without_self_graph_overlays_root_for_code_search_and_callers ... ok
+test root_parquet_self_pointer_uses_overlay_for_unsaved_edit_without_rebuild ... ok
+test worker_code_search_freshness_uses_registered_worktree_root ... ok
+test worker_linked_worktree_without_self_graph_overlays_root_for_code_search_and_callers ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.88s
+
+     Running tests/continuation_brain_session_wiring.rs (target/debug/deps/continuation_brain_session_wiring-57458f2e333d2538)
+
+running 2 tests
+test scheduler_seeded_with_acp_session_id_drops_continuation_as_stale ... ok
+test scheduler_seeded_with_spur_session_id_accepts_continuation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/continuation_integration.rs (target/debug/deps/continuation_integration-b245e96406e0ec06)
+
+running 6 tests
+test autonomous_turn_is_self_describing ... ok
+test backpressure_overflow_on_full_channel ... ok
+test merged_turn_has_user_block_at_front_and_self_describing_marker ... ok
+test session_swap_drops_all_pending_continuations ... ok
+test test_no_double_delivery_on_block_timeout ... ok
+test test_no_double_delivery_on_fast_path ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/continuation_invariants.rs (target/debug/deps/continuation_invariants-f74c1d15a0a3e1b3)
+
+running 1 test
+test invc3_delegation_completed_precedes_prompt_dispatched_in_seq_order ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/continuation_properties.rs (target/debug/deps/continuation_properties-d647dedb1b8fd128)
+
+running 2 tests
+test inv_d1_every_continuation_terminates_exactly_once ... ok
+test inv_d6_oversized_never_requeues ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+
+     Running tests/delegation_watchdog.rs (target/debug/deps/delegation_watchdog-afd0bac04a6cddf5)
+
+running 8 tests
+test brain_cancel_preempts_watchdog ... ok
+test cancel_during_permit_wait_short_circuits ... ok
+test heartbeating_worker_survives_indefinitely ... ok
+test initial_grace_period_covers_startup ... ok
+test lagged_broadcast_does_not_reset_deadline ... ok
+test normal_completion_stops_watchdog_cleanly ... ok
+test silent_worker_triggers_watchdog_timeout ... ok
+test watchdog_disabled_by_default_no_spawn ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/delegation_watchdog_madsim.rs (target/debug/deps/delegation_watchdog_madsim-107c50cc492fbefd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/doc_navigate.rs (target/debug/deps/doc_navigate-99be4fcc87f47acc)
+
+running 1 test
+test doc_navigate_returns_fts_hits_with_score_and_lede ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+     Running tests/e2e_closure_v0e.rs (target/debug/deps/e2e_closure_v0e-b91483dacfcb09b9)
+
+running 3 tests
+test t_v0e_1_no_persisted_direct_dispatch ... ok
+test t_v0e_2_auto_merge_pr_is_opt_in ... ok
+test t_v0e_3_fast_forward_matches_polling ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+     Running tests/epic_completion.rs (target/debug/deps/epic_completion-a4b5f21fcf5832fb)
+
+running 12 tests
+test closed_epic_backfill_clears_stale_integration_pending_on_failure ... ok
+test closed_epic_backfill_emits_plan_completed_event ... ok
+test epic_closure_ignores_non_task_plan_scoped_issues ... ok
+test epic_completion_backfills_missing_audit_for_closed_terminal_epic ... ok
+test mock_pm_reconciler_cancelled_task_does_not_cascade_fail_dependent ... ok
+test mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready_to_merge ... ok
+test mock_pm_reconciler_success_completion_fires_awaiting_review_continuation ... ok
+test mock_pm_reconciler_terminal_failure_fires_escalated_task_continuation ... ok
+test reconciler_pushes_plan_completed_continuation_after_worker_completion_closes_epic ... ok
+test t_v0d_1_epic_closes_when_children_terminal ... ok
+test t_v0d_2_all_approved_epic_still_yields_plan_ready_to_merge ... ok
+test three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ring ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+
+     Running tests/event_replay_integration.rs (target/debug/deps/event_replay_integration-9390fb0e198b8dd1)
+
+running 3 tests
+test committed_synopsis_survives_subsequent_seed_replay ... ok
+test replay_populates_all_three_projections_from_fixture ... ok
+test synopsis_seed_replays_into_fresh_projection ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/event_stream_e2e.rs (target/debug/deps/event_stream_e2e-85222f89aaade1f7)
+
+running 1 test
+test funnel_plus_sink_round_trip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/feature_gate_plumbing.rs (target/debug/deps/feature_gate_plumbing-f3674a5f166c59f8)
+
+running 1 test
+test callback_server_stores_feature_gate_tier_entitlements ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/g_strict_e2e.rs (target/debug/deps/g_strict_e2e-3c1ea09c7215b28c)
+
+running 4 tests
+test g_strict_diamond_dag_closure_walks_both_parents ... ok
+test g_strict_grandparent_depth_chain_walks_full_closure ... ok
+test g_strict_prevents_bd_2dww_class_loss ... ok
+test single_parent_fast_path_emits_base_branch ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.33s
+
+     Running tests/g_strict_restart_recovery.rs (target/debug/deps/g_strict_restart_recovery-899f0be1794ad4db)
+
+running 1 test
+test g_strict_restart_then_dispatch_walks_rehydrated_overlay ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+     Running tests/get_task_diff_restart_recovery.rs (target/debug/deps/get_task_diff_restart_recovery-f07d6d74e6754b57)
+
+running 1 test
+test t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/handlers_create_issue_event.rs (target/debug/deps/handlers_create_issue_event-666030fe87e9e5fb)
+
+running 1 test
+test create_issue_emits_issue_created_event ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/handlers_fetch_outcome_artifact.rs (target/debug/deps/handlers_fetch_outcome_artifact-e350c93b74bb52ff)
+
+running 3 tests
+test fetch_outcome_artifact_cross_session_returns_unauthorized ... ok
+test fetch_outcome_artifact_missing_delegation_id_invalid_params ... ok
+test fetch_outcome_artifact_returns_full_text_for_same_session ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/handlers_get_issue.rs (target/debug/deps/handlers_get_issue-03c7c54da750bdac)
+
+running 2 tests
+test get_issue_missing_id_param_returns_invalid_params ... ok
+test get_issue_returns_issue_via_pm_service ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+
+running 4 tests
+test get_plan_status_missing_plan_id_invalid_params ...      Running tests/handlers_get_plan_status.rs (target/debug/deps/handlers_get_plan_status-2433e1bdd5b36bee)
+ok
+test get_plan_status_returns_status_with_outcomes_fields ... ok
+test get_plan_status_times_out_stuck_plan_resolution ... ok
+test get_plan_status_unknown_plan_id_invalid_params ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/handlers_get_task_diff.rs (target/debug/deps/handlers_get_task_diff-df15b4a2031dc9e2)
+
+running 5 tests
+test get_task_diff_cached_result_succeeds_without_pm_or_repo_root ... ok
+test get_task_diff_historical_lookup_returns_attempt_record_shape ... ok
+test get_task_diff_missing_plan_id_invalid_params ... ok
+test get_task_diff_returns_cached_diff_shape ... ok
+test get_task_diff_unauthorized_when_recovery_feature_absent ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/handlers_report_progress.rs (target/debug/deps/handlers_report_progress-1cd28468455489d8)
+
+running 4 tests
+test report_progress_emits_one_event_with_message_and_percent ... ok
+test report_progress_missing_message_returns_invalid_params_and_emits_nothing ... ok
+test report_progress_non_string_message_returns_invalid_params ... ok
+test report_progress_omits_percent_when_absent ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/handlers_update_issue.rs (target/debug/deps/handlers_update_issue-bc27738b2ac0495b)
+
+running 3 tests
+test update_issue_missing_id_invalid_params ... ok
+test update_issue_propagates_priority_and_assignee ... ok
+test update_issue_writes_comment_via_pm ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/init_agents.rs (target/debug/deps/init_agents-e085053af340dcb7)
+
+running 3 tests
+test init_agents_finds_only_stubs_on_path ... ok
+test init_agents_registers_full_spec12_config ... ok
+test init_agents_with_empty_path_returns_empty ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/inv_d9_proptest.rs (target/debug/deps/inv_d9_proptest-fefaf606acadc61c)
+
+running 1 test
+test inv_d9_arb_delegation_status_clips_under_budget ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.53s
+
+     Running tests/knowledge_context_pack_2_eval.rs (target/debug/deps/knowledge_context_pack_2_eval-41a5b2f790b0bf31)
+
+running 6 tests
+test ambiguous_sink_risk_reconciles_exact_inbound_and_bounds_popular_sink ... ignored, TODO(phase4): port main kcp2 graph-path refinements into spur-analyst handler
+test confidence_calibration_spans_low_medium_high ... ok
+test connected_subsystem_paths_are_calls_dyn_inclusive_and_deduped ... ignored, TODO(phase4): port main kcp2 graph-path refinements into spur-analyst handler
+test disjoint_singletons_emit_single_no_path_caveat ... ignored, TODO(phase4): port main kcp2 graph-path refinements into spur-analyst handler
+test scope_and_intent_variations_drive_defaults ... ok
+test stale_analyst_hash_suppresses_graph_reasoning_sections ... ok
+
+test result: ok. 3 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 1.76s
+
+     Running tests/labels_br_round_trip.rs (target/debug/deps/labels_br_round_trip-88b5039c4914ce5f)
+
+running 4 tests
+test br_create_enforces_50_char_cap_but_label_add_does_not ... ok
+test every_label_constructor_is_accepted_by_br ... ok
+test mutation_id_label_fits_under_br_create_cap ... ok
+test parsers_round_trip_through_real_br_labels ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/license_runtime.rs (target/debug/deps/license_runtime-b51cf406526af23e)
+
+running 1 test
+test runtime_emits_initial_license_snapshot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/license_runtime_fake_provider.rs (target/debug/deps/license_runtime_fake_provider-b11f7ff4e79df488)
+
+running 7 tests
+test active_to_degraded_and_back_via_validate ... ok
+test authoritative_invalid_propagates_to_funnel ... ok
+test degraded_from_preserves_invalid_status_text ... ok
+test injected_subscription_event_reaches_funnel ... ok
+test runtime_heartbeats_when_provider_requires_it ... ok
+test runtime_skips_heartbeat_when_provider_declines ... ok
+test runtime_validates_within_first_minute_after_boot ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.85s
+
+     Running tests/lineage_integration.rs (target/debug/deps/lineage_integration-a8012cb1ba0346f5)
+
+running 15 tests
+test applying_same_event_twice_is_idempotent_except_cost ... ok
+test concurrent_same_agent_workers_attribute_tasks_correctly ... ok
+test delegation_completed_modified_renders_as_succeeded_with_note ... ok
+test delegation_completed_rejected_renders_as_failed_with_reason ... ok
+test delegation_completed_setup_failed_renders_as_failed_with_setup_error ... ok
+test delegation_completed_timed_out_renders_as_failed_with_timeout_detail ... ok
+test dispatched_before_spawned_drains_on_worker_arrival ... ok
+test duplicate_delegation_requested_with_differing_payload_warns ... ok
+test duplicate_delegation_requested_with_same_payload_is_silent ... ok
+test eager_stamp_cannot_misattribute_when_dispatch_order_differs ... ok
+test forest_with_multiple_brains ... ok
+test full_flow_brain_to_review_to_resolved ... ok
+test replay_produces_byte_identical_state ... ok
+test replay_produces_identical_timestamps ... ok
+test retry_preserves_previous_attempts ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/lineage_projection.rs (target/debug/deps/lineage_projection-473fc4d5a526851b)
+
+running 30 tests
+test artifact_appends_to_current_attempt ... ok
+test attempt_n_mismatch_still_appends_attempt ... ok
+test brain_retired_before_spawn_is_buffered_as_orphan ... ok
+test brain_retired_cascades_descendants_to_cancelled ... ok
+test brain_retired_drains_pending_review_for_cascaded_ids ... ok
+test brain_retired_is_idempotent ... ok
+test brain_retired_preserves_terminal_descendants ... ok
+test brain_spawned_creates_root_node ... ok
+test child_spawn_before_parent_spawn_attaches_on_parent_arrival ... ok
+test cost_update_accumulates_on_current_attempt ... ok
+test delegation_completed_cancelled_moves_phase_to_cancelled_with_reason ... ok
+test delegation_completed_success_moves_phase_to_succeeded ... ok
+test lineage_finds_peer_edges_inbound_to_target_delegation ... ok
+test lineage_peer_message_accepted_creates_edge_on_source_node ... ok
+test orphan_phase_event_is_replayed_after_spawn ... ok
+test orphan_replay_does_not_retrigger_legacy_adapter ... ok
+test phase_change_terminal_sets_attempt_ended ... ok
+test phase_change_updates_node_phase ... ok
+test replay_equals_live ... ok
+test retry_started_pushes_new_attempt ... ok
+test review_cancelled_clears_pending_review ... ok
+test review_requested_populates_pending_review_and_phase ... ok
+test review_resolved_clears_pending_review ... ok
+test spawn_creates_root_when_no_parent ... ok
+test spawn_links_child_under_parent ... ok
+test two_clear_cycles_leave_one_running_root ... ok
+test worker_report_progress_updates_node_by_delegation_id ... ok
+test worker_spawn_after_retire_attaches_under_live_brain_not_zombie ... ok
+test worker_spawned_attaches_under_latest_brain ... ok
+test worker_spawned_drains_child_orphan_buffer ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 12 tests
+test distinct_issue_ids_pass ... ok
+test duplicate_non_none_issue_id_is_rejected ... ok
+test duplicate_none_issue_id_across_tasks_is_allowed ... ok
+test parse_parallel_tasks_requires_brain_session_id ... ok
+test per_task_base_branch_survives ... ok
+test per_task_base_branch_survives_when_sent_as_string ... ok
+test per_task_base_commit_survives ... ok
+test per_task_base_repo_main_survives ... ok
+test per_task_base_with_overlay_survives ... ok
+test per_task_context_files_survive_to_delegation_requests ... ok
+test per_task_delegation_plan_rejects_malformed_object ... ok
+test per_task_issue_id_and_delegation_plan_survive_unshared ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/mcp_delegate_parallel_fields.rs (target/debug/deps/mcp_delegate_parallel_fields-94eed341d833ae5b)
+     Running tests/mcp_delegate_to_worker_fields.rs (target/debug/deps/mcp_delegate_to_worker_fields-3e6e6b9fc8935e11)
+
+running 5 tests
+test base_branch_survives ... ok
+test base_branch_survives_when_sent_as_string ... ok
+test base_commit_survives ... ok
+test base_repo_main_survives ... ok
+test base_with_overlay_survives ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/mcp_delegation_catalog.rs (target/debug/deps/mcp_delegation_catalog-cd3728207eb40d54)
+
+running 3 tests
+test delegation_module_advertises_delegation_tools_in_compatibility_order ... ok
+test fetch_outcome_artifact_schema_advertises_phase3_sections ... ok
+test spur_mcp_legacy_catalog_no_longer_owns_delegation_tools ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mcp_parallel_response_shape.rs (target/debug/deps/mcp_parallel_response_shape-97f865943336db35)
+
+running 3 tests
+test test_parallel_no_serial_dispatch_regression ... ok
+test test_parallel_preserves_input_order ... ok
+test test_parallel_response_length_invariant_INV_ASYNC_6 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/mcp_shutdown_bounded_with_pending_collectors.rs (target/debug/deps/mcp_shutdown_bounded_with_pending_collectors-e8bb333fb94066ee)
+
+running 1 test
+test test_shutdown_bounded_with_pending_collectors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 2 tests
+     Running tests/mcp_signals_catalog.rs (target/debug/deps/mcp_signals_catalog-560ceabc290cdaf3)
+test core_brain_registry_preserves_compatibility_catalog ... ok
+test signal_module_advertises_only_worker_signal_tools ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/merge_budget_consistency.rs (target/debug/deps/merge_budget_consistency-1dcd49c108f4150f)
+
+running 1 test
+test conservative_estimate_dominates_exact_cost ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/merge_plan_restart_recovery.rs (target/debug/deps/merge_plan_restart_recovery-68139bfce34d8b9f)
+
+running 1 test
+test t_v0d_3_merge_plan_works_after_restart_on_persisted_plan ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/mutation_acyclicity.rs (target/debug/deps/mutation_acyclicity-93b37d42272037b0)
+
+running 1 test
+test cycle_detection_emits_violation_and_rolls_back ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/mutation_pagination.rs (target/debug/deps/mutation_pagination-ccaba1741878b335)
+
+running 1 test
+test perf_regressions::mutation_scans_paginate_past_10k_issues ... ignored, heavy: bulk-inserts 10k+ issues to guard the old list_issues cap; run with `cargo test -- --ignored`
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mutation_phase_2c.rs (target/debug/deps/mutation_phase_2c-19634e5044b78414)
+
+running 14 tests
+test brain_directed_retries_capped_by_max_attempts ... ok
+test legacy_taskspec_audit_round_trips_without_extended_fields ... ok
+test mutation_op_abandon_task_with_cascade_marks_descendants_failed ... ok
+test mutation_op_abandon_task_without_cascade_does_not_touch_descendants ... ok
+test mutation_op_modify_task_spec_emits_extended_taskspec_audit ... ok
+test mutation_op_modify_task_spec_rolls_back_to_prior_spec ... ok
+test mutation_op_modify_task_spec_updates_issue_body_labels_and_blocked_by ... ok
+test mutation_op_retry_task_resets_to_pending_preserves_history ... ok
+test mutation_op_retry_task_rolls_back_on_executor_failure ... ok
+test submit_plan_mutation_after_escalation_clears_signal_and_resumes_engine ... ok
+test submit_plan_mutation_applies_batch_atomically ... ok
+test submit_plan_mutation_clears_signal_escalated_label_on_success ... ok
+test submit_plan_mutation_rolls_back_on_cycle_detection ... ok
+test submit_plan_mutation_validates_no_cycles_post_hoc ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+     Running tests/mutation_phase_2e.rs (target/debug/deps/mutation_phase_2e-e7c7b6c506d37693)
+
+running 4 tests
+test add_dependency_self_reference_rejected_early ... ok
+test mutation_op_add_dependency_post_hoc_cycle_triggers_rollback ... ok
+test mutation_op_cancel_task_does_not_cascade_and_does_not_close_descendants ... ok
+test mutation_op_insert_task_before_creates_dep_edge_and_resets_target ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/mutation_rollback_compensation.rs (target/debug/deps/mutation_rollback_compensation-5777aa8736a98609)
+
+running 1 test
+test t_v0d_6_rollback_audit_payload_enumerates_succeeded_and_failed_compensations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/mutation_split.rs (target/debug/deps/mutation_split-932f48786f655285)
+
+running 1 test
+test split_task_happy_path_rewires_downstream_and_commits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/mutation_write_ahead.rs (target/debug/deps/mutation_write_ahead-a2ab0cfe117d4cc1)
+
+running 2 tests
+test compensate_mutation_orphans_emits_violation_breadcrumb ... ok
+test write_ahead_comment_persists_when_rewire_validation_fails ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/notebook_mcp_config.rs (target/debug/deps/notebook_mcp_config-96fe47c556b6925a)
+
+running 7 tests
+test brain_mcp_servers_preinclude_notebook_stdio_proxy_on_nonce_socket ... ok
+test bridge_reemits_as_spur_event ... ok
+test control_socket_path_distinguishes_socket_nonces ... ok
+test control_socket_path_maps_nonce_under_home ... ok
+test orchestrator_emits_one_notebook_socket_nonce_for_multiple_sessions ... ok
+test stable_notebook_nonce_differs_across_repos ... ok
+test stable_notebook_nonce_is_deterministic_for_same_repo ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/notification_drain_madsim.rs (target/debug/deps/notification_drain_madsim-ea5d4b4302510889)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/notification_pump_integration.rs (target/debug/deps/notification_pump_integration-773077624fd6b6f3)
+
+running 2 tests
+test pump_abort_stops_emission_for_retired_session ... ok
+test pump_emits_agent_notification_with_correct_session_id ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.51s
+
+     Running tests/orchestrator_panic_recovery.rs (target/debug/deps/orchestrator_panic_recovery-596a8bf9a2b728ee)
+
+running 1 test
+test orchestrator_panic_mid_oid_send_fails_loud_and_retries_without_stale_base_oid ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/peer_mailbox_concurrency.rs (target/debug/deps/peer_mailbox_concurrency-94192f6493f6ebfc)
+
+running 8 tests
+test concurrent_record_terminal_does_not_double_emit ... ok
+test concurrent_transitions_on_same_message_are_serialized ... ok
+test fan_out_100x100_pending_for_target_is_consistent ... ok
+test n_task_accept_race_with_distinct_envelopes ... ok
+test n_task_accept_race_with_same_envelope ... ok
+test reconciler_does_not_race_with_concurrent_workers ... ok
+test record_injection_concurrent_calls_are_idempotent ... ok
+test sequential_replay_after_acceptance_returns_already_accepted ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/peer_mailbox_drain_madsim.rs (target/debug/deps/peer_mailbox_drain_madsim-93b7380816f2b291)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/peer_mailbox_e2e.rs (target/debug/deps/peer_mailbox_e2e-8febd2fdff24886f)
+
+running 7 tests
+test carry_forward_re_injects_after_pre_delivery_failure ... ok
+test full_stage1_flow_accept_inject_consume ... ok
+test malformed_terminal_notification_emits_malformed_funnel_event ... ok
+test post_prompt_skip_via_error_arm_does_not_emit_audit_failed ... ok
+test reconcile_advance_to_delivered_then_worker_ack_consumes ... ok
+test rejected_message_is_not_in_pending ... ok
+test worker_ack_during_accepted_state_consumes_message ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/peer_mailbox_ledger_properties.rs (target/debug/deps/peer_mailbox_ledger_properties-837a11bfced556da)
+
+running 8 tests
+test prop_accept_invariants ... ok
+test prop_apply_is_deterministic ... ok
+test prop_apply_is_idempotent_for_terminal_state ... ok
+test prop_injection_set_grows_monotonically ... ok
+test prop_message_leaves_non_terminal_index_when_terminalized ... ok
+test prop_relaxed_arms_are_legal ... ok
+test prop_terminal_states_reject_outgoing_transitions_under_full_state_targeting ... ok
+test prop_transition_matrix_consistency ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
+     Running tests/peer_mailbox_production_wireup.rs (target/debug/deps/peer_mailbox_production_wireup-d1159f766e0b3a92)
+
+running 5 tests
+test orchestrator_drop_aborts_reconciler ... ok
+test peer_mailbox_enabled_false_silently_drops_notification ... ok
+test peer_mailbox_enabled_true_attaches_bundle_and_spawns_reconciler ... ok
+test reconciler_drains_stranded_message ... ok
+test session_slot_update_propagates_to_reconciler_emit ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/pending_sweep.rs (target/debug/deps/pending_sweep-7825528fc6d1e1a3)
+
+running 4 tests
+test startup_sweep_honors_plan_pending_grace_boundary ... ok
+test startup_sweep_quarantines_all_plan_children_with_comments ... ok
+test startup_sweep_resumes_after_prior_partial_child_quarantine ... ok
+test startup_sweep_skips_pending_epic_without_plan_id_and_emits_event ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/persisted_authority_flip.rs (target/debug/deps/persisted_authority_flip-e4c0c38704097c95)
+
+running 14 tests
+test active_plan_cache_converges_when_reconciler_ticks_race_review_task ... ok
+test t_v0c_10_startup_reclaims_mid_plan_and_continues_dispatch ... ok
+test t_v0c_11_startup_reclaim_clears_stale_dispatch_before_redispatch ... ok
+test t_v0c_1_persisted_submit_path_does_not_direct_dispatch ... ok
+test t_v0c_2_reconciler_dispatch_writes_label_and_dispatch_audit ... ok
+test t_v0c_3_completion_success_writes_ready_for_review_and_completion ... ok
+test t_v0c_4_reject_closes_task_and_blocks_watcher ... ok
+test t_v0c_5_request_changes_stays_open_and_reconciler_redispatches ... ok
+test t_v0c_6_watcher_uses_projected_plan_state_not_stub_state ... ok
+test t_v0c_7_cache_miss_rehydrates_persisted_plan_from_beads ... ok
+test t_v0c_8_orphaned_dispatch_requeues_and_late_completion_is_superseded ... ok
+test t_v0c_9_orphaned_mutation_plan_is_compensated_before_new_signals ... ok
+test versioned_cache_load_or_project_plan_bounds_retries_at_3 ... ok
+test versioned_cache_stays_stale_when_only_task_audits_advance ... ignored, pinned residual; closes in PR3
+
+test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.60s
+
+     Running tests/pidfile_single_brain.rs (target/debug/deps/pidfile_single_brain-1e4ea05e347a05ae)
+
+running 2 tests
+test second_brain_acquisition_refuses ... ok
+test stale_pidfile_is_reacquirable_after_restart ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/plan_audit_coverage.rs (target/debug/deps/plan_audit_coverage-83e8641a0b153d53)
+
+running 10 tests
+test approve_closes_issue_and_clears_ready_for_review ... ok
+test completion_cancelled_closes_issue_and_emits_completion_audit ... ok
+test completion_failed_closes_issue_and_emits_completion_audit ... ok
+test completion_success_writes_ready_for_review_and_completion_audit ... ok
+test dispatch_intent_includes_lease_label ... ok
+test epic_completion_audit_round_trips_through_collect_sentinels ... ok
+test plan_audit_coverage_all_four_sentinels ... ok
+test reject_closes_issue_and_adds_review_rejected_label ... ok
+test request_changes_does_not_emit_dispatch_audit ... ok
+test request_changes_leaves_issue_open_and_not_review_ready ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+     Running tests/plan_cache_projection.rs (target/debug/deps/plan_cache_projection-ab7e071829060ea4)
+
+running 2 tests
+test get_plan_status_preserves_in_progress_persisted_children ... ok
+test get_plan_status_serves_cached_plan_with_freshness_when_present ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/plan_cancelled_task_semantics.rs (target/debug/deps/plan_cancelled_task_semantics-09d58910111db715)
+
+running 1 test
+test approve_does_not_enqueue_new_dispatches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/plan_complete_marker.rs (target/debug/deps/plan_complete_marker-8460257c00e41760)
+
+running 1 test
+test build_epic_subgraph_emits_plan_complete_on_epic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/plan_ownership.rs (target/debug/deps/plan_ownership-8e3e090ca91b42fb)
+
+running 24 tests
+test concurrent_execute_epic_starts_only_one_active_plan_for_current_brain ... ok
+test concurrent_resume_plan_claims_only_one_active_plan_for_current_brain ... ok
+test execute_epic_allows_re_issue_by_current_brain ... ok
+test execute_epic_allows_unowned_plan ... ok
+test execute_epic_emits_plan_ownership_acquired_when_claiming_unowned_epic ... ok
+test execute_epic_emits_plan_ownership_acquired_when_re_issued_by_current_brain ... ok
+test execute_epic_refuses_plan_owned_by_other_brain ... ok
+test execute_epic_refuses_plan_with_ambiguous_owners ... ok
+test execute_epic_rejects_new_epic_when_current_brain_already_owns_active_plan ... ok
+test force_reclaim_plan_handles_unowned_plan ... ok
+test force_reclaim_plan_refuses_without_confirm ... ok
+test force_reclaim_plan_takes_over_from_other_brain ... ok
+test merge_plan_refuses_plan_owned_by_other_brain ... ok
+test merge_plan_refuses_unowned_plan ... ok
+test resume_plan_appears_in_tools_list ... ok
+test resume_plan_claims_unowned_plan ... ok
+test resume_plan_refuses_mixed_current_and_other_owner_labels ... ok
+test resume_plan_refuses_plan_owned_by_other_brain ... ok
+test resume_plan_rejects_duplicate_plan_epics ... ok
+test resume_plan_rejects_unowned_plan_when_current_brain_already_owns_active_plan ... ok
+test review_task_refuses_plan_owned_by_other_brain ... ok
+test review_task_refuses_unowned_plan ... ok
+test terminal_owned_plan_does_not_block_execute_epic ... ok
+test terminal_owned_plan_does_not_block_resume_plan_claim ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+
+     Running tests/plan_projection.rs (target/debug/deps/plan_projection-931e2e6c90e9a1d6)
+
+running 4 tests
+test current_for_session_keeps_active_plan_over_late_terminal_snapshot ... ok
+test current_for_session_prefers_active_plan ... ok
+test projection_derives_stage_depth_from_dependencies ... ok
+test projection_preserves_issue_id_for_lineage_join ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/plan_snapshot_events.rs (target/debug/deps/plan_snapshot_events-9f3a7a06f49d7241)
+
+running 6 tests
+test persisted_plan_snapshot_carries_owner_brain_session_id ... ok
+test persisted_submit_plan_emits_plan_snapshot_updated ... ok
+test reconciler_dispatch_and_completion_emit_refreshed_snapshots ... ok
+test recover_persisted_plans_emits_plan_snapshot_updated ... ok
+test recover_persisted_plans_skips_unowned_legacy_plan ... ok
+test review_task_emits_refreshed_plan_snapshot ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+     Running tests/pm_module_routes.rs (target/debug/deps/pm_module_routes-92f485438721f282)
+
+running 2 tests
+test brain_route_get_issue_matches_pm_module_response ... ok
+test brain_route_graph_subgraph_missing_root_matches_pm_module_error_shape ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/preview_task_base.rs (target/debug/deps/preview_task_base-a48f8f6e18b7bbc5)
+
+running 2 tests
+test preview_task_base_reports_conflict_when_overlays_collide ... ok
+test preview_task_base_returns_overlays_and_base_oid_when_clean ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/projector_state_machine.rs (target/debug/deps/projector_state_machine-81c23c6f690153be)
+
+running 1 test
+test audit_sequence_projection_matches_reference_model ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.74s
+
+     Running tests/reconciler_late_enable.rs (target/debug/deps/reconciler_late_enable-19cf55fcdeebe9d0)
+
+running 1 test
+test reconciler_starts_only_after_brain_session_id_is_bound ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/reconciler_shutdown.rs (target/debug/deps/reconciler_shutdown-cd63e2e8f8551662)
+
+running 1 test
+test reconciler_shutdown_on_cancel ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/reconciler_tick.rs (target/debug/deps/reconciler_tick-89c58139ba305925)
+
+running 39 tests
+test all_approved_epic_emits_plan_ready_to_merge ... ok
+test epic_closes_when_scoped_children_terminal ... ok
+test execute_epic_default_notify_path_dispatches_ready_task ... ok
+test execute_epic_persists_execution_scope_labels_on_epic_and_tasks ... ok
+test execute_epic_preserves_pre_existing_agent_label_on_child_task ... ok
+test execute_epic_rejects_persisted_non_terminal_epic_on_second_call ... ok
+test execute_epic_rolls_back_epic_scope_when_task_scope_persist_fails ... ok
+test execute_epic_shutdown_abort_does_not_emit_plan_snapshot ... ok
+test hybrid_fast_forward_matches_polling_projection ... ok
+test index_hygiene_removes_label_only_dispatch_after_grace ... ok
+test lease_sweep_does_not_report_missing_lease_without_dispatch_marker ... ok
+test lease_sweep_prefers_audit_delegation_over_mismatched_label ... ok
+test lease_sweep_skips_when_label_has_no_audit ... ok
+test observe_ready_returns_unblocked_task_only ... ok
+test observe_ready_summaries_preserve_plan_labels ... ok
+test observe_ready_via_br_returns_ready_tasks ... ok
+test observe_ready_via_br_suppresses_tasks_for_closed_complete_epic ... ok
+test pending_label_on_closed_epic_blocks_dispatch ... ok
+test persisted_overlay_conflict_emits_plan_task_blocked_on_setup_conflict_continuation ... ok
+test plan_enumeration_finds_tasks_buried_under_backlog ... ok
+test reconciler_cancels_during_tick ... ok
+test resolve_dispatch_orphan_emits_breadcrumb_and_clears_label ... ok
+test resolve_dispatch_orphan_prefers_audit_delegation_over_mismatched_label ... ok
+test resolve_dispatch_orphan_preserves_legacy_ready_for_review_marker ... ok
+test submit_plan_default_notify_path_dispatches_ready_task ... ok
+test tick_once_clears_dispatch_label_when_send_fails ... ok
+test tick_once_dispatches_ready_task_with_single_approved_dep_branch_base ... ok
+test tick_once_does_not_dispatch_partial_plan_after_child_create_failure ... ok
+test tick_once_does_not_reclaim_expired_lease_owned_by_another_brain ... ok
+test tick_once_does_not_reclaim_live_lease ... ok
+test tick_once_index_hygiene_converges_completion_without_label_write ... ok
+test tick_once_index_hygiene_is_idempotent_and_preserves_type_b_labels ... ok
+test tick_once_persists_dispatch_before_queue_send ... ok
+test tick_once_persists_failed_completion_when_respond_to_drops ... ok
+test tick_once_reclaims_expired_lease_dispatch ... ok
+test tick_once_skips_broken_plan_and_dispatches_other_ready_work ... ok
+test tick_once_skips_plan_owned_by_another_brain ... ok
+test tick_once_skips_terminal_epic_owned_by_another_brain ... ok
+test worker_success_after_orphan_clear_is_superseded ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.39s
+
+     Running tests/report_signal_tool.rs (target/debug/deps/report_signal_tool-ab69049a55a432c4)
+
+running 3 tests
+test report_signal_on_open_task_records_all_artifacts ... ignored, serial integration: heavy beads report_signal tests contend under full-suite parallel load (green standalone); run with `cargo test -p spur-core --test report_signal_tool -- --ignored`
+test report_signal_on_terminal_task_records_late_arrival ... ignored, serial integration: heavy beads report_signal tests contend under full-suite parallel load (green standalone); run with `cargo test -p spur-core --test report_signal_tool -- --ignored`
+test report_signal_threads_worker_call_context ... ignored, serial integration: heavy beads report_signal tests contend under full-suite parallel load (green standalone); run with `cargo test -p spur-core --test report_signal_tool -- --ignored`
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/request_changes_feedback_roundtrip.rs (target/debug/deps/request_changes_feedback_roundtrip-47fb718bb2e63805)
+
+running 1 test
+test request_changes_feedback_survives_reprojection_and_reaches_worker ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/resume_plan_bridge.rs (target/debug/deps/resume_plan_bridge-1097166f92018f8e)
+
+running 3 tests
+test mcp_server_plan_owned_by_other_emits_plan_command_error ... ok
+test no_brain_session_emits_plan_command_error ... ok
+test retry_plan_task_no_brain_session_emits_plan_command_error ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.06s
+
+     Running tests/retry_loop.rs (target/debug/deps/retry_loop-ead16c6d7a681a9a)
+
+running 4 tests
+test check_exceeded_is_strict_greater_than ... ok
+test retry_loop_counts_attempts_and_fails_after_limit_plus_one ... ok
+test retry_loop_returns_terminal_on_first_terminal ... ok
+test retry_loop_terminal_short_circuits_mid_loop ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/retry_reflexion.rs (target/debug/deps/retry_reflexion-d71f81f0918e563d)
+
+running 1 test
+test third_attempt_prompt_contains_both_prior_attempts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review_gate_integration.rs (target/debug/deps/review_gate_integration-29e29f56072c743b)
+
+running 13 tests
+test approve_decision_produces_success_status ... ok
+test brain_cancellation_during_review_emits_review_cancelled ... ok
+test dispatcher_ignores_non_review_variants ... ok
+test dispatcher_routes_submit_review_to_sink ... ok
+test modify_decision_produces_modified_status ... ok
+test reject_decision_produces_rejected_status ... ok
+test retry_limit_exceeded_produces_failed ... ok
+test retry_then_approve_produces_success ... ok
+test review_cancelled_with_sender_dropped_reason_clears_pending_review ... ok
+test review_cancelled_with_timeout_reason_clears_pending_review ... ok
+test should_commit_worker_diff_matches_expected_variants ... ok
+test should_preserve_worktree_matches_expected_variants ... ok
+test timeout_produces_timed_out_status_and_removes_entry ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review_handle.rs (target/debug/deps/review_handle-7fa36c55e23b8550)
+
+running 2 tests
+test register_handle_double_register_fails ... ok
+test review_handle_emit_routes_to_funnel_and_carries_receiver ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review_loopback_e2e.rs (target/debug/deps/review_loopback_e2e-d4b711b45f7202a7)
+
+running 6 tests
+test e2e_approve ... ok
+test e2e_modify ... ok
+test e2e_reject ... ok
+test e2e_retry_limit_exceeded ... ok
+test e2e_retry_then_approve ... ok
+test e2e_timeout_produces_timed_out ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review_sink.rs (target/debug/deps/review_sink-18397d5eaa40cde0)
+
+running 5 tests
+test attempt_n_mismatch_drops_decision ... ok
+test double_register_fails ... ok
+test register_then_submit_delivers_decision ... ok
+test remove_cleans_up_entry ... ok
+test unknown_executor_id_is_dropped ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review_task_nonadvisory_writes.rs (target/debug/deps/review_task_nonadvisory_writes-cb9756720cdb0f97)
+
+running 3 tests
+test nonadvisory_retry_does_not_duplicate_successful_audit_ops ... ok
+test nonadvisory_review_writes_epic_task_transition_audit ... ok
+test server_nonadvisory_review_error_invalidates_active_plan_cache ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+     Running tests/rework_reuse_prior_worktree_e2e.rs (target/debug/deps/rework_reuse_prior_worktree_e2e-dd6e2d12eb951d1c)
+
+running 5 tests
+test approved_dep_overlay_and_reuse_branch_are_both_present_on_redispatch ... ignored, current reconciler base-spec optimization for single-parent deps emits BaseSpec::Branch, not WithOverlay; asserting overlay parity needs production change
+test happy_path_reuse_prior_worktree_and_merge_single_commit ... ok
+test replay_determinism_preserves_reuse_prior_worktree_in_projection ... ok
+test review_feedback_sentinel_byte_stable_and_projectable ... ok
+test validation_rejects_reuse_without_worker_branch ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/rmcp_streamable_http.rs (target/debug/deps/rmcp_streamable_http-1ca606ededf3f348)
+
+running 1 test
+test rmcp_client_can_initialize_list_tools_and_call_tool ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/scheduler_properties.rs (target/debug/deps/scheduler_properties-c6f962dbd2a8876a)
+
+running 3 tests
+test no_continuation_is_ever_scheduled_twice ... ok
+test pending_user_is_never_leapfrogged_by_continuation ... ok
+test turn_in_flight_implies_idle ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.36s
+
+     Running tests/server_start_pidfile.rs (target/debug/deps/server_start_pidfile-cb4478daa97b837f)
+
+running 3 tests
+test beads_backed_start_allows_concurrent_brain_servers ... ok
+test beads_backed_start_requires_repo_root_before_listener_boot ... ok
+test dropping_server_handle_releases_pidfile_for_next_start ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/session_milestone_events.rs (target/debug/deps/session_milestone_events-98155890b1836a95)
+
+running 2 tests
+test cold_resume_emits_no_retire_events ... ok
+test resume_emits_brain_connecting_before_connect_fails ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/session_pump_retire_madsim.rs (target/debug/deps/session_pump_retire_madsim-30f9d1c6b2e688fc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/shutdown_mcp_server_bounded.rs (target/debug/deps/shutdown_mcp_server_bounded-6bc862d0655103a0)
+
+running 2 tests
+test shutdown_mcp_server_bounds_guard_on_none_server_early_return ... ok
+test shutdown_mcp_server_returns_even_if_guard_task_hangs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.00s
+
+     Running tests/signal_dedup.rs (target/debug/deps/signal_dedup-cd2e413cd51ddc17)
+
+running 7 tests
+test distinct_signal_on_task_with_prior_processed_label_is_not_skipped ... ok
+test duplicate_signal_comments_with_same_signal_id_commit_once ... ok
+test watcher_processes_only_one_signal_per_task_per_tick ... ok
+test watcher_projects_real_plan_state_for_scoring ... ok
+test watcher_reserves_signal_before_mutation_and_does_not_retry_on_failure ... ok
+test watcher_skips_review_rejected_tasks_even_if_signal_label_exists ... ok
+test watcher_skips_signal_task_without_ready_for_review_label ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/signal_late_arrival.rs (target/debug/deps/signal_late_arrival-08c703883cfa6328)
+
+running 1 test
+test report_signal_on_closed_task_records_late_arrival ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/skills_installer.rs (target/debug/deps/skills_installer-e3439fe82c304fd9)
+
+running 8 tests
+test cross_version_upgrade_updates_unedited_files ... ok
+test folded_override_description_renders_valid_codex_frontmatter ... ok
+test fresh_install_creates_all_expected_files ... ok
+test override_body_flows_into_every_adapter ... ok
+test preexisting_user_file_without_marker_is_preserved ... ok
+test rerun_is_idempotent_no_writes ... ok
+test stale_managed_worker_adapter_file_for_brain_skill_is_removed ... ok
+test user_hand_edit_is_preserved ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s
+
+
+running 8 tests
+     Running tests/skip_perm_helper.rs (target/debug/deps/skip_perm_helper-6b54be940e49821a)
+test calls_set_session_mode_when_bypass_and_mode_present ... ok
+test load_session_calls_set_session_mode_when_bypass_and_mode_present ... ok
+test load_session_set_session_mode_error_is_non_fatal ... ok
+test load_session_skips_set_session_mode_when_flag_off ... ok
+test load_session_skips_set_session_mode_when_mode_absent ... ok
+test set_session_mode_error_is_non_fatal ... ok
+test skips_set_session_mode_when_flag_off ... ok
+test skips_set_session_mode_when_mode_absent ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/startup_recovery.rs (target/debug/deps/startup_recovery-bcb1f3c3e3b4ab74)
+
+running 4 tests
+test dropping_startup_recovery_handle_cancels_in_flight_task ... ok
+test recover_persisted_plans_skips_other_owned_and_unowned_plans ... ok
+test start_does_not_recover_before_brain_session_is_bound ... ok
+test start_returns_before_deferred_pending_sweep_finishes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/submit_plan_audit.rs (target/debug/deps/submit_plan_audit-35907cf0143aa97c)
+
+running 6 tests
+test emit_plan_submit_audit_writes_sentinel_on_epic ... ok
+test plan_submit_audit_includes_brain_session_id ... ok
+test plan_submit_audit_includes_explicit_base ... ok
+test plan_submit_audit_includes_merge_base_and_execution_mode ... ok
+test plan_submit_sentinel_round_trips_base_snapshot_oid ... ok
+test submit_plan_persists_plan_owner_on_epic ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/submit_plan_explicit_base.rs (target/debug/deps/submit_plan_explicit_base-6aa129719da8b90f)
+
+running 2 tests
+test submit_plan_explicit_branch_base_with_dirty_wt ... ok
+test submit_plan_unknown_base_branch_returns_error ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/submit_plan_id_collision.rs (target/debug/deps/submit_plan_id_collision-3d2272070f35e6cc)
+
+running 2 tests
+test concurrent_submit_plan_no_id_collision ... ok
+test submit_plan_persists_many_children_without_id_collision ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/submit_plan_idempotency.rs (target/debug/deps/submit_plan_idempotency-2e61fecc4b3f69d6)
+
+running 3 tests
+test submit_plan_client_idempotency_key_survives_brain_restart ... ok
+test submit_plan_record_failure_after_epic_build_orphans_plan_until_retry ... ignored, pinned residual; closes in PR3
+test submit_plan_rejects_blank_client_idempotency_key ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/submit_plan_persist.rs (target/debug/deps/submit_plan_persist-22302cc422cfecd2)
+
+running 17 tests
+test build_entries_backfills_task_map_and_leaves_unmatched_none ... ok
+test build_entries_does_not_overwrite_existing_issue_id ... ok
+test build_entries_ephemeral_keeps_all_issue_ids_none ... ok
+test children_are_in_topological_order ... ok
+test children_carry_spur_plan_id_plan_task_id_and_agent_labels ... ok
+test children_depends_on_carries_task_id_keys_not_beads_ids ... ok
+test children_parent_field_is_unset_before_epic_creation ... ok
+test cycle_produces_error ... ok
+test epic_create_carries_plan_id_label_and_epic_type ... ok
+test persisted_submit_plan_derives_epic_title_from_first_task_when_omitted ... ok
+test persisted_submit_plan_does_not_enqueue_delegation_request ... ok
+test persisted_submit_plan_rejects_whitespace_only_task_when_epic_title_omitted ... ok
+test persisted_submit_plan_still_rejects_empty_tasks_without_epic_title ... ok
+test review_approve_releases_plan_lock_before_beads_io ... ok
+test submit_plan_explicit_false_rejects_with_migration_guidance ... ok
+test submit_plan_omitted_persist_as_epic_defaults_to_persisted_path ... ok
+test submit_plan_schema_still_advertises_tasks_as_required ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests/submit_plan_schema.rs (target/debug/deps/submit_plan_schema-f2407cce5829d2a1)
+
+running 8 tests
+test missing_epic_title_is_documented_as_handler_error ... ok
+test persist_fields_are_not_required ... ok
+test schema_advertises_base_oneof ... ok
+test schema_advertises_client_idempotency_key_as_optional_string ... ok
+test schema_advertises_epic_body_as_string ... ok
+test schema_advertises_epic_title_as_string ... ok
+test schema_base_field_is_optional ... ok
+test schema_does_not_advertise_persist_as_epic ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/tool_catalog.rs (target/debug/deps/tool_catalog-f9c70ccc069c6370)
+
+running 4 tests
+test code_graph_tools_advertise_response_format_in_catalogs ... ok
+test delegation_tools_are_owned_by_core_catalog ... ok
+test pm_module_definitions_are_composed_into_brain_catalog ... ok
+test tool_catalog_matches_expected ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/tool_schema_stability.rs (target/debug/deps/tool_schema_stability-f649da4f1df7f3e9)
+
+running 6 tests
+test delegation_schemas_use_defs_refs ... ok
+test published_tool_schemas_use_defs_refs ... ok
+test schema_value_renames_top_level_definitions_to_defs ... ok
+test test_delegate_parallel_schema_stability ... ok
+test test_delegate_parallel_task_schema_stability ... ok
+test test_delegate_to_worker_schema_stability ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/worker_mcp_e2e.rs (target/debug/deps/worker_mcp_e2e-46ee5d9e4b90e939)
+
+running 1 test
+test end_to_end_orchestrator_worker_mcp_get_issue ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/worker_mcp_ensure_smoke.rs (target/debug/deps/worker_mcp_ensure_smoke-e1c6e28fd16b57cc)
+
+running 1 test
+test ensure_worker_mcp_server_boots_real_listener_and_caches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/worker_mcp_security.rs (target/debug/deps/worker_mcp_security-dc881f1642c476b2)
+
+running 7 tests
+test cross_brain_session_id_is_rejected ... ok
+test forged_session_id_is_rejected ... ok
+test post_initialize_request_without_token_succeeds_with_valid_session_id ... ok
+test t30_cross_delegation_spoof_rejected ... ok
+test t31_enable_worker_mcp_default_on_contract ... ok
+test t32_cross_brain_session_fetch_unauthorized ... ok
+test t33_token_not_in_argv_or_env ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/worker_mcp_stress.rs (target/debug/deps/worker_mcp_stress-887f5c08f1177ba8)
+
+running 2 tests
+test concurrency_n8_dedupes_server_and_summarizes_each_delegation ... ok
+test flush_failure_emits_summary_with_errors ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests/worker_server_audit.rs (target/debug/deps/worker_server_audit-d44b6d903898c82d)
+
+running 6 tests
+test drop_buffer_after_receiver_dropped_does_not_panic ... ok
+test drop_buffer_sends_on_flush_channel ... ok
+test drop_buffer_with_no_entries_is_silent ... ok
+test flush_delegation_drains_buffer_and_emits_summary_once ... ok
+test idle_flusher_drains_buffer_and_complete_emits_single_summary ... ok
+test read_tool_calls_append_to_buffer ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/worker_server_audit_flush.rs (target/debug/deps/worker_server_audit_flush-1be411730f2de9b6)
+
+running 3 tests
+test flusher_emits_sentinel_for_stale_entry ... ok
+test flusher_exits_within_1s_of_cancellation ... ok
+test flusher_warns_when_all_entries_have_no_target_issue_id ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/worker_server_dispatch.rs (target/debug/deps/worker_server_dispatch-c183e1948ad62522)
+
+running 16 tests
+test code_graph_worker_tools_do_not_duplicate_structured_payload_as_text_content ... ok
+test curated_tool_calls_route_and_deserialize_params ... ok
+test dispatcher_drop_emits_summary_event_with_correct_counts ... ok
+test json_rpc_batched_request_rejected ... ok
+test report_progress_disabled_returns_success_without_calling_handler ... ok
+test report_progress_enabled_with_capacity_emits_event ... ok
+test report_progress_full_bus_silently_drops_and_returns_success ... ok
+test tools_call_brain_only_tool_returns_authorization_error ... ok
+test tools_call_code_file_symbols_compact_and_table_formats_are_structured_only ... ok
+test tools_call_code_file_symbols_omitted_response_format_stays_full ... ok
+test tools_call_code_graph_metadata_tools_are_reachable ... ok
+test tools_call_code_read_symbol_source_format_is_structured_only ... ok
+test tools_call_get_issue_routes_to_handler ... ok
+test tools_list_advertises_response_format_for_worker_code_graph_tools ... ok
+test tools_list_returns_curated_worker_tools_including_code_graph_reads ... ok
+test worker_signal_tools_route_through_injected_sink ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
+
+     Running tests/worker_server_lifecycle.rs (target/debug/deps/worker_server_lifecycle-5efa80d7fcee96a9)
+
+running 5 tests
+test active_count_tracks_concurrent_dispatch_entry_and_exit ... ok
+test shutdown_blocks_until_active_count_reaches_zero ... ok
+test shutdown_returns_drained_quickly_when_no_in_flight_dispatchers ... ok
+test shutdown_warns_and_returns_undrained_when_deadline_elapses ... ok
+test start_binds_listener_and_returns_url ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.50s
+
+     Running tests/worker_server_token.rs (target/debug/deps/worker_server_token-5c173937f04d7c03)
+
+running 10 tests
+test expired_token_rejected ... ok
+test long_bearer_token_rejected_quickly ... ok
+test malformed_token_returns_401 ... ok
+test missing_token_returns_401 ... ok
+test session_reuse_survives_expired_token_after_session_open ... ok
+test tampered_hmac_rejected ... ok
+test valid_token_round_trip_header ... ok
+test valid_token_round_trip_query ... ok
+test worker_tools_list_includes_knowledge_context_pack ... ok
+test wrong_brain_session_id_rejected ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.39s
+
+     Running tests/worktree_authority.rs (target/debug/deps/worktree_authority-ed008d00e6b79d08)
+
+running 5 tests
+test orchestrator_restart_does_not_wipe_in_flight_v2_workers ... ok
+test self_held_remove_allows_sweep_to_reclaim ... ok
+test self_held_session_prevents_sweep_during_active_use ... ok
+test two_orchestrators_do_not_sweep_each_others_worktrees ... ok
+test v2_worker_survives_authority_sweep_when_session_alive ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/worktree_failure_chain_visibility.rs (target/debug/deps/worktree_failure_chain_visibility-213dd8a01092fcbe)
+
+running 1 test
+test create_worktree_v2_failure_surfaces_underlying_git_stderr_when_formatted_with_chain ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests spur_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+--- sccache stats (spur/worktrees/s3-verify) ---
+Compile requests                     821
+Compile requests executed            750
+Cache hits                           555
+Cache hits (Assembler)                98
+Cache hits (C/C++)                   266
+Cache hits (Rust)                    191
+Cache misses                         195
+Cache misses (Rust)                  195
+Cache hits rate                    74.00 %
+Cache hits rate (Assembler)       100.00 %
+Cache hits rate (C/C++)           100.00 %
+Cache hits rate (Rust)             49.48 %
+Cache timeouts                         0
+Cache read errors                      0
+Forced recaches                        0
+Cache write errors                     0
+Cache errors                           0
+Compilations                         195
+Compilation failures                   0
+Non-cacheable compilations             0
+[build] Done. target lives at i-0b9b64ba8a34d0ea2:/mnt/cargo/targets/spur/worktrees/s3-verify — use scripts/cloud-build/fetch.sh to pull artifacts.
+[build] Remote build queue: released ticket 00000000000000000008.
+######## DONE rc=0 (145s) ########
+@@@@@@@@ WRAP DONE overall_rc=0 17:24:38 @@@@@@@@
