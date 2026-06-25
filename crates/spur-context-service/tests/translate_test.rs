@@ -114,6 +114,61 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
 }
 
 #[test]
+fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
+    let root = unique_temp_dir("translate-no-embeddings")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture_with_symbol_vector(&artifact_dir, "CAST(NULL AS FLOAT[])")?;
+
+    let stats = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        source_root: None,
+        catalog_dsn: catalog_dsn.clone(),
+    })?;
+
+    assert_eq!(stats.rows_inserted.get("nodes"), Some(&1));
+    assert_eq!(stats.rows_inserted.get("symbol_embeddings"), Some(&0));
+    assert_eq!(stats.rows_inserted.get("section_bodies"), Some(&1));
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let embeddings_status: String = conn.query_row(
+        "SELECT embeddings_status FROM package_catalog WHERE source = ? AND package = ? AND revision = ?",
+        params![SOURCE, PACKAGE, REVISION],
+        |row| row.get(0),
+    )?;
+    assert_eq!(embeddings_status, "skipped");
+    assert_eq!(table_row_count(&conn, "symbol_embeddings")?, 0);
+
+    let result = query_knowledge_context(
+        &conn,
+        &KnowledgeContextOptions {
+            query: "alpha".to_owned(),
+            source: SOURCE.to_owned(),
+            package: PACKAGE.to_owned(),
+            revision: REVISION.to_owned(),
+            scope: KnowledgeScope::Code,
+            limit: 3,
+            query_vec: None,
+        },
+    )?;
+    assert!(
+        result.primary_evidence.iter().any(|item| item.grounding == "bm25-code"),
+        "expected BM25 code evidence without embeddings"
+    );
+    Ok(())
+}
+
+#[test]
 fn translated_artifact_read_symbol_returns_source_from_package_tree() -> Result<()> {
     let root = unique_temp_dir("translate-read")?;
     let artifact_dir = root.join("artifact");
@@ -203,6 +258,16 @@ fn translated_artifact_vector_search_returns_ranked_symbol() -> Result<()> {
 }
 
 fn write_artifact_fixture(artifact_dir: &Path) -> Result<()> {
+    write_artifact_fixture_with_symbol_vector(
+        artifact_dir,
+        "list_transform(range(0, 768), x -> CASE WHEN x = 0 THEN 1.0::FLOAT ELSE 0.0::FLOAT END)",
+    )
+}
+
+fn write_artifact_fixture_with_symbol_vector(
+    artifact_dir: &Path,
+    symbol_vector_expr: &str,
+) -> Result<()> {
     fs::create_dir_all(artifact_dir.join("code_symbols.lance"))
         .context("create code symbol sidecar dir")?;
     fs::create_dir_all(artifact_dir.join("sections.lancedb"))
@@ -290,7 +355,7 @@ fn write_artifact_fixture(artifact_dir: &Path) -> Result<()> {
                 'alpha' AS entity_name,
                 'function' AS symbol_kind,
                 'pub fn alpha() {{}}' AS embed_text,
-                list_transform(range(0, 768), x -> CASE WHEN x = 0 THEN 1.0::FLOAT ELSE 0.0::FLOAT END) AS vector,
+                {symbol_vector_expr} AS vector,
                 'code-hash' AS content_hash,
                 'embed-hash' AS embedding_input_hash,
                 'JinaEmbeddingsV2BaseCode' AS embedding_model

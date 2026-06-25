@@ -176,12 +176,12 @@ fn build_graph_invokes_spur_with_progress_visible() -> Result<()> {
     let root = unique_temp_dir("worker-build-graph")?;
     let bin_dir = root.join("bin");
     fs::create_dir_all(&bin_dir).context("create fake bin dir")?;
-    let record = root.join("spur-args.txt");
+    let record = root.join("spur-record.txt");
     let fake_spur = bin_dir.join("spur");
     fs::write(
         &fake_spur,
         format!(
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > {}\n",
+            "#!/usr/bin/env bash\n{{\n  printf 'args=%s\\n' \"$*\"\n  printf 'skip_embeddings=%s\\n' \"${{SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS-}}\"\n}} > {}\n",
             record.display()
         ),
     )
@@ -206,10 +206,11 @@ fn build_graph_invokes_spur_with_progress_visible() -> Result<()> {
 
     build_graph(&source, &artifact)?;
 
-    let args = fs::read_to_string(&record).context("read fake spur args")?;
-    assert!(args.contains("graph build"));
-    assert!(args.contains("--no-analyst"));
-    assert!(!args.contains("--quiet"));
+    let record = fs::read_to_string(&record).context("read fake spur record")?;
+    assert!(record.contains("args=graph build"));
+    assert!(record.contains("--no-analyst"));
+    assert!(!record.contains("--quiet"));
+    assert!(record.contains("skip_embeddings=1"));
     Ok(())
 }
 
