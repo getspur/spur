@@ -596,11 +596,6 @@ fn translate_with_source_root(
     source_root: Option<&Path>,
     env: &JobEnv,
 ) -> Result<TranslateStats, WorkerError> {
-    // Use DuckDB CLI for the translate step. The Rust duckdb crate's
-    // linux_arm64 DuckLake extension (both v1.4.4 and v1.5.4) has a bug
-    // where INSERTs to DuckLake tables return Ok but never flush the data
-    // to S3 parquet files. The CLI binary handles this correctly.
-    let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
     let revision_kind = if env.revision.contains('.') { "semver" } else { "git_sha" };
 
     let actual_artifact = if artifact_dir.join("nodes.parquet").is_file() {
@@ -618,155 +613,19 @@ fn translate_with_source_root(
 
     eprintln!("[worker] artifact: {}", actual_artifact.display());
 
-    let sql = generate_translate_sql(&actual_artifact, env, revision_kind, &region);
+    let opts = TranslateOptions {
+        source: env.source.clone(),
+        package: env.package.clone(),
+        revision: env.revision.clone(),
+        revision_kind: revision_kind.to_owned(),
+        artifact_dir: actual_artifact,
+        source_root: source_root.map(|p| p.to_path_buf()),
+        catalog_dsn: env.catalog_dsn.clone(),
+    };
 
-    let sql_path = PathBuf::from("/tmp/translate.sql");
-    fs::write(&sql_path, &sql)
-        .map_err(|e| WorkerError::Translate(format!("write SQL file: {e}")))?;
-
-    eprintln!("[worker] running DuckDB CLI translate...");
-    let result = Command::new("duckdb")
-        .arg("-f")
-        .arg(&sql_path)
-        .output()
-        .map_err(|e| WorkerError::Translate(format!("failed to run duckdb CLI: {e}")))?;
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-
-    if !result.status.success() {
-        return Err(WorkerError::Translate(format!(
-            "duckdb CLI failed (exit {:?}): {stderr}\n{stdout}",
-            result.status.code()
-        )));
-    }
-
-    eprintln!("[worker] CLI translate completed");
-
-    Ok(TranslateStats {
-        rows_inserted: std::collections::HashMap::new(),
-        snapshot_id: 0,
-    })
-}
-
-fn generate_translate_sql(
-    artifact: &Path,
-    env: &JobEnv,
-    revision_kind: &str,
-    region: &str,
-) -> String {
-    let catalog_path = env.catalog_dsn.replace('\'', "''");
-    let package = env.package.replace('\'', "''");
-    let source = env.source.replace('\'', "''");
-    let revision = env.revision.replace('\'', "''");
-    let artifact_path = artifact.to_string_lossy().replace('\'', "''");
-    let secret_sql = resolve_s3_secret_sql(region);
-    let (major, minor, patch) = parse_semver(&env.revision, revision_kind);
-
-    format!(
-        r#"
-INSTALL ducklake; LOAD ducklake;
-INSTALL httpfs; LOAD httpfs;
-{secret_sql}
-
-ATTACH 'ducklake:{catalog_path}' AS spur_context (DATA_PATH 's3://spur-context/data/', OVERRIDE_DATA_PATH TRUE, AUTOMATIC_MIGRATION TRUE);
-USE spur_context;
-
-{schema_sql}
-
-BEGIN TRANSACTION;
-
-DELETE FROM nodes WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM edges WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM edges_unresolved WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM files WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM file_manifests WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM section_bodies WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-DELETE FROM symbol_embeddings WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-
-INSERT INTO nodes (stable_symbol_id, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch, file_path, byte_range_start, byte_range_end, line_start, line_end, entity_name, qualified_name, symbol_kind, anchor_hash, enclosing_scope)
-SELECT stable_symbol_id, '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}, file_path, byte_range_start, byte_range_end, line_start, line_end, entity_name, qualified_name, symbol_kind, anchor_hash, enclosing_scope
-FROM read_parquet('{artifact_path}/nodes.parquet');
-
-INSERT INTO edges (source_stable_id, target_stable_id, target_package, target_label, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch, relation, edge_kind, confidence, confidence_score, bind_method, receiver_text, scope_text)
-SELECT source_stable_id, target_stable_id, CAST(NULL AS VARCHAR), target_label, '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}, relation, edge_kind, confidence, confidence_score::DOUBLE, bind_method, receiver_text, scope_text
-FROM read_parquet('{artifact_path}/edges.parquet');
-
-INSERT INTO edges_unresolved (source_stable_id, target_label, target_package, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch, relation, edge_kind, confidence, confidence_score, bind_method, receiver_text, scope_text)
-SELECT source_stable_id, target_label, import_path, '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}, relation, edge_kind, confidence, confidence_score::DOUBLE, bind_method, receiver_text, scope_text
-FROM read_parquet('{artifact_path}/edges_unresolved.parquet');
-
-INSERT INTO files (stable_file_id, file_path, source_text, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch)
-SELECT stable_file_id, file_path, CAST(NULL AS VARCHAR), '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}
-FROM read_parquet('{artifact_path}/files.parquet');
-
-INSERT INTO file_manifests (stable_file_id, path, content_oid, node_ids, package, source, revision, revision_kind, semver_major, semver_minor, semver_patch)
-SELECT stable_file_id, path, content_oid, list_transform(node_ids, node_id -> CAST(node_id AS VARCHAR)), '{package}', '{source}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}
-FROM read_parquet('{artifact_path}/file_manifests.parquet');
-
-COMMIT;
-
-BEGIN TRANSACTION;
-DELETE FROM package_catalog WHERE source = '{source}' AND package = '{package}' AND revision = '{revision}';
-INSERT INTO package_catalog (source, package, revision, revision_kind, semver_major, semver_minor, semver_patch, snapshot_id, indexed_at, index_status, embeddings_status, row_counts)
-VALUES ('{source}', '{package}', '{revision}', '{revision_kind}', {major}, {minor}, {patch}, 0, CURRENT_TIMESTAMP, 'complete', 'skipped', '{{}}');
-COMMIT;
-
-CALL ducklake_flush_inlined_data('spur_context');
-CHECKPOINT;
-"#,
-        secret_sql = secret_sql,
-        catalog_path = catalog_path,
-        schema_sql = include_str!("../sql/catalog_tables.sql"),
-        source = source,
-        package = package,
-        revision = revision,
-        revision_kind = revision_kind,
-        major = major,
-        minor = minor,
-        patch = patch,
-        artifact_path = artifact_path,
-    )
-}
-
-fn resolve_s3_secret_sql(region: &str) -> String {
-    if let (Some(key), Some(secret)) = (
-        std::env::var("AWS_ACCESS_KEY_ID").ok().filter(|s| !s.is_empty()),
-        std::env::var("AWS_SECRET_ACCESS_KEY").ok().filter(|s| !s.is_empty()),
-    ) {
-        let token = std::env::var("AWS_SESSION_TOKEN").unwrap_or_default();
-        return format!(
-            "CREATE OR REPLACE SECRET s3_creds (TYPE s3, KEY_ID '{}', SECRET '{}', REGION '{}'{});",
-            key.replace('\'', "''"), secret.replace('\'', "''"), region,
-            if token.is_empty() { String::new() } else { format!(", SESSION_TOKEN '{}'", token.replace('\'', "''")) },
-        );
-    }
-    if let Some(uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").ok().filter(|s| !s.is_empty()) {
-        let url = format!("http://169.254.170.2{uri}");
-        if let Ok(body) = http_get_bytes(&url, 64 * 1024, &[]) {
-            if let Ok(c) = serde_json::from_slice::<EcsCredentials>(&body) {
-                return format!(
-                    "CREATE OR REPLACE SECRET s3_creds (TYPE s3, KEY_ID '{}', SECRET '{}', REGION '{}'{});",
-                    c.access_key_id.replace('\'', "''"), c.secret_access_key.replace('\'', "''"), region,
-                    c.token.as_ref().map(|t| format!(", SESSION_TOKEN '{}'", t.replace('\'', "''"))).unwrap_or_default(),
-                );
-            }
-        }
-    }
-    format!("CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{}');", region)
-}
-
-fn parse_semver(revision: &str, revision_kind: &str) -> (String, String, String) {
-    if revision_kind == "git_sha" {
-        return ("NULL".to_owned(), "NULL".to_owned(), "NULL".to_owned());
-    }
-    let v = revision.strip_prefix('v').unwrap_or(revision);
-    let mut p = v.split('.');
-    let major = p.next().unwrap_or("0").to_owned();
-    let minor = p.next().unwrap_or("0").to_owned();
-    let patch_raw = p.next().unwrap_or("0");
-    let patch: String = patch_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
-    (major, minor, if patch.is_empty() { "0".to_owned() } else { patch })
+    eprintln!("[worker] running Rust API translate...");
+    translate_artifact_to_ducklake(&opts)
+        .map_err(|e| WorkerError::Translate(format!("{e:#}")))
 }
 
 /// Downloads the DuckLake catalog from S3 to a local file so it can be
