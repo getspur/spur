@@ -5,17 +5,22 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
-use duckdb::Connection;
-use serde_json::{json, Value};
-use spur_context_service::jobs::{lookup, JobStatus};
+use async_trait::async_trait;
+use serde_json::Value;
+use spur_context_service::jobs::{
+    CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
+};
 use spur_context_service::worker::{
-    build_graph, fetch_source, handle_spot_interruption, update_job_status_with_connection, JobEnv,
-    WorkerError,
+    build_graph, fetch_source, handle_spot_interruption, upload_with_owned_catalog_lease,
+    CatalogDownload, CatalogLease, CatalogLeaseStore, StageTracker, JobEnv, WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -139,34 +144,78 @@ async fn spot_interruption_handler_writes_checkpoint() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn update_job_status_marks_job_complete_in_catalog() -> Result<()> {
-    let conn = initialize_worker_catalog()?;
-    let env = JobEnv {
-        task_token: "task-token".to_owned(),
-        job_id: "job-complete".to_owned(),
-        package: "demo".to_owned(),
-        revision: "1.0.0".to_owned(),
-        source: "registry:crates-io".to_owned(),
-        source_url: "https://crates.io/api/v1/crates/demo/1.0.0/download".to_owned(),
-        source_kind: "tarball".to_owned(),
-        catalog_dsn: "sqlite:/tmp/catalog.sqlite".to_owned(),
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_updates_job_stages_around_fetch_build_and_translate() -> Result<()> {
+    let store = Arc::new(FakeJobStore::default());
+    store.seed_job("job-stages");
+    let tracker = StageTracker::with_job_store("job-stages", store.clone());
+
+    tokio::task::spawn_blocking(move || {
+        tracker.set("fetch_source");
+        tracker.set("build_graph");
+        tracker.set("translate");
+    })
+    .await
+    .context("stage reporter task")?;
+
+    assert_eq!(
+        store.stage_updates(),
+        ["fetch_source", "build_graph", "translate"]
+    );
+    let record = store
+        .lookup_job("job-stages")
+        .await?
+        .context("job should exist")?;
+    assert_eq!(record.status, JobStatus::Running);
+    assert_eq!(record.stage.as_deref(), Some("translate"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_lease_blocks_upload_when_token_is_lost() -> Result<()> {
+    let leases = FakeCatalogLeaseStore::lost();
+    let lease = CatalogLease {
+        catalog_uri: "s3://bucket/catalog.ducklake".to_owned(),
+        owner_job_id: "job-lost".to_owned(),
+        lease_token: "token-1".to_owned(),
+        expires_at_unix_secs: 1_900_000_000,
+        fencing_counter: 7,
     };
+    let upload_calls = AtomicUsize::new(0);
 
-    update_job_status_with_connection(
-        &conn,
-        &env,
-        JobStatus::Complete,
-        Some(42),
-        None,
-        Some(json!({ "nodes": 3, "edges": 2 })),
-    )?;
+    let err = upload_with_owned_catalog_lease(&leases, &lease, || {
+        upload_calls.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    })
+    .await
+    .unwrap_err();
 
-    let row = lookup(&conn, "job-complete")?.context("job row should exist")?;
-    assert_eq!(row.status, JobStatus::Complete);
-    assert_eq!(row.snapshot_id, Some(42));
-    assert_eq!(row.error, None);
-    assert_eq!(row.row_counts, Some(json!({ "nodes": 3, "edges": 2 })));
+    assert!(err.to_string().contains("lease lost"));
+    assert_eq!(upload_calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_download_upload_uses_conditional_s3_write_metadata() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let server = FakeS3Server::start("catalog-before", "\"etag-before\"", "version-before")?;
+    let _env = EnvGuard::set_all([
+        ("AWS_ENDPOINT_URL_S3", server.endpoint.as_str()),
+        ("AWS_ACCESS_KEY_ID", "test"),
+        ("AWS_SECRET_ACCESS_KEY", "test"),
+        ("AWS_REGION", "us-east-1"),
+    ]);
+
+    let download = CatalogDownload::fetch("s3://catalog-bucket/catalog.ducklake")
+        .await?
+        .context("s3 catalog should be downloaded")?;
+    fs::write(download.local_path(), "catalog-after").context("mutate local catalog")?;
+    download.upload().await?;
+
+    let put = server.put_request();
+    assert!(put.contains("if-match: \"etag-before\""));
+    assert!(!put.contains("if-none-match"));
+    assert!(put.contains("/catalog-bucket/catalog.ducklake"));
     Ok(())
 }
 
@@ -313,63 +362,6 @@ fn git_output<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
     String::from_utf8(output.stdout).context("git output utf-8")
 }
 
-fn initialize_worker_catalog() -> Result<Connection> {
-    let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS index_jobs (
-            job_id TEXT PRIMARY KEY,
-            source TEXT,
-            package TEXT,
-            revision TEXT,
-            source_url TEXT,
-            source_url_hash TEXT,
-            status TEXT,
-            execution_arn TEXT,
-            error TEXT,
-            snapshot_id BIGINT,
-            row_counts JSON,
-            created_at TIMESTAMPTZ,
-            updated_at TIMESTAMPTZ,
-            UNIQUE(source, package, revision, source_url_hash)
-        );
-
-        INSERT INTO index_jobs (
-            job_id,
-            source,
-            package,
-            revision,
-            source_url,
-            source_url_hash,
-            status,
-            execution_arn,
-            error,
-            snapshot_id,
-            row_counts,
-            created_at,
-            updated_at
-        )
-        VALUES (
-            'job-complete',
-            'registry:crates-io',
-            'demo',
-            '1.0.0',
-            'https://crates.io/api/v1/crates/demo/1.0.0/download',
-            'sha256:demo',
-            'running',
-            'arn:running',
-            NULL,
-            NULL,
-            NULL,
-            CURRENT_TIMESTAMP,
-            CURRENT_TIMESTAMP
-        );
-        "#,
-    )
-    .context("create worker catalog fixture")?;
-    Ok(conn)
-}
-
 fn unique_temp_dir(name: &str) -> Result<PathBuf> {
     let mut path = std::env::temp_dir();
     path.push(format!(
@@ -382,6 +374,296 @@ fn unique_temp_dir(name: &str) -> Result<PathBuf> {
     ));
     fs::create_dir_all(&path).context("create temp dir")?;
     Ok(path)
+}
+
+#[derive(Default)]
+struct FakeJobStore {
+    next_id: AtomicU64,
+    state: Mutex<FakeJobState>,
+}
+
+#[derive(Default)]
+struct FakeJobState {
+    jobs: std::collections::HashMap<String, JobRecord>,
+    dedupe: std::collections::HashMap<JobKey, String>,
+    stage_updates: Vec<String>,
+}
+
+#[async_trait]
+impl JobStore for FakeJobStore {
+    async fn create_or_get_active_job(
+        &self,
+        request: CreateJobRequest,
+    ) -> spur_context_service::jobs::Result<CreateJobOutcome> {
+        let key = request.key();
+        let mut state = self.state.lock().expect("fake store lock");
+        if let Some(job_id) = state.dedupe.get(&key) {
+            if let Some(record) = state.jobs.get(job_id) {
+                return Ok(CreateJobOutcome::Existing(record.clone()));
+            }
+        }
+
+        let job_id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+        let record = JobRecord {
+            job_id: job_id.clone(),
+            status: JobStatus::Queued,
+            source: request.source,
+            package: request.package,
+            revision: request.revision,
+            source_url: request.source_url,
+            source_url_hash: request.source_url_hash,
+            source_kind: request.source_kind,
+            caller_id: request.caller_id,
+            execution_arn: None,
+            attempt: 1,
+            stage: None,
+            snapshot_id: None,
+            row_counts: None,
+            error_code: None,
+            error_detail: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+        state.dedupe.insert(key, job_id.clone());
+        state.jobs.insert(job_id, record.clone());
+        Ok(CreateJobOutcome::Created(record))
+    }
+
+    async fn record_execution_started(
+        &self,
+        job_id: &str,
+        execution_arn: &str,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        self.update_job(job_id, |record| {
+            record.execution_arn = Some(execution_arn.to_owned());
+        })
+    }
+
+    async fn update_stage(
+        &self,
+        job_id: &str,
+        status: JobStatus,
+        stage: &str,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        let mut state = self.state.lock().expect("fake store lock");
+        let record = state
+            .jobs
+            .get_mut(job_id)
+            .ok_or(spur_context_service::jobs::JobsError::NotFound)?;
+        record.status = status;
+        record.stage = Some(stage.to_owned());
+        record.updated_at = format!("stage:{stage}");
+        let updated = record.clone();
+        state.stage_updates.push(stage.to_owned());
+        Ok(updated)
+    }
+
+    async fn mark_complete(
+        &self,
+        job_id: &str,
+        snapshot_id: i64,
+        row_counts: Value,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        let record = self.update_job(job_id, |record| {
+            record.status = JobStatus::Complete;
+            record.snapshot_id = Some(snapshot_id);
+            record.row_counts = Some(row_counts);
+            record.error_code = None;
+            record.error_detail = None;
+        })?;
+        self.release_dedupe_if_owner(&record).await?;
+        Ok(record)
+    }
+
+    async fn mark_failed(
+        &self,
+        job_id: &str,
+        code: &str,
+        detail: &str,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        let record = self.update_job(job_id, |record| {
+            record.status = JobStatus::Failed;
+            record.error_code = Some(code.to_owned());
+            record.error_detail = Some(detail.to_owned());
+        })?;
+        self.release_dedupe_if_owner(&record).await?;
+        Ok(record)
+    }
+
+    async fn lookup_job(
+        &self,
+        job_id: &str,
+    ) -> spur_context_service::jobs::Result<Option<JobRecord>> {
+        Ok(self
+            .state
+            .lock()
+            .expect("fake store lock")
+            .jobs
+            .get(job_id)
+            .cloned())
+    }
+
+    async fn release_dedupe_if_owner(
+        &self,
+        record: &JobRecord,
+    ) -> spur_context_service::jobs::Result<()> {
+        let mut state = self.state.lock().expect("fake store lock");
+        let key = record.key();
+        if state.dedupe.get(&key).is_some_and(|job_id| job_id == &record.job_id) {
+            state.dedupe.remove(&key);
+        }
+        Ok(())
+    }
+}
+
+impl FakeJobStore {
+    fn seed_job(&self, job_id: &str) {
+        let record = JobRecord {
+            job_id: job_id.to_owned(),
+            status: JobStatus::Queued,
+            source: "git:custom".to_owned(),
+            package: "demo".to_owned(),
+            revision: "main".to_owned(),
+            source_url: "https://github.com/example/demo".to_owned(),
+            source_url_hash: "sha256:demo".to_owned(),
+            source_kind: "git".to_owned(),
+            caller_id: "test".to_owned(),
+            execution_arn: None,
+            attempt: 1,
+            stage: None,
+            snapshot_id: None,
+            row_counts: None,
+            error_code: None,
+            error_detail: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+        let mut state = self.state.lock().expect("fake store lock");
+        state.dedupe.insert(record.key(), job_id.to_owned());
+        state.jobs.insert(job_id.to_owned(), record);
+    }
+
+    fn stage_updates(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("fake store lock")
+            .stage_updates
+            .clone()
+    }
+
+    fn update_job(
+        &self,
+        job_id: &str,
+        update: impl FnOnce(&mut JobRecord),
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        let mut state = self.state.lock().expect("fake store lock");
+        let record = state
+            .jobs
+            .get_mut(job_id)
+            .ok_or(JobsError::NotFound)?;
+        update(record);
+        Ok(record.clone())
+    }
+}
+
+struct FakeCatalogLeaseStore {
+    lost: AtomicBool,
+}
+
+impl FakeCatalogLeaseStore {
+    fn lost() -> Self {
+        Self {
+            lost: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait]
+impl CatalogLeaseStore for FakeCatalogLeaseStore {
+    async fn acquire(&self, catalog_uri: &str, owner_job_id: &str) -> Result<CatalogLease> {
+        Ok(CatalogLease {
+            catalog_uri: catalog_uri.to_owned(),
+            owner_job_id: owner_job_id.to_owned(),
+            lease_token: "token".to_owned(),
+            expires_at_unix_secs: 1_900_000_000,
+            fencing_counter: 1,
+        })
+    }
+
+    async fn renew(&self, lease: &CatalogLease) -> Result<CatalogLease> {
+        Ok(lease.clone())
+    }
+
+    async fn assert_owned(&self, _lease: &CatalogLease) -> Result<()> {
+        if self.lost.load(Ordering::SeqCst) {
+            anyhow::bail!("lease lost");
+        }
+        Ok(())
+    }
+
+    async fn release(&self, _lease: &CatalogLease) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct FakeS3Server {
+    endpoint: String,
+    put_request: Arc<Mutex<Option<String>>>,
+}
+
+impl FakeS3Server {
+    fn start(body: &'static str, etag: &'static str, version: &'static str) -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").context("bind fake s3")?;
+        let endpoint = format!("http://{}", listener.local_addr().context("fake s3 addr")?);
+        let put_request = Arc::new(Mutex::new(None));
+        let put_request_thread = put_request.clone();
+        thread::spawn(move || {
+            let (mut get_stream, _) = listener.accept().expect("accept fake s3 get");
+            let _get = read_http_request(&mut get_stream);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: {etag}\r\nx-amz-version-id: {version}\r\n\r\n{body}",
+                body.len()
+            );
+            get_stream
+                .write_all(response.as_bytes())
+                .expect("write fake s3 get");
+
+            let (mut put_stream, _) = listener.accept().expect("accept fake s3 put");
+            let put = read_http_request(&mut put_stream).to_ascii_lowercase();
+            *put_request_thread.lock().expect("put request lock") = Some(put);
+            put_stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .expect("write fake s3 put");
+        });
+        Ok(Self {
+            endpoint,
+            put_request,
+        })
+    }
+
+    fn put_request(&self) -> String {
+        self.put_request
+            .lock()
+            .expect("put request lock")
+            .clone()
+            .expect("put request should be captured")
+    }
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = stream.read(&mut chunk).expect("read fake s3 request");
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&request).to_string()
 }
 
 struct EnvGuard {
