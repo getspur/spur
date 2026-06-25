@@ -188,12 +188,22 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     // DuckLake 1.0 inlines small inserts (<10 rows) into the catalog metadata.
     // Flushing moves them to parquet files so they're accessible to read-only
     // consumers (Lambda) that open the catalog without the same inlining state.
-    conn.execute_batch("CALL ducklake_flush_inlined_data('spur_context');")
-        .context("failed to flush inlined DuckLake data")?;
+    //
+    // CRITICAL: ducklake_flush_inlined_data is a set-returning table function.
+    // Its parquet-writing work happens lazily as the result stream is consumed.
+    // execute_batch() uses duckdb_query_arrow internally which creates the stream
+    // but never drains it — so the writes never happen. We must use prepare().query()
+    // and fully drain the result set to force materialization.
+    {
+        let mut stmt = conn
+            .prepare("CALL ducklake_flush_inlined_data('spur_context')")
+            .context("failed to prepare ducklake_flush_inlined_data")?;
+        let mut rows = stmt.query([]).context("failed to execute flush")?;
+        while rows.next()?.is_some() {}
+    }
 
-    // Force DuckLake to write all pending parquet files to S3. Without this,
-    // data stays in DuckDB's buffer and is never persisted as parquet files.
-    conn.execute_batch("CHECKPOINT;")
+    // CHECKPOINT forces DuckLake to persist all pending state.
+    conn.execute("CHECKPOINT", [])
         .context("failed to checkpoint DuckLake")?;
 
     Ok(TranslateStats {
