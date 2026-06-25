@@ -189,7 +189,13 @@ pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Re
         .context("failed to load httpfs for S3 data path")?;
     }
 
+    if is_remote_catalog(catalog_dsn) {
+        conn.execute_batch("SET unsafe_disable_etag_checks = true;")
+            .context("failed to disable etag checks for remote catalog")?;
+    }
+
     attach_ducklake(&conn, catalog_dsn, data_path)?;
+
     Ok(conn)
 }
 
