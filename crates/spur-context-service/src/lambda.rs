@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::catalog::{self, CatalogResolver};
+use crate::jobs::{DynamoDbJobStore, JobStore};
 use crate::mcp::{self, McpHandlerError};
 
 pub static CATALOG_RESOLVER: OnceLock<Mutex<Option<CatalogResolver>>> = OnceLock::new();
+static AWS_CLIENTS: OnceLock<AwsClients> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct ApiGatewayRequest {
@@ -94,18 +96,27 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
         Err(error) => return tool_error_response(error),
     };
 
-    let mut catalog_guard = catalog_resolver()?;
-    let catalog = initialized_catalog(&mut catalog_guard)?;
-    let db = catalog.connection();
-
     let result = match request.tool.as_str() {
+        "external_index_status" => {
+            let jobs = job_store();
+            let checker = status_checker();
+            route_index_status_control_plane(&request.args, &jobs, &checker).await
+        }
         "external_index" => {
+            let mut catalog_guard = catalog_resolver()?;
+            let catalog = initialized_catalog(&mut catalog_guard)?;
+            let db = catalog.connection();
+            let jobs = job_store();
             let sfn_client = sfn_client()?;
             let caller_id = caller_id(&event.payload);
-            mcp::route_index(&request.args, db, catalog, &sfn_client, &caller_id).await
+            mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, &caller_id).await
         }
-        "external_index_status" => mcp::route_index_status(&request.args, db),
-        _ => mcp::handle_tool_sync(&request.tool, &request.args, db, catalog),
+        _ => {
+            let mut catalog_guard = catalog_resolver()?;
+            let catalog = initialized_catalog(&mut catalog_guard)?;
+            let db = catalog.connection();
+            mcp::handle_tool_sync(&request.tool, &request.args, db, catalog)
+        }
     };
 
     match result {
@@ -121,6 +132,14 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
         ),
         Err(error) => tool_error_response(error),
     }
+}
+
+pub async fn route_index_status_control_plane(
+    args: &Value,
+    jobs: &dyn JobStore,
+    checker: &dyn mcp::ExecutionStatusChecker,
+) -> Result<Value, McpHandlerError> {
+    mcp::route_index_status(args, jobs, Some(checker)).await
 }
 
 fn parse_tool_request(request: &ApiGatewayRequest) -> Result<ToolRequest, McpHandlerError> {
@@ -187,7 +206,40 @@ fn catalog_dsn() -> Result<String, Error> {
         })
 }
 
+fn job_store() -> DynamoDbJobStore {
+    DynamoDbJobStore::new(aws_clients().dynamodb.clone())
+}
+
+fn status_checker() -> mcp::SfnExecutionStatusChecker {
+    mcp::SfnExecutionStatusChecker::new(aws_clients().sfn.clone())
+}
+
 fn sfn_client() -> Result<SfnIndexExecutionStarter, Error> {
+    let client = aws_clients().sfn.clone();
+    Ok(SfnIndexExecutionStarter {
+        client,
+        state_machine_arn: env::var("SPUR_INDEX_STATE_MACHINE_ARN").map_err(|error| {
+            lambda_error(format!(
+                "SPUR_INDEX_STATE_MACHINE_ARN environment variable is required: {error}"
+            ))
+        })?,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct AwsClients {
+    dynamodb: aws_sdk_dynamodb::Client,
+    sfn: aws_sdk_sfn::Client,
+}
+
+fn aws_clients() -> &'static AwsClients {
+    AWS_CLIENTS.get_or_init(|| AwsClients {
+        dynamodb: dynamodb_client_from_env(),
+        sfn: sfn_client_from_env(),
+    })
+}
+
+fn sfn_client_from_env() -> aws_sdk_sfn::Client {
     let region = env::var("AWS_REGION")
         .or_else(|_| env::var("AWS_DEFAULT_REGION"))
         .unwrap_or_else(|_| "us-east-1".to_owned());
@@ -208,14 +260,31 @@ fn sfn_client() -> Result<SfnIndexExecutionStarter, Error> {
         ));
     }
 
-    Ok(SfnIndexExecutionStarter {
-        client: aws_sdk_sfn::Client::from_conf(config.build()),
-        state_machine_arn: env::var("SPUR_INDEX_STATE_MACHINE_ARN").map_err(|error| {
-            lambda_error(format!(
-                "SPUR_INDEX_STATE_MACHINE_ARN environment variable is required: {error}"
-            ))
-        })?,
-    })
+    aws_sdk_sfn::Client::from_conf(config.build())
+}
+
+fn dynamodb_client_from_env() -> aws_sdk_dynamodb::Client {
+    let region = env::var("AWS_REGION")
+        .or_else(|_| env::var("AWS_DEFAULT_REGION"))
+        .unwrap_or_else(|_| "us-east-1".to_owned());
+    let mut config = aws_sdk_dynamodb::Config::builder()
+        .behavior_version(aws_sdk_dynamodb::config::BehaviorVersion::latest())
+        .region(aws_sdk_dynamodb::config::Region::new(region));
+
+    if let (Ok(access_key), Ok(secret_key)) = (
+        env::var("AWS_ACCESS_KEY_ID"),
+        env::var("AWS_SECRET_ACCESS_KEY"),
+    ) {
+        config = config.credentials_provider(aws_sdk_dynamodb::config::Credentials::new(
+            access_key,
+            secret_key,
+            env::var("AWS_SESSION_TOKEN").ok(),
+            None,
+            "lambda-env",
+        ));
+    }
+
+    aws_sdk_dynamodb::Client::from_conf(config.build())
 }
 
 fn caller_id(request: &ApiGatewayRequest) -> String {

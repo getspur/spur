@@ -1,19 +1,26 @@
+use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use async_trait::async_trait;
 use duckdb::{params, Connection};
 use serde_json::{json, Value};
 use spur_context_service::catalog::CatalogResolver;
-use spur_context_service::jobs::{insert, InsertParams};
+use spur_context_service::jobs::{
+    CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore,
+};
 use spur_context_service::mcp::{
-    handle_tool, route_index, route_index_status, route_index_status_with_reconciliation,
-    tool_definitions, ExecutionOutcome, ExecutionOutcomeStatus, ExecutionStatusChecker,
-    IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
+    handle_tool, route_index, route_index_status, tool_definitions, ExecutionOutcome,
+    ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter,
+    McpHandlerError,
 };
 
 const PACKAGE: &str = "demo";
@@ -305,6 +312,7 @@ async fn handler_reports_unknown_tool_missing_args_and_missing_package() -> Resu
 #[tokio::test]
 async fn external_index_rejects_missing_source_url() -> Result<()> {
     let fixture = McpFixture::new("index-missing-source-url")?;
+    let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
 
     let error = route_index(
@@ -314,6 +322,7 @@ async fn external_index_rejects_missing_source_url() -> Result<()> {
         }),
         &fixture.conn,
         &fixture.catalog,
+        &jobs,
         &sfn,
         "caller-missing-source-url",
     )
@@ -327,18 +336,40 @@ async fn external_index_rejects_missing_source_url() -> Result<()> {
 
 #[tokio::test]
 async fn external_index_status_returns_not_found_for_unknown_job() -> Result<()> {
-    let fixture = McpFixture::new("index-status-not-found")?;
+    let jobs = FakeJobStore::default();
 
-    let response = route_index_status(&json!({ "job_id": "missing-job" }), &fixture.conn)?;
+    let response = route_index_status(&json!({ "job_id": "missing-job" }), &jobs, None).await?;
 
     assert_eq!(response, json!({ "status": "not_found" }));
     Ok(())
 }
 
 #[tokio::test]
-async fn external_index_status_reconciles_succeeded_execution() -> Result<()> {
-    let fixture = McpFixture::new("index-status-succeeded")?;
-    let job = seed_queued_job(&fixture.conn, "arn:success")?;
+async fn lambda_index_status_route_does_not_require_catalog_initialization() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let job = jobs.seed_queued_job("arn:lambda-status", |_| {});
+    let job_id = job.job_id.clone();
+    let checker = StubExecutionStatusChecker::new(None);
+
+    let response = spur_context_service::lambda::route_index_status_control_plane(
+        &json!({ "job_id": job_id.clone() }),
+        &jobs,
+        &checker,
+    )
+    .await?;
+
+    assert_eq!(response["job_id"], job_id);
+    assert_eq!(response["status"], "queued");
+    assert_eq!(checker.described_arns(), Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_status_repairs_stale_succeeded_execution() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let job = jobs.seed_queued_job("arn:success", |record| {
+        record.updated_at = "0".to_owned();
+    });
     let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
         status: ExecutionOutcomeStatus::Succeeded,
         output: Some(json!({
@@ -351,34 +382,39 @@ async fn external_index_status_reconciles_succeeded_execution() -> Result<()> {
         error: None,
     }));
 
-    let response = route_index_status_with_reconciliation(
+    let response = route_index_status(
         &json!({ "job_id": job.job_id }),
-        &fixture.conn,
+        &jobs,
         Some(&checker),
-    )?;
+    )
+    .await?;
 
     assert_eq!(response["status"], "complete");
     assert_eq!(response["snapshot_id"], 777);
     assert_eq!(response["row_counts"], json!({ "nodes": 5, "edges": 4 }));
+    assert_eq!(response["execution_arn"], "arn:success");
     assert_eq!(checker.described_arns(), ["arn:success"]);
     Ok(())
 }
 
 #[tokio::test]
 async fn external_index_status_reconciles_failed_execution() -> Result<()> {
-    let fixture = McpFixture::new("index-status-failed")?;
-    let job = seed_queued_job(&fixture.conn, "arn:failed")?;
+    let jobs = FakeJobStore::default();
+    let job = jobs.seed_queued_job("arn:failed", |record| {
+        record.updated_at = "0".to_owned();
+    });
     let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
         status: ExecutionOutcomeStatus::Failed,
         output: None,
         error: Some("fetch: clone failed".to_owned()),
     }));
 
-    let response = route_index_status_with_reconciliation(
+    let response = route_index_status(
         &json!({ "job_id": job.job_id }),
-        &fixture.conn,
+        &jobs,
         Some(&checker),
-    )?;
+    )
+    .await?;
 
     assert_eq!(response["status"], "failed");
     assert_eq!(response["error"]["code"], "fetch");
@@ -389,14 +425,12 @@ async fn external_index_status_reconciles_failed_execution() -> Result<()> {
 
 #[tokio::test]
 async fn external_index_status_without_checker_returns_stale_job() -> Result<()> {
-    let fixture = McpFixture::new("index-status-no-checker")?;
-    let job = seed_queued_job(&fixture.conn, "arn:stale")?;
+    let jobs = FakeJobStore::default();
+    let job = jobs.seed_queued_job("arn:stale", |record| {
+        record.updated_at = "0".to_owned();
+    });
 
-    let response = route_index_status_with_reconciliation(
-        &json!({ "job_id": job.job_id }),
-        &fixture.conn,
-        None,
-    )?;
+    let response = route_index_status(&json!({ "job_id": job.job_id }), &jobs, None).await?;
 
     assert_eq!(response["status"], "queued");
     assert!(response.get("snapshot_id").is_none());
@@ -405,8 +439,33 @@ async fn external_index_status_without_checker_returns_stale_job() -> Result<()>
 }
 
 #[tokio::test]
+async fn external_index_status_returns_dynamodb_state_when_describe_execution_fails() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let job = jobs.seed_queued_job("arn:transient", |record| {
+        record.status = JobStatus::Running;
+        record.stage = Some("building_graph".to_owned());
+        record.updated_at = "0".to_owned();
+    });
+    let checker = StubExecutionStatusChecker::fail("temporary sfn outage");
+
+    let response = route_index_status(
+        &json!({ "job_id": job.job_id }),
+        &jobs,
+        Some(&checker),
+    )
+    .await?;
+
+    assert_eq!(response["status"], "running");
+    assert_eq!(response["stage"], "building_graph");
+    assert_eq!(response["execution_arn"], "arn:transient");
+    assert_eq!(checker.described_arns(), ["arn:transient"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_index_returns_complete_for_warm_catalog_hit() -> Result<()> {
     let fixture = McpFixture::new("index-warm")?;
+    let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
 
     let response = route_index(
@@ -418,6 +477,7 @@ async fn external_index_returns_complete_for_warm_catalog_hit() -> Result<()> {
         }),
         &fixture.conn,
         &fixture.catalog,
+        &jobs,
         &sfn,
         "caller-warm",
     )
@@ -427,25 +487,49 @@ async fn external_index_returns_complete_for_warm_catalog_hit() -> Result<()> {
     assert_eq!(response["snapshot_id"], 100);
     assert_eq!(response["revision"], REVISION);
     assert_eq!(sfn.started_count(), 0);
+    assert_eq!(jobs.job_count(), 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn external_index_returns_existing_active_job_for_dedup_hit() -> Result<()> {
-    let fixture = McpFixture::new("index-dedup")?;
+async fn external_index_creates_job_starts_execution_and_records_arn() -> Result<()> {
+    let fixture = McpFixture::new("index-create")?;
+    let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
-    let existing = insert(
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
         &fixture.conn,
-        InsertParams {
-            source: "git:custom".to_owned(),
-            package: PACKAGE.to_owned(),
-            revision: "main".to_owned(),
-            source_url: SOURCE_URL.to_owned(),
-            source_url_hash: source_url_hash(SOURCE_URL),
-            execution_arn: Some("arn:existing".to_owned()),
-        },
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-create",
     )
-    .context("seed active job")?;
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    assert_eq!(response["job_id"], "job-1");
+    assert_eq!(response["execution_arn"], "arn:stub:job-1");
+    assert_eq!(response["revision"], "main");
+    assert_eq!(sfn.started_count(), 1);
+    let stored = jobs.lookup_job_sync("job-1").context("created job")?;
+    assert_eq!(stored.execution_arn.as_deref(), Some("arn:stub:job-1"));
+    assert_eq!(stored.caller_id, "caller-create");
+    assert_eq!(stored.source_kind, "git");
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_returns_existing_deduped_job_without_starting_execution() -> Result<()> {
+    let fixture = McpFixture::new("index-dedup")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+    let existing = jobs.seed_queued_job("arn:existing", |_| {});
 
     let response = route_index(
         &json!({
@@ -455,6 +539,7 @@ async fn external_index_returns_existing_active_job_for_dedup_hit() -> Result<()
         }),
         &fixture.conn,
         &fixture.catalog,
+        &jobs,
         &sfn,
         "caller-dedup",
     )
@@ -471,6 +556,7 @@ async fn external_index_returns_existing_active_job_for_dedup_hit() -> Result<()
 #[tokio::test]
 async fn external_index_rejects_localhost_source_url_before_starting_job() -> Result<()> {
     let fixture = McpFixture::new("index-abuse")?;
+    let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
 
     let response = route_index(
@@ -481,6 +567,7 @@ async fn external_index_rejects_localhost_source_url_before_starting_job() -> Re
         }),
         &fixture.conn,
         &fixture.catalog,
+        &jobs,
         &sfn,
         "caller-abuse",
     )
@@ -1094,33 +1181,27 @@ impl IndexExecutionStarter for StubIndexExecutionStarter {
     }
 }
 
-fn seed_queued_job(
-    conn: &Connection,
-    execution_arn: &str,
-) -> Result<spur_context_service::jobs::JobRow> {
-    insert(
-        conn,
-        InsertParams {
-            source: "git:custom".to_owned(),
-            package: PACKAGE.to_owned(),
-            revision: "main".to_owned(),
-            source_url: SOURCE_URL.to_owned(),
-            source_url_hash: source_url_hash(SOURCE_URL),
-            execution_arn: Some(execution_arn.to_owned()),
-        },
-    )
-    .context("seed queued job")
+struct StubExecutionStatusChecker {
+    result: StubExecutionResult,
+    described_arns: Mutex<Vec<String>>,
 }
 
-struct StubExecutionStatusChecker {
-    outcome: Option<ExecutionOutcome>,
-    described_arns: Mutex<Vec<String>>,
+enum StubExecutionResult {
+    Ok(Option<ExecutionOutcome>),
+    Err(String),
 }
 
 impl StubExecutionStatusChecker {
     fn new(outcome: Option<ExecutionOutcome>) -> Self {
         Self {
-            outcome,
+            result: StubExecutionResult::Ok(outcome),
+            described_arns: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn fail(message: &str) -> Self {
+        Self {
+            result: StubExecutionResult::Err(message.to_owned()),
             described_arns: Mutex::new(Vec::new()),
         }
     }
@@ -1136,6 +1217,203 @@ impl ExecutionStatusChecker for StubExecutionStatusChecker {
         arn: &str,
     ) -> std::result::Result<Option<ExecutionOutcome>, McpHandlerError> {
         self.described_arns.lock().unwrap().push(arn.to_owned());
-        Ok(self.outcome.clone())
+        match &self.result {
+            StubExecutionResult::Ok(outcome) => Ok(outcome.clone()),
+            StubExecutionResult::Err(message) => {
+                Err(McpHandlerError::Internal(message.clone()))
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct FakeJobStore {
+    next_id: AtomicU64,
+    state: Mutex<FakeJobState>,
+}
+
+#[derive(Default)]
+struct FakeJobState {
+    jobs: HashMap<String, JobRecord>,
+    dedupe: HashMap<JobKey, String>,
+}
+
+#[async_trait]
+impl JobStore for FakeJobStore {
+    async fn create_or_get_active_job(
+        &self,
+        request: CreateJobRequest,
+    ) -> spur_context_service::jobs::Result<CreateJobOutcome> {
+        let key = request.key();
+        let mut state = self.state.lock().expect("fake store lock");
+        if let Some(job_id) = state.dedupe.get(&key) {
+            if let Some(record) = state.jobs.get(job_id) {
+                return Ok(CreateJobOutcome::Existing(record.clone()));
+            }
+        }
+
+        let job_id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+        let record = JobRecord {
+            job_id: job_id.clone(),
+            status: JobStatus::Queued,
+            source: request.source,
+            package: request.package,
+            revision: request.revision,
+            source_url: request.source_url,
+            source_url_hash: request.source_url_hash,
+            source_kind: request.source_kind,
+            caller_id: request.caller_id,
+            execution_arn: None,
+            attempt: 1,
+            stage: None,
+            snapshot_id: None,
+            row_counts: None,
+            error_code: None,
+            error_detail: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+        state.dedupe.insert(key, job_id.clone());
+        state.jobs.insert(job_id, record.clone());
+        Ok(CreateJobOutcome::Created(record))
+    }
+
+    async fn record_execution_started(
+        &self,
+        job_id: &str,
+        execution_arn: &str,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        self.update_job(job_id, |record| {
+            record.execution_arn = Some(execution_arn.to_owned());
+            record.updated_at = "started".to_owned();
+        })
+    }
+
+    async fn update_stage(
+        &self,
+        job_id: &str,
+        status: JobStatus,
+        stage: &str,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        self.update_job(job_id, |record| {
+            record.status = status;
+            record.stage = Some(stage.to_owned());
+            record.updated_at = "stage".to_owned();
+        })
+    }
+
+    async fn mark_complete(
+        &self,
+        job_id: &str,
+        snapshot_id: i64,
+        row_counts: serde_json::Value,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        let record = self.update_job(job_id, |record| {
+            record.status = JobStatus::Complete;
+            record.snapshot_id = Some(snapshot_id);
+            record.row_counts = Some(row_counts);
+            record.error_code = None;
+            record.error_detail = None;
+            record.updated_at = "complete".to_owned();
+        })?;
+        self.release_dedupe_if_owner(&record).await?;
+        Ok(record)
+    }
+
+    async fn mark_failed(
+        &self,
+        job_id: &str,
+        code: &str,
+        detail: &str,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        let record = self.update_job(job_id, |record| {
+            record.status = JobStatus::Failed;
+            record.error_code = Some(code.to_owned());
+            record.error_detail = Some(detail.to_owned());
+            record.updated_at = "failed".to_owned();
+        })?;
+        self.release_dedupe_if_owner(&record).await?;
+        Ok(record)
+    }
+
+    async fn lookup_job(
+        &self,
+        job_id: &str,
+    ) -> spur_context_service::jobs::Result<Option<JobRecord>> {
+        Ok(self.lookup_job_sync(job_id))
+    }
+
+    async fn release_dedupe_if_owner(
+        &self,
+        record: &JobRecord,
+    ) -> spur_context_service::jobs::Result<()> {
+        let mut state = self.state.lock().expect("fake store lock");
+        let key = record.key();
+        if state.dedupe.get(&key).is_some_and(|job_id| job_id == &record.job_id) {
+            state.dedupe.remove(&key);
+        }
+        Ok(())
+    }
+}
+
+impl FakeJobStore {
+    fn seed_queued_job(
+        &self,
+        execution_arn: &str,
+        update: impl FnOnce(&mut JobRecord),
+    ) -> JobRecord {
+        let job_id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+        let mut record = JobRecord {
+            job_id: job_id.clone(),
+            status: JobStatus::Queued,
+            source: "git:custom".to_owned(),
+            package: PACKAGE.to_owned(),
+            revision: "main".to_owned(),
+            source_url: SOURCE_URL.to_owned(),
+            source_url_hash: source_url_hash(SOURCE_URL),
+            source_kind: "git".to_owned(),
+            caller_id: "seed".to_owned(),
+            execution_arn: Some(execution_arn.to_owned()),
+            attempt: 1,
+            stage: None,
+            snapshot_id: None,
+            row_counts: None,
+            error_code: None,
+            error_detail: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+        update(&mut record);
+        let mut state = self.state.lock().expect("fake store lock");
+        state.dedupe.insert(record.key(), job_id.clone());
+        state.jobs.insert(job_id, record.clone());
+        record
+    }
+
+    fn job_count(&self) -> usize {
+        self.state.lock().expect("fake store lock").jobs.len()
+    }
+
+    fn lookup_job_sync(&self, job_id: &str) -> Option<JobRecord> {
+        self.state
+            .lock()
+            .expect("fake store lock")
+            .jobs
+            .get(job_id)
+            .cloned()
+    }
+
+    fn update_job(
+        &self,
+        job_id: &str,
+        update: impl FnOnce(&mut JobRecord),
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        let mut state = self.state.lock().expect("fake store lock");
+        let record = state
+            .jobs
+            .get_mut(job_id)
+            .ok_or(spur_context_service::jobs::JobsError::NotFound)?;
+        update(record);
+        Ok(record.clone())
     }
 }
