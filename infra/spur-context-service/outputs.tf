@@ -18,6 +18,36 @@ output "s3_bucket_name" {
   value       = aws_s3_bucket.data.bucket
 }
 
+output "index_jobs_table_name" {
+  description = "DynamoDB table for index job records and dedupe pointers"
+  value       = aws_dynamodb_table.index_jobs.name
+}
+
+output "index_jobs_table_arn" {
+  description = "DynamoDB table ARN for index job records and dedupe pointers"
+  value       = aws_dynamodb_table.index_jobs.arn
+}
+
+output "catalog_leases_table_name" {
+  description = "DynamoDB table for catalog write leases"
+  value       = aws_dynamodb_table.catalog_leases.name
+}
+
+output "catalog_leases_table_arn" {
+  description = "DynamoDB table ARN for catalog write leases"
+  value       = aws_dynamodb_table.catalog_leases.arn
+}
+
+output "context_ducklake_data_path" {
+  description = "DuckLake data path passed to worker tasks"
+  value       = local.context_ducklake_data_path
+}
+
+output "worker_checkpoint_uri_template" {
+  description = "Checkpoint URI template passed to Step Functions for per-job worker checkpoint objects"
+  value       = local.worker_checkpoint_uri_template
+}
+
 output "cloudwatch_log_group" {
   description = "CloudWatch log group for Lambda"
   value       = aws_cloudwatch_log_group.lambda.name

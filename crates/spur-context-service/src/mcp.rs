@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_sdk_sfn::types::ExecutionStatus as AwsExecutionStatus;
 use duckdb::{params, Connection};
@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::abuse::{self, RateLimiter, SourceKind, ValidateOptions};
 use crate::catalog::{CatalogResolver, ResolvedRevision};
-use crate::jobs::{self, InsertParams, JobRow, JobStatus, JobsError};
+use crate::jobs::{CreateJobOutcome, CreateJobRequest, JobRecord, JobStatus, JobStore, JobsError};
 use crate::knowledge::{self, KnowledgeContextOptions, KnowledgeScope};
 use crate::query::{self, SearchMode, SearchOptions};
 
@@ -23,6 +23,7 @@ const DEFAULT_REF: &str = "latest";
 const KNOWLEDGE_QUERY_VECTOR_DIMENSIONS: usize = 768;
 const RATE_LIMIT_RETRY_AFTER_SECONDS: u64 = 60;
 const DESCRIBE_EXECUTION_TIMEOUT: Duration = Duration::from_secs(2);
+const STALE_JOB_REPAIR_AFTER: Duration = Duration::from_secs(60);
 
 static INDEX_RATE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
@@ -176,7 +177,7 @@ pub fn handle_tool_sync(
         "external_code_callees" => handle_code_callees(args, db, catalog),
         "external_knowledge_context" => handle_knowledge_context(args, db, catalog),
         "external_index" => handle_index_requires_lambda(args),
-        "external_index_status" => route_index_status(args, db),
+        "external_index_status" => handle_index_status_requires_lambda(args),
         other => Err(McpHandlerError::InvalidParams(format!(
             "unknown context-service MCP tool: {other}"
         ))),
@@ -279,14 +280,23 @@ fn handle_index_requires_lambda(args: &Value) -> Result<Value, McpHandlerError> 
     ))
 }
 
+fn handle_index_status_requires_lambda(args: &Value) -> Result<Value, McpHandlerError> {
+    let args: ExternalIndexStatusArgs = parse_args(args)?;
+    args.validate()?;
+    Err(McpHandlerError::Internal(
+        "external_index_status requires Lambda routing with a job store".to_owned(),
+    ))
+}
+
 #[expect(
     clippy::future_not_send,
     reason = "handler borrows a DuckDB connection, which is intentionally not Sync"
 )]
 pub async fn route_index(
     args: &Value,
-    db: &Connection,
+    _db: &Connection,
     catalog: &CatalogResolver,
+    jobs: &dyn JobStore,
     sfn_client: &impl IndexExecutionStarter,
     caller_id: &str,
 ) -> Result<Value, McpHandlerError> {
@@ -336,39 +346,28 @@ pub async fn route_index(
         }
     }
 
-    if let Some(existing) = jobs::find_active(db, source, &args.package, revision, &source_url_hash)
-        .map_err(jobs_error("external_index find_active failed"))?
-    {
-        return Ok(active_job_response(&existing));
-    }
-
-    let inserted = match jobs::insert(
-        db,
-        InsertParams {
+    let outcome = jobs
+        .create_or_get_active_job(CreateJobRequest {
             source: source.to_owned(),
             package: args.package.clone(),
             revision: revision.to_owned(),
             source_url: args.source_url.clone(),
             source_url_hash: source_url_hash.clone(),
-            execution_arn: None,
-        },
-    ) {
-        Ok(row) => row,
-        Err(JobsError::Conflict) => {
-            let existing = jobs::find_active(db, source, &args.package, revision, &source_url_hash)
-                .map_err(jobs_error("external_index reselect active job failed"))?
-                .ok_or_else(|| {
-                    McpHandlerError::Internal(
-                        "external_index insert conflict had no active job to return".to_owned(),
-                    )
-                })?;
-            return Ok(active_job_response(&existing));
+            source_kind: source_kind_label(source_kind).to_owned(),
+            caller_id: caller_id.to_owned(),
+        })
+        .await
+        .map_err(jobs_error("external_index create_or_get_active_job failed"))?;
+
+    let job = match outcome {
+        CreateJobOutcome::Created(record) => record,
+        CreateJobOutcome::Existing(record) => {
+            return Ok(active_job_response(&record));
         }
-        Err(error) => return Err(jobs_error("external_index insert failed")(error)),
     };
 
     let payload = json!({
-        "job_id": inserted.job_id,
+        "job_id": job.job_id,
         "source": source,
         "package": args.package,
         "revision": revision,
@@ -376,40 +375,58 @@ pub async fn route_index(
         "source_kind": source_kind_label(source_kind),
         "caller_id": caller_id
     });
-    let execution_arn = sfn_client
+    let execution_arn = match sfn_client
         .start_execution(IndexExecutionRequest {
-            name: inserted.job_id.clone(),
+            name: job.job_id.clone(),
             input: payload,
         })
-        .await?;
+        .await
+    {
+        Ok(execution_arn) => execution_arn,
+        Err(error) => {
+            let _ = jobs
+                .mark_failed(&job.job_id, "start_execution", &error.to_string())
+                .await;
+            return Err(error);
+        }
+    };
 
-    Ok(json!({
-        "job_id": inserted.job_id,
-        "status": "queued",
-        "execution_arn": execution_arn,
-        "revision": inserted.revision
-    }))
+    let job = match jobs
+        .record_execution_started(&job.job_id, &execution_arn)
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            let detail = error.to_string();
+            let _ = jobs
+                .mark_failed(&job.job_id, "record_execution_started", &detail)
+                .await;
+            return Err(jobs_error(
+                "external_index record_execution_started failed",
+            )(error));
+        }
+    };
+
+    Ok(active_job_response(&job))
 }
 
-pub fn route_index_status(args: &Value, db: &Connection) -> Result<Value, McpHandlerError> {
-    route_index_status_with_reconciliation(args, db, None)
-}
-
-pub fn route_index_status_with_reconciliation(
+pub async fn route_index_status(
     args: &Value,
-    db: &Connection,
+    jobs: &dyn JobStore,
     checker: Option<&dyn ExecutionStatusChecker>,
 ) -> Result<Value, McpHandlerError> {
     let args: ExternalIndexStatusArgs = parse_args(args)?;
     args.validate()?;
-    let Some(row) = jobs::lookup(db, &args.job_id)
+    let Some(record) = jobs
+        .lookup_job(&args.job_id)
+        .await
         .map_err(jobs_error("external_index_status lookup failed"))?
     else {
         return Ok(json!({ "status": "not_found" }));
     };
 
-    let row = update_stale_job(db, row, checker)?;
-    Ok(index_status_response(&row))
+    let record = update_stale_job(record, jobs, checker).await?;
+    Ok(index_status_response(&record))
 }
 
 #[derive(Debug, Deserialize)]
@@ -758,34 +775,42 @@ where
     })
 }
 
-fn update_stale_job(
-    db: &Connection,
-    row: JobRow,
+async fn update_stale_job(
+    record: JobRecord,
+    jobs: &dyn JobStore,
     checker: Option<&dyn ExecutionStatusChecker>,
-) -> Result<JobRow, McpHandlerError> {
-    if !matches!(row.status, JobStatus::Queued | JobStatus::Running) {
-        return Ok(row);
+) -> Result<JobRecord, McpHandlerError> {
+    if !matches!(record.status, JobStatus::Queued | JobStatus::Running) {
+        return Ok(record);
+    }
+    if !is_stale_job(&record) {
+        return Ok(record);
     }
 
     let Some(checker) = checker else {
-        return Ok(row);
+        return Ok(record);
     };
-    let Some(execution_arn) = row.execution_arn.as_deref() else {
-        return Ok(row);
+    let Some(execution_arn) = record.execution_arn.as_deref() else {
+        return Ok(record);
     };
 
     let Ok(Some(outcome)) = checker.describe_execution(execution_arn) else {
-        return Ok(row);
+        return Ok(record);
     };
 
     match outcome.status {
-        ExecutionOutcomeStatus::Running => Ok(row),
+        ExecutionOutcomeStatus::Running => Ok(record),
         ExecutionOutcomeStatus::Succeeded => {
             let snapshot_id = outcome
                 .output
                 .as_ref()
                 .and_then(|output| output.get("snapshot_id"))
-                .and_then(Value::as_i64);
+                .and_then(Value::as_i64)
+                .ok_or_else(|| {
+                    McpHandlerError::Internal(
+                        "DescribeExecution succeeded output missing snapshot_id".to_owned(),
+                    )
+                })?;
             let row_counts = outcome
                 .output
                 .as_ref()
@@ -794,18 +819,12 @@ fn update_stale_job(
                         .get("rows_inserted")
                         .or_else(|| output.get("row_counts"))
                 })
-                .cloned();
+                .cloned()
+                .unwrap_or_else(|| json!({}));
 
-            jobs::update_status(
-                db,
-                &row.job_id,
-                JobStatus::Complete,
-                snapshot_id,
-                None,
-                row_counts,
-            )
-            .map_err(jobs_error("external_index_status update complete failed"))?;
-            lookup_updated_job(db, &row.job_id)
+            jobs.mark_complete(&record.job_id, snapshot_id, row_counts)
+                .await
+                .map_err(jobs_error("external_index_status update complete failed"))
         }
         ExecutionOutcomeStatus::Failed => {
             let error = outcome
@@ -813,25 +832,30 @@ fn update_stale_job(
                 .as_deref()
                 .filter(|error| !error.trim().is_empty())
                 .unwrap_or("execution: failed");
-            jobs::update_status(db, &row.job_id, JobStatus::Failed, None, Some(error), None)
+            let (code, detail) = split_job_error(error);
+            jobs.mark_failed(&record.job_id, code, detail)
+                .await
                 .map_err(jobs_error(
                     "external_index_status update failed status failed",
-                ))?;
-            lookup_updated_job(db, &row.job_id)
+                ))
         }
     }
 }
 
-fn lookup_updated_job(db: &Connection, job_id: &str) -> Result<JobRow, McpHandlerError> {
-    jobs::lookup(db, job_id)
-        .map_err(jobs_error(
-            "external_index_status refresh updated job failed",
-        ))?
-        .ok_or_else(|| {
-            McpHandlerError::Internal(format!(
-                "external_index_status updated job disappeared: {job_id}"
-            ))
-        })
+fn is_stale_job(record: &JobRecord) -> bool {
+    updated_at_age(&record.updated_at).is_some_and(|age| age >= STALE_JOB_REPAIR_AFTER)
+}
+
+fn updated_at_age(updated_at: &str) -> Option<Duration> {
+    let updated_millis = updated_at.parse::<u128>().ok()?;
+    let now_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let elapsed = now_millis.saturating_sub(updated_millis);
+    Some(Duration::from_millis(
+        elapsed.min(u128::from(u64::MAX)) as u64,
+    ))
 }
 
 fn sfn_execution_outcome(
@@ -899,44 +923,55 @@ fn source_kind_label(source_kind: SourceKind) -> &'static str {
     }
 }
 
-fn active_job_response(row: &JobRow) -> Value {
+fn active_job_response(record: &JobRecord) -> Value {
     json!({
-        "job_id": row.job_id,
-        "status": row.status.to_string(),
-        "execution_arn": row.execution_arn,
-        "revision": row.revision
+        "job_id": record.job_id,
+        "status": record.status.to_string(),
+        "execution_arn": record.execution_arn,
+        "revision": record.revision
     })
 }
 
-fn index_status_response(row: &JobRow) -> Value {
+fn index_status_response(record: &JobRecord) -> Value {
     let mut response = json!({
-        "job_id": row.job_id,
-        "status": row.status.to_string(),
-        "revision": row.revision,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at
+        "job_id": record.job_id,
+        "status": record.status.to_string(),
+        "revision": record.revision,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "attempt": record.attempt,
+        "execution_arn": record.execution_arn
     });
 
-    if let Some(snapshot_id) = row.snapshot_id {
+    if let Some(stage) = record.stage.as_deref() {
+        response["stage"] = json!(stage);
+    }
+    if let Some(snapshot_id) = record.snapshot_id {
         response["snapshot_id"] = json!(snapshot_id);
     }
-    if let Some(row_counts) = row.row_counts.as_ref() {
+    if let Some(row_counts) = record.row_counts.as_ref() {
         response["row_counts"] = row_counts.clone();
     }
-    if row.status == JobStatus::Failed {
-        if let Some(error) = row.error.as_deref() {
-            response["error"] = job_error_response(error);
+    if record.status == JobStatus::Failed {
+        if record.error_code.is_some() || record.error_detail.is_some() {
+            response["error"] = job_error_response(
+                record.error_code.as_deref().unwrap_or("execution"),
+                record.error_detail.as_deref().unwrap_or("failed"),
+            );
         }
     }
 
     response
 }
 
-fn job_error_response(error: &str) -> Value {
-    let (code, detail) = error.split_once(':').map_or_else(
+fn split_job_error(error: &str) -> (&str, &str) {
+    error.split_once(':').map_or_else(
         || (error.trim(), ""),
         |(code, detail)| (code.trim(), detail.trim()),
-    );
+    )
+}
+
+fn job_error_response(code: &str, detail: &str) -> Value {
     json!({
         "code": code,
         "detail": detail,
