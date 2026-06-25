@@ -29,8 +29,44 @@ WORKER_ECR_REPO="spur-context-worker"
 WORKER_IMAGE_TAG="latest"
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 AWS_REGION_VAL="$(cd "$INFRA_DIR" && terraform output -raw aws_region 2>/dev/null || echo ap-southeast-5)"
+WORKER_IMAGE_URI=""
 
 log() { echo "[deploy] $*" >&2; }
+
+remote_worktree_key() {
+    local git_toplevel worktree_key default_remote_namespace remote_namespace
+    git_toplevel="$(git -C "$REPO_ROOT" rev-parse --show-toplevel)"
+    if [[ "$git_toplevel" == *"/.spur/worktrees/"* ]]; then
+        worktree_key="worktrees/$(basename "$git_toplevel")"
+        default_remote_namespace="$(basename "$(dirname "$(dirname "$(dirname "$git_toplevel")")")")"
+    else
+        worktree_key="main"
+        default_remote_namespace="$(basename "$git_toplevel")"
+    fi
+    remote_namespace="${SPUR_REMOTE_NAMESPACE:-$default_remote_namespace}"
+    echo "$remote_namespace/$worktree_key"
+}
+
+remote_worktree_path() {
+    local rel_path="$1"
+    echo "/home/${AWS_SSH_USER:-admin}/$(remote_worktree_key)/$rel_path"
+}
+
+fetch_remote_worktree_file() {
+    local remote_rel_path="$1"
+    local local_dest="$2"
+    local cloud_dir="$REPO_ROOT/scripts/cloud-build"
+
+    (
+        SCRIPT_DIR="$cloud_dir"
+        # shellcheck disable=SC1091
+        source "$SCRIPT_DIR/config.env"
+        # shellcheck disable=SC1090
+        source "$SCRIPT_DIR/provider-${SPUR_CLOUD}.sh"
+        provider_choose_transport
+        provider_fetch "$(remote_worktree_path "$remote_rel_path")" "$local_dest"
+    )
+}
 
 download_extensions() {
     local ext_dir="$BUILD_DIR/.duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}"
@@ -54,7 +90,7 @@ build_binary() {
     CFLAGS="-mcpu=neoverse-n1 -O2" \
     CXXFLAGS="-mcpu=neoverse-n1 -O2" \
         scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release
-    scripts/cloud-build/fetch.sh --to "$BUILD_DIR/bootstrap" crates/spur-context-service/target/release/spur-context-service
+    fetch_remote_worktree_file crates/spur-context-service/target/release/spur-context-service "$BUILD_DIR/bootstrap"
 }
 
 package_zip() {
@@ -91,11 +127,11 @@ build_and_push_worker_image() {
     # Build the Docker image entirely on the remote VM and push to ECR — no
     # local Docker or binary fetch needed. The VM has Docker installed via
     # startup-aws.sh and ECR push permissions via the spur-ecr-push IAM policy.
-    # The --binary flag points at the worker binary already built on the VM's
-    # target dir by build_worker() above.
+    # The --remote-binary flag points at the worker binary already built in the
+    # standalone crate's target dir by build_worker() above.
     cd "$REPO_ROOT"
     scripts/cloud-build/docker-build.sh \
-        --binary target/release/spur-context-worker \
+        --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker)" \
         --dockerfile-inline 'FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
@@ -104,7 +140,7 @@ ENTRYPOINT ["/usr/local/bin/spur-context-worker"]' \
         --tag "$full_tag"
 
     log "worker image pushed: $full_tag"
-    echo "$full_tag"
+    WORKER_IMAGE_URI="$full_tag"
 }
 
 main() {
@@ -124,7 +160,8 @@ main() {
     # Build + push worker container image (unless --skip-worker).
     if [[ "$skip_worker" == "false" ]]; then
         build_worker
-        worker_image_uri="$(build_and_push_worker_image)"
+        build_and_push_worker_image
+        worker_image_uri="$WORKER_IMAGE_URI"
     fi
 
     # Build or reuse Lambda zip.
