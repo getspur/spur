@@ -102,7 +102,6 @@ build_and_push_worker_image() {
         --binary target/release/spur-context-worker \
         --dockerfile-inline 'FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL -o /tmp/duckdb.zip "https://github.com/duckdb/duckdb/releases/download/v1.4.4/duckdb_cli-linux-arm64.zip" && unzip -o /tmp/duckdb.zip -d /tmp && install -m 0755 /tmp/duckdb /usr/local/bin/duckdb && rm -f /tmp/duckdb.zip /tmp/duckdb
 WORKDIR /workspace
 COPY spur-context-worker /usr/local/bin/spur-context-worker
 ENTRYPOINT ["/usr/local/bin/spur-context-worker"]' \

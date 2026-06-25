@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -uo pipefail
+WT="/Volumes/Projects/spur/.spur/worktrees/s3-verify"
+LOG="/Volumes/Projects/spur/.spur/s3-verify-run.log"
+cd "$WT" || { echo "FATAL: cannot cd to worktree" | tee -a "$LOG"; exit 99; }
+: > "$LOG"
+overall=0
+step() {
+  local name="$1"; shift
+  echo "" | tee -a "$LOG"
+  echo "######## START [$name] $(date -u +%H:%M:%S) ########" | tee -a "$LOG"
+  echo "+ $*" | tee -a "$LOG"
+  local t0=$SECONDS
+  ( "$@" ) >>"$LOG" 2>&1
+  local rc=$?
+  local dt=$((SECONDS - t0))
+  if [ $rc -eq 0 ]; then
+    echo "######## PASS  [$name] rc=0 (${dt}s) ########" | tee -a "$LOG"
+  else
+    echo "######## FAIL  [$name] rc=$rc (${dt}s) ########" | tee -a "$LOG"
+    echo "----- tail of [$name] -----" | tee -a "$LOG"
+    tail -40 "$LOG"
+    overall=$rc
+  fi
+  return $rc
+}
+
+step "clippy-workspace"   env SPUR_REMOTE=1 ./scripts/spur-cargo clippy --workspace -- -D warnings           && \
+step "test-spur-mcp-1"    ./scripts/spur-cargo test -p spur-mcp                                               && \
+step "test-spur-core-1"   ./scripts/spur-cargo test -p spur-core                                              && \
+step "test-spur-mcp-2"    ./scripts/spur-cargo test -p spur-mcp                                               && \
+step "test-spur-core-2"   ./scripts/spur-cargo test -p spur-core
+
+rc=$?
+echo "" | tee -a "$LOG"
+echo "@@@@@@@@ SEQUENCE DONE overall_rc=$rc @@@@@@@@" | tee -a "$LOG"
+echo "@@@@@@@@ $(date -u +%H:%M:%S) @@@@@@@@" | tee -a "$LOG"
+exit $rc
