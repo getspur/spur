@@ -191,6 +191,11 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     conn.execute_batch("CALL ducklake_flush_inlined_data('spur_context');")
         .context("failed to flush inlined DuckLake data")?;
 
+    // Force DuckLake to write all pending parquet files to S3. Without this,
+    // data stays in DuckDB's buffer and is never persisted as parquet files.
+    conn.execute_batch("CHECKPOINT;")
+        .context("failed to checkpoint DuckLake")?;
+
     Ok(TranslateStats {
         rows_inserted,
         snapshot_id,

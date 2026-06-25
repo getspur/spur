@@ -4,7 +4,7 @@
     "RunBuild": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
-      "TimeoutSeconds": 900,
+      "TimeoutSeconds": 3600,
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
@@ -72,7 +72,7 @@
       "ResultPath": "$.buildStats",
       "Retry": [
         {
-          "ErrorEquals": ["States.TaskFailed"],
+          "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
           "MaxAttempts": 2,
           "BackoffRate": 2.0,
           "MaxDelaySeconds": 30
@@ -90,7 +90,7 @@
     "FallbackBuild": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
-      "TimeoutSeconds": 900,
+      "TimeoutSeconds": 3600,
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
