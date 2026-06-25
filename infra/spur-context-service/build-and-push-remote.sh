@@ -36,9 +36,13 @@ CTX=/tmp/docker-build.$$
 mkdir -p "$CTX"
 cp "$SPUR_BIN" "$CTX/spur"
 cp "$WORKER_BIN" "$CTX/spur-context-worker"
+# Write Dockerfile — includes DuckDB CLI v1.5.4 for the translate step
+# (the Rust duckdb crate's linux_arm64 DuckLake extension has a bug where
+# INSERTs don't flush to S3; the CLI binary works correctly)
 cat > "$CTX/Dockerfile" <<'DOCKERFILE'
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/duckdb.zip "https://github.com/duckdb/duckdb/releases/download/v1.5.4/duckdb_cli-linux-arm64.zip" && unzip -o /tmp/duckdb.zip -d /tmp && install -m 0755 /tmp/duckdb /usr/local/bin/duckdb && rm -f /tmp/duckdb.zip /tmp/duckdb
 WORKDIR /workspace
 COPY spur-context-worker /usr/local/bin/spur-context-worker
 COPY spur /usr/local/bin/spur
