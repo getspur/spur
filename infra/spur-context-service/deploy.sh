@@ -151,11 +151,8 @@ build_and_push_worker_image() {
 
     local ecr_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${WORKER_ECR_REPO}"
     local full_tag="${ecr_uri}:${WORKER_IMAGE_TAG}"
-    local worker_context="$BUILD_DIR/worker-image"
-    mkdir -p "$worker_context"
-    fetch_remote_target_file target/release/spur "$worker_context/spur"
-    chmod +x "$worker_context/spur"
-    cat > "$worker_context/Dockerfile" <<'DOCKERFILE'
+    local worker_dockerfile="$BUILD_DIR/worker-image.Dockerfile"
+    cat > "$worker_dockerfile" <<'DOCKERFILE'
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
@@ -169,14 +166,13 @@ DOCKERFILE
     # Build the Docker image entirely on the remote VM and push to ECR — no
     # local Docker needed. The VM has Docker installed via startup-aws.sh and
     # ECR push permissions via the spur-ecr-push IAM policy.
-    # The --remote-binary flag points at the worker binary already built in the
-    # standalone crate's target dir by build_worker() above. The local context
-    # contributes the workspace spur CLI binary and canonical Dockerfile.
+    # The --remote-binary flags point at binaries already built on the VM: the
+    # standalone worker and the workspace spur CLI used by `spur graph build`.
     cd "$REPO_ROOT"
     scripts/cloud-build/docker-build.sh \
         --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker)" \
-        --context-dir "$worker_context" \
-        --dockerfile Dockerfile \
+        --remote-binary "$(remote_target_path target/release/spur)" \
+        --dockerfile "$worker_dockerfile" \
         --tag "$full_tag"
 
     smoke_worker_image "$full_tag"
