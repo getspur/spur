@@ -80,6 +80,13 @@ def test_worker_checkpoint_uri_is_per_job_object_from_state_machine():
     assert "/jobs/{}/checkpoint.json" in variables_tf
 
 
+def test_state_machine_does_not_retry_worker_reported_failures():
+    asl = (INFRA_DIR / "index_build_asl.json").read_text()
+
+    assert '"States.TaskFailed"' not in asl
+    assert '"States.ALL"' not in asl
+
+
 def test_catalog_lease_ttl_uses_worker_expiry_field():
     main_tf = (INFRA_DIR / "main.tf").read_text()
 
