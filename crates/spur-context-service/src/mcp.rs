@@ -699,6 +699,10 @@ fn normalize_selector(
     source: &str,
     catalog: &CatalogResolver,
 ) -> Result<String, McpHandlerError> {
+    let selector = selector.trim();
+    if selector.starts_with("pkg-symbol://") {
+        return Ok(selector.to_owned());
+    }
     let parsed = parse_external_selector(selector)?;
     let resolved = resolve_revision(
         catalog,
