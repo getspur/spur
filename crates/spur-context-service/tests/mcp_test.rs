@@ -26,6 +26,7 @@ use spur_context_service::mcp::{
 const PACKAGE: &str = "demo";
 const REVISION: &str = "1.0.0";
 const SOURCE_URL: &str = "https://1.1.1.1/example/demo";
+const GIT_SOURCE: &str = "git:github.com/example/demo";
 const DIMENSIONS: usize = 768;
 
 #[test]
@@ -56,9 +57,11 @@ fn tool_definitions_match_external_context_surface() {
 
     let read_schema = schema_for(&definitions, "external_code_read");
     assert_eq!(required(read_schema), ["selector"]);
+    assert!(read_schema["properties"]["source"]["default"].is_string());
 
     let callers_schema = schema_for(&definitions, "external_code_callers");
     assert_eq!(required(callers_schema), ["selector"]);
+    assert!(callers_schema["properties"]["source"]["default"].is_string());
     assert_eq!(
         callers_schema["properties"]["include_unresolved"]["default"],
         false
@@ -66,6 +69,7 @@ fn tool_definitions_match_external_context_surface() {
 
     let callees_schema = schema_for(&definitions, "external_code_callees");
     assert_eq!(required(callees_schema), ["selector"]);
+    assert!(callees_schema["properties"]["source"]["default"].is_string());
 
     let knowledge_schema = schema_for(&definitions, "external_knowledge_context");
     assert_eq!(required(knowledge_schema), ["query", "package"]);
@@ -139,6 +143,29 @@ async fn external_code_read_resolves_selector_ref_and_returns_source() -> Result
     assert_eq!(response["stable_symbol_id"], "bbbbbbbbbbbbbbbb");
     assert_eq!(response["file_path"], "src/lib.rs");
     assert_eq!(response["line_range"], json!([6, 7]));
+    assert_eq!(response["source"], "pub fn beta() {\n}\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_code_read_resolves_non_default_source() -> Result<()> {
+    let fixture = McpFixture::new("read-git-source")?;
+    move_fixture_to_source(&fixture, GIT_SOURCE)?;
+
+    let response = handle_tool(
+        "external_code_read",
+        &json!({
+            "source": GIT_SOURCE,
+            "selector": "pkg:demo@latest::demo::beta",
+            "context_lines": 0
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+
+    assert_eq!(response["stable_symbol_id"], "bbbbbbbbbbbbbbbb");
+    assert_eq!(response["package_source"], GIT_SOURCE);
     assert_eq!(response["source"], "pub fn beta() {\n}\n");
     Ok(())
 }
@@ -601,6 +628,38 @@ fn required(schema: &Value) -> Vec<&str> {
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect()
+}
+
+fn move_fixture_to_source(fixture: &McpFixture, source: &str) -> Result<()> {
+    for table in [
+        "nodes",
+        "edges",
+        "edges_unresolved",
+        "files",
+        "section_bodies",
+        "symbol_embeddings",
+        "refs",
+    ] {
+        fixture
+            .conn
+            .execute(
+                &format!("UPDATE {table} SET source = ? WHERE source = 'registry:crates-io'"),
+                params![source],
+            )
+            .with_context(|| format!("move query fixture table {table} to source {source}"))?;
+    }
+
+    for table in ["package_catalog", "refs"] {
+        fixture
+            .catalog
+            .connection()
+            .execute(
+                &format!("UPDATE {table} SET source = ? WHERE source = 'registry:crates-io'"),
+                params![source],
+            )
+            .with_context(|| format!("move catalog fixture table {table} to source {source}"))?;
+    }
+    Ok(())
 }
 
 struct McpFixture {

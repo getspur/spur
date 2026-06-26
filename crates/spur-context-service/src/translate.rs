@@ -165,13 +165,14 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     ensure_catalog_schema(&conn)?;
 
     let mut rows_inserted = HashMap::new();
-    let embeddings_translated = run_transaction(&conn, || {
+    run_transaction(&conn, || {
         delete_existing_revision_rows(&conn, opts)?;
         insert_structural_tables(&conn, opts, revision, &mut rows_inserted)?;
-        insert_git_tables(&conn, opts, revision, &mut rows_inserted)?;
-        insert_sidecar_tables(&conn, opts, revision, &mut rows_inserted)
+        insert_git_tables(&conn, opts, revision, &mut rows_inserted)
     })
     .context("failed to translate artifact tables into DuckLake")?;
+    let embeddings_translated = insert_sidecar_tables(&conn, opts, revision, &mut rows_inserted)
+        .context("failed to translate artifact sidecars into DuckLake")?;
 
     let snapshot_id = latest_snapshot_id(&conn).context("failed to read DuckLake snapshot id")?;
     write_catalog_metadata(
@@ -202,9 +203,10 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
         while rows.next()?.is_some() {}
     }
 
-    // CHECKPOINT forces DuckLake to persist all pending state.
-    conn.execute("CHECKPOINT", [])
-        .context("failed to checkpoint DuckLake")?;
+    // FORCE CHECKPOINT makes the just-committed DuckLake changes durable before
+    // the worker uploads the catalog metadata back to S3.
+    conn.execute("FORCE CHECKPOINT", [])
+        .context("failed to force checkpoint DuckLake")?;
 
     Ok(TranslateStats {
         rows_inserted,
