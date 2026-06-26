@@ -14,8 +14,14 @@ use crate::catalog::{self, CatalogResolver};
 use crate::jobs::{DynamoDbJobStore, JobStore};
 use crate::mcp::{self, McpHandlerError};
 
-pub static CATALOG_RESOLVER: OnceLock<Mutex<Option<CatalogResolver>>> = OnceLock::new();
+pub static CATALOG_RESOLVER: OnceLock<Mutex<Option<CatalogCacheEntry>>> = OnceLock::new();
 static AWS_CLIENTS: OnceLock<AwsClients> = OnceLock::new();
+
+pub struct CatalogCacheEntry {
+    catalog_dsn: String,
+    catalog_etag: Option<String>,
+    resolver: CatalogResolver,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ApiGatewayRequest {
@@ -103,8 +109,11 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
             route_index_status_control_plane(&request.args, &jobs, &checker).await
         }
         "external_index" => {
+            let catalog_dsn = catalog_dsn()?;
+            let catalog_etag = catalog_etag(&catalog_dsn).await?;
             let mut catalog_guard = catalog_resolver()?;
-            let catalog = initialized_catalog(&mut catalog_guard)?;
+            let catalog =
+                initialized_catalog(&mut catalog_guard, &catalog_dsn, catalog_etag.as_deref())?;
             let db = catalog.connection();
             let jobs = job_store();
             let sfn_client = sfn_client()?;
@@ -112,8 +121,11 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
             mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, &caller_id).await
         }
         _ => {
+            let catalog_dsn = catalog_dsn()?;
+            let catalog_etag = catalog_etag(&catalog_dsn).await?;
             let mut catalog_guard = catalog_resolver()?;
-            let catalog = initialized_catalog(&mut catalog_guard)?;
+            let catalog =
+                initialized_catalog(&mut catalog_guard, &catalog_dsn, catalog_etag.as_deref())?;
             let db = catalog.connection();
             mcp::handle_tool_sync(&request.tool, &request.args, db, catalog)
         }
@@ -176,7 +188,7 @@ fn routed_tool_name(request: &ApiGatewayRequest) -> Option<&'static str> {
     }
 }
 
-fn catalog_resolver() -> Result<MutexGuard<'static, Option<CatalogResolver>>, Error> {
+fn catalog_resolver() -> Result<MutexGuard<'static, Option<CatalogCacheEntry>>, Error> {
     CATALOG_RESOLVER
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -184,16 +196,48 @@ fn catalog_resolver() -> Result<MutexGuard<'static, Option<CatalogResolver>>, Er
 }
 
 fn initialized_catalog<'a>(
-    guard: &'a mut MutexGuard<'static, Option<CatalogResolver>>,
+    guard: &'a mut MutexGuard<'static, Option<CatalogCacheEntry>>,
+    catalog_dsn: &str,
+    catalog_etag: Option<&str>,
 ) -> Result<&'a CatalogResolver, Error> {
-    if guard.is_none() {
-        let catalog_dsn = catalog_dsn()?;
-        let conn = catalog::connect_ducklake(&catalog_dsn).map_err(Error::from)?;
-        **guard = Some(CatalogResolver::from_connection(conn));
+    let cached_dsn = guard.as_ref().map(|entry| entry.catalog_dsn.as_str());
+    let cached_etag = guard
+        .as_ref()
+        .and_then(|entry| entry.catalog_etag.as_deref());
+
+    if should_initialize_catalog(cached_dsn, cached_etag, catalog_dsn, catalog_etag) {
+        let conn = catalog::connect_ducklake(catalog_dsn).map_err(Error::from)?;
+        **guard = Some(CatalogCacheEntry {
+            catalog_dsn: catalog_dsn.to_owned(),
+            catalog_etag: catalog_etag.map(str::to_owned),
+            resolver: CatalogResolver::from_connection(conn),
+        });
     }
     guard
         .as_ref()
+        .map(|entry| &entry.resolver)
         .ok_or_else(|| lambda_error("catalog resolver cache did not initialize"))
+}
+
+fn should_initialize_catalog(
+    cached_dsn: Option<&str>,
+    cached_etag: Option<&str>,
+    catalog_dsn: &str,
+    current_etag: Option<&str>,
+) -> bool {
+    let Some(cached_dsn) = cached_dsn else {
+        return true;
+    };
+    if cached_dsn != catalog_dsn {
+        return true;
+    }
+    if !catalog::is_remote_catalog(catalog_dsn) {
+        return false;
+    }
+    match (cached_etag, current_etag) {
+        (Some(cached), Some(current)) => cached != current,
+        _ => true,
+    }
 }
 
 fn catalog_dsn() -> Result<String, Error> {
@@ -204,6 +248,44 @@ fn catalog_dsn() -> Result<String, Error> {
                 "SPUR_CATALOG_S3_URI (or SPUR_CATALOG_DSN) environment variable is required: {error}"
             ))
         })
+}
+
+async fn catalog_etag(catalog_dsn: &str) -> Result<Option<String>, Error> {
+    let Some(uri) = parse_s3_uri(catalog_dsn)? else {
+        return Ok(None);
+    };
+    let output = aws_clients()
+        .s3
+        .head_object()
+        .bucket(uri.bucket)
+        .key(uri.key)
+        .send()
+        .await
+        .map_err(|error| lambda_error(format!("failed to read catalog ETag: {error}")))?;
+    Ok(output.e_tag().map(str::to_owned))
+}
+
+struct S3Uri {
+    bucket: String,
+    key: String,
+}
+
+fn parse_s3_uri(uri: &str) -> Result<Option<S3Uri>, Error> {
+    let Some(without_scheme) = uri.strip_prefix("s3://") else {
+        return Ok(None);
+    };
+    let (bucket, key) = without_scheme.split_once('/').ok_or_else(|| {
+        lambda_error(format!("S3 catalog URI must include bucket and key: {uri}"))
+    })?;
+    if bucket.is_empty() || key.is_empty() {
+        return Err(lambda_error(format!(
+            "S3 catalog URI must include bucket and key: {uri}"
+        )));
+    }
+    Ok(Some(S3Uri {
+        bucket: bucket.to_owned(),
+        key: key.to_owned(),
+    }))
 }
 
 fn job_store() -> DynamoDbJobStore {
@@ -229,12 +311,14 @@ fn sfn_client() -> Result<SfnIndexExecutionStarter, Error> {
 #[derive(Debug, Clone)]
 struct AwsClients {
     dynamodb: aws_sdk_dynamodb::Client,
+    s3: aws_sdk_s3::Client,
     sfn: aws_sdk_sfn::Client,
 }
 
 fn aws_clients() -> &'static AwsClients {
     AWS_CLIENTS.get_or_init(|| AwsClients {
         dynamodb: dynamodb_client_from_env(),
+        s3: s3_client_from_env(),
         sfn: sfn_client_from_env(),
     })
 }
@@ -285,6 +369,30 @@ fn dynamodb_client_from_env() -> aws_sdk_dynamodb::Client {
     }
 
     aws_sdk_dynamodb::Client::from_conf(config.build())
+}
+
+fn s3_client_from_env() -> aws_sdk_s3::Client {
+    let region = env::var("AWS_REGION")
+        .or_else(|_| env::var("AWS_DEFAULT_REGION"))
+        .unwrap_or_else(|_| "us-east-1".to_owned());
+    let mut config = aws_sdk_s3::Config::builder()
+        .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+        .region(aws_sdk_s3::config::Region::new(region));
+
+    if let (Ok(access_key), Ok(secret_key)) = (
+        env::var("AWS_ACCESS_KEY_ID"),
+        env::var("AWS_SECRET_ACCESS_KEY"),
+    ) {
+        config = config.credentials_provider(aws_sdk_s3::config::Credentials::new(
+            access_key,
+            secret_key,
+            env::var("AWS_SESSION_TOKEN").ok(),
+            None,
+            "lambda-env",
+        ));
+    }
+
+    aws_sdk_s3::Client::from_conf(config.build())
 }
 
 fn caller_id(request: &ApiGatewayRequest) -> String {
@@ -464,5 +572,48 @@ mod tests {
         }));
 
         assert_eq!(caller_id(&request), "rest-principal");
+    }
+
+    #[test]
+    fn remote_catalog_dsn_reinitializes_when_etag_changes() {
+        let s3_dsn = "s3://spur-context/catalog/catalog.ducklake";
+
+        assert!(should_initialize_catalog(
+            None,
+            None,
+            s3_dsn,
+            Some("etag-a")
+        ));
+        assert!(!should_initialize_catalog(
+            Some(s3_dsn),
+            Some("etag-a"),
+            s3_dsn,
+            Some("etag-a")
+        ));
+        assert!(should_initialize_catalog(
+            Some(s3_dsn),
+            Some("etag-a"),
+            s3_dsn,
+            Some("etag-b")
+        ));
+        assert!(should_initialize_catalog(
+            Some(s3_dsn),
+            Some("etag-a"),
+            s3_dsn,
+            None
+        ));
+
+        assert!(should_initialize_catalog(
+            None,
+            None,
+            "sqlite:/tmp/catalog.sqlite",
+            None
+        ));
+        assert!(!should_initialize_catalog(
+            Some("sqlite:/tmp/catalog.sqlite"),
+            None,
+            "sqlite:/tmp/catalog.sqlite",
+            None
+        ));
     }
 }
