@@ -171,6 +171,52 @@ async fn external_code_read_resolves_non_default_source() -> Result<()> {
 }
 
 #[tokio::test]
+async fn external_code_read_reports_missing_indexed_source_text() -> Result<()> {
+    let fixture = McpFixture::new("read-missing-source-text")?;
+    fixture
+        .conn
+        .execute("DELETE FROM files WHERE file_path = 'src/lib.rs'", [])?;
+
+    let search = handle_tool(
+        "external_code_search",
+        &json!({
+            "query": "bet",
+            "package": PACKAGE,
+            "symbol_kind": "function",
+            "limit": 20
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+
+    assert_eq!(search["total_matches"], 1);
+    assert_eq!(
+        search["candidates"][0]["stable_symbol_id"],
+        "bbbbbbbbbbbbbbbb"
+    );
+
+    let error = handle_tool(
+        "external_code_read",
+        &json!({
+            "selector": "pkg:demo@latest::demo::beta",
+            "context_lines": 0
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await
+    .expect_err("missing source text should not look like a missing symbol");
+
+    assert!(matches!(error, McpHandlerError::Internal(_)));
+    assert!(
+        error.to_string().contains("source text is not indexed"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_code_read_accepts_search_uri_for_ambiguous_symbol_name() -> Result<()> {
     let fixture = McpFixture::new("read-search-uri")?;
     move_fixture_to_source(&fixture, GIT_SOURCE)?;
