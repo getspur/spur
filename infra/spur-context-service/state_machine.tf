@@ -12,6 +12,8 @@ resource "aws_sfn_state_machine" "index_build" {
     {
       cluster_arn                    = aws_ecs_cluster.indexing.arn
       worker_taskdef_arn             = aws_ecs_task_definition.worker.arn
+      worker_lambda_arn              = aws_lambda_alias.worker_live.arn
+      worker_lambda_timeout_sec      = var.worker_lambda_timeout_sec
       index_jobs_table_name          = aws_dynamodb_table.index_jobs.name
       catalog_leases_table_name      = aws_dynamodb_table.catalog_leases.name
       catalog_s3_uri                 = var.catalog_s3_uri
