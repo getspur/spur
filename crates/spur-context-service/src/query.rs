@@ -201,7 +201,7 @@ pub fn read_symbol(
                 n.qualified_name,
                 f.source_text
             FROM nodes n
-            JOIN files f
+            LEFT JOIN files f
               ON f.source = n.source
              AND f.package = n.package
              AND f.revision = n.revision
@@ -240,8 +240,18 @@ pub fn read_symbol(
     let Some(row) = row else {
         return Ok(None);
     };
+    let source_text = row.source_text.ok_or_else(|| {
+        anyhow!(
+            "source text is not indexed for {} {}@{} `{}` ({})",
+            row.package_source,
+            row.package,
+            row.revision,
+            row.file_path,
+            row.stable_symbol_id
+        )
+    })?;
     let (source, line_range) = slice_symbol_source(
-        &row.source_text,
+        &source_text,
         row.byte_start,
         row.byte_end,
         row.line_start,
@@ -1117,7 +1127,7 @@ struct SymbolSourceRow {
     line_start: usize,
     line_end: usize,
     qualified_name: String,
-    source_text: String,
+    source_text: Option<String>,
 }
 
 #[derive(Default)]
