@@ -498,6 +498,73 @@ fn analyst_build_uses_complete_lance_sidecar_for_hybrid_search() {
 }
 
 #[test]
+fn analyst_build_uses_complete_lance_sidecar_for_hybrid_search_without_temporal() {
+    let tempdir = tempfile::Builder::new()
+        .prefix("bundled-duckdb-complete-sidecar-no-temporal")
+        .tempdir()
+        .expect("tempdir");
+    write_section_fixture_source(tempdir.path());
+    let artifact = non_temporal_artifact_with_section("analyst-complete-sidecar-no-temporal");
+    let artifact_dir = spur_graph::store::parquet::write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write artifact");
+    write_sections_dataset_best_effort_with_options(
+        &artifact,
+        tempdir.path(),
+        &artifact_dir,
+        SectionEmbeddingOptions {
+            skip_embeddings: true,
+            batch_size: 64,
+        },
+    );
+    spur_graph::store::stamp_sidecar_status(
+        &artifact_dir,
+        GraphArtifactSidecarStatus {
+            complete: true,
+            row_counts: GraphArtifactSidecarRowCounts {
+                section_bodies: 1,
+                code_symbols: 1,
+            },
+        },
+    )
+    .expect("stamp sidecar complete");
+    let db_path = tempdir.path().join("analyst.duckdb");
+
+    build_analyst(tempdir.path(), &artifact_dir, &db_path);
+
+    let macros = query_csv(
+        &db_path,
+        "SELECT function_name
+         FROM duckdb_functions()
+         WHERE function_name IN (
+           'search_context_candidates',
+           'search_context_candidates_hybrid'
+         )
+         ORDER BY function_name;",
+    );
+    assert_eq!(
+        macros.trim(),
+        "search_context_candidates\nsearch_context_candidates_hybrid"
+    );
+
+    let optional_views = query_csv(
+        &db_path,
+        "SELECT view_name
+         FROM duckdb_views()
+         WHERE view_name IN ('commits', 'symbol_snapshots', 'temporal_edges')
+         ORDER BY view_name;",
+    );
+    assert_eq!(optional_views.trim(), "");
+
+    let section_count = query_csv(&db_path, "SELECT count(*) FROM sections;");
+    assert_eq!(section_count.trim(), "1");
+}
+
+#[test]
 fn analyst_build_degrades_to_bm25_when_sidecar_manifest_incomplete() {
     let tempdir = tempfile::Builder::new()
         .prefix("bundled-duckdb-incomplete-sidecar")
@@ -962,6 +1029,15 @@ fn temporal_artifact_with_section(graph_content_hash: &str) -> GraphIndexArtifac
         receiver_text: None,
         scope_text: None,
     });
+    artifact
+}
+
+fn non_temporal_artifact_with_section(graph_content_hash: &str) -> GraphIndexArtifact {
+    let mut artifact = temporal_artifact_with_section(graph_content_hash);
+    artifact.commits.clear();
+    artifact.symbol_snapshots.clear();
+    artifact.temporal_edges.clear();
+    artifact.diagnostics.clear();
     artifact
 }
 
