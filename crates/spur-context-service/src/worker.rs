@@ -181,15 +181,16 @@ pub async fn run_job_and_report_with_services(
                 }
                 Err(error) => {
                     let error_detail = format!("{error:#}");
+                    let error_code = failure_error_code(&error);
                     eprintln!("[worker] job failed: {error_detail}");
                     mark_job_failed_best_effort(
                         jobs.as_ref(),
                         env,
-                        &failure_error_code(&error),
+                        &error_code,
                         &error_detail,
                     )
                     .await;
-                    if let Err(sfn_err) = send_task_failure(env, &failure_error_code(&error), &error_detail).await {
+                    if let Err(sfn_err) = send_task_failure(env, &error_code, &error_detail).await {
                         eprintln!("[worker] SendTaskFailure also failed: {sfn_err:#}");
                     }
                     return Err(error);
@@ -200,14 +201,15 @@ pub async fn run_job_and_report_with_services(
             if let Err(error) = signal_result {
                 let worker_error = WorkerError::SfnSend(error.to_string());
                 let error_detail = worker_error.to_string();
+                let error_code = failure_error_code(&worker_error);
                 mark_job_failed_best_effort(
                     jobs.as_ref(),
                     env,
-                    &failure_error_code(&worker_error),
+                    &error_code,
                     &error_detail,
                 )
                 .await;
-                send_task_failure(env, &failure_error_code(&worker_error), &error_detail).await?;
+                send_task_failure(env, &error_code, &error_detail).await?;
                 return Err(worker_error);
             }
             handle_spot_interruption(env, &stage.get()).await?;
@@ -1558,11 +1560,11 @@ fn tarball_size_cap_bytes() -> usize {
 
 fn failure_error_code(error: &WorkerError) -> String {
     match error {
-        WorkerError::Fetch(detail) => format!("fetch:{detail}"),
-        WorkerError::Build(detail) => format!("build:{detail}"),
-        WorkerError::Translate(detail) => format!("commit:{detail}"),
+        WorkerError::Fetch(_) => "fetch".to_owned(),
+        WorkerError::Build(_) => "build".to_owned(),
+        WorkerError::Translate(_) => "commit".to_owned(),
         WorkerError::SpotInterrupted => "spot_interrupted".to_owned(),
-        WorkerError::SfnSend(detail) => format!("sfn_send:{detail}"),
+        WorkerError::SfnSend(_) => "sfn_send".to_owned(),
     }
 }
 
@@ -1720,4 +1722,35 @@ struct Checkpoint<'a> {
     translate_partial: bool,
     error: &'a str,
     written_at_unix_secs: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_failure_code_is_stable_and_bounded() {
+        let checkout_detail = "git checkout failed: ".to_owned() + &"x".repeat(512);
+
+        assert_eq!(
+            failure_error_code(&WorkerError::Fetch(checkout_detail)),
+            "fetch"
+        );
+        assert_eq!(
+            failure_error_code(&WorkerError::Build("graph build failed".to_owned())),
+            "build"
+        );
+        assert_eq!(
+            failure_error_code(&WorkerError::Translate("catalog write failed".to_owned())),
+            "commit"
+        );
+        assert_eq!(
+            failure_error_code(&WorkerError::SfnSend("SendTaskFailure failed".to_owned())),
+            "sfn_send"
+        );
+        assert_eq!(
+            failure_error_code(&WorkerError::SpotInterrupted),
+            "spot_interrupted"
+        );
+    }
 }
