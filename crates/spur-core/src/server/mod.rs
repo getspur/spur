@@ -316,6 +316,7 @@ impl McpCallbackServer {
                 event_sink: server.event_sink.clone(),
                 feature_gate: Arc::clone(&server.feature_gate),
             },
+            &spur_acp::config::ContextServiceConfig::default(),
         )
         .expect("core MCP tool registry must be valid");
         server.tool_registry = Arc::new(tool_registry);
