@@ -1,5 +1,5 @@
-//! `spur mcp`, `spur graph mcp`, and `spur analyst mcp` — standalone MCP
-//! servers launched directly from the `spur` CLI.
+//! `spur mcp`, `spur graph mcp`, `spur analyst mcp`, and `spur context mcp` —
+//! standalone MCP servers launched directly from the `spur` CLI.
 //!
 //! Each builds a [`spur_mcp::ToolRegistry`] from one or more domain
 //! `ToolModule`s, wraps it in a [`RegistryServerHandler`], and serves it over
@@ -10,6 +10,7 @@
 //! { "mcpServers": {
 //!     "spur-graph":   { "command": "spur", "args": ["graph", "mcp"] },
 //!     "spur-analyst": { "command": "spur", "args": ["analyst", "mcp"] },
+//!     "spur-context": { "command": "spur", "args": ["context", "mcp", "--url", "..."] },
 //!     "spur":         { "command": "spur", "args": ["mcp"] }
 //! }}
 //! ```
@@ -32,6 +33,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use spur_analyst::mcp::AnalystMcpModule;
+use spur_core::mcp::ContextServiceClient;
 use spur_graph::mcp::{GraphMcpDeps, GraphMcpModule};
 use spur_mcp::{serve_stdio_server, RegistryServerHandler, ToolRegistry};
 
@@ -46,6 +48,10 @@ const ANALYST_INSTRUCTIONS: &str =
     "DuckDB-backed analytics over the .spur/analyst.duckdb index: knowledge_context_pack for \
      one-shot oriented evidence, and doc_navigate for documentation section search. Use these for \
      ranked/aggregated/path-shaped answers over code and docs.";
+
+const CONTEXT_INSTRUCTIONS: &str =
+    "Cloud-backed external code-context tools (external_*): search/read indexed packages, inspect \
+     callers/callees, query external knowledge context, and manage external indexes.";
 
 const BUNDLED_INSTRUCTIONS: &str =
     "SPUR standalone query surface: code-graph tools (code_*) plus DuckDB analyst tools \
@@ -105,6 +111,24 @@ pub async fn run_analyst_server(root: Option<PathBuf>) -> Result<()> {
     Box::pin(with_mcp_worktree_scope(root, serve_stdio_server(handler))).await?
 }
 
+fn context_server_registry(url: String, token: Option<String>) -> Result<ToolRegistry> {
+    Ok(ToolRegistry::builder()
+        .with(ContextServiceClient::with_optional_token(url, token))?
+        .build())
+}
+
+/// `spur context mcp` — standalone external code-context MCP server.
+///
+/// Exposes the 7 `external_*` tools (external_code_search, external_code_read,
+/// external_code_callers, external_code_callees, external_knowledge_context,
+/// external_index, external_index_status) as a spec-compliant MCP stdio server.
+/// Tools proxy to the cloud spur-context-service Lambda.
+pub async fn run_context_server(url: String, token: Option<String>) -> Result<()> {
+    let registry = context_server_registry(url, token)?;
+    let handler = RegistryServerHandler::new(registry, "spur-context-mcp", CONTEXT_INSTRUCTIONS);
+    serve_stdio_server(handler).await
+}
+
 /// `spur mcp` — bundled read-only MCP server (graph + analyst).
 ///
 /// `root` is the optional `--root <path>` override. When absent, `SPUR_WORKTREE`
@@ -137,5 +161,24 @@ mod tests {
         .expect("scoped server future");
 
         assert_eq!(scoped, Some(expected));
+    }
+
+    #[test]
+    fn context_server_registry_exposes_external_tools() {
+        let registry =
+            super::context_server_registry("https://context.example.test".to_owned(), None)
+                .expect("context registry should build");
+        let tools = registry.list_tools();
+        let names: std::collections::BTreeSet<_> =
+            tools.iter().map(|tool| tool.name.as_str()).collect();
+
+        assert_eq!(tools.len(), 7);
+        assert!(names.contains("external_code_search"));
+        assert!(names.contains("external_code_read"));
+        assert!(names.contains("external_code_callers"));
+        assert!(names.contains("external_code_callees"));
+        assert!(names.contains("external_knowledge_context"));
+        assert!(names.contains("external_index"));
+        assert!(names.contains("external_index_status"));
     }
 }
