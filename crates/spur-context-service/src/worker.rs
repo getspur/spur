@@ -31,7 +31,7 @@ const DEFAULT_CHECKPOINT_BUCKET: &str = "spur-context";
 const DEFAULT_TARBALL_SIZE_CAP_BYTES: usize = 500 * 1024 * 1024;
 const HTTP_HEADER_CAP_BYTES: usize = 64 * 1024;
 const ECS_CREDENTIALS_CAP_BYTES: usize = 64 * 1024;
-const JINA_CODE_EMBED_MODEL_NAME: &str = "JinaEmbeddingsV2BaseCode";
+const EMBEDDING_GEMMA_EMBED_MODEL_NAME: &str = "EmbeddingGemma300M";
 const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
 const GRAPH_SKIP_SECTION_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 const DEFAULT_CATALOG_LEASES_TABLE: &str = "spur-context-catalog-leases";
@@ -432,7 +432,7 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
     // Call `spur graph build` as a subprocess. This decouples spur-context-service
     // from spur-cli, allowing duckdb v1.5.4 (for DuckLake) to coexist with
     // spur-cli's duckdb v1.4.4 (for DuckPGQ in spur-analyst) in the same Docker image.
-    let _embed_model = EnvVarGuard::set(EMBED_MODEL_ENV, JINA_CODE_EMBED_MODEL_NAME);
+    let _embed_model = EnvVarGuard::set(EMBED_MODEL_ENV, EMBEDDING_GEMMA_EMBED_MODEL_NAME);
 
     let started = Instant::now();
     eprintln!(

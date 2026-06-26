@@ -15,7 +15,9 @@ anyhow = { workspace = true }
 arrow-array = { workspace = true }
 async-trait = { workspace = true }
 duckdb = { workspace = true, features = ["bundled"] }
-fastembed = { version = "4", default-features = false, optional = true }
+# 5.8.0 already includes EmbeddingGemma300M. Newer 5.x releases pull ORT
+# rc.11/rc.12 binaries that require newer Linux runtime symbols on the build VM.
+fastembed = { version = "=5.8.0", default-features = false, optional = true }
 futures = { workspace = true }
 globset = "0.4"
 lance-index = { workspace = true }
