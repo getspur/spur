@@ -39,6 +39,13 @@ def test_deploy_worker_image_contains_worker_and_spur_binaries():
     assert "spur-context-worker" in deploy_sh
 
 
+def test_deploy_rebuilds_lambda_zip_by_default():
+    script = DEPLOY_SH.read_text()
+
+    assert 'elif [[ ! -f "$zip_path" ]]' not in script
+    assert 'rm -f "$zip_path"' in script
+
+
 def test_remote_worker_image_script_delegates_to_canonical_deploy_path():
     script = REMOTE_BUILD_SH.read_text()
 
