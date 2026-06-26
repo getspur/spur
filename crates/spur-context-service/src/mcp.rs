@@ -216,7 +216,7 @@ fn handle_code_read(
     catalog: &CatalogResolver,
 ) -> Result<Value, McpHandlerError> {
     let args: CodeReadArgs = parse_args(args)?;
-    let selector = normalize_selector(&args.selector, catalog)?;
+    let selector = normalize_selector(&args.selector, args.source(), catalog)?;
     let source = query::read_symbol(db, &selector, args.context_lines.unwrap_or(0))
         .map_err(internal_error("external_code_read failed"))?
         .ok_or_else(|| McpHandlerError::NotFound(format!("symbol not found: {}", args.selector)))?;
@@ -229,7 +229,7 @@ fn handle_code_callers(
     catalog: &CatalogResolver,
 ) -> Result<Value, McpHandlerError> {
     let args: CodeCallersArgs = parse_args(args)?;
-    let selector = normalize_selector(&args.selector, catalog)?;
+    let selector = normalize_selector(&args.selector, args.source(), catalog)?;
     let result = query::find_callers(db, &selector, args.include_unresolved.unwrap_or(false))
         .map_err(internal_error("external_code_callers failed"))?;
     json_value(result)
@@ -241,7 +241,7 @@ fn handle_code_callees(
     catalog: &CatalogResolver,
 ) -> Result<Value, McpHandlerError> {
     let args: CodeCalleesArgs = parse_args(args)?;
-    let selector = normalize_selector(&args.selector, catalog)?;
+    let selector = normalize_selector(&args.selector, args.source(), catalog)?;
     let result = query::find_callees(db, &selector, args.include_unresolved.unwrap_or(false))
         .map_err(internal_error("external_code_callees failed"))?;
     json_value(result)
@@ -462,21 +462,42 @@ impl CodeSearchArgs {
 #[serde(deny_unknown_fields)]
 struct CodeReadArgs {
     selector: String,
+    source: Option<String>,
     context_lines: Option<usize>,
+}
+
+impl CodeReadArgs {
+    fn source(&self) -> &str {
+        self.source.as_deref().unwrap_or(DEFAULT_SOURCE)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodeCallersArgs {
     selector: String,
+    source: Option<String>,
     include_unresolved: Option<bool>,
+}
+
+impl CodeCallersArgs {
+    fn source(&self) -> &str {
+        self.source.as_deref().unwrap_or(DEFAULT_SOURCE)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodeCalleesArgs {
     selector: String,
+    source: Option<String>,
     include_unresolved: Option<bool>,
+}
+
+impl CodeCalleesArgs {
+    fn source(&self) -> &str {
+        self.source.as_deref().unwrap_or(DEFAULT_SOURCE)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -675,18 +696,19 @@ fn lookup_complete_catalog_revision(
 
 fn normalize_selector(
     selector: &str,
+    source: &str,
     catalog: &CatalogResolver,
 ) -> Result<String, McpHandlerError> {
     let parsed = parse_external_selector(selector)?;
     let resolved = resolve_revision(
         catalog,
-        DEFAULT_SOURCE,
+        source,
         &parsed.package,
         parsed.revision_or_ref.as_deref(),
     )?;
     Ok(format!(
-        "pkg:{}@{}::{}",
-        resolved.package, resolved.revision, parsed.qualified_name
+        "pkg:{}|{}@{}::{}",
+        resolved.source, resolved.package, resolved.revision, parsed.qualified_name
     ))
 }
 
@@ -1036,6 +1058,11 @@ fn external_code_read_def() -> ToolDefinition {
                     "type": "string",
                     "description": "External selector such as pkg:serde@1.0.152::serde::de::Deserialize."
                 },
+                "source": {
+                    "type": "string",
+                    "default": DEFAULT_SOURCE,
+                    "description": "Package source, for example registry:crates-io or git:github.com/..."
+                },
                 "context_lines": {
                     "type": "integer",
                     "minimum": 0,
@@ -1060,6 +1087,11 @@ fn external_code_callers_def() -> ToolDefinition {
                     "type": "string",
                     "description": "External selector such as pkg:serde@1.0.152::serde::de::Deserialize."
                 },
+                "source": {
+                    "type": "string",
+                    "default": DEFAULT_SOURCE,
+                    "description": "Package source, for example registry:crates-io or git:github.com/..."
+                },
                 "include_unresolved": {
                     "type": "boolean",
                     "default": false,
@@ -1082,6 +1114,11 @@ fn external_code_callees_def() -> ToolDefinition {
                 "selector": {
                     "type": "string",
                     "description": "External selector such as pkg:serde@1.0.152::serde::de::Deserialize."
+                },
+                "source": {
+                    "type": "string",
+                    "default": DEFAULT_SOURCE,
+                    "description": "Package source, for example registry:crates-io or git:github.com/..."
                 },
                 "include_unresolved": {
                     "type": "boolean",

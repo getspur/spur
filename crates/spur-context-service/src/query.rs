@@ -700,6 +700,14 @@ fn parse_pkg_selector(selector: &str) -> Option<ParsedSelector> {
         return None;
     }
 
+    let (source, package_revision) = match package_revision.split_once('|') {
+        Some((source, package_revision)) if !source.is_empty() && !package_revision.is_empty() => {
+            (source.to_owned(), package_revision)
+        }
+        Some(_) => return None,
+        None => (DEFAULT_SOURCE.to_owned(), package_revision),
+    };
+
     let (package, revision) = match package_revision.split_once('@') {
         Some((package, revision)) if !package.is_empty() && !revision.is_empty() => {
             (package.to_owned(), Some(revision.to_owned()))
@@ -709,7 +717,7 @@ fn parse_pkg_selector(selector: &str) -> Option<ParsedSelector> {
     };
 
     Some(ParsedSelector {
-        source: DEFAULT_SOURCE.to_owned(),
+        source,
         package,
         revision,
         name: name.to_owned(),
