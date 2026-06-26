@@ -239,8 +239,9 @@ main() {
     # Build or reuse Lambda zip.
     if [[ -n "$local_zip" ]]; then
         zip_path="$local_zip"
-    elif [[ ! -f "$zip_path" ]]; then
+    else
         mkdir -p "$(dirname "$zip_path")"
+        rm -f "$zip_path"
         download_extensions
         build_binary
         package_zip "$zip_path"
