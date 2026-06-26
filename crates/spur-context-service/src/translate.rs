@@ -11,8 +11,8 @@ use duckdb::{params, Connection};
 use serde::Deserialize;
 
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
-const DEFAULT_EMBEDDING_MODEL: &str = "JinaEmbeddingsV2BaseCode";
-const DEFAULT_EMBED_TEXT_VERSION: &str = "v2-jina-code";
+const DEFAULT_EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
+const DEFAULT_EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
 const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
 
 #[derive(Debug)]
