@@ -6,6 +6,7 @@ pub mod signals;
 pub mod worker;
 
 pub use context_service::ContextServiceClient;
+use spur_acp::config::ContextServiceConfig;
 
 const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
     "delegate_to_worker",
@@ -39,6 +40,7 @@ pub fn brain_tool_registry(
     delegation_deps: delegation::DelegationMcpDeps,
     plan_deps: plan::PlanMcpDeps,
     signal_deps: signals::SignalMcpDeps,
+    context_service_config: &ContextServiceConfig,
 ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
     let mut builder = spur_mcp::ToolRegistry::builder()
         .with(delegation::DelegationMcpModule::new(delegation_deps))?
@@ -48,10 +50,32 @@ pub fn brain_tool_registry(
         .with(plan::PlanMcpModule::remainder(plan_deps))?
         .with(signals::SignalMcpModule::new(signal_deps))?
         .with_alias("code_search", "code_symbol_search")?;
-    if let Some(context_service_client) = context_service::ContextServiceClient::from_env() {
+    if let Some(context_service_client) = context_service_client(context_service_config) {
         builder = builder.with(context_service_client)?;
     }
     Ok(builder.build())
+}
+
+fn context_service_client(
+    config: &ContextServiceConfig,
+) -> Option<context_service::ContextServiceClient> {
+    let base_url = std::env::var("SPUR_CONTEXT_SERVICE_URL")
+        .ok()
+        .and_then(non_empty_trimmed)
+        .or_else(|| non_empty_trimmed(config.url.clone()))?;
+    let bearer_token = std::env::var("SPUR_CONTEXT_SERVICE_TOKEN")
+        .ok()
+        .and_then(non_empty_trimmed)
+        .or_else(|| config.token.clone().and_then(non_empty_trimmed));
+    Some(context_service::ContextServiceClient::with_optional_token(
+        base_url,
+        bearer_token,
+    ))
+}
+
+fn non_empty_trimmed(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 pub fn catalog_tool_registry() -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {

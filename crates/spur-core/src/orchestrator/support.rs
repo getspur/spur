@@ -208,6 +208,7 @@ impl Orchestrator {
                 event_sink,
                 feature_gate: self.mcp_feature_gate(),
             },
+            &self.config.context_service,
         )
     }
 

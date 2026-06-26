@@ -43,7 +43,7 @@ use tracing_subscriber::prelude::*;
 use commands::auth::AuthCommands;
 use commands::flags::FlagsCommands;
 use commands::telemetry::TelemetryCommands;
-use spur_acp::config::SpurConfig;
+use spur_acp::config::{ContextServiceConfig, SpurConfig};
 use spur_acp::{BrainSessionId, SessionId};
 use spur_cli::log_writer;
 use spur_cli::pm_service_gate_allows_construction;
@@ -666,12 +666,12 @@ enum ContextCommands {
     /// `command: "spur", args: ["context", "mcp", "--url", "..."]`.
     Mcp {
         /// Cloud context-service API URL (e.g. API Gateway endpoint).
-        /// Falls back to SPUR_CONTEXT_SERVICE_URL env var.
+        /// Falls back to [context_service] config, env, then built-in default.
         #[arg(long, value_name = "URL")]
         url: Option<String>,
 
         /// Bearer token for the context-service API. Optional - the default
-        /// deployment has no auth. Falls back to SPUR_CONTEXT_SERVICE_TOKEN.
+        /// deployment has no auth. Falls back to config, then env.
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
     },
@@ -1200,15 +1200,9 @@ async fn run() -> Result<()> {
         },
         Commands::Context { command } => match command {
             ContextCommands::Mcp { url, token } => {
-                let url = url
-                    .or_else(|| std::env::var("SPUR_CONTEXT_SERVICE_URL").ok())
-                    .filter(|value| !value.trim().is_empty())
-                    .context(
-                        "context service URL is required; pass --url or set SPUR_CONTEXT_SERVICE_URL",
-                    )?;
-                let token = token
-                    .or_else(|| std::env::var("SPUR_CONTEXT_SERVICE_TOKEN").ok())
-                    .filter(|value| !value.trim().is_empty());
+                let config = load_config_for_repo(&repo_root)?;
+                let (url, token) =
+                    resolve_context_service_cli_config(url, token, &config.context_service);
                 commands::mcp::run_context_server(url, token).await
             }
         },
@@ -1817,6 +1811,108 @@ fn load_config() -> Result<SpurConfig> {
 
 fn load_config_for_repo(repo_root: &Path) -> Result<SpurConfig> {
     spur_acp::config::load_layered(repo_root)
+}
+
+fn resolve_context_service_cli_config(
+    url: Option<String>,
+    token: Option<String>,
+    config: &ContextServiceConfig,
+) -> (String, Option<String>) {
+    resolve_context_service_cli_config_with_env(url, token, config, |key| std::env::var(key).ok())
+}
+
+fn resolve_context_service_cli_config_with_env(
+    url: Option<String>,
+    token: Option<String>,
+    config: &ContextServiceConfig,
+    env: impl Fn(&str) -> Option<String>,
+) -> (String, Option<String>) {
+    let default_url = ContextServiceConfig::default().url;
+    let url = url
+        .and_then(non_empty_trimmed)
+        .or_else(|| non_empty_trimmed(config.url.clone()))
+        .or_else(|| env("SPUR_CONTEXT_SERVICE_URL").and_then(non_empty_trimmed))
+        .unwrap_or(default_url);
+    let token = token
+        .and_then(non_empty_trimmed)
+        .or_else(|| config.token.clone().and_then(non_empty_trimmed))
+        .or_else(|| env("SPUR_CONTEXT_SERVICE_TOKEN").and_then(non_empty_trimmed));
+    (url, token)
+}
+
+fn non_empty_trimmed(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod context_service_cli_config_tests {
+    use super::*;
+    use spur_acp::config::ContextServiceConfig;
+
+    fn fake_env(key: &str) -> Option<String> {
+        match key {
+            "SPUR_CONTEXT_SERVICE_URL" => Some("https://env.example.test".to_owned()),
+            "SPUR_CONTEXT_SERVICE_TOKEN" => Some("env-token".to_owned()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn context_cli_resolution_uses_builtin_default_without_config_or_env() {
+        let config = ContextServiceConfig {
+            url: String::new(),
+            token: None,
+        };
+        let (url, token) =
+            resolve_context_service_cli_config_with_env(None, None, &config, |_| None);
+
+        assert_eq!(url, ContextServiceConfig::default().url);
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn context_cli_resolution_prefers_config_before_env() {
+        let config = ContextServiceConfig {
+            url: "https://config.example.test".to_owned(),
+            token: Some("config-token".to_owned()),
+        };
+        let (url, token) =
+            resolve_context_service_cli_config_with_env(None, None, &config, fake_env);
+
+        assert_eq!(url, "https://config.example.test");
+        assert_eq!(token.as_deref(), Some("config-token"));
+    }
+
+    #[test]
+    fn context_cli_resolution_uses_env_when_config_empty() {
+        let config = ContextServiceConfig {
+            url: String::new(),
+            token: None,
+        };
+        let (url, token) =
+            resolve_context_service_cli_config_with_env(None, None, &config, fake_env);
+
+        assert_eq!(url, "https://env.example.test");
+        assert_eq!(token.as_deref(), Some("env-token"));
+    }
+
+    #[test]
+    fn context_cli_resolution_prefers_flags_over_config_and_env() {
+        let config = ContextServiceConfig {
+            url: "https://config.example.test".to_owned(),
+            token: Some("config-token".to_owned()),
+        };
+        let (url, token) = resolve_context_service_cli_config_with_env(
+            Some("https://flag.example.test".to_owned()),
+            Some("flag-token".to_owned()),
+            &config,
+            fake_env,
+        );
+
+        assert_eq!(url, "https://flag.example.test");
+        assert_eq!(token.as_deref(), Some("flag-token"));
+    }
 }
 
 // Only the `spur bot telegram` arm builds an interactive host today; under

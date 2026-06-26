@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::json;
+use spur_acp::config::ContextServiceConfig;
 use spur_core::mcp::plan::{PlanMcpDeps, PlanMcpModule};
 use spur_core::mcp::signals::{SignalMcpDeps, SignalMcpModule};
 use spur_license::policy::PolicyResolver;
@@ -41,6 +42,7 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "doc_navigate",
     "knowledge_context_pack",
     "knowledge_context_pack_2",
+    "query",
     "submit_plan",
     "execute_epic",
     "get_plan_status",
@@ -53,6 +55,13 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "submit_plan_mutation",
     "report_signal",
     "report_progress",
+    "external_code_search",
+    "external_code_read",
+    "external_code_callers",
+    "external_code_callees",
+    "external_knowledge_context",
+    "external_index",
+    "external_index_status",
 ];
 
 fn pro_feature_gate() -> Arc<FeatureGate> {
@@ -133,6 +142,7 @@ fn core_brain_registry_preserves_compatibility_catalog() {
         spur_core::mcp::delegation::DelegationMcpDeps::catalog_only(),
         plan_deps(),
         catalog_deps(),
+        &ContextServiceConfig::default(),
     )
     .expect("core-composed brain registry");
     let names: Vec<String> = registry
@@ -148,5 +158,30 @@ fn core_brain_registry_preserves_compatibility_catalog() {
     assert_eq!(
         names, expected,
         "brain catalog order and size must not drift"
+    );
+}
+
+#[test]
+fn core_brain_registry_omits_external_tools_when_context_service_url_empty() {
+    let context_service = ContextServiceConfig {
+        url: String::new(),
+        token: None,
+    };
+    let registry = spur_core::mcp::brain_tool_registry(
+        spur_core::mcp::delegation::DelegationMcpDeps::catalog_only(),
+        plan_deps(),
+        catalog_deps(),
+        &context_service,
+    )
+    .expect("core-composed brain registry");
+    let names: Vec<String> = registry
+        .list_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+
+    assert!(
+        names.iter().all(|name| !name.starts_with("external_")),
+        "empty context-service URL must disable external tools: {names:?}"
     );
 }
