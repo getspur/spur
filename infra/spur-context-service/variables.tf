@@ -75,6 +75,35 @@ variable "worker_ecr_image" {
   type        = string
 }
 
+variable "worker_lambda_image" {
+  description = "ECR image URI for the Lambda-compatible spur-context-worker image"
+  type        = string
+}
+
+variable "worker_lambda_memory_mb" {
+  description = "Lambda worker memory allocation. This account/region currently accepts up to 3008 MB; raise after a Lambda memory quota increase."
+  type        = number
+  default     = 3008
+}
+
+variable "worker_lambda_timeout_sec" {
+  description = "Lambda worker timeout in seconds. Lambda max is 900 seconds."
+  type        = number
+  default     = 900
+}
+
+variable "worker_lambda_ephemeral_storage_mb" {
+  description = "Lambda worker /tmp storage in MB. Lambda max is 10240 MB."
+  type        = number
+  default     = 10240
+}
+
+variable "worker_lambda_provisioned_concurrency" {
+  description = "Provisioned concurrency for the Lambda worker live alias (0 = disabled)"
+  type        = number
+  default     = 0
+}
+
 locals {
   context_ducklake_data_path     = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/data/")
   worker_checkpoint_uri_template = "s3://${var.bucket_name}/jobs/{}/checkpoint.json"

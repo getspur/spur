@@ -72,10 +72,10 @@ resource "aws_cloudwatch_log_group" "lambda" {
 }
 
 resource "aws_s3_object" "lambda_zip" {
-  bucket = aws_s3_bucket.data.bucket
-  key    = "lambda/spur-context-service-${filemd5(var.lambda_zip_path)}.zip"
-  source = var.lambda_zip_path
-  etag   = filemd5(var.lambda_zip_path)
+  bucket      = aws_s3_bucket.data.bucket
+  key         = "lambda/spur-context-service-${filemd5(var.lambda_zip_path)}.zip"
+  source      = var.lambda_zip_path
+  source_hash = filemd5(var.lambda_zip_path)
 }
 
 resource "aws_lambda_function" "service" {

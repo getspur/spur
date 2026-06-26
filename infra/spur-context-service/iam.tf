@@ -30,7 +30,8 @@ resource "aws_iam_role_policy" "s3_access" {
         "s3:GetObject",
         "s3:GetObjectVersion",
         "s3:PutObject",
-        "s3:ListBucket"
+        "s3:ListBucket",
+        "s3:DeleteObject"
       ]
       Resource = [
         aws_s3_bucket.data.arn,
@@ -158,6 +159,23 @@ resource "aws_iam_role_policy" "sfn_ecs" {
         }
       }
     ]
+  })
+}
+
+resource "aws_iam_role_policy" "sfn_lambda" {
+  name = "LambdaInvokeWorker"
+  role = aws_iam_role.sfn.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["lambda:InvokeFunction"]
+      Resource = [
+        aws_lambda_function.worker.arn,
+        aws_lambda_alias.worker_live.arn
+      ]
+    }]
   })
 }
 

@@ -68,6 +68,26 @@ output "worker_task_definition_arn" {
   value       = aws_ecs_task_definition.worker.arn
 }
 
+output "worker_image_uri" {
+  description = "ECR image URI used by the ECS indexing worker"
+  value       = var.worker_ecr_image
+}
+
+output "worker_lambda_image_uri" {
+  description = "ECR image URI used by the Lambda indexing worker fast path"
+  value       = var.worker_lambda_image
+}
+
+output "worker_lambda_function_name" {
+  description = "Lambda function name for the indexing worker fast path"
+  value       = aws_lambda_function.worker.function_name
+}
+
+output "worker_lambda_alias_arn" {
+  description = "Lambda alias ARN invoked by the index build state machine"
+  value       = aws_lambda_alias.worker_live.arn
+}
+
 output "worker_log_group" {
   description = "CloudWatch log group for worker tasks"
   value       = aws_cloudwatch_log_group.worker.name
