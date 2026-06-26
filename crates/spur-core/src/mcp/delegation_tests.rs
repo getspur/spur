@@ -7,6 +7,7 @@ fn install_core_delegation_registry(server: &mut McpCallbackServer) {
             event_sink: None,
             feature_gate: community_feature_gate(),
         },
+        &spur_acp::config::ContextServiceConfig::default(),
     )
     .expect("core delegation registry");
     server.set_tool_registry(registry);
