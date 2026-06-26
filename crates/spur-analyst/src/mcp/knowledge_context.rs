@@ -13,9 +13,9 @@ use crate::{
 };
 use futures::future::join_all;
 use serde_json::{json, Value};
-use spur_graph::{resolve_worktree_root_from, EMBEDDING_VECTOR_DIMENSIONS};
 #[cfg(feature = "embed")]
-use spur_graph::{EmbeddingModelSelection, EMBED_MODEL_ENV};
+use spur_graph::{embedding_query_text_for_model, EmbeddingModelSelection, EMBED_MODEL_ENV};
+use spur_graph::{resolve_worktree_root_from, EMBEDDING_VECTOR_DIMENSIONS};
 
 use super::McpHandlerError;
 
@@ -33,6 +33,9 @@ const EMBED_INFERENCE_TIMEOUT: Duration = Duration::from_millis(1500);
 static BGE_BASE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
 #[cfg(feature = "embed")]
 static JINA_CODE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
+#[cfg(feature = "embed")]
+static EMBEDDING_GEMMA_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> =
+    EmbedModelCell::new();
 
 pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
@@ -334,7 +337,7 @@ impl KnowledgeIntent {
 
 #[cfg(feature = "embed")]
 struct EmbedModelCell<M> {
-    model: OnceLock<Arc<M>>,
+    model: OnceLock<Arc<Mutex<M>>>,
     loading: Mutex<bool>,
 }
 
@@ -353,7 +356,7 @@ impl<M> EmbedModelCell<M> {
         }
     }
 
-    fn ready(&self) -> Option<Arc<M>> {
+    fn ready(&self) -> Option<Arc<Mutex<M>>> {
         self.model.get().cloned()
     }
 
@@ -382,7 +385,7 @@ impl<M> EmbedModelCell<M> {
     }
 
     #[cfg(test)]
-    fn load_if_idle(&self, load: impl FnOnce() -> Option<M>) -> Option<Arc<M>> {
+    fn load_if_idle(&self, load: impl FnOnce() -> Option<M>) -> Option<Arc<Mutex<M>>> {
         if let Some(model) = self.ready() {
             return Some(model);
         }
@@ -402,9 +405,9 @@ impl<M> EmbedModelCell<M> {
 
 #[cfg(feature = "embed")]
 impl<M> EmbedLoadPermit<'_, M> {
-    fn complete(mut self, model: Option<M>) -> Option<Arc<M>> {
+    fn complete(mut self, model: Option<M>) -> Option<Arc<Mutex<M>>> {
         if let Some(model) = model {
-            let _ = self.cell.model.set(Arc::new(model));
+            let _ = self.cell.model.set(Arc::new(Mutex::new(model)));
         }
         self.cell.clear_loading();
         self.completed = true;
@@ -428,6 +431,7 @@ fn embed_model_cell(
     match embedding_model {
         EmbeddingModelSelection::BgeBaseEnV15 => &BGE_BASE_EMBED_MODEL,
         EmbeddingModelSelection::JinaCode => &JINA_CODE_EMBED_MODEL,
+        EmbeddingModelSelection::EmbeddingGemma300M => &EMBEDDING_GEMMA_EMBED_MODEL,
     }
 }
 
@@ -537,7 +541,11 @@ async fn embed_query_with_ready_model(
         query,
         EMBED_INFERENCE_TIMEOUT,
         move |model, query| {
-            let embeddings = model.embed(vec![query.as_str()], None).ok()?;
+            let query = embedding_query_text_for_model(query.as_str(), embedding_model);
+            let mut model = model
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let embeddings = model.embed(vec![query.as_ref()], None).ok()?;
             let embedding = embeddings.into_iter().next()?;
             embedding.try_into().ok()
         },
@@ -553,8 +561,8 @@ async fn embed_with_ready_model<M, F>(
     inference: F,
 ) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]>
 where
-    M: Send + Sync + 'static,
-    F: FnOnce(Arc<M>, String) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> + Send + 'static,
+    M: Send + 'static,
+    F: FnOnce(Arc<Mutex<M>>, String) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> + Send + 'static,
 {
     let model = cell.ready()?;
     let query = query.to_owned();
@@ -1838,6 +1846,10 @@ mod tests {
             embed_model_cell(EmbeddingModelSelection::JinaCode),
             &JINA_CODE_EMBED_MODEL
         ));
+        assert!(std::ptr::eq(
+            embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M),
+            &EMBEDDING_GEMMA_EMBED_MODEL
+        ));
     }
 
     #[cfg(feature = "embed")]
@@ -1860,7 +1872,12 @@ mod tests {
                 Some(7)
             })
             .expect("second load should succeed");
-        assert_eq!(*model, 7);
+        assert_eq!(
+            *model
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            7
+        );
         assert_eq!(attempts, 2);
 
         let model = cell
@@ -1869,7 +1886,12 @@ mod tests {
                 Some(9)
             })
             .expect("ready model should be reused");
-        assert_eq!(*model, 7);
+        assert_eq!(
+            *model
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            7
+        );
         assert_eq!(attempts, 2, "ready model should not be reloaded");
     }
 
