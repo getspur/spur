@@ -6,7 +6,8 @@
 -- precomputed at build time; query time is just a ranked lookup + join.
 --
 -- Ordering contract:
---   * runs AFTER init_views.sql        (search_code joins v_symbol_scorecard)
+--   * runs AFTER temporal or static search views
+--     (search_code joins v_symbol_scorecard; symbol_text reads v_search_symbol_tokens)
 --   * analyst.rs injects either Lance-backed sections or an empty fallback table.
 
 INSTALL fts; LOAD fts;
@@ -48,7 +49,7 @@ PRAGMA create_fts_index('sections_search', 'stable_symbol_id', 'body_text', over
 CREATE OR REPLACE TABLE symbol_text AS
 WITH toks AS (
   SELECT s.stable_symbol_id, string_agg(DISTINCT tok, ' ') AS token_text
-  FROM symbol_snapshots s, UNNEST(s.tokens) AS u(tok)
+  FROM v_search_symbol_tokens s, UNNEST(s.tokens) AS u(tok)
   WHERE s.tokens IS NOT NULL
     AND s.stable_symbol_id IN (SELECT stable_symbol_id FROM nodes)
   GROUP BY s.stable_symbol_id
