@@ -324,6 +324,11 @@ enum Commands {
         #[command(subcommand)]
         command: AnalystCommands,
     },
+    /// External code-context tools (search/read/callers/callees across indexed packages)
+    Context {
+        #[command(subcommand)]
+        command: ContextCommands,
+    },
     /// Build and inspect the code graph index
     Graph {
         #[command(subcommand)]
@@ -497,6 +502,33 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_context_mcp_subcommand() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "spur",
+                "context",
+                "mcp",
+                "--url",
+                "https://context.example.test",
+                "--token",
+                "secret-token",
+            ])
+            .expect("context mcp should parse");
+        assert_eq!(matches.subcommand_name(), Some("context"));
+        let (_, sub) = matches.subcommand().expect("context subcommand");
+        assert_eq!(sub.subcommand_name(), Some("mcp"));
+        let (_, mcp) = sub.subcommand().expect("context mcp subcommand");
+        assert_eq!(
+            mcp.get_one::<String>("url").map(String::as_str),
+            Some("https://context.example.test")
+        );
+        assert_eq!(
+            mcp.get_one::<String>("token").map(String::as_str),
+            Some("secret-token")
+        );
+    }
+
+    #[test]
     fn cli_accepts_graph_build_with_temporal_flag() {
         Cli::command()
             .try_get_matches_from([
@@ -624,6 +656,24 @@ enum AnalystCommands {
         /// the MCP client launch directory.
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextCommands {
+    /// Run the external code-context MCP server over stdio, exposing the
+    /// `external_*` tools. Wire into an MCP client via
+    /// `command: "spur", args: ["context", "mcp", "--url", "..."]`.
+    Mcp {
+        /// Cloud context-service API URL (e.g. API Gateway endpoint).
+        /// Falls back to SPUR_CONTEXT_SERVICE_URL env var.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+
+        /// Bearer token for the context-service API. Optional - the default
+        /// deployment has no auth. Falls back to SPUR_CONTEXT_SERVICE_TOKEN.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
     },
 }
 
@@ -1147,6 +1197,20 @@ async fn run() -> Result<()> {
                 )
             }
             AnalystCommands::Mcp { root } => commands::mcp::run_analyst_server(root).await,
+        },
+        Commands::Context { command } => match command {
+            ContextCommands::Mcp { url, token } => {
+                let url = url
+                    .or_else(|| std::env::var("SPUR_CONTEXT_SERVICE_URL").ok())
+                    .filter(|value| !value.trim().is_empty())
+                    .context(
+                        "context service URL is required; pass --url or set SPUR_CONTEXT_SERVICE_URL",
+                    )?;
+                let token = token
+                    .or_else(|| std::env::var("SPUR_CONTEXT_SERVICE_TOKEN").ok())
+                    .filter(|value| !value.trim().is_empty());
+                commands::mcp::run_context_server(url, token).await
+            }
         },
         Commands::Graph { command } => match command {
             GraphCommands::Build {
