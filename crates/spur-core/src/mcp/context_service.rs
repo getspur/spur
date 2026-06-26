@@ -9,14 +9,18 @@ const DEFAULT_INDEX_SOURCE: &str = "git:custom";
 const KNOWLEDGE_QUERY_VECTOR_DIMENSIONS: usize = 768;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) struct ContextServiceClient {
+pub struct ContextServiceClient {
     client: reqwest::Client,
     base_url: String,
-    bearer_token: String,
+    bearer_token: Option<String>,
 }
 
 impl ContextServiceClient {
-    pub(crate) fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
+        Self::with_optional_token(base_url, Some(bearer_token.into()))
+    }
+
+    pub fn with_optional_token(base_url: impl Into<String>, bearer_token: Option<String>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -27,24 +31,30 @@ impl ContextServiceClient {
     fn with_client(
         client: reqwest::Client,
         base_url: impl Into<String>,
-        bearer_token: impl Into<String>,
+        bearer_token: Option<String>,
     ) -> Self {
         Self {
             client,
             base_url: base_url.into(),
-            bearer_token: bearer_token.into(),
+            bearer_token: normalize_bearer_token(bearer_token),
         }
     }
 
-    pub(crate) fn from_env() -> Option<Self> {
+    pub fn from_env() -> Option<Self> {
         let base_url = std::env::var("SPUR_CONTEXT_SERVICE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())?;
         let bearer_token = std::env::var("SPUR_CONTEXT_SERVICE_TOKEN")
             .ok()
-            .filter(|value| !value.trim().is_empty())?;
-        Some(Self::new(base_url, bearer_token))
+            .filter(|value| !value.trim().is_empty());
+        Some(Self::with_optional_token(base_url, bearer_token))
     }
+}
+
+fn normalize_bearer_token(bearer_token: Option<String>) -> Option<String> {
+    bearer_token
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 #[async_trait]
@@ -59,16 +69,17 @@ impl ToolModule for ContextServiceClient {
         name: &str,
         args: Value,
     ) -> Result<ToolResponse, McpError> {
-        let response = self
+        let mut request = self
             .client
             .post(&self.base_url)
-            .bearer_auth(&self.bearer_token)
-            .json(&json!({ "tool": name, "args": args }))
-            .send()
-            .await
-            .map_err(|error| {
-                McpError::internal_error(format!("context service request failed: {error}"), None)
-            })?;
+            .json(&json!({ "tool": name, "args": args }));
+        if let Some(bearer_token) = &self.bearer_token {
+            request = request.bearer_auth(bearer_token);
+        }
+
+        let response = request.send().await.map_err(|error| {
+            McpError::internal_error(format!("context service request failed: {error}"), None)
+        })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -429,6 +440,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn omits_authorization_header_when_token_is_not_configured() {
+        let (base_url, observed) = spawn_mock_service(json!({
+            "matches": []
+        }))
+        .await;
+        let client = ContextServiceClient::with_optional_token(base_url, None);
+        let ctx = ToolCallContext::new(
+            spur_mcp::ServerKind::Brain,
+            spur_mcp::ToolAuthority::Brain,
+            None,
+            None,
+        );
+
+        client
+            .call(
+                ctx,
+                "external_code_search",
+                json!({ "query": "Deserialize", "package": "serde" }),
+            )
+            .await
+            .expect("success envelope should produce ToolResponse");
+
+        let observed = observed.await.expect("mock service should receive request");
+        assert_eq!(observed.authorization, None);
+    }
+
+    #[tokio::test]
     async fn error_envelope_maps_to_mcp_error() {
         let (base_url, _observed) = spawn_mock_service(json!({
             "error": {
@@ -478,6 +516,25 @@ mod tests {
         restore_env("SPUR_CONTEXT_SERVICE_TOKEN", prev_token);
 
         assert!(configured.is_none());
+    }
+
+    #[test]
+    fn from_env_accepts_url_without_token() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev_url = std::env::var_os("SPUR_CONTEXT_SERVICE_URL");
+        let prev_token = std::env::var_os("SPUR_CONTEXT_SERVICE_TOKEN");
+
+        unsafe {
+            std::env::set_var("SPUR_CONTEXT_SERVICE_URL", "https://context.example.test");
+            std::env::remove_var("SPUR_CONTEXT_SERVICE_TOKEN");
+        }
+        let configured = ContextServiceClient::from_env();
+        restore_env("SPUR_CONTEXT_SERVICE_URL", prev_url);
+        restore_env("SPUR_CONTEXT_SERVICE_TOKEN", prev_token);
+
+        assert!(configured.is_some());
     }
 
     async fn spawn_mock_service(response: Value) -> (String, oneshot::Receiver<ObservedRequest>) {

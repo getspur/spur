@@ -1,9 +1,11 @@
 pub(crate) mod catalog;
-pub(crate) mod context_service;
+pub mod context_service;
 pub mod delegation;
 pub mod plan;
 pub mod signals;
 pub mod worker;
+
+pub use context_service::ContextServiceClient;
 
 const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
     "delegate_to_worker",
