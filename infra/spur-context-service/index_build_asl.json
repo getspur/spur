@@ -88,7 +88,7 @@
       "ResultPath": "$.buildStats",
       "Retry": [
         {
-          "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
+          "ErrorEquals": ["States.Timeout"],
           "MaxAttempts": 2,
           "BackoffRate": 2.0,
           "MaxDelaySeconds": 30
@@ -96,7 +96,7 @@
       ],
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": ["States.Timeout"],
           "Next": "FallbackBuild",
           "ResultPath": "$.buildError"
         }
