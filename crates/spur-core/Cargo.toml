@@ -25,6 +25,7 @@ parking_lot = "0.12"
 rand = "0.8"
 rusqlite = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 sha2 = { workspace = true }
@@ -60,7 +61,6 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
 duckdb = { workspace = true }
 toml = { workspace = true }
-reqwest = { workspace = true }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 tracing-subscriber = { workspace = true }
 spur-blob-store = { workspace = true, features = ["test-support"] }
