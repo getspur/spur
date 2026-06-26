@@ -19,6 +19,10 @@ const INIT_DIAGNOSTICS_SQL: &str =
     include_str!("../../../spur-context/analyst/init_diagnostics.sql");
 const INIT_ALGORITHMS_SQL: &str = include_str!("../../../spur-context/analyst/init_algorithms.sql");
 const INIT_VIEWS_SQL: &str = include_str!("../../../spur-context/analyst/init_views.sql");
+const INIT_TEMPORAL_SEARCH_TOKEN_SQL: &str =
+    include_str!("../../../spur-context/analyst/init_search_tokens_temporal.sql");
+const INIT_STATIC_SEARCH_VIEWS_SQL: &str =
+    include_str!("../../../spur-context/analyst/init_search_views_static.sql");
 const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
 const ARTIFACT_PLACEHOLDER: &str = "__SPUR_GRAPH_ARTIFACT_DIR__";
 const LANCE_ATTACH_PLACEHOLDER: &str = "__SPUR_LANCE_ATTACH_SQL__";
@@ -105,16 +109,13 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
     }
 
     // Assemble the (pre-substitution) SQL template now so the freshness guard can
-    // fingerprint it. Which scripts are included depends on temporal/lance
-    // presence, so the fingerprint captures config as well as SQL content.
+    // fingerprint it. Which scripts are included depends on optional temporal,
+    // diagnostics, and Lance sidecar presence, so the fingerprint captures config
+    // as well as SQL content.
     let sections_dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
     let code_symbols_dataset_dir = artifact_dir.join(CODE_SYMBOLS_DATASET_DIR);
-    let lance_available = want_temporal && lance_hybrid_available(&artifact_dir, quiet);
-    let init_search_sql = if want_temporal {
-        render_init_search_sql(lance_available)?
-    } else {
-        String::new()
-    };
+    let lance_available = lance_hybrid_available(&artifact_dir, quiet);
+    let init_search_sql = render_init_search_sql(lance_available)?;
     let sql_template = [
         INIT_SQL,
         if want_temporal { INIT_TEMPORAL_SQL } else { "" },
@@ -124,13 +125,18 @@ pub fn build(root: &Path, options: AnalystBuildOptions) -> Result<()> {
         // runs — and must precede init_views.sql, whose Tier-B views join the
         // v_symbol_centrality/_component/_community surfaces it creates.
         INIT_ALGORITHMS_SQL,
-        // Views depend on temporal_edges / symbol_snapshots; only install when
-        // the temporal layer is present.
+        // Temporal views use historical shards when present. Structural fallback
+        // views keep scorecard/search surfaces available when temporal is disabled.
         if want_temporal { INIT_VIEWS_SQL } else { "" },
+        if want_temporal {
+            INIT_TEMPORAL_SEARCH_TOKEN_SQL
+        } else {
+            INIT_STATIC_SEARCH_VIEWS_SQL
+        },
         // Search appliance: materializes the prose (section bodies, from Lance)
-        // and code (symbol tokens) FTS indexes + search() macros. It always
-        // needs v_symbol_scorecard (temporal views); Lance-backed prose and
-        // hybrid search are optional branches within the rendered SQL.
+        // and code (symbol tokens) FTS indexes + search() macros. It needs the
+        // scorecard/token views above; Lance-backed prose and hybrid search are
+        // optional branches within the rendered SQL.
         init_search_sql.as_str(),
     ]
     .concat();
