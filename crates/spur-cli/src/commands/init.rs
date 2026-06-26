@@ -1,5 +1,5 @@
 use anyhow::Result;
-use spur_acp::config::{AgentConfig, SpurConfig};
+use spur_acp::config::{AgentConfig, ContextServiceConfig, SpurConfig};
 use spur_acp::types::AgentRole;
 use spur_core::Orchestrator;
 use std::collections::HashMap;
@@ -170,7 +170,8 @@ pub async fn run(
             spur_acp::config::layered::default_user_baseline(&repo_root)?
         };
         let full = toml::Value::try_from(&config)?;
-        let sparse = spur_acp::config::layered::sparse_diff(&full, &baseline);
+        let mut sparse = spur_acp::config::layered::sparse_diff(&full, &baseline);
+        expose_default_context_service_section(&mut sparse, &baseline)?;
         std::fs::create_dir_all(config_path.parent().unwrap())?;
         std::fs::write(&config_path, toml::to_string_pretty(&sparse)?)?;
         true
@@ -254,6 +255,25 @@ fn load_or_default_config(path: &std::path::Path) -> Result<(SpurConfig, bool)> 
     } else {
         Ok((SpurConfig::default(), false))
     }
+}
+
+fn expose_default_context_service_section(
+    sparse: &mut toml::Value,
+    baseline: &toml::Value,
+) -> Result<()> {
+    if sparse.get("context_service").is_some() {
+        return Ok(());
+    }
+
+    let default_context_service = toml::Value::try_from(ContextServiceConfig::default())?;
+    if baseline.get("context_service") != Some(&default_context_service) {
+        return Ok(());
+    }
+
+    if let Some(table) = sparse.as_table_mut() {
+        table.insert("context_service".to_owned(), default_context_service);
+    }
+    Ok(())
 }
 
 fn merge_agents(
