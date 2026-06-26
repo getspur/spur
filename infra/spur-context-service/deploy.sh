@@ -5,7 +5,7 @@
 #   ./deploy.sh                    # build Lambda + worker, terraform apply
 #   ./deploy.sh --local-zip path   # skip Lambda build, use existing zip
 #   ./deploy.sh --skip-worker      # skip worker image build/push
-#   ./deploy.sh --worker-image-only # build/push worker image, print image URI
+#   ./deploy.sh --worker-image-only # build/push worker images, print ECS image URI
 #
 # Prerequisites:
 #   - scripts/spur-cargo (remote Graviton4 VM)
@@ -27,10 +27,12 @@ EXTENSIONS=("httpfs" "ducklake")
 # Worker container config.  The image is built on the remote VM (x86_64 for
 # Fargate compatibility) and pushed to ECR.
 WORKER_ECR_REPO="spur-context-worker"
+WORKER_LAMBDA_ECR_REPO="spur-context-worker-lambda"
 WORKER_IMAGE_TAG="latest"
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 AWS_REGION_VAL="$(cd "$INFRA_DIR" && terraform output -raw aws_region 2>/dev/null || echo ap-southeast-5)"
 WORKER_IMAGE_URI=""
+WORKER_LAMBDA_IMAGE_URI=""
 
 log() { echo "[deploy] $*" >&2; }
 
@@ -142,6 +144,15 @@ build_worker() {
         scripts/spur-cargo --workdir crates/spur-context-service build --features worker --release
 }
 
+build_worker_lambda() {
+    log "building Lambda worker binary (--features worker-lambda, arm64 neoverse-n1)..."
+    cd "$REPO_ROOT"
+    AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
+    CFLAGS="-mcpu=neoverse-n1 -O2" \
+    CXXFLAGS="-mcpu=neoverse-n1 -O2" \
+        scripts/spur-cargo --workdir crates/spur-context-service build --features worker-lambda --release
+}
+
 build_and_push_worker_image() {
     log "building Docker image for spur-context-worker (remote Docker build on VM)..."
 
@@ -181,6 +192,37 @@ DOCKERFILE
     WORKER_IMAGE_URI="$full_tag"
 }
 
+build_and_push_worker_lambda_image() {
+    log "building Docker image for spur-context-worker Lambda (remote Docker build on VM)..."
+
+    aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
+        || aws ecr create-repository --repository-name "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
+
+    local ecr_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${WORKER_LAMBDA_ECR_REPO}"
+    local full_tag="${ecr_uri}:${WORKER_IMAGE_TAG}"
+    local worker_lambda_dockerfile="$BUILD_DIR/worker-lambda-image.Dockerfile"
+    cat > "$worker_lambda_dockerfile" <<'DOCKERFILE'
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY spur-context-worker-lambda /usr/local/bin/spur-context-worker-lambda
+COPY spur /usr/local/bin/spur
+RUN /usr/local/bin/spur --version
+RUN /usr/local/bin/spur-context-worker-lambda --smoke
+ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]
+DOCKERFILE
+
+    cd "$REPO_ROOT"
+    scripts/cloud-build/docker-build.sh \
+        --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker-lambda)" \
+        --remote-binary "$(remote_target_path target/release/spur)" \
+        --dockerfile "$worker_lambda_dockerfile" \
+        --tag "$full_tag"
+
+    log "worker Lambda image pushed: $full_tag"
+    WORKER_LAMBDA_IMAGE_URI="$full_tag"
+}
+
 smoke_worker_image() {
     local full_tag="$1"
     local cloud_dir="$REPO_ROOT/scripts/cloud-build"
@@ -209,6 +251,7 @@ main() {
     local skip_worker=false
     local worker_image_only=false
     local worker_image_uri=""
+    local worker_lambda_image_uri=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -223,15 +266,19 @@ main() {
     if [[ "$skip_worker" == "false" ]]; then
         build_spur_cli
         build_worker
+        build_worker_lambda
         build_and_push_worker_image
+        build_and_push_worker_lambda_image
         worker_image_uri="$WORKER_IMAGE_URI"
+        worker_lambda_image_uri="$WORKER_LAMBDA_IMAGE_URI"
     fi
 
     if [[ "$worker_image_only" == "true" ]]; then
-        if [[ -z "$worker_image_uri" ]]; then
-            log "--worker-image-only requires worker image build; do not combine it with --skip-worker"
+        if [[ -z "$worker_image_uri" || -z "$worker_lambda_image_uri" ]]; then
+            log "--worker-image-only requires worker image builds; do not combine it with --skip-worker"
             exit 2
         fi
+        log "worker Lambda image URI: $worker_lambda_image_uri"
         echo "$worker_image_uri"
         exit 0
     fi
@@ -254,6 +301,19 @@ main() {
     local tf_vars=(-var "lambda_zip_path=$zip_path")
     if [[ -n "$worker_image_uri" ]]; then
         tf_vars+=(-var "worker_ecr_image=$worker_image_uri")
+    else
+        worker_image_uri="$(terraform output -raw worker_image_uri 2>/dev/null || true)"
+        if [[ -n "$worker_image_uri" ]]; then
+            tf_vars+=(-var "worker_ecr_image=$worker_image_uri")
+        fi
+    fi
+    if [[ -n "$worker_lambda_image_uri" ]]; then
+        tf_vars+=(-var "worker_lambda_image=$worker_lambda_image_uri")
+    else
+        worker_lambda_image_uri="$(terraform output -raw worker_lambda_image_uri 2>/dev/null || true)"
+        if [[ -n "$worker_lambda_image_uri" ]]; then
+            tf_vars+=(-var "worker_lambda_image=$worker_lambda_image_uri")
+        fi
     fi
 
     terraform apply "${tf_vars[@]}" -auto-approve

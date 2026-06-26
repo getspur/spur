@@ -13,20 +13,27 @@ Client → API Gateway (HTTP) → Lambda (ARM64, provided.al2023)
                                 ├── DynamoDB job/status/dedupe records
                                 └── Step Functions DescribeExecution repair
 
-external_index → DynamoDB job + dedupe → Step Functions → ECS worker
-                                                     ↓
-                                      DuckLake/S3 package data writes
-                                      under DynamoDB catalog lease
+external_index → DynamoDB job + dedupe → Step Functions → Lambda worker
+                                                   │
+                                                   └── ECS worker fallback
+                                                       for Lambda platform
+                                                       failures/timeouts
+                                                   ↓
+                                    DuckLake/S3 package data writes
+                                    under DynamoDB catalog lease
 ```
 
 DuckLake/S3 is the data plane for indexed package rows, refs, catalog metadata,
 and Parquet files. DynamoDB is the production control plane for job status,
 idempotency, execution ARNs, and catalog write leases.
 
-The deployed worker image includes both `/usr/local/bin/spur-context-worker`
+The deployed ECS fallback image includes both `/usr/local/bin/spur-context-worker`
 and `/usr/local/bin/spur`; `deploy.sh` smoke-tests both before Terraform applies
-the task definition. `external_index_status` repairs stale queued/running jobs
-through Step Functions `DescribeExecution` when an execution ARN is present.
+the task definition. The Lambda fast-path image includes
+`/usr/local/bin/spur-context-worker-lambda` plus `/usr/local/bin/spur` and is
+invoked first by Step Functions. `external_index_status` repairs stale
+queued/running jobs through Step Functions `DescribeExecution` when an execution
+ARN is present.
 
 ## Resources
 
@@ -36,12 +43,14 @@ through Step Functions `DescribeExecution` when an execution ARN is present.
 | `aws_dynamodb_table.index_jobs` | Job records, active dedupe pointers, execution ARNs |
 | `aws_dynamodb_table.catalog_leases` | Serialized DuckLake catalog write leases |
 | `aws_lambda_function.service` | ARM64 Lambda, 1024MB, 30s timeout |
-| `aws_sfn_state_machine.index_build` | On-demand indexing orchestration |
-| `aws_ecs_cluster.indexing` / task definition | Fargate worker runtime |
+| `aws_sfn_state_machine.index_build` | Lambda-first on-demand indexing orchestration |
+| `aws_lambda_function.worker` | Fast-start indexing worker image |
+| `aws_ecs_cluster.indexing` / task definition | Fargate fallback worker runtime |
 | `aws_apigatewayv2_api.http` | HTTP API front door |
 | `aws_iam_role.lambda` | Execution role with S3 read, DynamoDB, SFN + CloudWatch Logs |
-| `aws_iam_role.worker_task` | Worker role with S3, DynamoDB, SFN callback permissions |
+| `aws_iam_role.worker_task` | ECS fallback worker role with S3, DynamoDB, SFN callback permissions |
 | `aws_cloudwatch_log_group.lambda` | 14-day retention |
+| `aws_cloudwatch_log_group.worker_lambda` | Lambda worker logs |
 | `aws_cloudwatch_log_group.worker` | Worker task logs |
 
 ## Deploy
@@ -77,7 +86,12 @@ terraform apply -var concurrent_warm_instances=1
 | `concurrent_warm_instances` | `0` | Provisioned concurrency |
 | `vpc_id` | n/a | VPC for ECS worker tasks |
 | `worker_subnets` | `[]` | Subnets for ECS worker tasks |
-| `worker_ecr_image` | n/a | Worker image URI built by `deploy.sh` |
+| `worker_ecr_image` | n/a | ECS fallback worker image URI built by `deploy.sh` |
+| `worker_lambda_image` | n/a | Lambda fast-path worker image URI built by `deploy.sh` |
+| `worker_lambda_memory_mb` | `3008` | Lambda worker memory for this account/region cap |
+| `worker_lambda_timeout_sec` | `900` | Lambda worker timeout |
+| `worker_lambda_ephemeral_storage_mb` | `10240` | Lambda worker `/tmp` storage |
+| `worker_lambda_provisioned_concurrency` | `0` | Warm Lambda worker instances |
 
 ## Cold Start Performance
 

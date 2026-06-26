@@ -19,8 +19,9 @@ use spur_context_service::jobs::{
     CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
 };
 use spur_context_service::worker::{
-    build_graph, fetch_source, handle_spot_interruption, upload_with_owned_catalog_lease,
-    CatalogDownload, CatalogLease, CatalogLeaseStore, StageTracker, JobEnv, WorkerError,
+    build_graph, fetch_source, handle_spot_interruption, run_job_and_record_with_services,
+    upload_with_owned_catalog_lease, CatalogDownload, CatalogLease, CatalogLeaseStore,
+    StageTracker, JobEnv, WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -168,6 +169,44 @@ async fn worker_updates_job_stages_around_fetch_build_and_translate() -> Result<
         .context("job should exist")?;
     assert_eq!(record.status, JobStatus::Running);
     assert_eq!(record.stage.as_deref(), Some("translate"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn lambda_worker_records_failed_job_without_sfn_callback() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE", "1")]);
+    let store = Arc::new(FakeJobStore::default());
+    store.seed_job("job-lambda-fail");
+    let leases = Arc::new(FakeCatalogLeaseStore::lost());
+    let env = JobEnv {
+        task_token: String::new(),
+        job_id: "job-lambda-fail".to_owned(),
+        package: "demo".to_owned(),
+        revision: "deadbeef".to_owned(),
+        source: "git:custom".to_owned(),
+        source_url: "https://github.com/example/demo".to_owned(),
+        source_kind: "unsupported".to_owned(),
+        catalog_dsn: "sqlite:/tmp/catalog.sqlite".to_owned(),
+    };
+
+    let err = run_job_and_record_with_services(&env, store.clone(), leases)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, WorkerError::Fetch(_)));
+    let record = store
+        .lookup_job("job-lambda-fail")
+        .await?
+        .context("job should exist")?;
+    assert_eq!(record.status, JobStatus::Failed);
+    assert_eq!(record.error_code.as_deref(), Some("fetch"));
+    assert!(
+        record
+            .error_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("unsupported SOURCE_KIND"))
+    );
     Ok(())
 }
 

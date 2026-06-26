@@ -225,6 +225,30 @@ pub async fn run_job(env: &JobEnv) -> Result<TranslateStats, WorkerError> {
     run_job_with_services(env, jobs, leases).await
 }
 
+pub async fn run_job_and_record(env: &JobEnv) -> Result<TranslateStats, WorkerError> {
+    let dynamodb = dynamodb_client();
+    let jobs = Arc::new(DynamoDbJobStore::new(dynamodb.clone()));
+    let leases = Arc::new(DynamoDbCatalogLeaseStore::new(dynamodb));
+    run_job_and_record_with_services(env, jobs, leases).await
+}
+
+pub async fn run_job_and_record_with_services(
+    env: &JobEnv,
+    jobs: Arc<dyn JobStore>,
+    leases: Arc<dyn CatalogLeaseStore>,
+) -> Result<TranslateStats, WorkerError> {
+    match run_job_with_services(env, jobs.clone(), leases).await {
+        Ok(stats) => Ok(stats),
+        Err(error) => {
+            let error_detail = format!("{error:#}");
+            let error_code = failure_error_code(&error);
+            eprintln!("[worker] job failed: {error_detail}");
+            mark_job_failed_best_effort(jobs.as_ref(), env, &error_code, &error_detail).await;
+            Err(error)
+        }
+    }
+}
+
 pub async fn run_job_with_services(
     env: &JobEnv,
     jobs: Arc<dyn JobStore>,
