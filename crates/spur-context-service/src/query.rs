@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 const DEFAULT_SOURCE: &str = "registry:crates-io";
+const PKG_SYMBOL_URI_PREFIX: &str = "pkg-symbol://";
 const CALL_EDGE_KIND_CALLS: &str = "calls";
 const CALL_EDGE_KIND_DYN: &str = "calls_dyn";
 const CALL_EDGE_KIND_HOF: &str = "references_hof";
@@ -332,6 +333,15 @@ pub fn find_callees(
 }
 
 pub fn resolve_selector(db: &Connection, selector: &str) -> Result<SelectorResolution> {
+    if let Some(parsed) = parse_pkg_symbol_uri(selector) {
+        return Ok(match stable_selector_node(db, &parsed)? {
+            Some(node) => SelectorResolution::Resolved(ResolvedSymbol {
+                stable_symbol_id: node.stable_symbol_id,
+            }),
+            None => SelectorResolution::NotFound,
+        });
+    }
+
     let Some(parsed) = parse_pkg_selector(selector) else {
         return Ok(SelectorResolution::NotFound);
     };
@@ -628,6 +638,10 @@ fn resolution_from_candidates(candidates: Vec<CodeCandidate>) -> SelectorResolut
 }
 
 fn resolve_required(db: &Connection, selector: &str) -> Result<Option<ResolvedNode>> {
+    if let Some(parsed) = parse_pkg_symbol_uri(selector) {
+        return stable_selector_node(db, &parsed);
+    }
+
     let Some(parsed) = parse_pkg_selector(selector) else {
         return Ok(None);
     };
@@ -652,6 +666,42 @@ fn resolve_required(db: &Connection, selector: &str) -> Result<Option<ResolvedNo
             candidates.len()
         ),
     }
+}
+
+fn stable_selector_node(
+    db: &Connection,
+    parsed: &ParsedStableSelector,
+) -> Result<Option<ResolvedNode>> {
+    optional_no_rows(
+        db.query_row(
+            r"
+            SELECT stable_symbol_id, source, package, revision, entity_name, qualified_name
+            FROM nodes
+            WHERE source = $1
+              AND package = $2
+              AND revision = $3
+              AND stable_symbol_id = $4
+            LIMIT 1
+            ",
+            params![
+                &parsed.source,
+                &parsed.package,
+                &parsed.revision,
+                &parsed.stable_symbol_id
+            ],
+            |row| {
+                Ok(ResolvedNode {
+                    stable_symbol_id: row.get(0)?,
+                    source: row.get(1)?,
+                    package: row.get(2)?,
+                    revision: row.get(3)?,
+                    entity_name: row.get(4)?,
+                    qualified_name: row.get(5)?,
+                })
+            },
+        ),
+        "failed to resolve stable external code selector",
+    )
 }
 
 fn latest_revision(db: &Connection, source: &str, package: &str) -> Result<Option<String>> {
@@ -721,6 +771,28 @@ fn parse_pkg_selector(selector: &str) -> Option<ParsedSelector> {
         package,
         revision,
         name: name.to_owned(),
+    })
+}
+
+fn parse_pkg_symbol_uri(selector: &str) -> Option<ParsedStableSelector> {
+    let body = selector.trim().strip_prefix(PKG_SYMBOL_URI_PREFIX)?;
+    let mut parts = body.rsplitn(4, '/');
+    let stable_symbol_id = parts.next()?;
+    let revision = parts.next()?;
+    let package = parts.next()?;
+    let source = parts.next()?;
+    if source.is_empty()
+        || package.is_empty()
+        || revision.is_empty()
+        || stable_symbol_id.is_empty()
+    {
+        return None;
+    }
+    Some(ParsedStableSelector {
+        source: source.to_owned(),
+        package: package.to_owned(),
+        revision: revision.to_owned(),
+        stable_symbol_id: stable_symbol_id.to_owned(),
     })
 }
 
@@ -1023,6 +1095,14 @@ struct ParsedSelector {
     package: String,
     revision: Option<String>,
     name: String,
+}
+
+#[derive(Debug)]
+struct ParsedStableSelector {
+    source: String,
+    package: String,
+    revision: String,
+    stable_symbol_id: String,
 }
 
 #[derive(Debug)]
