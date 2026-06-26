@@ -1,6 +1,73 @@
 {
-  "StartAt": "RunBuild",
+  "StartAt": "RunLambdaBuild",
   "States": {
+    "RunLambdaBuild": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "TimeoutSeconds": ${worker_lambda_timeout_sec},
+      "Parameters": {
+        "FunctionName": "${worker_lambda_arn}",
+        "Payload": {
+          "job_id.$": "$.job_id",
+          "package.$": "$.package",
+          "revision.$": "$.revision",
+          "source.$": "$.source",
+          "source_url.$": "$.source_url",
+          "source_kind.$": "$.source_kind"
+        }
+      },
+      "ResultPath": "$.lambdaResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.Timeout",
+            "Lambda.Unknown",
+            "Sandbox.Timedout",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "Next": "RunBuild",
+          "ResultPath": "$.lambdaError"
+        }
+      ],
+      "Next": "CheckLambdaBuild"
+    },
+    "CheckLambdaBuild": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.lambdaResult.Payload.status",
+          "StringEquals": "complete",
+          "Next": "Done"
+        },
+        {
+          "Variable": "$.lambdaResult.Payload.status",
+          "StringEquals": "failed",
+          "Next": "LambdaBuildFailed"
+        }
+      ],
+      "Default": "RunBuild"
+    },
+    "LambdaBuildFailed": {
+      "Type": "Fail",
+      "Error": "worker_failed",
+      "Cause": "Lambda worker reported deterministic indexing failure"
+    },
     "RunBuild": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",

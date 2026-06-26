@@ -39,11 +39,28 @@ def test_deploy_worker_image_contains_worker_and_spur_binaries():
     assert "spur-context-worker" in deploy_sh
 
 
+def test_deploy_builds_lambda_worker_image_for_fast_start():
+    script = DEPLOY_SH.read_text()
+    cargo_toml = (ROOT / "crates" / "spur-context-service" / "Cargo.toml").read_text()
+
+    assert "worker-lambda" in cargo_toml
+    assert "spur-context-worker-lambda" in cargo_toml
+    assert "scripts/spur-cargo --workdir crates/spur-context-service build --features worker-lambda --release" in script
+    assert "WORKER_LAMBDA_ECR_REPO" in script
+    assert "COPY spur-context-worker-lambda /usr/local/bin/spur-context-worker-lambda" in script
+    assert 'ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]' in script
+    assert '-var "worker_lambda_image=' in script
+
+
 def test_deploy_rebuilds_lambda_zip_by_default():
     script = DEPLOY_SH.read_text()
+    main_tf = (INFRA_DIR / "main.tf").read_text()
 
     assert 'elif [[ ! -f "$zip_path" ]]' not in script
     assert 'rm -f "$zip_path"' in script
+    lambda_zip = main_tf.split('resource "aws_s3_object" "lambda_zip"', 1)[1]
+    assert "source_hash = filemd5(var.lambda_zip_path)" in lambda_zip
+    assert "etag   = filemd5(var.lambda_zip_path)" not in lambda_zip
 
 
 def test_remote_worker_image_script_delegates_to_canonical_deploy_path():
@@ -61,6 +78,7 @@ def test_remote_docker_build_accepts_multiple_remote_binaries():
     assert "REMOTE_BINARIES=()" in script
     assert 'REMOTE_BINARIES+=("$2")' in script
     assert 'for remote_binary in "${REMOTE_BINARIES[@]}"' in script
+    assert "docker build --platform linux/arm64 --provenance=false" in script
 
 
 def test_worker_checkpoint_uri_is_per_job_object_from_state_machine():
@@ -85,6 +103,46 @@ def test_state_machine_does_not_retry_worker_reported_failures():
 
     assert '"States.TaskFailed"' not in asl
     assert '"States.ALL"' not in asl
+
+
+def test_state_machine_invokes_lambda_worker_before_ecs_fallback():
+    asl = (INFRA_DIR / "index_build_asl.json").read_text()
+    state_machine_tf = (INFRA_DIR / "state_machine.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+
+    assert '"StartAt": "RunLambdaBuild"' in asl
+    assert '"Resource": "arn:aws:states:::lambda:invoke"' in asl
+    assert '"FunctionName": "${worker_lambda_arn}"' in asl
+    assert '"Next": "CheckLambdaBuild"' in asl
+    assert '"Next": "RunBuild"' in asl
+    assert '"ErrorEquals": ["States.Timeout"' in asl
+    assert '"Lambda.Unknown"' in asl
+    assert '"Sandbox.Timedout"' in asl
+    assert "worker_lambda_arn" in state_machine_tf
+    assert 'Action = ["lambda:InvokeFunction"]' in iam_tf
+
+
+def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
+    lambda_tf = (INFRA_DIR / "lambda_worker.tf").read_text()
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+    outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+
+    assert 'resource "aws_lambda_function" "worker"' in lambda_tf
+    assert 'package_type  = "Image"' in lambda_tf
+    assert "image_uri     = var.worker_lambda_image" in lambda_tf
+    assert "timeout       = var.worker_lambda_timeout_sec" in lambda_tf
+    assert "memory_size   = var.worker_lambda_memory_mb" in lambda_tf
+    assert "ephemeral_storage" in lambda_tf
+    assert "AWS_REGION" not in lambda_tf
+    assert "worker_lambda_memory_mb" in variables_tf
+    assert "default     = 3008" in variables_tf
+    assert "worker_lambda_ephemeral_storage_mb" in variables_tf
+    assert 'output "worker_image_uri"' in outputs_tf
+    assert 'output "worker_lambda_image_uri"' in outputs_tf
+    assert 'output "worker_lambda_function_name"' in outputs_tf
+    lambda_s3_policy = iam_tf.split('resource "aws_iam_role_policy" "s3_access"', 1)[1]
+    assert '"s3:DeleteObject"' in lambda_s3_policy
 
 
 def test_catalog_lease_ttl_uses_worker_expiry_field():
