@@ -1,4 +1,5 @@
 pub(crate) mod catalog;
+pub(crate) mod context_service;
 pub mod delegation;
 pub mod plan;
 pub mod signals;
@@ -37,7 +38,7 @@ pub fn brain_tool_registry(
     plan_deps: plan::PlanMcpDeps,
     signal_deps: signals::SignalMcpDeps,
 ) -> Result<spur_mcp::ToolRegistry, spur_mcp::ToolRegistryError> {
-    let builder = spur_mcp::ToolRegistry::builder()
+    let mut builder = spur_mcp::ToolRegistry::builder()
         .with(delegation::DelegationMcpModule::new(delegation_deps))?
         .with(catalog::ServerCatalogMcpModule::prelude())?
         .with(plan::PlanMcpModule::management(plan_deps.clone()))?
@@ -45,6 +46,9 @@ pub fn brain_tool_registry(
         .with(plan::PlanMcpModule::remainder(plan_deps))?
         .with(signals::SignalMcpModule::new(signal_deps))?
         .with_alias("code_search", "code_symbol_search")?;
+    if let Some(context_service_client) = context_service::ContextServiceClient::from_env() {
+        builder = builder.with(context_service_client)?;
+    }
     Ok(builder.build())
 }
 
