@@ -22,6 +22,9 @@ def test_deploy_builds_standalone_context_service_from_crate_workdir():
         '--remote-binary "$(remote_worktree_path '
         'crates/spur-context-service/target/release/spur-context-worker)"'
     ) in script
+    assert '--remote-binary "$(remote_target_path target/release/spur)"' in script
+    assert "fetch_remote_target_file target/release/spur" not in script
+    assert "--context-dir \"$worker_context\"" not in script
     assert 'worker_image_uri="$(build_and_push_worker_image)"' not in script
     assert "scripts/spur-cargo run --workdir crates/spur-context-service" not in script
     assert "scripts/spur-cargo build -p spur-context-service" not in script
@@ -43,6 +46,14 @@ def test_remote_worker_image_script_delegates_to_canonical_deploy_path():
     assert "COPY spur-context-worker /usr/local/bin/spur-context-worker" not in script
     assert "COPY spur /usr/local/bin/spur" not in script
     assert "docker build" not in script
+
+
+def test_remote_docker_build_accepts_multiple_remote_binaries():
+    script = (ROOT / "scripts" / "cloud-build" / "docker-build.sh").read_text()
+
+    assert "REMOTE_BINARIES=()" in script
+    assert 'REMOTE_BINARIES+=("$2")' in script
+    assert 'for remote_binary in "${REMOTE_BINARIES[@]}"' in script
 
 
 def test_worker_checkpoint_uri_is_per_job_object_from_state_machine():
