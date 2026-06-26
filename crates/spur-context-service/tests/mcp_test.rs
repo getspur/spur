@@ -171,6 +171,101 @@ async fn external_code_read_resolves_non_default_source() -> Result<()> {
 }
 
 #[tokio::test]
+async fn external_code_read_accepts_search_uri_for_ambiguous_symbol_name() -> Result<()> {
+    let fixture = McpFixture::new("read-search-uri")?;
+    move_fixture_to_source(&fixture, GIT_SOURCE)?;
+
+    let search = handle_tool(
+        "external_code_search",
+        &json!({
+            "source": GIT_SOURCE,
+            "query": "Buffer",
+            "package": PACKAGE,
+            "symbol_kind": "struct",
+            "limit": 10
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+
+    assert_eq!(search["total_matches"], 1);
+    assert_eq!(search["candidates"][0]["selector"], "pkg:demo@1.0.0::Buffer");
+    let uri = search["candidates"][0]["uri"]
+        .as_str()
+        .context("search candidate URI")?;
+
+    let response = handle_tool(
+        "external_code_read",
+        &json!({
+            "selector": uri,
+            "context_lines": 0
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+
+    assert_eq!(response["stable_symbol_id"], "bufferstruct0001");
+    assert_eq!(response["package_source"], GIT_SOURCE);
+    assert_eq!(
+        response["source"],
+        "pub struct Buffer {\n    bytes: [u8; 20],\n}\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_call_graph_accepts_search_uri_selectors() -> Result<()> {
+    let fixture = McpFixture::new("call-graph-search-uri")?;
+
+    let beta_uri = search_uri(&fixture, "bet", Some("function")).await?;
+    let callers = handle_tool(
+        "external_code_callers",
+        &json!({
+            "selector": beta_uri,
+            "include_unresolved": true
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(
+        callers["callers"]
+            .as_array()
+            .context("callers array")?
+            .len(),
+        3
+    );
+    assert_eq!(callers["counts_by_kind"]["unresolved"], 1);
+
+    let alpha_uri = search_uri(&fixture, "alpha", Some("function")).await?;
+    let callees = handle_tool(
+        "external_code_callees",
+        &json!({
+            "selector": alpha_uri,
+            "include_unresolved": true
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(
+        callees["callees"]
+            .as_array()
+            .context("callees array")?
+            .len(),
+        2
+    );
+    assert_eq!(
+        callees["callees"][0]["callee"]["stable_symbol_id"],
+        "bbbbbbbbbbbbbbbb"
+    );
+    assert_eq!(callees["callees"][1]["edge"]["target_label"], "external::Thing");
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_code_callers_returns_resolved_and_unresolved_edges() -> Result<()> {
     let fixture = McpFixture::new("callers")?;
 
@@ -621,6 +716,27 @@ fn schema_for<'a>(
         .input_schema
 }
 
+async fn search_uri(
+    fixture: &McpFixture,
+    query: &str,
+    symbol_kind: Option<&str>,
+) -> Result<String> {
+    let mut args = json!({
+        "query": query,
+        "package": PACKAGE,
+        "limit": 20
+    });
+    if let Some(symbol_kind) = symbol_kind {
+        args["symbol_kind"] = json!(symbol_kind);
+    }
+    let response = handle_tool("external_code_search", &args, &fixture.conn, &fixture.catalog)
+        .await?;
+    response["candidates"][0]["uri"]
+        .as_str()
+        .map(str::to_owned)
+        .context("search candidate URI")
+}
+
 fn required(schema: &Value) -> Vec<&str> {
     schema["required"]
         .as_array()
@@ -842,6 +958,14 @@ fn seed_query_fixture(conn: &Connection) -> Result<()> {
         "pub fn hof_caller() {}\n",
         "\n",
         "pub fn task_spawner() {}\n",
+        "\n",
+        "pub struct Buffer {\n",
+        "    bytes: [u8; 20],\n",
+        "}\n",
+        "\n",
+        "impl Buffer {\n",
+        "    pub fn new() -> Self { Self { bytes: [0; 20] } }\n",
+        "}\n",
     );
 
     conn.execute(
@@ -916,6 +1040,28 @@ fn seed_query_fixture(conn: &Connection) -> Result<()> {
         "demo::runtime::task_spawner",
         19,
         19,
+    )?;
+    insert_node_with_kind(
+        conn,
+        "bufferstruct0001",
+        source_text,
+        "Buffer",
+        "Buffer",
+        "struct",
+        "pub struct Buffer",
+        21,
+        23,
+    )?;
+    insert_node_with_kind(
+        conn,
+        "bufferimpl000001",
+        source_text,
+        "Buffer",
+        "impl Buffer",
+        "impl",
+        "impl Buffer",
+        25,
+        27,
     )?;
 
     insert_edge(
@@ -1001,7 +1147,30 @@ fn insert_node(
     line_start: i64,
     line_end: i64,
 ) -> Result<()> {
-    let marker = format!("pub fn {entity_name}");
+    insert_node_with_kind(
+        conn,
+        id,
+        source_text,
+        entity_name,
+        qualified_name,
+        "function",
+        &format!("pub fn {entity_name}"),
+        line_start,
+        line_end,
+    )
+}
+
+fn insert_node_with_kind(
+    conn: &Connection,
+    id: &str,
+    source_text: &str,
+    entity_name: &str,
+    qualified_name: &str,
+    symbol_kind: &str,
+    marker: &str,
+    line_start: i64,
+    line_end: i64,
+) -> Result<()> {
     let byte_start = source_text
         .find(&marker)
         .with_context(|| format!("find marker {marker}"))? as i64;
@@ -1013,7 +1182,7 @@ fn insert_node(
         r"
         INSERT INTO nodes VALUES
             ($1, 'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0,
-             'src/lib.rs', $2, $3, $4, $5, $6, $7, 'function', $8, NULL)
+             'src/lib.rs', $2, $3, $4, $5, $6, $7, $8, $9, NULL)
         ",
         params![
             id,
@@ -1023,6 +1192,7 @@ fn insert_node(
             line_end,
             entity_name,
             qualified_name,
+            symbol_kind,
             format!("anchor-{id}")
         ],
     )
