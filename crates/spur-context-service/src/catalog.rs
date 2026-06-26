@@ -3,7 +3,7 @@ use duckdb::{params, Connection};
 
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 
-fn is_remote_catalog(catalog_dsn: &str) -> bool {
+pub(crate) fn is_remote_catalog(catalog_dsn: &str) -> bool {
     catalog_dsn.starts_with("s3://")
         || catalog_dsn.starts_with("https://")
         || catalog_dsn.starts_with("http://")

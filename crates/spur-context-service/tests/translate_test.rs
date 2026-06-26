@@ -169,6 +169,47 @@ fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
 }
 
 #[test]
+fn skipped_lance_sidecars_do_not_poison_required_graph_commits() -> Result<()> {
+    let root = unique_temp_dir("translate-skipped-lance-sidecars")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+    fs::remove_file(artifact_dir.join("code_symbols.lance").join("part.parquet"))
+        .context("remove code symbol sidecar parquet")?;
+    fs::remove_file(artifact_dir.join("sections.lancedb").join("part.parquet"))
+        .context("remove section sidecar parquet")?;
+
+    let stats = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        source_root: None,
+        catalog_dsn: catalog_dsn.clone(),
+    })?;
+
+    assert_eq!(stats.rows_inserted.get("nodes"), Some(&1));
+    assert_eq!(stats.rows_inserted.get("symbol_embeddings"), Some(&0));
+    assert_eq!(stats.rows_inserted.get("section_bodies"), Some(&0));
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let durable_nodes: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE source = ? AND package = ? AND revision = ?",
+        params![SOURCE, PACKAGE, REVISION],
+        |row| row.get(0),
+    )?;
+    assert_eq!(durable_nodes, 1);
+    Ok(())
+}
+
+#[test]
 fn translated_artifact_read_symbol_returns_source_from_package_tree() -> Result<()> {
     let root = unique_temp_dir("translate-read")?;
     let artifact_dir = root.join("artifact");
