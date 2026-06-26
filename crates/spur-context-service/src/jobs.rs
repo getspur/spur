@@ -10,6 +10,8 @@ use std::{
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::{
+    error::SdkError,
+    operation::transact_write_items::TransactWriteItemsError,
     types::{AttributeValue, Delete, Put, ReturnValue, TransactWriteItem},
     Client as DynamoDbClient,
 };
@@ -656,8 +658,32 @@ fn optional_json_attr(
     }
 }
 
-fn is_transaction_conflict(error: &impl fmt::Display) -> bool {
-    let message = error.to_string();
+fn is_transaction_conflict(error: &SdkError<TransactWriteItemsError>) -> bool {
+    match error {
+        SdkError::ServiceError(service_error) => {
+            transact_write_error_is_conflict(service_error.err())
+        }
+        _ => transaction_conflict_message(&error.to_string()),
+    }
+}
+
+fn transact_write_error_is_conflict(error: &TransactWriteItemsError) -> bool {
+    match error {
+        TransactWriteItemsError::TransactionCanceledException(error) => error
+            .cancellation_reasons()
+            .iter()
+            .any(|reason| cancellation_reason_is_conflict(reason.code()))
+            || error.message().is_some_and(transaction_conflict_message),
+        TransactWriteItemsError::TransactionInProgressException(_) => true,
+        _ => transaction_conflict_message(&error.to_string()),
+    }
+}
+
+fn cancellation_reason_is_conflict(code: Option<&str>) -> bool {
+    matches!(code, Some("ConditionalCheckFailed" | "TransactionConflict"))
+}
+
+fn transaction_conflict_message(message: &str) -> bool {
     message.contains("TransactionCanceledException")
         || message.contains("ConditionalCheckFailed")
         || message.contains("TransactionConflict")
@@ -706,3 +732,49 @@ impl fmt::Display for InvalidJobStatus {
 }
 
 impl StdError for InvalidJobStatus {}
+
+#[cfg(test)]
+mod tests {
+    use aws_sdk_dynamodb::{
+        operation::transact_write_items::TransactWriteItemsError,
+        types::{error::TransactionCanceledException, CancellationReason},
+    };
+
+    use super::*;
+
+    #[test]
+    fn transaction_canceled_conditional_check_is_conflict() {
+        let error =
+            TransactWriteItemsError::TransactionCanceledException(transaction_canceled_with_reason(
+                "ConditionalCheckFailed",
+            ));
+
+        assert!(transact_write_error_is_conflict(&error));
+    }
+
+    #[test]
+    fn transaction_canceled_transaction_conflict_is_conflict() {
+        let error =
+            TransactWriteItemsError::TransactionCanceledException(transaction_canceled_with_reason(
+                "TransactionConflict",
+            ));
+
+        assert!(transact_write_error_is_conflict(&error));
+    }
+
+    #[test]
+    fn transaction_canceled_validation_error_is_not_conflict() {
+        let error =
+            TransactWriteItemsError::TransactionCanceledException(transaction_canceled_with_reason(
+                "ValidationError",
+            ));
+
+        assert!(!transact_write_error_is_conflict(&error));
+    }
+
+    fn transaction_canceled_with_reason(code: &str) -> TransactionCanceledException {
+        TransactionCanceledException::builder()
+            .cancellation_reasons(CancellationReason::builder().code(code).build())
+            .build()
+    }
+}
