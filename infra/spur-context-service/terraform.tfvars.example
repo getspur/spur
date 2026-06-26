@@ -16,8 +16,11 @@ worker_subnets = [
   "subnet-yyyyyyyy",
 ]
 
-# ECR image for the worker container.  Built and pushed by deploy.sh, or
+# ECR images for the indexing workers. Built and pushed by deploy.sh, or
 # manually:
 #   docker build -t <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker:latest .
 #   docker push <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker:latest
-worker_ecr_image = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker:latest"
+#   docker build -t <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker-lambda:latest .
+#   docker push <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker-lambda:latest
+worker_ecr_image    = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker:latest"
+worker_lambda_image = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker-lambda:latest"

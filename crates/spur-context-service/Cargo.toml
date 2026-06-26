@@ -24,11 +24,17 @@ name = "spur-context-worker"
 path = "src/bin/worker.rs"
 required-features = ["worker"]
 
+[[bin]]
+name = "spur-context-worker-lambda"
+path = "src/bin/worker_lambda.rs"
+required-features = ["worker-lambda"]
+
 [features]
 default = []
 analyst = []
 lambda = ["dep:lambda_runtime"]
 worker = []
+worker-lambda = ["worker", "dep:lambda_runtime"]
 
 [dependencies]
 anyhow = "1"
