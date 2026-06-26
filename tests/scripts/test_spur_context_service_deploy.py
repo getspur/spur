@@ -56,6 +56,9 @@ def test_deploy_rebuilds_lambda_zip_by_default():
     script = DEPLOY_SH.read_text()
     main_tf = (INFRA_DIR / "main.tf").read_text()
 
+    assert 'local tf_zip_path="../../target/lambda/spur-context-service.zip"' in script
+    assert 'tf_zip_path="$local_zip"' in script
+    assert 'tf_vars=(-var "lambda_zip_path=$tf_zip_path")' in script
     assert 'elif [[ ! -f "$zip_path" ]]' not in script
     assert 'rm -f "$zip_path"' in script
     lambda_zip = main_tf.split('resource "aws_s3_object" "lambda_zip"', 1)[1]

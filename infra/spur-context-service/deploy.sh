@@ -247,6 +247,7 @@ EOF
 
 main() {
     local zip_path="$REPO_ROOT/target/lambda/spur-context-service.zip"
+    local tf_zip_path="../../target/lambda/spur-context-service.zip"
     local local_zip=""
     local skip_worker=false
     local worker_image_only=false
@@ -286,6 +287,7 @@ main() {
     # Build or reuse Lambda zip.
     if [[ -n "$local_zip" ]]; then
         zip_path="$local_zip"
+        tf_zip_path="$local_zip"
     else
         mkdir -p "$(dirname "$zip_path")"
         rm -f "$zip_path"
@@ -298,7 +300,7 @@ main() {
     cd "$INFRA_DIR"
     terraform init -upgrade
 
-    local tf_vars=(-var "lambda_zip_path=$zip_path")
+    local tf_vars=(-var "lambda_zip_path=$tf_zip_path")
     if [[ -n "$worker_image_uri" ]]; then
         tf_vars+=(-var "worker_ecr_image=$worker_image_uri")
     else
