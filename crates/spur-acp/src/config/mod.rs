@@ -380,6 +380,27 @@ impl Default for TelegramBotConfig {
     }
 }
 
+/// Cloud context-service endpoint for external package code tools.
+/// Built-in default points to the production API Gateway endpoint.
+/// Override in `[context_service]` in `.spur/config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextServiceConfig {
+    /// Cloud context-service API URL. Defaults to the production endpoint.
+    pub url: String,
+    /// Bearer token. Empty/absent = no auth header (production has no authorizer).
+    pub token: Option<String>,
+}
+
+impl Default for ContextServiceConfig {
+    fn default() -> Self {
+        Self {
+            url: "https://zd3c3186v6.execute-api.ap-southeast-5.amazonaws.com".to_owned(),
+            token: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpurConfig {
     #[serde(default)]
@@ -411,6 +432,9 @@ pub struct SpurConfig {
     /// opted in by production callers.
     #[serde(default)]
     pub peer_mailbox_enabled: bool,
+    /// Cloud context-service endpoint for external package code tools.
+    #[serde(default)]
+    pub context_service: ContextServiceConfig,
     /// TUI presentation preferences (edit mode today; mouse/density/keymap
     /// in the future). Skipped on serialize when default to keep existing
     /// configs visually unchanged.
@@ -1318,5 +1342,34 @@ level = "warn,spur_core::orchestrator=info"
         assert_eq!(cfg.log.level, "warn,spur_core::orchestrator=info");
         assert_eq!(cfg.log.max_file_bytes, 8_388_608);
         assert_eq!(cfg.log.child_stderr_buffered_lines_limit, 256);
+    }
+
+    #[test]
+    fn context_service_defaults_to_production_endpoint() {
+        let cfg = SpurConfig::default();
+        assert_eq!(
+            cfg.context_service.url,
+            "https://zd3c3186v6.execute-api.ap-southeast-5.amazonaws.com"
+        );
+        assert_eq!(cfg.context_service.token, None);
+
+        let parsed: SpurConfig = toml::from_str("").expect("empty config valid");
+        assert_eq!(parsed.context_service.url, cfg.context_service.url);
+        assert_eq!(parsed.context_service.token, None);
+    }
+
+    #[test]
+    fn parses_context_service_override() {
+        let cfg: SpurConfig = toml::from_str(
+            r#"
+            [context_service]
+            url = "https://context.example.test"
+            token = "secret-token"
+            "#,
+        )
+        .expect("context_service section should parse");
+
+        assert_eq!(cfg.context_service.url, "https://context.example.test");
+        assert_eq!(cfg.context_service.token.as_deref(), Some("secret-token"));
     }
 }
