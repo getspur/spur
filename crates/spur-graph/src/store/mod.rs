@@ -17,7 +17,8 @@ pub use build::{
 };
 pub use canonical_hash::artifact_content_hash_blake3_hex;
 pub use lance_sections::{
-    write_sections_dataset, EmbeddingModelSelection, CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE,
+    embedding_query_text_for_model, write_sections_dataset, EmbeddingModelSelection,
+    CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, EMBEDDING_GEMMA_EMBED_MODEL_NAME,
     EMBEDDING_VECTOR_DIMENSIONS, EMBED_MODEL_ENV, EMBED_MODEL_NAME, JINA_CODE_EMBED_MODEL_NAME,
     SECTIONS_DATASET_DIR, SECTIONS_TABLE,
 };
