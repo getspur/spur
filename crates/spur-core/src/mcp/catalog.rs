@@ -25,6 +25,7 @@ const ANALYST_TOOL_NAMES: &[&str] = &[
     "doc_navigate",
     "knowledge_context_pack",
     "knowledge_context_pack_2",
+    "query",
 ];
 
 pub(crate) fn is_server_owned_tool(name: &str) -> bool {
