@@ -15,6 +15,7 @@ const PACKAGE: &str = "demo";
 const REVISION: &str = "1.2.3";
 const DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
+const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
 
 #[test]
 fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
@@ -111,6 +112,24 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
         assert_eq!(table_row_count(&conn, table)?, 1, "row count for {table}");
     }
 
+    let (section_vector_len, section_model, section_input_hash, section_text_version): (
+        i64,
+        String,
+        String,
+        String,
+    ) = conn.query_row(
+        r"
+        SELECT array_length(vector), embedding_model, embedding_input_hash, embed_text_version
+        FROM section_bodies
+        ",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    assert_eq!(section_vector_len, DIMENSIONS as i64);
+    assert_eq!(section_model, EMBEDDING_MODEL);
+    assert_eq!(section_input_hash, "section-embed-hash");
+    assert_eq!(section_text_version, EMBED_TEXT_VERSION);
+
     Ok(())
 }
 
@@ -163,7 +182,10 @@ fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
         },
     )?;
     assert!(
-        result.primary_evidence.iter().any(|item| item.grounding == "bm25-code"),
+        result
+            .primary_evidence
+            .iter()
+            .any(|item| item.grounding == "bm25-code"),
         "expected BM25 code evidence without embeddings"
     );
     Ok(())
