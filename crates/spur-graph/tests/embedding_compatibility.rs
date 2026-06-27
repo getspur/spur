@@ -1,21 +1,21 @@
 use spur_graph::{
-    EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS, EMBED_MODEL_ENV, EMBED_MODEL_NAME,
-    JINA_CODE_EMBED_MODEL_NAME,
+    EmbeddingModelSelection, EMBEDDING_GEMMA_EMBED_MODEL_NAME, EMBEDDING_VECTOR_DIMENSIONS,
+    EMBED_MODEL_ENV,
 };
 
 #[test]
-fn embedding_contract_uses_bge_base_model_and_dimensions() {
-    assert_eq!(EMBED_MODEL_NAME, "BGEBaseENV15");
+fn embedding_contract_uses_gemma_model_and_dimensions() {
+    assert_eq!(EMBEDDING_GEMMA_EMBED_MODEL_NAME, "EmbeddingGemma300M");
     assert_eq!(EMBEDDING_VECTOR_DIMENSIONS, 768);
 }
 
 #[test]
-fn embedding_contract_supports_jina_code_without_dimension_change() {
+fn embedding_contract_rejects_legacy_model_aliases() {
     assert_eq!(EMBED_MODEL_ENV, "SPUR_EMBEDDING_MODEL");
-    assert_eq!(JINA_CODE_EMBED_MODEL_NAME, "JinaEmbeddingsV2BaseCode");
+    assert_eq!(EmbeddingModelSelection::parse("jina-code"), None);
+    assert_eq!(EmbeddingModelSelection::parse("bge-base-en-v1.5"), None);
     assert_eq!(
-        EmbeddingModelSelection::parse("jina-code"),
-        Some(EmbeddingModelSelection::JinaCode)
+        EmbeddingModelSelection::parse("google/embeddinggemma-300m"),
+        Some(EmbeddingModelSelection::EmbeddingGemma300M)
     );
-    assert_eq!(EmbeddingModelSelection::JinaCode.dimensions(), 768);
 }

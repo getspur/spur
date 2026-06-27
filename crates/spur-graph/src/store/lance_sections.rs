@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,7 +21,6 @@ use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use lancedb::table::OptimizeAction;
 
 use crate::content_hash::blake3_hex;
-use crate::embedding::openrouter::OpenRouterEmbedder;
 use crate::store::parquet::GraphArtifactSidecarRowCounts;
 use crate::{
     GraphEdgeArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphSymbolArtifact,
@@ -30,11 +28,7 @@ use crate::{
 };
 
 pub const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
-pub const EMBED_MODEL_NAME: &str = "BGEBaseENV15";
-pub const JINA_CODE_EMBED_MODEL_NAME: &str = "JinaEmbeddingsV2BaseCode";
 pub const EMBEDDING_GEMMA_EMBED_MODEL_NAME: &str = "EmbeddingGemma300M";
-pub const EMBED_MODEL_APPROX_SIZE_MB: usize = 420;
-pub const JINA_CODE_EMBED_MODEL_APPROX_SIZE_MB: usize = 550;
 pub const EMBEDDING_GEMMA_EMBED_MODEL_APPROX_SIZE_MB: usize = 1200;
 pub const SECTIONS_DATASET_DIR: &str = "sections.lancedb";
 pub const SECTIONS_TABLE: &str = "section_bodies";
@@ -44,12 +38,9 @@ pub const EMBEDDING_VECTOR_DIMENSIONS: usize = 768;
 const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
 const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE";
-const OPENROUTER_EMBED_CONCURRENCY: usize = 8;
 pub const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
 const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
-const SYMBOL_EMBED_TEXT_VERSION: &str = "v2-bge-base";
-const JINA_CODE_EMBED_TEXT_VERSION: &str = "v2-jina-code";
 const EMBEDDING_GEMMA_EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
 const EMBEDDING_INPUT_HASH_COLUMN: &str = "embedding_input_hash";
 const EMBEDDING_MODEL_COLUMN: &str = "embedding_model";
@@ -59,14 +50,10 @@ const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 #[cfg(debug_assertions)]
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
 
-static BGE_BASE_EMBED_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
-static JINA_CODE_EMBED_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
 static EMBEDDING_GEMMA_EMBED_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingModelSelection {
-    BgeBaseEnV15,
-    JinaCode,
     EmbeddingGemma300M,
 }
 
@@ -86,10 +73,6 @@ impl EmbeddingModelSelection {
             .flat_map(char::to_lowercase)
             .collect::<String>();
         match normalized.as_str() {
-            "bgebaseenv15" | "bgebaseen15" | "bgebase" => Some(Self::BgeBaseEnV15),
-            "jinacode" | "jinaembeddingsv2basecode" | "jinaembeddingv2basecode" => {
-                Some(Self::JinaCode)
-            }
             ""
             | "embeddinggemma"
             | "embeddinggemma300"
@@ -100,19 +83,11 @@ impl EmbeddingModelSelection {
     }
 
     pub fn model_name(self) -> &'static str {
-        match self {
-            Self::BgeBaseEnV15 => EMBED_MODEL_NAME,
-            Self::JinaCode => JINA_CODE_EMBED_MODEL_NAME,
-            Self::EmbeddingGemma300M => EMBEDDING_GEMMA_EMBED_MODEL_NAME,
-        }
+        EMBEDDING_GEMMA_EMBED_MODEL_NAME
     }
 
     pub fn approximate_size_mb(self) -> usize {
-        match self {
-            Self::BgeBaseEnV15 => EMBED_MODEL_APPROX_SIZE_MB,
-            Self::JinaCode => JINA_CODE_EMBED_MODEL_APPROX_SIZE_MB,
-            Self::EmbeddingGemma300M => EMBEDDING_GEMMA_EMBED_MODEL_APPROX_SIZE_MB,
-        }
+        EMBEDDING_GEMMA_EMBED_MODEL_APPROX_SIZE_MB
     }
 
     pub fn dimensions(self) -> usize {
@@ -120,40 +95,22 @@ impl EmbeddingModelSelection {
     }
 
     pub fn fastembed_model(self) -> EmbeddingModel {
-        match self {
-            Self::BgeBaseEnV15 => EmbeddingModel::BGEBaseENV15,
-            Self::JinaCode => EmbeddingModel::JinaEmbeddingsV2BaseCode,
-            Self::EmbeddingGemma300M => EmbeddingModel::EmbeddingGemma300M,
-        }
+        EmbeddingModel::EmbeddingGemma300M
     }
 }
 
 pub fn embedding_query_text_for_model(
     query: &str,
-    embedding_model: EmbeddingModelSelection,
+    _embedding_model: EmbeddingModelSelection,
 ) -> Cow<'_, str> {
-    match embedding_model {
-        EmbeddingModelSelection::EmbeddingGemma300M => {
-            Cow::Owned(format!("task: code retrieval | query: {query}"))
-        }
-        EmbeddingModelSelection::BgeBaseEnV15 | EmbeddingModelSelection::JinaCode => {
-            Cow::Borrowed(query)
-        }
-    }
+    Cow::Owned(format!("task: code retrieval | query: {query}"))
 }
 
 fn embedding_document_text_for_model(
     text: &str,
-    embedding_model: EmbeddingModelSelection,
+    _embedding_model: EmbeddingModelSelection,
 ) -> Cow<'_, str> {
-    match embedding_model {
-        EmbeddingModelSelection::EmbeddingGemma300M => {
-            Cow::Owned(format!("title: none | text: {text}"))
-        }
-        EmbeddingModelSelection::BgeBaseEnV15 | EmbeddingModelSelection::JinaCode => {
-            Cow::Borrowed(text)
-        }
-    }
+    Cow::Owned(format!("title: none | text: {text}"))
 }
 
 // Vector reuse is intentionally split across two scopes: in-place incremental
@@ -2161,18 +2118,11 @@ fn first_source_line_for_symbol<'a>(
 
 fn section_embed_content_hash_for_model(
     source_content_hash: &str,
-    embedding_model: EmbeddingModelSelection,
+    _embedding_model: EmbeddingModelSelection,
 ) -> String {
-    match embedding_model {
-        EmbeddingModelSelection::BgeBaseEnV15 => source_content_hash.to_owned(),
-        EmbeddingModelSelection::JinaCode => blake3_hex(
-            format!("{JINA_CODE_EMBED_TEXT_VERSION}:section\0{source_content_hash}").as_bytes(),
-        ),
-        EmbeddingModelSelection::EmbeddingGemma300M => blake3_hex(
-            format!("{EMBEDDING_GEMMA_EMBED_TEXT_VERSION}:section\0{source_content_hash}")
-                .as_bytes(),
-        ),
-    }
+    blake3_hex(
+        format!("{EMBEDDING_GEMMA_EMBED_TEXT_VERSION}:section\0{source_content_hash}").as_bytes(),
+    )
 }
 
 fn section_embedding_input_hash_for_model(
@@ -2184,22 +2134,12 @@ fn section_embedding_input_hash_for_model(
 
 fn symbol_embed_content_hash_for_model(
     source_content_hash: &str,
-    has_significant_body: bool,
-    embedding_model: EmbeddingModelSelection,
+    _has_significant_body: bool,
+    _embedding_model: EmbeddingModelSelection,
 ) -> String {
-    match embedding_model {
-        EmbeddingModelSelection::BgeBaseEnV15 if has_significant_body => {
-            blake3_hex(format!("{SYMBOL_EMBED_TEXT_VERSION}\0{source_content_hash}").as_bytes())
-        }
-        EmbeddingModelSelection::BgeBaseEnV15 => source_content_hash.to_owned(),
-        EmbeddingModelSelection::JinaCode => blake3_hex(
-            format!("{JINA_CODE_EMBED_TEXT_VERSION}:symbol\0{source_content_hash}").as_bytes(),
-        ),
-        EmbeddingModelSelection::EmbeddingGemma300M => blake3_hex(
-            format!("{EMBEDDING_GEMMA_EMBED_TEXT_VERSION}:symbol\0{source_content_hash}")
-                .as_bytes(),
-        ),
-    }
+    blake3_hex(
+        format!("{EMBEDDING_GEMMA_EMBED_TEXT_VERSION}:symbol\0{source_content_hash}").as_bytes(),
+    )
 }
 
 fn symbol_embedding_input_hash_for_model(
@@ -2303,7 +2243,7 @@ fn embed_eligible_rows(
     rows: &[SectionRow],
     options: SectionEmbeddingOptions,
 ) -> Vec<Option<Vec<f32>>> {
-    let mut embedder = SectionEmbedder::new(options, EmbeddingModelSelection::BgeBaseEnV15);
+    let mut embedder = SectionEmbedder::new(options, EmbeddingModelSelection::EmbeddingGemma300M);
     embedder.embed_row_vectors(rows)
 }
 
@@ -2319,24 +2259,6 @@ struct TextEmbeddingService {
     options: SectionEmbeddingOptions,
     embedding_model: EmbeddingModelSelection,
     model_requested: bool,
-}
-
-struct OpenRouterEmbeddingChunkResult {
-    rows: Vec<OpenRouterEmbeddingChunkRow>,
-    embeddings: Vec<Vec<f32>>,
-}
-
-struct OpenRouterEmbeddingChunkRow {
-    row_index: usize,
-    stable_symbol_id: String,
-}
-
-struct ConcurrentEmbeddingConfig {
-    row_count: usize,
-    batch_size: usize,
-    concurrency: usize,
-    chunk_count: usize,
-    embedding_kind: &'static str,
 }
 
 #[derive(Clone)]
@@ -2498,7 +2420,6 @@ impl TextEmbeddingService {
 
     fn needs_model_init(&self) -> bool {
         !self.options.skip_embeddings
-            && !openrouter_api_key_available()
             && !self.model_requested
             && embed_model_cell(self.embedding_model).get().is_none()
     }
@@ -2507,9 +2428,6 @@ impl TextEmbeddingService {
         if self.options.skip_embeddings {
             return false;
         }
-        if openrouter_api_key_available() {
-            return true;
-        }
         self.model(embedding_kind).is_some()
     }
 
@@ -2517,7 +2435,7 @@ impl TextEmbeddingService {
         &mut self,
         row_count: usize,
         inputs: Vec<EmbeddingTextInput<'_>>,
-        mut on_chunk_started: F,
+        on_chunk_started: F,
         embedding_kind: &'static str,
     ) -> Vec<Option<Vec<f32>>>
     where
@@ -2537,36 +2455,6 @@ impl TextEmbeddingService {
         let chunks: Vec<_> = inputs.chunks(batch_size).collect();
         let chunk_count = chunks.len();
 
-        if openrouter_api_key_available() {
-            tracing::info!(
-                embedding_kind,
-                batch_size,
-                concurrency = OPENROUTER_EMBED_CONCURRENCY,
-                model = OpenRouterEmbedder::MODEL,
-                "Using OpenRouter for concurrent bulk embedding"
-            );
-            match self
-                .embed_inputs_with_openrouter_concurrency(
-                    row_count,
-                    &inputs,
-                    batch_size,
-                    chunk_count,
-                    &mut on_chunk_started,
-                    embedding_kind,
-                )
-                .await
-            {
-                Ok(result) => return result,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        embedding_kind,
-                        "OpenRouter embedding failed; Using local fastembed"
-                    );
-                }
-            }
-        }
-
         self.embed_inputs_locally_with_progress(
             result,
             chunks,
@@ -2575,40 +2463,6 @@ impl TextEmbeddingService {
             on_chunk_started,
             embedding_kind,
         )
-    }
-
-    async fn embed_inputs_with_openrouter_concurrency<F>(
-        &self,
-        row_count: usize,
-        inputs: &[EmbeddingTextInput<'_>],
-        batch_size: usize,
-        chunk_count: usize,
-        on_chunk_started: &mut F,
-        embedding_kind: &'static str,
-    ) -> Result<Vec<Option<Vec<f32>>>>
-    where
-        F: FnMut(SectionEmbeddingChunkProgress),
-    {
-        let embedder = Arc::new(OpenRouterEmbedder::new()?);
-        embed_text_inputs_concurrently_with(
-            inputs,
-            ConcurrentEmbeddingConfig {
-                row_count,
-                batch_size,
-                concurrency: OPENROUTER_EMBED_CONCURRENCY,
-                chunk_count,
-                embedding_kind,
-            },
-            on_chunk_started,
-            move |texts| {
-                let embedder = Arc::clone(&embedder);
-                async move {
-                    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                    embedder.embed_batch(&refs).await
-                }
-            },
-        )
-        .await
     }
 
     fn embed_inputs_locally_with_progress<F>(
@@ -2679,97 +2533,6 @@ impl TextEmbeddingService {
     }
 }
 
-async fn embed_text_inputs_concurrently_with<F, Fut>(
-    inputs: &[EmbeddingTextInput<'_>],
-    config: ConcurrentEmbeddingConfig,
-    on_chunk_started: &mut impl FnMut(SectionEmbeddingChunkProgress),
-    embed_batch: F,
-) -> Result<Vec<Option<Vec<f32>>>>
-where
-    F: Fn(Vec<String>) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<Vec<Vec<f32>>>> + Send + 'static,
-{
-    let concurrency = config.concurrency.max(1);
-    let mut result = vec![None; config.row_count];
-    let mut completed_eligible_rows = 0usize;
-    let mut join_set = tokio::task::JoinSet::new();
-
-    for (chunk_offset, chunk) in inputs.chunks(config.batch_size).enumerate() {
-        on_chunk_started(SectionEmbeddingChunkProgress {
-            chunk_index: chunk_offset + 1,
-            chunk_count: config.chunk_count,
-            chunk_rows: chunk.len(),
-            completed_eligible_rows,
-            embedding_eligible_rows: inputs.len(),
-        });
-
-        let rows = chunk
-            .iter()
-            .map(|input| OpenRouterEmbeddingChunkRow {
-                row_index: input.row_index,
-                stable_symbol_id: input.stable_symbol_id.to_owned(),
-            })
-            .collect::<Vec<_>>();
-        let texts = chunk
-            .iter()
-            .map(|input| input.text.to_string())
-            .collect::<Vec<_>>();
-        let embed_batch = embed_batch.clone();
-        join_set.spawn(async move {
-            let embeddings = embed_batch(texts).await?;
-            Ok(OpenRouterEmbeddingChunkResult { rows, embeddings })
-        });
-
-        if join_set.len() >= concurrency {
-            collect_completed_embedding_chunk(&mut join_set, &mut result, config.embedding_kind)
-                .await?;
-        }
-        completed_eligible_rows += chunk.len();
-    }
-
-    while !join_set.is_empty() {
-        collect_completed_embedding_chunk(&mut join_set, &mut result, config.embedding_kind)
-            .await?;
-    }
-
-    Ok(result)
-}
-
-async fn collect_completed_embedding_chunk(
-    join_set: &mut tokio::task::JoinSet<Result<OpenRouterEmbeddingChunkResult>>,
-    result: &mut [Option<Vec<f32>>],
-    embedding_kind: &'static str,
-) -> Result<()> {
-    let completed = join_set
-        .join_next()
-        .await
-        .context("OpenRouter embedding task set ended unexpectedly")?
-        .context("OpenRouter embedding task panicked")??;
-
-    if completed.embeddings.len() != completed.rows.len() {
-        bail!(
-            "OpenRouter returned {} embeddings for {} inputs",
-            completed.embeddings.len(),
-            completed.rows.len()
-        );
-    }
-
-    for (row, embedding) in completed.rows.into_iter().zip(completed.embeddings) {
-        if embedding.len() == EMBEDDING_VECTOR_DIMENSIONS {
-            result[row.row_index] = Some(embedding);
-        } else {
-            tracing::warn!(
-                stable_symbol_id = %row.stable_symbol_id,
-                dimensions = embedding.len(),
-                embedding_kind,
-                "embedder returned unexpected embedding dimensions"
-            );
-        }
-    }
-
-    Ok(())
-}
-
 fn apply_embeddings_to_inputs(
     result: &mut [Option<Vec<f32>>],
     chunk: &[EmbeddingTextInput<'_>],
@@ -2814,7 +2577,7 @@ where
 {
     embed_text_inputs_with(
         rows.len(),
-        section_embedding_inputs(rows, EmbeddingModelSelection::BgeBaseEnV15),
+        section_embedding_inputs(rows, EmbeddingModelSelection::EmbeddingGemma300M),
         options,
         on_chunk_started,
         "section",
@@ -2834,7 +2597,7 @@ where
 {
     embed_text_inputs_with(
         rows.len(),
-        symbol_embedding_inputs(rows, EmbeddingModelSelection::BgeBaseEnV15),
+        symbol_embedding_inputs(rows, EmbeddingModelSelection::EmbeddingGemma300M),
         options,
         on_chunk_started,
         "code symbol",
@@ -2947,13 +2710,9 @@ where
 }
 
 fn embed_model_cell(
-    embedding_model: EmbeddingModelSelection,
+    _embedding_model: EmbeddingModelSelection,
 ) -> &'static OnceLock<Option<Mutex<TextEmbedding>>> {
-    match embedding_model {
-        EmbeddingModelSelection::BgeBaseEnV15 => &BGE_BASE_EMBED_MODEL,
-        EmbeddingModelSelection::JinaCode => &JINA_CODE_EMBED_MODEL,
-        EmbeddingModelSelection::EmbeddingGemma300M => &EMBEDDING_GEMMA_EMBED_MODEL,
-    }
+    &EMBEDDING_GEMMA_EMBED_MODEL
 }
 
 fn shared_embed_model(
@@ -2983,10 +2742,6 @@ fn shared_embed_model(
             }
         })
         .as_ref()
-}
-
-fn openrouter_api_key_available() -> bool {
-    std::env::var("OPENROUTER_API_KEY").is_ok_and(|value| !value.trim().is_empty())
 }
 
 fn is_embedding_eligible(row: &SectionRow) -> bool {
@@ -3626,18 +3381,14 @@ fn fastembed_cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, MutexGuard,
-    };
-    use tokio::sync::Barrier;
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn section_row_fixture(heading_level: u8, body_text: String) -> SectionRow {
         let embedding_input_hash = section_embedding_input_hash_for_model(
             &body_text,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         SectionRow {
             stable_symbol_id: "symbol".to_owned(),
@@ -3651,7 +3402,7 @@ mod tests {
             parent_stable_id: None,
             content_hash: "hash".to_owned(),
             embedding_input_hash,
-            embedding_model: EMBED_MODEL_NAME.to_owned(),
+            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
             vector: None,
         }
     }
@@ -3664,7 +3415,7 @@ mod tests {
         let body_text = format!("## {stable_symbol_id}\n\nBody.");
         let embedding_input_hash = section_embedding_input_hash_for_model(
             &body_text,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         SectionRow {
             stable_symbol_id: stable_symbol_id.to_owned(),
@@ -3678,7 +3429,7 @@ mod tests {
             parent_stable_id: None,
             content_hash: content_hash.to_owned(),
             embedding_input_hash,
-            embedding_model: EMBED_MODEL_NAME.to_owned(),
+            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
             vector: None,
         }
     }
@@ -3687,7 +3438,7 @@ mod tests {
         let embedding_input_hash = symbol_embedding_input_hash_for_model(
             embed_text,
             false,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         SymbolRow {
             stable_symbol_id: stable_symbol_id.to_owned(),
@@ -3699,7 +3450,7 @@ mod tests {
             vector: None,
             content_hash: "hash".to_owned(),
             embedding_input_hash,
-            embedding_model: EMBED_MODEL_NAME.to_owned(),
+            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
         }
     }
 
@@ -3896,7 +3647,7 @@ mod tests {
             root,
             4096,
             None,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let mut rows = Vec::new();
         while let Some(batch) = batcher.next_batch().expect("symbol row batch") {
@@ -3911,7 +3662,7 @@ mod tests {
             root,
             4096,
             None,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let mut rows = Vec::new();
         while let Some(batch) = batcher.next_batch().expect("section row batch") {
@@ -4296,10 +4047,10 @@ mod tests {
     }
 
     #[test]
-    fn embedding_migration_uses_bge_base_contract() {
-        assert_eq!(EMBED_MODEL_NAME, "BGEBaseENV15");
+    fn embedding_migration_uses_gemma_contract() {
+        assert_eq!(EMBEDDING_GEMMA_EMBED_MODEL_NAME, "EmbeddingGemma300M");
         assert_eq!(EMBEDDING_VECTOR_DIMENSIONS, 768);
-        assert_eq!(SYMBOL_EMBED_TEXT_VERSION, "v2-bge-base");
+        assert_eq!(EMBEDDING_GEMMA_EMBED_TEXT_VERSION, "v3-embeddinggemma-300m");
     }
 
     #[test]
@@ -4334,9 +4085,7 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_key_does_not_bypass_local_gemma_model_initialization() {
-        let _guard = env_lock();
-        let _openrouter = EnvGuard::set("OPENROUTER_API_KEY", "test-key");
+    fn text_embedding_service_requires_local_gemma_model_initialization() {
         let service = TextEmbeddingService::new(
             SectionEmbeddingOptions::default(),
             EmbeddingModelSelection::EmbeddingGemma300M,
@@ -4346,116 +4095,62 @@ mod tests {
     }
 
     #[test]
-    fn embedding_model_from_env_accepts_jina_code_alias() {
+    fn embedding_model_from_env_ignores_legacy_jina_code_alias() {
         let _guard = env_lock();
         let _model = EnvGuard::set(EMBED_MODEL_ENV, "jina-code");
 
         assert_eq!(
             EmbeddingModelSelection::from_env(),
-            EmbeddingModelSelection::JinaCode
+            EmbeddingModelSelection::EmbeddingGemma300M
         );
         assert_eq!(
             EmbeddingModelSelection::from_env().model_name(),
-            JINA_CODE_EMBED_MODEL_NAME
+            EMBEDDING_GEMMA_EMBED_MODEL_NAME
         );
-        assert_eq!(EmbeddingModelSelection::JinaCode.dimensions(), 768);
+        assert_eq!(
+            EmbeddingModelSelection::EmbeddingGemma300M.dimensions(),
+            768
+        );
     }
 
     #[test]
-    fn embedding_model_is_part_of_vector_content_hash_for_jina_code() {
+    fn gemma_embedding_text_version_is_part_of_vector_content_hash() {
         let source_hash = "source-content";
 
-        assert_eq!(
+        assert_ne!(
             section_embed_content_hash_for_model(
                 source_hash,
-                EmbeddingModelSelection::BgeBaseEnV15
+                EmbeddingModelSelection::EmbeddingGemma300M
             ),
-            source_hash
-        );
-        assert_ne!(
-            section_embed_content_hash_for_model(source_hash, EmbeddingModelSelection::JinaCode),
             source_hash
         );
         assert_ne!(
             symbol_embed_content_hash_for_model(
                 source_hash,
                 false,
-                EmbeddingModelSelection::BgeBaseEnV15
+                EmbeddingModelSelection::EmbeddingGemma300M
             ),
-            symbol_embed_content_hash_for_model(
-                source_hash,
-                false,
-                EmbeddingModelSelection::JinaCode
-            )
-        );
-        assert_ne!(
-            symbol_embed_content_hash_for_model(
-                source_hash,
-                true,
-                EmbeddingModelSelection::BgeBaseEnV15
-            ),
-            symbol_embed_content_hash_for_model(
-                source_hash,
-                true,
-                EmbeddingModelSelection::JinaCode
-            )
+            source_hash
         );
         assert_ne!(
             section_embedding_input_hash_for_model(
                 "same body",
-                EmbeddingModelSelection::BgeBaseEnV15
+                EmbeddingModelSelection::EmbeddingGemma300M
             ),
-            section_embedding_input_hash_for_model("same body", EmbeddingModelSelection::JinaCode)
+            blake3_hex("same body".as_bytes())
         );
         assert_ne!(
             symbol_embedding_input_hash_for_model(
                 "same embed text",
                 false,
-                EmbeddingModelSelection::BgeBaseEnV15
+                EmbeddingModelSelection::EmbeddingGemma300M
             ),
-            symbol_embedding_input_hash_for_model(
-                "same embed text",
-                false,
-                EmbeddingModelSelection::JinaCode
-            )
+            blake3_hex("same embed text".as_bytes())
         );
     }
 
     #[test]
-    fn embedding_model_is_part_of_vector_content_hash_for_embeddinggemma() {
-        let source_hash = "source-content";
-
-        assert_eq!(EMBEDDING_GEMMA_EMBED_TEXT_VERSION, "v3-embeddinggemma-300m");
-        assert_ne!(
-            section_embed_content_hash_for_model(
-                source_hash,
-                EmbeddingModelSelection::EmbeddingGemma300M
-            ),
-            source_hash
-        );
-        assert_ne!(
-            section_embed_content_hash_for_model(source_hash, EmbeddingModelSelection::JinaCode),
-            section_embed_content_hash_for_model(
-                source_hash,
-                EmbeddingModelSelection::EmbeddingGemma300M
-            )
-        );
-        assert_ne!(
-            symbol_embed_content_hash_for_model(
-                source_hash,
-                true,
-                EmbeddingModelSelection::JinaCode
-            ),
-            symbol_embed_content_hash_for_model(
-                source_hash,
-                true,
-                EmbeddingModelSelection::EmbeddingGemma300M
-            )
-        );
-    }
-
-    #[test]
-    fn embeddinggemma_formats_document_inputs_without_changing_bge_or_jina() {
+    fn embeddinggemma_formats_query_and_document_inputs() {
         let section_rows = vec![section_row_fixture(
             2,
             "## Install\n\nInstall body.".to_owned(),
@@ -4463,16 +4158,12 @@ mod tests {
         let symbol_rows = vec![symbol_row_fixture("symbol-one", "one embed text")];
 
         assert_eq!(
-            section_embedding_inputs(&section_rows, EmbeddingModelSelection::BgeBaseEnV15)[0]
-                .text
-                .as_ref(),
-            "## Install\n\nInstall body."
-        );
-        assert_eq!(
-            symbol_embedding_inputs(&symbol_rows, EmbeddingModelSelection::JinaCode)[0]
-                .text
-                .as_ref(),
-            "one embed text"
+            embedding_query_text_for_model(
+                "find task spawner",
+                EmbeddingModelSelection::EmbeddingGemma300M
+            )
+            .as_ref(),
+            "task: code retrieval | query: find task spawner"
         );
         assert_eq!(
             section_embedding_inputs(&section_rows, EmbeddingModelSelection::EmbeddingGemma300M)[0]
@@ -4663,7 +4354,7 @@ mod tests {
             root,
             2,
             None,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let mut lengths = Vec::new();
 
@@ -4721,7 +4412,7 @@ mod tests {
             root,
             16,
             None,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let rows = batcher
             .next_batch()
@@ -4812,7 +4503,7 @@ mod tests {
             root,
             16,
             None,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let rows = batcher
             .next_batch()
@@ -4893,7 +4584,7 @@ mod tests {
             root,
             16,
             None,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let rows = batcher
             .next_batch()
@@ -5054,7 +4745,7 @@ mod tests {
                 skip_embeddings: false,
                 batch_size: 1,
             },
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
 
         assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
@@ -5069,7 +4760,7 @@ mod tests {
                 skip_embeddings: true,
                 batch_size: 1,
             },
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
 
         assert_eq!(embedder.embed_row_vectors(&rows), vec![None]);
@@ -5145,73 +4836,6 @@ mod tests {
         assert!(vectors.iter().all(Option::is_some));
     }
 
-    #[tokio::test]
-    async fn embed_text_inputs_concurrently_caps_openrouter_requests_at_eight() {
-        let ids = (0..16)
-            .map(|index| format!("symbol-{index}"))
-            .collect::<Vec<_>>();
-        let texts = (0..16).map(|index| index.to_string()).collect::<Vec<_>>();
-        let inputs = ids
-            .iter()
-            .zip(texts.iter())
-            .enumerate()
-            .map(|(row_index, (stable_symbol_id, text))| EmbeddingTextInput {
-                row_index,
-                stable_symbol_id,
-                text: Cow::Borrowed(text),
-            })
-            .collect::<Vec<_>>();
-        let in_flight = Arc::new(AtomicUsize::new(0));
-        let max_in_flight = Arc::new(AtomicUsize::new(0));
-        let barrier = Arc::new(Barrier::new(OPENROUTER_EMBED_CONCURRENCY));
-
-        let vectors = embed_text_inputs_concurrently_with(
-            &inputs,
-            ConcurrentEmbeddingConfig {
-                row_count: inputs.len(),
-                batch_size: 1,
-                concurrency: OPENROUTER_EMBED_CONCURRENCY,
-                chunk_count: inputs.len(),
-                embedding_kind: "section",
-            },
-            &mut |_| {},
-            {
-                let in_flight = Arc::clone(&in_flight);
-                let max_in_flight = Arc::clone(&max_in_flight);
-                let barrier = Arc::clone(&barrier);
-                move |texts| {
-                    let in_flight = Arc::clone(&in_flight);
-                    let max_in_flight = Arc::clone(&max_in_flight);
-                    let barrier = Arc::clone(&barrier);
-                    async move {
-                        let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                        max_in_flight.fetch_max(current, Ordering::SeqCst);
-                        barrier.wait().await;
-                        in_flight.fetch_sub(1, Ordering::SeqCst);
-
-                        let value = texts[0].parse::<f32>().expect("numeric text");
-                        Ok(vec![vec![value; EMBEDDING_VECTOR_DIMENSIONS]])
-                    }
-                }
-            },
-        )
-        .await
-        .expect("concurrent embeddings");
-
-        assert_eq!(
-            max_in_flight.load(Ordering::SeqCst),
-            OPENROUTER_EMBED_CONCURRENCY
-        );
-        assert_eq!(vectors.len(), inputs.len());
-        for (index, vector) in vectors.into_iter().enumerate() {
-            assert_eq!(
-                vector.expect("embedding vector")[0],
-                index as f32,
-                "vector should stay mapped to its input row"
-            );
-        }
-    }
-
     // ---- carry-forward tests (TDD: written before implementation) ----
 
     /// Write section rows with known fake vectors into dir A (v1), then write
@@ -5251,7 +4875,7 @@ mod tests {
             body_text: old_changed_body.to_owned(),
             embedding_input_hash: section_embedding_input_hash_for_model(
                 old_changed_body,
-                EmbeddingModelSelection::BgeBaseEnV15,
+                EmbeddingModelSelection::EmbeddingGemma300M,
             ),
             ..versioned_section_row("changed", "docs/b.md", "hash-old")
         };
@@ -5272,7 +4896,7 @@ mod tests {
                 body_text: new_changed_body.to_owned(),
                 embedding_input_hash: section_embedding_input_hash_for_model(
                     new_changed_body,
-                    EmbeddingModelSelection::BgeBaseEnV15,
+                    EmbeddingModelSelection::EmbeddingGemma300M,
                 ),
                 ..versioned_section_row("changed", "docs/b.md", "hash-new")
             },
@@ -5378,17 +5002,17 @@ mod tests {
         let unchanged_input_hash = symbol_embedding_input_hash_for_model(
             "unchanged embed text",
             false,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let old_changed_input_hash = symbol_embedding_input_hash_for_model(
             "old changed embed text",
             false,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let new_changed_input_hash = symbol_embedding_input_hash_for_model(
             "new changed embed text",
             false,
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
 
         let row_unchanged = SymbolRow {
@@ -5401,7 +5025,7 @@ mod tests {
             vector: Some(fake_vec.clone()),
             content_hash: "hash-old".to_owned(),
             embedding_input_hash: unchanged_input_hash.clone(),
-            embedding_model: EMBED_MODEL_NAME.to_owned(),
+            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
         };
         let row_changed = SymbolRow {
             stable_symbol_id: "sym-changed".to_owned(),
@@ -5413,7 +5037,7 @@ mod tests {
             vector: Some(fake_vec.clone()),
             content_hash: "hash-old".to_owned(),
             embedding_input_hash: old_changed_input_hash,
-            embedding_model: EMBED_MODEL_NAME.to_owned(),
+            embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
         };
         db_a.create_table(
             CODE_SYMBOLS_TABLE,
@@ -5434,7 +5058,7 @@ mod tests {
                 vector: None,
                 content_hash: "hash-new".to_owned(),
                 embedding_input_hash: unchanged_input_hash,
-                embedding_model: EMBED_MODEL_NAME.to_owned(),
+                embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
             },
             SymbolRow {
                 stable_symbol_id: "sym-changed".to_owned(),
@@ -5446,7 +5070,7 @@ mod tests {
                 vector: None,
                 content_hash: "hash-new".to_owned(),
                 embedding_input_hash: new_changed_input_hash,
-                embedding_model: EMBED_MODEL_NAME.to_owned(),
+                embedding_model: EMBEDDING_GEMMA_EMBED_MODEL_NAME.to_owned(),
             },
         ];
         let carried = carry_forward_symbol_vectors(rows_v2, dir_a.path()).await;
@@ -5493,15 +5117,15 @@ mod tests {
         .expect("connect a");
         let unchanged_input_hash = section_embedding_input_hash_for_model(
             "## Stable\n\nUnchanged body.",
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let old_changed_input_hash = section_embedding_input_hash_for_model(
             "## Changed\n\nOld body.",
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let new_changed_input_hash = section_embedding_input_hash_for_model(
             "## Changed\n\nNew body.",
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
         );
 
         let row_unchanged = SectionRow {
@@ -6062,7 +5686,7 @@ mod tests {
                 &["src/changed.rs"],
                 &["src/deleted.rs"],
             ),
-            EmbeddingModelSelection::BgeBaseEnV15,
+            EmbeddingModelSelection::EmbeddingGemma300M,
             Some(&progress),
         )
         .await
@@ -6112,17 +5736,19 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_delta_sidecar_rebuilds_when_previous_embedding_model_differs() {
+        const LEGACY_EMBED_MODEL_NAME: &str = "LegacyEmbeddingModel";
+
         let root = tempfile::tempdir().expect("root");
         let prev_dir = tempfile::tempdir().expect("prev sidecar");
         let next_dir = tempfile::tempdir().expect("next sidecar");
         let unchanged_markdown = "## Stable Section\n\nUnchanged markdown body.\n";
         let changed_markdown_old = "## Changed Section\n\nOld markdown body.\n";
         let unchanged_source = concat!(
-            "/// Unchanged function documentation long enough to be embedded and retained in the old BGE sidecar.\n",
+            "/// Unchanged function documentation long enough to be embedded and retained in the old sidecar.\n",
             "pub fn stable_symbol() {}\n",
         );
         let changed_source_old = concat!(
-            "/// Old changed function documentation long enough to be embedded in the old BGE sidecar.\n",
+            "/// Old changed function documentation long enough to be embedded in the old sidecar.\n",
             "pub fn changed_symbol() {}\n",
         );
         write_source(root.path(), "docs/unchanged.md", unchanged_markdown);
@@ -6176,19 +5802,19 @@ mod tests {
         let mut prev_section_rows = section_rows_from_artifact(&prev_artifact, root.path());
         for (index, row) in prev_section_rows.iter_mut().enumerate() {
             row.vector = Some(fake_vector(index as f32));
-            assert_eq!(row.embedding_model, EMBED_MODEL_NAME);
+            row.embedding_model = LEGACY_EMBED_MODEL_NAME.to_owned();
         }
         let mut prev_symbol_rows = symbol_rows_from_artifact(&prev_artifact, root.path());
         for (index, row) in prev_symbol_rows.iter_mut().enumerate() {
             row.vector = Some(fake_vector(index as f32));
-            assert_eq!(row.embedding_model, EMBED_MODEL_NAME);
+            row.embedding_model = LEGACY_EMBED_MODEL_NAME.to_owned();
         }
         write_previous_section_sidecar_rows(prev_dir.path(), prev_section_rows).await;
         write_previous_symbol_sidecar_rows(prev_dir.path(), prev_symbol_rows).await;
 
         let changed_markdown_new = "## Changed Section\n\nNew markdown body.\n";
         let changed_source_new = concat!(
-            "/// New changed function documentation long enough to be embedded with the Jina sidecar model.\n",
+            "/// New changed function documentation long enough to be embedded with the Gemma sidecar model.\n",
             "pub fn changed_symbol() {}\n",
         );
         write_source(root.path(), "docs/changed.md", changed_markdown_new);
@@ -6246,11 +5872,11 @@ mod tests {
                 &["docs/changed.md", "src/changed.rs"],
                 &[],
             ),
-            EmbeddingModelSelection::JinaCode,
+            EmbeddingModelSelection::EmbeddingGemma300M,
             None,
         )
         .await
-        .expect("write Jina delta from BGE sidecar seed");
+        .expect("write Gemma delta from incompatible sidecar seed");
 
         assert_eq!(row_counts.section_bodies, 2);
         assert_eq!(row_counts.code_symbols, 2);
@@ -6259,16 +5885,16 @@ mod tests {
         assert!(
             section_rows
                 .iter()
-                .all(|row| row.embedding_model == JINA_CODE_EMBED_MODEL_NAME),
-            "section sidecar should fall back to a full Jina rewrite instead of retaining BGE rows: {section_rows:?}"
+                .all(|row| row.embedding_model == EMBEDDING_GEMMA_EMBED_MODEL_NAME),
+            "section sidecar should fall back to a full Gemma rewrite instead of retaining legacy rows: {section_rows:?}"
         );
         let symbol_rows = read_stored_symbol_rows(next_dir.path()).await;
         assert_eq!(symbol_rows.len(), 2);
         assert!(
             symbol_rows
                 .iter()
-                .all(|row| row.embedding_model == JINA_CODE_EMBED_MODEL_NAME),
-            "code symbol sidecar should fall back to a full Jina rewrite instead of retaining BGE rows: {symbol_rows:?}"
+                .all(|row| row.embedding_model == EMBEDDING_GEMMA_EMBED_MODEL_NAME),
+            "code symbol sidecar should fall back to a full Gemma rewrite instead of retaining legacy rows: {symbol_rows:?}"
         );
     }
 
@@ -6335,7 +5961,7 @@ mod tests {
         let row_without = section_row_fixture(2, "## Empty\n\nBody.".to_owned());
 
         let rows = [row_with_vector, row_without];
-        let inputs = section_embedding_inputs(&rows, EmbeddingModelSelection::BgeBaseEnV15);
+        let inputs = section_embedding_inputs(&rows, EmbeddingModelSelection::EmbeddingGemma300M);
         assert_eq!(
             inputs.len(),
             1,
@@ -6352,7 +5978,7 @@ mod tests {
         let row_without = symbol_row_fixture("sym-b", "other embed text");
 
         let rows = [row_with_vector, row_without];
-        let inputs = symbol_embedding_inputs(&rows, EmbeddingModelSelection::BgeBaseEnV15);
+        let inputs = symbol_embedding_inputs(&rows, EmbeddingModelSelection::EmbeddingGemma300M);
         assert_eq!(
             inputs.len(),
             1,

@@ -1180,7 +1180,7 @@ fn external_knowledge_context_def() -> ToolDefinition {
                     "items": { "type": "number" },
                     "minItems": KNOWLEDGE_QUERY_VECTOR_DIMENSIONS,
                     "maxItems": KNOWLEDGE_QUERY_VECTOR_DIMENSIONS,
-                    "description": "Optional precomputed query embedding. When omitted, retrieval gracefully degrades to BM25-only."
+                    "description": "Optional precomputed EmbeddingGemma300M query embedding produced with the `task: code retrieval | query:` prompt. When omitted, retrieval gracefully degrades to BM25-only."
                 }
             },
             "additionalProperties": false
