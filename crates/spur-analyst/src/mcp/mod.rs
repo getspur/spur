@@ -215,6 +215,11 @@ fn query_def() -> ToolDefinition {
                     "type": "string",
                     "minLength": 1,
                     "description": "DuckDB SQL to execute read-only."
+                },
+                "allow_stale": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, execute even if the analyst DB graph hash differs from the live graph pointer and include a staleness_warning in the response."
                 }
             }
         }),
