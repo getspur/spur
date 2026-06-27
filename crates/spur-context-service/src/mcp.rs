@@ -978,13 +978,13 @@ fn index_status_response(record: &JobRecord) -> Value {
     if let Some(row_counts) = record.row_counts.as_ref() {
         response["row_counts"] = row_counts.clone();
     }
-    if record.status == JobStatus::Failed {
-        if record.error_code.is_some() || record.error_detail.is_some() {
-            response["error"] = job_error_response(
-                record.error_code.as_deref().unwrap_or("execution"),
-                record.error_detail.as_deref().unwrap_or("failed"),
-            );
-        }
+    if record.status == JobStatus::Failed
+        && (record.error_code.is_some() || record.error_detail.is_some())
+    {
+        response["error"] = job_error_response(
+            record.error_code.as_deref().unwrap_or("execution"),
+            record.error_detail.as_deref().unwrap_or("failed"),
+        );
     }
 
     response
