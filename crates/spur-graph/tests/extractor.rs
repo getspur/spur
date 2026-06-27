@@ -2107,6 +2107,75 @@ fn incremental_rebinds_call_edge_when_caller_file_changed() {
     assert_eq!(after_target, before_target);
 }
 
+#[test]
+fn incremental_rename_drops_dangling_stamped_edge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(root.join("src/x.rs"), "pub fn foo() {}\n").expect("write x.rs");
+    fs::write(root.join("src/y.rs"), "pub fn calls() { foo(); }\n").expect("write y.rs");
+
+    let baseline = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+        .expect("full baseline");
+    let caller = baseline
+        .symbols
+        .iter()
+        .find(|symbol| symbol.file_path == "src/y.rs" && symbol.entity_name == "calls")
+        .expect("baseline caller symbol");
+    let foo = baseline
+        .symbols
+        .iter()
+        .find(|symbol| symbol.file_path == "src/x.rs" && symbol.entity_name == "foo")
+        .expect("baseline foo symbol");
+    let baseline_edge = baseline
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.source_stable_symbol_id == caller.stable_symbol_id
+                && edge.target_label.as_deref() == Some("foo")
+        })
+        .expect("baseline foo call edge");
+    assert_eq!(
+        baseline_edge.target_stable_symbol_id.as_deref(),
+        Some(foo.stable_symbol_id.as_str())
+    );
+    assert_eq!(baseline_edge.bind_method.as_deref(), Some("singleton"));
+
+    sleep(Duration::from_millis(5));
+    fs::write(root.join("src/x.rs"), "pub fn bar() {}\n").expect("rename foo to bar");
+
+    let (incremental, mode, _stats) =
+        artifact_from_facts_incremental(&baseline, root).expect("incremental");
+    assert_eq!(mode, BuildMode::Incremental);
+    assert!(
+        !incremental
+            .symbols
+            .iter()
+            .any(|symbol| symbol.stable_symbol_id == foo.stable_symbol_id),
+        "renamed foo symbol id should not exist in the incremental artifact"
+    );
+
+    let caller = incremental
+        .symbols
+        .iter()
+        .find(|symbol| symbol.file_path == "src/y.rs" && symbol.entity_name == "calls")
+        .expect("incremental caller symbol");
+    let edge = incremental
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == RelationKind::Calls
+                && edge.source_stable_symbol_id == caller.stable_symbol_id
+                && edge.target_label.as_deref() == Some("foo")
+        })
+        .expect("incremental foo call edge");
+    assert_eq!(
+        edge.target_stable_symbol_id, None,
+        "dangling stamped target should drop to unresolved"
+    );
+}
+
 // FIXME(bd-plan-171a4139): see incremental_matches_full_under_edit_sequence above.
 #[test]
 #[ignore]
