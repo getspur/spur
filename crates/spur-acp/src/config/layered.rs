@@ -339,6 +339,30 @@ mod tests {
     }
 
     #[test]
+    fn load_layered_merges_skills_bundled_dir() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        let user = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            user.path(),
+            "[skills]\nbundled_dir = '/user/assets/skills'\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join(".spur/config.toml"),
+            "[skills]\nbundled_dir = '/repo/assets/skills'\n",
+        )
+        .unwrap();
+
+        let cfg = load_layered_from_paths(repo.path(), Some(user.path())).unwrap();
+
+        assert_eq!(
+            cfg.skills.bundled_dir.as_deref(),
+            Some(std::path::Path::new("/repo/assets/skills"))
+        );
+    }
+
+    #[test]
     fn all_missing_is_default() {
         let repo = tempfile::tempdir().unwrap();
 

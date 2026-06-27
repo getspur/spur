@@ -112,6 +112,9 @@ pub enum InstallError {
 
     #[error("invalid skill id `{id}`: {reason}")]
     InvalidSkillId { id: String, reason: String },
+
+    #[error("skill catalog error: {0}")]
+    SkillCatalog(#[from] crate::skills::SkillCatalogError),
 }
 
 impl From<crate::skills::InvalidSkillId> for InstallError {
