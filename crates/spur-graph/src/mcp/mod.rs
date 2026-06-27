@@ -1621,6 +1621,15 @@ pub async fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerError> {
     code_graph_backend_value(args, code_symbol_info_with_client).await
 }
 
+pub async fn code_symbol_info_rebuild_aware(args: &Value) -> Result<Value, McpHandlerError> {
+    with_loaded_graph_artifact(Some(shared_rebuild_coordinator()), |loaded| {
+        let client = InMemoryClient::new(Arc::clone(&loaded.artifact));
+        code_symbol_info_with_client(args, &client)
+    })
+    .await
+    .map_err(CodeGraphError::into_handler_error)
+}
+
 async fn code_symbol_info_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
