@@ -1367,11 +1367,8 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str, data_path: &st
                     "[translate] using explicit AWS credentials (provider={})",
                     c.provider
                 );
-                let token_clause = if c.session_token.is_some() {
-                    format!(
-                        ", SESSION_TOKEN '{}'",
-                        c.session_token.as_ref().unwrap().replace('\'', "''")
-                    )
+                let token_clause = if let Some(session_token) = &c.session_token {
+                    format!(", SESSION_TOKEN '{}'", session_token.replace('\'', "''"))
                 } else {
                     String::new()
                 };

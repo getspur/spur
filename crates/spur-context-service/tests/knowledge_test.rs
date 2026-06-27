@@ -40,6 +40,50 @@ fn bm25_only_search_returns_ranked_code_and_docs() -> Result<()> {
 }
 
 #[test]
+fn bm25_tokenizes_camel_case_identifiers_and_preserves_exact_match_score() -> Result<()> {
+    let fixture = KnowledgeFixture::new()?;
+    insert_node(
+        &fixture.conn,
+        "sym-handle-submit-plan",
+        "src/plan.rs",
+        "handleSubmitPlan",
+        "demo::handleSubmitPlan",
+    )?;
+
+    let split_query = query_knowledge_context(
+        &fixture.conn,
+        &knowledge_options("handle submit plan", KnowledgeScope::Code, None, 8),
+    )?;
+    let split_hit = split_query
+        .primary_evidence
+        .iter()
+        .find(|evidence| {
+            evidence.stable_symbol_id.as_deref() == Some("pkg:demo@1.0.0::demo::handleSubmitPlan")
+        })
+        .context("expected split-token query to find camelCase identifier")?;
+
+    let exact_query = query_knowledge_context(
+        &fixture.conn,
+        &knowledge_options("handleSubmitPlan", KnowledgeScope::Code, None, 8),
+    )?;
+    let exact_hit = exact_query
+        .primary_evidence
+        .iter()
+        .find(|evidence| {
+            evidence.stable_symbol_id.as_deref() == Some("pkg:demo@1.0.0::demo::handleSubmitPlan")
+        })
+        .context("expected exact query to find camelCase identifier")?;
+
+    assert!(
+        exact_hit.score >= split_hit.score,
+        "exact identifier score {} should be at least split-token score {}",
+        exact_hit.score,
+        split_hit.score
+    );
+    Ok(())
+}
+
+#[test]
 fn vector_only_search_surfaces_semantic_code_without_bm25_hits() -> Result<()> {
     let fixture = KnowledgeFixture::new()?;
 
