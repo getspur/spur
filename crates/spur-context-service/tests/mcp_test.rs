@@ -28,6 +28,8 @@ const REVISION: &str = "1.0.0";
 const SOURCE_URL: &str = "https://1.1.1.1/example/demo";
 const GIT_SOURCE: &str = "git:github.com/example/demo";
 const DIMENSIONS: usize = 768;
+const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
+const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
 
 #[test]
 fn tool_definitions_match_external_context_surface() {
@@ -1308,7 +1310,7 @@ fn insert_embedding(
         INSERT INTO symbol_embeddings VALUES
             ('{id}', 'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0,
              'src/lib.rs', '{entity_name}', '{qualified_name}', 'function',
-             {}, 'JinaEmbeddingsV2BaseCode', 'hash-{id}', 'v2-jina-code')
+             {}, '{EMBEDDING_MODEL}', 'hash-{id}', '{EMBED_TEXT_VERSION}')
         ",
         vector_sql(&vector)
     );

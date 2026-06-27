@@ -30,10 +30,6 @@ const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
 #[cfg(feature = "embed")]
 const EMBED_INFERENCE_TIMEOUT: Duration = Duration::from_millis(1500);
 #[cfg(feature = "embed")]
-static BGE_BASE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
-#[cfg(feature = "embed")]
-static JINA_CODE_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> = EmbedModelCell::new();
-#[cfg(feature = "embed")]
 static EMBEDDING_GEMMA_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> =
     EmbedModelCell::new();
 
@@ -426,13 +422,9 @@ impl<M> Drop for EmbedLoadPermit<'_, M> {
 
 #[cfg(feature = "embed")]
 fn embed_model_cell(
-    embedding_model: EmbeddingModelSelection,
+    _embedding_model: EmbeddingModelSelection,
 ) -> &'static EmbedModelCell<fastembed::TextEmbedding> {
-    match embedding_model {
-        EmbeddingModelSelection::BgeBaseEnV15 => &BGE_BASE_EMBED_MODEL,
-        EmbeddingModelSelection::JinaCode => &JINA_CODE_EMBED_MODEL,
-        EmbeddingModelSelection::EmbeddingGemma300M => &EMBEDDING_GEMMA_EMBED_MODEL,
-    }
+    &EMBEDDING_GEMMA_EMBED_MODEL
 }
 
 #[cfg(feature = "embed")]
@@ -1878,15 +1870,7 @@ mod tests {
 
     #[cfg(feature = "embed")]
     #[test]
-    fn embed_model_cell_selection_keeps_bge_and_jina_code_separate() {
-        assert!(std::ptr::eq(
-            embed_model_cell(EmbeddingModelSelection::BgeBaseEnV15),
-            &BGE_BASE_EMBED_MODEL
-        ));
-        assert!(std::ptr::eq(
-            embed_model_cell(EmbeddingModelSelection::JinaCode),
-            &JINA_CODE_EMBED_MODEL
-        ));
+    fn embed_model_cell_selection_uses_single_gemma_cell() {
         assert!(std::ptr::eq(
             embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M),
             &EMBEDDING_GEMMA_EMBED_MODEL

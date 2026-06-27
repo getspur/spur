@@ -1,6 +1,5 @@
 pub mod content_hash;
 pub mod discovery;
-pub mod embedding;
 pub mod extract;
 pub mod git;
 pub mod git_walk;
