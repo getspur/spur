@@ -4334,6 +4334,18 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_key_does_not_bypass_local_gemma_model_initialization() {
+        let _guard = env_lock();
+        let _openrouter = EnvGuard::set("OPENROUTER_API_KEY", "test-key");
+        let service = TextEmbeddingService::new(
+            SectionEmbeddingOptions::default(),
+            EmbeddingModelSelection::EmbeddingGemma300M,
+        );
+
+        assert!(service.needs_model_init());
+    }
+
+    #[test]
     fn embedding_model_from_env_accepts_jina_code_alias() {
         let _guard = env_lock();
         let _model = EnvGuard::set(EMBED_MODEL_ENV, "jina-code");
