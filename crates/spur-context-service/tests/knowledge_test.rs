@@ -182,6 +182,107 @@ fn hybrid_search_deduplicates_bm25_and_vector_symbol_hits() -> Result<()> {
 }
 
 #[test]
+fn scope_all_vector_search_surfaces_semantic_doc_without_bm25_hits() -> Result<()> {
+    let fixture = KnowledgeFixture::new()?;
+    insert_doc_vector(&fixture.conn, "doc-semantic", unit_vector(3))?;
+
+    let result = query_knowledge_context(
+        &fixture.conn,
+        &knowledge_options(
+            "chronomancy loom aether",
+            KnowledgeScope::All,
+            Some(unit_vector(3)),
+            4,
+        ),
+    )?;
+
+    let top_doc = result
+        .supporting_docs
+        .first()
+        .context("expected semantic doc evidence")?;
+    assert_eq!(top_doc.stable_symbol_id.as_deref(), Some("doc-semantic"));
+    assert_eq!(top_doc.grounding, "hybrid-doc");
+    assert!(top_doc.score > 0.99, "expected near-identical vector score");
+    Ok(())
+}
+
+#[test]
+fn scope_docs_vector_search_returns_vector_ranked_doc_results() -> Result<()> {
+    let fixture = KnowledgeFixture::new()?;
+    insert_doc_vector(&fixture.conn, "doc-semantic", unit_vector(3))?;
+
+    let result = query_knowledge_context(
+        &fixture.conn,
+        &knowledge_options(
+            "chronomancy loom aether",
+            KnowledgeScope::Docs,
+            Some(unit_vector(3)),
+            4,
+        ),
+    )?;
+
+    assert!(result.primary_evidence.is_empty());
+    let top_doc = result
+        .supporting_docs
+        .first()
+        .context("expected docs-scope vector evidence")?;
+    assert_eq!(top_doc.stable_symbol_id.as_deref(), Some("doc-semantic"));
+    assert_eq!(top_doc.grounding, "hybrid-doc");
+    Ok(())
+}
+
+#[test]
+fn hybrid_search_deduplicates_bm25_and_vector_doc_hits() -> Result<()> {
+    let fixture = KnowledgeFixture::new()?;
+    insert_doc_vector(&fixture.conn, "doc-parse", unit_vector(4))?;
+
+    let result = query_knowledge_context(
+        &fixture.conn,
+        &knowledge_options(
+            "parse config",
+            KnowledgeScope::Docs,
+            Some(unit_vector(4)),
+            8,
+        ),
+    )?;
+
+    let parse_hits = result
+        .supporting_docs
+        .iter()
+        .filter(|evidence| evidence.stable_symbol_id.as_deref() == Some("doc-parse"))
+        .collect::<Vec<_>>();
+    assert_eq!(parse_hits.len(), 1);
+    assert_eq!(parse_hits[0].grounding, "hybrid-doc");
+    Ok(())
+}
+
+#[test]
+fn hybrid_merge_does_not_collapse_doc_and_code_stable_id_collision() -> Result<()> {
+    let fixture = KnowledgeFixture::new()?;
+    insert_doc(
+        &fixture.conn,
+        "sym-parse",
+        "docs/collision.md",
+        "Collision Guide",
+        "parse config collision documentation",
+    )?;
+
+    let result = query_knowledge_context(
+        &fixture.conn,
+        &knowledge_options("parse config", KnowledgeScope::All, Some(unit_vector(1)), 8),
+    )?;
+
+    assert!(result.primary_evidence.iter().any(|evidence| {
+        evidence.stable_symbol_id.as_deref() == Some("pkg:demo@1.0.0::demo::parse_config_loader")
+    }));
+    assert!(result
+        .supporting_docs
+        .iter()
+        .any(|evidence| evidence.stable_symbol_id.as_deref() == Some("sym-parse")));
+    Ok(())
+}
+
+#[test]
 fn scope_filters_code_docs_and_all_results() -> Result<()> {
     let fixture = KnowledgeFixture::new()?;
 
@@ -302,7 +403,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             title VARCHAR,
             body_text VARCHAR,
             body_hash VARCHAR,
-            token_count INTEGER
+            token_count INTEGER,
+            vector FLOAT[],
+            embedding_model VARCHAR,
+            embedding_input_hash VARCHAR,
+            embed_text_version VARCHAR
         );
 
         CREATE TABLE symbol_embeddings (
@@ -380,6 +485,13 @@ fn seed_fixture(conn: &Connection) -> Result<()> {
         "docs/other.md",
         "Other Guide",
         "unrelated packaging notes",
+    )?;
+    insert_doc(
+        conn,
+        "doc-semantic",
+        "docs/semantic.md",
+        "Nebula Manual",
+        "gossamer lattice notes",
     )?;
 
     insert_embedding(
@@ -459,7 +571,7 @@ fn insert_doc(
         r"
         INSERT INTO section_bodies VALUES
             ($1, 'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0,
-             $2, $3, $4, $5, 10)
+             $2, $3, $4, $5, 10, NULL, NULL, NULL, NULL)
         ",
         params![
             section_id,
@@ -470,6 +582,23 @@ fn insert_doc(
         ],
     )
     .with_context(|| format!("insert doc {section_id}"))?;
+    Ok(())
+}
+
+fn insert_doc_vector(conn: &Connection, section_id: &str, vector: Vec<f32>) -> Result<()> {
+    let sql = format!(
+        r"
+        UPDATE section_bodies
+        SET vector = {},
+            embedding_model = '{EMBEDDING_MODEL}',
+            embedding_input_hash = 'hash-{section_id}',
+            embed_text_version = '{EMBED_TEXT_VERSION}'
+        WHERE section_id = '{section_id}'
+        ",
+        vector_sql(&vector)
+    );
+    conn.execute_batch(&sql)
+        .with_context(|| format!("insert doc vector {section_id}"))?;
     Ok(())
 }
 
