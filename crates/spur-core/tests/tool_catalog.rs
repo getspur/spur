@@ -6,6 +6,7 @@
 use spur_core::mcp::tools_list;
 use spur_core::mcp::worker_tools_list;
 use spur_mcp::ToolDefinition;
+use std::path::Path;
 
 const EXPECTED: &[&str] = &[
     "delegate_to_worker",
@@ -40,6 +41,7 @@ const EXPECTED: &[&str] = &[
     "doc_navigate",
     "knowledge_context_pack",
     "knowledge_context_pack_2",
+    "query",
     "submit_plan",
     "execute_epic",
     "get_plan_status",
@@ -75,6 +77,18 @@ fn tool_catalog_matches_expected() {
     assert_eq!(
         actual, expected,
         "tool_catalog drift detected; update EXPECTED in tests/tool_catalog.rs if intentional",
+    );
+}
+
+#[test]
+fn worker_knowledge_context_enables_spur_analyst_embeddings() {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let manifest =
+        std::fs::read_to_string(&manifest_path).expect("spur-core Cargo.toml must be readable");
+
+    assert!(
+        manifest.contains(r#"spur-analyst = { workspace = true, features = ["embed"] }"#),
+        "spur-core must enable spur-analyst/embed so knowledge_context_pack_2 can create query vectors"
     );
 }
 

@@ -30,7 +30,7 @@ rmcp = { workspace = true }
 schemars = { workspace = true }
 sha2 = { workspace = true }
 spur-acp = { workspace = true }
-spur-analyst = { workspace = true, default-features = false }
+spur-analyst = { workspace = true, features = ["embed"] }
 spur-blob-store = { workspace = true }
 spur-graph = { workspace = true }
 spur-mcp = { workspace = true }
