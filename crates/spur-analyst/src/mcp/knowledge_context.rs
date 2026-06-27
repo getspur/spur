@@ -1828,6 +1828,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn analyst_db_path_falls_back_to_parent_repo_db_for_spur_worker_worktree() {
+        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+        let repo_spur = repo_dir.path().join(".spur");
+        let worker_dir = repo_spur.join("worktrees").join("worker-1");
+        fs::create_dir_all(&worker_dir).expect("create worker dir");
+        fs::write(repo_spur.join("analyst.duckdb"), b"db").expect("write repo analyst db");
+
+        let selected = spur_graph::mcp::with_worktree_root_for_request(worker_dir, async {
+            analyst_db_path()
+        })
+        .await
+        .expect("analyst db path");
+
+        assert_eq!(selected, repo_spur.join("analyst.duckdb"));
+    }
+
     #[cfg(feature = "embed")]
     fn test_embedding(first_value: f32) -> [f32; EMBEDDING_VECTOR_DIMENSIONS] {
         let mut embedding = [0.0; EMBEDDING_VECTOR_DIMENSIONS];
