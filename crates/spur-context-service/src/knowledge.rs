@@ -4,11 +4,11 @@ use anyhow::{anyhow, Context as _, Result};
 use duckdb::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 const EMBEDDING_VECTOR_DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
+const EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
 const MAX_KNOWLEDGE_LIMIT: usize = 20;
 const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
@@ -119,10 +119,8 @@ pub fn query_knowledge_context(
         .context("failed to query BM25 knowledge candidates")?;
     let query_vec_sql = format_query_vec_sql(opts.query_vec.as_deref());
     let vector_candidates = match query_vec_sql {
-        Some(query_vec_sql) if !matches!(opts.scope, KnowledgeScope::Docs) => {
-            query_vector_candidates(db, opts, &query_vec_sql, pool_limit)
-                .context("failed to query vector knowledge candidates")?
-        }
+        Some(query_vec_sql) => query_vector_candidates(db, opts, &query_vec_sql, pool_limit)
+            .context("failed to query vector knowledge candidates")?,
         _ => Vec::new(),
     };
 
@@ -190,16 +188,41 @@ fn query_bm25_candidates(
                   AND $5 IN ('all', 'code')
                   AND COALESCE(symbol_kind, '') NOT IN ('section', 'mcp_tool')
             ),
+            query_runs AS (
+                SELECT run
+                FROM UNNEST(regexp_extract_all($1, '[[:alnum:]_]+')) AS runs(run)
+            ),
             query_terms AS (
                 SELECT DISTINCT term
-                FROM UNNEST(regexp_extract_all(lower($1), '[[:alnum:]]+')) AS terms(term)
+                FROM (
+                    SELECT lower(run) AS term
+                    FROM query_runs
+                    UNION ALL
+                    SELECT lower(split) AS term
+                    FROM query_runs,
+                         UNNEST(regexp_extract_all(run, '([a-z0-9]+|[A-Z][a-z0-9]*)')) AS splits(split)
+                ) emitted_query_terms
                 WHERE term <> ''
             ),
-            tokens AS (
-                SELECT c.candidate_key, token
+            token_runs AS (
+                SELECT row_number() OVER () AS run_id, c.candidate_key, run
                 FROM corpus c,
-                     UNNEST(regexp_extract_all(lower(c.search_text), '[[:alnum:]]+')) AS toks(token)
-                WHERE token <> ''
+                     UNNEST(regexp_extract_all(c.search_text, '[[:alnum:]_]+')) AS runs(run)
+            ),
+            tokens AS (
+                SELECT candidate_key, token
+                FROM (
+                    SELECT DISTINCT candidate_key, run_id, token
+                    FROM (
+                        SELECT candidate_key, run_id, lower(run) AS token
+                        FROM token_runs
+                        UNION ALL
+                        SELECT candidate_key, run_id, lower(split) AS token
+                        FROM token_runs,
+                             UNNEST(regexp_extract_all(run, '([a-z0-9]+|[A-Z][a-z0-9]*)')) AS splits(split)
+                    ) emitted_tokens
+                    WHERE token <> ''
+                ) deduped_tokens
             ),
             lengths AS (
                 SELECT candidate_key, COUNT(*)::DOUBLE AS doc_len
@@ -295,33 +318,74 @@ fn query_vector_candidates(
     query_vec_sql: &str,
     limit: usize,
 ) -> Result<Vec<KnowledgeCandidate>> {
-    let sql = format!(
-        r"
-        WITH distances AS (
+    let mut branches = Vec::new();
+    if matches!(opts.scope, KnowledgeScope::All | KnowledgeScope::Code) {
+        branches.push(format!(
+            r"
             SELECT
+                'code' AS kind,
                 entity_name AS title,
                 file_path,
                 stable_symbol_id,
                 qualified_name,
                 symbol_kind,
-                list_cosine_distance(embedding, {query_vec_sql}) AS distance
+                list_cosine_distance(embedding, {query_vec_sql}) AS distance,
+                'primary' AS neighbor_kind,
+                'hybrid-code' AS grounding
             FROM symbol_embeddings
             WHERE source = $1
               AND package = $2
               AND revision = $3
               AND embedding_model = $4
               AND embed_text_version = $5
+            "
+        ));
+    }
+    if matches!(opts.scope, KnowledgeScope::All | KnowledgeScope::Docs)
+        && section_vector_columns_available(db)
+    {
+        branches.push(format!(
+            r"
+            SELECT
+                'doc' AS kind,
+                COALESCE(title, section_id) AS title,
+                file_path,
+                section_id AS stable_symbol_id,
+                CAST(NULL AS VARCHAR) AS qualified_name,
+                CAST('section' AS VARCHAR) AS symbol_kind,
+                list_cosine_distance(vector, {query_vec_sql}) AS distance,
+                CAST(NULL AS VARCHAR) AS neighbor_kind,
+                'hybrid-doc' AS grounding
+            FROM section_bodies
+            WHERE source = $1
+              AND package = $2
+              AND revision = $3
+              AND embedding_model = $4
+              AND embed_text_version = $5
+              AND vector IS NOT NULL
+            "
+        ));
+    }
+    if branches.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let distance_sources = branches.join("\nUNION ALL\n");
+    let sql = format!(
+        r"
+        WITH distances AS (
+            {distance_sources}
         )
         SELECT
-            'code' AS kind,
+            kind,
             title,
             file_path,
             stable_symbol_id,
             qualified_name,
             symbol_kind,
             round(GREATEST(0.0, 1.0 - distance), 6) AS score,
-            'primary' AS neighbor_kind,
-            'hybrid-code' AS grounding
+            neighbor_kind,
+            grounding
         FROM distances
         WHERE distance IS NOT NULL
         ORDER BY distance ASC NULLS LAST, file_path, title, stable_symbol_id
@@ -409,6 +473,8 @@ fn merge_candidates(
             candidate.score = (entry.fused_score / (2.0 / 61.0)).min(1.0);
             if entry.has_vector && is_code(&candidate) {
                 candidate.grounding = "hybrid-code".to_owned();
+            } else if entry.has_vector && is_doc(&candidate) {
+                candidate.grounding = "hybrid-doc".to_owned();
             }
             (candidate, entry.best_rank, entry.best_priority)
         })
@@ -486,12 +552,16 @@ fn sort_candidates(candidates: &mut [KnowledgeCandidate]) {
 }
 
 fn candidate_id(candidate: &KnowledgeCandidate) -> String {
-    candidate.stable_symbol_id.clone().unwrap_or_else(|| {
-        format!(
-            "{}:{}:{}",
-            candidate.kind, candidate.file_path, candidate.title
-        )
-    })
+    candidate
+        .stable_symbol_id
+        .as_ref()
+        .map(|stable_symbol_id| format!("{}:{stable_symbol_id}", candidate.kind))
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}:{}",
+                candidate.kind, candidate.file_path, candidate.title
+            )
+        })
 }
 
 fn split_evidence(
@@ -576,7 +646,7 @@ fn build_why_relevant(candidate: &KnowledgeCandidate) -> String {
 fn grounding_score_prefix(grounding: &str) -> &str {
     match grounding {
         "bm25-code" | "bm25-doc" => "BM25",
-        "hybrid-code" => "hybrid",
+        "hybrid-code" | "hybrid-doc" => "hybrid",
         _ if grounding.starts_with("bm25-") => "BM25",
         _ => grounding,
     }
@@ -597,11 +667,34 @@ fn confidence_for_result(candidates: &[KnowledgeCandidate], evidence_count: usiz
 }
 
 fn confidence_score_thresholds(grounding: &str) -> (f64, f64) {
-    if grounding.starts_with("hybrid-") {
-        (HYBRID_HIGH_CONFIDENCE_SCORE, HYBRID_MEDIUM_CONFIDENCE_SCORE)
-    } else {
-        (BM25_HIGH_CONFIDENCE_SCORE, BM25_MEDIUM_CONFIDENCE_SCORE)
+    match grounding {
+        // Doc semantic thresholds mirror code until we have empirical doc-vector calibration data.
+        "hybrid-code" | "hybrid-doc" => {
+            (HYBRID_HIGH_CONFIDENCE_SCORE, HYBRID_MEDIUM_CONFIDENCE_SCORE)
+        }
+        _ => (BM25_HIGH_CONFIDENCE_SCORE, BM25_MEDIUM_CONFIDENCE_SCORE),
     }
+}
+
+fn section_vector_columns_available(db: &Connection) -> bool {
+    let Ok(columns) = table_columns(db, "section_bodies") else {
+        return false;
+    };
+    ["vector", "embedding_model", "embed_text_version"]
+        .into_iter()
+        .all(|column| columns.contains(column))
+}
+
+fn table_columns(db: &Connection, table: &str) -> Result<BTreeSet<String>> {
+    let sql = format!("DESCRIBE SELECT * FROM {table} LIMIT 0");
+    let mut stmt = db
+        .prepare(&sql)
+        .with_context(|| format!("failed to describe {table}"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to read {table} columns"))?;
+    Ok(columns.into_iter().collect())
 }
 
 fn query_graph_content_hash(db: &Connection, opts: &KnowledgeContextOptions) -> Option<String> {
