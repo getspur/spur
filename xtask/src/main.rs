@@ -232,7 +232,8 @@ fn install_remote_linux_binaries(
         "scripts/cloud-build/build.sh remote release build",
     )?;
     let mut fetch = remote_install_fetch_command(workspace_root, &dest.dir, notebook_channel);
-    run_status(&mut fetch, remote_install_fetch_label(notebook_channel))
+    run_status(&mut fetch, remote_install_fetch_label(notebook_channel))?;
+    install_bundled_skill_assets(workspace_root, &dest.dir)
 }
 
 fn remote_install_build_command(
@@ -652,6 +653,57 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn remote_install_binaries_copies_skill_assets_to_staged_prefix_share() {
+        let workspace = temp_test_dir("remote-workspace");
+        let scripts = workspace.join("scripts/cloud-build");
+        fs::create_dir_all(&scripts).unwrap();
+        let build_script = scripts.join("build.sh");
+        fs::write(&build_script, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&build_script);
+        let fetch_script = scripts.join("fetch.sh");
+        fs::write(
+            &fetch_script,
+            "#!/bin/sh\n\
+             while [ \"$#\" -gt 0 ]; do\n\
+             \tif [ \"$1\" = \"--to\" ]; then\n\
+             \t\tdest=\"$2\"\n\
+             \t\tshift 2\n\
+             \telse\n\
+             \t\tshift\n\
+             \tfi\n\
+             done\n\
+             mkdir -p \"$(dirname \"$dest\")\"\n\
+             printf 'fake remote spur' > \"$dest\"\n",
+        )
+        .unwrap();
+        make_executable(&fetch_script);
+        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        fs::write(
+            &asset,
+            "---\nname: package-skill\ndescription: packaged\n---\nbody\n",
+        )
+        .unwrap();
+        let dest = RemoteInstallDest {
+            dir: workspace.join("target/remote-linux-bin"),
+            staged: true,
+        };
+
+        install_remote_linux_binaries(&workspace, &dest, NotebookInstallChannel::Green).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dest.dir.join("spur")).unwrap(),
+            "fake remote spur"
+        );
+        let installed_asset = workspace.join("target/share/spur/skills/package-skill/SKILL.md");
+        assert_eq!(
+            fs::read_to_string(installed_asset).unwrap(),
+            "---\nname: package-skill\ndescription: packaged\n---\nbody\n"
+        );
+    }
+
+    #[test]
     fn force_flag_is_not_forwarded_to_cargo() {
         assert!(is_xtask_install_flag("--force"));
     }
@@ -837,5 +889,14 @@ mod tests {
         let path = env::temp_dir().join(format!("spur-xtask-{label}-{}-{n}", std::process::id()));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
     }
 }
