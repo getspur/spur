@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 #[cfg(any(test, feature = "test-support"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -519,6 +519,7 @@ const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
 const COLD_OPEN_GRAPH_REBUILD_TIMEOUT: Duration = Duration::from_secs(120);
+const INCREMENTAL_FAILURES_BEFORE_FULL_REBUILD: u32 = 3;
 
 tokio::task_local! {
     static SCOPED_CODE_GRAPH_WORKTREE_ROOT: PathBuf;
@@ -531,6 +532,8 @@ static GRAPH_REBUILD_LATENCY_BUDGET_OVERRIDE_MS: AtomicU64 =
     AtomicU64::new(GRAPH_REBUILD_LATENCY_BUDGET_UNSET_MS);
 #[cfg(any(test, feature = "test-support"))]
 static GRAPH_REBUILD_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(test, feature = "test-support"))]
+static INCREMENTAL_REBUILD_FAILURES_REMAINING: AtomicUsize = AtomicUsize::new(0);
 // Temporal resolution error codes (T3 / Phase 1.5 hardening)
 const CODE_GRAPH_NOT_FOUND_ERROR_CODE: i64 = -32004;
 const CODE_GRAPH_DELETED_ERROR_CODE: i64 = -32005;
@@ -2149,6 +2152,7 @@ impl LoadedGraphArtifact {
                 if rebuild_key.retain_temporal_index_on_miss =>
             {
                 rebuild_coordinator.temporal_index_for_artifact(
+                    &rebuild_key.worktree,
                     rebuild_key.key.clone(),
                     Arc::clone(&self.artifact),
                 )
@@ -2461,14 +2465,16 @@ struct RebuildCandidate {
 #[derive(Clone)]
 #[allow(dead_code)]
 struct LoadedRebuildKey {
+    worktree: PathBuf,
     key: RebuildKey,
     retain_temporal_index_on_miss: bool,
 }
 
 #[allow(dead_code)]
 impl LoadedRebuildKey {
-    fn retain_on_miss(key: RebuildKey) -> Self {
+    fn retain_on_miss(worktree: PathBuf, key: RebuildKey) -> Self {
         Self {
+            worktree,
             key,
             retain_temporal_index_on_miss: true,
         }
@@ -2720,6 +2726,7 @@ async fn rebuild_key_for_loaded_artifact(
         &git.supplemental_changed,
     ));
     Some(LoadedRebuildKey {
+        worktree: worktree.to_path_buf(),
         key: RebuildKey::from(&git.head_oid, &dirty_oids),
         retain_temporal_index_on_miss: !git.has_uncommitted_changes
             && git.supplemental_changed.is_empty(),
@@ -2759,6 +2766,7 @@ async fn with_graph_metadata_for_payload(
     if let (Some(rebuild_coordinator), Some(rebuild_candidate)) =
         (rebuild_coordinator, analysis.rebuild_candidate.take())
     {
+        let rebuild_worktree = rebuild_candidate.worktree.clone();
         let rebuild_key = rebuild_candidate.key.clone();
         match try_rebuild_artifact(
             Arc::clone(&rebuild_coordinator),
@@ -2771,7 +2779,10 @@ async fn with_graph_metadata_for_payload(
             RebuildAttempt::Fresh(rebuilt_artifact) => match handler(LoadedGraphArtifact::new(
                 Arc::clone(&rebuilt_artifact),
                 Some(Arc::clone(&rebuild_coordinator)),
-                Some(LoadedRebuildKey::retain_on_miss(rebuild_key)),
+                Some(LoadedRebuildKey::retain_on_miss(
+                    rebuild_worktree,
+                    rebuild_key,
+                )),
             )) {
                 Ok(mut fresh_payload) => {
                     let fresh_files = fresh_payload.files_for_metadata(&rebuilt_artifact);
@@ -2876,11 +2887,46 @@ pub fn set_graph_rebuild_delay_for_test(delay: Duration) -> GraphRebuildDelayGua
 }
 
 #[cfg(any(test, feature = "test-support"))]
+pub struct IncrementalRebuildFailureGuard {
+    previous_failures: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for IncrementalRebuildFailureGuard {
+    fn drop(&mut self) {
+        INCREMENTAL_REBUILD_FAILURES_REMAINING.store(self.previous_failures, Ordering::SeqCst);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_incremental_rebuild_failures_for_test(
+    failures: usize,
+) -> IncrementalRebuildFailureGuard {
+    let previous_failures = INCREMENTAL_REBUILD_FAILURES_REMAINING.swap(failures, Ordering::SeqCst);
+    IncrementalRebuildFailureGuard { previous_failures }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 async fn apply_graph_rebuild_delay_for_test() {
     let delay_ms = GRAPH_REBUILD_DELAY_MS.load(Ordering::SeqCst);
     if delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn fail_incremental_rebuild_for_test() -> anyhow::Result<()> {
+    if INCREMENTAL_REBUILD_FAILURES_REMAINING
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        return Err(anyhow::anyhow!(
+            "forced incremental graph rebuild failure for test"
+        ));
+    }
+    Ok(())
 }
 
 async fn try_rebuild_artifact(
@@ -2889,21 +2935,51 @@ async fn try_rebuild_artifact(
     rebuild_candidate: RebuildCandidate,
     base_seed: Option<&'static str>,
 ) -> RebuildAttempt {
+    let rebuild_worktree = rebuild_candidate.worktree.clone();
+    let rebuild_key = rebuild_candidate.key.clone();
     let mut task = spawn_incremental_rebuild_task(
-        rebuild_coordinator,
+        Arc::clone(&rebuild_coordinator),
         previous_artifact,
         rebuild_candidate,
         base_seed,
     );
 
     match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
-        Ok(Ok(Ok(artifact))) => RebuildAttempt::Fresh(artifact),
+        Ok(Ok(Ok(artifact))) => {
+            rebuild_coordinator.reset_incremental_rebuild_failures(&rebuild_key);
+            RebuildAttempt::Fresh(artifact)
+        }
         Ok(Ok(Err(error))) => {
             tracing::warn!(
                 target: "spur_graph::mcp",
                 error = %error,
                 "in-memory code graph rebuild failed; serving stale response"
             );
+            let failures = rebuild_coordinator.record_incremental_rebuild_failure(&rebuild_key);
+            if failures <= INCREMENTAL_FAILURES_BEFORE_FULL_REBUILD {
+                return RebuildAttempt::StaleRebuildFailed;
+            }
+
+            tracing::warn!(
+                target: "spur_graph::mcp",
+                failures,
+                threshold = INCREMENTAL_FAILURES_BEFORE_FULL_REBUILD,
+                "persistent in-memory incremental rebuild failures; attempting full rebuild"
+            );
+            let full_rebuild_candidate = RebuildCandidate {
+                worktree: rebuild_worktree,
+                key: rebuild_key.clone(),
+            };
+            if let Some(artifact) = try_full_rebuild_after_incremental_failure(
+                Arc::clone(&rebuild_coordinator),
+                full_rebuild_candidate,
+            )
+            .await
+            {
+                rebuild_coordinator.reset_incremental_rebuild_failures(&rebuild_key);
+                return RebuildAttempt::Fresh(artifact);
+            }
+            rebuild_coordinator.reset_incremental_rebuild_failures(&rebuild_key);
             RebuildAttempt::StaleRebuildFailed
         }
         Ok(Err(error)) => {
@@ -2935,6 +3011,54 @@ async fn try_rebuild_artifact(
                 }
             });
             RebuildAttempt::StaleBudgetExceeded
+        }
+    }
+}
+
+async fn try_full_rebuild_after_incremental_failure(
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    rebuild_candidate: RebuildCandidate,
+) -> Option<Arc<GraphIndexArtifact>> {
+    let mut task = spawn_full_rebuild_task(rebuild_coordinator, rebuild_candidate);
+    match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
+        Ok(Ok(Ok(artifact))) => Some(artifact),
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                target: "spur_graph::mcp",
+                error = %error,
+                "full code graph rebuild escalation failed; serving stale response"
+            );
+            None
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target: "spur_graph::mcp",
+                error = %error,
+                "full code graph rebuild escalation task failed; serving stale response"
+            );
+            None
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                match task.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: "spur_graph::mcp",
+                            error = %error,
+                            "full code graph rebuild escalation failed after response budget elapsed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "spur_graph::mcp",
+                            error = %error,
+                            "full code graph rebuild escalation task failed after response budget elapsed"
+                        );
+                    }
+                }
+            });
+            None
         }
     }
 }
@@ -2971,14 +3095,17 @@ fn spawn_incremental_rebuild_task(
 ) -> tokio::task::JoinHandle<anyhow::Result<Arc<GraphIndexArtifact>>> {
     let RebuildCandidate { worktree, key } = rebuild_candidate;
     tokio::spawn(async move {
+        let rebuild_worktree = worktree.clone();
         rebuild_coordinator
-            .get_or_build(key, move || {
+            .get_or_build(rebuild_worktree, key, move || {
                 let previous_artifact = Arc::clone(&previous_artifact);
                 let worktree = worktree.clone();
                 async move {
                     #[cfg(any(test, feature = "test-support"))]
                     apply_graph_rebuild_delay_for_test().await;
                     tokio::task::spawn_blocking(move || {
+                        #[cfg(any(test, feature = "test-support"))]
+                        fail_incremental_rebuild_for_test()?;
                         let (artifact, _mode, stats) =
                             crate::store::build::artifact_from_facts_incremental(
                                 &previous_artifact,
@@ -2999,18 +3126,15 @@ fn spawn_incremental_rebuild_task(
     })
 }
 
-async fn try_rebuild_artifact_from_worktree(
+fn spawn_full_rebuild_task(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     rebuild_candidate: RebuildCandidate,
-) -> RebuildAttempt {
-    if let Some(seed) = load_base_seed_for_worktree(&rebuild_candidate.worktree) {
-        return try_rebuild_artifact_from_seed(rebuild_coordinator, rebuild_candidate, seed).await;
-    }
-
+) -> tokio::task::JoinHandle<anyhow::Result<Arc<GraphIndexArtifact>>> {
     let RebuildCandidate { worktree, key } = rebuild_candidate;
-    let mut task = tokio::spawn(async move {
+    tokio::spawn(async move {
+        let rebuild_worktree = worktree.clone();
         rebuild_coordinator
-            .get_or_build(key, move || {
+            .get_or_build(rebuild_worktree, key, move || {
                 let worktree = worktree.clone();
                 async move {
                     #[cfg(any(test, feature = "test-support"))]
@@ -3025,7 +3149,18 @@ async fn try_rebuild_artifact_from_worktree(
                 }
             })
             .await
-    });
+    })
+}
+
+async fn try_rebuild_artifact_from_worktree(
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    rebuild_candidate: RebuildCandidate,
+) -> RebuildAttempt {
+    if let Some(seed) = load_base_seed_for_worktree(&rebuild_candidate.worktree) {
+        return try_rebuild_artifact_from_seed(rebuild_coordinator, rebuild_candidate, seed).await;
+    }
+
+    let mut task = spawn_full_rebuild_task(rebuild_coordinator, rebuild_candidate);
 
     match tokio::time::timeout(graph_rebuild_latency_budget(), &mut task).await {
         Ok(Ok(Ok(artifact))) => RebuildAttempt::Fresh(artifact),
@@ -5700,4 +5835,83 @@ fn mermaid_id(symbol_id: &str) -> String {
 
 fn escape_mermaid_label(label: &str) -> String {
     label.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+
+    const ESCALATION_THRESHOLD: usize = 3;
+
+    #[tokio::test]
+    async fn persistent_incremental_failures_escalate_to_full_rebuild() {
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let _incremental_failures = set_incremental_rebuild_failures_for_test(usize::MAX);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write alpha");
+
+        let facts = build_facts(root, None).expect("extract alpha").0;
+        let previous_artifact =
+            Arc::new(artifact_from_facts(&facts, root).expect("alpha artifact"));
+
+        fs::write(root.join("src/lib.rs"), "pub fn beta() {}\n").expect("write beta");
+
+        let coordinator = Arc::new(RebuildCoordinator::new());
+        let key = RebuildKey::from("test-head", &BTreeMap::new());
+
+        for attempt in 1..=ESCALATION_THRESHOLD {
+            assert!(
+                matches!(
+                    try_rebuild_artifact(
+                        Arc::clone(&coordinator),
+                        Arc::clone(&previous_artifact),
+                        rebuild_candidate(root, key.clone()),
+                        None,
+                    )
+                    .await,
+                    RebuildAttempt::StaleRebuildFailed
+                ),
+                "attempt {attempt} should serve stale after incremental failure"
+            );
+        }
+
+        let rebuilt = match try_rebuild_artifact(
+            Arc::clone(&coordinator),
+            Arc::clone(&previous_artifact),
+            rebuild_candidate(root, key),
+            None,
+        )
+        .await
+        {
+            RebuildAttempt::Fresh(artifact) => artifact,
+            RebuildAttempt::StaleBudgetExceeded => {
+                panic!("full rebuild escalation should not exceed the test budget")
+            }
+            RebuildAttempt::StaleRebuildFailed => {
+                panic!("persistent incremental failures should escalate to a fresh full rebuild")
+            }
+        };
+
+        assert!(
+            rebuilt
+                .symbols
+                .iter()
+                .any(|symbol| symbol.entity_name == "beta"),
+            "fresh full rebuild should index the rewritten file"
+        );
+    }
+
+    fn rebuild_candidate(root: &Path, key: RebuildKey) -> RebuildCandidate {
+        RebuildCandidate {
+            worktree: root.to_path_buf(),
+            key,
+        }
+    }
 }
