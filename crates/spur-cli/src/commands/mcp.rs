@@ -104,6 +104,8 @@ pub async fn run_graph_server(root: Option<PathBuf>) -> Result<()> {
 /// `root` is the optional `--root <path>` override. When absent, `SPUR_WORKTREE`
 /// is honored before falling back to the MCP client launch directory.
 pub async fn run_analyst_server(root: Option<PathBuf>) -> Result<()> {
+    spur_analyst::mcp::warm_embed_model();
+
     let registry = ToolRegistry::builder()
         .with(AnalystMcpModule::new())?
         .build();
@@ -134,6 +136,8 @@ pub async fn run_context_server(url: String, token: Option<String>) -> Result<()
 /// `root` is the optional `--root <path>` override. When absent, `SPUR_WORKTREE`
 /// is honored before falling back to the MCP client launch directory.
 pub async fn run_bundled_server(root: Option<PathBuf>) -> Result<()> {
+    spur_analyst::mcp::warm_embed_model();
+
     let registry = ToolRegistry::builder()
         .with(GraphMcpModule::new(GraphMcpDeps::default()))?
         .with(AnalystMcpModule::new())?
@@ -145,6 +149,34 @@ pub async fn run_bundled_server(root: Option<PathBuf>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("missing function signature: {signature}"));
+        let tail = &source[start..];
+        let next_fn = tail
+            .find("\npub async fn ")
+            .filter(|offset| *offset > 0)
+            .unwrap_or(tail.len());
+        &tail[..next_fn]
+    }
+
+    #[test]
+    fn standalone_query_servers_pre_warm_kcp_embeddings() {
+        let source = include_str!("mcp.rs");
+
+        for signature in [
+            "pub async fn run_analyst_server",
+            "pub async fn run_bundled_server",
+        ] {
+            let body = function_body(source, signature);
+            assert!(
+                body.contains("spur_analyst::mcp::warm_embed_model();"),
+                "{signature} must pre-warm knowledge_context_pack embeddings"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn worktree_scope_wraps_entire_server_future() {
         let root = std::env::current_dir()
