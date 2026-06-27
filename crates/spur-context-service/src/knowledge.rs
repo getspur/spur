@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 const EMBEDDING_VECTOR_DIMENSIONS: usize = 768;
+const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
+const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
 const MAX_KNOWLEDGE_LIMIT: usize = 20;
 const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
@@ -307,6 +309,8 @@ fn query_vector_candidates(
             WHERE source = $1
               AND package = $2
               AND revision = $3
+              AND embedding_model = $4
+              AND embed_text_version = $5
         )
         SELECT
             'code' AS kind,
@@ -321,7 +325,7 @@ fn query_vector_candidates(
         FROM distances
         WHERE distance IS NOT NULL
         ORDER BY distance ASC NULLS LAST, file_path, title, stable_symbol_id
-        LIMIT $4
+        LIMIT $6
         "
     );
     let mut stmt = db
@@ -329,7 +333,14 @@ fn query_vector_candidates(
         .context("failed to prepare vector knowledge query")?;
     let rows = stmt
         .query_map(
-            params![opts.source, opts.package, opts.revision, limit as i64],
+            params![
+                opts.source,
+                opts.package,
+                opts.revision,
+                EMBEDDING_MODEL,
+                EMBED_TEXT_VERSION,
+                limit as i64
+            ],
             candidate_from_vector_row,
         )
         .context("failed to run vector knowledge query")?;
