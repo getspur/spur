@@ -8,6 +8,10 @@ const SOURCE: &str = "registry:crates-io";
 const PACKAGE: &str = "demo";
 const REVISION: &str = "1.0.0";
 const DIMENSIONS: usize = 768;
+const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
+const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
+const LEGACY_EMBEDDING_MODEL: &str = "JinaEmbeddingsV2BaseCode";
+const LEGACY_EMBED_TEXT_VERSION: &str = "v2-jina-code";
 
 #[test]
 fn bm25_only_search_returns_ranked_code_and_docs() -> Result<()> {
@@ -60,6 +64,45 @@ fn vector_only_search_surfaces_semantic_code_without_bm25_hits() -> Result<()> {
     assert_eq!(top.grounding, "hybrid-code");
     assert!(top.score > 0.99, "expected near-identical vector score");
     assert!(result.supporting_docs.is_empty());
+    Ok(())
+}
+
+#[test]
+fn vector_search_ignores_embeddings_from_other_models() -> Result<()> {
+    let fixture = KnowledgeFixture::new()?;
+    insert_embedding_with_model(
+        &fixture.conn,
+        "sym-legacy",
+        "src/aaa_legacy.rs",
+        "legacy_task_spawner",
+        "demo::legacy_task_spawner",
+        unit_vector(0),
+        LEGACY_EMBEDDING_MODEL,
+        LEGACY_EMBED_TEXT_VERSION,
+    )?;
+
+    let result = query_knowledge_context(
+        &fixture.conn,
+        &knowledge_options(
+            "unmatched lexical query",
+            KnowledgeScope::Code,
+            Some(unit_vector(0)),
+            3,
+        ),
+    )?;
+
+    let top = result
+        .primary_evidence
+        .first()
+        .context("expected Gemma vector evidence")?;
+    assert_eq!(
+        top.stable_symbol_id.as_deref(),
+        Some("pkg:demo@1.0.0::demo::runtime::task_spawner")
+    );
+    assert_ne!(
+        top.stable_symbol_id.as_deref(),
+        Some("pkg:demo@1.0.0::demo::legacy_task_spawner")
+    );
     Ok(())
 }
 
@@ -394,12 +437,34 @@ fn insert_embedding(
     qualified_name: &str,
     vector: Vec<f32>,
 ) -> Result<()> {
+    insert_embedding_with_model(
+        conn,
+        id,
+        file_path,
+        entity_name,
+        qualified_name,
+        vector,
+        EMBEDDING_MODEL,
+        EMBED_TEXT_VERSION,
+    )
+}
+
+fn insert_embedding_with_model(
+    conn: &Connection,
+    id: &str,
+    file_path: &str,
+    entity_name: &str,
+    qualified_name: &str,
+    vector: Vec<f32>,
+    embedding_model: &str,
+    embed_text_version: &str,
+) -> Result<()> {
     let sql = format!(
         r"
         INSERT INTO symbol_embeddings VALUES
             ('{id}', 'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0,
              '{file_path}', '{entity_name}', '{qualified_name}', 'function',
-             {}, 'JinaEmbeddingsV2BaseCode', 'hash-{id}', 'v2-jina-code')
+             {}, '{embedding_model}', 'hash-{id}', '{embed_text_version}')
         ",
         vector_sql(&vector)
     );
