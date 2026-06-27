@@ -113,8 +113,16 @@ CREATE TABLE IF NOT EXISTS section_bodies (
     title VARCHAR,
     body_text VARCHAR,
     body_hash VARCHAR,
-    token_count INTEGER
+    token_count INTEGER,
+    vector FLOAT[],
+    embedding_model VARCHAR,
+    embedding_input_hash VARCHAR,
+    embed_text_version VARCHAR
 );
+ALTER TABLE section_bodies ADD COLUMN IF NOT EXISTS vector FLOAT[];
+ALTER TABLE section_bodies ADD COLUMN IF NOT EXISTS embedding_model VARCHAR;
+ALTER TABLE section_bodies ADD COLUMN IF NOT EXISTS embedding_input_hash VARCHAR;
+ALTER TABLE section_bodies ADD COLUMN IF NOT EXISTS embed_text_version VARCHAR;
 ALTER TABLE section_bodies SET PARTITIONED BY (source, package);
 
 CREATE TABLE IF NOT EXISTS symbol_embeddings (
