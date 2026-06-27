@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use duckdb::arrow::array::{
@@ -9,12 +11,15 @@ use duckdb::arrow::array::{
     UInt32Array, UInt64Array, UInt8Array,
 };
 use duckdb::arrow::datatypes::DataType;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::knowledge_context::analyst_db_path;
 use super::McpHandlerError;
 
 const MAX_QUERY_ROWS: usize = 1000;
+const STALE_ANALYST_DB_MESSAGE: &str =
+    "The analyst DB lags the live graph. Run `spur graph build` to refresh, or set allow_stale=true to override.";
 static LANCE_INSTALLED: OnceLock<()> = OnceLock::new();
 static DUCKPGQ_INSTALLED: OnceLock<()> = OnceLock::new();
 
@@ -22,7 +27,7 @@ pub async fn query(args: &Value) -> Result<Value, McpHandlerError> {
     let request = QueryRequest::parse(args)?;
     reject_write_statement(&request.query)?;
     let db_path = analyst_db_path()?;
-    match query_read_only(&db_path, &request.query) {
+    match query_read_only(&db_path, &request.query, request.allow_stale) {
         Ok(result) => Ok(result),
         Err(error) => Ok(query_error(&db_path, &error)),
     }
@@ -30,6 +35,7 @@ pub async fn query(args: &Value) -> Result<Value, McpHandlerError> {
 
 struct QueryRequest {
     query: String,
+    allow_stale: bool,
 }
 
 impl QueryRequest {
@@ -45,7 +51,18 @@ impl QueryRequest {
                 )
             })?
             .to_owned();
-        Ok(Self { query })
+        let allow_stale = args
+            .get("allow_stale")
+            .map(|value| {
+                value.as_bool().ok_or_else(|| {
+                    McpHandlerError::InvalidParams(
+                        "query field 'allow_stale' must be a boolean".into(),
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or(false);
+        Ok(Self { query, allow_stale })
     }
 }
 
@@ -89,7 +106,7 @@ fn first_token(query: &str) -> &str {
     &trimmed[..end]
 }
 
-fn query_read_only(db_path: &Path, sql: &str) -> Result<Value, McpHandlerError> {
+fn query_read_only(db_path: &Path, sql: &str, allow_stale: bool) -> Result<Value, McpHandlerError> {
     let config = duckdb::Config::default()
         .access_mode(duckdb::AccessMode::ReadOnly)
         .map_err(|error| {
@@ -101,6 +118,11 @@ fn query_read_only(db_path: &Path, sql: &str) -> Result<Value, McpHandlerError> 
             db_path.display()
         ))
     })?;
+
+    let staleness_warning = match freshness_gate(&conn, db_path, allow_stale)? {
+        FreshnessGate::Proceed { warning } => warning,
+        FreshnessGate::Block(response) => return Ok(response),
+    };
 
     let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
     LANCE_INSTALLED.get_or_init(|| {
@@ -142,13 +164,115 @@ fn query_read_only(db_path: &Path, sql: &str) -> Result<Value, McpHandlerError> 
     }
     let row_count = rows.len();
 
-    Ok(json!({
+    let mut response = json!({
         "db_path": db_path.display().to_string(),
         "columns": columns,
         "rows": rows,
         "row_count": row_count,
         "truncated": truncated
-    }))
+    });
+    if let Some(warning) = staleness_warning {
+        response["staleness_warning"] = Value::String(warning);
+    }
+    Ok(response)
+}
+
+enum FreshnessGate {
+    Proceed { warning: Option<String> },
+    Block(Value),
+}
+
+fn freshness_gate(
+    conn: &duckdb::Connection,
+    db_path: &Path,
+    allow_stale: bool,
+) -> Result<FreshnessGate, McpHandlerError> {
+    if allow_stale {
+        return Ok(FreshnessGate::Proceed {
+            warning: Some("allow_stale".into()),
+        });
+    }
+
+    let Some(live_hash) = read_live_graph_hash(db_path)? else {
+        return Ok(FreshnessGate::Proceed {
+            warning: Some("no_live_pointer".into()),
+        });
+    };
+    let analyst_hash = query_analyst_graph_hash(conn)?;
+    if analyst_hash.as_deref() == Some(live_hash.as_str()) {
+        return Ok(FreshnessGate::Proceed { warning: None });
+    }
+
+    Ok(FreshnessGate::Block(json!({
+        "error": "analyst_db_stale",
+        "analyst_hash": analyst_hash,
+        "live_hash": live_hash,
+        "message": STALE_ANALYST_DB_MESSAGE
+    })))
+}
+
+fn query_analyst_graph_hash(conn: &duckdb::Connection) -> Result<Option<String>, McpHandlerError> {
+    let mut stmt = conn
+        .prepare("SELECT graph_content_hash FROM _meta LIMIT 1")
+        .map_err(|error| {
+            McpHandlerError::Internal(format!(
+                "failed to prepare analyst freshness query: {error}"
+            ))
+        })?;
+    let mut rows = stmt.query([]).map_err(|error| {
+        McpHandlerError::Internal(format!("failed to query analyst freshness: {error}"))
+    })?;
+    let Some(row) = rows.next().map_err(|error| {
+        McpHandlerError::Internal(format!("failed to read analyst freshness row: {error}"))
+    })?
+    else {
+        return Ok(None);
+    };
+    row.get(0).map(Some).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "failed to read analyst graph_content_hash: {error}"
+        ))
+    })
+}
+
+fn read_live_graph_hash(db_path: &Path) -> Result<Option<String>, McpHandlerError> {
+    let Some(spur_dir) = db_path.parent() else {
+        return Ok(None);
+    };
+    for pointer_path in live_pointer_paths(spur_dir) {
+        match fs::read(&pointer_path) {
+            Ok(bytes) => {
+                let pointer: LiveGraphPointer =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        McpHandlerError::Internal(format!(
+                            "invalid live graph pointer `{}`: {error}",
+                            pointer_path.display()
+                        ))
+                    })?;
+                return Ok(Some(pointer.graph_content_hash));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(McpHandlerError::Internal(format!(
+                    "failed to read live graph pointer `{}`: {error}",
+                    pointer_path.display()
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn live_pointer_paths(spur_dir: &Path) -> [PathBuf; 2] {
+    [
+        spur_dir.join("graph").join("pointer.json"),
+        spur_dir.join("graph-index.pointer.json"),
+    ]
+}
+
+#[derive(Deserialize)]
+struct LiveGraphPointer {
+    graph_content_hash: String,
 }
 
 fn arrow_value(
