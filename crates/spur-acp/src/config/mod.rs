@@ -16,6 +16,7 @@ pub use validator::{validate_agent_config, ConfigError};
 use crate::domain::delegation::TimeoutFallback;
 use crate::types::{AgentKind, AgentRole, CostTier, TransportKind};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Per-agent task-routing descriptor. Feeds both the brain prompt and
@@ -401,6 +402,21 @@ impl Default for ContextServiceConfig {
     }
 }
 
+/// Bundled skill asset resolution.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Directory containing `assets/skills/<skill-id>/SKILL.md`-style entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundled_dir: Option<PathBuf>,
+}
+
+impl SkillsConfig {
+    fn is_default(&self) -> bool {
+        self.bundled_dir.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpurConfig {
     #[serde(default)]
@@ -435,6 +451,9 @@ pub struct SpurConfig {
     /// Cloud context-service endpoint for external package code tools.
     #[serde(default)]
     pub context_service: ContextServiceConfig,
+    /// Bundled skill asset resolution.
+    #[serde(default, skip_serializing_if = "SkillsConfig::is_default")]
+    pub skills: SkillsConfig,
     /// TUI presentation preferences (edit mode today; mouse/density/keymap
     /// in the future). Skipped on serialize when default to keep existing
     /// configs visually unchanged.
