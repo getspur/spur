@@ -49,6 +49,7 @@ impl RebuildBundle {
 
 struct RebuildCacheState {
     latest_by_worktree: HashMap<PathBuf, RebuildKey>,
+    incremental_failures_by_key: HashMap<RebuildKey, u32>,
     retained: VecDeque<Arc<RebuildBundle>>,
 }
 
@@ -56,6 +57,7 @@ impl RebuildCacheState {
     fn new() -> Self {
         Self {
             latest_by_worktree: HashMap::new(),
+            incremental_failures_by_key: HashMap::new(),
             retained: VecDeque::with_capacity(CACHE_CAPACITY),
         }
     }
@@ -155,6 +157,25 @@ impl RebuildCoordinator {
     ) -> Option<Arc<TemporalIndex>> {
         let bundle = self.retained_bundle(key)?;
         Some(self.temporal_index_for_bundle(&bundle))
+    }
+
+    pub(crate) fn record_incremental_rebuild_failure(&self, key: &RebuildKey) -> u32 {
+        let Ok(mut cache) = self.cache.lock() else {
+            return 0;
+        };
+        let failures = cache
+            .incremental_failures_by_key
+            .entry(key.clone())
+            .or_default();
+        *failures = failures.saturating_add(1);
+        *failures
+    }
+
+    pub(crate) fn reset_incremental_rebuild_failures(&self, key: &RebuildKey) {
+        let Ok(mut cache) = self.cache.lock() else {
+            return;
+        };
+        cache.incremental_failures_by_key.remove(key);
     }
 
     fn temporal_index_for_bundle(&self, bundle: &Arc<RebuildBundle>) -> Arc<TemporalIndex> {
