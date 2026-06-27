@@ -30,6 +30,7 @@ pub enum Language {
     Cpp,
     Lua,
     Shell,
+    Sql,
 }
 
 /// Precision heuristic for common C runtime calls, not an exhaustive builtin list.
@@ -323,6 +324,7 @@ impl Language {
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Self::Lua => tree_sitter_lua::LANGUAGE.into(),
             Self::Shell => tree_sitter_bash::LANGUAGE.into(),
+            Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
         }
     }
 
@@ -339,6 +341,7 @@ impl Language {
             Self::Cpp => cpp_config(),
             Self::Lua => lua_config(),
             Self::Shell => shell_config(),
+            Self::Sql => sql_config(),
         }
     }
 
@@ -352,7 +355,7 @@ impl Language {
             Self::Cpp => CPP_BUILTIN_METHODS,
             Self::Lua => LUA_BUILTIN_METHODS,
             Self::Shell => SHELL_BUILTIN_METHODS,
-            Self::Markdown | Self::JupyterNotebook => &[],
+            Self::Markdown | Self::JupyterNotebook | Self::Sql => &[],
         }
     }
 
@@ -369,6 +372,7 @@ impl Language {
             Self::Cpp => "cpp",
             Self::Lua => "lua",
             Self::Shell => "shell",
+            Self::Sql => "sql",
         }
     }
 }
@@ -614,6 +618,31 @@ pub(crate) fn shell_config() -> LanguageConfig {
     }
 }
 
+pub(crate) fn sql_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_sequel::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/sql/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/sql/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: &[
+            ("definition.struct", NodeKind::Struct),
+            ("definition.type_alias", NodeKind::TypeAlias),
+            ("definition.function", NodeKind::Function),
+            ("definition.enum", NodeKind::Enum),
+            ("definition.field", NodeKind::Field),
+            ("definition.module", NodeKind::Module),
+        ],
+        relation_kind_map: None,
+        preserve_bare_import_path: true,
+        is_method: None,
+    }
+}
+
 pub(crate) fn markdown_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_md::LANGUAGE.into(),
@@ -734,6 +763,18 @@ fn shell_matcher(path: &std::path::Path) -> bool {
         })
 }
 
+const SQL_EXTENSIONS: &[&str] = &["sql"];
+
+fn sql_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            SQL_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
 pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
     &[
         LanguageDescriptor {
@@ -798,6 +839,13 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::Shell,
             label: "shell",
             extensions: SHELL_EXTENSIONS,
+        },
+        LanguageDescriptor {
+            matcher: sql_matcher,
+            factory: sql_config,
+            language: Language::Sql,
+            label: "sql",
+            extensions: SQL_EXTENSIONS,
         },
         LanguageDescriptor {
             matcher: markdown_matcher,
@@ -2132,6 +2180,10 @@ mod gate_contract {
                 relation_set(&["imports", "calls", "contains", "defines"]),
             ),
             (
+                Language::Sql.label(),
+                relation_set(&["calls", "constructs", "contains", "defines", "references"]),
+            ),
+            (
                 Language::Markdown.label(),
                 // README's Markdown `imports` cell is `Y(links)`: the
                 // @import capture channel is remapped to RelationKind::Links.
@@ -2230,6 +2282,14 @@ mod gate_contract {
             ],
             Language::Lua => &["definition.function", "definition.method"],
             Language::Shell => &["definition.function"],
+            Language::Sql => &[
+                "definition.struct",
+                "definition.type_alias",
+                "definition.function",
+                "definition.enum",
+                "definition.field",
+                "definition.module",
+            ],
             Language::Markdown => &["definition.section"],
             Language::JupyterNotebook => &[],
         }
