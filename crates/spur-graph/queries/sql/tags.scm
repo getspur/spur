@@ -8,17 +8,26 @@
   (object_reference
     name: (identifier) @name)) @definition.type_alias
 
+(create_materialized_view
+  (object_reference
+    name: (identifier) @name)) @definition.type_alias
+
 (create_function
   (object_reference
     name: (identifier) @name)) @definition.function
 
-(create_index
-  column: (identifier) @name) @definition.field
+(create_type
+  (object_reference
+    name: (identifier) @name)
+  (keyword_as)
+  (keyword_enum)
+  (enum_elements)) @definition.enum
 
 (create_type
   (object_reference
     name: (identifier) @name)
-  (enum_elements)) @definition.enum
+  (keyword_as)
+  (column_definitions)) @definition.struct
 
 (create_schema
   .
