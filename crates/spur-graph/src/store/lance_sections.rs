@@ -14,9 +14,7 @@ use arrow_array::{
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use lancedb::index::{
-    scalar::FtsIndexBuilder, vector::IvfHnswSqIndexBuilder, Index, IndexConfig, IndexType,
-};
+use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexConfig, IndexType};
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use lancedb::table::OptimizeAction;
 
@@ -752,15 +750,7 @@ async fn write_sections_dataset_async_with_embedding_model(
                     phase: SidecarPhase::Sections,
                 },
             );
-            let mut should_optimize_existing_indices = ensure_body_text_fts_index(table).await?;
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::Indexing {
-                    label: "vector HNSW",
-                    phase: SidecarPhase::Sections,
-                },
-            );
-            should_optimize_existing_indices |= ensure_vector_index(table).await?;
+            let should_optimize_existing_indices = ensure_body_text_fts_index(table).await?;
             if should_optimize_existing_indices {
                 optimize_existing_indices(table, "section").await?;
             }
@@ -1043,15 +1033,7 @@ async fn write_symbol_rows_dataset_async(
                     phase: SidecarPhase::CodeSymbols,
                 },
             );
-            let mut should_optimize_existing_indices = ensure_code_symbol_fts_index(table).await?;
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::Indexing {
-                    label: "vector HNSW",
-                    phase: SidecarPhase::CodeSymbols,
-                },
-            );
-            should_optimize_existing_indices |= ensure_code_symbol_vector_index(table).await?;
+            let should_optimize_existing_indices = ensure_code_symbol_fts_index(table).await?;
             if should_optimize_existing_indices {
                 optimize_existing_indices(table, "code symbol").await?;
             }
@@ -1102,38 +1084,6 @@ async fn ensure_body_text_fts_index(table: &lancedb::Table) -> Result<bool> {
     Ok(false)
 }
 
-async fn ensure_vector_index(table: &lancedb::Table) -> Result<bool> {
-    let vector_rows = table
-        .count_rows(Some("vector IS NOT NULL".to_owned()))
-        .await
-        .context("failed to count LanceDB section vector rows")?;
-
-    if vector_rows == 0 {
-        return Ok(false);
-    }
-
-    if has_matching_index(
-        &table
-            .list_indices()
-            .await
-            .context("failed to list LanceDB section indices")?,
-        "vector",
-        is_vector_index_type,
-    ) {
-        return Ok(true);
-    }
-
-    table
-        .create_index(
-            &["vector"],
-            Index::IvfHnswSq(IvfHnswSqIndexBuilder::default()),
-        )
-        .execute()
-        .await
-        .context("failed to create LanceDB vector HNSW index")?;
-    Ok(false)
-}
-
 fn has_matching_index(
     indices: &[IndexConfig],
     column: &str,
@@ -1156,19 +1106,6 @@ async fn optimize_existing_indices(table: &lancedb::Table, table_label: &str) ->
     Ok(())
 }
 
-fn is_vector_index_type(index_type: &IndexType) -> bool {
-    matches!(
-        index_type,
-        IndexType::IvfFlat
-            | IndexType::IvfSq
-            | IndexType::IvfPq
-            | IndexType::IvfRq
-            | IndexType::IvfHnswPq
-            | IndexType::IvfHnswSq
-            | IndexType::IvfHnswFlat
-    )
-}
-
 async fn ensure_code_symbol_fts_index(table: &lancedb::Table) -> Result<bool> {
     if has_matching_index(
         &table
@@ -1186,38 +1123,6 @@ async fn ensure_code_symbol_fts_index(table: &lancedb::Table) -> Result<bool> {
         .execute()
         .await
         .context("failed to create LanceDB embed_text FTS index")?;
-    Ok(false)
-}
-
-async fn ensure_code_symbol_vector_index(table: &lancedb::Table) -> Result<bool> {
-    let vector_rows = table
-        .count_rows(Some("vector IS NOT NULL".to_owned()))
-        .await
-        .context("failed to count LanceDB code symbol vector rows")?;
-
-    if vector_rows == 0 {
-        return Ok(false);
-    }
-
-    if has_matching_index(
-        &table
-            .list_indices()
-            .await
-            .context("failed to list LanceDB code symbol indices")?,
-        "vector",
-        is_vector_index_type,
-    ) {
-        return Ok(true);
-    }
-
-    table
-        .create_index(
-            &["vector"],
-            Index::IvfHnswSq(IvfHnswSqIndexBuilder::default()),
-        )
-        .execute()
-        .await
-        .context("failed to create LanceDB code symbol vector HNSW index")?;
     Ok(false)
 }
 
@@ -2529,7 +2434,7 @@ impl TextEmbeddingService {
         let mut model = model
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        model.embed(texts.to_vec(), None)
+        model.embed(texts, None)
     }
 }
 
@@ -3959,6 +3864,81 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn sidecar_indexing_progress_reports_only_fts_indexes() {
+        let root = tempfile::tempdir().expect("root");
+        let sidecar_dir = tempfile::tempdir().expect("sidecar");
+        let markdown_source = "## Topic\n\nSearchable markdown body.\n";
+        let rust_source = "/// Searchable symbol docs.\npub fn searchable_symbol() {}\n";
+        write_source(root.path(), "docs/topic.md", markdown_source);
+        write_source(root.path(), "src/lib.rs", rust_source);
+        let artifact = graph_artifact_for_code_files(
+            "fts-indexing-only",
+            vec![
+                (
+                    "docs/topic.md",
+                    markdown_source,
+                    markdown_section_symbols(
+                        "docs/topic.md",
+                        markdown_source,
+                        &[("section:topic", "## Topic")],
+                    ),
+                ),
+                (
+                    "src/lib.rs",
+                    rust_source,
+                    vec![code_symbol(
+                        "src/lib.rs",
+                        rust_source,
+                        "sym:searchable",
+                        "searchable_symbol",
+                    )],
+                ),
+            ],
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let progress = {
+            let events = Arc::clone(&events);
+            move |event| events.lock().expect("events").push(event)
+        };
+
+        let row_counts = write_sections_dataset_with_sidecar_options_and_progress(
+            &artifact,
+            root.path(),
+            sidecar_dir.path(),
+            SectionSidecarOptions {
+                embedding: SectionEmbeddingOptions {
+                    skip_embeddings: true,
+                    batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
+                },
+                write_batch_size: SECTION_WRITE_BATCH_SIZE_DEFAULT,
+                previous_artifact_dir: None,
+                delta: None,
+            },
+            Some(&progress),
+        )
+        .expect("write sidecar");
+
+        assert_eq!(row_counts.section_bodies, 1);
+        assert_eq!(row_counts.code_symbols, 1);
+        let events = events.lock().expect("events").clone();
+        let indexing_events = events
+            .iter()
+            .filter_map(|event| match event {
+                SectionSidecarProgressEvent::Indexing { label, phase } => Some((*phase, *label)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            indexing_events,
+            vec![
+                (SidecarPhase::Sections, "body_text FTS"),
+                (SidecarPhase::CodeSymbols, "embed_text FTS"),
+            ],
+            "sidecar writes should not report unused LanceDB vector indexes"
+        );
+    }
+
     fn graph_artifact_for_path(
         stable_file_id: &str,
         path: &str,
@@ -4829,8 +4809,11 @@ mod tests {
         assert_eq!(
             batch_texts,
             vec![
-                vec!["one embed text".to_owned(), "two embed text".to_owned()],
-                vec!["three embed text".to_owned()],
+                vec![
+                    "title: none | text: one embed text".to_owned(),
+                    "title: none | text: two embed text".to_owned(),
+                ],
+                vec!["title: none | text: three embed text".to_owned()],
             ]
         );
         assert!(vectors.iter().all(Option::is_some));
