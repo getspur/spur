@@ -14,6 +14,7 @@ const SOURCE: &str = "registry:crates-io";
 const PACKAGE: &str = "demo";
 const REVISION: &str = "1.2.3";
 const DIMENSIONS: usize = 768;
+const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
 
 #[test]
 fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
@@ -399,7 +400,7 @@ fn write_artifact_fixture_with_symbol_vector(
                 {symbol_vector_expr} AS vector,
                 'code-hash' AS content_hash,
                 'embed-hash' AS embedding_input_hash,
-                'JinaEmbeddingsV2BaseCode' AS embedding_model
+                '{EMBEDDING_MODEL}' AS embedding_model
         ) TO '{symbols_path}' (FORMAT PARQUET);
 
         COPY (
@@ -416,7 +417,7 @@ fn write_artifact_fixture_with_symbol_vector(
                 'section-hash' AS content_hash,
                 list_transform(range(0, 768), x -> 0.0::FLOAT) AS vector,
                 'section-embed-hash' AS embedding_input_hash,
-                'JinaEmbeddingsV2BaseCode' AS embedding_model
+                '{EMBEDDING_MODEL}' AS embedding_model
         ) TO '{sections_path}' (FORMAT PARQUET);
         "#
     ))
