@@ -2149,6 +2149,7 @@ impl LoadedGraphArtifact {
                 if rebuild_key.retain_temporal_index_on_miss =>
             {
                 rebuild_coordinator.temporal_index_for_artifact(
+                    &rebuild_key.worktree,
                     rebuild_key.key.clone(),
                     Arc::clone(&self.artifact),
                 )
@@ -2461,14 +2462,16 @@ struct RebuildCandidate {
 #[derive(Clone)]
 #[allow(dead_code)]
 struct LoadedRebuildKey {
+    worktree: PathBuf,
     key: RebuildKey,
     retain_temporal_index_on_miss: bool,
 }
 
 #[allow(dead_code)]
 impl LoadedRebuildKey {
-    fn retain_on_miss(key: RebuildKey) -> Self {
+    fn retain_on_miss(worktree: PathBuf, key: RebuildKey) -> Self {
         Self {
+            worktree,
             key,
             retain_temporal_index_on_miss: true,
         }
@@ -2720,6 +2723,7 @@ async fn rebuild_key_for_loaded_artifact(
         &git.supplemental_changed,
     ));
     Some(LoadedRebuildKey {
+        worktree: worktree.to_path_buf(),
         key: RebuildKey::from(&git.head_oid, &dirty_oids),
         retain_temporal_index_on_miss: !git.has_uncommitted_changes
             && git.supplemental_changed.is_empty(),
@@ -2759,6 +2763,7 @@ async fn with_graph_metadata_for_payload(
     if let (Some(rebuild_coordinator), Some(rebuild_candidate)) =
         (rebuild_coordinator, analysis.rebuild_candidate.take())
     {
+        let rebuild_worktree = rebuild_candidate.worktree.clone();
         let rebuild_key = rebuild_candidate.key.clone();
         match try_rebuild_artifact(
             Arc::clone(&rebuild_coordinator),
@@ -2771,7 +2776,10 @@ async fn with_graph_metadata_for_payload(
             RebuildAttempt::Fresh(rebuilt_artifact) => match handler(LoadedGraphArtifact::new(
                 Arc::clone(&rebuilt_artifact),
                 Some(Arc::clone(&rebuild_coordinator)),
-                Some(LoadedRebuildKey::retain_on_miss(rebuild_key)),
+                Some(LoadedRebuildKey::retain_on_miss(
+                    rebuild_worktree,
+                    rebuild_key,
+                )),
             )) {
                 Ok(mut fresh_payload) => {
                     let fresh_files = fresh_payload.files_for_metadata(&rebuilt_artifact);
@@ -2971,8 +2979,9 @@ fn spawn_incremental_rebuild_task(
 ) -> tokio::task::JoinHandle<anyhow::Result<Arc<GraphIndexArtifact>>> {
     let RebuildCandidate { worktree, key } = rebuild_candidate;
     tokio::spawn(async move {
+        let rebuild_worktree = worktree.clone();
         rebuild_coordinator
-            .get_or_build(key, move || {
+            .get_or_build(rebuild_worktree, key, move || {
                 let previous_artifact = Arc::clone(&previous_artifact);
                 let worktree = worktree.clone();
                 async move {
@@ -3009,8 +3018,9 @@ async fn try_rebuild_artifact_from_worktree(
 
     let RebuildCandidate { worktree, key } = rebuild_candidate;
     let mut task = tokio::spawn(async move {
+        let rebuild_worktree = worktree.clone();
         rebuild_coordinator
-            .get_or_build(key, move || {
+            .get_or_build(rebuild_worktree, key, move || {
                 let worktree = worktree.clone();
                 async move {
                     #[cfg(any(test, feature = "test-support"))]
