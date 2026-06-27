@@ -689,6 +689,7 @@ impl<'a> FactBuilder<'a> {
                     }
                 }
             } else if edge.relation == RelationKind::References {
+                let allow_reference_fallbacks = reference_fallbacks_allowed(&edge, &file_by_id);
                 if let Some(target) = singleton_symbols_by_label.get(&edge.target_name).copied() {
                     if target != edge.source
                         && matches!(
@@ -707,7 +708,11 @@ impl<'a> FactBuilder<'a> {
                         } else {
                             self.add_pending_edge(&edge, Some(target));
                         }
+                    } else if target != edge.source && allow_reference_fallbacks {
+                        self.add_pending_edge(&edge, Some(target));
                     }
+                } else if allow_reference_fallbacks {
+                    self.add_pending_edge(&edge, None);
                 }
             } else if edge.relation == RelationKind::Calls {
                 let candidates = qualified_edge_candidates(&edge, &qualified_symbols_by_name);
@@ -800,6 +805,13 @@ impl<'a> FactBuilder<'a> {
             );
         }
     }
+}
+
+fn reference_fallbacks_allowed(edge: &PendingEdge, file_by_id: &HashMap<NodeId, &str>) -> bool {
+    edge.edge_kind != Some(GraphEdgeKind::ReferencesHof)
+        || file_by_id
+            .get(&edge.source)
+            .is_some_and(|path| path.ends_with(".sql"))
 }
 
 fn resolve_call_edge_after_qualified_miss(
@@ -4154,6 +4166,138 @@ pub fn same_file_mapper(value: i32) -> i32 { value }
 
         let same_file = reference("same_file_mapper");
         assert!(same_file.target_node_id.is_some());
+    }
+
+    #[test]
+    fn sql_style_references_resolve_non_callable_singletons_and_keep_ambiguous_unresolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut parser = Parser::new();
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&language).expect("configure parser");
+        let tree = parser
+            .parse("fn placeholder() {}\nstruct Orders;\n", None)
+            .expect("parse source");
+        let root_node = tree.root_node();
+
+        let mut builder = FactBuilder::new(dir.path());
+        let file_id = FileId(builder.next_file_id());
+        let file = builder.add_file_node("schema.sql", file_id, root_node);
+        let source = builder.add_node(
+            "schema.sql",
+            "orders_view".to_owned(),
+            "orders_view".to_owned(),
+            NodeKind::TypeAlias,
+            file_id,
+            root_node,
+        );
+        let orders = builder.add_node(
+            "schema.sql",
+            "orders".to_owned(),
+            "orders".to_owned(),
+            NodeKind::Struct,
+            file_id,
+            root_node,
+        );
+        let public_table = builder.add_node(
+            "schema.sql",
+            "ambiguous_table".to_owned(),
+            "public::ambiguous_table".to_owned(),
+            NodeKind::Struct,
+            file_id,
+            root_node,
+        );
+        let archive_table = builder.add_node(
+            "schema.sql",
+            "ambiguous_table".to_owned(),
+            "archive::ambiguous_table".to_owned(),
+            NodeKind::Struct,
+            file_id,
+            root_node,
+        );
+        builder.add_edge(file, Some(source), RelationKind::Contains, None);
+        builder.add_edge(file, Some(orders), RelationKind::Contains, None);
+        builder.add_edge(file, Some(public_table), RelationKind::Contains, None);
+        builder.add_edge(file, Some(archive_table), RelationKind::Contains, None);
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "orders".to_owned(),
+            import_path: None,
+            relation: RelationKind::References,
+            edge_kind: Some(GraphEdgeKind::ReferencesHof),
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+        builder.pending_edges.push(PendingEdge {
+            source,
+            target_name: "ambiguous_table".to_owned(),
+            import_path: None,
+            relation: RelationKind::References,
+            edge_kind: Some(GraphEdgeKind::ReferencesHof),
+            origin: CallOrigin::Expression,
+            receiver_text: None,
+            scope_text: None,
+        });
+
+        builder.resolve_pending_edges();
+
+        let resolved = builder
+            .facts
+            .edges
+            .iter()
+            .find(|edge| edge.target_label.as_deref() == Some("orders"))
+            .expect("orders reference edge");
+        assert_eq!(resolved.relation, RelationKind::References);
+        assert_eq!(resolved.source_node_id, source);
+        assert_eq!(resolved.target_node_id, Some(orders));
+
+        let unresolved = builder
+            .facts
+            .edges
+            .iter()
+            .find(|edge| edge.target_label.as_deref() == Some("ambiguous_table"))
+            .expect("ambiguous reference edge");
+        assert_eq!(unresolved.relation, RelationKind::References);
+        assert_eq!(unresolved.source_node_id, source);
+        assert_eq!(unresolved.target_node_id, None);
+        assert_eq!(
+            builder
+                .facts
+                .edges
+                .iter()
+                .filter(|edge| edge.relation == RelationKind::References)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn sql_partitioned_alter_is_not_captured_as_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("schema.sql"),
+            r#"
+CREATE TABLE events (
+    id INTEGER,
+    created_at TIMESTAMP
+);
+
+ALTER TABLE events SET PARTITIONED BY (id);
+"#,
+        )
+        .expect("write sql");
+
+        let (facts, _counts) = build_facts(dir.path(), None).expect("build facts");
+        let fields: Vec<_> = facts
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Field)
+            .map(|node| node.label.as_str())
+            .collect();
+
+        assert!(fields.contains(&"id"));
+        assert!(fields.contains(&"created_at"));
+        assert!(!fields.contains(&"PARTITIONED"));
     }
 
     #[test]
