@@ -4,7 +4,7 @@
 //! filesystem assets; per-project overrides in `.spur/skills/` take
 //! precedence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -17,7 +17,7 @@ const SPUR_SKILLS_DIR_ENV: &str = "SPUR_SKILLS_DIR";
 const CLAUDE_CODE_ACP_SKILL: &str = "brain-delegation-claude-code-acp";
 const BUNDLED_ALIASES: &[(&str, &str)] = &[("brain-delegation-claude-code", CLAUDE_CODE_ACP_SKILL)];
 
-static WORKSPACE_BUNDLED_RAW: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+static WORKSPACE_BUNDLED_RAW: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BundledRootSource {
@@ -315,9 +315,13 @@ fn package_asset_candidates() -> Vec<PathBuf> {
         return Vec::new();
     };
 
-    let mut candidates = vec![bin_dir.join("share/spur/skills")];
+    let mut candidates = vec![
+        bin_dir.join("share/spur/skills"),
+        bin_dir.join("assets/skills"),
+    ];
     if let Some(prefix) = bin_dir.parent() {
         candidates.push(prefix.join("share/spur/skills"));
+        candidates.push(prefix.join("assets/skills"));
     }
     candidates
 }
@@ -341,14 +345,21 @@ fn read_valid_override(repo_root: &Path, id: &str) -> Option<String> {
 }
 
 /// Returns all bundled skills (raw content including frontmatter) for CLI extraction.
-pub fn all_bundled_raw() -> &'static BTreeMap<String, String> {
+pub fn all_bundled_raw() -> &'static HashMap<&'static str, &'static str> {
     WORKSPACE_BUNDLED_RAW.get_or_init(|| {
-        SkillCatalog::from_root(
+        let raw = SkillCatalog::from_root(
             manifest_workspace_asset_root(),
             BundledRootSource::Workspace,
         )
         .list_bundled_raw_map()
-        .expect("workspace bundled skill assets must be readable")
+        .expect("workspace bundled skill assets must be readable");
+        raw.into_iter()
+            .map(|(id, body)| {
+                let id = Box::leak(id.into_boxed_str()) as &'static str;
+                let body = Box::leak(body.into_boxed_str()) as &'static str;
+                (id, body)
+            })
+            .collect()
     })
 }
 
@@ -468,6 +479,9 @@ pub struct SkillPayload {
 /// `.spur/skills/<id>/SKILL.md` overrides (override wins per id).
 ///
 /// Validates every skill id (bundled and override) through `validate_id`.
+///
+/// Returns `SkillCatalogError` instead of only `InvalidSkillId` because
+/// filesystem-backed assets can also fail during root discovery or reads.
 pub fn list_active_skills(repo_root: &Path) -> Result<Vec<SkillPayload>, SkillCatalogError> {
     let mut by_id: std::collections::BTreeMap<String, SkillPayload> =
         std::collections::BTreeMap::new();
@@ -547,6 +561,7 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::process::Command;
 
     fn write_skill(root: &Path, id: &str, description: &str, body: &str) {
         let dir = root.join(id);
@@ -560,6 +575,12 @@ mod tests {
 
     fn workspace_asset_skill_dir(id: &str) -> PathBuf {
         manifest_workspace_asset_root().join(id)
+    }
+
+    fn toml_basic_string(path: &Path) -> String {
+        path.to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
     }
 
     #[test]
@@ -714,6 +735,88 @@ mod tests {
 
         assert_eq!(selected.path, env_root.path());
         assert_eq!(selected.source, BundledRootSource::Env);
+    }
+
+    #[test]
+    fn env_bundled_dir_is_read_from_process_env_and_wins_over_config() {
+        let repo = tempfile::tempdir().unwrap();
+        let env_root = tempfile::tempdir().unwrap();
+        let config_root = tempfile::tempdir().unwrap();
+        write_skill(
+            env_root.path(),
+            "env-skill",
+            "Env bundled skill",
+            "Env body\n",
+        );
+        write_skill(
+            config_root.path(),
+            "config-skill",
+            "Config bundled skill",
+            "Config body\n",
+        );
+        std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            format!(
+                "[skills]\nbundled_dir = \"{}\"\n",
+                toml_basic_string(config_root.path())
+            ),
+        )
+        .unwrap();
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("skills::tests::env_bundled_dir_child_asserts_process_env")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env("SPUR_SKILLS_ENV_CHILD", "1")
+            .env(SPUR_SKILLS_DIR_ENV, env_root.path())
+            .env("SPUR_SKILLS_ENV_REPO", repo.path())
+            .output()
+            .expect("child test process should run");
+
+        assert!(
+            output.status.success(),
+            "child env test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("1 passed"),
+            "expected exactly one child test to run, got stdout:\n{stdout}"
+        );
+    }
+
+    #[test]
+    fn env_bundled_dir_child_asserts_process_env() {
+        if std::env::var_os("SPUR_SKILLS_ENV_CHILD").is_none() {
+            return;
+        }
+        let repo = PathBuf::from(std::env::var_os("SPUR_SKILLS_ENV_REPO").unwrap());
+
+        let catalog = SkillCatalog::discover(&repo).unwrap();
+        let skills = list_active_skills(&repo).unwrap();
+        let ids = skills
+            .iter()
+            .map(|skill| skill.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(catalog.source(), SPUR_SKILLS_DIR_ENV);
+        assert_eq!(ids, vec!["env-skill"]);
+    }
+
+    #[test]
+    fn package_asset_candidates_cover_dist_included_assets_tree() {
+        let exe = std::env::current_exe().unwrap();
+        let bin_dir = exe.parent().unwrap();
+        let candidates = package_asset_candidates();
+
+        assert!(candidates.contains(&bin_dir.join("share/spur/skills")));
+        assert!(candidates.contains(&bin_dir.join("assets/skills")));
+        if let Some(prefix) = bin_dir.parent() {
+            assert!(candidates.contains(&prefix.join("share/spur/skills")));
+            assert!(candidates.contains(&prefix.join("assets/skills")));
+        }
     }
 
     #[test]

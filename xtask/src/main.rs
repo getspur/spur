@@ -371,6 +371,55 @@ fn install_built_binary(
         )
     })?;
     eprintln!("installed {binary_name}: {}", installed_binary.display());
+    install_bundled_skill_assets(workspace_root, &bin_dir)?;
+    Ok(())
+}
+
+fn install_bundled_skill_assets(workspace_root: &Path, bin_dir: &Path) -> Result<(), String> {
+    let source = workspace_root.join("assets/skills");
+    if !source.is_dir() {
+        return Err(format!(
+            "expected bundled skill assets at {}",
+            source.display()
+        ));
+    }
+    let prefix = bin_dir.parent().ok_or_else(|| {
+        format!(
+            "failed to resolve install prefix from {}",
+            bin_dir.display()
+        )
+    })?;
+    let dest = prefix.join("share/spur/skills");
+    remove_existing_path(&dest)?;
+    copy_dir_all(&source, &dest)?;
+    eprintln!("installed skill assets: {}", dest.display());
+    Ok(())
+}
+
+fn copy_dir_all(source: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest)
+        .map_err(|err| format!("failed to create {}: {err}", dest.display()))?;
+    for entry in
+        fs::read_dir(source).map_err(|err| format!("failed to read {}: {err}", source.display()))?
+    {
+        let entry = entry.map_err(|err| format!("failed to read {}: {err}", source.display()))?;
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|err| format!("failed to inspect {}: {err}", source_path.display()))?;
+        if file_type.is_dir() {
+            copy_dir_all(&source_path, &dest_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &dest_path).map_err(|err| {
+                format!(
+                    "failed to copy {} to {}: {err}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -608,6 +657,73 @@ mod tests {
     }
 
     #[test]
+    fn install_built_binary_copies_skill_assets_to_cargo_home_share() {
+        let workspace = temp_test_dir("workspace");
+        let cargo_home = temp_test_dir("cargo-home");
+        let built = workspace.join("target/debug/spur");
+        fs::create_dir_all(built.parent().unwrap()).unwrap();
+        fs::write(&built, "fake spur binary").unwrap();
+        let asset = workspace.join("assets/skills/package-skill/SKILL.md");
+        fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        fs::write(
+            &asset,
+            "---\nname: package-skill\ndescription: packaged\n---\nbody\n",
+        )
+        .unwrap();
+
+        let output = Command::new(env::current_exe().unwrap())
+            .arg("tests::install_built_binary_child_asserts_skill_asset_copy")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env("SPUR_XTASK_INSTALL_ASSET_CHILD", "1")
+            .env("SPUR_XTASK_WORKSPACE", &workspace)
+            .env("CARGO_HOME", &cargo_home)
+            .output()
+            .expect("child test process should run");
+
+        assert!(
+            output.status.success(),
+            "child install test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("1 passed"),
+            "expected exactly one child test to run, got stdout:\n{stdout}"
+        );
+    }
+
+    #[test]
+    fn install_built_binary_child_asserts_skill_asset_copy() {
+        if env::var_os("SPUR_XTASK_INSTALL_ASSET_CHILD").is_none() {
+            return;
+        }
+        let workspace = PathBuf::from(env::var_os("SPUR_XTASK_WORKSPACE").unwrap());
+
+        install_built_binary(&workspace, true, "spur").unwrap();
+
+        let installed_asset = cargo_home_bin()
+            .parent()
+            .unwrap()
+            .join("share/spur/skills/package-skill/SKILL.md");
+        assert_eq!(
+            fs::read_to_string(installed_asset).unwrap(),
+            "---\nname: package-skill\ndescription: packaged\n---\nbody\n"
+        );
+    }
+
+    #[test]
+    fn dist_workspace_includes_skill_assets_for_archives_and_installers() {
+        let raw = fs::read_to_string(workspace_root().join("dist-workspace.toml")).unwrap();
+
+        assert!(
+            raw.contains("include = [") && raw.contains("\"assets\""),
+            "dist-workspace.toml must include the asset tree so cargo-dist archives/installers ship assets/skills"
+        );
+    }
+
+    #[test]
     fn notebook_channel_parser_accepts_flag_and_equals_forms() {
         let parsed = parse_install_options(vec![
             "--notebook-channel".to_owned(),
@@ -713,5 +829,13 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    fn temp_test_dir(label: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = env::temp_dir().join(format!("spur-xtask-{label}-{}-{n}", std::process::id()));
+        fs::create_dir(&path).unwrap();
+        path
     }
 }
