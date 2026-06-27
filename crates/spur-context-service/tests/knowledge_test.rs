@@ -10,8 +10,8 @@ const REVISION: &str = "1.0.0";
 const DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
 const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
-const LEGACY_EMBEDDING_MODEL: &str = "JinaEmbeddingsV2BaseCode";
-const LEGACY_EMBED_TEXT_VERSION: &str = "v2-jina-code";
+const LEGACY_EMBEDDING_MODEL: &str = "LegacyEmbeddingModel";
+const LEGACY_EMBED_TEXT_VERSION: &str = "v0-legacy";
 
 #[test]
 fn bm25_only_search_returns_ranked_code_and_docs() -> Result<()> {
