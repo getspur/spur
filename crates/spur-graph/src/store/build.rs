@@ -1200,11 +1200,13 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
     let workspace_index = import_workspace_index_from_buckets(buckets);
     let mut external_imports = ExternalImportRegistry::from_buckets(buckets);
     let symbols_by_entity_name = symbols_by_entity_name_from_buckets(buckets);
+    let mut current_symbol_ids = current_symbol_ids_from_buckets(buckets);
     let (file_import_index, import_ambiguous_unresolved) = rebind_import_edges(
         buckets,
         &workspace_index,
         &symbols_by_entity_name,
         &mut external_imports,
+        &mut current_symbol_ids,
     );
     let remaining_ambiguous_unresolved = rebind_remaining_edges(
         buckets,
@@ -1212,6 +1214,7 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
         &symbols_by_entity_name,
         &file_import_index,
         &mut external_imports,
+        &mut current_symbol_ids,
     );
     external_imports.write_to_buckets(buckets);
     let ambiguous_unresolved = import_ambiguous_unresolved + remaining_ambiguous_unresolved;
@@ -1221,6 +1224,14 @@ fn rebind_cross_file_edges(buckets: &mut BTreeMap<String, FileBucket>) {
             "spur-graph: left ambiguous cross-file edges unresolved"
         );
     }
+}
+
+fn current_symbol_ids_from_buckets(buckets: &BTreeMap<String, FileBucket>) -> HashSet<String> {
+    buckets
+        .values()
+        .flat_map(|bucket| bucket.symbols.iter())
+        .map(|symbol| symbol.stable_symbol_id.clone())
+        .collect()
 }
 
 fn symbols_by_entity_name_from_buckets(
@@ -1252,6 +1263,7 @@ fn rebind_import_edges(
     workspace_index: &ImportWorkspaceIndex,
     symbols_by_entity_name: &BTreeMap<String, Vec<RebindTarget>>,
     external_imports: &mut ExternalImportRegistry,
+    current_symbol_ids: &mut HashSet<String>,
 ) -> (FileImportIndex, usize) {
     let workspace_targets_by_stable_id = workspace_targets_by_stable_id(symbols_by_entity_name);
     let mut file_import_index = FileImportIndex::new();
@@ -1282,8 +1294,10 @@ fn rebind_import_edges(
                         source_file_path,
                         workspace_index,
                         external_imports,
+                        current_symbol_ids,
                     );
                 }
+                drop_dangling_stamped_target(edge, current_symbol_ids);
                 record_resolved_workspace_import(
                     &mut file_import_index,
                     source_file_path,
@@ -1299,6 +1313,7 @@ fn rebind_import_edges(
                     source_file_path,
                     workspace_index,
                     external_imports,
+                    current_symbol_ids,
                 ) {
                     continue;
                 }
@@ -1320,6 +1335,7 @@ fn rebind_import_edges(
                     source_file_path,
                     workspace_index,
                     external_imports,
+                    current_symbol_ids,
                 ) {
                     continue;
                 }
@@ -1332,6 +1348,7 @@ fn rebind_import_edges(
                     source_file_path,
                     workspace_index,
                     external_imports,
+                    current_symbol_ids,
                 ) {
                     continue;
                 }
@@ -1368,6 +1385,7 @@ fn rebind_remaining_edges(
     symbols_by_entity_name: &BTreeMap<String, Vec<RebindTarget>>,
     file_import_index: &FileImportIndex,
     external_imports: &mut ExternalImportRegistry,
+    current_symbol_ids: &mut HashSet<String>,
 ) -> usize {
     let mut ambiguous_unresolved = 0usize;
 
@@ -1396,8 +1414,10 @@ fn rebind_remaining_edges(
                         source_file_path,
                         workspace_index,
                         external_imports,
+                        current_symbol_ids,
                     );
                 }
+                drop_dangling_stamped_target(edge, current_symbol_ids);
                 continue;
             }
             if edge.relation == RelationKind::Links {
@@ -1473,6 +1493,20 @@ fn rebind_remaining_edges(
         }
     }
     ambiguous_unresolved
+}
+
+fn drop_dangling_stamped_target(
+    edge: &mut GraphEdgeArtifact,
+    current_symbol_ids: &HashSet<String>,
+) {
+    if resolution_is_stamped(edge)
+        && edge
+            .target_stable_symbol_id
+            .as_deref()
+            .is_some_and(|target_id| !current_symbol_ids.contains(target_id))
+    {
+        edge.target_stable_symbol_id = None;
+    }
 }
 
 fn import_licensed_call_target<'a>(
@@ -1829,6 +1863,7 @@ fn bind_external_import_edge(
     source_file_path: &str,
     workspace_index: &ImportWorkspaceIndex,
     external_imports: &mut ExternalImportRegistry,
+    current_symbol_ids: &mut HashSet<String>,
 ) -> bool {
     if edge.relation != RelationKind::Imports {
         return false;
@@ -1842,7 +1877,9 @@ fn bind_external_import_edge(
         return false;
     };
 
-    edge.target_stable_symbol_id = Some(external_imports.bind_external(path, name));
+    let stable_symbol_id = external_imports.bind_external(path, name);
+    current_symbol_ids.insert(stable_symbol_id.clone());
+    edge.target_stable_symbol_id = Some(stable_symbol_id);
     edge.bind_method = Some("external".to_owned());
     true
 }
@@ -2388,11 +2425,11 @@ mod tests {
 
     use super::{
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
-        compose_artifact, empty_bucket, import_workspace_index_from_buckets,
-        manifest_version_from_query_bytes, rebind_cross_file_edges, rebind_import_edges,
-        rebind_remaining_edges, symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry,
-        ExternalImportRegistry, FileImportIndex, ManifestQueryBytes, RebindTarget,
-        GRAPH_INDEX_VERSION_TEMPORAL,
+        compose_artifact, current_symbol_ids_from_buckets, empty_bucket,
+        import_workspace_index_from_buckets, manifest_version_from_query_bytes,
+        rebind_cross_file_edges, rebind_import_edges, rebind_remaining_edges,
+        symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry, ExternalImportRegistry,
+        FileImportIndex, ManifestQueryBytes, RebindTarget, GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
@@ -2856,12 +2893,14 @@ mod tests {
         let workspace_index = import_workspace_index_from_buckets(&buckets);
         let symbols_by_entity_name = symbols_by_entity_name_from_buckets(&buckets);
         let mut external_imports = ExternalImportRegistry::from_buckets(&buckets);
+        let mut current_symbol_ids = current_symbol_ids_from_buckets(&buckets);
 
         let (file_import_index, ambiguous_unresolved) = rebind_import_edges(
             &mut buckets,
             &workspace_index,
             &symbols_by_entity_name,
             &mut external_imports,
+            &mut current_symbol_ids,
         );
 
         assert_eq!(ambiguous_unresolved, 0);
@@ -2930,6 +2969,7 @@ mod tests {
         let workspace_index = import_workspace_index_from_buckets(&buckets);
         let symbols_by_entity_name = symbols_by_entity_name_from_buckets(&buckets);
         let mut external_imports = ExternalImportRegistry::from_buckets(&buckets);
+        let mut current_symbol_ids = current_symbol_ids_from_buckets(&buckets);
         let file_import_index = FileImportIndex::from([(
             "crates/crate-a/src/lib.rs".to_owned(),
             BTreeMap::from([(
@@ -2950,6 +2990,7 @@ mod tests {
             &symbols_by_entity_name,
             &file_import_index,
             &mut external_imports,
+            &mut current_symbol_ids,
         );
 
         assert_eq!(ambiguous_unresolved, 0);
@@ -3009,6 +3050,7 @@ mod tests {
         let workspace_index = import_workspace_index_from_buckets(&buckets);
         let symbols_by_entity_name = symbols_by_entity_name_from_buckets(&buckets);
         let mut external_imports = ExternalImportRegistry::from_buckets(&buckets);
+        let mut current_symbol_ids = current_symbol_ids_from_buckets(&buckets);
         let file_import_index = FileImportIndex::from([(
             "crates/crate-a/src/lib.rs".to_owned(),
             BTreeMap::from([(
@@ -3029,6 +3071,7 @@ mod tests {
             &symbols_by_entity_name,
             &file_import_index,
             &mut external_imports,
+            &mut current_symbol_ids,
         );
 
         let edges = &buckets["crates/crate-a/src/lib.rs"].edges;
