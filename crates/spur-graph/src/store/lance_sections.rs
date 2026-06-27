@@ -4829,8 +4829,11 @@ mod tests {
         assert_eq!(
             batch_texts,
             vec![
-                vec!["one embed text".to_owned(), "two embed text".to_owned()],
-                vec!["three embed text".to_owned()],
+                vec![
+                    "title: none | text: one embed text".to_owned(),
+                    "title: none | text: two embed text".to_owned(),
+                ],
+                vec!["title: none | text: three embed text".to_owned()],
             ]
         );
         assert!(vectors.iter().all(Option::is_some));

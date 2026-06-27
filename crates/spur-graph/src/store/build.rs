@@ -127,6 +127,16 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         bytes: include_bytes!("../../queries/shell/spur-edges.scm"),
     },
     ManifestQueryBytes {
+        language: "sql",
+        query: "tags",
+        bytes: include_bytes!("../../queries/sql/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "sql",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/sql/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
         language: "typescript",
         query: "tags",
         bytes: include_bytes!("../../queries/typescript/tags.scm"),
