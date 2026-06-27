@@ -65,6 +65,7 @@ Legend:
 | Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
 | Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - |
 | Shell | - | Y | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Sql | Y | Y | - | - | - | Y | Y | - | - | Y | - | Y | - | - | - |
 | Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - |
 | JupyterNotebook | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 
@@ -102,21 +103,21 @@ This table is the relation-level analogue of the Definition Coverage Matrix and 
 seed of the Tier-0 ontology realization contract
 (`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
 
-| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Lua | Shell | Markdown | JupyterNotebook |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y(links) | — |
-| calls | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| constructs | Y | Y | Y | Y | Y | Y | Y | — | — | — | — |
-| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
-| produces | — | — | — | — | — | — | — | — | — | — | Y |
-| consumes | — | — | — | — | — | — | — | — | — | — | Y |
-| binds | — | — | — | — | — | — | — | — | — | — | Y |
-| emits | — | — | — | — | — | — | — | — | — | — | Y |
-| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| references (HOF/notebook facts) | Y | Y | Y | Y | Y | — | Y | — | — | — | Y |
-| links | — | — | — | — | — | — | — | — | — | Y | — |
-| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — |
-| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — |
+| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Lua | Shell | Sql | Markdown | JupyterNotebook |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | Y(links) | — |
+| calls | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| constructs | Y | Y | Y | Y | Y | Y | Y | — | — | Y | — | — |
+| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| produces | — | — | — | — | — | — | — | — | — | — | — | Y |
+| consumes | — | — | — | — | — | — | — | — | — | — | — | Y |
+| binds | — | — | — | — | — | — | — | — | — | — | — | Y |
+| emits | — | — | — | — | — | — | — | — | — | — | — | Y |
+| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| references (HOF/notebook facts) | Y | Y | Y | Y | Y | — | Y | — | — | Y | — | Y |
+| links | — | — | — | — | — | — | — | — | — | — | Y | — |
+| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — |
+| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — |
 
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
