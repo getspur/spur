@@ -111,6 +111,7 @@ fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
         | Language::Cpp
         | Language::Lua
         | Language::Shell
+        | Language::Sql
         | Language::JupyterNotebook => SymbolQueryPolicy::ReuseTags,
         Language::Markdown => {
             SymbolQueryPolicy::Dedicated(include_str!("../../queries/markdown/symbols.scm"))
