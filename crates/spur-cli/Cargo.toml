@@ -53,6 +53,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
+nix = { version = "0.29", features = ["resource"] }
 directories = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }
