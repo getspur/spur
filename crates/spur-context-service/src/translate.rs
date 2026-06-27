@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-const DEFAULT_EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
+const DEFAULT_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
 const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
 
 #[derive(Debug)]
@@ -916,13 +916,36 @@ fn insert_section_bodies(
     } else {
         "array_length(regexp_extract_all(COALESCE(body_text, ''), '[[:alnum:]]+'))::INTEGER"
     };
+    let vector_expr = if columns.contains("vector") {
+        "vector::FLOAT[]"
+    } else {
+        "CAST(NULL AS FLOAT[])"
+    };
+    let model_expr = if columns.contains("embedding_model") {
+        format!(
+            "COALESCE(embedding_model, {})",
+            sql_string(DEFAULT_EMBEDDING_MODEL)
+        )
+    } else {
+        sql_string(DEFAULT_EMBEDDING_MODEL)
+    };
+    let input_hash_expr = if columns.contains("embedding_input_hash") {
+        "embedding_input_hash".to_owned()
+    } else if columns.contains("content_hash") {
+        "content_hash".to_owned()
+    } else if columns.contains("body_hash") {
+        "body_hash".to_owned()
+    } else {
+        "CAST(NULL AS VARCHAR)".to_owned()
+    };
 
     let template = format!(
         r"
         INSERT INTO section_bodies (
             section_id, package, source, revision, revision_kind,
             semver_major, semver_minor, semver_patch,
-            file_path, title, body_text, body_hash, token_count
+            file_path, title, body_text, body_hash, token_count,
+            vector, embedding_model, embedding_input_hash, embed_text_version
         )
         SELECT
             {section_id_expr} AS section_id,
@@ -937,7 +960,11 @@ fn insert_section_bodies(
             {title_expr} AS title,
             body_text,
             {body_hash_expr} AS body_hash,
-            {token_count_expr} AS token_count
+            {token_count_expr} AS token_count,
+            {vector_expr} AS vector,
+            {model_expr} AS embedding_model,
+            {input_hash_expr} AS embedding_input_hash,
+            {embed_text_version} AS embed_text_version
         FROM __SOURCE_SQL__
         ",
         section_id_expr = section_id_expr,
@@ -951,6 +978,10 @@ fn insert_section_bodies(
         title_expr = title_expr,
         body_hash_expr = body_hash_expr,
         token_count_expr = token_count_expr,
+        vector_expr = vector_expr,
+        model_expr = model_expr,
+        input_hash_expr = input_hash_expr,
+        embed_text_version = sql_string(DEFAULT_EMBED_TEXT_VERSION),
     );
 
     match insert_from_source(
@@ -1367,11 +1398,8 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str, data_path: &st
                     "[translate] using explicit AWS credentials (provider={})",
                     c.provider
                 );
-                let token_clause = if c.session_token.is_some() {
-                    format!(
-                        ", SESSION_TOKEN '{}'",
-                        c.session_token.as_ref().unwrap().replace('\'', "''")
-                    )
+                let token_clause = if let Some(session_token) = &c.session_token {
+                    format!(", SESSION_TOKEN '{}'", session_token.replace('\'', "''"))
                 } else {
                     String::new()
                 };

@@ -14,9 +14,7 @@ use arrow_array::{
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use lancedb::index::{
-    scalar::FtsIndexBuilder, vector::IvfHnswSqIndexBuilder, Index, IndexConfig, IndexType,
-};
+use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexConfig, IndexType};
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use lancedb::table::OptimizeAction;
 
@@ -41,7 +39,8 @@ const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE"
 pub const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
 const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
-const EMBEDDING_GEMMA_EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
+const EMBEDDING_GEMMA_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
+const EMBEDDING_GEMMA_SYMBOL_EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
 const EMBEDDING_INPUT_HASH_COLUMN: &str = "embedding_input_hash";
 const EMBEDDING_MODEL_COLUMN: &str = "embedding_model";
 const INDEX_REBUILD_MIN_ROWS: usize = 50;
@@ -106,11 +105,24 @@ pub fn embedding_query_text_for_model(
     Cow::Owned(format!("task: code retrieval | query: {query}"))
 }
 
+fn embedding_document_title(title: &str) -> &str {
+    let title = title.trim();
+    if title.is_empty() {
+        "none"
+    } else {
+        title
+    }
+}
+
 fn embedding_document_text_for_model(
+    title: &str,
     text: &str,
     _embedding_model: EmbeddingModelSelection,
-) -> Cow<'_, str> {
-    Cow::Owned(format!("title: none | text: {text}"))
+) -> Cow<'static, str> {
+    Cow::Owned(format!(
+        "title: {} | text: {text}",
+        embedding_document_title(title)
+    ))
 }
 
 // Vector reuse is intentionally split across two scopes: in-place incremental
@@ -752,15 +764,7 @@ async fn write_sections_dataset_async_with_embedding_model(
                     phase: SidecarPhase::Sections,
                 },
             );
-            let mut should_optimize_existing_indices = ensure_body_text_fts_index(table).await?;
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::Indexing {
-                    label: "vector HNSW",
-                    phase: SidecarPhase::Sections,
-                },
-            );
-            should_optimize_existing_indices |= ensure_vector_index(table).await?;
+            let should_optimize_existing_indices = ensure_body_text_fts_index(table).await?;
             if should_optimize_existing_indices {
                 optimize_existing_indices(table, "section").await?;
             }
@@ -1043,15 +1047,7 @@ async fn write_symbol_rows_dataset_async(
                     phase: SidecarPhase::CodeSymbols,
                 },
             );
-            let mut should_optimize_existing_indices = ensure_code_symbol_fts_index(table).await?;
-            emit_progress(
-                progress,
-                SectionSidecarProgressEvent::Indexing {
-                    label: "vector HNSW",
-                    phase: SidecarPhase::CodeSymbols,
-                },
-            );
-            should_optimize_existing_indices |= ensure_code_symbol_vector_index(table).await?;
+            let should_optimize_existing_indices = ensure_code_symbol_fts_index(table).await?;
             if should_optimize_existing_indices {
                 optimize_existing_indices(table, "code symbol").await?;
             }
@@ -1102,38 +1098,6 @@ async fn ensure_body_text_fts_index(table: &lancedb::Table) -> Result<bool> {
     Ok(false)
 }
 
-async fn ensure_vector_index(table: &lancedb::Table) -> Result<bool> {
-    let vector_rows = table
-        .count_rows(Some("vector IS NOT NULL".to_owned()))
-        .await
-        .context("failed to count LanceDB section vector rows")?;
-
-    if vector_rows == 0 {
-        return Ok(false);
-    }
-
-    if has_matching_index(
-        &table
-            .list_indices()
-            .await
-            .context("failed to list LanceDB section indices")?,
-        "vector",
-        is_vector_index_type,
-    ) {
-        return Ok(true);
-    }
-
-    table
-        .create_index(
-            &["vector"],
-            Index::IvfHnswSq(IvfHnswSqIndexBuilder::default()),
-        )
-        .execute()
-        .await
-        .context("failed to create LanceDB vector HNSW index")?;
-    Ok(false)
-}
-
 fn has_matching_index(
     indices: &[IndexConfig],
     column: &str,
@@ -1156,19 +1120,6 @@ async fn optimize_existing_indices(table: &lancedb::Table, table_label: &str) ->
     Ok(())
 }
 
-fn is_vector_index_type(index_type: &IndexType) -> bool {
-    matches!(
-        index_type,
-        IndexType::IvfFlat
-            | IndexType::IvfSq
-            | IndexType::IvfPq
-            | IndexType::IvfRq
-            | IndexType::IvfHnswPq
-            | IndexType::IvfHnswSq
-            | IndexType::IvfHnswFlat
-    )
-}
-
 async fn ensure_code_symbol_fts_index(table: &lancedb::Table) -> Result<bool> {
     if has_matching_index(
         &table
@@ -1186,38 +1137,6 @@ async fn ensure_code_symbol_fts_index(table: &lancedb::Table) -> Result<bool> {
         .execute()
         .await
         .context("failed to create LanceDB embed_text FTS index")?;
-    Ok(false)
-}
-
-async fn ensure_code_symbol_vector_index(table: &lancedb::Table) -> Result<bool> {
-    let vector_rows = table
-        .count_rows(Some("vector IS NOT NULL".to_owned()))
-        .await
-        .context("failed to count LanceDB code symbol vector rows")?;
-
-    if vector_rows == 0 {
-        return Ok(false);
-    }
-
-    if has_matching_index(
-        &table
-            .list_indices()
-            .await
-            .context("failed to list LanceDB code symbol indices")?,
-        "vector",
-        is_vector_index_type,
-    ) {
-        return Ok(true);
-    }
-
-    table
-        .create_index(
-            &["vector"],
-            Index::IvfHnswSq(IvfHnswSqIndexBuilder::default()),
-        )
-        .execute()
-        .await
-        .context("failed to create LanceDB code symbol vector HNSW index")?;
     Ok(false)
 }
 
@@ -1830,6 +1749,7 @@ impl<'a> SectionRowBatcher<'a> {
             parent_stable_id: None,
             content_hash,
             embedding_input_hash: section_embedding_input_hash_for_model(
+                &manifest.path,
                 source,
                 self.embedding_model,
             ),
@@ -2002,7 +1922,11 @@ fn section_row(
         return Ok(None);
     };
     let body_text = body_text.to_owned();
-    let embedding_input_hash = section_embedding_input_hash_for_model(&body_text, embedding_model);
+    let embedding_input_hash = section_embedding_input_hash_for_model(
+        &section.qualified_name,
+        &body_text,
+        embedding_model,
+    );
     Ok(Some(SectionRow {
         stable_symbol_id: section.stable_symbol_id.clone(),
         file_path: section.file_path.clone(),
@@ -2126,10 +2050,18 @@ fn section_embed_content_hash_for_model(
 }
 
 fn section_embedding_input_hash_for_model(
+    title: &str,
     body_text: &str,
     embedding_model: EmbeddingModelSelection,
 ) -> String {
-    section_embed_content_hash_for_model(&blake3_hex(body_text.as_bytes()), embedding_model)
+    let input_hash = blake3_hex(
+        format!(
+            "title\0{}\0text\0{body_text}",
+            embedding_document_title(title)
+        )
+        .as_bytes(),
+    );
+    section_embed_content_hash_for_model(&input_hash, embedding_model)
 }
 
 fn symbol_embed_content_hash_for_model(
@@ -2138,7 +2070,8 @@ fn symbol_embed_content_hash_for_model(
     _embedding_model: EmbeddingModelSelection,
 ) -> String {
     blake3_hex(
-        format!("{EMBEDDING_GEMMA_EMBED_TEXT_VERSION}:symbol\0{source_content_hash}").as_bytes(),
+        format!("{EMBEDDING_GEMMA_SYMBOL_EMBED_TEXT_VERSION}:symbol\0{source_content_hash}")
+            .as_bytes(),
     )
 }
 
@@ -2615,7 +2548,11 @@ fn section_embedding_inputs(
         .map(|(row_index, row)| EmbeddingTextInput {
             row_index,
             stable_symbol_id: row.stable_symbol_id.as_str(),
-            text: embedding_document_text_for_model(row.body_text.as_str(), embedding_model),
+            text: embedding_document_text_for_model(
+                row.qualified_name.as_str(),
+                row.body_text.as_str(),
+                embedding_model,
+            ),
         })
         .collect()
 }
@@ -2630,7 +2567,7 @@ fn symbol_embedding_inputs(
         .map(|(row_index, row)| EmbeddingTextInput {
             row_index,
             stable_symbol_id: row.stable_symbol_id.as_str(),
-            text: embedding_document_text_for_model(row.embed_text.as_str(), embedding_model),
+            text: embedding_document_text_for_model("", row.embed_text.as_str(), embedding_model),
         })
         .collect()
 }
@@ -3386,14 +3323,16 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn section_row_fixture(heading_level: u8, body_text: String) -> SectionRow {
+        let qualified_name = "docs/example.md::Section".to_owned();
         let embedding_input_hash = section_embedding_input_hash_for_model(
+            &qualified_name,
             &body_text,
             EmbeddingModelSelection::EmbeddingGemma300M,
         );
         SectionRow {
             stable_symbol_id: "symbol".to_owned(),
             file_path: "docs/example.md".to_owned(),
-            qualified_name: "docs/example.md::Section".to_owned(),
+            qualified_name,
             heading_level,
             body_text,
             body_byte_start: 0,
@@ -3413,14 +3352,16 @@ mod tests {
         content_hash: &str,
     ) -> SectionRow {
         let body_text = format!("## {stable_symbol_id}\n\nBody.");
+        let qualified_name = stable_symbol_id.to_owned();
         let embedding_input_hash = section_embedding_input_hash_for_model(
+            &qualified_name,
             &body_text,
             EmbeddingModelSelection::EmbeddingGemma300M,
         );
         SectionRow {
             stable_symbol_id: stable_symbol_id.to_owned(),
             file_path: file_path.to_owned(),
-            qualified_name: stable_symbol_id.to_owned(),
+            qualified_name,
             heading_level: 2,
             body_text,
             body_byte_start: 0,
@@ -3959,6 +3900,81 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn sidecar_indexing_progress_reports_only_fts_indexes() {
+        let root = tempfile::tempdir().expect("root");
+        let sidecar_dir = tempfile::tempdir().expect("sidecar");
+        let markdown_source = "## Topic\n\nSearchable markdown body.\n";
+        let rust_source = "/// Searchable symbol docs.\npub fn searchable_symbol() {}\n";
+        write_source(root.path(), "docs/topic.md", markdown_source);
+        write_source(root.path(), "src/lib.rs", rust_source);
+        let artifact = graph_artifact_for_code_files(
+            "fts-indexing-only",
+            vec![
+                (
+                    "docs/topic.md",
+                    markdown_source,
+                    markdown_section_symbols(
+                        "docs/topic.md",
+                        markdown_source,
+                        &[("section:topic", "## Topic")],
+                    ),
+                ),
+                (
+                    "src/lib.rs",
+                    rust_source,
+                    vec![code_symbol(
+                        "src/lib.rs",
+                        rust_source,
+                        "sym:searchable",
+                        "searchable_symbol",
+                    )],
+                ),
+            ],
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let progress = {
+            let events = Arc::clone(&events);
+            move |event| events.lock().expect("events").push(event)
+        };
+
+        let row_counts = write_sections_dataset_with_sidecar_options_and_progress(
+            &artifact,
+            root.path(),
+            sidecar_dir.path(),
+            SectionSidecarOptions {
+                embedding: SectionEmbeddingOptions {
+                    skip_embeddings: true,
+                    batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
+                },
+                write_batch_size: SECTION_WRITE_BATCH_SIZE_DEFAULT,
+                previous_artifact_dir: None,
+                delta: None,
+            },
+            Some(&progress),
+        )
+        .expect("write sidecar");
+
+        assert_eq!(row_counts.section_bodies, 1);
+        assert_eq!(row_counts.code_symbols, 1);
+        let events = events.lock().expect("events").clone();
+        let indexing_events = events
+            .iter()
+            .filter_map(|event| match event {
+                SectionSidecarProgressEvent::Indexing { label, phase } => Some((*phase, *label)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            indexing_events,
+            vec![
+                (SidecarPhase::Sections, "body_text FTS"),
+                (SidecarPhase::CodeSymbols, "embed_text FTS"),
+            ],
+            "sidecar writes should not report unused LanceDB vector indexes"
+        );
+    }
+
     fn graph_artifact_for_path(
         stable_file_id: &str,
         path: &str,
@@ -4050,7 +4066,10 @@ mod tests {
     fn embedding_migration_uses_gemma_contract() {
         assert_eq!(EMBEDDING_GEMMA_EMBED_MODEL_NAME, "EmbeddingGemma300M");
         assert_eq!(EMBEDDING_VECTOR_DIMENSIONS, 768);
-        assert_eq!(EMBEDDING_GEMMA_EMBED_TEXT_VERSION, "v3-embeddinggemma-300m");
+        assert_eq!(
+            EMBEDDING_GEMMA_EMBED_TEXT_VERSION,
+            "v4-embeddinggemma-300m-titled"
+        );
     }
 
     #[test]
@@ -4134,6 +4153,7 @@ mod tests {
         );
         assert_ne!(
             section_embedding_input_hash_for_model(
+                "same title",
                 "same body",
                 EmbeddingModelSelection::EmbeddingGemma300M
             ),
@@ -4146,6 +4166,22 @@ mod tests {
                 EmbeddingModelSelection::EmbeddingGemma300M
             ),
             blake3_hex("same embed text".as_bytes())
+        );
+        let legacy_symbol_input_hash = blake3_hex(
+            format!(
+                "v3-embeddinggemma-300m:symbol\0{}",
+                blake3_hex("same embed text".as_bytes())
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            symbol_embedding_input_hash_for_model(
+                "same embed text",
+                false,
+                EmbeddingModelSelection::EmbeddingGemma300M
+            ),
+            legacy_symbol_input_hash,
+            "symbol embedding hashes must not change for the section title prompt update"
         );
     }
 
@@ -4169,13 +4205,55 @@ mod tests {
             section_embedding_inputs(&section_rows, EmbeddingModelSelection::EmbeddingGemma300M)[0]
                 .text
                 .as_ref(),
-            "title: none | text: ## Install\n\nInstall body."
+            "title: docs/example.md::Section | text: ## Install\n\nInstall body."
         );
         assert_eq!(
             symbol_embedding_inputs(&symbol_rows, EmbeddingModelSelection::EmbeddingGemma300M)[0]
                 .text
                 .as_ref(),
             "title: none | text: one embed text"
+        );
+    }
+
+    #[test]
+    fn section_embedding_input_hash_includes_qualified_name() {
+        let source = "## Shared\n\nSame body.";
+        let section = |stable_symbol_id: &str, qualified_name: &str| GraphSymbolArtifact {
+            stable_symbol_id: stable_symbol_id.to_owned(),
+            file_path: "docs/example.md".to_owned(),
+            byte_range: [0, source.len()],
+            line_range: [1, 3],
+            entity_name: qualified_name.to_owned(),
+            qualified_name: qualified_name.to_owned(),
+            symbol_kind: "section".to_owned(),
+            anchor_hash: format!("anchor:{stable_symbol_id}"),
+            enclosing_scope: None,
+        };
+
+        let first = section_row(
+            &section("section-one", "Guide::Install"),
+            source,
+            "content-hash",
+            EmbeddingModelSelection::EmbeddingGemma300M,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("first section row")
+        .expect("first section row present");
+        let second = section_row(
+            &section("section-two", "Guide::Usage"),
+            source,
+            "content-hash",
+            EmbeddingModelSelection::EmbeddingGemma300M,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("second section row")
+        .expect("second section row present");
+
+        assert_ne!(
+            first.embedding_input_hash, second.embedding_input_hash,
+            "same section body under different headings must not reuse vectors"
         );
     }
 
@@ -4877,6 +4955,7 @@ mod tests {
             heading_level: 2,
             body_text: old_changed_body.to_owned(),
             embedding_input_hash: section_embedding_input_hash_for_model(
+                "changed",
                 old_changed_body,
                 EmbeddingModelSelection::EmbeddingGemma300M,
             ),
@@ -4898,6 +4977,7 @@ mod tests {
             SectionRow {
                 body_text: new_changed_body.to_owned(),
                 embedding_input_hash: section_embedding_input_hash_for_model(
+                    "changed",
                     new_changed_body,
                     EmbeddingModelSelection::EmbeddingGemma300M,
                 ),
@@ -5119,14 +5199,17 @@ mod tests {
         .await
         .expect("connect a");
         let unchanged_input_hash = section_embedding_input_hash_for_model(
+            "section-unchanged",
             "## Stable\n\nUnchanged body.",
             EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let old_changed_input_hash = section_embedding_input_hash_for_model(
+            "section-changed",
             "## Changed\n\nOld body.",
             EmbeddingModelSelection::EmbeddingGemma300M,
         );
         let new_changed_input_hash = section_embedding_input_hash_for_model(
+            "section-changed",
             "## Changed\n\nNew body.",
             EmbeddingModelSelection::EmbeddingGemma300M,
         );
