@@ -2529,7 +2529,7 @@ impl TextEmbeddingService {
         let mut model = model
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        model.embed(texts.to_vec(), None)
+        model.embed(texts, None)
     }
 }
 

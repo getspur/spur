@@ -857,7 +857,7 @@ async fn exact_graph_context_for_result(
         return ExactGraphContext::default();
     };
 
-    let symbol_info = spur_graph::mcp::code_symbol_info(&json!({
+    let symbol_info = spur_graph::mcp::code_symbol_info_rebuild_aware(&json!({
         "selector": first_selector,
     }))
     .await;
@@ -1812,6 +1812,7 @@ fn is_test_file(file_path: &str) -> bool {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     #[cfg(feature = "embed")]
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -1825,7 +1826,10 @@ mod tests {
     use duckdb::Connection;
 
     use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
-    use spur_graph::{artifact_from_facts, build_facts, EMBEDDING_VECTOR_DIMENSIONS};
+    use spur_graph::{
+        artifact_from_facts, build_facts, write_artifact_parquet, write_current_pointer,
+        EMBEDDING_VECTOR_DIMENSIONS,
+    };
 
     const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -2089,6 +2093,51 @@ mod tests {
         .expect("create graph reasoning fixture views");
         drop(conn);
         (temp_dir, db_path)
+    }
+
+    fn git(worktree: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .output()
+            .unwrap_or_else(|error| panic!("run git {}: {error}", args.join(" ")));
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("git stdout UTF-8")
+    }
+
+    fn commit_fixture(worktree: &Path) {
+        git(worktree, &["init", "-q"]);
+        git(worktree, &["config", "user.email", "test@spur"]);
+        git(worktree, &["config", "user.name", "SPUR Test"]);
+        git(worktree, &["add", "."]);
+        git(worktree, &["commit", "-m", "fixture"]);
+    }
+
+    fn write_graph_artifact_for_test(worktree: &Path, artifact: &spur_graph::GraphIndexArtifact) {
+        let artifact_dir = worktree.join(".spur/graph/test-artifact.parquet");
+        let written = write_artifact_parquet(
+            artifact,
+            &artifact_dir,
+            spur_graph::WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write graph artifact");
+        write_current_pointer(worktree, &written).expect("write graph CURRENT pointer");
+    }
+
+    fn write_minimal_graph_fixture(worktree: &Path, source: &str) {
+        fs::create_dir_all(worktree.join("src")).expect("create src dir");
+        fs::write(
+            worktree.join("Cargo.toml"),
+            "[package]\nname = \"kcp-graph-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write fixture manifest");
+        fs::write(worktree.join("src/lib.rs"), source).expect("write fixture source");
     }
 
     fn kcp2_fixture_repo(include_graph_reasoning_views: bool) -> (tempfile::TempDir, PathBuf) {
@@ -3018,6 +3067,73 @@ pub fn lexical_signal_anchor() {
             .expect("caveats")
             .iter()
             .any(|caveat| caveat["code"] == "analyst_graph_stale"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_staleness_uses_rebuilt_graph_hash() {
+        let worktree = tempfile::tempdir().expect("worktree tempdir");
+        write_minimal_graph_fixture(
+            worktree.path(),
+            "pub fn stable_symbol() -> bool {\n    true\n}\n",
+        );
+        commit_fixture(worktree.path());
+
+        let (facts, _file_counts) = build_facts(worktree.path(), None).expect("build facts");
+        let stale_artifact =
+            artifact_from_facts(&facts, worktree.path()).expect("build stale graph artifact");
+        let stale_graph_hash = stale_artifact.graph_content_hash.clone();
+        let stable_symbol_id = stale_artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.entity_name == "stable_symbol")
+            .expect("stable symbol is indexed")
+            .stable_symbol_id
+            .clone();
+        write_graph_artifact_for_test(worktree.path(), &stale_artifact);
+
+        fs::write(
+            worktree.path().join("src/lib.rs"),
+            "pub fn stable_symbol() -> bool {\n    true\n}\n\npub fn live_symbol() -> bool {\n    stable_symbol()\n}\n",
+        )
+        .expect("dirty fixture source");
+
+        let (_db_dir, db_path) = minimal_analyst_db_with_meta();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "stable symbol",
+            "intent": "review",
+            "scope": "code",
+            "graph_reasoning": {
+                "paths": false,
+                "communities": false,
+                "risk": false
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some(stale_graph_hash.clone()),
+            candidates: vec![candidate(Some(&stable_symbol_id), "stable_symbol", 9.0)],
+        };
+
+        let exact_context =
+            spur_graph::mcp::with_worktree_root_for_request(worktree.path().to_path_buf(), async {
+                exact_graph_context_for_result(&request.base, &result).await
+            })
+            .await;
+        let pack =
+            pack_query_result_v2_with_graph_reasoning(&request, result, exact_context, &db_path)
+                .await;
+
+        assert_eq!(
+            pack["staleness"]["analyst_graph_content_hash"],
+            stale_graph_hash
+        );
+        assert_ne!(
+            pack["staleness"]["exact_graph_hash"], stale_graph_hash,
+            "exact graph hash must come from the rebuilt live graph, not the stale loaded artifact",
+        );
+        assert_eq!(pack["staleness"]["exact_graph_verified"], true);
+        assert_eq!(pack["staleness"]["analyst_matches_exact_graph"], false);
     }
 
     #[tokio::test]
