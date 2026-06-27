@@ -190,16 +190,41 @@ fn query_bm25_candidates(
                   AND $5 IN ('all', 'code')
                   AND COALESCE(symbol_kind, '') NOT IN ('section', 'mcp_tool')
             ),
+            query_runs AS (
+                SELECT run
+                FROM UNNEST(regexp_extract_all($1, '[[:alnum:]_]+')) AS runs(run)
+            ),
             query_terms AS (
                 SELECT DISTINCT term
-                FROM UNNEST(regexp_extract_all(lower($1), '[[:alnum:]]+')) AS terms(term)
+                FROM (
+                    SELECT lower(run) AS term
+                    FROM query_runs
+                    UNION ALL
+                    SELECT lower(split) AS term
+                    FROM query_runs,
+                         UNNEST(regexp_extract_all(run, '([a-z0-9]+|[A-Z][a-z0-9]*)')) AS splits(split)
+                ) emitted_query_terms
                 WHERE term <> ''
             ),
-            tokens AS (
-                SELECT c.candidate_key, token
+            token_runs AS (
+                SELECT row_number() OVER () AS run_id, c.candidate_key, run
                 FROM corpus c,
-                     UNNEST(regexp_extract_all(lower(c.search_text), '[[:alnum:]]+')) AS toks(token)
-                WHERE token <> ''
+                     UNNEST(regexp_extract_all(c.search_text, '[[:alnum:]_]+')) AS runs(run)
+            ),
+            tokens AS (
+                SELECT candidate_key, token
+                FROM (
+                    SELECT DISTINCT candidate_key, run_id, token
+                    FROM (
+                        SELECT candidate_key, run_id, lower(run) AS token
+                        FROM token_runs
+                        UNION ALL
+                        SELECT candidate_key, run_id, lower(split) AS token
+                        FROM token_runs,
+                             UNNEST(regexp_extract_all(run, '([a-z0-9]+|[A-Z][a-z0-9]*)')) AS splits(split)
+                    ) emitted_tokens
+                    WHERE token <> ''
+                ) deduped_tokens
             ),
             lengths AS (
                 SELECT candidate_key, COUNT(*)::DOUBLE AS doc_len
