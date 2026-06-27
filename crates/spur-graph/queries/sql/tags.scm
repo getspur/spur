@@ -62,4 +62,5 @@
   (identifier) @name) @definition.module
 
 (column_definition
-  name: (identifier) @name) @definition.field
+  name: (identifier) @name
+  (#not-match? @name "^[Pp][Aa][Rr][Tt][Ii][Tt][Ii][Oo][Nn][Ee][Dd]$")) @definition.field
