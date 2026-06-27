@@ -379,8 +379,11 @@ pub fn query_context_candidates(
         Err(error) if query_vec_sql.is_some() => {
             hybrid_failed = true;
             tracing::warn!(
-                error = %error,
+                error = %format!("{error:#}"),
                 query,
+                scope = sql_scope,
+                intent = sql_intent,
+                limit,
                 "hybrid search failed; degrading to BM25-only context candidate search"
             );
             query_context_candidates_inner(
