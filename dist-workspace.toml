@@ -31,6 +31,9 @@ precise-builds = true
 ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell", "npm"]
+# Ship bundled skill assets in cargo-dist archives/installers. The runtime
+# resolver checks package-relative assets/skills as well as share/spur/skills.
+include = ["assets"]
 # Generate and dist a source tarball
 source-tarball = false
 # A namespace to use when publishing this package to the npm registry
