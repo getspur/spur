@@ -1,11 +1,11 @@
 //! Skill-based brain prompt resources (Amendment A1).
 //!
 //! Loads SKILL.md files for brain prompt assembly. Bundled defaults are
-//! compiled in via `include_str!`; per-project overrides in `.spur/skills/`
-//! take precedence.
+//! filesystem assets; per-project overrides in `.spur/skills/` take
+//! precedence.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 mod frontmatter;
@@ -13,118 +13,361 @@ mod frontmatter;
 pub mod adapters;
 pub mod installer;
 
-static BUNDLED: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-static BUNDLED_RAW: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+const SPUR_SKILLS_DIR_ENV: &str = "SPUR_SKILLS_DIR";
+const CLAUDE_CODE_ACP_SKILL: &str = "brain-delegation-claude-code-acp";
+const BUNDLED_ALIASES: &[(&str, &str)] = &[("brain-delegation-claude-code", CLAUDE_CODE_ACP_SKILL)];
 
-fn bundled_raw() -> &'static HashMap<&'static str, &'static str> {
-    BUNDLED_RAW.get_or_init(|| {
-        let mut m = HashMap::new();
-        m.insert(
-            "brain-delegation",
-            include_str!("brain-delegation/SKILL.md"),
-        );
-        let claude_skill = include_str!("brain-delegation-claude-code-acp/SKILL.md");
-        m.insert("brain-delegation-claude-code-acp", claude_skill);
-        m.insert("brain-delegation-claude-code", claude_skill);
-        m.insert(
-            "brain-delegation-kiro",
-            include_str!("brain-delegation-kiro/SKILL.md"),
-        );
-        m.insert(
-            "brain-delegation-codex",
-            include_str!("brain-delegation-codex/SKILL.md"),
-        );
-        m.insert(
-            "brain-delegation-gemini",
-            include_str!("brain-delegation-gemini/SKILL.md"),
-        );
-        m.insert(
-            "test-driven-development",
-            include_str!("test-driven-development/SKILL.md"),
-        );
-        m.insert(
-            "systematic-debugging",
-            include_str!("systematic-debugging/SKILL.md"),
-        );
-        m.insert(
-            "verification-before-completion",
-            include_str!("verification-before-completion/SKILL.md"),
-        );
-        m.insert(
-            "receiving-code-review",
-            include_str!("receiving-code-review/SKILL.md"),
-        );
-        m.insert(
-            "requesting-code-review",
-            include_str!("requesting-code-review/SKILL.md"),
-        );
-        m.insert("spur-way", include_str!("spur-way/SKILL.md"));
-        m.insert("beads-lifecycle", include_str!("beads-lifecycle/SKILL.md"));
-        m.insert("worker-signals", include_str!("worker-signals/SKILL.md"));
-        m.insert(
-            "brain-review-gate",
-            include_str!("brain-review-gate/SKILL.md"),
-        );
-        m.insert(
-            "plan-task-discipline",
-            include_str!("plan-task-discipline/SKILL.md"),
-        );
-        m.insert(
-            "worker-mention-routing",
-            include_str!("worker-mention-routing/SKILL.md"),
-        );
-        m.insert("brainstorming", include_str!("brainstorming/SKILL.md"));
-        m.insert("code-explore", include_str!("code-explore/SKILL.md"));
-        m.insert("spur-analyst", include_str!("spur-analyst/SKILL.md"));
-        m.insert(
-            "performance-investigation",
-            include_str!("performance-investigation/SKILL.md"),
-        );
-        m.insert("writing-plans", include_str!("writing-plans/SKILL.md"));
-        m.insert("writing-skills", include_str!("writing-skills/SKILL.md"));
-        m.insert("open-design", include_str!("open-design/SKILL.md"));
-        m.insert(
-            "notebook-data-app",
-            include_str!("notebook-data-app/SKILL.md"),
-        );
-        m
+static WORKSPACE_BUNDLED_RAW: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BundledRootSource {
+    Env,
+    Config,
+    Package,
+    Workspace,
+}
+
+impl BundledRootSource {
+    fn label(self) -> &'static str {
+        match self {
+            BundledRootSource::Env => SPUR_SKILLS_DIR_ENV,
+            BundledRootSource::Config => "[skills].bundled_dir",
+            BundledRootSource::Package => "package asset path",
+            BundledRootSource::Workspace => "workspace assets/skills",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedBundledRoot {
+    path: PathBuf,
+    source: BundledRootSource,
+}
+
+#[derive(Debug, Clone)]
+struct RootCandidate {
+    path: PathBuf,
+    source: BundledRootSource,
+}
+
+impl RootCandidate {
+    fn new(path: PathBuf, source: BundledRootSource) -> Self {
+        Self { path, source }
+    }
+
+    fn render(&self) -> String {
+        format!("{}={}", self.source.label(), self.path.display())
+    }
+}
+
+/// Filesystem-backed catalog of bundled skill assets.
+#[derive(Debug, Clone)]
+pub struct SkillCatalog {
+    bundled_root: PathBuf,
+    source: BundledRootSource,
+}
+
+/// Error returned while resolving or reading bundled skill assets.
+#[derive(Debug, thiserror::Error)]
+pub enum SkillCatalogError {
+    #[error(
+        "missing bundled skill asset root; checked: {checked}; set SPUR_SKILLS_DIR or [skills].bundled_dir to a directory containing skill assets"
+    )]
+    MissingBundledRoot { checked: String },
+
+    #[error("failed to load SPUR config while resolving bundled skills: {source}")]
+    Config {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("failed to read bundled skill asset root {path}: {source}")]
+    ReadRoot {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to read bundled skill `{id}` from {path}: {source}")]
+    ReadSkill {
+        id: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid skill id `{id}`: {reason}")]
+    InvalidSkillId { id: String, reason: String },
+}
+
+impl From<InvalidSkillId> for SkillCatalogError {
+    fn from(e: InvalidSkillId) -> Self {
+        SkillCatalogError::InvalidSkillId {
+            id: e.id,
+            reason: e.reason.to_string(),
+        }
+    }
+}
+
+impl SkillCatalog {
+    pub fn discover(repo_root: &Path) -> Result<Self, SkillCatalogError> {
+        let env_dir = std::env::var_os(SPUR_SKILLS_DIR_ENV).and_then(|value| {
+            if value.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(value))
+            }
+        });
+        let config_dir = configured_bundled_dir(repo_root)?;
+        let selected =
+            select_bundled_root(repo_root, env_dir, config_dir, package_asset_candidates())?;
+        Ok(Self {
+            bundled_root: selected.path,
+            source: selected.source,
+        })
+    }
+
+    fn from_root(root: PathBuf, source: BundledRootSource) -> Self {
+        Self {
+            bundled_root: root,
+            source,
+        }
+    }
+
+    pub fn bundled_root(&self) -> &Path {
+        &self.bundled_root
+    }
+
+    pub fn source(&self) -> &'static str {
+        self.source.label()
+    }
+
+    pub fn load_raw(
+        &self,
+        id: &str,
+        repo_root: &Path,
+    ) -> Result<Option<String>, SkillCatalogError> {
+        if let Some(raw) = read_valid_override(repo_root, id) {
+            return Ok(Some(raw));
+        }
+        self.load_bundled_raw(id)
+    }
+
+    fn load_bundled_raw(&self, id: &str) -> Result<Option<String>, SkillCatalogError> {
+        validate_id(id)?;
+        let canonical = canonical_bundled_id(id);
+        let path = self.bundled_root.join(canonical).join("SKILL.md");
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => Ok(Some(raw)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(SkillCatalogError::ReadSkill {
+                id: canonical.to_string(),
+                path,
+                source,
+            }),
+        }
+    }
+
+    pub fn list_raw(&self, _repo_root: &Path) -> Result<Vec<(String, String)>, SkillCatalogError> {
+        Ok(self.list_bundled_raw_map()?.into_iter().collect())
+    }
+
+    fn list_bundled_raw_map(&self) -> Result<BTreeMap<String, String>, SkillCatalogError> {
+        let entries = std::fs::read_dir(&self.bundled_root).map_err(|source| {
+            SkillCatalogError::ReadRoot {
+                path: self.bundled_root.clone(),
+                source,
+            }
+        })?;
+        let mut by_id = BTreeMap::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| SkillCatalogError::ReadRoot {
+                path: self.bundled_root.clone(),
+                source,
+            })?;
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            validate_id(&id)?;
+            let skill_md = entry.path().join("SKILL.md");
+            if !skill_md.is_file() {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&skill_md).map_err(|source| {
+                SkillCatalogError::ReadSkill {
+                    id: id.clone(),
+                    path: skill_md,
+                    source,
+                }
+            })?;
+            by_id.insert(id, raw);
+        }
+        add_bundled_aliases(&mut by_id);
+        Ok(by_id)
+    }
+}
+
+fn configured_bundled_dir(repo_root: &Path) -> Result<Option<PathBuf>, SkillCatalogError> {
+    let config = spur_acp::config::load_layered(repo_root)
+        .map_err(|source| SkillCatalogError::Config { source })?;
+    Ok(config
+        .skills
+        .bundled_dir
+        .map(|path| absolutize_config_path(repo_root, path)))
+}
+
+fn absolutize_config_path(repo_root: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        repo_root.join(path)
+    }
+}
+
+fn canonical_bundled_id(id: &str) -> &str {
+    BUNDLED_ALIASES
+        .iter()
+        .find_map(|(alias, target)| (*alias == id).then_some(*target))
+        .unwrap_or(id)
+}
+
+fn add_bundled_aliases(by_id: &mut BTreeMap<String, String>) {
+    for (alias, target) in BUNDLED_ALIASES {
+        if by_id.contains_key(*alias) {
+            continue;
+        }
+        if let Some(raw) = by_id.get(*target).cloned() {
+            by_id.insert((*alias).to_string(), raw);
+        }
+    }
+}
+
+fn select_bundled_root(
+    repo_root: &Path,
+    env_dir: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+    package_candidates: Vec<PathBuf>,
+) -> Result<SelectedBundledRoot, SkillCatalogError> {
+    if let Some(path) = env_dir {
+        return require_existing_root(vec![RootCandidate::new(path, BundledRootSource::Env)]);
+    }
+    if let Some(path) = config_dir {
+        return require_existing_root(vec![RootCandidate::new(path, BundledRootSource::Config)]);
+    }
+
+    let mut candidates: Vec<RootCandidate> = package_candidates
+        .into_iter()
+        .map(|path| RootCandidate::new(path, BundledRootSource::Package))
+        .collect();
+    candidates.push(RootCandidate::new(
+        repo_root.join("assets/skills"),
+        BundledRootSource::Workspace,
+    ));
+    let manifest_root = manifest_workspace_asset_root();
+    if !candidates
+        .iter()
+        .any(|candidate| candidate.path == manifest_root)
+    {
+        candidates.push(RootCandidate::new(
+            manifest_root,
+            BundledRootSource::Workspace,
+        ));
+    }
+    require_existing_root(candidates)
+}
+
+#[cfg(test)]
+fn resolve_bundled_root_for_test(
+    repo_root: &Path,
+    env_dir: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+    package_candidates: Vec<PathBuf>,
+) -> Result<SelectedBundledRoot, SkillCatalogError> {
+    select_bundled_root(repo_root, env_dir, config_dir, package_candidates)
+}
+
+fn require_existing_root(
+    candidates: Vec<RootCandidate>,
+) -> Result<SelectedBundledRoot, SkillCatalogError> {
+    for candidate in &candidates {
+        if candidate.path.is_dir() {
+            return Ok(SelectedBundledRoot {
+                path: candidate.path.clone(),
+                source: candidate.source,
+            });
+        }
+    }
+    Err(SkillCatalogError::MissingBundledRoot {
+        checked: candidates
+            .iter()
+            .map(RootCandidate::render)
+            .collect::<Vec<_>>()
+            .join(", "),
     })
 }
 
-/// Returns all bundled skills (raw content including frontmatter) for CLI extraction.
-pub fn all_bundled_raw() -> &'static HashMap<&'static str, &'static str> {
-    bundled_raw()
+fn package_asset_candidates() -> Vec<PathBuf> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let Some(bin_dir) = exe.parent() else {
+        return Vec::new();
+    };
+
+    let mut candidates = vec![bin_dir.join("share/spur/skills")];
+    if let Some(prefix) = bin_dir.parent() {
+        candidates.push(prefix.join("share/spur/skills"));
+    }
+    candidates
 }
 
-fn bundled() -> &'static HashMap<&'static str, &'static str> {
-    BUNDLED.get_or_init(|| {
-        let mut m = HashMap::new();
-        for (k, v) in bundled_raw() {
-            let leaked: &'static str = strip_frontmatter_owned(v).leak();
-            m.insert(*k, leaked);
-        }
-        m
+fn manifest_workspace_asset_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/skills")
+}
+
+fn read_valid_override(repo_root: &Path, id: &str) -> Option<String> {
+    validate_id(id).ok()?;
+    let override_path = repo_root.join(".spur/skills").join(id).join("SKILL.md");
+    if !override_path.exists() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&override_path).ok()?;
+    let parsed = frontmatter::parse_source(&raw);
+    if is_unedited_spur_managed_source(&raw, parsed.body) || is_legacy_generated_spur_source(&raw) {
+        return None;
+    }
+    Some(raw)
+}
+
+/// Returns all bundled skills (raw content including frontmatter) for CLI extraction.
+pub fn all_bundled_raw() -> &'static BTreeMap<String, String> {
+    WORKSPACE_BUNDLED_RAW.get_or_init(|| {
+        SkillCatalog::from_root(
+            manifest_workspace_asset_root(),
+            BundledRootSource::Workspace,
+        )
+        .list_bundled_raw_map()
+        .expect("workspace bundled skill assets must be readable")
     })
 }
 
 /// Load a skill body: user override wins, else bundled default.
 /// Frontmatter is stripped in both cases.
 pub fn load_skill(name: &str, repo_root: &Path) -> Option<String> {
-    let override_path = repo_root.join(".spur/skills").join(name).join("SKILL.md");
-    if override_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&override_path) {
-            let parsed = frontmatter::parse_source(&raw);
-            if !is_unedited_spur_managed_source(&raw, parsed.body)
-                && !is_legacy_generated_spur_source(&raw)
-            {
-                return Some(parsed.body.to_string());
-            }
-        }
+    if let Some(raw) = read_valid_override(repo_root, name) {
+        return Some(frontmatter::parse_source(&raw).body.to_string());
     }
-    bundled().get(name).map(|s| s.to_string())
+    let catalog = SkillCatalog::discover(repo_root).ok()?;
+    catalog
+        .load_bundled_raw(name)
+        .ok()
+        .flatten()
+        .map(|raw| frontmatter::parse_source(&raw).body.to_string())
 }
 
 /// Strip YAML frontmatter delimited by `---\n...\n---\n`.
+#[cfg(test)]
 fn strip_frontmatter(s: &str) -> &str {
     if let Some(rest) = s.strip_prefix("---\n") {
         if let Some(idx) = rest.find("\n---\n") {
@@ -136,11 +379,6 @@ fn strip_frontmatter(s: &str) -> &str {
         }
     }
     s
-}
-
-/// Owned variant for user-override files read from disk.
-fn strip_frontmatter_owned(s: &str) -> String {
-    strip_frontmatter(s).to_string()
 }
 
 static SKILL_ID_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -230,18 +468,19 @@ pub struct SkillPayload {
 /// `.spur/skills/<id>/SKILL.md` overrides (override wins per id).
 ///
 /// Validates every skill id (bundled and override) through `validate_id`.
-pub fn list_active_skills(repo_root: &Path) -> Result<Vec<SkillPayload>, InvalidSkillId> {
+pub fn list_active_skills(repo_root: &Path) -> Result<Vec<SkillPayload>, SkillCatalogError> {
     let mut by_id: std::collections::BTreeMap<String, SkillPayload> =
         std::collections::BTreeMap::new();
 
     // Bundled first.
-    for (id, raw) in bundled_raw() {
-        validate_id(id)?;
-        let parsed = frontmatter::parse_source(raw);
+    let catalog = SkillCatalog::discover(repo_root)?;
+    for (id, raw) in catalog.list_raw(repo_root)? {
+        validate_id(&id)?;
+        let parsed = frontmatter::parse_source(&raw);
         by_id.insert(
-            id.to_string(),
+            id.clone(),
             SkillPayload {
-                id: id.to_string(),
+                id,
                 description: parsed.description.as_deref().unwrap_or("").to_string(),
                 body: parsed.body.to_string(),
                 source: SkillSource::Bundled,
@@ -306,11 +545,26 @@ fn is_legacy_generated_spur_source(raw: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::path::PathBuf;
+
+    fn write_skill(root: &Path, id: &str, description: &str, body: &str) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {id}\ndescription: {description}\n---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    fn workspace_asset_skill_dir(id: &str) -> PathBuf {
+        manifest_workspace_asset_root().join(id)
+    }
 
     #[test]
     fn bundled_skills_parse_and_strip_frontmatter() {
-        let map = bundled();
+        let map = all_bundled_raw();
         for name in [
             "brain-delegation",
             "brain-delegation-claude-code-acp",
@@ -332,9 +586,10 @@ mod tests {
             "code-explore",
             "spur-analyst",
         ] {
-            let body = map
+            let raw = map
                 .get(name)
                 .unwrap_or_else(|| panic!("missing bundled skill: {name}"));
+            let body = frontmatter::parse_source(raw).body;
             assert!(!body.starts_with("---"), "{name}: frontmatter not stripped");
             assert!(!body.is_empty(), "{name}: body is empty after strip");
         }
@@ -355,6 +610,137 @@ mod tests {
     fn load_skill_returns_none_for_unknown() {
         let fake_root = PathBuf::from("/nonexistent-spur-test-root");
         assert!(load_skill("nonexistent-skill", &fake_root).is_none());
+    }
+
+    #[test]
+    fn load_skill_reads_repo_assets_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset_root = dir.path().join("assets/skills");
+        write_skill(
+            &asset_root,
+            "asset-only",
+            "Asset fallback",
+            "Asset fallback body\n",
+        );
+
+        let body = load_skill("asset-only", dir.path()).unwrap();
+
+        assert_eq!(body, "Asset fallback body\n");
+    }
+
+    #[test]
+    fn list_active_skills_reads_configured_bundled_dir() {
+        let repo = tempfile::tempdir().unwrap();
+        let asset_root = tempfile::tempdir().unwrap();
+        write_skill(
+            asset_root.path(),
+            "configured-skill",
+            "Configured bundled skill",
+            "Configured body\n",
+        );
+        std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            format!(
+                "[skills]\nbundled_dir = '{}'\n",
+                asset_root.path().display()
+            ),
+        )
+        .unwrap();
+
+        let skills = list_active_skills(repo.path()).unwrap();
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "configured-skill");
+        assert_eq!(skills[0].description, "Configured bundled skill");
+        assert_eq!(skills[0].body, "Configured body\n");
+        assert!(matches!(skills[0].source, SkillSource::Bundled));
+    }
+
+    #[test]
+    fn list_active_skills_reports_missing_configured_bundled_dir() {
+        let repo = tempfile::tempdir().unwrap();
+        let missing = repo.path().join("missing-skills");
+        std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            format!("[skills]\nbundled_dir = '{}'\n", missing.display()),
+        )
+        .unwrap();
+
+        let err = list_active_skills(repo.path()).unwrap_err().to_string();
+
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+        assert!(err.contains("[skills].bundled_dir"), "{err}");
+        assert!(err.contains("SPUR_SKILLS_DIR"), "{err}");
+    }
+
+    #[test]
+    fn load_skill_uses_override_when_configured_bundled_dir_is_missing() {
+        let repo = tempfile::tempdir().unwrap();
+        let missing = repo.path().join("missing-skills");
+        std::fs::create_dir_all(repo.path().join(".spur/skills/override-only")).unwrap();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            format!("[skills]\nbundled_dir = '{}'\n", missing.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path()
+                .join(".spur/skills/override-only")
+                .join("SKILL.md"),
+            "---\nname: override-only\ndescription: Override\n---\nOverride body\n",
+        )
+        .unwrap();
+
+        let body = load_skill("override-only", repo.path()).unwrap();
+
+        assert_eq!(body, "Override body\n");
+    }
+
+    #[test]
+    fn env_bundled_dir_wins_over_configured_dir() {
+        let repo = tempfile::tempdir().unwrap();
+        let env_root = tempfile::tempdir().unwrap();
+        let config_root = tempfile::tempdir().unwrap();
+
+        let selected = resolve_bundled_root_for_test(
+            repo.path(),
+            Some(env_root.path().to_path_buf()),
+            Some(config_root.path().to_path_buf()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(selected.path, env_root.path());
+        assert_eq!(selected.source, BundledRootSource::Env);
+    }
+
+    #[test]
+    fn claude_code_alias_resolves_to_configured_acp_asset() {
+        let repo = tempfile::tempdir().unwrap();
+        let asset_root = tempfile::tempdir().unwrap();
+        write_skill(
+            asset_root.path(),
+            "brain-delegation-claude-code-acp",
+            "Configured Claude ACP skill",
+            "Configured Claude ACP body\n",
+        );
+        std::fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            format!(
+                "[skills]\nbundled_dir = '{}'\n",
+                asset_root.path().display()
+            ),
+        )
+        .unwrap();
+
+        let acp = load_skill("brain-delegation-claude-code-acp", repo.path()).unwrap();
+        let alias = load_skill("brain-delegation-claude-code", repo.path()).unwrap();
+
+        assert_eq!(acp, "Configured Claude ACP body\n");
+        assert_eq!(alias, acp);
     }
 
     #[test]
@@ -834,7 +1220,7 @@ mod tests {
             "Artifact step must route kind:deck to the native deck guide"
         );
         let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/skills/open-design/references/deck-mode.md");
+            .join("../../assets/skills/open-design/references/deck-mode.md");
         let text = std::fs::read_to_string(&refs).expect("deck-mode.md must exist");
         for marker in [
             "jute_deck",
@@ -854,7 +1240,7 @@ mod tests {
     #[test]
     fn open_design_deck_mode_lists_ported_themes() {
         let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/skills/open-design/references/deck-mode.md");
+            .join("../../assets/skills/open-design/references/deck-mode.md");
         let text = std::fs::read_to_string(&refs).expect("deck-mode.md must exist");
         for id in [
             "editorial-monocle",
@@ -879,7 +1265,7 @@ mod tests {
             "SKILL.md must route polished/branded decks to the artifact track"
         );
         let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/skills/open-design/references/deck-artifact.md");
+            .join("../../assets/skills/open-design/references/deck-artifact.md");
         let text = std::fs::read_to_string(&refs).expect("deck-artifact.md must exist");
         for marker in [
             "deck-skeleton.html",
@@ -899,8 +1285,7 @@ mod tests {
 
     #[test]
     fn open_design_critique_has_deck_checks() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/skills/open-design/references");
+        let dir = workspace_asset_skill_dir("open-design").join("references");
         let critique = std::fs::read_to_string(dir.join("critique.md")).unwrap();
         assert!(
             critique.contains("Deck-specific checks"),
@@ -916,8 +1301,7 @@ mod tests {
 
     #[test]
     fn open_design_critique_has_artifact_deck_checks() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/skills/open-design/references");
+        let dir = workspace_asset_skill_dir("open-design").join("references");
         let critique = std::fs::read_to_string(dir.join("critique.md")).unwrap();
         assert!(
             critique.contains("Artifact-deck checks"),
@@ -941,7 +1325,7 @@ mod tests {
         );
         // The reference doc itself ships beside the skill source.
         let refs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/skills/open-design/references/design-systems.md");
+            .join("../../assets/skills/open-design/references/design-systems.md");
         let text = std::fs::read_to_string(&refs).expect("design-systems.md must exist");
         assert!(
             text.contains("index.json") && text.contains("swatches"),
@@ -958,8 +1342,7 @@ mod tests {
     #[test]
     fn open_design_directions_reference_lists_all_five() {
         // The reference files live beside the bundled skill source.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/skills/open-design/references");
+        let dir = workspace_asset_skill_dir("open-design").join("references");
         let directions =
             std::fs::read_to_string(dir.join("directions.md")).expect("directions.md must exist");
         for school in [
