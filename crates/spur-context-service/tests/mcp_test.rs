@@ -29,7 +29,7 @@ const SOURCE_URL: &str = "https://1.1.1.1/example/demo";
 const GIT_SOURCE: &str = "git:github.com/example/demo";
 const DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
+const EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
 
 #[test]
 fn tool_definitions_match_external_context_surface() {

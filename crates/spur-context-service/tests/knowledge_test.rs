@@ -9,7 +9,7 @@ const PACKAGE: &str = "demo";
 const REVISION: &str = "1.0.0";
 const DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
+const EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
 const LEGACY_EMBEDDING_MODEL: &str = "LegacyEmbeddingModel";
 const LEGACY_EMBED_TEXT_VERSION: &str = "v0-legacy";
 

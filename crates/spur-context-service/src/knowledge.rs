@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 const EMBEDDING_VECTOR_DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-const EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
+const EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
 const MAX_KNOWLEDGE_LIMIT: usize = 20;
 const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
