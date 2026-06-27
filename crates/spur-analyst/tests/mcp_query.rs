@@ -25,6 +25,19 @@ impl QueryFixture {
             db_path,
         }
     }
+
+    fn write_live_pointer(&self, graph_content_hash: &str) {
+        let pointer_dir = self.root.join(".spur").join("graph");
+        fs::create_dir_all(&pointer_dir).expect("create graph pointer dir");
+        fs::write(
+            pointer_dir.join("pointer.json"),
+            json!({
+                "graph_content_hash": graph_content_hash
+            })
+            .to_string(),
+        )
+        .expect("write live graph pointer");
+    }
 }
 
 #[tokio::test]
@@ -107,6 +120,48 @@ async fn query_show_tables_returns_expected_columns() {
     assert_eq!(result["truncated"], json!(false));
 }
 
+#[tokio::test]
+async fn query_blocks_stale_analyst_db_unless_allow_stale_is_explicit() {
+    let fixture = QueryFixture::new(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('old');
+        CREATE TABLE facts (value INTEGER);
+        INSERT INTO facts VALUES (42);
+        "#,
+    );
+    fixture.write_live_pointer("new");
+
+    let stale = query_fixture(&fixture, "SELECT value FROM facts").await;
+
+    assert_eq!(stale["error"], json!("analyst_db_stale"));
+    assert_eq!(stale["analyst_hash"], json!("old"));
+    assert_eq!(stale["live_hash"], json!("new"));
+    assert!(stale["message"]
+        .as_str()
+        .expect("stale error message")
+        .contains("allow_stale=true"));
+    assert!(
+        stale.get("rows").is_none(),
+        "stale query should not execute"
+    );
+
+    let allowed = query_fixture_with_args(
+        fixture.root.as_path(),
+        json!({
+            "query": "SELECT value FROM facts",
+            "allow_stale": true
+        }),
+    )
+    .await
+    .expect("allow stale query dispatch");
+
+    assert_eq!(allowed["columns"], json!(["value"]));
+    assert_eq!(allowed["rows"], json!([[42]]));
+    assert_eq!(allowed["row_count"], json!(1));
+    assert_eq!(allowed["staleness_warning"], json!("allow_stale"));
+}
+
 async fn query_fixture(fixture: &QueryFixture, sql: &str) -> Value {
     query_fixture_result(fixture.root.as_path(), sql)
         .await
@@ -120,9 +175,13 @@ async fn query_fixture_err(fixture: &QueryFixture, sql: &str) -> McpHandlerError
 }
 
 async fn query_fixture_result(root: &Path, sql: &str) -> Result<Value, McpHandlerError> {
+    query_fixture_with_args(root, json!({ "query": sql })).await
+}
+
+async fn query_fixture_with_args(root: &Path, args: Value) -> Result<Value, McpHandlerError> {
     let module = AnalystMcpModule::new();
     spur_graph::mcp::with_worktree_root_for_request(root.to_path_buf(), async move {
-        module.dispatch("query", json!({ "query": sql })).await
+        module.dispatch("query", args).await
     })
     .await
 }
