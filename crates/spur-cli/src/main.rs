@@ -50,6 +50,43 @@ use spur_cli::pm_service_gate_allows_construction;
 use spur_core::{Orchestrator, RunOpts};
 use spur_license::SpurLicense;
 
+#[cfg(unix)]
+const MIN_NOFILE_SOFT_LIMIT: nix::sys::resource::rlim_t = 4096;
+
+#[cfg(unix)]
+fn raise_nofile_soft_limit() {
+    let _ = try_raise_nofile_soft_limit(MIN_NOFILE_SOFT_LIMIT);
+}
+
+#[cfg(not(unix))]
+fn raise_nofile_soft_limit() {}
+
+#[cfg(unix)]
+fn try_raise_nofile_soft_limit(target_floor: nix::sys::resource::rlim_t) -> nix::Result<()> {
+    use nix::sys::resource::{getrlimit, setrlimit, Resource};
+
+    let (current, hard) = getrlimit(Resource::RLIMIT_NOFILE)?;
+    let desired = desired_nofile_soft_limit(current, hard, target_floor);
+    if desired > current {
+        setrlimit(Resource::RLIMIT_NOFILE, desired, hard)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn desired_nofile_soft_limit(
+    current: nix::sys::resource::rlim_t,
+    hard: nix::sys::resource::rlim_t,
+    target_floor: nix::sys::resource::rlim_t,
+) -> nix::sys::resource::rlim_t {
+    let capped_floor = if hard == nix::sys::resource::RLIM_INFINITY {
+        target_floor
+    } else {
+        target_floor.min(hard)
+    };
+    current.max(capped_floor)
+}
+
 /// Returns an optional guard that must be held until process exit to flush buffered logs.
 fn init_tracing(
     tui_mode: bool,
@@ -528,6 +565,18 @@ mod cli_parse_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn nofile_limit_selection_raises_without_lowering_or_exceeding_hard_limit() {
+        assert_eq!(desired_nofile_soft_limit(256, 10_000, 4096), 4096);
+        assert_eq!(
+            desired_nofile_soft_limit(256, nix::sys::resource::RLIM_INFINITY, 4096),
+            4096
+        );
+        assert_eq!(desired_nofile_soft_limit(256, 1024, 4096), 1024);
+        assert_eq!(desired_nofile_soft_limit(8192, 10_000, 4096), 8192);
+    }
+
     #[test]
     fn cli_accepts_graph_build_with_temporal_flag() {
         Cli::command()
@@ -780,6 +829,8 @@ enum BotCommands {
 }
 
 fn main() -> ExitCode {
+    raise_nofile_soft_limit();
+
     // rustls 0.23 requires an explicit default CryptoProvider before any TLS
     // handshake. `octocrab` (used by `spur pm ingest github`) pulls in rustls
     // and would otherwise panic on first network call. `install_default()` is
