@@ -782,7 +782,8 @@ fn parse_anchor_array_v2(
 }
 
 pub(crate) fn analyst_db_path() -> Result<PathBuf, McpHandlerError> {
-    Ok(current_repo_root()?.join(".spur").join("analyst.duckdb"))
+    let root = current_repo_root()?;
+    Ok(select_analyst_db_path(&root))
 }
 
 fn current_repo_root() -> Result<PathBuf, McpHandlerError> {
@@ -793,6 +794,29 @@ fn current_repo_root() -> Result<PathBuf, McpHandlerError> {
         McpHandlerError::Internal(format!("failed to read current directory: {error}"))
     })?;
     Ok(resolve_worktree_root_from(current_dir))
+}
+
+fn select_analyst_db_path(root: &Path) -> PathBuf {
+    let local_db = root.join(".spur").join("analyst.duckdb");
+    if local_db.exists() {
+        return local_db;
+    }
+    parent_spur_worktree_analyst_db(root).unwrap_or(local_db)
+}
+
+fn parent_spur_worktree_analyst_db(root: &Path) -> Option<PathBuf> {
+    for ancestor in root.ancestors() {
+        if ancestor.file_name().is_some_and(|name| name == "worktrees") {
+            let spur_dir = ancestor.parent()?;
+            if spur_dir.file_name().is_some_and(|name| name == ".spur") {
+                let db_path = spur_dir.join("analyst.duckdb");
+                if db_path.exists() {
+                    return Some(db_path);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Value {
@@ -1826,6 +1850,23 @@ mod tests {
             confidence_score_thresholds(Some("hybrid-code")),
             (0.80, 0.55)
         );
+    }
+
+    #[tokio::test]
+    async fn analyst_db_path_falls_back_to_parent_repo_db_for_spur_worker_worktree() {
+        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+        let repo_spur = repo_dir.path().join(".spur");
+        let worker_dir = repo_spur.join("worktrees").join("worker-1");
+        fs::create_dir_all(&worker_dir).expect("create worker dir");
+        fs::write(repo_spur.join("analyst.duckdb"), b"db").expect("write repo analyst db");
+
+        let selected = spur_graph::mcp::with_worktree_root_for_request(worker_dir, async {
+            analyst_db_path()
+        })
+        .await
+        .expect("analyst db path");
+
+        assert_eq!(selected, repo_spur.join("analyst.duckdb"));
     }
 
     #[cfg(feature = "embed")]
