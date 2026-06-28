@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::abuse::{self, RateLimiter, SourceKind, ValidateOptions};
-use crate::catalog::{CatalogResolver, ResolvedRevision};
+use crate::catalog::{readable_table, CatalogResolver, ResolvedRevision};
 use crate::jobs::{CreateJobOutcome, CreateJobRequest, JobRecord, JobStatus, JobStore, JobsError};
 use crate::knowledge::{self, KnowledgeContextOptions, KnowledgeScope};
 use crate::query::{self, SearchMode, SearchOptions};
@@ -673,14 +673,19 @@ fn lookup_complete_catalog_revision(
         }
     };
 
+    let package_catalog = readable_table(catalog.connection(), "package_catalog")
+        .map_err(|error| McpHandlerError::Internal(format!("{error:#}")))?;
+    let sql = format!(
+        r"
+        SELECT index_status
+        FROM {package_catalog}
+        WHERE source = ? AND package = ? AND revision = ?
+        LIMIT 1
+        "
+    );
     let status: Option<String> = optional_no_rows(
         catalog.connection().query_row(
-            r"
-            SELECT index_status
-            FROM package_catalog
-            WHERE source = ? AND package = ? AND revision = ?
-            LIMIT 1
-            ",
+            &sql,
             params![source, package, resolved.revision.as_str()],
             |row| row.get(0),
         ),
