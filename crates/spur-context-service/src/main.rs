@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use lambda_runtime::Error;
 use spur_context_service::lambda;
 
@@ -10,7 +8,7 @@ async fn main() -> Result<(), Error> {
         std::env::set_var("HOME", "/tmp");
     }
 
-    lambda_runtime::run(lambda_runtime::service_fn(|event| lambda::handler(event))).await
+    lambda_runtime::run(lambda_runtime::service_fn(lambda::handler)).await
 }
 
 fn copy_bundled_extensions() {

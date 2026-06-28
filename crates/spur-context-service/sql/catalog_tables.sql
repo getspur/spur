@@ -293,6 +293,16 @@ CREATE TABLE IF NOT EXISTS gold.temporal_edges AS SELECT * FROM temporal_edges L
 CREATE TABLE IF NOT EXISTS gold.package_catalog AS SELECT * FROM package_catalog LIMIT 0;
 CREATE TABLE IF NOT EXISTS gold.refs AS SELECT * FROM refs LIMIT 0;
 
+ALTER TABLE gold.nodes ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.edges ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.edges_unresolved ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.files ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.file_manifests ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.section_bodies ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.symbol_embeddings ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.commits ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.symbol_snapshots ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.temporal_edges ADD COLUMN IF NOT EXISTS generation BIGINT;
 ALTER TABLE gold.nodes SET PARTITIONED BY (source, package);
 ALTER TABLE gold.edges SET PARTITIONED BY (source, package);
 ALTER TABLE gold.edges_unresolved SET PARTITIONED BY (source, package);
