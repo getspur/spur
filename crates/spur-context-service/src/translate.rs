@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::catalog::{
     catalog_dsn_with_env_password, ducklake_data_path, export_frozen_snapshot, gold_table,
+    postgres_metadata_dsn,
 };
 use crate::medallion::SilverManifest;
 
@@ -181,10 +182,7 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     load_ducklake_extensions(&conn, &catalog_dsn, &data_path)?;
     attach_ducklake(&conn, &catalog_dsn, &data_path)?;
     ensure_catalog_schema(&conn)?;
-    // Generation monotonicity currently depends on the catalog lease serializing
-    // translate workers. Before the lease is removed for concurrent Aurora writers,
-    // replace this MAX()+1 allocator with an atomic reservation or Postgres sequence.
-    let generation = next_generation(&conn)?;
+    let generation = next_generation(&conn, &catalog_dsn)?;
 
     let mut rows_inserted = HashMap::new();
     run_transaction(&conn, || {
@@ -233,7 +231,7 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     // the worker uploads the catalog metadata back to S3.
     conn.execute("FORCE CHECKPOINT", [])
         .context("failed to force checkpoint DuckLake")?;
-    export_frozen_snapshot(&catalog_dsn, &data_path)
+    export_frozen_snapshot(&catalog_dsn, &data_path, generation)
         .context("failed to export frozen DuckLake catalog snapshot")?;
 
     Ok(TranslateStats {
@@ -1192,13 +1190,81 @@ fn default_lineage() -> TranslateLineage {
     }
 }
 
-fn next_generation(conn: &Connection) -> Result<i64> {
-    conn.query_row(
-        "SELECT COALESCE(MAX(generation), 0)::BIGINT + 1 FROM gold.package_catalog",
-        [],
-        |row| row.get(0),
-    )
-    .context("failed to allocate next gold generation")
+fn next_generation(conn: &Connection, catalog_dsn: &str) -> Result<i64> {
+    if is_postgres_catalog(catalog_dsn) {
+        return next_postgres_generation(conn, catalog_dsn);
+    }
+    reserve_transactional_generation(conn)
+}
+
+fn next_postgres_generation(conn: &Connection, catalog_dsn: &str) -> Result<i64> {
+    let alias = format!("spur_generation_{}", uuid::Uuid::new_v4().simple());
+    let dsn = postgres_metadata_dsn(catalog_dsn_with_env_password(catalog_dsn).as_str());
+    conn.execute_batch(&format!(
+        "ATTACH '{}' AS {alias} (TYPE postgres);",
+        escape_sql_literal(&dsn)
+    ))
+    .context("failed to attach Postgres generation allocator")?;
+
+    let sql = postgres_generation_allocator_sql(&alias);
+    conn.execute_batch(&sql.create_sequence)
+        .context("failed to ensure Postgres gold generation sequence")?;
+    conn.query_row(&sql.reserve_generation, [], |row| row.get(0))
+        .context("failed to reserve Postgres gold generation")
+}
+
+struct PostgresGenerationAllocatorSql {
+    create_sequence: String,
+    reserve_generation: String,
+}
+
+fn postgres_generation_allocator_sql(alias: &str) -> PostgresGenerationAllocatorSql {
+    PostgresGenerationAllocatorSql {
+        create_sequence: format!(
+            "CALL postgres_execute('{alias}', 'CREATE SEQUENCE IF NOT EXISTS public.spur_context_gold_generation_seq AS BIGINT START WITH 1')"
+        ),
+        reserve_generation: format!(
+            "SELECT generation::BIGINT FROM postgres_query('{alias}', 'SELECT nextval(''public.spur_context_gold_generation_seq'') AS generation')"
+        ),
+    }
+}
+
+fn reserve_transactional_generation(conn: &Connection) -> Result<i64> {
+    run_transaction(conn, || {
+        conn.execute(
+            r"
+            INSERT INTO gold.generation_allocator (allocator_id, next_generation)
+            SELECT 1, 1
+            WHERE NOT EXISTS (
+                SELECT 1 FROM gold.generation_allocator WHERE allocator_id = 1
+            )
+            ",
+            [],
+        )
+        .context("failed to initialize gold generation allocator")?;
+        let generation: i64 = conn
+            .query_row(
+                r"
+                SELECT next_generation::BIGINT
+                FROM gold.generation_allocator
+                WHERE allocator_id = 1
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to read reserved gold generation")?;
+        conn.execute(
+            r"
+            UPDATE gold.generation_allocator
+            SET next_generation = next_generation + 1
+            WHERE allocator_id = 1
+            ",
+            [],
+        )
+        .context("failed to advance gold generation allocator")?;
+        Ok(generation)
+    })
+    .context("failed to reserve transactional gold generation")
 }
 
 fn delete_generation_rows(
@@ -1981,6 +2047,29 @@ mod tests {
         assert!(
             format!("{error:#}").contains("SPUR_CONTEXT_DUCKLAKE_DATA_PATH"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn postgres_generation_allocator_uses_sequence_not_max_scan() {
+        let sql = postgres_generation_allocator_sql("pg_alloc");
+
+        assert!(
+            sql.create_sequence
+                .contains("CREATE SEQUENCE IF NOT EXISTS public.spur_context_gold_generation_seq"),
+            "sequence creation SQL must create the shared Postgres sequence: {}",
+            sql.create_sequence
+        );
+        assert!(
+            sql.reserve_generation
+                .contains("nextval(''public.spur_context_gold_generation_seq'')"),
+            "reservation SQL must use nextval(): {}",
+            sql.reserve_generation
+        );
+        assert!(
+            !sql.reserve_generation.to_ascii_uppercase().contains("MAX("),
+            "generation allocation must not use MAX()+1: {}",
+            sql.reserve_generation
         );
     }
 }

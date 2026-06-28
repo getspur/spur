@@ -259,15 +259,42 @@ fn initialized_catalog<'a>(
 
 async fn prepare_catalog() -> Result<PreparedCatalog, Error> {
     let catalog_dsn = catalog_dsn()?;
-    let catalog_etag = catalog_etag(&catalog_dsn).await?;
-    prepare_catalog_source(catalog_dsn, catalog_etag).await
+    prepare_catalog_source(catalog_dsn).await
 }
 
-async fn prepare_catalog_source(
-    catalog_dsn: String,
-    catalog_etag: Option<String>,
-) -> Result<PreparedCatalog, Error> {
+async fn prepare_catalog_source(catalog_dsn: String) -> Result<PreparedCatalog, Error> {
     if let Some(uri) = parse_s3_uri(&catalog_dsn)? {
+        if uri.key.ends_with(".json") {
+            let pointer = download_snapshot_pointer(&uri).await?;
+            let Some(snapshot_uri) = parse_s3_uri(&pointer.manifest.snapshot_uri)? else {
+                return Err(lambda_error(format!(
+                    "snapshot pointer must reference an S3 snapshot URI, got `{}`",
+                    pointer.manifest.snapshot_uri
+                )));
+            };
+            let cache_token =
+                snapshot_pointer_cache_token(pointer.pointer_etag.as_deref(), &pointer.manifest);
+            let local_path =
+                local_snapshot_path(&pointer.manifest.snapshot_uri, Some(&cache_token))?;
+            if !local_path.is_file() {
+                download_catalog_snapshot(&snapshot_uri, &local_path).await?;
+            }
+            verify_local_snapshot_hash(&local_path, &pointer.manifest.sha256)?;
+            return Ok(PreparedCatalog {
+                cache_key: snapshot_pointer_cache_key(
+                    &catalog_dsn,
+                    pointer.pointer_etag.as_deref(),
+                    &pointer.manifest,
+                ),
+                catalog_etag: pointer.pointer_etag,
+                source: PreparedCatalogSource::FrozenSnapshot {
+                    local_path,
+                    data_path: pointer.manifest.data_path,
+                },
+            });
+        }
+
+        let catalog_etag = catalog_etag(&catalog_dsn).await?;
         let data_path = catalog_data_path(&catalog_dsn)?;
         let local_path = local_snapshot_path(&catalog_dsn, catalog_etag.as_deref())?;
         if !local_path.is_file() {
@@ -283,6 +310,7 @@ async fn prepare_catalog_source(
         });
     }
 
+    let catalog_etag = None;
     if is_postgres_catalog_dsn(&catalog_dsn) {
         return Err(lambda_error(
             "serving requires SPUR_CATALOG_S3_URI to point at a frozen DuckLake snapshot; refusing to connect to Postgres",
@@ -350,6 +378,84 @@ async fn catalog_etag(catalog_dsn: &str) -> Result<Option<String>, Error> {
         .await
         .map_err(|error| lambda_error(format!("failed to read catalog ETag: {error}")))?;
     Ok(output.e_tag().map(str::to_owned))
+}
+
+struct SnapshotPointerDownload {
+    manifest: catalog::FrozenSnapshotManifest,
+    pointer_etag: Option<String>,
+}
+
+async fn download_snapshot_pointer(uri: &S3Uri) -> Result<SnapshotPointerDownload, Error> {
+    let output = aws_clients()
+        .s3
+        .get_object()
+        .bucket(&uri.bucket)
+        .key(&uri.key)
+        .send()
+        .await
+        .map_err(|error| lambda_error(format!("failed to download catalog pointer: {error}")))?;
+    let pointer_etag = output.e_tag().map(str::to_owned);
+    let bytes = output.body.collect().await.map_err(|error| {
+        lambda_error(format!(
+            "failed to read catalog pointer download body: {error}"
+        ))
+    })?;
+    let bytes = bytes.into_bytes();
+    let manifest =
+        catalog::FrozenSnapshotManifest::from_json_slice(bytes.as_ref()).map_err(Error::from)?;
+    Ok(SnapshotPointerDownload {
+        manifest,
+        pointer_etag,
+    })
+}
+
+fn snapshot_pointer_cache_key(
+    pointer_uri: &str,
+    pointer_etag: Option<&str>,
+    manifest: &catalog::FrozenSnapshotManifest,
+) -> String {
+    format!(
+        "pointer={pointer_uri}\netag={}\ngeneration={}\nsnapshot={}\nsha256={}",
+        pointer_etag.unwrap_or("<missing>"),
+        manifest.generation,
+        manifest.snapshot_uri,
+        manifest.sha256
+    )
+}
+
+fn snapshot_pointer_cache_token(
+    pointer_etag: Option<&str>,
+    manifest: &catalog::FrozenSnapshotManifest,
+) -> String {
+    format!(
+        "{}:{}:{}",
+        pointer_etag.unwrap_or("<missing>"),
+        manifest.generation,
+        manifest.sha256
+    )
+}
+
+fn verify_local_snapshot_hash(local_path: &Path, expected_sha256: &str) -> Result<(), Error> {
+    let bytes = fs::read(local_path).map_err(|error| {
+        lambda_error(format!(
+            "failed to read cached catalog snapshot `{}`: {error}",
+            local_path.display()
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual != expected_sha256 {
+        return Err(lambda_error(format!(
+            "cached catalog snapshot `{}` sha256 mismatch: expected {expected_sha256}, got {actual}",
+            local_path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn catalog_data_path(snapshot_uri: &str) -> Result<String, Error> {
@@ -802,5 +908,62 @@ mod tests {
             "sqlite:/tmp/catalog.sqlite",
             None
         ));
+    }
+
+    #[test]
+    fn pointer_cache_key_changes_when_live_pointer_switches_generation() {
+        let pointer_uri = "s3://example-context/gold/catalog-snapshot/current.json";
+        let first = catalog::FrozenSnapshotManifest::published(
+            10,
+            "s3://example-context/gold/catalog-snapshot/generations/00000000000000000010/spur_context.ducklake".to_owned(),
+            "s3://example-context/gold/data/".to_owned(),
+            "sha10".to_owned(),
+            10,
+        );
+        let second = catalog::FrozenSnapshotManifest::published(
+            11,
+            "s3://example-context/gold/catalog-snapshot/generations/00000000000000000011/spur_context.ducklake".to_owned(),
+            "s3://example-context/gold/data/".to_owned(),
+            "sha11".to_owned(),
+            11,
+        );
+
+        let first_key = snapshot_pointer_cache_key(pointer_uri, Some("etag-a"), &first);
+        let second_key = snapshot_pointer_cache_key(pointer_uri, Some("etag-b"), &second);
+
+        assert_ne!(first_key, second_key);
+        assert!(should_initialize_catalog(
+            Some(&first_key),
+            Some("etag-a"),
+            &second_key,
+            Some("etag-b")
+        ));
+    }
+
+    #[test]
+    fn pointer_cache_key_supports_rollback_to_previous_generation() {
+        let pointer_uri = "s3://example-context/gold/catalog-snapshot/current.json";
+        let current = catalog::FrozenSnapshotManifest::published(
+            11,
+            "s3://example-context/gold/catalog-snapshot/generations/00000000000000000011/spur_context.ducklake".to_owned(),
+            "s3://example-context/gold/data/".to_owned(),
+            "sha11".to_owned(),
+            11,
+        );
+        let rollback = catalog::FrozenSnapshotManifest::published(
+            10,
+            "s3://example-context/gold/catalog-snapshot/generations/00000000000000000010/spur_context.ducklake".to_owned(),
+            "s3://example-context/gold/data/".to_owned(),
+            "sha10".to_owned(),
+            10,
+        );
+
+        let current_key = snapshot_pointer_cache_key(pointer_uri, Some("etag-current"), &current);
+        let rollback_key =
+            snapshot_pointer_cache_key(pointer_uri, Some("etag-rollback"), &rollback);
+
+        assert_ne!(current_key, rollback_key);
+        assert!(rollback_key.contains("generation=10"));
+        assert!(rollback_key.contains(&rollback.snapshot_uri));
     }
 }
