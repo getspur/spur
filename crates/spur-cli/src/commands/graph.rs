@@ -36,12 +36,20 @@ pub struct GraphBuildOptions {
 }
 
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
-    build_with_section_embedding_override(options, false)
+    build_with_embedding_overrides(options, false, false)
 }
 
 pub fn build_with_section_embedding_override(
     options: GraphBuildOptions,
     no_section_embeddings: bool,
+) -> anyhow::Result<()> {
+    build_with_embedding_overrides(options, no_section_embeddings, false)
+}
+
+pub fn build_with_embedding_overrides(
+    options: GraphBuildOptions,
+    no_section_embeddings: bool,
+    no_code_symbol_embeddings: bool,
 ) -> anyhow::Result<()> {
     let root = match (options.root, options.workspace) {
         (Some(path), _) => path,
@@ -151,10 +159,12 @@ pub fn build_with_section_embedding_override(
                 .map(|stats| extraction_progress_bar(stats.file_count)),
         )?,
     };
-    let section_sidecar_options =
-        SectionSidecarOptions::from_env_with_skip_override(no_section_embeddings)
-            .with_previous_artifact_dir(previous_artifact_path)
-            .with_delta(sidecar_delta);
+    let section_sidecar_options = SectionSidecarOptions::from_env_with_skip_overrides(
+        no_section_embeddings,
+        no_code_symbol_embeddings,
+    )
+    .with_previous_artifact_dir(previous_artifact_path)
+    .with_delta(sidecar_delta);
 
     let mut temporal_write_stage = None;
     if use_temporal {
