@@ -20,11 +20,7 @@ const SNAPSHOT_INDEXES: &[(&str, &str, &str)] = &[
         "ducklake_delete_file",
         "delete_file_id",
     ),
-    (
-        "ducklake_schema_schema_id",
-        "ducklake_schema",
-        "schema_id",
-    ),
+    ("ducklake_schema_schema_id", "ducklake_schema", "schema_id"),
     (
         "ducklake_snapshot_snapshot_id",
         "ducklake_snapshot",
@@ -171,11 +167,8 @@ impl CatalogResolver {
             "
         );
         optional_no_rows(
-            self.conn.query_row(
-                &sql,
-                params![source, package, ref_name],
-                |row| row.get(0),
-            ),
+            self.conn
+                .query_row(&sql, params![source, package, ref_name], |row| row.get(0)),
             "failed to resolve catalog ref",
         )
     }
@@ -196,10 +189,8 @@ impl CatalogResolver {
             "
         );
         optional_no_rows(
-            self.conn.query_row(
-                &sql,
-                params![source, package, revision],
-                |row| {
+            self.conn
+                .query_row(&sql, params![source, package, revision], |row| {
                     Ok(ResolvedRevision {
                         source: row.get(0)?,
                         package: row.get(1)?,
@@ -207,8 +198,7 @@ impl CatalogResolver {
                         revision_kind: row.get(3)?,
                         snapshot_id: row.get(4)?,
                     })
-                },
-            ),
+                }),
             "failed to resolve catalog revision",
         )
     }
@@ -468,7 +458,10 @@ impl SnapshotLocation {
         if data_path.starts_with("s3://") {
             let uri = snapshot_s3_uri(data_path);
             let mut local_path = std::env::temp_dir();
-            local_path.push(format!("spur_context_snapshot_{}.ducklake", uuid::Uuid::new_v4()));
+            local_path.push(format!(
+                "spur_context_snapshot_{}.ducklake",
+                uuid::Uuid::new_v4()
+            ));
             Ok(Self {
                 local_path,
                 s3_uri: Some(uri),
@@ -818,9 +811,7 @@ fn s3_client_from_env() -> aws_sdk_s3::Client {
 }
 
 fn postgres_metadata_dsn(catalog_dsn: &str) -> String {
-    let dsn = catalog_dsn
-        .strip_prefix("ducklake:")
-        .unwrap_or(catalog_dsn);
+    let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
     if let Some(rest) = dsn.strip_prefix("postgres:") {
         rest.to_owned()
     } else if let Some(rest) = dsn.strip_prefix("postgresql:") {
@@ -904,8 +895,7 @@ mod tests {
             .context("system clock before epoch")?
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("{prefix}-{nanos}-{}", std::process::id()));
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("create temp dir `{}`", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("create temp dir `{}`", dir.display()))?;
         Ok(dir)
     }
 }
