@@ -37,6 +37,7 @@ const SECTION_EMBED_MAX_BODY_BYTES: usize = 4096;
 const SECTION_EMBED_BATCH_SIZE_DEFAULT: usize = 64;
 const SECTION_EMBED_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_EMBED_BATCH_SIZE";
 pub const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
+pub const CODE_SYMBOL_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS";
 const SECTION_WRITE_BATCH_SIZE_DEFAULT: usize = 512;
 const SECTION_WRITE_BATCH_SIZE_ENV: &str = "SPUR_GRAPH_SECTION_WRITE_BATCH_SIZE";
 const EMBEDDING_GEMMA_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
@@ -218,14 +219,19 @@ pub enum SectionSidecarProgressEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SectionEmbeddingOptions {
-    pub skip_embeddings: bool,
+    pub skip_section_embeddings: bool,
+    pub skip_code_symbol_embeddings: bool,
     pub batch_size: usize,
 }
 
 impl SectionEmbeddingOptions {
     pub fn from_env() -> Self {
-        let skip_embeddings = matches!(
+        let skip_section_embeddings = matches!(
             std::env::var(SECTION_EMBED_SKIP_ENV),
+            Ok(value) if value == "1"
+        );
+        let skip_code_symbol_embeddings = matches!(
+            std::env::var(CODE_SYMBOL_EMBED_SKIP_ENV),
             Ok(value) if value == "1"
         );
         let batch_size = std::env::var(SECTION_EMBED_BATCH_SIZE_ENV)
@@ -235,14 +241,23 @@ impl SectionEmbeddingOptions {
             .unwrap_or(SECTION_EMBED_BATCH_SIZE_DEFAULT);
 
         Self {
-            skip_embeddings,
+            skip_section_embeddings,
+            skip_code_symbol_embeddings,
             batch_size,
         }
     }
 
-    pub fn from_env_with_skip_override(skip_embeddings_override: bool) -> Self {
+    pub fn from_env_with_skip_override(skip_section_embeddings_override: bool) -> Self {
+        Self::from_env_with_skip_overrides(skip_section_embeddings_override, false)
+    }
+
+    pub fn from_env_with_skip_overrides(
+        skip_section_embeddings_override: bool,
+        skip_code_symbol_embeddings_override: bool,
+    ) -> Self {
         let mut options = Self::from_env();
-        options.skip_embeddings |= skip_embeddings_override;
+        options.skip_section_embeddings |= skip_section_embeddings_override;
+        options.skip_code_symbol_embeddings |= skip_code_symbol_embeddings_override;
         options
     }
 }
@@ -250,7 +265,8 @@ impl SectionEmbeddingOptions {
 impl Default for SectionEmbeddingOptions {
     fn default() -> Self {
         Self {
-            skip_embeddings: false,
+            skip_section_embeddings: false,
+            skip_code_symbol_embeddings: false,
             batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
         }
     }
@@ -295,10 +311,18 @@ impl SectionSidecarOptions {
         }
     }
 
-    pub fn from_env_with_skip_override(skip_embeddings_override: bool) -> Self {
+    pub fn from_env_with_skip_override(skip_section_embeddings_override: bool) -> Self {
+        Self::from_env_with_skip_overrides(skip_section_embeddings_override, false)
+    }
+
+    pub fn from_env_with_skip_overrides(
+        skip_section_embeddings_override: bool,
+        skip_code_symbol_embeddings_override: bool,
+    ) -> Self {
         Self {
-            embedding: SectionEmbeddingOptions::from_env_with_skip_override(
-                skip_embeddings_override,
+            embedding: SectionEmbeddingOptions::from_env_with_skip_overrides(
+                skip_section_embeddings_override,
+                skip_code_symbol_embeddings_override,
             ),
             write_batch_size: section_write_batch_size_from_env(),
             previous_artifact_dir: None,
@@ -607,7 +631,7 @@ async fn write_sections_dataset_async_with_embedding_model(
         SectionSidecarProgressEvent::Started {
             total_rows,
             markdown_files: batcher.markdown_file_count(),
-            embeddings_enabled: !options.embedding.skip_embeddings,
+            embeddings_enabled: !options.embedding.skip_section_embeddings,
             embedding_batch_size: options.embedding.batch_size,
             write_batch_size: batcher.write_batch_size(),
             row_scope,
@@ -901,7 +925,7 @@ async fn write_symbol_rows_dataset_async(
         progress,
         SectionSidecarProgressEvent::CodeSymbolsStarted {
             total_rows,
-            embeddings_enabled: !embedding_options.skip_embeddings,
+            embeddings_enabled: !embedding_options.skip_code_symbol_embeddings,
             row_scope,
         },
     );
@@ -952,7 +976,7 @@ async fn write_symbol_rows_dataset_async(
             .filter(|row| !row.embed_text.trim().is_empty() && row.vector.is_none())
             .count();
         let embeddings_available =
-            embedding_eligible_rows > 0 && !embedding_options.skip_embeddings;
+            embedding_eligible_rows > 0 && !embedding_options.skip_code_symbol_embeddings;
         emit_progress(
             progress,
             SectionSidecarProgressEvent::BatchStarted {
@@ -2190,6 +2214,7 @@ struct SymbolEmbedder {
 
 struct TextEmbeddingService {
     options: SectionEmbeddingOptions,
+    skip_embeddings: bool,
     embedding_model: EmbeddingModelSelection,
     model_requested: bool,
 }
@@ -2213,7 +2238,11 @@ struct SectionEmbeddingChunkProgress {
 impl SectionEmbedder {
     fn new(options: SectionEmbeddingOptions, embedding_model: EmbeddingModelSelection) -> Self {
         Self {
-            service: TextEmbeddingService::new(options, embedding_model),
+            service: TextEmbeddingService::new(
+                options,
+                options.skip_section_embeddings,
+                embedding_model,
+            ),
         }
     }
 
@@ -2229,7 +2258,7 @@ impl SectionEmbedder {
     where
         F: FnMut(SectionEmbeddingChunkProgress),
     {
-        if rows.iter().all(|row| row.vector.is_some()) || self.service.options.skip_embeddings {
+        if rows.iter().all(|row| row.vector.is_some()) || self.service.skip_embeddings {
             return;
         }
         let vectors = self
@@ -2264,7 +2293,7 @@ impl SectionEmbedder {
         F: FnMut(SectionEmbeddingChunkProgress),
     {
         let result = vec![None; rows.len()];
-        if self.service.options.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
+        if self.service.skip_embeddings || !rows.iter().any(is_embedding_eligible) {
             return result;
         }
 
@@ -2282,7 +2311,11 @@ impl SectionEmbedder {
 impl SymbolEmbedder {
     fn new(options: SectionEmbeddingOptions, embedding_model: EmbeddingModelSelection) -> Self {
         Self {
-            service: TextEmbeddingService::new(options, embedding_model),
+            service: TextEmbeddingService::new(
+                options,
+                options.skip_code_symbol_embeddings,
+                embedding_model,
+            ),
         }
     }
 
@@ -2304,7 +2337,7 @@ impl SymbolEmbedder {
     where
         F: FnMut(SectionEmbeddingChunkProgress),
     {
-        if rows.iter().all(|row| row.vector.is_some()) || self.service.options.skip_embeddings {
+        if rows.iter().all(|row| row.vector.is_some()) || self.service.skip_embeddings {
             return;
         }
         let vectors = self
@@ -2343,22 +2376,27 @@ impl SymbolEmbedder {
 }
 
 impl TextEmbeddingService {
-    fn new(options: SectionEmbeddingOptions, embedding_model: EmbeddingModelSelection) -> Self {
+    fn new(
+        options: SectionEmbeddingOptions,
+        skip_embeddings: bool,
+        embedding_model: EmbeddingModelSelection,
+    ) -> Self {
         Self {
             options,
+            skip_embeddings,
             embedding_model,
             model_requested: false,
         }
     }
 
     fn needs_model_init(&self) -> bool {
-        !self.options.skip_embeddings
+        !self.skip_embeddings
             && !self.model_requested
             && embed_model_cell(self.embedding_model).get().is_none()
     }
 
     fn prepare_model(&mut self, embedding_kind: &'static str) -> bool {
-        if self.options.skip_embeddings {
+        if self.skip_embeddings {
             return false;
         }
         self.model(embedding_kind).is_some()
@@ -2375,7 +2413,7 @@ impl TextEmbeddingService {
         F: FnMut(SectionEmbeddingChunkProgress),
     {
         let result = vec![None; row_count];
-        if self.options.skip_embeddings || inputs.is_empty() {
+        if self.skip_embeddings || inputs.is_empty() {
             return result;
         }
         let options = self.options;
@@ -2512,6 +2550,7 @@ where
         rows.len(),
         section_embedding_inputs(rows, EmbeddingModelSelection::EmbeddingGemma300M),
         options,
+        options.skip_section_embeddings,
         on_chunk_started,
         "section",
         embed_batch,
@@ -2532,6 +2571,7 @@ where
         rows.len(),
         symbol_embedding_inputs(rows, EmbeddingModelSelection::EmbeddingGemma300M),
         options,
+        options.skip_code_symbol_embeddings,
         on_chunk_started,
         "code symbol",
         embed_batch,
@@ -2577,6 +2617,7 @@ fn embed_text_inputs_with<F>(
     row_count: usize,
     eligible: Vec<EmbeddingTextInput<'_>>,
     options: SectionEmbeddingOptions,
+    skip_embeddings: bool,
     mut on_chunk_started: impl FnMut(SectionEmbeddingChunkProgress),
     embedding_kind: &'static str,
     mut embed_batch: F,
@@ -2585,7 +2626,7 @@ where
     F: FnMut(&[&str]) -> Result<Vec<Vec<f32>>>,
 {
     let mut result = vec![None; row_count];
-    if options.skip_embeddings {
+    if skip_embeddings {
         return result;
     }
     if eligible.is_empty() {
@@ -3425,7 +3466,8 @@ mod tests {
     ) -> SectionSidecarOptions {
         SectionSidecarOptions {
             embedding: SectionEmbeddingOptions {
-                skip_embeddings: true,
+                skip_section_embeddings: true,
+                skip_code_symbol_embeddings: true,
                 batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
             },
             write_batch_size: SECTION_WRITE_BATCH_SIZE_DEFAULT,
@@ -3900,8 +3942,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn sidecar_indexing_progress_reports_only_fts_indexes() {
+    #[tokio::test]
+    async fn sidecar_indexing_progress_reports_only_fts_indexes() {
         let root = tempfile::tempdir().expect("root");
         let sidecar_dir = tempfile::tempdir().expect("sidecar");
         let markdown_source = "## Topic\n\nSearchable markdown body.\n";
@@ -3944,7 +3986,8 @@ mod tests {
             sidecar_dir.path(),
             SectionSidecarOptions {
                 embedding: SectionEmbeddingOptions {
-                    skip_embeddings: true,
+                    skip_section_embeddings: true,
+                    skip_code_symbol_embeddings: true,
                     batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
                 },
                 write_batch_size: SECTION_WRITE_BATCH_SIZE_DEFAULT,
@@ -3957,6 +4000,18 @@ mod tests {
 
         assert_eq!(row_counts.section_bodies, 1);
         assert_eq!(row_counts.code_symbols, 1);
+        let section_rows = read_stored_section_rows(sidecar_dir.path()).await;
+        assert_eq!(section_rows.len(), 1);
+        assert!(
+            !section_rows[0].has_vector,
+            "section skip should write a searchable row with a null vector"
+        );
+        let symbol_rows = read_stored_symbol_rows(sidecar_dir.path()).await;
+        assert_eq!(symbol_rows.len(), 1);
+        assert!(
+            !symbol_rows[0].has_vector,
+            "code-symbol skip should write a searchable row with a null vector"
+        );
         let events = events.lock().expect("events").clone();
         let indexing_events = events
             .iter()
@@ -4107,6 +4162,7 @@ mod tests {
     fn text_embedding_service_requires_local_gemma_model_initialization() {
         let service = TextEmbeddingService::new(
             SectionEmbeddingOptions::default(),
+            false,
             EmbeddingModelSelection::EmbeddingGemma300M,
         );
 
@@ -4274,12 +4330,14 @@ mod tests {
     fn section_embedding_options_from_env_uses_defaults_for_missing_invalid_and_zero() {
         let _lock = env_lock();
         let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let _code_symbol_skip = EnvGuard::remove(CODE_SYMBOL_EMBED_SKIP_ENV);
         let batch = EnvGuard::remove(SECTION_EMBED_BATCH_SIZE_ENV);
 
         assert_eq!(
             SectionEmbeddingOptions::from_env(),
             SectionEmbeddingOptions {
-                skip_embeddings: false,
+                skip_section_embeddings: false,
+                skip_code_symbol_embeddings: false,
                 batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
             }
         );
@@ -4303,12 +4361,31 @@ mod tests {
     fn section_embedding_options_from_env_accepts_skip_and_valid_batch_size() {
         let _lock = env_lock();
         let _skip = EnvGuard::set(SECTION_EMBED_SKIP_ENV, "1");
+        let _code_symbol_skip = EnvGuard::remove(CODE_SYMBOL_EMBED_SKIP_ENV);
         let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "7");
 
         assert_eq!(
             SectionEmbeddingOptions::from_env(),
             SectionEmbeddingOptions {
-                skip_embeddings: true,
+                skip_section_embeddings: true,
+                skip_code_symbol_embeddings: false,
+                batch_size: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn section_embedding_options_from_env_accepts_code_symbol_skip() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let _code_symbol_skip = EnvGuard::set(CODE_SYMBOL_EMBED_SKIP_ENV, "1");
+        let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "7");
+
+        assert_eq!(
+            SectionEmbeddingOptions::from_env(),
+            SectionEmbeddingOptions {
+                skip_section_embeddings: false,
+                skip_code_symbol_embeddings: true,
                 batch_size: 7,
             }
         );
@@ -4318,12 +4395,31 @@ mod tests {
     fn section_embedding_options_from_env_with_skip_override_matches_env_skip() {
         let _lock = env_lock();
         let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let _code_symbol_skip = EnvGuard::remove(CODE_SYMBOL_EMBED_SKIP_ENV);
         let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "7");
 
         assert_eq!(
             SectionEmbeddingOptions::from_env_with_skip_override(true),
             SectionEmbeddingOptions {
-                skip_embeddings: true,
+                skip_section_embeddings: true,
+                skip_code_symbol_embeddings: false,
+                batch_size: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn section_embedding_options_from_env_with_skip_overrides_splits_flags() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let _code_symbol_skip = EnvGuard::remove(CODE_SYMBOL_EMBED_SKIP_ENV);
+        let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "7");
+
+        assert_eq!(
+            SectionEmbeddingOptions::from_env_with_skip_overrides(false, true),
+            SectionEmbeddingOptions {
+                skip_section_embeddings: false,
+                skip_code_symbol_embeddings: true,
                 batch_size: 7,
             }
         );
@@ -4333,6 +4429,7 @@ mod tests {
     fn section_sidecar_options_from_env_uses_default_write_batch_for_missing_invalid_and_zero() {
         let _lock = env_lock();
         let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let _code_symbol_skip = EnvGuard::remove(CODE_SYMBOL_EMBED_SKIP_ENV);
         let _embed_batch = EnvGuard::remove(SECTION_EMBED_BATCH_SIZE_ENV);
         let write_batch = EnvGuard::remove(SECTION_WRITE_BATCH_SIZE_ENV);
 
@@ -4361,7 +4458,8 @@ mod tests {
         let _lock = env_lock();
         let _write_batch = EnvGuard::set(SECTION_WRITE_BATCH_SIZE_ENV, "2");
         let embedding = SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: false,
             batch_size: 13,
         };
 
@@ -4800,7 +4898,8 @@ mod tests {
             "## Install\n\nInstall body.".to_owned(),
         )];
         let options = SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: false,
             batch_size: 1,
         };
 
@@ -4816,11 +4915,82 @@ mod tests {
     }
 
     #[test]
+    fn section_skip_leaves_code_symbol_embedding_eligible() {
+        let section_rows = vec![section_row_fixture(
+            2,
+            "## Install\n\nInstall body.".to_owned(),
+        )];
+        let symbol_rows = vec![symbol_row_fixture("sym-a", "symbol embed text")];
+        let options = SectionEmbeddingOptions {
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: false,
+            batch_size: 1,
+        };
+
+        assert_eq!(
+            embed_eligible_rows_with(
+                &section_rows,
+                options,
+                |_| panic!("section progress should not be called"),
+                |_| panic!("section embedder should not be called"),
+            ),
+            vec![None]
+        );
+
+        let symbol_vectors = embed_symbol_rows_with(
+            &symbol_rows,
+            options,
+            |_| {},
+            |texts: &[&str]| Ok(vec![vec![0.5; EMBEDDING_VECTOR_DIMENSIONS]; texts.len()]),
+        );
+        assert!(
+            symbol_vectors[0].is_some(),
+            "section skip must not suppress code-symbol vectors"
+        );
+    }
+
+    #[test]
+    fn code_symbol_skip_leaves_section_embedding_eligible() {
+        let section_rows = vec![section_row_fixture(
+            2,
+            "## Install\n\nInstall body.".to_owned(),
+        )];
+        let symbol_rows = vec![symbol_row_fixture("sym-a", "symbol embed text")];
+        let options = SectionEmbeddingOptions {
+            skip_section_embeddings: false,
+            skip_code_symbol_embeddings: true,
+            batch_size: 1,
+        };
+
+        let section_vectors = embed_eligible_rows_with(
+            &section_rows,
+            options,
+            |_| {},
+            |texts: &[&str]| Ok(vec![vec![0.5; EMBEDDING_VECTOR_DIMENSIONS]; texts.len()]),
+        );
+        assert!(
+            section_vectors[0].is_some(),
+            "code-symbol skip must not suppress section vectors"
+        );
+
+        assert_eq!(
+            embed_symbol_rows_with(
+                &symbol_rows,
+                options,
+                |_| panic!("code-symbol progress should not be called"),
+                |_| panic!("code-symbol embedder should not be called"),
+            ),
+            vec![None]
+        );
+    }
+
+    #[test]
     fn section_embedder_does_not_initialize_model_for_skipped_or_ineligible_rows() {
         let rows = vec![section_row_fixture(1, "# Title\n\nSkipped.".to_owned())];
         let mut embedder = SectionEmbedder::new(
             SectionEmbeddingOptions {
-                skip_embeddings: false,
+                skip_section_embeddings: false,
+                skip_code_symbol_embeddings: false,
                 batch_size: 1,
             },
             EmbeddingModelSelection::EmbeddingGemma300M,
@@ -4835,7 +5005,8 @@ mod tests {
         )];
         let mut embedder = SectionEmbedder::new(
             SectionEmbeddingOptions {
-                skip_embeddings: true,
+                skip_section_embeddings: true,
+                skip_code_symbol_embeddings: false,
                 batch_size: 1,
             },
             EmbeddingModelSelection::EmbeddingGemma300M,
@@ -4854,7 +5025,8 @@ mod tests {
             section_row_fixture(2, "## Three\n\nBody three.".to_owned()),
         ];
         let options = SectionEmbeddingOptions {
-            skip_embeddings: false,
+            skip_section_embeddings: false,
+            skip_code_symbol_embeddings: false,
             batch_size: 2,
         };
         let mut batch_sizes = Vec::new();
@@ -4884,7 +5056,8 @@ mod tests {
             symbol_row_fixture("symbol-three", "three embed text"),
         ];
         let options = SectionEmbeddingOptions {
-            skip_embeddings: false,
+            skip_section_embeddings: false,
+            skip_code_symbol_embeddings: false,
             batch_size: 2,
         };
         let mut batch_texts = Vec::new();
@@ -6018,7 +6191,8 @@ mod tests {
             sidecar_dir.path(),
             SectionSidecarOptions {
                 embedding: SectionEmbeddingOptions {
-                    skip_embeddings: true,
+                    skip_section_embeddings: true,
+                    skip_code_symbol_embeddings: true,
                     batch_size: SECTION_EMBED_BATCH_SIZE_DEFAULT,
                 },
                 write_batch_size: SECTION_WRITE_BATCH_SIZE_DEFAULT,
@@ -6084,7 +6258,8 @@ mod tests {
             section_row_fixture(2, "## Three\n\nBody three.".to_owned()),
         ];
         let options = SectionEmbeddingOptions {
-            skip_embeddings: false,
+            skip_section_embeddings: false,
+            skip_code_symbol_embeddings: false,
             batch_size: 2,
         };
         let mut progress = Vec::new();
