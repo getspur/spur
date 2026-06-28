@@ -1,5 +1,10 @@
 FROM arm64v8/debian:bookworm-slim
 
+# The copied worker binary must be built through graviton2-baseline.sh. Lambda
+# arm64 and Fargate arm64 both run on Graviton2-class hosts, so image assembly
+# must not depend on newer build-VM CPU tuning.
+LABEL io.spur.cpu-baseline="graviton2-safe"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*

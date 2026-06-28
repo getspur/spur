@@ -8,7 +8,8 @@
 #   ./deploy.sh --worker-image-only # build/push worker images, print ECS image URI
 #
 # Prerequisites:
-#   - scripts/spur-cargo (remote Graviton4 VM)
+#   - scripts/spur-cargo (remote Graviton4 VM; deploy builds force a
+#     Graviton2-safe arm64 CPU baseline)
 #   - terraform >= 1.5
 #   - docker (for worker container build)
 #   - AWS credentials with Lambda/S3/IAM/ECR/ECS/SFN access
@@ -35,6 +36,9 @@ WORKER_IMAGE_URI=""
 WORKER_LAMBDA_IMAGE_URI=""
 
 log() { echo "[deploy] $*" >&2; }
+
+# shellcheck source=infra/spur-context-service/graviton2-baseline.sh
+source "$SCRIPT_DIR/graviton2-baseline.sh"
 
 remote_worktree_key() {
     local git_toplevel worktree_key default_remote_namespace remote_namespace
@@ -107,20 +111,16 @@ build_binary() {
     cd "$REPO_ROOT"
     # spur-context-service is excluded from the workspace (standalone Cargo.toml
     # with duckdb 1.5.4). Build from the crate directory directly.
-    AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
-    CFLAGS="-mcpu=neoverse-n1 -O2" \
-    CXXFLAGS="-mcpu=neoverse-n1 -O2" \
-        scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release
+    run_graviton2_safe_cargo "serving Lambda bootstrap" \
+        --workdir crates/spur-context-service build --features lambda --release
     fetch_remote_worktree_file crates/spur-context-service/target/release/spur-context-service "$BUILD_DIR/bootstrap"
 }
 
 build_spur_cli() {
     log "building spur CLI (portable arm64 neoverse-n1 for worker image)..."
     cd "$REPO_ROOT"
-    AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
-    CFLAGS="-mcpu=neoverse-n1 -O2" \
-    CXXFLAGS="-mcpu=neoverse-n1 -O2" \
-        scripts/spur-cargo build -p spur-cli --release
+    run_graviton2_safe_cargo "spur CLI worker image dependency" \
+        build -p spur-cli --release
 }
 
 package_zip() {
@@ -135,22 +135,19 @@ build_worker() {
     log "building worker binary (--features worker, arm64 neoverse-n1 for Fargate)..."
     cd "$REPO_ROOT"
     # Fargate ARM64 runs on Graviton2 (neoverse-n1). The build VM's default
-    # neoverse-v2 produces SIGILL on Fargate. Match the Lambda build flags.
+    # newest-CPU tuning can produce unsupported instructions. Match the Lambda
+    # build flags.
     # The binary stays on the VM — build_and_push_worker_image() builds the
     # Docker image remotely using docker-build.sh, so no local fetch needed.
-    AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
-    CFLAGS="-mcpu=neoverse-n1 -O2" \
-    CXXFLAGS="-mcpu=neoverse-n1 -O2" \
-        scripts/spur-cargo --workdir crates/spur-context-service build --features worker --release
+    run_graviton2_safe_cargo "Fargate worker binary" \
+        --workdir crates/spur-context-service build --features worker --release
 }
 
 build_worker_lambda() {
     log "building Lambda worker binary (--features worker-lambda, arm64 neoverse-n1)..."
     cd "$REPO_ROOT"
-    AWS_RUSTFLAGS_DEFAULT="-Ctarget-cpu=neoverse-n1 -Ctarget-feature=+lse -Clinker=clang -Clink-arg=-fuse-ld=/mnt/cargo/rust-lld-driver/ld.lld" \
-    CFLAGS="-mcpu=neoverse-n1 -O2" \
-    CXXFLAGS="-mcpu=neoverse-n1 -O2" \
-        scripts/spur-cargo --workdir crates/spur-context-service build --features worker-lambda --release
+    run_graviton2_safe_cargo "worker Lambda image binary" \
+        --workdir crates/spur-context-service build --features worker-lambda --release
 }
 
 build_and_push_worker_image() {
@@ -165,6 +162,7 @@ build_and_push_worker_image() {
     local worker_dockerfile="$BUILD_DIR/worker-image.Dockerfile"
     cat > "$worker_dockerfile" <<'DOCKERFILE'
 FROM debian:bookworm-slim
+LABEL io.spur.cpu-baseline="graviton2-safe"
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 COPY spur-context-worker /usr/local/bin/spur-context-worker
@@ -203,6 +201,7 @@ build_and_push_worker_lambda_image() {
     local worker_lambda_dockerfile="$BUILD_DIR/worker-lambda-image.Dockerfile"
     cat > "$worker_lambda_dockerfile" <<'DOCKERFILE'
 FROM debian:bookworm-slim
+LABEL io.spur.cpu-baseline="graviton2-safe"
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 COPY spur-context-worker-lambda /usr/local/bin/spur-context-worker-lambda
