@@ -10,6 +10,8 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
 use serde::Deserialize;
 
+use crate::medallion::SilverManifest;
+
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
 const DEFAULT_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
@@ -119,6 +121,7 @@ pub struct TranslateOptions {
     pub revision: String,
     pub revision_kind: String,
     pub artifact_dir: PathBuf,
+    pub artifact_manifest: Option<SilverManifest>,
     pub source_root: Option<PathBuf>,
     pub catalog_dsn: String,
 }
@@ -297,11 +300,11 @@ fn insert_structural_tables(
     revision: RevisionParts,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<()> {
-    let nodes = required_artifact_file(&opts.artifact_dir, "nodes.parquet")?;
-    let edges = required_artifact_file(&opts.artifact_dir, "edges.parquet")?;
-    let unresolved = required_artifact_file(&opts.artifact_dir, "edges_unresolved.parquet")?;
-    let files = required_artifact_file(&opts.artifact_dir, "files.parquet")?;
-    let file_manifests = required_artifact_file(&opts.artifact_dir, "file_manifests.parquet")?;
+    let nodes = required_artifact_file(opts, "nodes.parquet")?;
+    let edges = required_artifact_file(opts, "edges.parquet")?;
+    let unresolved = required_artifact_file(opts, "edges_unresolved.parquet")?;
+    let files = required_artifact_file(opts, "files.parquet")?;
+    let file_manifests = required_artifact_file(opts, "file_manifests.parquet")?;
     stage_source_files(conn, opts.source_root.as_deref(), &files)?;
 
     insert_from_source(
@@ -592,7 +595,7 @@ fn insert_git_tables(
         return Ok(());
     }
 
-    if let Some(commits) = optional_artifact_source(&opts.artifact_dir, "commits.parquet", None)? {
+    if let Some(commits) = optional_artifact_source(opts, "commits.parquet", None)? {
         insert_from_source(
             conn,
             "commits",
@@ -630,7 +633,7 @@ fn insert_git_tables(
     }
 
     if let Some(snapshots) = optional_artifact_source(
-        &opts.artifact_dir,
+        opts,
         "symbol_snapshots.parquet",
         Some("symbol_snapshots/**/*.parquet"),
     )? {
@@ -680,7 +683,7 @@ fn insert_git_tables(
     }
 
     if let Some(temporal_edges) = optional_artifact_source(
-        &opts.artifact_dir,
+        opts,
         "temporal_edges.parquet",
         Some("temporal_edges/**/*.parquet"),
     )? {
@@ -766,7 +769,8 @@ fn insert_symbol_embeddings(
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
     let sidecar_path = opts.artifact_dir.join("code_symbols.lance");
-    let Some(source) = sidecar_source(conn, &sidecar_path, SidecarKind::CodeSymbols)? else {
+    let Some(source) = sidecar_source(conn, opts, "code_symbols.lance", SidecarKind::CodeSymbols)?
+    else {
         rows_inserted.insert("symbol_embeddings".to_owned(), 0);
         return Ok(false);
     };
@@ -876,7 +880,8 @@ fn insert_section_bodies(
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
     let sidecar_path = opts.artifact_dir.join("sections.lancedb");
-    let Some(source) = sidecar_source(conn, &sidecar_path, SidecarKind::Sections)? else {
+    let Some(source) = sidecar_source(conn, opts, "sections.lancedb", SidecarKind::Sections)?
+    else {
         rows_inserted.insert("section_bodies".to_owned(), 0);
         return Ok(false);
     };
@@ -1194,10 +1199,27 @@ enum SidecarKind {
 
 fn sidecar_source(
     conn: &Connection,
-    path: &Path,
+    opts: &TranslateOptions,
+    relative_dir: &str,
     kind: SidecarKind,
 ) -> Result<Option<SidecarSource>> {
-    if let Some(glob) = parquet_sidecar_glob(path)? {
+    let path = opts.artifact_dir.join(relative_dir);
+    if let Some(manifest) = &opts.artifact_manifest {
+        let files = manifest_files_under(opts, manifest, relative_dir)?;
+        let parquet_files = files
+            .iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("parquet"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !parquet_files.is_empty() {
+            return Ok(Some(SidecarSource::Parquet(read_parquet_files_source(
+                &parquet_files,
+            ))));
+        }
+        if files.is_empty() {
+            return Ok(None);
+        }
+    } else if let Some(glob) = parquet_sidecar_glob(&path)? {
         return Ok(Some(SidecarSource::Parquet(read_parquet_glob_source(
             &glob,
         ))));
@@ -1208,7 +1230,7 @@ fn sidecar_source(
     }
 
     if let Err(error) = load_lance_extension(conn) {
-        warn_skip_sidecar(path, &error);
+        warn_skip_sidecar(&path, &error);
         return Ok(None);
     }
 
@@ -1274,8 +1296,13 @@ fn contains_parquet_file(path: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn required_artifact_file(artifact_dir: &Path, file_name: &str) -> Result<PathBuf> {
-    let path = artifact_dir.join(file_name);
+fn required_artifact_file(opts: &TranslateOptions, file_name: &str) -> Result<PathBuf> {
+    let path = if let Some(manifest) = &opts.artifact_manifest {
+        manifest_file_path(opts, manifest, file_name)?
+            .ok_or_else(|| anyhow!("manifest missing required artifact file `{file_name}`"))?
+    } else {
+        opts.artifact_dir.join(file_name)
+    };
     if !path.is_file() {
         bail!("missing required artifact file `{}`", path.display());
     }
@@ -1283,10 +1310,26 @@ fn required_artifact_file(artifact_dir: &Path, file_name: &str) -> Result<PathBu
 }
 
 fn optional_artifact_source(
-    artifact_dir: &Path,
+    opts: &TranslateOptions,
     file_name: &str,
     glob: Option<&str>,
 ) -> Result<Option<String>> {
+    if let Some(manifest) = &opts.artifact_manifest {
+        if let Some(path) = manifest_file_path(opts, manifest, file_name)? {
+            if path.is_file() {
+                return Ok(Some(read_parquet_source(&path)));
+            }
+        }
+        if let Some(glob) = glob {
+            let paths = manifest_files_for_glob(opts, manifest, glob)?;
+            if !paths.is_empty() {
+                return Ok(Some(read_parquet_files_source(&paths)));
+            }
+        }
+        return Ok(None);
+    }
+
+    let artifact_dir = &opts.artifact_dir;
     let file = artifact_dir.join(file_name);
     if file.is_file() {
         return Ok(Some(read_parquet_source(&file)));
@@ -1322,6 +1365,100 @@ fn read_parquet_glob_source(path: &Path) -> String {
         "read_parquet('{}')",
         escape_sql_literal(&path.display().to_string())
     )
+}
+
+fn read_parquet_files_source(paths: &[PathBuf]) -> String {
+    if paths.len() == 1 {
+        return read_parquet_source(&paths[0]);
+    }
+    let paths = paths
+        .iter()
+        .map(|path| format!("'{}'", escape_sql_literal(&path.display().to_string())))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("read_parquet([{paths}])")
+}
+
+fn manifest_file_path(
+    opts: &TranslateOptions,
+    manifest: &SilverManifest,
+    relative_path: &str,
+) -> Result<Option<PathBuf>> {
+    validate_manifest_relative_path(relative_path)?;
+    Ok(manifest
+        .files
+        .iter()
+        .any(|file| file.path == relative_path)
+        .then(|| {
+            opts.artifact_dir
+                .join(path_from_manifest_relative(relative_path))
+        }))
+}
+
+fn manifest_files_under(
+    opts: &TranslateOptions,
+    manifest: &SilverManifest,
+    relative_dir: &str,
+) -> Result<Vec<PathBuf>> {
+    validate_manifest_relative_path(relative_dir)?;
+    let prefix = format!("{}/", relative_dir.trim_end_matches('/'));
+    let mut files = Vec::new();
+    for file in &manifest.files {
+        validate_manifest_relative_path(&file.path)?;
+        if file.path.starts_with(&prefix) {
+            files.push(
+                opts.artifact_dir
+                    .join(path_from_manifest_relative(&file.path)),
+            );
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn manifest_files_for_glob(
+    opts: &TranslateOptions,
+    manifest: &SilverManifest,
+    glob: &str,
+) -> Result<Vec<PathBuf>> {
+    let root = glob
+        .find(|ch| ['*', '?'].contains(&ch))
+        .map(|index| &glob[..index])
+        .unwrap_or(glob)
+        .trim_end_matches('/');
+    let mut paths = manifest_files_under(opts, manifest, root)?;
+    paths.retain(|path| path.extension().and_then(|ext| ext.to_str()) == Some("parquet"));
+    Ok(paths)
+}
+
+fn validate_manifest_relative_path(path: &str) -> Result<()> {
+    if path.trim().is_empty() || path.contains('\\') {
+        bail!("invalid manifest path `{path}`");
+    }
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        bail!("manifest path must be relative: `{path}`");
+    }
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                bail!("manifest path escapes artifact root: `{path}`");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn path_from_manifest_relative(relative_path: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for part in relative_path.split('/') {
+        path.push(part);
+    }
+    path
 }
 
 fn run_transaction<T>(conn: &Connection, f: impl FnOnce() -> Result<T>) -> Result<T> {
