@@ -29,7 +29,7 @@ use crate::jobs::{DynamoDbJobStore, JobStatus, JobStore};
 use crate::medallion::{SilverManifest, SilverManifestFile, SILVER_PREFIX};
 use crate::translate::{
     translate_artifact_to_ducklake, TranslateLineage, TranslateOptions, TranslateStats,
-    CATALOG_TABLES_SQL,
+    CATALOG_TABLES_SQL, DEFAULT_EMBED_TEXT_VERSION, DEFAULT_TRANSLATE_SCHEMA_VERSION,
 };
 
 const DEFAULT_ARTIFACT_DIR: &str = "/tmp/artifact";
@@ -45,6 +45,29 @@ const GRAPH_SKIP_SECTION_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDI
 const DEFAULT_CATALOG_LEASES_TABLE: &str = "spur-context-catalog-leases";
 const CATALOG_LEASE_DURATION_SECS: i64 = 10 * 60;
 const CATALOG_LEASE_RENEW_INTERVAL_SECS: u64 = 60;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobFromLayer {
+    Source,
+    Bronze,
+    Silver,
+}
+
+impl JobFromLayer {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "source" => Ok(Self::Source),
+            "bronze" => Ok(Self::Bronze),
+            "silver" => Ok(Self::Silver),
+            other => bail!("unsupported --from-layer `{other}`"),
+        }
+    }
+}
+
+impl Default for JobFromLayer {
+    fn default() -> Self {
+        Self::Source
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobEnv {
@@ -56,10 +79,47 @@ pub struct JobEnv {
     pub source_url: String,
     pub source_kind: String,
     pub catalog_dsn: String,
+    pub from_layer: JobFromLayer,
 }
 
 impl JobEnv {
     pub fn from_env() -> Result<Self> {
+        let from_layer = optional_env("SPUR_CONTEXT_FROM_LAYER")
+            .or_else(|| optional_env("FROM_LAYER"))
+            .map(|value| JobFromLayer::parse(&value))
+            .transpose()?
+            .unwrap_or_default();
+        Self::from_env_with_layer(from_layer)
+    }
+
+    pub fn from_env_args<I, S>(args: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let mut from_layer = optional_env("SPUR_CONTEXT_FROM_LAYER")
+            .or_else(|| optional_env("FROM_LAYER"))
+            .map(|value| JobFromLayer::parse(&value))
+            .transpose()?
+            .unwrap_or_default();
+
+        let mut args = args.into_iter().map(Into::into).skip(1).peekable();
+        while let Some(arg) = args.next() {
+            let arg = arg.to_string_lossy();
+            if let Some(value) = arg.strip_prefix("--from-layer=") {
+                from_layer = JobFromLayer::parse(value)?;
+            } else if arg == "--from-layer" {
+                let Some(value) = args.next() else {
+                    bail!("--from-layer requires a value");
+                };
+                from_layer = JobFromLayer::parse(&value.to_string_lossy())?;
+            }
+        }
+
+        Self::from_env_with_layer(from_layer)
+    }
+
+    fn from_env_with_layer(from_layer: JobFromLayer) -> Result<Self> {
         let catalog_dsn = optional_env("SPUR_CATALOG_DSN")
             .or_else(|| optional_env("SPUR_CATALOG_S3_URI"))
             .ok_or_else(|| anyhow!("SPUR_CATALOG_DSN or SPUR_CATALOG_S3_URI must be set"))?;
@@ -73,6 +133,7 @@ impl JobEnv {
             source_url: required_env("SOURCE_URL")?,
             source_kind: required_env("SOURCE_KIND")?,
             catalog_dsn,
+            from_layer,
         })
     }
 }
@@ -187,7 +248,8 @@ impl StageReporter {
 }
 
 pub async fn run_from_env() -> Result<(), WorkerError> {
-    let env = JobEnv::from_env().map_err(|error| WorkerError::Fetch(error.to_string()))?;
+    let env = JobEnv::from_env_args(env::args_os())
+        .map_err(|error| WorkerError::Fetch(error.to_string()))?;
     run_job_and_report(&env).await
 }
 
@@ -387,26 +449,92 @@ async fn prepare_job(
     stage: &StageTracker,
     leases: &dyn CatalogLeaseStore,
 ) -> Result<PreparedJob, WorkerError> {
+    match env.from_layer {
+        JobFromLayer::Source => prepare_job_from_source(env, stage, leases).await,
+        JobFromLayer::Bronze => prepare_job_from_bronze(env, stage, leases).await,
+        JobFromLayer::Silver => prepare_job_from_silver(env, stage, leases).await,
+    }
+}
+
+async fn prepare_job_from_source(
+    env: &JobEnv,
+    stage: &StageTracker,
+    leases: &dyn CatalogLeaseStore,
+) -> Result<PreparedJob, WorkerError> {
     let workspace = TempWorkspace::new(&env.job_id)?;
     let source_dest = workspace.path.join("source");
-    let artifact_base = artifact_dir();
 
     stage.set_async("fetch_source").await;
     let stage_started = log_stage_started("fetch_source");
     let source_path = fetch_source_with_default_bronze(env, &source_dest, leases).await?;
     log_stage_completed("fetch_source", stage_started);
 
+    build_persist_and_prepare_default(env, stage, workspace, Some(source_path), leases).await
+}
+
+async fn prepare_job_from_bronze(
+    env: &JobEnv,
+    stage: &StageTracker,
+    leases: &dyn CatalogLeaseStore,
+) -> Result<PreparedJob, WorkerError> {
+    let workspace = TempWorkspace::new(&env.job_id)?;
+    let source_dest = workspace.path.join("source");
+
+    stage.set_async("restore_bronze").await;
+    let stage_started = log_stage_started("restore_bronze");
+    let source_path = restore_bronze_source_with_default_services(env, &source_dest, leases)
+        .await?
+        .ok_or_else(|| {
+            WorkerError::Fetch(format!(
+                "bronze raw source missing for {}/{}/{}",
+                env.source, env.package, env.revision
+            ))
+        })?;
+    log_stage_completed("restore_bronze", stage_started);
+
+    build_persist_and_prepare_default(env, stage, workspace, Some(source_path), leases).await
+}
+
+async fn prepare_job_from_silver(
+    env: &JobEnv,
+    stage: &StageTracker,
+    _leases: &dyn CatalogLeaseStore,
+) -> Result<PreparedJob, WorkerError> {
+    let workspace = TempWorkspace::new(&env.job_id)?;
+    let silver_store = S3SilverArtifactStore::new(silver_bucket());
+
+    stage.set_async("restore_silver").await;
+    let stage_started = log_stage_started("restore_silver");
+    let row = lookup_silver_artifact_with_default_services(env)
+        .await?
+        .ok_or_else(|| {
+            WorkerError::Build(format!(
+                "silver graph artifact missing for {}/{}/{}",
+                env.source, env.package, env.revision
+            ))
+        })?;
+    let prepared = prepare_from_silver_row(env, workspace, None, row, &silver_store).await?;
+    log_stage_completed("restore_silver", stage_started);
+    Ok(prepared)
+}
+
+async fn build_persist_and_prepare_default(
+    env: &JobEnv,
+    stage: &StageTracker,
+    workspace: TempWorkspace,
+    source_path: Option<PathBuf>,
+    leases: &dyn CatalogLeaseStore,
+) -> Result<PreparedJob, WorkerError> {
+    let source_path_for_build = source_path
+        .as_ref()
+        .ok_or_else(|| WorkerError::Build("source path is required to build silver".to_owned()))?;
+    let artifact_base = artifact_dir();
+
     stage.set_async("build_graph").await;
     let stage_started = log_stage_started("build_graph");
-    let build_source_path = source_path.clone();
-    let build_artifact_base = artifact_base.clone();
-    let artifact_dir = tokio::task::spawn_blocking(move || {
-        prepare_artifact_dir(&build_artifact_base)?;
-        build_graph(&build_source_path, &build_artifact_base)?;
-        resolve_graph_artifact_dir(&build_artifact_base)
-    })
-    .await
-    .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))??;
+    let artifact_dir = SpurGraphArtifactBuilder
+        .build(source_path_for_build, &artifact_base)
+        .await?;
     log_stage_completed("build_graph", stage_started);
 
     stage.set_async("persist_silver").await;
@@ -424,18 +552,210 @@ async fn prepare_job(
     .await?;
     log_stage_completed("persist_silver", stage_started);
 
-    Ok(PreparedJob {
+    Ok(prepared_job_from_silver(
+        workspace,
+        source_path,
+        silver_artifact_dir,
+        persisted_silver.row,
+        persisted_silver.manifest,
+    ))
+}
+
+pub async fn prepare_job_with_services(
+    env: &JobEnv,
+    stage: &StageTracker,
+    bronze_registry: &dyn BronzeRawSourceRegistry,
+    bronze_store: &dyn BronzeArchiveStore,
+    silver_registry: &dyn SilverGraphArtifactRegistry,
+    silver_store: &dyn SilverArtifactStore,
+    graph_builder: &dyn GraphArtifactBuilder,
+) -> Result<PreparedJob, WorkerError> {
+    let workspace = TempWorkspace::new(&env.job_id)?;
+    match env.from_layer {
+        JobFromLayer::Source => {
+            let source_dest = workspace.path.join("source");
+            stage.set_async("fetch_source").await;
+            let stage_started = log_stage_started("fetch_source");
+            let source_path =
+                fetch_source_with_bronze_services(env, &source_dest, bronze_registry, bronze_store)
+                    .await?;
+            log_stage_completed("fetch_source", stage_started);
+            build_persist_and_prepare_with_services(
+                env,
+                stage,
+                workspace,
+                source_path,
+                bronze_registry,
+                silver_registry,
+                silver_store,
+                graph_builder,
+            )
+            .await
+        }
+        JobFromLayer::Bronze => {
+            let source_dest = workspace.path.join("source");
+            stage.set_async("restore_bronze").await;
+            let stage_started = log_stage_started("restore_bronze");
+            let source_path = retrieve_bronze_source_by_coordinate(
+                &env.source,
+                &env.package,
+                &env.revision,
+                &source_dest,
+                bronze_registry,
+                bronze_store,
+            )
+            .await?
+            .ok_or_else(|| {
+                WorkerError::Fetch(format!(
+                    "bronze raw source missing for {}/{}/{}",
+                    env.source, env.package, env.revision
+                ))
+            })?;
+            log_stage_completed("restore_bronze", stage_started);
+            build_persist_and_prepare_with_services(
+                env,
+                stage,
+                workspace,
+                source_path,
+                bronze_registry,
+                silver_registry,
+                silver_store,
+                graph_builder,
+            )
+            .await
+        }
+        JobFromLayer::Silver => {
+            stage.set_async("restore_silver").await;
+            let stage_started = log_stage_started("restore_silver");
+            let row = silver_registry
+                .lookup(&env.source, &env.package, &env.revision)
+                .await?
+                .ok_or_else(|| {
+                    WorkerError::Build(format!(
+                        "silver graph artifact missing for {}/{}/{}",
+                        env.source, env.package, env.revision
+                    ))
+                })?;
+            let prepared = prepare_from_silver_row(env, workspace, None, row, silver_store).await?;
+            log_stage_completed("restore_silver", stage_started);
+            Ok(prepared)
+        }
+    }
+}
+
+async fn build_persist_and_prepare_with_services(
+    env: &JobEnv,
+    stage: &StageTracker,
+    workspace: TempWorkspace,
+    source_path: PathBuf,
+    bronze_registry: &dyn BronzeRawSourceRegistry,
+    silver_registry: &dyn SilverGraphArtifactRegistry,
+    silver_store: &dyn SilverArtifactStore,
+    graph_builder: &dyn GraphArtifactBuilder,
+) -> Result<PreparedJob, WorkerError> {
+    let artifact_base = artifact_dir();
+    stage.set_async("build_graph").await;
+    let stage_started = log_stage_started("build_graph");
+    let artifact_dir = graph_builder.build(&source_path, &artifact_base).await?;
+    log_stage_completed("build_graph", stage_started);
+
+    stage.set_async("persist_silver").await;
+    let stage_started = log_stage_started("persist_silver");
+    let bronze_content_sha256 = bronze_registry
+        .lookup(&env.source, &env.package, &env.revision)
+        .await?
+        .map(|row| row.content_sha256)
+        .ok_or_else(|| {
+            WorkerError::Build(format!(
+                "bronze raw source missing after restore for {}/{}/{}",
+                env.source, env.package, env.revision
+            ))
+        })?;
+    let builder_version = silver_builder_version(&artifact_dir)?;
+    let persisted_silver = persist_silver_graph_artifact_with_manifest(
+        env,
+        &artifact_dir,
+        &bronze_content_sha256,
+        &builder_version,
+        silver_store,
+        silver_registry,
+    )
+    .await?;
+    let silver_artifact_dir = workspace.path.join("silver_artifact");
+    download_silver_artifact_from_manifest(
+        &persisted_silver.row.manifest_uri,
+        &persisted_silver.manifest,
+        &silver_artifact_dir,
+        silver_store,
+    )
+    .await?;
+    log_stage_completed("persist_silver", stage_started);
+
+    Ok(prepared_job_from_silver(
+        workspace,
+        Some(source_path),
+        silver_artifact_dir,
+        persisted_silver.row,
+        persisted_silver.manifest,
+    ))
+}
+
+async fn prepare_from_silver_row(
+    env: &JobEnv,
+    workspace: TempWorkspace,
+    source_path: Option<PathBuf>,
+    row: SilverGraphArtifact,
+    silver_store: &dyn SilverArtifactStore,
+) -> Result<PreparedJob, WorkerError> {
+    let manifest = silver_store.download_manifest(&row.manifest_uri).await?;
+    silver_store
+        .validate_manifest(&row.manifest_uri, &manifest)
+        .await?;
+    let silver_artifact_dir = workspace.path.join("silver_artifact");
+    download_silver_artifact_from_manifest(
+        &row.manifest_uri,
+        &manifest,
+        &silver_artifact_dir,
+        silver_store,
+    )
+    .await?;
+
+    if row.source != env.source || row.package != env.package || row.version != env.revision {
+        return Err(WorkerError::Build(format!(
+            "silver graph artifact coordinate mismatch: expected {}/{}/{} got {}/{}/{}",
+            env.source, env.package, env.revision, row.source, row.package, row.version
+        )));
+    }
+
+    Ok(prepared_job_from_silver(
+        workspace,
+        source_path,
+        silver_artifact_dir,
+        row,
+        manifest,
+    ))
+}
+
+fn prepared_job_from_silver(
+    workspace: TempWorkspace,
+    source_path: Option<PathBuf>,
+    artifact_dir: PathBuf,
+    row: SilverGraphArtifact,
+    manifest: SilverManifest,
+) -> PreparedJob {
+    PreparedJob {
         _workspace: workspace,
         source_path,
-        artifact_dir: silver_artifact_dir,
-        artifact_manifest: Some(persisted_silver.manifest),
+        artifact_dir,
+        artifact_manifest: Some(manifest),
         lineage: Some(TranslateLineage {
-            bronze_content_sha256: persisted_silver.row.bronze_content_sha256,
-            silver_graph_content_hash: persisted_silver.row.graph_content_hash,
-            builder_version: persisted_silver.row.builder_version,
-            translate_schema_version: "translate-v1".to_owned(),
+            bronze_content_sha256: row.bronze_content_sha256,
+            silver_graph_content_hash: row.graph_content_hash,
+            builder_version: row.builder_version,
+            translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
+            embed_text_version: DEFAULT_EMBED_TEXT_VERSION.to_owned(),
         }),
-    })
+    }
 }
 
 fn translate_prepared_blocking(
@@ -447,7 +767,7 @@ fn translate_prepared_blocking(
     let stage_started = log_stage_started("translate");
     let stats = translate_with_source_root(
         &prepared.artifact_dir,
-        Some(&prepared.source_path),
+        prepared.source_path.as_deref(),
         prepared.artifact_manifest.clone(),
         prepared.lineage.clone(),
         env,
@@ -541,6 +861,7 @@ pub trait SilverArtifactStore: Send + Sync {
         manifest_uri: &str,
         manifest: &SilverManifest,
     ) -> Result<(), WorkerError>;
+    async fn download_manifest(&self, manifest_uri: &str) -> Result<SilverManifest, WorkerError>;
     async fn download_manifest_file(
         &self,
         manifest_uri: &str,
@@ -551,7 +872,41 @@ pub trait SilverArtifactStore: Send + Sync {
 
 #[async_trait]
 pub trait SilverGraphArtifactRegistry: Send + Sync {
+    async fn lookup(
+        &self,
+        source: &str,
+        package: &str,
+        version: &str,
+    ) -> Result<Option<SilverGraphArtifact>, WorkerError>;
     async fn register(&self, row: &SilverGraphArtifact) -> Result<(), WorkerError>;
+}
+
+#[async_trait]
+pub trait GraphArtifactBuilder: Send + Sync {
+    async fn build(&self, source_path: &Path, artifact_base: &Path)
+        -> Result<PathBuf, WorkerError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpurGraphArtifactBuilder;
+
+#[async_trait]
+impl GraphArtifactBuilder for SpurGraphArtifactBuilder {
+    async fn build(
+        &self,
+        source_path: &Path,
+        artifact_base: &Path,
+    ) -> Result<PathBuf, WorkerError> {
+        let source_path = source_path.to_path_buf();
+        let artifact_base = artifact_base.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            prepare_artifact_dir(&artifact_base)?;
+            build_graph(&source_path, &artifact_base)?;
+            resolve_graph_artifact_dir(&artifact_base)
+        })
+        .await
+        .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))?
+    }
 }
 
 #[derive(Debug)]
@@ -680,6 +1035,44 @@ async fn fetch_source_with_default_bronze(
     fetch_source_with_bronze_services(env, dest, &registry, &archive_store).await
 }
 
+async fn restore_bronze_source_with_default_services(
+    env: &JobEnv,
+    dest: &Path,
+    _leases: &dyn CatalogLeaseStore,
+) -> Result<Option<PathBuf>, WorkerError> {
+    let archive_store = S3BronzeArchiveStore::new(bronze_bucket());
+    if env.catalog_dsn.starts_with("s3://") {
+        let Some(row) = lookup_bronze_row_in_s3_catalog(env).await? else {
+            return Ok(None);
+        };
+        return restore_registered_bronze_source(&row, dest, &archive_store).await;
+    }
+
+    let registry = DuckLakeBronzeRegistry::new(env.catalog_dsn.clone());
+    retrieve_bronze_source_by_coordinate(
+        &env.source,
+        &env.package,
+        &env.revision,
+        dest,
+        &registry,
+        &archive_store,
+    )
+    .await
+}
+
+async fn lookup_silver_artifact_with_default_services(
+    env: &JobEnv,
+) -> Result<Option<SilverGraphArtifact>, WorkerError> {
+    if env.catalog_dsn.starts_with("s3://") {
+        return lookup_silver_row_in_s3_catalog(env).await;
+    }
+
+    let registry = DuckLakeSilverRegistry::new(env.catalog_dsn.clone());
+    registry
+        .lookup(&env.source, &env.package, &env.revision)
+        .await
+}
+
 async fn fetch_source_with_s3_catalog_bronze(
     env: &JobEnv,
     dest: &Path,
@@ -723,6 +1116,22 @@ async fn lookup_bronze_row_in_s3_catalog(
     };
     let registry =
         DuckLakeBronzeRegistry::new(catalog_dl.local_path().to_string_lossy().to_string());
+    registry
+        .lookup(&env.source, &env.package, &env.revision)
+        .await
+}
+
+async fn lookup_silver_row_in_s3_catalog(
+    env: &JobEnv,
+) -> Result<Option<SilverGraphArtifact>, WorkerError> {
+    let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
+        .await
+        .map_err(|error| WorkerError::Build(format!("download silver catalog: {error:#}")))?;
+    let Some(catalog_dl) = catalog_dl else {
+        return Ok(None);
+    };
+    let registry =
+        DuckLakeSilverRegistry::new(catalog_dl.local_path().to_string_lossy().to_string());
     registry
         .lookup(&env.source, &env.package, &env.revision)
         .await
@@ -1138,6 +1547,65 @@ impl DuckLakeSilverRegistry {
 
 #[async_trait]
 impl SilverGraphArtifactRegistry for DuckLakeSilverRegistry {
+    async fn lookup(
+        &self,
+        source: &str,
+        package: &str,
+        version: &str,
+    ) -> Result<Option<SilverGraphArtifact>, WorkerError> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT source, package, version, revision_kind,
+                       semver_major, semver_minor, semver_patch,
+                       bronze_content_sha256, builder_version, graph_content_hash,
+                       artifact_s3_prefix, manifest_uri, manifest_schema_hash,
+                       node_count, edge_count, file_count, embedding_count,
+                       COALESCE(CAST(epoch(built_at) AS BIGINT), 0), build_status
+                FROM silver.graph_artifacts
+                WHERE source = ? AND package = ? AND version = ? AND build_status = 'success'
+                ORDER BY built_at DESC NULLS LAST
+                LIMIT 1
+                "#,
+            )
+            .map_err(|error| WorkerError::Build(format!("prepare silver lookup: {error}")))?;
+        let result = stmt.query_row(params![source, package, version], |row| {
+            let node_count: i64 = row.get(13)?;
+            let edge_count: i64 = row.get(14)?;
+            let file_count: i64 = row.get(15)?;
+            let embedding_count: i64 = row.get(16)?;
+            Ok(SilverGraphArtifact {
+                source: row.get(0)?,
+                package: row.get(1)?,
+                version: row.get(2)?,
+                revision_kind: row.get(3)?,
+                semver_major: row.get(4)?,
+                semver_minor: row.get(5)?,
+                semver_patch: row.get(6)?,
+                bronze_content_sha256: row.get(7)?,
+                builder_version: row.get(8)?,
+                graph_content_hash: row.get(9)?,
+                artifact_s3_prefix: row.get(10)?,
+                manifest_uri: row.get(11)?,
+                manifest_schema_hash: row.get(12)?,
+                node_count: u64::try_from(node_count).unwrap_or(0),
+                edge_count: u64::try_from(edge_count).unwrap_or(0),
+                file_count: u64::try_from(file_count).unwrap_or(0),
+                embedding_count: u64::try_from(embedding_count).unwrap_or(0),
+                built_at: row.get(17)?,
+                build_status: row.get(18)?,
+            })
+        });
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(WorkerError::Build(format!(
+                "lookup silver graph artifact: {error}"
+            ))),
+        }
+    }
+
     async fn register(&self, row: &SilverGraphArtifact) -> Result<(), WorkerError> {
         let node_count = i64::try_from(row.node_count)
             .map_err(|_| WorkerError::Build(format!("node count too large: {}", row.node_count)))?;
@@ -1265,21 +1733,7 @@ impl SilverArtifactStore for S3SilverArtifactStore {
     ) -> Result<(), WorkerError> {
         let parsed = parse_s3_uri(manifest_uri)
             .map_err(|error| WorkerError::Build(format!("invalid silver manifest URI: {error}")))?;
-        let resp = s3_client()
-            .get_object()
-            .bucket(&parsed.bucket)
-            .key(&parsed.key)
-            .send()
-            .await
-            .map_err(|error| WorkerError::Build(format!("download silver manifest: {error}")))?;
-        let body =
-            resp.body.collect().await.map_err(|error| {
-                WorkerError::Build(format!("read silver manifest body: {error}"))
-            })?;
-        let uploaded: SilverManifest =
-            serde_json::from_slice(&body.into_bytes()).map_err(|error| {
-                WorkerError::Build(format!("parse uploaded silver manifest: {error}"))
-            })?;
+        let uploaded = self.download_manifest(manifest_uri).await?;
         if &uploaded != manifest {
             return Err(WorkerError::Build(
                 "uploaded silver manifest does not match local manifest".to_owned(),
@@ -1315,6 +1769,24 @@ impl SilverArtifactStore for S3SilverArtifactStore {
             }
         }
         Ok(())
+    }
+
+    async fn download_manifest(&self, manifest_uri: &str) -> Result<SilverManifest, WorkerError> {
+        let parsed = parse_s3_uri(manifest_uri)
+            .map_err(|error| WorkerError::Build(format!("invalid silver manifest URI: {error}")))?;
+        let resp = s3_client()
+            .get_object()
+            .bucket(&parsed.bucket)
+            .key(&parsed.key)
+            .send()
+            .await
+            .map_err(|error| WorkerError::Build(format!("download silver manifest: {error}")))?;
+        let body =
+            resp.body.collect().await.map_err(|error| {
+                WorkerError::Build(format!("read silver manifest body: {error}"))
+            })?;
+        serde_json::from_slice(&body.into_bytes())
+            .map_err(|error| WorkerError::Build(format!("parse silver manifest: {error}")))
     }
 
     async fn download_manifest_file(
@@ -3232,12 +3704,30 @@ fn command_stderr(output: &std::process::Output) -> String {
 }
 
 #[derive(Debug)]
-struct PreparedJob {
+pub struct PreparedJob {
     _workspace: TempWorkspace,
-    source_path: PathBuf,
+    source_path: Option<PathBuf>,
     artifact_dir: PathBuf,
     artifact_manifest: Option<SilverManifest>,
     lineage: Option<TranslateLineage>,
+}
+
+impl PreparedJob {
+    pub fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
+    }
+
+    pub fn artifact_dir(&self) -> &Path {
+        &self.artifact_dir
+    }
+
+    pub fn artifact_manifest(&self) -> Option<&SilverManifest> {
+        self.artifact_manifest.as_ref()
+    }
+
+    pub fn lineage(&self) -> Option<&TranslateLineage> {
+        self.lineage.as_ref()
+    }
 }
 
 #[derive(Debug)]

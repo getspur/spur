@@ -262,13 +262,15 @@ CREATE TABLE IF NOT EXISTS package_catalog (
     bronze_content_sha256 VARCHAR,
     silver_graph_content_hash VARCHAR,
     builder_version VARCHAR,
-    translate_schema_version VARCHAR
+    translate_schema_version VARCHAR,
+    embed_text_version VARCHAR
 );
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS generation BIGINT;
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS bronze_content_sha256 VARCHAR;
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS silver_graph_content_hash VARCHAR;
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS builder_version VARCHAR;
 ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS translate_schema_version VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS embed_text_version VARCHAR;
 ALTER TABLE package_catalog SET PARTITIONED BY (source, package);
 
 CREATE TABLE IF NOT EXISTS refs (
@@ -318,5 +320,6 @@ ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS bronze_content_sha256 
 ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS silver_graph_content_hash VARCHAR;
 ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS builder_version VARCHAR;
 ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS translate_schema_version VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS embed_text_version VARCHAR;
 ALTER TABLE gold.package_catalog SET PARTITIONED BY (source, package);
 ALTER TABLE gold.refs SET PARTITIONED BY (source, package);
