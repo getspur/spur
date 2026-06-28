@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use duckdb::{params, Connection};
 use spur_context_service::catalog::{
-    compact_gold_and_export_snapshot, CatalogResolver, SnapshotCleanupOptions,
+    compact_gold_and_export_snapshot, CatalogResolver, FrozenSnapshotManifest,
+    SnapshotCleanupOptions,
 };
 use spur_context_service::knowledge::{
     query_knowledge_context, KnowledgeContextOptions, KnowledgeScope,
@@ -242,7 +243,7 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
         );
     }
 
-    let snapshot_path = catalog_snapshot_path(&data_path);
+    let snapshot_path = catalog_snapshot_path(&data_path)?;
     assert!(
         snapshot_path.is_file(),
         "translate must export frozen snapshot to {}",
@@ -351,7 +352,7 @@ fn exported_snapshot_serves_after_compaction_cleanup_fence_cycle() -> Result<()>
         },
     )?;
 
-    let snapshot_path = catalog_snapshot_path(&data_path);
+    let snapshot_path = catalog_snapshot_path(&data_path)?;
     let snapshot_resolver =
         CatalogResolver::new_with_data_path(&snapshot_path.display().to_string(), &data_path)?;
     let resolved = snapshot_resolver.resolve_latest(SOURCE, PACKAGE)?;
@@ -906,11 +907,17 @@ fn translate_lineage() -> TranslateLineage {
     }
 }
 
-fn catalog_snapshot_path(data_path: &str) -> PathBuf {
-    PathBuf::from(data_path)
+fn catalog_snapshot_path(data_path: &str) -> Result<PathBuf> {
+    let pointer_path = PathBuf::from(data_path)
         .join("gold")
         .join("catalog-snapshot")
-        .join("spur_context.ducklake")
+        .join("current.json");
+    let pointer: FrozenSnapshotManifest = serde_json::from_slice(
+        &fs::read(&pointer_path)
+            .with_context(|| format!("read snapshot pointer {}", pointer_path.display()))?,
+    )
+    .context("parse snapshot pointer")?;
+    Ok(PathBuf::from(pointer.snapshot_uri))
 }
 
 fn silver_manifest_for_fixture() -> SilverManifest {

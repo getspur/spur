@@ -6,10 +6,16 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context as _, Result};
 use aws_sdk_s3::primitives::ByteStream;
 use duckdb::{params, Connection};
+use sha2::{Digest, Sha256};
 
 pub(crate) const DUCKLAKE_DATA_PATH_ENV: &str = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH";
 const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
-const SNAPSHOT_RELATIVE_PATH: &str = "gold/catalog-snapshot/spur_context.ducklake";
+const SNAPSHOT_POINTER_RELATIVE_PATH: &str = "gold/catalog-snapshot/current.json";
+const SNAPSHOT_GENERATIONS_RELATIVE_DIR: &str = "gold/catalog-snapshot/generations";
+const SNAPSHOT_FILE_NAME: &str = "spur_context.ducklake";
+const SNAPSHOT_MANIFEST_FILE_NAME: &str = "manifest.json";
+const SNAPSHOT_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const SNAPSHOT_PUBLISHED_STATUS: &str = "published";
 const SNAPSHOT_INDEXES: &[(&str, &str, &str)] = &[
     (
         "ducklake_data_file_data_file_id",
@@ -72,6 +78,81 @@ pub struct RevisionInfo {
 pub struct SnapshotCleanupOptions {
     pub older_than: Duration,
     pub republish_lag: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FrozenSnapshotManifest {
+    pub schema_version: u32,
+    pub generation: i64,
+    pub snapshot_uri: String,
+    pub data_path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub status: String,
+}
+
+impl FrozenSnapshotManifest {
+    pub fn published(
+        generation: i64,
+        snapshot_uri: String,
+        data_path: String,
+        sha256: String,
+        bytes: u64,
+    ) -> Self {
+        Self {
+            schema_version: SNAPSHOT_MANIFEST_SCHEMA_VERSION,
+            generation,
+            snapshot_uri,
+            data_path,
+            sha256,
+            bytes,
+            status: SNAPSHOT_PUBLISHED_STATUS.to_owned(),
+        }
+    }
+
+    pub fn ensure_published(&self) -> Result<()> {
+        if self.schema_version != SNAPSHOT_MANIFEST_SCHEMA_VERSION {
+            bail!(
+                "unsupported frozen snapshot manifest schema version {}",
+                self.schema_version
+            );
+        }
+        if self.status != SNAPSHOT_PUBLISHED_STATUS {
+            bail!(
+                "frozen snapshot manifest for generation {} is not published: {}",
+                self.generation,
+                self.status
+            );
+        }
+        if self.generation <= 0 {
+            bail!("frozen snapshot manifest generation must be positive");
+        }
+        if self.snapshot_uri.trim().is_empty() {
+            bail!("frozen snapshot manifest snapshot_uri must be non-empty");
+        }
+        if self.data_path.trim().is_empty() {
+            bail!("frozen snapshot manifest data_path must be non-empty");
+        }
+        if self.sha256.trim().is_empty() {
+            bail!("frozen snapshot manifest sha256 must be non-empty");
+        }
+        Ok(())
+    }
+
+    pub fn from_json_slice(bytes: &[u8]) -> Result<Self> {
+        let manifest: Self =
+            serde_json::from_slice(bytes).context("failed to parse frozen snapshot manifest")?;
+        manifest.ensure_published()?;
+        Ok(manifest)
+    }
+
+    fn to_json_bytes(&self) -> Result<Vec<u8>> {
+        self.ensure_published()?;
+        let mut bytes =
+            serde_json::to_vec_pretty(self).context("failed to encode frozen snapshot manifest")?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
 }
 
 impl CatalogResolver {
@@ -279,34 +360,98 @@ pub fn compact_gold_and_export_snapshot(
     conn.execute("FORCE CHECKPOINT", [])
         .context("failed to checkpoint DuckLake before snapshot export")?;
 
-    export_frozen_snapshot(catalog_dsn, data_path)
+    let generation = current_snapshot_generation(&conn)?;
+    export_frozen_snapshot(catalog_dsn, data_path, generation)
 }
 
-pub(crate) fn export_frozen_snapshot(catalog_dsn: &str, data_path: &str) -> Result<PathBuf> {
-    let location = SnapshotLocation::for_data_path(data_path)?;
-    if let Some(parent) = location.local_path.parent() {
+pub(crate) fn export_frozen_snapshot(
+    catalog_dsn: &str,
+    data_path: &str,
+    generation: i64,
+) -> Result<PathBuf> {
+    let location = SnapshotLocation::for_data_path_and_generation(data_path, generation)?;
+    if let Some(parent) = location.local_staging_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create snapshot dir `{}`", parent.display()))?;
     }
-    if location.local_path.exists() {
-        fs::remove_file(&location.local_path).with_context(|| {
+    if location.s3_uri.is_some() {
+        if let Ok(manifest) = read_snapshot_manifest(&location) {
+            if manifest.generation != generation || manifest.snapshot_uri != location.snapshot_uri {
+                bail!(
+                    "existing S3 frozen snapshot manifest does not match generation {generation}: `{}`",
+                    location.local_manifest_path.display()
+                );
+            }
+            publish_snapshot_pointer(&location, &manifest)?;
+            return Ok(location.local_path);
+        }
+    } else if location.local_path.exists() || location.local_manifest_path.exists() {
+        if location.local_path.is_file() && location.local_manifest_path.is_file() {
+            let manifest = read_snapshot_manifest(&location)?;
+            if manifest.generation != generation || manifest.snapshot_uri != location.snapshot_uri {
+                bail!(
+                    "existing frozen snapshot manifest does not match generation {generation}: `{}`",
+                    location.local_manifest_path.display()
+                );
+            }
+            publish_snapshot_pointer(&location, &manifest)?;
+            return Ok(location.local_path);
+        }
+        bail!(
+            "partial immutable frozen snapshot exists for generation {generation}: snapshot={}, manifest={}",
+            location.local_path.display(),
+            location.local_manifest_path.display()
+        );
+    }
+    if location.local_staging_path.exists() {
+        fs::remove_file(&location.local_staging_path).with_context(|| {
             format!(
-                "failed to replace existing snapshot `{}`",
-                location.local_path.display()
+                "failed to remove stale snapshot staging file `{}`",
+                location.local_staging_path.display()
             )
         })?;
     }
 
-    copy_ducklake_metadata_tables(catalog_dsn, &location.local_path)?;
-    replay_snapshot_indexes(&location.local_path)?;
-    validate_snapshot_attaches(&location.local_path, data_path)?;
-    verify_snapshot_referenced_files_exist(&location.local_path, data_path)?;
+    copy_ducklake_metadata_tables(catalog_dsn, &location.local_staging_path)?;
+    replay_snapshot_indexes(&location.local_staging_path)?;
+    validate_snapshot_attaches(&location.local_staging_path, data_path)?;
+    verify_snapshot_referenced_files_exist(&location.local_staging_path, data_path)?;
 
-    if let Some(uri) = location.s3_uri {
-        upload_file_to_s3(&location.local_path, &uri)?;
-    }
+    let (sha256, bytes) = file_sha256_and_len(&location.local_staging_path)?;
+    let manifest = FrozenSnapshotManifest::published(
+        generation,
+        location.snapshot_uri.clone(),
+        data_path.to_owned(),
+        sha256,
+        bytes,
+    );
+
+    publish_snapshot_file(&location)?;
+    publish_snapshot_manifest(&location, &manifest)?;
+    publish_snapshot_pointer(&location, &manifest)?;
 
     Ok(location.local_path)
+}
+
+pub fn rollback_frozen_snapshot_pointer(
+    data_path: &str,
+    generation: i64,
+) -> Result<FrozenSnapshotManifest> {
+    let location = SnapshotLocation::for_data_path_and_generation(data_path, generation)?;
+    let manifest = read_snapshot_manifest(&location)?;
+    manifest.ensure_published()?;
+
+    if let Some(uri) = &location.s3_uri {
+        head_s3_object(uri)?;
+    } else if !location.local_path.is_file() {
+        bail!(
+            "cannot roll back to missing frozen snapshot `{}`",
+            location.local_path.display()
+        );
+    }
+
+    publish_snapshot_pointer(&location, &manifest)?;
+    Ok(manifest)
 }
 
 pub(crate) fn readable_table(conn: &Connection, table: &str) -> Result<String> {
@@ -484,38 +629,237 @@ fn interval_literal(duration: Duration) -> String {
 #[derive(Debug)]
 struct SnapshotLocation {
     local_path: PathBuf,
+    local_staging_path: PathBuf,
+    local_manifest_path: PathBuf,
+    local_pointer_path: PathBuf,
+    snapshot_uri: String,
     s3_uri: Option<String>,
+    s3_manifest_uri: Option<String>,
+    s3_pointer_uri: Option<String>,
 }
 
 impl SnapshotLocation {
-    fn for_data_path(data_path: &str) -> Result<Self> {
+    fn for_data_path_and_generation(data_path: &str, generation: i64) -> Result<Self> {
+        if generation <= 0 {
+            bail!("frozen snapshot generation must be positive");
+        }
+
+        let generation_dir = format!("{generation:020}");
         if data_path.starts_with("s3://") {
-            let uri = snapshot_s3_uri(data_path);
+            let uri = snapshot_s3_uri(data_path, generation);
+            let manifest_uri = snapshot_manifest_s3_uri(data_path, generation);
+            let pointer_uri = snapshot_pointer_s3_uri(data_path);
             let mut local_path = std::env::temp_dir();
             local_path.push(format!(
                 "spur_context_snapshot_{}.ducklake",
                 uuid::Uuid::new_v4()
             ));
+            let local_manifest_path = local_path.with_extension("manifest.json");
+            let local_pointer_path = local_path.with_extension("current.json");
             Ok(Self {
+                local_staging_path: local_path.clone(),
                 local_path,
+                local_manifest_path,
+                local_pointer_path,
+                snapshot_uri: uri.clone(),
                 s3_uri: Some(uri),
+                s3_manifest_uri: Some(manifest_uri),
+                s3_pointer_uri: Some(pointer_uri),
             })
         } else {
+            let snapshot_dir = Path::new(data_path)
+                .join(SNAPSHOT_GENERATIONS_RELATIVE_DIR)
+                .join(generation_dir);
+            let local_path = snapshot_dir.join(SNAPSHOT_FILE_NAME);
+            let local_staging_path = snapshot_dir.join(format!(
+                ".{SNAPSHOT_FILE_NAME}.{}.tmp",
+                uuid::Uuid::new_v4()
+            ));
+            let local_manifest_path = snapshot_dir.join(SNAPSHOT_MANIFEST_FILE_NAME);
+            let local_pointer_path = Path::new(data_path).join(SNAPSHOT_POINTER_RELATIVE_PATH);
             Ok(Self {
-                local_path: Path::new(data_path).join(SNAPSHOT_RELATIVE_PATH),
+                snapshot_uri: local_path.display().to_string(),
+                local_path,
+                local_staging_path,
+                local_manifest_path,
+                local_pointer_path,
                 s3_uri: None,
+                s3_manifest_uri: None,
+                s3_pointer_uri: None,
             })
         }
     }
 }
 
-fn snapshot_s3_uri(data_path: &str) -> String {
+fn snapshot_s3_uri(data_path: &str, generation: i64) -> String {
+    format!(
+        "{}/{}/{:020}/{}",
+        snapshot_base_uri(data_path).trim_end_matches('/'),
+        SNAPSHOT_GENERATIONS_RELATIVE_DIR,
+        generation,
+        SNAPSHOT_FILE_NAME
+    )
+}
+
+fn snapshot_manifest_s3_uri(data_path: &str, generation: i64) -> String {
+    format!(
+        "{}/{}/{:020}/{}",
+        snapshot_base_uri(data_path).trim_end_matches('/'),
+        SNAPSHOT_GENERATIONS_RELATIVE_DIR,
+        generation,
+        SNAPSHOT_MANIFEST_FILE_NAME
+    )
+}
+
+fn snapshot_pointer_s3_uri(data_path: &str) -> String {
+    format!(
+        "{}/{}",
+        snapshot_base_uri(data_path).trim_end_matches('/'),
+        SNAPSHOT_POINTER_RELATIVE_PATH
+    )
+}
+
+fn snapshot_base_uri(data_path: &str) -> String {
     let trimmed = data_path.trim_end_matches('/');
     if let Some(base) = trimmed.strip_suffix("/gold/data") {
-        format!("{base}/{SNAPSHOT_RELATIVE_PATH}")
+        base.to_owned()
     } else {
-        format!("{trimmed}/{SNAPSHOT_RELATIVE_PATH}")
+        trimmed.to_owned()
     }
+}
+
+fn current_snapshot_generation(conn: &Connection) -> Result<i64> {
+    let generation: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(generation), MAX(snapshot_id), 0)::BIGINT FROM gold.package_catalog",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to read current published snapshot generation")?;
+    if generation <= 0 {
+        bail!("cannot export frozen snapshot before a gold generation is published");
+    }
+    Ok(generation)
+}
+
+fn publish_snapshot_file(location: &SnapshotLocation) -> Result<()> {
+    if let Some(uri) = &location.s3_uri {
+        upload_file_to_s3(&location.local_staging_path, uri)?;
+        return Ok(());
+    }
+
+    if let Some(parent) = location.local_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create snapshot dir `{}`", parent.display()))?;
+    }
+    if location.local_path.exists() {
+        bail!(
+            "immutable frozen snapshot already exists: `{}`",
+            location.local_path.display()
+        );
+    }
+    fs::rename(&location.local_staging_path, &location.local_path).with_context(|| {
+        format!(
+            "failed to publish frozen snapshot `{}`",
+            location.local_path.display()
+        )
+    })
+}
+
+fn publish_snapshot_manifest(
+    location: &SnapshotLocation,
+    manifest: &FrozenSnapshotManifest,
+) -> Result<()> {
+    let bytes = manifest.to_json_bytes()?;
+    if let Some(uri) = &location.s3_manifest_uri {
+        put_s3_object(uri, bytes, "application/json", false)?;
+    } else {
+        write_json_file_atomic(&location.local_manifest_path, &bytes, false)?;
+    }
+    Ok(())
+}
+
+fn publish_snapshot_pointer(
+    location: &SnapshotLocation,
+    manifest: &FrozenSnapshotManifest,
+) -> Result<()> {
+    let bytes = manifest.to_json_bytes()?;
+    if let Some(uri) = &location.s3_pointer_uri {
+        put_s3_object(uri, bytes, "application/json", true)?;
+    } else {
+        publish_local_snapshot_pointer(&location.local_pointer_path, manifest)?;
+    }
+    Ok(())
+}
+
+fn read_snapshot_manifest(location: &SnapshotLocation) -> Result<FrozenSnapshotManifest> {
+    let bytes = if let Some(uri) = &location.s3_manifest_uri {
+        get_s3_object_bytes(uri)?
+    } else {
+        fs::read(&location.local_manifest_path).with_context(|| {
+            format!(
+                "failed to read frozen snapshot manifest `{}`",
+                location.local_manifest_path.display()
+            )
+        })?
+    };
+    FrozenSnapshotManifest::from_json_slice(&bytes)
+}
+
+fn publish_local_snapshot_pointer(
+    pointer_path: &Path,
+    manifest: &FrozenSnapshotManifest,
+) -> Result<()> {
+    let bytes = manifest.to_json_bytes()?;
+    write_json_file_atomic(pointer_path, &bytes, true)
+}
+
+#[cfg(test)]
+fn read_local_snapshot_pointer(pointer_path: &Path) -> Result<FrozenSnapshotManifest> {
+    let bytes = fs::read(pointer_path).with_context(|| {
+        format!(
+            "failed to read snapshot pointer `{}`",
+            pointer_path.display()
+        )
+    })?;
+    FrozenSnapshotManifest::from_json_slice(&bytes)
+}
+
+fn write_json_file_atomic(path: &Path, bytes: &[u8], overwrite: bool) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create json dir `{}`", parent.display()))?;
+    }
+    if !overwrite && path.exists() {
+        bail!("immutable json object already exists: `{}`", path.display());
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("snapshot.json");
+    let tmp_path = path.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&tmp_path, bytes)
+        .with_context(|| format!("failed to write temp json `{}`", tmp_path.display()))?;
+    if !overwrite && path.exists() {
+        let _ = fs::remove_file(&tmp_path);
+        bail!("immutable json object already exists: `{}`", path.display());
+    }
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("failed to atomically publish json `{}`", path.display()))
+}
+
+fn file_sha256_and_len(path: &Path) -> Result<(String, u64)> {
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read snapshot `{}`", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let sha256 = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok((sha256, bytes.len() as u64))
 }
 
 fn copy_ducklake_metadata_tables(catalog_dsn: &str, snapshot_path: &Path) -> Result<()> {
@@ -754,18 +1098,34 @@ fn join_uri_path(base: &str, child: &str) -> String {
 }
 
 fn upload_file_to_s3(local_path: &Path, uri: &str) -> Result<()> {
-    let parsed = parse_s3_uri(uri)?;
     let bytes = fs::read(local_path)
         .with_context(|| format!("failed to read snapshot `{}`", local_path.display()))?;
+    put_s3_object(uri, bytes, "application/octet-stream", false)
+}
+
+fn put_s3_object(
+    uri: &str,
+    bytes: Vec<u8>,
+    content_type: &str,
+    allow_overwrite: bool,
+) -> Result<()> {
+    let parsed = parse_s3_uri(uri)?;
+    let uri = uri.to_owned();
+    let content_type = content_type.to_owned();
     run_s3_blocking(move |client| async move {
-        client
+        let mut request = client
             .put_object()
             .bucket(parsed.bucket)
             .key(parsed.key)
-            .body(ByteStream::from(bytes))
+            .content_type(content_type)
+            .body(ByteStream::from(bytes));
+        if !allow_overwrite {
+            request = request.if_none_match("*");
+        }
+        request
             .send()
             .await
-            .context("failed to upload frozen DuckLake snapshot to S3")?;
+            .with_context(|| format!("failed to upload frozen snapshot object `{uri}`"))?;
         Ok(())
     })
 }
@@ -785,10 +1145,31 @@ fn head_s3_object(uri: &str) -> Result<()> {
     })
 }
 
-fn run_s3_blocking<F, Fut>(f: F) -> Result<()>
+fn get_s3_object_bytes(uri: &str) -> Result<Vec<u8>> {
+    let parsed = parse_s3_uri(uri)?;
+    let uri = uri.to_owned();
+    run_s3_blocking(move |client| async move {
+        let output = client
+            .get_object()
+            .bucket(parsed.bucket)
+            .key(parsed.key)
+            .send()
+            .await
+            .with_context(|| format!("failed to read S3 object `{uri}`"))?;
+        let bytes = output
+            .body
+            .collect()
+            .await
+            .with_context(|| format!("failed to read S3 object body `{uri}`"))?;
+        Ok(bytes.into_bytes().to_vec())
+    })
+}
+
+fn run_s3_blocking<T, F, Fut>(f: F) -> Result<T>
 where
     F: FnOnce(aws_sdk_s3::Client) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
 {
     thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().context("failed to create S3 runtime")?;
@@ -845,7 +1226,7 @@ fn s3_client_from_env() -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(config.build())
 }
 
-fn postgres_metadata_dsn(catalog_dsn: &str) -> String {
+pub(crate) fn postgres_metadata_dsn(catalog_dsn: &str) -> String {
     let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
     if let Some(rest) = dsn.strip_prefix("postgres:") {
         rest.to_owned()
@@ -967,6 +1348,103 @@ mod tests {
                 "metadata copy must roll back earlier tables if a later table fails"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_location_uses_immutable_generation_path_and_live_pointer() -> Result<()> {
+        let root = unique_temp_dir("snapshot-location")?;
+        let data_path = root.join("data");
+        let location =
+            SnapshotLocation::for_data_path_and_generation(&data_path.display().to_string(), 42)?;
+
+        assert_eq!(
+            location.local_path,
+            data_path
+                .join("gold")
+                .join("catalog-snapshot")
+                .join("generations")
+                .join("00000000000000000042")
+                .join("spur_context.ducklake")
+        );
+        assert_eq!(
+            location.local_manifest_path,
+            data_path
+                .join("gold")
+                .join("catalog-snapshot")
+                .join("generations")
+                .join("00000000000000000042")
+                .join("manifest.json")
+        );
+        assert_eq!(
+            location.local_pointer_path,
+            data_path
+                .join("gold")
+                .join("catalog-snapshot")
+                .join("current.json")
+        );
+        assert_eq!(location.s3_uri, None);
+        Ok(())
+    }
+
+    #[test]
+    fn pointer_publish_refuses_incomplete_manifest_without_live_marker() -> Result<()> {
+        let root = unique_temp_dir("snapshot-pointer-incomplete")?;
+        let pointer_path = root.join("current.json");
+        let manifest = FrozenSnapshotManifest {
+            schema_version: 1,
+            generation: 7,
+            snapshot_uri: root.join("snapshot.ducklake").display().to_string(),
+            data_path: root.join("data").display().to_string(),
+            sha256: "abc123".to_owned(),
+            bytes: 12,
+            status: "staging".to_owned(),
+        };
+
+        let err = publish_local_snapshot_pointer(&pointer_path, &manifest)
+            .expect_err("staging manifests must not become the live pointer");
+
+        assert!(
+            format!("{err:#}").contains("published"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !pointer_path.exists(),
+            "failed publishes must not leave a pointer"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_rewrites_pointer_to_previous_published_generation() -> Result<()> {
+        let root = unique_temp_dir("snapshot-pointer-rollback")?;
+        let pointer_path = root.join("current.json");
+        let first = FrozenSnapshotManifest::published(
+            10,
+            root.join("generations/10/spur_context.ducklake")
+                .display()
+                .to_string(),
+            root.join("data").display().to_string(),
+            "sha10".to_owned(),
+            10,
+        );
+        let second = FrozenSnapshotManifest::published(
+            11,
+            root.join("generations/11/spur_context.ducklake")
+                .display()
+                .to_string(),
+            root.join("data").display().to_string(),
+            "sha11".to_owned(),
+            11,
+        );
+
+        publish_local_snapshot_pointer(&pointer_path, &second)?;
+        publish_local_snapshot_pointer(&pointer_path, &first)?;
+
+        let current = read_local_snapshot_pointer(&pointer_path)?;
+        assert_eq!(current.generation, 10);
+        assert_eq!(current.snapshot_uri, first.snapshot_uri);
+        assert_eq!(current.status, "published");
         Ok(())
     }
 
