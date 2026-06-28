@@ -126,7 +126,8 @@ async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
         &root,
         &out_dir,
         SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: false,
             batch_size: 64,
         },
     );
@@ -185,7 +186,8 @@ async fn lance_sections_streams_small_write_batches_without_vectors() {
         &root,
         &out_dir,
         SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: false,
             batch_size: 64,
         },
     );
@@ -280,7 +282,7 @@ async fn lance_sections_refreshes_existing_fts_index_after_large_append() {
 }
 
 #[tokio::test]
-async fn lance_sections_skip_embeddings_writes_code_symbol_rows_without_vectors() {
+async fn lance_sections_skip_code_symbol_embeddings_writes_code_symbol_rows_without_vectors() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(root.join("src")).expect("mkdir src");
@@ -304,7 +306,8 @@ async fn lance_sections_skip_embeddings_writes_code_symbol_rows_without_vectors(
         &root,
         &out_dir,
         SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: false,
+            skip_code_symbol_embeddings: true,
             batch_size: 64,
         },
     );

@@ -502,6 +502,19 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_graph_build_no_code_symbol_embeddings_flag() {
+        Cli::command()
+            .try_get_matches_from([
+                "spur",
+                "graph",
+                "build",
+                "--workspace",
+                "--no-code-symbol-embeddings",
+            ])
+            .expect("graph build --no-code-symbol-embeddings should parse");
+    }
+
+    #[test]
     fn cli_accepts_graph_mcp_subcommand() {
         let root = PathBuf::from(".");
         let matches = Cli::command()
@@ -750,6 +763,10 @@ enum GraphCommands {
         /// Also honored via SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS=1.
         #[arg(long)]
         no_section_embeddings: bool,
+        /// Skip fastembed code-symbol vectors while still writing searchable code-symbol text.
+        /// Also honored via SPUR_GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS=1.
+        #[arg(long)]
+        no_code_symbol_embeddings: bool,
         /// Enable temporal git walk preparation for graph build.
         /// Also honored via SPUR_GRAPH_WITH_TEMPORAL=1.
         #[arg(long)]
@@ -1265,6 +1282,7 @@ async fn run() -> Result<()> {
                 quiet,
                 no_analyst,
                 no_section_embeddings,
+                no_code_symbol_embeddings,
                 with_temporal,
                 temporal_max_rows_per_shard,
                 temporal_max_commits_per_shard,
@@ -1281,8 +1299,12 @@ async fn run() -> Result<()> {
                         max_commits_per_shard: temporal_max_commits_per_shard,
                     },
                 };
-                if no_section_embeddings {
-                    commands::graph::build_with_section_embedding_override(options, true)
+                if no_section_embeddings || no_code_symbol_embeddings {
+                    commands::graph::build_with_embedding_overrides(
+                        options,
+                        no_section_embeddings,
+                        no_code_symbol_embeddings,
+                    )
                 } else {
                     commands::graph::build(options)
                 }
