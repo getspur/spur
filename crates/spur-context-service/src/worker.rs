@@ -743,6 +743,7 @@ fn prepared_job_from_silver(
     row: SilverGraphArtifact,
     manifest: SilverManifest,
 ) -> PreparedJob {
+    let allow_missing_embeddings = row.embedding_count == 0;
     PreparedJob {
         _workspace: workspace,
         source_path,
@@ -755,6 +756,7 @@ fn prepared_job_from_silver(
             translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
             embed_text_version: DEFAULT_EMBED_TEXT_VERSION.to_owned(),
         }),
+        allow_missing_embeddings,
     }
 }
 
@@ -770,6 +772,7 @@ fn translate_prepared_blocking(
         prepared.source_path.as_deref(),
         prepared.artifact_manifest.clone(),
         prepared.lineage.clone(),
+        prepared.allow_missing_embeddings,
         env,
     )?;
     log_stage_completed("translate", stage_started);
@@ -2208,7 +2211,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 pub fn translate(artifact_dir: &Path, env: &JobEnv) -> Result<TranslateStats, WorkerError> {
-    translate_with_source_root(artifact_dir, None, None, None, env)
+    translate_with_source_root(artifact_dir, None, None, None, false, env)
 }
 
 pub async fn handle_spot_interruption(
@@ -2820,6 +2823,7 @@ fn translate_with_source_root(
     source_root: Option<&Path>,
     artifact_manifest: Option<SilverManifest>,
     lineage: Option<TranslateLineage>,
+    allow_missing_embeddings: bool,
     env: &JobEnv,
 ) -> Result<TranslateStats, WorkerError> {
     let revision_kind = if env.revision.contains('.') {
@@ -2855,6 +2859,7 @@ fn translate_with_source_root(
         source_root: source_root.map(|p| p.to_path_buf()),
         catalog_dsn: env.catalog_dsn.clone(),
         lineage,
+        allow_missing_embeddings,
     };
 
     eprintln!("[worker] running Rust API translate...");
@@ -3710,6 +3715,7 @@ pub struct PreparedJob {
     artifact_dir: PathBuf,
     artifact_manifest: Option<SilverManifest>,
     lineage: Option<TranslateLineage>,
+    allow_missing_embeddings: bool,
 }
 
 impl PreparedJob {

@@ -127,6 +127,7 @@ pub struct TranslateOptions {
     pub source_root: Option<PathBuf>,
     pub catalog_dsn: String,
     pub lineage: Option<TranslateLineage>,
+    pub allow_missing_embeddings: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +333,7 @@ fn insert_structural_tables(
 
     insert_from_source(
         conn,
+        GoldInsertScope::new(opts, generation),
         "nodes",
         &read_parquet_source(&nodes),
         &format!(
@@ -372,6 +374,7 @@ fn insert_structural_tables(
 
     insert_from_source(
         conn,
+        GoldInsertScope::new(opts, generation),
         "edges",
         &read_parquet_source(&edges),
         &format!(
@@ -415,6 +418,7 @@ fn insert_structural_tables(
 
     insert_from_source(
         conn,
+        GoldInsertScope::new(opts, generation),
         "edges_unresolved",
         &read_parquet_source(&unresolved),
         &format!(
@@ -466,6 +470,7 @@ fn insert_structural_tables(
 
     insert_from_source(
         conn,
+        GoldInsertScope::new(opts, generation),
         "files",
         &read_parquet_source(&files),
         &format!(
@@ -506,6 +511,7 @@ fn insert_structural_tables(
 
     insert_from_source(
         conn,
+        GoldInsertScope::new(opts, generation),
         "file_manifests",
         &read_parquet_source(&file_manifests),
         &format!(
@@ -632,6 +638,7 @@ fn insert_git_tables(
     if let Some(commits) = optional_artifact_source(opts, "commits.parquet", None)? {
         insert_from_source(
             conn,
+            GoldInsertScope::new(opts, generation),
             "commits",
             &commits,
             &format!(
@@ -675,6 +682,7 @@ fn insert_git_tables(
     )? {
         insert_from_source(
             conn,
+            GoldInsertScope::new(opts, generation),
             "symbol_snapshots",
             &snapshots,
             &format!(
@@ -727,6 +735,7 @@ fn insert_git_tables(
     )? {
         insert_from_source(
             conn,
+            GoldInsertScope::new(opts, generation),
             "temporal_edges",
             &temporal_edges,
             &format!(
@@ -815,6 +824,12 @@ fn insert_symbol_embeddings(
     let sidecar_path = opts.artifact_dir.join("code_symbols.lance");
     let Some(source) = sidecar_source(conn, opts, "code_symbols.lance", SidecarKind::CodeSymbols)?
     else {
+        if !opts.allow_missing_embeddings {
+            bail!(
+                "expected symbol embeddings from `{}` but the sidecar was unavailable",
+                sidecar_path.display()
+            );
+        }
         rows_inserted.insert("symbol_embeddings".to_owned(), 0);
         return Ok(false);
     };
@@ -822,7 +837,12 @@ fn insert_symbol_embeddings(
     let columns = match source_columns(conn, source.sql()) {
         Ok(columns) => columns,
         Err(error) if source.is_lance() => {
-            warn_skip_sidecar(&sidecar_path, &error);
+            skip_lance_sidecar_or_fail(
+                opts,
+                &sidecar_path,
+                error,
+                "expected symbol embeddings but failed to read Lance sidecar",
+            )?;
             rows_inserted.insert("symbol_embeddings".to_owned(), 0);
             return Ok(false);
         }
@@ -900,18 +920,32 @@ fn insert_symbol_embeddings(
 
     match insert_from_source(
         conn,
+        GoldInsertScope::new(opts, generation),
         "symbol_embeddings",
         &filtered_source_sql,
         &template,
         rows_inserted,
     ) {
-        Ok(()) => Ok(rows_inserted
-            .get("symbol_embeddings")
-            .copied()
-            .unwrap_or_default()
-            > 0),
+        Ok(()) => {
+            let inserted = rows_inserted
+                .get("symbol_embeddings")
+                .copied()
+                .unwrap_or_default();
+            if inserted == 0 && !opts.allow_missing_embeddings {
+                bail!(
+                    "expected symbol embeddings from `{}` but zero embedding rows landed",
+                    sidecar_path.display()
+                );
+            }
+            Ok(inserted > 0)
+        }
         Err(error) if source.is_lance() => {
-            warn_skip_sidecar(&sidecar_path, &error);
+            skip_lance_sidecar_or_fail(
+                opts,
+                &sidecar_path,
+                error,
+                "expected symbol embeddings but failed to insert Lance sidecar",
+            )?;
             rows_inserted.insert("symbol_embeddings".to_owned(), 0);
             Ok(false)
         }
@@ -929,6 +963,12 @@ fn insert_section_bodies(
     let sidecar_path = opts.artifact_dir.join("sections.lancedb");
     let Some(source) = sidecar_source(conn, opts, "sections.lancedb", SidecarKind::Sections)?
     else {
+        if !opts.allow_missing_embeddings {
+            bail!(
+                "expected section bodies from `{}` but the sidecar was unavailable",
+                sidecar_path.display()
+            );
+        }
         rows_inserted.insert("section_bodies".to_owned(), 0);
         return Ok(false);
     };
@@ -936,7 +976,12 @@ fn insert_section_bodies(
     let columns = match source_columns(conn, source.sql()) {
         Ok(columns) => columns,
         Err(error) if source.is_lance() => {
-            warn_skip_sidecar(&sidecar_path, &error);
+            skip_lance_sidecar_or_fail(
+                opts,
+                &sidecar_path,
+                error,
+                "expected section bodies but failed to read Lance sidecar",
+            )?;
             rows_inserted.insert("section_bodies".to_owned(), 0);
             return Ok(false);
         }
@@ -1040,14 +1085,32 @@ fn insert_section_bodies(
 
     match insert_from_source(
         conn,
+        GoldInsertScope::new(opts, generation),
         "section_bodies",
         source.sql(),
         &template,
         rows_inserted,
     ) {
-        Ok(()) => Ok(true),
+        Ok(()) => {
+            let inserted = rows_inserted
+                .get("section_bodies")
+                .copied()
+                .unwrap_or_default();
+            if inserted == 0 && !opts.allow_missing_embeddings {
+                bail!(
+                    "expected section bodies from `{}` but zero rows landed",
+                    sidecar_path.display()
+                );
+            }
+            Ok(inserted > 0)
+        }
         Err(error) if source.is_lance() => {
-            warn_skip_sidecar(&sidecar_path, &error);
+            skip_lance_sidecar_or_fail(
+                opts,
+                &sidecar_path,
+                error,
+                "expected section bodies but failed to insert Lance sidecar",
+            )?;
             rows_inserted.insert("section_bodies".to_owned(), 0);
             Ok(false)
         }
@@ -1194,6 +1257,7 @@ fn validate_generation(
 
 fn insert_from_source(
     conn: &Connection,
+    scope: GoldInsertScope<'_>,
     table: &str,
     source_sql: &str,
     insert_template: &str,
@@ -1201,6 +1265,8 @@ fn insert_from_source(
 ) -> Result<()> {
     let count = count_source_rows(conn, source_sql)
         .with_context(|| format!("failed to count source rows for {table}"))?;
+    let before = count_gold_generation_rows(conn, table, scope)
+        .with_context(|| format!("failed to count pre-insert gold.{table} rows"))?;
     let sql = insert_template.replace("__SOURCE_SQL__", source_sql);
 
     // Use the single-statement prepared path for DuckLake DML. In duckdb-rs
@@ -1213,20 +1279,66 @@ fn insert_from_source(
     stmt.execute([])
         .with_context(|| format!("failed to insert {table} rows"))?;
 
-    // Verify the data actually landed in the DuckLake table
-    let verify_count: i64 = conn
-        .query_row(
-            &format!("SELECT COUNT(*)::BIGINT FROM {}", gold_table(table)),
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(-1);
-    eprintln!(
-        "[translate] {table}: inserted {count} source rows, table now has {verify_count} rows"
-    );
+    let after = count_gold_generation_rows(conn, table, scope)
+        .with_context(|| format!("failed to count post-insert gold.{table} rows"))?;
+    if after < before {
+        bail!(
+            "gold.{table} generation {} row count went backwards: before {before}, after {after}",
+            scope.generation
+        );
+    }
+    let landed = usize::try_from(after - before).context("landed row delta does not fit usize")?;
+    if landed != count {
+        bail!(
+            "gold.{table} generation {} row count mismatch: source rows {count}, landed delta {landed} (before {before}, after {after})",
+            scope.generation
+        );
+    }
+    eprintln!("[translate] {table}: inserted {count} source rows, scoped rows {before}->{after}");
 
     rows_inserted.insert(table.to_owned(), count);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct GoldInsertScope<'a> {
+    source: &'a str,
+    package: &'a str,
+    revision: &'a str,
+    generation: i64,
+}
+
+impl<'a> GoldInsertScope<'a> {
+    fn new(opts: &'a TranslateOptions, generation: i64) -> Self {
+        Self {
+            source: &opts.source,
+            package: &opts.package,
+            revision: &opts.revision,
+            generation,
+        }
+    }
+}
+
+fn count_gold_generation_rows(
+    conn: &Connection,
+    table: &str,
+    scope: GoldInsertScope<'_>,
+) -> Result<i64> {
+    let sql = format!(
+        "SELECT COUNT(*)::BIGINT FROM {} WHERE source = ? AND package = ? AND revision = ? AND generation = ?",
+        gold_table(table)
+    );
+    conn.query_row(
+        &sql,
+        params![
+            scope.source,
+            scope.package,
+            scope.revision,
+            scope.generation
+        ],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("failed to count gold.{table} generation rows"))
 }
 
 fn count_source_rows(conn: &Connection, source_sql: &str) -> Result<usize> {
@@ -1325,6 +1437,15 @@ enum SidecarKind {
     Sections,
 }
 
+impl SidecarKind {
+    fn expected_sidecar_error_context(self) -> &'static str {
+        match self {
+            Self::CodeSymbols => "expected symbol embeddings but failed to load Lance sidecar",
+            Self::Sections => "expected section bodies but failed to load Lance sidecar",
+        }
+    }
+}
+
 fn sidecar_source(
     conn: &Connection,
     opts: &TranslateOptions,
@@ -1358,25 +1479,24 @@ fn sidecar_source(
     }
 
     if let Err(error) = load_lance_extension(conn) {
-        warn_skip_sidecar(&path, &error);
+        skip_lance_sidecar_or_fail(opts, &path, error, kind.expected_sidecar_error_context())?;
         return Ok(None);
     }
 
     if matches!(kind, SidecarKind::Sections) {
         let attach_sql = format!(
-            "ATTACH '{}' AS spur_context_sections_lance (TYPE lancedb);",
+            "ATTACH '{}' AS spur_context_sections_lance (TYPE lance);",
             escape_sql_literal(&path.display().to_string())
         );
         if conn.execute_batch(&attach_sql).is_ok() {
             return Ok(Some(SidecarSource::Lance(
-                "spur_context_sections_lance.section_bodies".to_owned(),
+                "spur_context_sections_lance.main.section_bodies".to_owned(),
             )));
         }
     }
 
-    Ok(Some(SidecarSource::Lance(format!(
-        "lance_scan('{}')",
-        escape_sql_literal(&path.display().to_string())
+    Ok(Some(SidecarSource::Lance(sql_string(
+        &path.display().to_string(),
     ))))
 }
 
@@ -1703,8 +1823,14 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str, data_path: &st
 }
 
 fn load_lance_extension(conn: &Connection) -> Result<()> {
-    conn.execute_batch("INSTALL lance; LOAD lance;")
-        .context("failed to load lance extension")
+    match conn.execute_batch("LOAD lance;") {
+        Ok(()) => Ok(()),
+        Err(load_error) => conn
+            .execute_batch("INSTALL lance; LOAD lance;")
+            .with_context(|| {
+                format!("failed to load lance extension: initial LOAD failed: {load_error}")
+            }),
+    }
 }
 
 fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
@@ -1796,4 +1922,72 @@ fn warn_skip_sidecar(path: &Path, error: &anyhow::Error) {
         "warning: skipping Lance sidecar `{}` during DuckLake translation: {error:#}",
         path.display()
     );
+}
+
+fn skip_lance_sidecar_or_fail(
+    opts: &TranslateOptions,
+    path: &Path,
+    error: anyhow::Error,
+    context: &'static str,
+) -> Result<()> {
+    if opts.allow_missing_embeddings {
+        warn_skip_sidecar(path, &error);
+        Ok(())
+    } else {
+        Err(error).with_context(|| format!("{context}: {}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_from_source_fails_when_landed_delta_mismatches_source_count() -> Result<()> {
+        let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
+        conn.execute_batch(
+            r"
+            CREATE SCHEMA gold;
+            CREATE TABLE gold.nodes (
+                source VARCHAR,
+                package VARCHAR,
+                revision VARCHAR,
+                generation BIGINT,
+                value BIGINT
+            );
+            CREATE TEMP TABLE source_rows (value BIGINT);
+            INSERT INTO source_rows VALUES (1);
+            ",
+        )
+        .context("create test tables")?;
+
+        let mut rows_inserted = HashMap::new();
+        let scope = GoldInsertScope {
+            source: "registry:crates-io",
+            package: "demo",
+            revision: "1.2.3",
+            generation: 7,
+        };
+        let error = insert_from_source(
+            &conn,
+            scope,
+            "nodes",
+            "(SELECT * FROM source_rows)",
+            r"
+            INSERT INTO gold.nodes (source, package, revision, generation, value)
+            SELECT 'registry:crates-io', 'demo', '1.2.3', 7, value
+            FROM __SOURCE_SQL__
+            WHERE false
+            ",
+            &mut rows_inserted,
+        )
+        .expect_err("insert helper must reject a landed row delta mismatch");
+
+        assert!(
+            format!("{error:#}").contains("row count mismatch"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!rows_inserted.contains_key("nodes"));
+        Ok(())
+    }
 }

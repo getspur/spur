@@ -32,6 +32,12 @@ fn main() -> Result<()> {
                 .long("source")
                 .default_value("registry:crates-io"),
         )
+        .arg(
+            Arg::new("allow-missing-embeddings")
+                .long("allow-missing-embeddings")
+                .action(clap::ArgAction::SetTrue)
+                .help("Allow publishing BM25-only artifacts with no embedding sidecars"),
+        )
         .get_matches();
 
     let package = matches.get_one::<String>("package").unwrap();
@@ -41,6 +47,7 @@ fn main() -> Result<()> {
     let catalog = matches.get_one::<String>("catalog").unwrap();
     let upload_s3 = matches.get_one::<String>("upload-s3").cloned();
     let source = matches.get_one::<String>("source").unwrap();
+    let allow_missing_embeddings = matches.get_flag("allow-missing-embeddings");
 
     let opts = TranslateOptions {
         source: source.clone(),
@@ -52,6 +59,7 @@ fn main() -> Result<()> {
         source_root,
         catalog_dsn: catalog.clone(),
         lineage: None,
+        allow_missing_embeddings,
     };
 
     eprintln!("[index] translating {source}/{package}@{revision} ...");
