@@ -10,31 +10,19 @@ const SOURCE: &str = "registry:crates-io";
 const PACKAGE: &str = "serde";
 
 #[test]
-fn init_catalog_sql_creates_expected_nodes_schema() -> Result<()> {
-    let root = unique_temp_dir("init-sql")?;
+fn catalog_tables_sql_creates_medallion_schemas_and_gold_catalog_columns() -> Result<()> {
+    let root = unique_temp_dir("catalog-tables-sql")?;
     fs::create_dir_all(root.join("data")).context("create ducklake data dir")?;
     let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
     let data_path = root.join("data").display().to_string();
 
-    let sql = include_str!("../sql/init_catalog.sql")
-        .replace("INSTALL postgres;", "INSTALL sqlite;")
-        .replace("LOAD postgres;", "LOAD sqlite;")
-        .replace("__CATALOG_DSN__", &escape_sql_literal(&catalog_dsn))
-        .replace("s3://spur-context/data/", &escape_sql_literal(&data_path));
-
     let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
-    conn.execute_batch(&sql)
-        .context("execute init catalog sql")?;
-
-    let mut stmt = conn
-        .prepare("PRAGMA table_info('nodes')")
-        .context("inspect nodes schema")?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    attach_ducklake(&conn, &catalog_dsn, &data_path)?;
+    conn.execute_batch(include_str!("../sql/catalog_tables.sql"))
+        .context("execute catalog tables sql")?;
 
     assert_eq!(
-        columns,
+        columns_for(&conn, "gold", "nodes")?,
         [
             "stable_symbol_id",
             "package",
@@ -56,7 +44,35 @@ fn init_catalog_sql_creates_expected_nodes_schema() -> Result<()> {
             "enclosing_scope",
         ]
     );
+
+    assert_eq!(table_exists(&conn, "bronze", "raw_sources")?, 1);
+    assert_eq!(table_exists(&conn, "silver", "graph_artifacts")?, 1);
+    assert_eq!(table_exists(&conn, "gold", "package_catalog")?, 1);
+
+    for column in [
+        "generation",
+        "bronze_content_sha256",
+        "silver_graph_content_hash",
+        "builder_version",
+        "translate_schema_version",
+    ] {
+        assert_eq!(
+            nullable_column_count(&conn, "gold", "package_catalog", column)?,
+            1,
+            "gold.package_catalog must have nullable column {column}"
+        );
+    }
     Ok(())
+}
+
+#[test]
+fn duplicate_init_catalog_sql_is_removed_to_prevent_schema_drift() {
+    assert!(
+        !PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("sql/init_catalog.sql")
+            .exists(),
+        "catalog DDL must live only in sql/catalog_tables.sql"
+    );
 }
 
 #[test]
@@ -268,4 +284,54 @@ fn unique_temp_dir(name: &str) -> Result<PathBuf> {
 
 fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn table_exists(conn: &Connection, schema: &str, table: &str) -> Result<i64> {
+    conn.query_row(
+        r"
+        SELECT COUNT(*)
+        FROM information_schema.tables
+        WHERE table_schema = ? AND table_name = ?
+        ",
+        [schema, table],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("check table exists {schema}.{table}"))
+}
+
+fn columns_for(conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            r"
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = ? AND table_name = ?
+            ORDER BY ordinal_position
+            ",
+        )
+        .with_context(|| format!("inspect columns for {schema}.{table}"))?;
+    stmt.query_map([schema, table], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("collect columns for {schema}.{table}"))
+}
+
+fn nullable_column_count(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<i64> {
+    conn.query_row(
+        r"
+        SELECT COUNT(*)
+        FROM information_schema.columns
+        WHERE table_schema = ?
+          AND table_name = ?
+          AND column_name = ?
+          AND is_nullable = 'YES'
+        ",
+        [schema, table, column],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("check nullable column {schema}.{table}.{column}"))
 }
