@@ -7,6 +7,7 @@ use duckdb::{params, Connection};
 use spur_context_service::knowledge::{
     query_knowledge_context, KnowledgeContextOptions, KnowledgeScope,
 };
+use spur_context_service::medallion::{SilverManifest, SilverManifestFile};
 use spur_context_service::query::read_symbol;
 use spur_context_service::translate::{translate_artifact_to_ducklake, TranslateOptions};
 
@@ -36,6 +37,7 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir: artifact_dir.clone(),
+        artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
     })?;
@@ -152,6 +154,7 @@ fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
+        artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
     })?;
@@ -214,6 +217,7 @@ fn skipped_lance_sidecars_do_not_poison_required_graph_commits() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
+        artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
     })?;
@@ -229,6 +233,42 @@ fn skipped_lance_sidecars_do_not_poison_required_graph_commits() -> Result<()> {
         |row| row.get(0),
     )?;
     assert_eq!(durable_nodes, 1);
+    Ok(())
+}
+
+#[test]
+fn manifest_translate_ignores_unlisted_sidecar_files() -> Result<()> {
+    let root = unique_temp_dir("translate-manifest-sidecars")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+    write_unlisted_symbol_sidecar_row(&artifact_dir.join("code_symbols.lance/stale.parquet"))?;
+    let manifest = silver_manifest_for_fixture();
+
+    let stats = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: Some(manifest),
+        source_root: None,
+        catalog_dsn: catalog_dsn.clone(),
+    })?;
+
+    assert_eq!(stats.rows_inserted.get("symbol_embeddings"), Some(&1));
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let embedded_symbols: Vec<String> = collect_strings(
+        &conn,
+        "SELECT stable_symbol_id FROM symbol_embeddings ORDER BY stable_symbol_id",
+    )?;
+    assert_eq!(embedded_symbols, ["sym-alpha"]);
     Ok(())
 }
 
@@ -256,6 +296,7 @@ fn translated_artifact_read_symbol_returns_source_from_package_tree() -> Result<
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
+        artifact_manifest: None,
         source_root: Some(source_root),
         catalog_dsn: catalog_dsn.clone(),
     })?;
@@ -289,6 +330,7 @@ fn translated_artifact_vector_search_returns_ranked_symbol() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
+        artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
     })?;
@@ -448,6 +490,51 @@ fn write_artifact_fixture_with_symbol_vector(
     Ok(())
 }
 
+fn write_unlisted_symbol_sidecar_row(path: &Path) -> Result<()> {
+    let conn = Connection::open_in_memory().context("open stale sidecar writer duckdb")?;
+    let symbols_path = sql_path(path);
+    conn.execute_batch(&format!(
+        r#"
+        COPY (
+            SELECT
+                'sym-stale' AS stable_symbol_id,
+                'src/stale.rs' AS file_path,
+                'demo::stale' AS qualified_name,
+                'stale' AS entity_name,
+                'function' AS symbol_kind,
+                'pub fn stale() {{}}' AS embed_text,
+                list_transform(range(0, 768), x -> 0.5::FLOAT) AS vector,
+                'stale-code-hash' AS content_hash,
+                'stale-embed-hash' AS embedding_input_hash,
+                '{EMBEDDING_MODEL}' AS embedding_model
+        ) TO '{symbols_path}' (FORMAT PARQUET);
+        "#
+    ))
+    .context("write unlisted symbol sidecar row")
+}
+
+fn silver_manifest_for_fixture() -> SilverManifest {
+    SilverManifest {
+        schema_hash: "sha256:test-schema".to_owned(),
+        files: [
+            "nodes.parquet",
+            "edges.parquet",
+            "edges_unresolved.parquet",
+            "files.parquet",
+            "file_manifests.parquet",
+            "code_symbols.lance/part.parquet",
+            "sections.lancedb/part.parquet",
+        ]
+        .into_iter()
+        .map(|path| SilverManifestFile {
+            path: path.to_owned(),
+            size_bytes: 1,
+            etag: format!("\"{path}\""),
+        })
+        .collect(),
+    }
+}
+
 fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
     let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
     conn.execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
@@ -502,6 +589,13 @@ fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
         row.get(0)
     })
     .with_context(|| format!("count rows in {table}"))
+}
+
+fn collect_strings(conn: &Connection, sql: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(sql).context("prepare string collection")?;
+    stmt.query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect strings")
 }
 
 fn unit_vector(index: usize) -> Vec<f32> {

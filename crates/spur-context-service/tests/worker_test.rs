@@ -22,9 +22,11 @@ use spur_context_service::jobs::{
 };
 use spur_context_service::worker::{
     build_graph, fetch_source, fetch_source_with_bronze_services, handle_spot_interruption,
-    retrieve_bronze_source_by_coordinate, run_job_and_record_with_services,
-    upload_with_owned_catalog_lease, BronzeArchiveStore, BronzeRawSource, BronzeRawSourceRegistry,
-    CatalogDownload, CatalogLease, CatalogLeaseStore, JobEnv, StageTracker, WorkerError,
+    persist_silver_graph_artifact, retrieve_bronze_source_by_coordinate,
+    run_job_and_record_with_services, upload_with_owned_catalog_lease, BronzeArchiveStore,
+    BronzeRawSource, BronzeRawSourceRegistry, CatalogDownload, CatalogLease, CatalogLeaseStore,
+    JobEnv, SilverArtifactStore, SilverGraphArtifact, SilverGraphArtifactRegistry,
+    SilverUploadedFile, StageTracker, WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -219,6 +221,74 @@ async fn bronze_fetch_errors_when_existing_success_row_hash_drifts() -> Result<(
     assert!(err.to_string().contains("bronze content drift"));
     assert_eq!(store.uploads(), 0);
     assert_eq!(registry.registers(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn silver_upload_writes_validates_manifest_before_registering() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_SILVER_BUCKET", "silver-test")]);
+    let root = unique_temp_dir("worker-silver-upload")?;
+    let artifact_dir = root.join("artifact");
+    write_silver_artifact_fixture(&artifact_dir)?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let store = FakeSilverArtifactStore::new(events.clone());
+    let registry = FakeSilverRegistry::new(events.clone());
+    let env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+
+    let row = persist_silver_graph_artifact(
+        &env,
+        &artifact_dir,
+        "bronze-sha256",
+        "builder-v1",
+        &store,
+        &registry,
+    )
+    .await?;
+
+    assert_eq!(
+        row.artifact_s3_prefix,
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/"
+    );
+    assert_eq!(
+        row.manifest_uri,
+        "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/manifest.json"
+    );
+    assert_eq!(row.builder_version, "builder-v1");
+    assert_eq!(row.graph_content_hash, "graph-hash-123");
+    assert_eq!(row.node_count, 7);
+    assert_eq!(row.edge_count, 11);
+    assert_eq!(row.file_count, 3);
+    assert_eq!(row.embedding_count, 5);
+    assert_eq!(row.build_status, "success");
+
+    let registered = registry.rows();
+    assert_eq!(registered, [row]);
+
+    let manifest = store.manifest().context("manifest should be uploaded")?;
+    assert_eq!(manifest.files.len(), 7);
+    assert!(manifest.schema_hash.starts_with("sha256:"));
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.path == "nodes.parquet"));
+    assert!(manifest
+        .files
+        .iter()
+        .any(|file| file.path == "code_symbols.lance/part.parquet"));
+    assert!(!manifest
+        .files
+        .iter()
+        .any(|file| file.path == "manifest.json"));
+
+    let events = events.lock().expect("events lock").clone();
+    let upload_manifest = event_index(&events, "upload_manifest:").context("upload manifest")?;
+    let validate = event_index(&events, "validate_manifest:").context("validate manifest")?;
+    let register = event_index(&events, "register").context("register silver")?;
+    assert!(
+        upload_manifest < validate && validate < register,
+        "events must upload manifest, validate it, then register: {events:?}"
+    );
     Ok(())
 }
 
@@ -575,6 +645,68 @@ fn demo_job_env(source_url: &str) -> JobEnv {
     }
 }
 
+fn write_silver_artifact_fixture(artifact_dir: &Path) -> Result<()> {
+    fs::create_dir_all(artifact_dir.join("code_symbols.lance")).context("create symbols dir")?;
+    fs::create_dir_all(artifact_dir.join("sections.lancedb")).context("create sections dir")?;
+    for relative in [
+        "nodes.parquet",
+        "edges.parquet",
+        "edges_unresolved.parquet",
+        "files.parquet",
+        "file_manifests.parquet",
+        "code_symbols.lance/part.parquet",
+        "sections.lancedb/part.parquet",
+    ] {
+        fs::write(artifact_dir.join(relative), format!("fixture:{relative}"))
+            .with_context(|| format!("write {relative}"))?;
+    }
+    fs::write(
+        artifact_dir.join("manifest.json"),
+        serde_json::json!({
+            "graph_index_version": "4",
+            "schema_version": "spur-graph-schema-v9",
+            "manifest_version": "manifest-v1",
+            "graph_content_hash": "graph-hash-123",
+            "indexed_commit_oid": null,
+            "extractor_version": "extractor-v1",
+            "complete": true,
+            "row_counts": {
+                "nodes": 7,
+                "edges": 11,
+                "edges_by_dst": null,
+                "edges_unresolved": 2,
+                "files": 3,
+                "file_manifests": 3,
+                "tombstones": 0,
+                "commits": 0,
+                "symbol_snapshots": 0,
+                "temporal_edges": 0,
+                "diagnostics": 0
+            },
+            "sidecar_complete": true,
+            "sidecar_row_counts": {
+                "section_bodies": 4,
+                "code_symbols": 5
+            },
+            "parquet_writer": {
+                "compression": "zstd-3",
+                "row_group_size": 16384
+            },
+            "edges_by_dst_present": false,
+            "temporal_shards": []
+        })
+        .to_string(),
+    )
+    .context("write graph artifact manifest")?;
+    Ok(())
+}
+
+fn event_index(events: &[String], prefix: &str) -> Option<usize> {
+    events
+        .iter()
+        .position(|event| event == prefix || event.starts_with(prefix))
+}
+
 fn bronze_row(source_url: &str, content_sha256: &str, bytes: u64) -> BronzeRawSource {
     BronzeRawSource {
         source: "registry:crates-io".to_owned(),
@@ -591,6 +723,113 @@ fn bronze_row(source_url: &str, content_sha256: &str, bytes: u64) -> BronzeRawSo
         bytes,
         fetched_at: 1_800_000_000,
         fetch_status: "success".to_owned(),
+    }
+}
+
+struct FakeSilverArtifactStore {
+    events: Arc<Mutex<Vec<String>>>,
+    manifest: Mutex<Option<spur_context_service::medallion::SilverManifest>>,
+}
+
+impl FakeSilverArtifactStore {
+    fn new(events: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            events,
+            manifest: Mutex::new(None),
+        }
+    }
+
+    fn manifest(&self) -> Option<spur_context_service::medallion::SilverManifest> {
+        self.manifest.lock().expect("silver manifest lock").clone()
+    }
+}
+
+#[async_trait]
+impl SilverArtifactStore for FakeSilverArtifactStore {
+    async fn upload_file(&self, key: &str, path: &Path) -> Result<SilverUploadedFile, WorkerError> {
+        let size_bytes = fs::metadata(path)
+            .map_err(|error| WorkerError::Build(format!("fake silver stat: {error}")))?
+            .len();
+        self.events
+            .lock()
+            .expect("events lock")
+            .push(format!("upload_file:{key}"));
+        Ok(SilverUploadedFile {
+            s3_uri: format!("s3://silver-test/{key}"),
+            etag: format!("\"etag:{key}\""),
+            size_bytes,
+        })
+    }
+
+    async fn upload_manifest(
+        &self,
+        key: &str,
+        manifest: &spur_context_service::medallion::SilverManifest,
+    ) -> Result<String, WorkerError> {
+        self.events
+            .lock()
+            .expect("events lock")
+            .push(format!("upload_manifest:{key}"));
+        *self.manifest.lock().expect("silver manifest lock") = Some(manifest.clone());
+        Ok(format!("s3://silver-test/{key}"))
+    }
+
+    async fn validate_manifest(
+        &self,
+        manifest_uri: &str,
+        manifest: &spur_context_service::medallion::SilverManifest,
+    ) -> Result<(), WorkerError> {
+        self.events
+            .lock()
+            .expect("events lock")
+            .push(format!("validate_manifest:{manifest_uri}"));
+        let uploaded = self.manifest.lock().expect("silver manifest lock").clone();
+        if uploaded.as_ref() != Some(manifest) {
+            return Err(WorkerError::Build("manifest not uploaded".to_owned()));
+        }
+        Ok(())
+    }
+
+    async fn download_manifest_file(
+        &self,
+        _manifest_uri: &str,
+        _relative_path: &str,
+        _dest: &Path,
+    ) -> Result<(), WorkerError> {
+        unimplemented!("not needed for silver upload test")
+    }
+}
+
+struct FakeSilverRegistry {
+    events: Arc<Mutex<Vec<String>>>,
+    rows: Mutex<Vec<SilverGraphArtifact>>,
+}
+
+impl FakeSilverRegistry {
+    fn new(events: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            events,
+            rows: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn rows(&self) -> Vec<SilverGraphArtifact> {
+        self.rows.lock().expect("silver registry lock").clone()
+    }
+}
+
+#[async_trait]
+impl SilverGraphArtifactRegistry for FakeSilverRegistry {
+    async fn register(&self, row: &SilverGraphArtifact) -> Result<(), WorkerError> {
+        self.events
+            .lock()
+            .expect("events lock")
+            .push("register".to_owned());
+        self.rows
+            .lock()
+            .expect("silver registry lock")
+            .push(row.clone());
+        Ok(())
     }
 }
 
