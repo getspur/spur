@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Context as _, Result};
 use arrow_array::{
-    Array as _, FixedSizeListArray, Float32Array, LargeStringArray, RecordBatch, StringArray,
-    UInt32Array, UInt64Array, UInt8Array,
+    Array as _, FixedSizeListArray, Float32Array, LargeStringArray, RecordBatch,
+    RecordBatchIterator, StringArray, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
@@ -361,6 +361,19 @@ impl Default for SectionSidecarOptions {
             delta: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VectorBackfillStats {
+    pub sections: VectorBackfillTableStats,
+    pub code_symbols: VectorBackfillTableStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VectorBackfillTableStats {
+    pub null_vector_rows: usize,
+    pub eligible_rows: usize,
+    pub filled_rows: usize,
 }
 
 fn section_write_batch_size_from_env() -> usize {
@@ -2771,6 +2784,537 @@ fn parent_by_child<'a>(
     parents
 }
 
+pub fn backfill_missing_vectors(
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+) -> Result<VectorBackfillStats> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::scope(|scope| {
+            scope
+                .spawn(|| backfill_missing_vectors_without_current_runtime(artifact_dir, options))
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        });
+    }
+    backfill_missing_vectors_without_current_runtime(artifact_dir, options)
+}
+
+fn backfill_missing_vectors_without_current_runtime(
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+) -> Result<VectorBackfillStats> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create LanceDB vector backfill runtime")?;
+    runtime.block_on(backfill_missing_vectors_async(artifact_dir, options))
+}
+
+async fn backfill_missing_vectors_async(
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+) -> Result<VectorBackfillStats> {
+    let embedding_model = EmbeddingModelSelection::from_env();
+    let mut section_service =
+        TextEmbeddingService::new(options, options.skip_section_embeddings, embedding_model);
+    let mut symbol_service = TextEmbeddingService::new(
+        options,
+        options.skip_code_symbol_embeddings,
+        embedding_model,
+    );
+    backfill_missing_vectors_async_with_embedding_model_and_embedder(
+        artifact_dir,
+        options,
+        embedding_model,
+        |phase, texts| match phase {
+            SidecarPhase::Sections => section_service.embed_texts_locally(texts, "section"),
+            SidecarPhase::CodeSymbols => symbol_service.embed_texts_locally(texts, "code symbol"),
+        },
+    )
+    .await
+}
+
+async fn backfill_missing_vectors_async_with_embedding_model_and_embedder<F>(
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+    embedding_model: EmbeddingModelSelection,
+    mut embed_batch: F,
+) -> Result<VectorBackfillStats>
+where
+    F: FnMut(SidecarPhase, &[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    let sections =
+        backfill_section_vectors(artifact_dir, options, embedding_model, &mut embed_batch).await?;
+    let code_symbols =
+        backfill_symbol_vectors(artifact_dir, options, embedding_model, &mut embed_batch).await?;
+    Ok(VectorBackfillStats {
+        sections,
+        code_symbols,
+    })
+}
+
+#[cfg(test)]
+async fn backfill_missing_vectors_with<F>(
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+    embed_batch: F,
+) -> Result<VectorBackfillStats>
+where
+    F: FnMut(SidecarPhase, &[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    backfill_missing_vectors_async_with_embedding_model_and_embedder(
+        artifact_dir,
+        options,
+        EmbeddingModelSelection::EmbeddingGemma300M,
+        embed_batch,
+    )
+    .await
+}
+
+async fn backfill_section_vectors<F>(
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+    embedding_model: EmbeddingModelSelection,
+    embed_batch: &mut F,
+) -> Result<VectorBackfillTableStats>
+where
+    F: FnMut(SidecarPhase, &[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    if options.skip_section_embeddings {
+        return Ok(VectorBackfillTableStats::default());
+    }
+    let Some(table) = open_section_table_for_backfill(artifact_dir).await? else {
+        return Ok(VectorBackfillTableStats::default());
+    };
+    if !table_has_vector_identity_columns(&table, "section sidecar").await {
+        return Ok(VectorBackfillTableStats::default());
+    }
+    let (null_vector_rows, mut rows) = load_section_backfill_rows(&table, embedding_model).await?;
+    let eligible_rows = rows.len();
+    apply_backfill_embeddings_to_section_rows(&mut rows, options, embedding_model, embed_batch);
+    let filled_rows = merge_backfilled_section_rows(&table, rows).await?;
+    Ok(VectorBackfillTableStats {
+        null_vector_rows,
+        eligible_rows,
+        filled_rows,
+    })
+}
+
+async fn backfill_symbol_vectors<F>(
+    artifact_dir: &Path,
+    options: SectionEmbeddingOptions,
+    embedding_model: EmbeddingModelSelection,
+    embed_batch: &mut F,
+) -> Result<VectorBackfillTableStats>
+where
+    F: FnMut(SidecarPhase, &[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    if options.skip_code_symbol_embeddings {
+        return Ok(VectorBackfillTableStats::default());
+    }
+    let Some(table) = open_symbol_table_for_backfill(artifact_dir).await? else {
+        return Ok(VectorBackfillTableStats::default());
+    };
+    if !table_has_vector_identity_columns(&table, "code symbol sidecar").await {
+        return Ok(VectorBackfillTableStats::default());
+    }
+    let (null_vector_rows, mut rows) = load_symbol_backfill_rows(&table, embedding_model).await?;
+    let eligible_rows = rows.len();
+    apply_backfill_embeddings_to_symbol_rows(&mut rows, options, embedding_model, embed_batch);
+    let filled_rows = merge_backfilled_symbol_rows(&table, rows).await?;
+    Ok(VectorBackfillTableStats {
+        null_vector_rows,
+        eligible_rows,
+        filled_rows,
+    })
+}
+
+async fn open_section_table_for_backfill(artifact_dir: &Path) -> Result<Option<lancedb::Table>> {
+    let dataset_dir = artifact_dir.join(SECTIONS_DATASET_DIR);
+    if !dataset_dir.is_dir() {
+        return Ok(None);
+    }
+    let db = lancedb::connect(dataset_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .context("failed to connect to sections.lancedb for vector backfill")?;
+    Ok(db.open_table(SECTIONS_TABLE).execute().await.ok())
+}
+
+async fn open_symbol_table_for_backfill(artifact_dir: &Path) -> Result<Option<lancedb::Table>> {
+    if !artifact_dir.join(CODE_SYMBOLS_DATASET_DIR).is_dir() {
+        return Ok(None);
+    }
+    let db = lancedb::connect(artifact_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .context("failed to connect to code_symbols.lance for vector backfill")?;
+    Ok(db.open_table(CODE_SYMBOLS_TABLE).execute().await.ok())
+}
+
+async fn load_section_backfill_rows(
+    table: &lancedb::Table,
+    embedding_model: EmbeddingModelSelection,
+) -> Result<(usize, Vec<SectionRow>)> {
+    let mut stream = table
+        .query()
+        .only_if("vector IS NULL")
+        .select(Select::columns(&[
+            "stable_symbol_id",
+            "file_path",
+            "qualified_name",
+            "heading_level",
+            "body_text",
+            "body_byte_start",
+            "body_byte_end",
+            "child_count",
+            "parent_stable_id",
+            "content_hash",
+            EMBEDDING_INPUT_HASH_COLUMN,
+            EMBEDDING_MODEL_COLUMN,
+        ]))
+        .execute()
+        .await
+        .context("failed to query missing LanceDB section vectors")?;
+    let mut null_vector_rows = 0usize;
+    let mut rows = Vec::new();
+    while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
+        .await
+        .transpose()
+        .context("failed to read missing LanceDB section vector rows")?
+    {
+        null_vector_rows += batch.num_rows();
+        let stable_symbol_ids = string_column(&batch, "stable_symbol_id", "section")?;
+        let file_paths = string_column(&batch, "file_path", "section")?;
+        let qualified_names = string_column(&batch, "qualified_name", "section")?;
+        let heading_levels = batch
+            .column_by_name("heading_level")
+            .context("section backfill rows missing heading_level column")?
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .context("section heading_level column was not UInt8")?;
+        let body_texts = batch
+            .column_by_name("body_text")
+            .context("section backfill rows missing body_text column")?
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .context("section body_text column was not LargeUtf8")?;
+        let body_byte_starts = batch
+            .column_by_name("body_byte_start")
+            .context("section backfill rows missing body_byte_start column")?
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .context("section body_byte_start column was not UInt64")?;
+        let body_byte_ends = batch
+            .column_by_name("body_byte_end")
+            .context("section backfill rows missing body_byte_end column")?
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .context("section body_byte_end column was not UInt64")?;
+        let child_counts = batch
+            .column_by_name("child_count")
+            .context("section backfill rows missing child_count column")?
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .context("section child_count column was not UInt32")?;
+        let parent_stable_ids = string_column(&batch, "parent_stable_id", "section")?;
+        let content_hashes = string_column(&batch, "content_hash", "section")?;
+        let embedding_input_hashes = string_column(&batch, EMBEDDING_INPUT_HASH_COLUMN, "section")?;
+        let embedding_models = string_column(&batch, EMBEDDING_MODEL_COLUMN, "section")?;
+        for index in 0..batch.num_rows() {
+            let row = SectionRow {
+                stable_symbol_id: stable_symbol_ids.value(index).to_owned(),
+                file_path: file_paths.value(index).to_owned(),
+                qualified_name: qualified_names.value(index).to_owned(),
+                heading_level: heading_levels.value(index),
+                body_text: body_texts.value(index).to_owned(),
+                body_byte_start: body_byte_starts.value(index),
+                body_byte_end: body_byte_ends.value(index),
+                child_count: child_counts.value(index),
+                parent_stable_id: if parent_stable_ids.is_null(index) {
+                    None
+                } else {
+                    Some(parent_stable_ids.value(index).to_owned())
+                },
+                content_hash: content_hashes.value(index).to_owned(),
+                embedding_input_hash: embedding_input_hashes.value(index).to_owned(),
+                embedding_model: embedding_models.value(index).to_owned(),
+                vector: None,
+            };
+            if section_row_matches_current_embedding_contract(&row, embedding_model) {
+                rows.push(row);
+            }
+        }
+    }
+    sort_section_rows_by_vector_identity(&mut rows);
+    Ok((null_vector_rows, rows))
+}
+
+async fn load_symbol_backfill_rows(
+    table: &lancedb::Table,
+    embedding_model: EmbeddingModelSelection,
+) -> Result<(usize, Vec<SymbolRow>)> {
+    let mut stream = table
+        .query()
+        .only_if("vector IS NULL")
+        .select(Select::columns(&[
+            "stable_symbol_id",
+            "file_path",
+            "qualified_name",
+            "entity_name",
+            "symbol_kind",
+            "embed_text",
+            "content_hash",
+            EMBEDDING_INPUT_HASH_COLUMN,
+            EMBEDDING_MODEL_COLUMN,
+        ]))
+        .execute()
+        .await
+        .context("failed to query missing LanceDB code symbol vectors")?;
+    let mut null_vector_rows = 0usize;
+    let mut rows = Vec::new();
+    while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
+        .await
+        .transpose()
+        .context("failed to read missing LanceDB code symbol vector rows")?
+    {
+        null_vector_rows += batch.num_rows();
+        let stable_symbol_ids = string_column(&batch, "stable_symbol_id", "code symbol")?;
+        let file_paths = string_column(&batch, "file_path", "code symbol")?;
+        let qualified_names = string_column(&batch, "qualified_name", "code symbol")?;
+        let entity_names = string_column(&batch, "entity_name", "code symbol")?;
+        let symbol_kinds = string_column(&batch, "symbol_kind", "code symbol")?;
+        let embed_texts = batch
+            .column_by_name("embed_text")
+            .context("code symbol backfill rows missing embed_text column")?
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .context("code symbol embed_text column was not LargeUtf8")?;
+        let content_hashes = string_column(&batch, "content_hash", "code symbol")?;
+        let embedding_input_hashes =
+            string_column(&batch, EMBEDDING_INPUT_HASH_COLUMN, "code symbol")?;
+        let embedding_models = string_column(&batch, EMBEDDING_MODEL_COLUMN, "code symbol")?;
+        for index in 0..batch.num_rows() {
+            let row = SymbolRow {
+                stable_symbol_id: stable_symbol_ids.value(index).to_owned(),
+                file_path: file_paths.value(index).to_owned(),
+                qualified_name: qualified_names.value(index).to_owned(),
+                entity_name: entity_names.value(index).to_owned(),
+                symbol_kind: symbol_kinds.value(index).to_owned(),
+                embed_text: embed_texts.value(index).to_owned(),
+                vector: None,
+                content_hash: content_hashes.value(index).to_owned(),
+                embedding_input_hash: embedding_input_hashes.value(index).to_owned(),
+                embedding_model: embedding_models.value(index).to_owned(),
+            };
+            if symbol_row_matches_current_embedding_contract(&row, embedding_model) {
+                rows.push(row);
+            }
+        }
+    }
+    sort_symbol_rows_by_vector_identity(&mut rows);
+    Ok((null_vector_rows, rows))
+}
+
+fn string_column<'a>(
+    batch: &'a RecordBatch,
+    column: &str,
+    table_label: &str,
+) -> Result<&'a StringArray> {
+    batch
+        .column_by_name(column)
+        .with_context(|| format!("{table_label} backfill rows missing {column} column"))?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .with_context(|| format!("{table_label} {column} column was not Utf8"))
+}
+
+fn section_row_matches_current_embedding_contract(
+    row: &SectionRow,
+    embedding_model: EmbeddingModelSelection,
+) -> bool {
+    row.embedding_model == embedding_model.model_name()
+        && row.embedding_input_hash
+            == section_embedding_input_hash_for_model(
+                row.qualified_name.as_str(),
+                row.body_text.as_str(),
+                embedding_model,
+            )
+        && is_embedding_eligible(row)
+}
+
+fn symbol_row_matches_current_embedding_contract(
+    row: &SymbolRow,
+    embedding_model: EmbeddingModelSelection,
+) -> bool {
+    row.embedding_model == embedding_model.model_name()
+        && row.embedding_input_hash
+            == symbol_embedding_input_hash_for_model(
+                row.embed_text.as_str(),
+                false,
+                embedding_model,
+            )
+        && !row.embed_text.trim().is_empty()
+}
+
+fn apply_backfill_embeddings_to_section_rows<F>(
+    rows: &mut [SectionRow],
+    options: SectionEmbeddingOptions,
+    embedding_model: EmbeddingModelSelection,
+    embed_batch: &mut F,
+) where
+    F: FnMut(SidecarPhase, &[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    let vectors = embed_backfill_inputs_with(
+        rows.len(),
+        section_embedding_inputs(rows, embedding_model),
+        options.batch_size,
+        SidecarPhase::Sections,
+        "section",
+        embed_batch,
+    );
+    for (row, vector) in rows.iter_mut().zip(vectors) {
+        row.vector = vector;
+    }
+}
+
+fn apply_backfill_embeddings_to_symbol_rows<F>(
+    rows: &mut [SymbolRow],
+    options: SectionEmbeddingOptions,
+    embedding_model: EmbeddingModelSelection,
+    embed_batch: &mut F,
+) where
+    F: FnMut(SidecarPhase, &[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    let vectors = embed_backfill_inputs_with(
+        rows.len(),
+        symbol_embedding_inputs(rows, embedding_model),
+        options.batch_size,
+        SidecarPhase::CodeSymbols,
+        "code symbol",
+        embed_batch,
+    );
+    for (row, vector) in rows.iter_mut().zip(vectors) {
+        row.vector = vector;
+    }
+}
+
+fn embed_backfill_inputs_with<F>(
+    row_count: usize,
+    eligible: Vec<EmbeddingTextInput<'_>>,
+    batch_size: usize,
+    phase: SidecarPhase,
+    embedding_kind: &'static str,
+    embed_batch: &mut F,
+) -> Vec<Option<Vec<f32>>>
+where
+    F: FnMut(SidecarPhase, &[&str]) -> Result<Vec<Vec<f32>>>,
+{
+    let mut result = vec![None; row_count];
+    if eligible.is_empty() {
+        return result;
+    }
+    let batch_size = if batch_size == 0 {
+        SECTION_EMBED_BATCH_SIZE_DEFAULT
+    } else {
+        batch_size
+    };
+    for chunk in eligible.chunks(batch_size) {
+        let texts: Vec<&str> = chunk.iter().map(|input| input.text.as_ref()).collect();
+        let embeddings = match embed_batch(phase, &texts) {
+            Ok(embeddings) => embeddings,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    embedding_kind,
+                    "vector backfill embedding batch failed; stopping this table"
+                );
+                return result;
+            }
+        };
+        if !apply_embeddings_to_inputs(&mut result, chunk, embeddings, embedding_kind) {
+            return result;
+        }
+    }
+    result
+}
+
+async fn merge_backfilled_section_rows(
+    table: &lancedb::Table,
+    rows: Vec<SectionRow>,
+) -> Result<usize> {
+    let rows = rows
+        .into_iter()
+        .filter(|row| row.vector.is_some())
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let schema = sections_schema();
+    let batch = rows_to_batch(rows, schema.clone())?;
+    let reader = RecordBatchIterator::new(std::iter::once(Ok(batch)), schema);
+    let mut merge = table.merge_insert(&[
+        "file_path",
+        EMBEDDING_MODEL_COLUMN,
+        EMBEDDING_INPUT_HASH_COLUMN,
+        "stable_symbol_id",
+    ]);
+    merge.when_matched_update_all(Some("target.vector IS NULL".to_owned()));
+    let result = merge
+        .execute(Box::new(reader))
+        .await
+        .context("failed to merge backfilled LanceDB section vectors")?;
+    Ok(result.num_updated_rows as usize)
+}
+
+async fn merge_backfilled_symbol_rows(
+    table: &lancedb::Table,
+    rows: Vec<SymbolRow>,
+) -> Result<usize> {
+    let rows = rows
+        .into_iter()
+        .filter(|row| row.vector.is_some())
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let schema = symbol_rows_schema();
+    let batch = symbol_rows_to_batch(rows, schema.clone())?;
+    let reader = RecordBatchIterator::new(std::iter::once(Ok(batch)), schema);
+    let mut merge = table.merge_insert(&[
+        "file_path",
+        EMBEDDING_MODEL_COLUMN,
+        EMBEDDING_INPUT_HASH_COLUMN,
+        "stable_symbol_id",
+    ]);
+    merge.when_matched_update_all(Some("target.vector IS NULL".to_owned()));
+    let result = merge
+        .execute(Box::new(reader))
+        .await
+        .context("failed to merge backfilled LanceDB code symbol vectors")?;
+    Ok(result.num_updated_rows as usize)
+}
+
+fn sort_section_rows_by_vector_identity(rows: &mut [SectionRow]) {
+    rows.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
+            .then(a.embedding_model.cmp(&b.embedding_model))
+            .then(a.embedding_input_hash.cmp(&b.embedding_input_hash))
+    });
+}
+
+fn sort_symbol_rows_by_vector_identity(rows: &mut [SymbolRow]) {
+    rows.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then(a.stable_symbol_id.cmp(&b.stable_symbol_id))
+            .then(a.embedding_model.cmp(&b.embedding_model))
+            .then(a.embedding_input_hash.cmp(&b.embedding_input_hash))
+    });
+}
+
 /// Query the `sections.lancedb` table in `prev_dir` and fill `row.vector` for
 /// any row whose `(file_path, embedding_model, embedding_input_hash,
 /// stable_symbol_id)` matches a row in the previous table.  Rows with the
@@ -3691,6 +4235,7 @@ mod tests {
         file_path: String,
         embedding_model: String,
         has_vector: bool,
+        vector: Option<Vec<f32>>,
     }
 
     #[derive(Debug)]
@@ -3699,6 +4244,7 @@ mod tests {
         file_path: String,
         embedding_model: String,
         has_vector: bool,
+        vector: Option<Vec<f32>>,
     }
 
     async fn read_stored_section_rows(dir: &Path) -> Vec<StoredSectionRow> {
@@ -3757,11 +4303,21 @@ mod tests {
                 .downcast_ref::<FixedSizeListArray>()
                 .expect("vector fixed-size list");
             for index in 0..batch.num_rows() {
+                let vector = if vectors.is_null(index) {
+                    None
+                } else {
+                    vectors
+                        .value(index)
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .map(|array| array.values().to_vec())
+                };
                 rows.push(StoredSectionRow {
                     stable_symbol_id: ids.value(index).to_owned(),
                     file_path: file_paths.value(index).to_owned(),
                     embedding_model: embedding_models.value(index).to_owned(),
                     has_vector: !vectors.is_null(index),
+                    vector,
                 });
             }
         }
@@ -3820,11 +4376,21 @@ mod tests {
                 .downcast_ref::<FixedSizeListArray>()
                 .expect("vector fixed-size list");
             for index in 0..batch.num_rows() {
+                let vector = if vectors.is_null(index) {
+                    None
+                } else {
+                    vectors
+                        .value(index)
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .map(|array| array.values().to_vec())
+                };
                 rows.push(StoredSymbolRow {
                     stable_symbol_id: ids.value(index).to_owned(),
                     file_path: file_paths.value(index).to_owned(),
                     embedding_model: embedding_models.value(index).to_owned(),
                     has_vector: !vectors.is_null(index),
+                    vector,
                 });
             }
         }
@@ -6211,6 +6777,174 @@ mod tests {
             read_stored_symbol_rows(sidecar_dir.path()).await.is_empty(),
             "existing sidecar table must not retain deleted path rows"
         );
+    }
+
+    #[tokio::test]
+    async fn vector_backfill_fills_missing_section_vectors_without_recomputing_existing_or_stale_hashes(
+    ) {
+        let sidecar_dir = tempfile::tempdir().expect("sidecar");
+        let mut filled = versioned_section_row("section:filled", "docs/filled.md", "hash-filled");
+        filled.vector = Some(fake_vector(7.0));
+        let missing = versioned_section_row("section:missing", "docs/missing.md", "hash-missing");
+        let expected_missing_input = embedding_document_text_for_model(
+            missing.qualified_name.as_str(),
+            missing.body_text.as_str(),
+            EmbeddingModelSelection::EmbeddingGemma300M,
+        )
+        .into_owned();
+        let mut stale_hash = versioned_section_row("section:stale", "docs/stale.md", "hash-stale");
+        stale_hash.body_text = "## Current\n\nCurrent body.".to_owned();
+        stale_hash.embedding_input_hash = section_embedding_input_hash_for_model(
+            stale_hash.qualified_name.as_str(),
+            "## Old\n\nOld body.",
+            EmbeddingModelSelection::EmbeddingGemma300M,
+        );
+        let h1 = SectionRow {
+            heading_level: 1,
+            ..versioned_section_row("section:h1", "docs/h1.md", "hash-h1")
+        };
+        write_previous_section_sidecar_rows(
+            sidecar_dir.path(),
+            vec![filled, missing, stale_hash, h1],
+        )
+        .await;
+
+        let mut calls = Vec::new();
+        let stats = backfill_missing_vectors_with(
+            sidecar_dir.path(),
+            SectionEmbeddingOptions {
+                skip_section_embeddings: false,
+                skip_code_symbol_embeddings: true,
+                batch_size: 8,
+            },
+            |phase, texts| {
+                calls.push((
+                    phase,
+                    texts
+                        .iter()
+                        .map(|text| (*text).to_owned())
+                        .collect::<Vec<_>>(),
+                ));
+                Ok(texts.iter().map(|_| fake_vector(42.0)).collect())
+            },
+        )
+        .await
+        .expect("backfill section vectors");
+
+        assert_eq!(stats.sections.filled_rows, 1);
+        assert_eq!(stats.code_symbols.filled_rows, 0);
+        assert_eq!(
+            calls,
+            vec![(SidecarPhase::Sections, vec![expected_missing_input])]
+        );
+
+        let stored_rows = read_stored_section_rows(sidecar_dir.path()).await;
+        let stored = |stable_symbol_id: &str| {
+            stored_rows
+                .iter()
+                .find(|row| row.stable_symbol_id == stable_symbol_id)
+                .unwrap_or_else(|| panic!("missing stored row {stable_symbol_id}"))
+        };
+        assert_eq!(stored("section:filled").vector, Some(fake_vector(7.0)));
+        assert_eq!(stored("section:missing").vector, Some(fake_vector(42.0)));
+        assert!(!stored("section:stale").has_vector);
+        assert!(!stored("section:h1").has_vector);
+    }
+
+    #[tokio::test]
+    async fn vector_backfill_resumes_symbol_vectors_and_skips_changed_input_hashes() {
+        let sidecar_dir = tempfile::tempdir().expect("sidecar");
+        let mut filled = symbol_row_fixture("sym-filled", "filled embed text");
+        filled.vector = Some(fake_vector(3.0));
+        let missing_one = symbol_row_fixture("sym-missing-one", "first missing text");
+        let missing_two = symbol_row_fixture("sym-missing-two", "second missing text");
+        let mut stale_hash = symbol_row_fixture("sym-stale", "current stale text");
+        stale_hash.embedding_input_hash = symbol_embedding_input_hash_for_model(
+            "old stale text",
+            false,
+            EmbeddingModelSelection::EmbeddingGemma300M,
+        );
+        write_previous_symbol_sidecar_rows(
+            sidecar_dir.path(),
+            vec![filled, missing_one, missing_two, stale_hash],
+        )
+        .await;
+
+        let options = SectionEmbeddingOptions {
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: false,
+            batch_size: 1,
+        };
+        let mut first_run_calls = Vec::new();
+        let mut chunk_index = 0usize;
+        let first_stats =
+            backfill_missing_vectors_with(sidecar_dir.path(), options, |phase, texts| {
+                chunk_index += 1;
+                first_run_calls.push((
+                    phase,
+                    texts
+                        .iter()
+                        .map(|text| (*text).to_owned())
+                        .collect::<Vec<_>>(),
+                ));
+                if chunk_index == 2 {
+                    anyhow::bail!("simulated interruption after first symbol chunk");
+                }
+                Ok(texts.iter().map(|_| fake_vector(11.0)).collect())
+            })
+            .await
+            .expect("first partial symbol backfill");
+
+        assert_eq!(first_stats.code_symbols.filled_rows, 1);
+        assert_eq!(
+            first_run_calls,
+            vec![
+                (
+                    SidecarPhase::CodeSymbols,
+                    vec!["title: none | text: first missing text".to_owned()]
+                ),
+                (
+                    SidecarPhase::CodeSymbols,
+                    vec!["title: none | text: second missing text".to_owned()]
+                ),
+            ]
+        );
+
+        let mut second_run_calls = Vec::new();
+        let second_stats =
+            backfill_missing_vectors_with(sidecar_dir.path(), options, |phase, texts| {
+                second_run_calls.push((
+                    phase,
+                    texts
+                        .iter()
+                        .map(|text| (*text).to_owned())
+                        .collect::<Vec<_>>(),
+                ));
+                Ok(texts.iter().map(|_| fake_vector(22.0)).collect())
+            })
+            .await
+            .expect("resume symbol backfill");
+
+        assert_eq!(second_stats.code_symbols.filled_rows, 1);
+        assert_eq!(
+            second_run_calls,
+            vec![(
+                SidecarPhase::CodeSymbols,
+                vec!["title: none | text: second missing text".to_owned()]
+            )]
+        );
+
+        let stored_rows = read_stored_symbol_rows(sidecar_dir.path()).await;
+        let stored = |stable_symbol_id: &str| {
+            stored_rows
+                .iter()
+                .find(|row| row.stable_symbol_id == stable_symbol_id)
+                .unwrap_or_else(|| panic!("missing stored row {stable_symbol_id}"))
+        };
+        assert_eq!(stored("sym-filled").vector, Some(fake_vector(3.0)));
+        assert_eq!(stored("sym-missing-one").vector, Some(fake_vector(11.0)));
+        assert_eq!(stored("sym-missing-two").vector, Some(fake_vector(22.0)));
+        assert!(!stored("sym-stale").has_vector);
     }
 
     /// Pre-filled vectors must not be passed to the embedder (section).
