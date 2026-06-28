@@ -1,5 +1,6 @@
 #![cfg(feature = "worker")]
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
@@ -15,13 +16,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
+use sha2::Digest as _;
 use spur_context_service::jobs::{
     CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
 };
 use spur_context_service::worker::{
-    build_graph, fetch_source, handle_spot_interruption, run_job_and_record_with_services,
-    upload_with_owned_catalog_lease, CatalogDownload, CatalogLease, CatalogLeaseStore,
-    StageTracker, JobEnv, WorkerError,
+    build_graph, fetch_source, fetch_source_with_bronze_services, handle_spot_interruption,
+    retrieve_bronze_source_by_coordinate, run_job_and_record_with_services,
+    upload_with_owned_catalog_lease, BronzeArchiveStore, BronzeRawSource, BronzeRawSourceRegistry,
+    CatalogDownload, CatalogLease, CatalogLeaseStore, JobEnv, StageTracker, WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -84,6 +87,138 @@ fn fetch_source_downloads_and_extracts_tarball() -> Result<()> {
         fs::read_to_string(fetched.join("src/lib.rs")).context("read fetched lib")?,
         "pub fn demo() {}\n"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bronze_fetch_uploads_archive_and_registers_raw_source() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE", "1")]);
+    let root = unique_temp_dir("worker-bronze-upload")?;
+    let archive = demo_tarball(&root)?;
+    let source_url = serve_once(fs::read(&archive).context("read archive")?);
+    let registry = FakeBronzeRegistry::default();
+    let store = FakeBronzeArchiveStore::default();
+    let env = demo_job_env(&source_url);
+
+    let fetched =
+        fetch_source_with_bronze_services(&env, &root.join("fetch"), &registry, &store).await?;
+
+    assert!(fetched.join("Cargo.toml").is_file());
+    assert_eq!(
+        store.uploaded_keys(),
+        ["bronze/registry:crates-io/demo/0.1.0/source.tar.gz"]
+    );
+    let rows = registry.rows();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.source, "registry:crates-io");
+    assert_eq!(row.package, "demo");
+    assert_eq!(row.version, "0.1.0");
+    assert_eq!(row.revision_kind, "semver");
+    assert_eq!(row.semver_major, Some(0));
+    assert_eq!(row.semver_minor, Some(1));
+    assert_eq!(row.semver_patch, Some(0));
+    assert_eq!(row.source_kind, "tarball");
+    assert_eq!(row.source_url, source_url);
+    assert_eq!(
+        row.s3_uri,
+        "s3://bronze-test/bronze/registry:crates-io/demo/0.1.0/source.tar.gz"
+    );
+    assert_eq!(row.bytes, fs::metadata(&archive)?.len());
+    assert_eq!(row.fetch_status, "success");
+    assert_eq!(
+        store.sha256_for(&row.s3_uri),
+        Some(row.content_sha256.clone())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn retrieve_bronze_source_by_coordinate_extracts_registered_archive() -> Result<()> {
+    let root = unique_temp_dir("worker-bronze-retrieve")?;
+    let archive = demo_tarball(&root)?;
+    let archive_bytes = fs::read(&archive).context("read archive")?;
+    let store = FakeBronzeArchiveStore::default();
+    let content_sha256 = store.seed_object(
+        "bronze/registry:crates-io/demo/0.1.0/source.tar.gz",
+        archive_bytes,
+    );
+    let registry = FakeBronzeRegistry::with_row(bronze_row(
+        "http://127.0.0.1:1/unreachable.tar.gz",
+        &content_sha256,
+        fs::metadata(&archive)?.len(),
+    ));
+
+    let restored = retrieve_bronze_source_by_coordinate(
+        "registry:crates-io",
+        "demo",
+        "0.1.0",
+        &root.join("restored"),
+        &registry,
+        &store,
+    )
+    .await?
+    .context("bronze source should be restored")?;
+
+    assert!(restored.join("Cargo.toml").is_file());
+    assert_eq!(
+        fs::read_to_string(restored.join("src/lib.rs")).context("read restored lib")?,
+        "pub fn demo() {}\n"
+    );
+    assert_eq!(store.downloads(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bronze_dedup_skips_upstream_fetch_when_registered_hash_matches() -> Result<()> {
+    let root = unique_temp_dir("worker-bronze-dedup")?;
+    let archive = demo_tarball(&root)?;
+    let archive_bytes = fs::read(&archive).context("read archive")?;
+    let store = FakeBronzeArchiveStore::default();
+    let content_sha256 = store.seed_object(
+        "bronze/registry:crates-io/demo/0.1.0/source.tar.gz",
+        archive_bytes,
+    );
+    let registry = FakeBronzeRegistry::with_row(bronze_row(
+        "http://127.0.0.1:1/unreachable.tar.gz",
+        &content_sha256,
+        fs::metadata(&archive)?.len(),
+    ));
+    let env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+
+    let fetched =
+        fetch_source_with_bronze_services(&env, &root.join("fetch"), &registry, &store).await?;
+
+    assert!(fetched.join("src/lib.rs").is_file());
+    assert_eq!(store.uploads(), 0);
+    assert_eq!(store.downloads(), 1);
+    assert_eq!(registry.registers(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bronze_fetch_errors_when_existing_success_row_hash_drifts() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE", "1")]);
+    let root = unique_temp_dir("worker-bronze-drift")?;
+    let archive = demo_tarball(&root)?;
+    let source_url = serve_once(fs::read(&archive).context("read archive")?);
+    let registry = FakeBronzeRegistry::with_row(bronze_row(
+        "http://127.0.0.1:1/stale.tar.gz",
+        "old-sha256",
+        fs::metadata(&archive)?.len(),
+    ));
+    let store = FakeBronzeArchiveStore::default();
+    let env = demo_job_env(&source_url);
+
+    let err = fetch_source_with_bronze_services(&env, &root.join("fetch"), &registry, &store)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("bronze content drift"));
+    assert_eq!(store.uploads(), 0);
+    assert_eq!(registry.registers(), 0);
     Ok(())
 }
 
@@ -201,12 +336,10 @@ async fn lambda_worker_records_failed_job_without_sfn_callback() -> Result<()> {
         .context("job should exist")?;
     assert_eq!(record.status, JobStatus::Failed);
     assert_eq!(record.error_code.as_deref(), Some("fetch"));
-    assert!(
-        record
-            .error_detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("unsupported SOURCE_KIND"))
-    );
+    assert!(record
+        .error_detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("unsupported SOURCE_KIND")));
     Ok(())
 }
 
@@ -415,6 +548,204 @@ fn unique_temp_dir(name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn demo_tarball(root: &Path) -> Result<PathBuf> {
+    let fixture = root.join("fixture").join("demo-0.1.0");
+    fs::create_dir_all(fixture.join("src")).context("create fixture")?;
+    fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .context("write manifest")?;
+    fs::write(fixture.join("src/lib.rs"), "pub fn demo() {}\n").context("write lib")?;
+    let archive = root.join("demo.tar.gz");
+    create_tarball(root.join("fixture").as_path(), &archive)?;
+    Ok(archive)
+}
+
+fn demo_job_env(source_url: &str) -> JobEnv {
+    JobEnv {
+        task_token: "task-token".to_owned(),
+        job_id: "job-bronze".to_owned(),
+        package: "demo".to_owned(),
+        revision: "0.1.0".to_owned(),
+        source: "registry:crates-io".to_owned(),
+        source_url: source_url.to_owned(),
+        source_kind: "tarball".to_owned(),
+        catalog_dsn: "sqlite:/tmp/catalog.sqlite".to_owned(),
+    }
+}
+
+fn bronze_row(source_url: &str, content_sha256: &str, bytes: u64) -> BronzeRawSource {
+    BronzeRawSource {
+        source: "registry:crates-io".to_owned(),
+        package: "demo".to_owned(),
+        version: "0.1.0".to_owned(),
+        revision_kind: "semver".to_owned(),
+        semver_major: Some(0),
+        semver_minor: Some(1),
+        semver_patch: Some(0),
+        source_kind: "tarball".to_owned(),
+        source_url: source_url.to_owned(),
+        s3_uri: "s3://bronze-test/bronze/registry:crates-io/demo/0.1.0/source.tar.gz".to_owned(),
+        content_sha256: content_sha256.to_owned(),
+        bytes,
+        fetched_at: 1_800_000_000,
+        fetch_status: "success".to_owned(),
+    }
+}
+
+#[derive(Default)]
+struct FakeBronzeRegistry {
+    rows: Mutex<Vec<BronzeRawSource>>,
+    registers: AtomicUsize,
+}
+
+impl FakeBronzeRegistry {
+    fn with_row(row: BronzeRawSource) -> Self {
+        Self {
+            rows: Mutex::new(vec![row]),
+            registers: AtomicUsize::new(0),
+        }
+    }
+
+    fn rows(&self) -> Vec<BronzeRawSource> {
+        self.rows.lock().expect("bronze registry lock").clone()
+    }
+
+    fn registers(&self) -> usize {
+        self.registers.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl BronzeRawSourceRegistry for FakeBronzeRegistry {
+    async fn lookup(
+        &self,
+        source: &str,
+        package: &str,
+        version: &str,
+    ) -> Result<Option<BronzeRawSource>, WorkerError> {
+        Ok(self
+            .rows
+            .lock()
+            .expect("bronze registry lock")
+            .iter()
+            .rev()
+            .find(|row| row.source == source && row.package == package && row.version == version)
+            .cloned())
+    }
+
+    async fn register(&self, row: &BronzeRawSource) -> Result<(), WorkerError> {
+        self.registers.fetch_add(1, Ordering::SeqCst);
+        self.rows
+            .lock()
+            .expect("bronze registry lock")
+            .push(row.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct FakeBronzeArchiveStore {
+    objects: Mutex<HashMap<String, FakeBronzeObject>>,
+    uploaded_keys: Mutex<Vec<String>>,
+    uploads: AtomicUsize,
+    downloads: AtomicUsize,
+}
+
+#[derive(Clone)]
+struct FakeBronzeObject {
+    content_sha256: String,
+    bytes: Vec<u8>,
+}
+
+impl FakeBronzeArchiveStore {
+    fn seed_object(&self, key: &str, bytes: Vec<u8>) -> String {
+        let content_sha256 = sha256_hex(&bytes);
+        self.objects.lock().expect("bronze store lock").insert(
+            format!("s3://bronze-test/{key}"),
+            FakeBronzeObject {
+                content_sha256: content_sha256.clone(),
+                bytes,
+            },
+        );
+        content_sha256
+    }
+
+    fn uploaded_keys(&self) -> Vec<String> {
+        self.uploaded_keys
+            .lock()
+            .expect("uploaded keys lock")
+            .clone()
+    }
+
+    fn sha256_for(&self, uri: &str) -> Option<String> {
+        self.objects
+            .lock()
+            .expect("bronze store lock")
+            .get(uri)
+            .map(|object| object.content_sha256.clone())
+    }
+
+    fn uploads(&self) -> usize {
+        self.uploads.load(Ordering::SeqCst)
+    }
+
+    fn downloads(&self) -> usize {
+        self.downloads.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl BronzeArchiveStore for FakeBronzeArchiveStore {
+    async fn content_sha256(&self, s3_uri: &str) -> Result<Option<String>, WorkerError> {
+        Ok(self.sha256_for(s3_uri))
+    }
+
+    async fn download_to_path(&self, s3_uri: &str, path: &Path) -> Result<(), WorkerError> {
+        let object = self
+            .objects
+            .lock()
+            .expect("bronze store lock")
+            .get(s3_uri)
+            .cloned()
+            .ok_or_else(|| WorkerError::Fetch(format!("missing fake bronze object {s3_uri}")))?;
+        fs::write(path, object.bytes)
+            .map_err(|error| WorkerError::Fetch(format!("write fake bronze download: {error}")))?;
+        self.downloads.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn upload_path(
+        &self,
+        key: &str,
+        content_sha256: &str,
+        path: &Path,
+    ) -> Result<String, WorkerError> {
+        let bytes = fs::read(path)
+            .map_err(|error| WorkerError::Fetch(format!("read fake bronze upload: {error}")))?;
+        let uri = format!("s3://bronze-test/{key}");
+        self.objects.lock().expect("bronze store lock").insert(
+            uri.clone(),
+            FakeBronzeObject {
+                content_sha256: content_sha256.to_owned(),
+                bytes,
+            },
+        );
+        self.uploaded_keys
+            .lock()
+            .expect("uploaded keys lock")
+            .push(key.to_owned());
+        self.uploads.fetch_add(1, Ordering::SeqCst);
+        Ok(uri)
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = sha2::Sha256::digest(bytes);
+    format!("{digest:x}")
+}
+
 #[derive(Default)]
 struct FakeJobStore {
     next_id: AtomicU64,
@@ -548,7 +879,11 @@ impl JobStore for FakeJobStore {
     ) -> spur_context_service::jobs::Result<()> {
         let mut state = self.state.lock().expect("fake store lock");
         let key = record.key();
-        if state.dedupe.get(&key).is_some_and(|job_id| job_id == &record.job_id) {
+        if state
+            .dedupe
+            .get(&key)
+            .is_some_and(|job_id| job_id == &record.job_id)
+        {
             state.dedupe.remove(&key);
         }
         Ok(())
@@ -596,10 +931,7 @@ impl FakeJobStore {
         update: impl FnOnce(&mut JobRecord),
     ) -> spur_context_service::jobs::Result<JobRecord> {
         let mut state = self.state.lock().expect("fake store lock");
-        let record = state
-            .jobs
-            .get_mut(job_id)
-            .ok_or(JobsError::NotFound)?;
+        let record = state.jobs.get_mut(job_id).ok_or(JobsError::NotFound)?;
         update(record);
         Ok(record.clone())
     }

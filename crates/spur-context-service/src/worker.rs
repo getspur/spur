@@ -16,6 +16,7 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use async_trait::async_trait;
 use aws_sdk_dynamodb::{types::AttributeValue, Client as DynamoDbClient};
 use aws_sdk_s3::primitives::ByteStream;
+use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -23,11 +24,15 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::abuse;
+use crate::catalog::connect_ducklake_with_data_path;
 use crate::jobs::{DynamoDbJobStore, JobStatus, JobStore};
-use crate::translate::{translate_artifact_to_ducklake, TranslateOptions, TranslateStats};
+use crate::translate::{
+    translate_artifact_to_ducklake, TranslateOptions, TranslateStats, CATALOG_TABLES_SQL,
+};
 
 const DEFAULT_ARTIFACT_DIR: &str = "/tmp/artifact";
 const DEFAULT_CHECKPOINT_BUCKET: &str = "spur-context";
+const DEFAULT_BRONZE_BUCKET: &str = "spur-context";
 const DEFAULT_TARBALL_SIZE_CAP_BYTES: usize = 500 * 1024 * 1024;
 const HTTP_HEADER_CAP_BYTES: usize = 64 * 1024;
 const ECS_CREDENTIALS_CAP_BYTES: usize = 64 * 1024;
@@ -115,6 +120,13 @@ impl StageTracker {
         }
     }
 
+    async fn set_async(&self, stage: &str) {
+        self.set_current(stage);
+        if let Some(reporter) = &self.reporter {
+            reporter.record_async(stage).await;
+        }
+    }
+
     fn set_current(&self, stage: &str) {
         if let Ok(mut current) = self.current.lock() {
             *current = stage.to_owned();
@@ -143,6 +155,19 @@ impl StageReporter {
             JobStatus::Running,
             stage,
         ));
+        if let Err(error) = result {
+            eprintln!(
+                "[worker] warning: failed to record stage `{stage}` for job `{}`: {error:#}",
+                self.job_id
+            );
+        }
+    }
+
+    async fn record_async(&self, stage: &str) {
+        let result = self
+            .jobs
+            .update_stage(&self.job_id, JobStatus::Running, stage)
+            .await;
         if let Err(error) = result {
             eprintln!(
                 "[worker] warning: failed to record stage `{stage}` for job `{}`: {error:#}",
@@ -264,13 +289,7 @@ async fn run_job_with_stage(
     jobs: Arc<dyn JobStore>,
     leases: Arc<dyn CatalogLeaseStore>,
 ) -> Result<TranslateStats, WorkerError> {
-    let blocking_env = env.clone();
-    let stage_clone = stage.clone();
-    let prepared = tokio::task::spawn_blocking(move || {
-        prepare_job_blocking(&blocking_env, &stage_clone)
-    })
-        .await
-        .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))??;
+    let prepared = prepare_job(&env, &stage, leases.as_ref()).await?;
 
     let mut lease = None;
     if env.catalog_dsn.starts_with("s3://") {
@@ -279,7 +298,9 @@ async fn run_job_with_stage(
             leases
                 .acquire(&env.catalog_dsn, &env.job_id)
                 .await
-                .map_err(|error| WorkerError::Translate(format!("acquire catalog lease: {error:#}")))?,
+                .map_err(|error| {
+                    WorkerError::Translate(format!("acquire catalog lease: {error:#}"))
+                })?,
         );
     }
 
@@ -309,22 +330,22 @@ async fn run_job_with_stage(
             translate_prepared_blocking(&local_env, &translate_stage, &prepared)
         });
         let (stats, renewed_lease) =
-            await_translate_with_lease_renewal(translate_task, leases.clone(), lease.clone()).await?;
+            await_translate_with_lease_renewal(translate_task, leases.clone(), lease.clone())
+                .await?;
         if renewed_lease.is_some() {
             lease = renewed_lease;
         }
 
         if let Some(ref dl) = catalog_dl {
             if let Some(current_lease) = lease.as_mut() {
-                *current_lease = leases
-                    .renew(current_lease)
-                    .await
-                    .map_err(|error| {
-                        WorkerError::Translate(format!("renew catalog lease before upload: {error:#}"))
-                    })?;
+                *current_lease = leases.renew(current_lease).await.map_err(|error| {
+                    WorkerError::Translate(format!("renew catalog lease before upload: {error:#}"))
+                })?;
                 upload_with_owned_catalog_lease(leases.as_ref(), current_lease, || dl.upload())
                     .await
-                    .map_err(|error| WorkerError::Translate(format!("upload catalog: {error:#}")))?;
+                    .map_err(|error| {
+                        WorkerError::Translate(format!("upload catalog: {error:#}"))
+                    })?;
             } else {
                 dl.upload()
                     .await
@@ -352,26 +373,31 @@ async fn run_job_with_stage(
     result
 }
 
-fn prepare_job_blocking(env: &JobEnv, stage: &StageTracker) -> Result<PreparedJob, WorkerError> {
+async fn prepare_job(
+    env: &JobEnv,
+    stage: &StageTracker,
+    leases: &dyn CatalogLeaseStore,
+) -> Result<PreparedJob, WorkerError> {
     let workspace = TempWorkspace::new(&env.job_id)?;
     let source_dest = workspace.path.join("source");
     let artifact_base = artifact_dir();
 
-    stage.set("fetch_source");
+    stage.set_async("fetch_source").await;
     let stage_started = log_stage_started("fetch_source");
-    let source_path = fetch_source(
-        &env.source_url,
-        &env.source_kind,
-        &env.revision,
-        &source_dest,
-    )?;
+    let source_path = fetch_source_with_default_bronze(env, &source_dest, leases).await?;
     log_stage_completed("fetch_source", stage_started);
 
-    stage.set("build_graph");
+    stage.set_async("build_graph").await;
     let stage_started = log_stage_started("build_graph");
-    prepare_artifact_dir(&artifact_base)?;
-    build_graph(&source_path, &artifact_base)?;
-    let artifact_dir = resolve_graph_artifact_dir(&artifact_base)?;
+    let build_source_path = source_path.clone();
+    let build_artifact_base = artifact_base.clone();
+    let artifact_dir = tokio::task::spawn_blocking(move || {
+        prepare_artifact_dir(&build_artifact_base)?;
+        build_graph(&build_source_path, &build_artifact_base)?;
+        resolve_graph_artifact_dir(&build_artifact_base)
+    })
+    .await
+    .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))??;
     log_stage_completed("build_graph", stage_started);
 
     Ok(PreparedJob {
@@ -388,10 +414,299 @@ fn translate_prepared_blocking(
 ) -> Result<TranslateStats, WorkerError> {
     stage.set_current("translate");
     let stage_started = log_stage_started("translate");
-    let stats = translate_with_source_root(&prepared.artifact_dir, Some(&prepared.source_path), env)?;
+    let stats =
+        translate_with_source_root(&prepared.artifact_dir, Some(&prepared.source_path), env)?;
     log_stage_completed("translate", stage_started);
     stage.set_current("complete");
     Ok(stats)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BronzeRawSource {
+    pub source: String,
+    pub package: String,
+    pub version: String,
+    pub revision_kind: String,
+    pub semver_major: Option<i32>,
+    pub semver_minor: Option<i32>,
+    pub semver_patch: Option<i32>,
+    pub source_kind: String,
+    pub source_url: String,
+    pub s3_uri: String,
+    pub content_sha256: String,
+    pub bytes: u64,
+    pub fetched_at: i64,
+    pub fetch_status: String,
+}
+
+#[async_trait]
+pub trait BronzeRawSourceRegistry: Send + Sync {
+    async fn lookup(
+        &self,
+        source: &str,
+        package: &str,
+        version: &str,
+    ) -> Result<Option<BronzeRawSource>, WorkerError>;
+    async fn register(&self, row: &BronzeRawSource) -> Result<(), WorkerError>;
+}
+
+#[async_trait]
+pub trait BronzeArchiveStore: Send + Sync {
+    async fn content_sha256(&self, s3_uri: &str) -> Result<Option<String>, WorkerError>;
+    async fn download_to_path(&self, s3_uri: &str, path: &Path) -> Result<(), WorkerError>;
+    async fn upload_path(
+        &self,
+        key: &str,
+        content_sha256: &str,
+        path: &Path,
+    ) -> Result<String, WorkerError>;
+}
+
+#[derive(Debug)]
+struct FetchedSourceArchive {
+    source_path: PathBuf,
+    archive_path: PathBuf,
+    extension: &'static str,
+    content_sha256: String,
+    bytes: u64,
+}
+
+pub async fn fetch_source_with_bronze_services(
+    env: &JobEnv,
+    dest: &Path,
+    registry: &dyn BronzeRawSourceRegistry,
+    archive_store: &dyn BronzeArchiveStore,
+) -> Result<PathBuf, WorkerError> {
+    fetch_source_with_bronze_services_outcome(env, dest, registry, archive_store).await
+}
+
+async fn fetch_source_with_bronze_services_outcome(
+    env: &JobEnv,
+    dest: &Path,
+    registry: &dyn BronzeRawSourceRegistry,
+    archive_store: &dyn BronzeArchiveStore,
+) -> Result<PathBuf, WorkerError> {
+    let source_kind = normalize_source_kind(&env.source_kind)?;
+
+    let existing = registry
+        .lookup(&env.source, &env.package, &env.revision)
+        .await?;
+    if let Some(row) = existing.as_ref() {
+        if let Some(source_path) =
+            restore_registered_bronze_source(row, dest, archive_store).await?
+        {
+            return Ok(source_path);
+        }
+    }
+
+    validate_source_url_for_fetch(&env.source_url)?;
+
+    let source_url = env.source_url.clone();
+    let revision = env.revision.clone();
+    let dest = dest.to_path_buf();
+    let fetched = tokio::task::spawn_blocking(move || {
+        fetch_source_archive(&source_url, source_kind, &revision, &dest)
+    })
+    .await
+    .map_err(|error| WorkerError::Fetch(format!("worker join failed: {error}")))??;
+
+    if let Some(row) = existing.as_ref() {
+        if row.fetch_status == "success" && row.content_sha256 != fetched.content_sha256 {
+            let _ = fs::remove_file(&fetched.archive_path);
+            return Err(WorkerError::Fetch(format!(
+                "bronze content drift for {}/{}/{}: existing sha256 {} != fetched sha256 {}",
+                env.source, env.package, env.revision, row.content_sha256, fetched.content_sha256
+            )));
+        }
+    }
+
+    let key = bronze_source_key(&env.source, &env.package, &env.revision, fetched.extension);
+    let s3_uri = archive_store
+        .upload_path(&key, &fetched.content_sha256, &fetched.archive_path)
+        .await?;
+    let row = bronze_row_from_env(env, &s3_uri, &fetched.content_sha256, fetched.bytes);
+    registry.register(&row).await?;
+    let _ = fs::remove_file(&fetched.archive_path);
+
+    Ok(fetched.source_path)
+}
+
+pub async fn retrieve_bronze_source_by_coordinate(
+    source: &str,
+    package: &str,
+    version: &str,
+    dest: &Path,
+    registry: &dyn BronzeRawSourceRegistry,
+    archive_store: &dyn BronzeArchiveStore,
+) -> Result<Option<PathBuf>, WorkerError> {
+    let Some(row) = registry.lookup(source, package, version).await? else {
+        return Ok(None);
+    };
+    restore_registered_bronze_source(&row, dest, archive_store).await
+}
+
+async fn restore_registered_bronze_source(
+    row: &BronzeRawSource,
+    dest: &Path,
+    archive_store: &dyn BronzeArchiveStore,
+) -> Result<Option<PathBuf>, WorkerError> {
+    if row.fetch_status != "success" {
+        return Ok(None);
+    }
+    if archive_store.content_sha256(&row.s3_uri).await?.as_deref()
+        != Some(row.content_sha256.as_str())
+    {
+        return Ok(None);
+    }
+
+    let extension = archive_extension_for_row(row)?;
+    let archive = archive_path_for_restore(dest, extension);
+    if let Some(parent) = archive.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            WorkerError::Fetch(format!("failed to create `{}`: {error}", parent.display()))
+        })?;
+    }
+    archive_store
+        .download_to_path(&row.s3_uri, &archive)
+        .await?;
+    let source_path = restore_source_archive(&row.source_kind, &row.version, &archive, dest);
+    let _ = fs::remove_file(&archive);
+    source_path.map(Some)
+}
+
+async fn fetch_source_with_default_bronze(
+    env: &JobEnv,
+    dest: &Path,
+    leases: &dyn CatalogLeaseStore,
+) -> Result<PathBuf, WorkerError> {
+    let archive_store = S3BronzeArchiveStore::new(bronze_bucket());
+    if env.catalog_dsn.starts_with("s3://") {
+        return fetch_source_with_s3_catalog_bronze(env, dest, leases, &archive_store).await;
+    }
+
+    let registry = DuckLakeBronzeRegistry::new(env.catalog_dsn.clone());
+    fetch_source_with_bronze_services(env, dest, &registry, &archive_store).await
+}
+
+async fn fetch_source_with_s3_catalog_bronze(
+    env: &JobEnv,
+    dest: &Path,
+    leases: &dyn CatalogLeaseStore,
+    archive_store: &dyn BronzeArchiveStore,
+) -> Result<PathBuf, WorkerError> {
+    let source_kind = normalize_source_kind(&env.source_kind)?;
+
+    if let Some(row) = lookup_bronze_row_in_s3_catalog(env).await? {
+        if let Some(source_path) =
+            restore_registered_bronze_source(&row, dest, archive_store).await?
+        {
+            return Ok(source_path);
+        }
+    }
+
+    validate_source_url_for_fetch(&env.source_url)?;
+
+    let source_url = env.source_url.clone();
+    let revision = env.revision.clone();
+    let dest = dest.to_path_buf();
+    let fetched = tokio::task::spawn_blocking(move || {
+        fetch_source_archive(&source_url, source_kind, &revision, &dest)
+    })
+    .await
+    .map_err(|error| WorkerError::Fetch(format!("worker join failed: {error}")))??;
+
+    register_fetched_bronze_in_s3_catalog(env, leases, archive_store, &fetched).await?;
+    let _ = fs::remove_file(&fetched.archive_path);
+    Ok(fetched.source_path)
+}
+
+async fn lookup_bronze_row_in_s3_catalog(
+    env: &JobEnv,
+) -> Result<Option<BronzeRawSource>, WorkerError> {
+    let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
+        .await
+        .map_err(|error| WorkerError::Fetch(format!("download bronze catalog: {error:#}")))?;
+    let Some(catalog_dl) = catalog_dl else {
+        return Ok(None);
+    };
+    let registry =
+        DuckLakeBronzeRegistry::new(catalog_dl.local_path().to_string_lossy().to_string());
+    registry
+        .lookup(&env.source, &env.package, &env.revision)
+        .await
+}
+
+async fn register_fetched_bronze_in_s3_catalog(
+    env: &JobEnv,
+    leases: &dyn CatalogLeaseStore,
+    archive_store: &dyn BronzeArchiveStore,
+    fetched: &FetchedSourceArchive,
+) -> Result<(), WorkerError> {
+    let lease = leases
+        .acquire(&env.catalog_dsn, &env.job_id)
+        .await
+        .map_err(|error| WorkerError::Fetch(format!("acquire bronze catalog lease: {error:#}")))?;
+
+    let result = async {
+        let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
+            .await
+            .map_err(|error| WorkerError::Fetch(format!("download bronze catalog: {error:#}")))?;
+        let Some(catalog_dl) = catalog_dl else {
+            return Ok(());
+        };
+        let registry =
+            DuckLakeBronzeRegistry::new(catalog_dl.local_path().to_string_lossy().to_string());
+        if let Some(row) = registry
+            .lookup(&env.source, &env.package, &env.revision)
+            .await?
+        {
+            if row.fetch_status == "success" && row.content_sha256 != fetched.content_sha256 {
+                return Err(WorkerError::Fetch(format!(
+                    "bronze content drift for {}/{}/{}: existing sha256 {} != fetched sha256 {}",
+                    env.source,
+                    env.package,
+                    env.revision,
+                    row.content_sha256,
+                    fetched.content_sha256
+                )));
+            }
+            if row.fetch_status == "success"
+                && row.content_sha256 == fetched.content_sha256
+                && archive_store.content_sha256(&row.s3_uri).await?.as_deref()
+                    == Some(fetched.content_sha256.as_str())
+            {
+                return Ok(());
+            }
+        }
+
+        let key = bronze_source_key(&env.source, &env.package, &env.revision, fetched.extension);
+        let s3_uri = archive_store
+            .upload_path(&key, &fetched.content_sha256, &fetched.archive_path)
+            .await?;
+        let row = bronze_row_from_env(env, &s3_uri, &fetched.content_sha256, fetched.bytes);
+        registry.register(&row).await?;
+        upload_with_owned_catalog_lease(leases, &lease, || catalog_dl.upload())
+            .await
+            .map_err(|error| WorkerError::Fetch(format!("upload bronze catalog: {error:#}")))?;
+        Ok(())
+    }
+    .await;
+
+    release_bronze_catalog_lease_best_effort(leases, &lease, env).await;
+    result
+}
+
+async fn release_bronze_catalog_lease_best_effort(
+    leases: &dyn CatalogLeaseStore,
+    lease: &CatalogLease,
+    env: &JobEnv,
+) {
+    if let Err(error) = leases.release(lease).await {
+        eprintln!(
+            "[worker] warning: failed to release bronze catalog lease for job `{}`: {error:#}",
+            env.job_id
+        );
+    }
 }
 
 pub fn fetch_source(
@@ -400,24 +715,203 @@ pub fn fetch_source(
     revision: &str,
     dest: &Path,
 ) -> Result<PathBuf, WorkerError> {
-    if !matches!(
-        optional_env("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE").as_deref(),
-        Some("1")
-    ) {
-        let parsed =
-            abuse::validate(source_url, &abuse::ValidateOptions::default()).map_err(|error| {
-                WorkerError::Fetch(format!("source_url abuse re-validation failed: {error}"))
-            })?;
-        abuse::resolve_and_check_dns(&parsed)
-            .map_err(|error| WorkerError::Fetch(format!("source_url DNS check failed: {error}")))?;
-    }
+    validate_source_url_for_fetch(source_url)?;
 
-    match source_kind.trim().to_ascii_lowercase().as_str() {
+    match normalize_source_kind(source_kind)? {
         "git" => fetch_git(source_url, revision, dest),
         "tarball" => fetch_tarball(source_url, dest),
-        other => Err(WorkerError::Fetch(format!(
-            "unsupported SOURCE_KIND `{other}`"
-        ))),
+        _ => unreachable!("normalize_source_kind returned unsupported source kind"),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DuckLakeBronzeRegistry {
+    catalog_dsn: String,
+}
+
+impl DuckLakeBronzeRegistry {
+    pub fn new(catalog_dsn: impl Into<String>) -> Self {
+        Self {
+            catalog_dsn: catalog_dsn.into(),
+        }
+    }
+
+    fn connect(&self) -> Result<Connection, WorkerError> {
+        let data_path = bronze_ducklake_data_path(&self.catalog_dsn)?;
+        let conn = connect_ducklake_with_data_path(&self.catalog_dsn, &data_path)
+            .map_err(|error| WorkerError::Fetch(format!("connect bronze catalog: {error:#}")))?;
+        conn.execute_batch(CATALOG_TABLES_SQL).map_err(|error| {
+            WorkerError::Fetch(format!("ensure bronze raw_sources schema: {error:#}"))
+        })?;
+        Ok(conn)
+    }
+}
+
+#[async_trait]
+impl BronzeRawSourceRegistry for DuckLakeBronzeRegistry {
+    async fn lookup(
+        &self,
+        source: &str,
+        package: &str,
+        version: &str,
+    ) -> Result<Option<BronzeRawSource>, WorkerError> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT source, package, version, revision_kind,
+                       semver_major, semver_minor, semver_patch,
+                       source_kind, source_url, s3_uri, content_sha256,
+                       bytes, COALESCE(CAST(epoch(fetched_at) AS BIGINT), 0), fetch_status
+                FROM bronze.raw_sources
+                WHERE source = ? AND package = ? AND version = ?
+                ORDER BY fetched_at DESC NULLS LAST
+                LIMIT 1
+                "#,
+            )
+            .map_err(|error| WorkerError::Fetch(format!("prepare bronze lookup: {error}")))?;
+        let result = stmt.query_row(params![source, package, version], |row| {
+            let bytes: i64 = row.get(11)?;
+            Ok(BronzeRawSource {
+                source: row.get(0)?,
+                package: row.get(1)?,
+                version: row.get(2)?,
+                revision_kind: row.get(3)?,
+                semver_major: row.get(4)?,
+                semver_minor: row.get(5)?,
+                semver_patch: row.get(6)?,
+                source_kind: row.get(7)?,
+                source_url: row.get(8)?,
+                s3_uri: row.get(9)?,
+                content_sha256: row.get(10)?,
+                bytes: u64::try_from(bytes).unwrap_or(0),
+                fetched_at: row.get(12)?,
+                fetch_status: row.get(13)?,
+            })
+        });
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(WorkerError::Fetch(format!(
+                "lookup bronze raw source: {error}"
+            ))),
+        }
+    }
+
+    async fn register(&self, row: &BronzeRawSource) -> Result<(), WorkerError> {
+        let bytes = i64::try_from(row.bytes).map_err(|_| {
+            WorkerError::Fetch(format!(
+                "bronze archive too large to register: {}",
+                row.bytes
+            ))
+        })?;
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO bronze.raw_sources (
+                source, package, version, revision_kind,
+                semver_major, semver_minor, semver_patch,
+                source_kind, source_url, s3_uri, content_sha256,
+                bytes, fetched_at, fetch_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(to_timestamp(?) AS TIMESTAMP), ?)
+            "#,
+            params![
+                row.source,
+                row.package,
+                row.version,
+                row.revision_kind,
+                row.semver_major,
+                row.semver_minor,
+                row.semver_patch,
+                row.source_kind,
+                row.source_url,
+                row.s3_uri,
+                row.content_sha256,
+                bytes,
+                row.fetched_at,
+                row.fetch_status,
+            ],
+        )
+        .map_err(|error| WorkerError::Fetch(format!("register bronze raw source: {error}")))?;
+        conn.execute("FORCE CHECKPOINT", [])
+            .map_err(|error| WorkerError::Fetch(format!("checkpoint bronze catalog: {error}")))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct S3BronzeArchiveStore {
+    bucket: String,
+}
+
+impl S3BronzeArchiveStore {
+    pub fn new(bucket: impl Into<String>) -> Self {
+        Self {
+            bucket: bucket.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl BronzeArchiveStore for S3BronzeArchiveStore {
+    async fn content_sha256(&self, s3_uri: &str) -> Result<Option<String>, WorkerError> {
+        let parsed = parse_s3_uri(s3_uri)
+            .map_err(|error| WorkerError::Fetch(format!("invalid bronze S3 URI: {error}")))?;
+        let resp = s3_client()
+            .head_object()
+            .bucket(parsed.bucket)
+            .key(parsed.key)
+            .send()
+            .await
+            .map_err(|error| WorkerError::Fetch(format!("head bronze archive: {error}")))?;
+        Ok(resp
+            .metadata()
+            .and_then(|metadata| metadata.get("content-sha256"))
+            .cloned())
+    }
+
+    async fn download_to_path(&self, s3_uri: &str, path: &Path) -> Result<(), WorkerError> {
+        let parsed = parse_s3_uri(s3_uri)
+            .map_err(|error| WorkerError::Fetch(format!("invalid bronze S3 URI: {error}")))?;
+        let resp = s3_client()
+            .get_object()
+            .bucket(parsed.bucket)
+            .key(parsed.key)
+            .send()
+            .await
+            .map_err(|error| WorkerError::Fetch(format!("download bronze archive: {error}")))?;
+        let body =
+            resp.body.collect().await.map_err(|error| {
+                WorkerError::Fetch(format!("read bronze archive body: {error}"))
+            })?;
+        tokio::fs::write(path, body.into_bytes())
+            .await
+            .map_err(|error| {
+                WorkerError::Fetch(format!("failed to write `{}`: {error}", path.display()))
+            })?;
+        Ok(())
+    }
+
+    async fn upload_path(
+        &self,
+        key: &str,
+        content_sha256: &str,
+        path: &Path,
+    ) -> Result<String, WorkerError> {
+        let data = tokio::fs::read(path).await.map_err(|error| {
+            WorkerError::Fetch(format!("failed to read `{}`: {error}", path.display()))
+        })?;
+        s3_client()
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .metadata("content-sha256", content_sha256)
+            .body(ByteStream::from(data))
+            .send()
+            .await
+            .map_err(|error| WorkerError::Fetch(format!("upload bronze archive: {error}")))?;
+        Ok(format!("s3://{}/{key}", self.bucket))
     }
 }
 
@@ -443,13 +937,18 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
     let status = Command::new("spur")
         .env(GRAPH_SKIP_SECTION_EMBEDDINGS_ENV, "1")
         .args([
-            "graph", "build",
-            "--root", &source_path.to_string_lossy(),
-            "--output", &artifact_dir.to_string_lossy(),
+            "graph",
+            "build",
+            "--root",
+            &source_path.to_string_lossy(),
+            "--output",
+            &artifact_dir.to_string_lossy(),
             "--no-analyst",
         ])
         .status()
-        .map_err(|error| WorkerError::Build(format!("failed to run `spur graph build`: {error}")))?;
+        .map_err(|error| {
+            WorkerError::Build(format!("failed to run `spur graph build`: {error}"))
+        })?;
 
     if !status.success() {
         return Err(WorkerError::Build(format!(
@@ -500,6 +999,45 @@ pub async fn handle_spot_interruption(
     send_task_failure(env, "spot_interrupted", "Fargate Spot interruption").await
 }
 
+fn normalize_source_kind(source_kind: &str) -> Result<&'static str, WorkerError> {
+    match source_kind.trim().to_ascii_lowercase().as_str() {
+        "git" => Ok("git"),
+        "tarball" => Ok("tarball"),
+        other => Err(WorkerError::Fetch(format!(
+            "unsupported SOURCE_KIND `{other}`"
+        ))),
+    }
+}
+
+fn validate_source_url_for_fetch(source_url: &str) -> Result<(), WorkerError> {
+    if matches!(
+        optional_env("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE").as_deref(),
+        Some("1")
+    ) {
+        return Ok(());
+    }
+    let parsed =
+        abuse::validate(source_url, &abuse::ValidateOptions::default()).map_err(|error| {
+            WorkerError::Fetch(format!("source_url abuse re-validation failed: {error}"))
+        })?;
+    abuse::resolve_and_check_dns(&parsed)
+        .map_err(|error| WorkerError::Fetch(format!("source_url DNS check failed: {error}")))?;
+    Ok(())
+}
+
+fn fetch_source_archive(
+    source_url: &str,
+    source_kind: &str,
+    revision: &str,
+    dest: &Path,
+) -> Result<FetchedSourceArchive, WorkerError> {
+    match source_kind {
+        "git" => fetch_git_with_archive(source_url, revision, dest),
+        "tarball" => fetch_tarball_with_archive(source_url, dest),
+        _ => unreachable!("source kind is normalized before fetch_source_archive"),
+    }
+}
+
 fn fetch_git(source_url: &str, revision: &str, dest: &Path) -> Result<PathBuf, WorkerError> {
     if dest.exists() {
         fs::remove_dir_all(dest).map_err(|error| {
@@ -540,7 +1078,60 @@ fn fetch_git(source_url: &str, revision: &str, dest: &Path) -> Result<PathBuf, W
     Ok(dest.to_path_buf())
 }
 
+fn fetch_git_with_archive(
+    source_url: &str,
+    revision: &str,
+    dest: &Path,
+) -> Result<FetchedSourceArchive, WorkerError> {
+    let source_path = fetch_git(source_url, revision, dest)?;
+    let archive_path = archive_path_for_restore(dest, "gitbundle");
+    if archive_path.exists() {
+        fs::remove_file(&archive_path).map_err(|error| {
+            WorkerError::Fetch(format!(
+                "failed to clear `{}`: {error}",
+                archive_path.display()
+            ))
+        })?;
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&source_path)
+        .args(["bundle", "create"])
+        .arg(&archive_path)
+        .args(["--all", "HEAD"])
+        .output()
+        .map_err(|error| WorkerError::Fetch(format!("failed to run git bundle: {error}")))?;
+    if !output.status.success() {
+        return Err(WorkerError::Fetch(format!(
+            "git bundle failed: {}",
+            command_stderr(&output)
+        )));
+    }
+    let (content_sha256, bytes) = archive_metadata(&archive_path)?;
+    Ok(FetchedSourceArchive {
+        source_path,
+        archive_path,
+        extension: "gitbundle",
+        content_sha256,
+        bytes,
+    })
+}
+
 fn fetch_tarball(source_url: &str, dest: &Path) -> Result<PathBuf, WorkerError> {
+    let fetched = fetch_tarball_with_archive(source_url, dest)?;
+    fs::remove_file(&fetched.archive_path).map_err(|error| {
+        WorkerError::Fetch(format!(
+            "failed to remove `{}`: {error}",
+            fetched.archive_path.display()
+        ))
+    })?;
+    Ok(fetched.source_path)
+}
+
+fn fetch_tarball_with_archive(
+    source_url: &str,
+    dest: &Path,
+) -> Result<FetchedSourceArchive, WorkerError> {
     if dest.exists() {
         fs::remove_dir_all(dest).map_err(|error| {
             WorkerError::Fetch(format!("failed to clear `{}`: {error}", dest.display()))
@@ -550,18 +1141,250 @@ fn fetch_tarball(source_url: &str, dest: &Path) -> Result<PathBuf, WorkerError> 
         WorkerError::Fetch(format!("failed to create `{}`: {error}", dest.display()))
     })?;
 
-    let archive = if source_url.to_ascii_lowercase().contains(".zip") {
-        dest.join("__source_archive.zip")
-    } else {
-        dest.join("__source_archive.tar.gz")
-    };
+    let extension = archive_extension_for_tarball_url(source_url);
+    let archive = archive_path_for_restore(dest, extension);
+    if let Some(parent) = archive.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            WorkerError::Fetch(format!("failed to create `{}`: {error}", parent.display()))
+        })?;
+    }
+    if archive.exists() {
+        fs::remove_file(&archive).map_err(|error| {
+            WorkerError::Fetch(format!("failed to clear `{}`: {error}", archive.display()))
+        })?;
+    }
     download_tarball(source_url, &archive)?;
     extract_archive(&archive, dest)?;
-    fs::remove_file(&archive).map_err(|error| {
-        WorkerError::Fetch(format!("failed to remove `{}`: {error}", archive.display()))
-    })?;
 
+    let (content_sha256, bytes) = archive_metadata(&archive)?;
+    Ok(FetchedSourceArchive {
+        source_path: single_extracted_root(dest).unwrap_or_else(|| dest.to_path_buf()),
+        archive_path: archive,
+        extension,
+        content_sha256,
+        bytes,
+    })
+}
+
+fn restore_source_archive(
+    source_kind: &str,
+    revision: &str,
+    archive: &Path,
+    dest: &Path,
+) -> Result<PathBuf, WorkerError> {
+    match normalize_source_kind(source_kind)? {
+        "git" => restore_git_bundle(archive, revision, dest),
+        "tarball" => restore_tarball_archive(archive, dest),
+        _ => unreachable!("normalize_source_kind returned unsupported source kind"),
+    }
+}
+
+fn restore_git_bundle(archive: &Path, revision: &str, dest: &Path) -> Result<PathBuf, WorkerError> {
+    if dest.exists() {
+        fs::remove_dir_all(dest).map_err(|error| {
+            WorkerError::Fetch(format!("failed to clear `{}`: {error}", dest.display()))
+        })?;
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            WorkerError::Fetch(format!("failed to create `{}`: {error}", parent.display()))
+        })?;
+    }
+
+    let clone = Command::new("git")
+        .arg("clone")
+        .arg(archive)
+        .arg(dest)
+        .output()
+        .map_err(|error| WorkerError::Fetch(format!("failed to run git clone: {error}")))?;
+    if !clone.status.success() {
+        return Err(WorkerError::Fetch(format!(
+            "git clone from bronze bundle failed: {}",
+            command_stderr(&clone)
+        )));
+    }
+
+    let checkout = Command::new("git")
+        .arg("-C")
+        .arg(dest)
+        .args(["checkout", revision])
+        .output()
+        .map_err(|error| WorkerError::Fetch(format!("failed to run git checkout: {error}")))?;
+    if !checkout.status.success() {
+        return Err(WorkerError::Fetch(format!(
+            "git checkout `{revision}` from bronze bundle failed: {}",
+            command_stderr(&checkout)
+        )));
+    }
+
+    Ok(dest.to_path_buf())
+}
+
+fn restore_tarball_archive(archive: &Path, dest: &Path) -> Result<PathBuf, WorkerError> {
+    if dest.exists() {
+        fs::remove_dir_all(dest).map_err(|error| {
+            WorkerError::Fetch(format!("failed to clear `{}`: {error}", dest.display()))
+        })?;
+    }
+    fs::create_dir_all(dest).map_err(|error| {
+        WorkerError::Fetch(format!("failed to create `{}`: {error}", dest.display()))
+    })?;
+    extract_archive(archive, dest)?;
     Ok(single_extracted_root(dest).unwrap_or_else(|| dest.to_path_buf()))
+}
+
+fn archive_extension_for_tarball_url(source_url: &str) -> &'static str {
+    if source_url.to_ascii_lowercase().contains(".zip") {
+        "zip"
+    } else {
+        "tar.gz"
+    }
+}
+
+fn archive_extension_for_row(row: &BronzeRawSource) -> Result<&'static str, WorkerError> {
+    match normalize_source_kind(&row.source_kind)? {
+        "git" => Ok("gitbundle"),
+        "tarball" if row.s3_uri.to_ascii_lowercase().ends_with(".zip") => Ok("zip"),
+        "tarball" => Ok("tar.gz"),
+        _ => unreachable!("normalize_source_kind returned unsupported source kind"),
+    }
+}
+
+fn archive_path_for_restore(dest: &Path, extension: &str) -> PathBuf {
+    dest.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("__source_archive.{extension}"))
+}
+
+fn bronze_source_key(source: &str, package: &str, version: &str, extension: &str) -> String {
+    // Infra follow-up: apply an S3 lifecycle policy to bronze/* that moves raw
+    // archives to Intelligent-Tiering after 30 days and expires older
+    // noncurrent objects beyond the package's latest-N retention window.
+    format!("bronze/{source}/{package}/{version}/source.{extension}")
+}
+
+fn bronze_row_from_env(
+    env: &JobEnv,
+    s3_uri: &str,
+    content_sha256: &str,
+    bytes: u64,
+) -> BronzeRawSource {
+    let revision = revision_metadata(&env.revision);
+    BronzeRawSource {
+        source: env.source.clone(),
+        package: env.package.clone(),
+        version: env.revision.clone(),
+        revision_kind: revision.kind,
+        semver_major: revision.semver_major,
+        semver_minor: revision.semver_minor,
+        semver_patch: revision.semver_patch,
+        source_kind: env.source_kind.clone(),
+        source_url: env.source_url.clone(),
+        s3_uri: s3_uri.to_owned(),
+        content_sha256: content_sha256.to_owned(),
+        bytes,
+        fetched_at: unix_secs_i64(),
+        fetch_status: "success".to_owned(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RevisionMetadata {
+    kind: String,
+    semver_major: Option<i32>,
+    semver_minor: Option<i32>,
+    semver_patch: Option<i32>,
+}
+
+fn revision_metadata(revision: &str) -> RevisionMetadata {
+    if revision.contains('.') {
+        let mut parts = revision.split('.');
+        return RevisionMetadata {
+            kind: "semver".to_owned(),
+            semver_major: parts.next().and_then(|part| part.parse::<i32>().ok()),
+            semver_minor: parts.next().and_then(|part| part.parse::<i32>().ok()),
+            semver_patch: parts.next().and_then(|part| part.parse::<i32>().ok()),
+        };
+    }
+    RevisionMetadata {
+        kind: "git_sha".to_owned(),
+        semver_major: None,
+        semver_minor: None,
+        semver_patch: None,
+    }
+}
+
+fn archive_metadata(path: &Path) -> Result<(String, u64), WorkerError> {
+    let content_sha256 = sha256_file(path)?;
+    let bytes = fs::metadata(path)
+        .map_err(|error| {
+            WorkerError::Fetch(format!(
+                "failed to stat bronze archive `{}`: {error}",
+                path.display()
+            ))
+        })?
+        .len();
+    Ok((content_sha256, bytes))
+}
+
+fn sha256_file(path: &Path) -> Result<String, WorkerError> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        WorkerError::Fetch(format!("failed to open `{}`: {error}", path.display()))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            WorkerError::Fetch(format!("failed to read `{}`: {error}", path.display()))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn bronze_bucket() -> String {
+    optional_env("SPUR_CONTEXT_BRONZE_BUCKET").unwrap_or_else(|| DEFAULT_BRONZE_BUCKET.to_owned())
+}
+
+fn bronze_ducklake_data_path(catalog_dsn: &str) -> Result<String, WorkerError> {
+    if let Some(path) = optional_env("SPUR_CONTEXT_DUCKLAKE_DATA_PATH") {
+        create_local_bronze_data_path_if_needed(&path)?;
+        return Ok(path);
+    }
+    if let Some(sqlite_path) = bronze_sqlite_catalog_path(catalog_dsn) {
+        let path = sqlite_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("data");
+        fs::create_dir_all(&path).map_err(|error| {
+            WorkerError::Fetch(format!(
+                "failed to create DuckLake data path `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        return Ok(path.display().to_string());
+    }
+    Ok("s3://spur-context/data/".to_owned())
+}
+
+fn create_local_bronze_data_path_if_needed(path: &str) -> Result<(), WorkerError> {
+    if path.contains("://") || path == ":memory:" {
+        return Ok(());
+    }
+    fs::create_dir_all(path).map_err(|error| {
+        WorkerError::Fetch(format!(
+            "failed to create DuckLake data path `{path}`: {error}"
+        ))
+    })
+}
+
+fn bronze_sqlite_catalog_path(catalog_dsn: &str) -> Option<PathBuf> {
+    let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
+    let path = dsn.strip_prefix("sqlite:")?;
+    (path != ":memory:").then(|| PathBuf::from(path))
 }
 
 fn download_tarball(source_url: &str, archive: &Path) -> Result<(), WorkerError> {
@@ -767,7 +1590,11 @@ fn translate_with_source_root(
     source_root: Option<&Path>,
     env: &JobEnv,
 ) -> Result<TranslateStats, WorkerError> {
-    let revision_kind = if env.revision.contains('.') { "semver" } else { "git_sha" };
+    let revision_kind = if env.revision.contains('.') {
+        "semver"
+    } else {
+        "git_sha"
+    };
 
     let actual_artifact = if artifact_dir.join("nodes.parquet").is_file() {
         artifact_dir.to_path_buf()
@@ -778,7 +1605,9 @@ fn translate_with_source_root(
             .filter(|p| p.is_dir() && p.join("nodes.parquet").is_file())
             .collect();
         candidates.sort();
-        candidates.into_iter().next()
+        candidates
+            .into_iter()
+            .next()
             .ok_or_else(|| WorkerError::Translate("no nodes.parquet found in artifact".into()))?
     };
 
@@ -795,8 +1624,7 @@ fn translate_with_source_root(
     };
 
     eprintln!("[worker] running Rust API translate...");
-    translate_artifact_to_ducklake(&opts)
-        .map_err(|e| WorkerError::Translate(format!("{e:#}")))
+    translate_artifact_to_ducklake(&opts).map_err(|e| WorkerError::Translate(format!("{e:#}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -872,7 +1700,10 @@ impl DynamoDbCatalogLeaseStore {
             .expression_attribute_names("#created_at", "created_at_unix_secs")
             .expression_attribute_names("#fencing_counter", "fencing_counter")
             .expression_attribute_values(":catalog_uri", AttributeValue::S(catalog_uri.to_owned()))
-            .expression_attribute_values(":owner_job_id", AttributeValue::S(owner_job_id.to_owned()))
+            .expression_attribute_values(
+                ":owner_job_id",
+                AttributeValue::S(owner_job_id.to_owned()),
+            )
             .expression_attribute_values(":lease_token", AttributeValue::S(lease_token.to_owned()))
             .expression_attribute_values(":expires_at", AttributeValue::N(expires_at.to_string()))
             .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
@@ -902,9 +1733,7 @@ impl CatalogLeaseStore for DynamoDbCatalogLeaseStore {
         )
         .await
         .with_context(|| {
-            format!(
-                "catalog lease for {catalog_uri} is held by another worker at {now}"
-            )
+            format!("catalog lease for {catalog_uri} is held by another worker at {now}")
         })
     }
 
@@ -923,7 +1752,10 @@ impl CatalogLeaseStore for DynamoDbCatalogLeaseStore {
             .client
             .get_item()
             .table_name(&self.table_name)
-            .key("pk", AttributeValue::S(catalog_lease_pk(&lease.catalog_uri)))
+            .key(
+                "pk",
+                AttributeValue::S(catalog_lease_pk(&lease.catalog_uri)),
+            )
             .consistent_read(true)
             .send()
             .await
@@ -946,12 +1778,21 @@ impl CatalogLeaseStore for DynamoDbCatalogLeaseStore {
             .client
             .delete_item()
             .table_name(&self.table_name)
-            .key("pk", AttributeValue::S(catalog_lease_pk(&lease.catalog_uri)))
+            .key(
+                "pk",
+                AttributeValue::S(catalog_lease_pk(&lease.catalog_uri)),
+            )
             .condition_expression("#owner_job_id = :owner_job_id AND #lease_token = :lease_token")
             .expression_attribute_names("#owner_job_id", "owner_job_id")
             .expression_attribute_names("#lease_token", "lease_token")
-            .expression_attribute_values(":owner_job_id", AttributeValue::S(lease.owner_job_id.clone()))
-            .expression_attribute_values(":lease_token", AttributeValue::S(lease.lease_token.clone()))
+            .expression_attribute_values(
+                ":owner_job_id",
+                AttributeValue::S(lease.owner_job_id.clone()),
+            )
+            .expression_attribute_values(
+                ":lease_token",
+                AttributeValue::S(lease.lease_token.clone()),
+            )
             .send()
             .await;
         match result {
@@ -1020,9 +1861,9 @@ impl CatalogDownload {
         let version_id = resp.version_id().map(str::to_owned);
         let upload_condition = match e_tag {
             Some(e_tag) => CatalogUploadCondition::IfMatch { e_tag, version_id },
-            None => bail!(
-                "downloaded S3 catalog had no ETag; refusing to allow unconditional upload"
-            ),
+            None => {
+                bail!("downloaded S3 catalog had no ETag; refusing to allow unconditional upload")
+            }
         };
         let body = resp
             .body
@@ -1092,7 +1933,8 @@ async fn await_translate_with_lease_renewal(
         return Ok((stats, None));
     };
 
-    let mut interval = tokio::time::interval(Duration::from_secs(CATALOG_LEASE_RENEW_INTERVAL_SECS));
+    let mut interval =
+        tokio::time::interval(Duration::from_secs(CATALOG_LEASE_RENEW_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval.tick().await;
     loop {

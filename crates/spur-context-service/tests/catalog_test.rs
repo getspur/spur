@@ -49,6 +49,26 @@ fn catalog_tables_sql_creates_medallion_schemas_and_gold_catalog_columns() -> Re
     assert_eq!(table_exists(&conn, "silver", "graph_artifacts")?, 1);
     assert_eq!(table_exists(&conn, "gold", "package_catalog")?, 1);
 
+    assert_eq!(
+        columns_for(&conn, "bronze", "raw_sources")?,
+        [
+            "source",
+            "package",
+            "version",
+            "revision_kind",
+            "semver_major",
+            "semver_minor",
+            "semver_patch",
+            "source_kind",
+            "source_url",
+            "s3_uri",
+            "content_sha256",
+            "bytes",
+            "fetched_at",
+            "fetch_status",
+        ]
+    );
+
     for column in [
         "generation",
         "bronze_content_sha256",
