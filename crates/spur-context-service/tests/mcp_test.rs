@@ -13,7 +13,10 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use duckdb::{params, Connection};
 use serde_json::{json, Value};
-use spur_context_service::catalog::CatalogResolver;
+use spur_context_service::catalog::{
+    compact_gold_and_export_snapshot, connect_frozen_snapshot, CatalogResolver,
+    SnapshotCleanupOptions,
+};
 use spur_context_service::jobs::{
     CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore,
 };
@@ -124,6 +127,64 @@ async fn external_code_search_resolves_latest_and_returns_candidates() -> Result
         "bbbbbbbbbbbbbbbb"
     );
     assert_eq!(response["candidates"][0]["revision"], REVISION);
+    Ok(())
+}
+
+#[tokio::test]
+async fn serving_uses_frozen_snapshot_when_postgres_catalog_is_unreachable() -> Result<()> {
+    let fixture = FrozenServingFixture::new("serving-frozen-snapshot")?;
+    let snapshot_conn = connect_frozen_snapshot(&fixture.snapshot_path, &fixture.data_path)
+        .context("serving should attach the frozen snapshot without a live catalog backend")?;
+    let catalog = CatalogResolver::from_connection(snapshot_conn);
+
+    let response = handle_tool(
+        "external_code_search",
+        &json!({
+            "query": "bet",
+            "package": PACKAGE,
+            "limit": 20
+        }),
+        catalog.connection(),
+        &catalog,
+    )
+    .await?;
+
+    assert_eq!(response["total_matches"], 1);
+    assert_eq!(
+        response["candidates"][0]["stable_symbol_id"],
+        "bbbbbbbbbbbbbbbb"
+    );
+    assert_eq!(response["candidates"][0]["revision"], REVISION);
+
+    let source = handle_tool(
+        "external_code_read",
+        &json!({
+            "selector": "pkg:demo@latest::demo::beta",
+            "context_lines": 0
+        }),
+        catalog.connection(),
+        &catalog,
+    )
+    .await?;
+
+    assert_eq!(source["file_path"], "src/lib.rs");
+    assert_eq!(source["source"], "pub fn beta() {\n}\n");
+
+    let write_error = catalog
+        .connection()
+        .execute(
+            "INSERT INTO gold.refs VALUES ('registry:crates-io', 'demo', 'mutable', '1.0.0', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .expect_err("serving must attach the frozen snapshot read-only");
+    assert!(
+        write_error.to_string().contains("read-only")
+            || write_error.to_string().contains("read only"),
+        "unexpected write error: {write_error}"
+    );
+
+    let _postgres_catalog_that_must_not_be_used =
+        "ducklake:postgresql://127.0.0.1:1/spur_context?connect_timeout=1";
     Ok(())
 }
 
@@ -853,6 +914,135 @@ impl McpFixture {
             _root: root,
         })
     }
+}
+
+struct FrozenServingFixture {
+    snapshot_path: PathBuf,
+    data_path: String,
+    _root: PathBuf,
+}
+
+impl FrozenServingFixture {
+    fn new(name: &str) -> Result<Self> {
+        let root = unique_temp_dir(name)?;
+        let data_path = root.join("data");
+        fs::create_dir_all(&data_path).context("create frozen serving data dir")?;
+
+        let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+        let data_path = data_path.display().to_string();
+        initialize_gold_serving_catalog(&catalog_dsn, &data_path)?;
+        compact_gold_and_export_snapshot(
+            &catalog_dsn,
+            &data_path,
+            SnapshotCleanupOptions {
+                older_than: std::time::Duration::from_secs(3600),
+                republish_lag: std::time::Duration::from_secs(300),
+            },
+        )?;
+
+        let snapshot_path = catalog_snapshot_path(&data_path);
+        assert!(
+            snapshot_path.is_file(),
+            "expected frozen serving snapshot at {}",
+            snapshot_path.display()
+        );
+
+        Ok(Self {
+            snapshot_path,
+            data_path,
+            _root: root,
+        })
+    }
+}
+
+fn initialize_gold_serving_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
+    let conn = Connection::open_in_memory().context("open frozen serving setup DuckDB")?;
+    attach_ducklake(&conn, catalog_dsn, data_path)?;
+    conn.execute_batch(include_str!("../sql/catalog_tables.sql"))
+        .context("create medallion catalog tables")?;
+
+    let source_text = "pub fn beta() {\n}\n";
+    conn.execute(
+        r"
+        INSERT INTO gold.files (
+            stable_file_id, file_path, source_text,
+            package, source, revision, revision_kind,
+            semver_major, semver_minor, semver_patch, generation
+        )
+        VALUES (
+            'file-demo-lib', 'src/lib.rs', ?,
+            'demo', 'registry:crates-io', '1.0.0', 'semver',
+            1, 0, 0, 7
+        )
+        ",
+        params![source_text],
+    )
+    .context("insert frozen serving file")?;
+    conn.execute(
+        r"
+        INSERT INTO gold.nodes (
+            stable_symbol_id, package, source, revision, revision_kind,
+            semver_major, semver_minor, semver_patch, file_path,
+            byte_range_start, byte_range_end, line_start, line_end,
+            entity_name, qualified_name, symbol_kind, anchor_hash,
+            enclosing_scope, generation
+        )
+        VALUES (
+            'bbbbbbbbbbbbbbbb', 'demo', 'registry:crates-io', '1.0.0', 'semver',
+            1, 0, 0, 'src/lib.rs',
+            0, ?, 1, 2,
+            'beta', 'demo::beta', 'function', 'anchor-beta',
+            NULL, 7
+        )
+        ",
+        params![source_text.len() as i64],
+    )
+    .context("insert frozen serving node")?;
+    conn.execute_batch(
+        r#"
+        INSERT INTO gold.package_catalog (
+            source, package, revision, revision_kind,
+            semver_major, semver_minor, semver_patch,
+            snapshot_id, indexed_at, index_status, embeddings_status, row_counts,
+            generation, bronze_content_sha256, silver_graph_content_hash,
+            builder_version, translate_schema_version
+        )
+        VALUES (
+            'registry:crates-io', 'demo', '1.0.0', 'semver',
+            1, 0, 0,
+            777, TIMESTAMP '2026-06-28 00:00:00',
+            'complete', 'skipped', '{"nodes":1}',
+            7, 'bronze-fixture', 'graph-fixture', 'builder-fixture', 'translate-fixture'
+        );
+
+        INSERT INTO gold.refs (source, package, ref_name, revision, updated_at)
+        VALUES (
+            'registry:crates-io', 'demo', 'latest', '1.0.0',
+            TIMESTAMP '2026-06-28 00:01:00'
+        );
+        "#,
+    )
+    .context("insert frozen serving catalog metadata")?;
+    flush_inlined_ducklake_data(&conn)?;
+    conn.execute("FORCE CHECKPOINT", [])
+        .context("checkpoint frozen serving fixture")?;
+    Ok(())
+}
+
+fn flush_inlined_ducklake_data(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("CALL ducklake_flush_inlined_data('spur_context')")
+        .context("prepare ducklake_flush_inlined_data")?;
+    let mut rows = stmt.query([]).context("execute ducklake flush")?;
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
+fn catalog_snapshot_path(data_path: &str) -> PathBuf {
+    PathBuf::from(data_path)
+        .join("gold")
+        .join("catalog-snapshot")
+        .join("spur_context.ducklake")
 }
 
 fn create_query_schema(conn: &Connection) -> Result<()> {
