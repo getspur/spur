@@ -3,6 +3,11 @@ output "api_url" {
   value       = aws_apigatewayv2_api.http.api_endpoint
 }
 
+output "api_invoke_policy_arn" {
+  description = "IAM policy ARN for SigV4 callers allowed to invoke the context-service API"
+  value       = aws_iam_policy.context_service_invoke.arn
+}
+
 output "lambda_function_name" {
   description = "Lambda function name"
   value       = aws_lambda_function.service.function_name

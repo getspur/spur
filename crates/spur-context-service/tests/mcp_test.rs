@@ -18,12 +18,12 @@ use spur_context_service::catalog::{
     FrozenSnapshotManifest, SnapshotCleanupOptions,
 };
 use spur_context_service::jobs::{
-    CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore,
+    CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
 };
 use spur_context_service::mcp::{
-    handle_tool, route_index, route_index_status, tool_definitions, ExecutionOutcome,
-    ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter,
-    McpHandlerError,
+    handle_tool, route_index, route_index_status, route_index_status_for_caller, tool_definitions,
+    ExecutionOutcome, ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest,
+    IndexExecutionStarter, McpHandlerError,
 };
 
 const PACKAGE: &str = "demo";
@@ -582,9 +582,38 @@ async fn external_index_status_returns_not_found_for_unknown_job() -> Result<()>
 }
 
 #[tokio::test]
+async fn external_index_status_for_caller_hides_jobs_owned_by_other_callers() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let job = jobs.seed_queued_job("arn:other-caller", |record| {
+        record.caller_id = "caller-a".to_owned();
+    });
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Succeeded,
+        output: Some(json!({
+            "snapshot_id": 777,
+        })),
+        error: None,
+    }));
+
+    let response = route_index_status_for_caller(
+        &json!({ "job_id": job.job_id }),
+        &jobs,
+        Some(&checker),
+        "caller-b",
+    )
+    .await?;
+
+    assert_eq!(response, json!({ "status": "not_found" }));
+    assert_eq!(checker.described_arns(), Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test]
 async fn lambda_index_status_route_does_not_require_catalog_initialization() -> Result<()> {
     let jobs = FakeJobStore::default();
-    let job = jobs.seed_queued_job("arn:lambda-status", |_| {});
+    let job = jobs.seed_queued_job("arn:lambda-status", |record| {
+        record.caller_id = "caller-lambda-status".to_owned();
+    });
     let job_id = job.job_id.clone();
     let checker = StubExecutionStatusChecker::new(None);
 
@@ -592,6 +621,7 @@ async fn lambda_index_status_route_does_not_require_catalog_initialization() -> 
         &json!({ "job_id": job_id.clone() }),
         &jobs,
         &checker,
+        "caller-lambda-status",
     )
     .await?;
 
@@ -747,6 +777,94 @@ async fn external_index_creates_job_starts_execution_and_records_arn() -> Result
     assert_eq!(stored.execution_arn.as_deref(), Some("arn:stub:job-1"));
     assert_eq!(stored.caller_id, "caller-create");
     assert_eq!(stored.source_kind, "git");
+    let started = sfn.started_requests();
+    assert_eq!(
+        started[0].input["limits"],
+        json!({
+            "max_source_bytes": 2147483648_u64,
+            "max_build_seconds": 1800_u64
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_rejects_when_caller_concurrent_cap_is_full() -> Result<()> {
+    let fixture = McpFixture::new("index-concurrent-cap")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+    jobs.seed_queued_job("arn:busy-a", |record| {
+        record.caller_id = "caller-full".to_owned();
+        record.revision = "busy-a".to_owned();
+    });
+    jobs.seed_queued_job("arn:busy-b", |record| {
+        record.caller_id = "caller-full".to_owned();
+        record.revision = "busy-b".to_owned();
+    });
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "new-work",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-full",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "rejected");
+    assert_eq!(response["reason"], "concurrent_job_limit");
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_rejects_when_caller_rate_limit_is_full() -> Result<()> {
+    let fixture = McpFixture::new("index-rate-limit")?;
+    let jobs = FakeJobStore::default();
+    jobs.set_rate_limit_per_minute(1);
+    let sfn = StubIndexExecutionStarter::default();
+
+    let first = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "rate-a",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-rate-limited",
+    )
+    .await?;
+
+    assert_eq!(first["status"], "queued");
+
+    let second = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "rate-b",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-rate-limited",
+    )
+    .await?;
+
+    assert_eq!(second["status"], "rejected");
+    assert_eq!(second["reason"], "rate_limit");
+    assert_eq!(sfn.started_count(), 1);
     Ok(())
 }
 
@@ -1622,6 +1740,10 @@ impl StubIndexExecutionStarter {
     fn started_count(&self) -> usize {
         self.started.lock().unwrap().len()
     }
+
+    fn started_requests(&self) -> Vec<IndexExecutionRequest> {
+        self.started.lock().unwrap().clone()
+    }
 }
 
 impl IndexExecutionStarter for StubIndexExecutionStarter {
@@ -1691,13 +1813,42 @@ struct FakeJobStore {
 struct FakeJobState {
     jobs: HashMap<String, JobRecord>,
     dedupe: HashMap<JobKey, String>,
+    rate_limit_max: Option<u32>,
+    rate_counts: HashMap<String, u32>,
 }
 
 #[async_trait]
 impl JobStore for FakeJobStore {
+    async fn check_index_rate_limit(
+        &self,
+        caller_id: &str,
+        max_requests_per_minute: u32,
+    ) -> spur_context_service::jobs::Result<()> {
+        let mut state = self.state.lock().expect("fake store lock");
+        let max = state.rate_limit_max.unwrap_or(max_requests_per_minute);
+        if max == 0 {
+            return Err(JobsError::RateLimited);
+        }
+        let count = state.rate_counts.entry(caller_id.to_owned()).or_default();
+        if *count >= max {
+            return Err(JobsError::RateLimited);
+        }
+        *count += 1;
+        Ok(())
+    }
+
     async fn create_or_get_active_job(
         &self,
         request: CreateJobRequest,
+    ) -> spur_context_service::jobs::Result<CreateJobOutcome> {
+        self.create_or_get_active_job_with_limit(request, u32::MAX)
+            .await
+    }
+
+    async fn create_or_get_active_job_with_limit(
+        &self,
+        request: CreateJobRequest,
+        max_active_jobs_per_caller: u32,
     ) -> spur_context_service::jobs::Result<CreateJobOutcome> {
         let key = request.key();
         let mut state = self.state.lock().expect("fake store lock");
@@ -1705,6 +1856,18 @@ impl JobStore for FakeJobStore {
             if let Some(record) = state.jobs.get(job_id) {
                 return Ok(CreateJobOutcome::Existing(record.clone()));
             }
+        }
+
+        let active_jobs = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.caller_id == request.caller_id
+                    && matches!(record.status, JobStatus::Queued | JobStatus::Running)
+            })
+            .count();
+        if active_jobs >= max_active_jobs_per_caller as usize {
+            return Err(JobsError::ConcurrentLimit);
         }
 
         let job_id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
@@ -1816,6 +1979,10 @@ impl JobStore for FakeJobStore {
 }
 
 impl FakeJobStore {
+    fn set_rate_limit_per_minute(&self, max: u32) {
+        self.state.lock().expect("fake store lock").rate_limit_max = Some(max);
+    }
+
     fn seed_queued_job(
         &self,
         execution_arn: &str,
