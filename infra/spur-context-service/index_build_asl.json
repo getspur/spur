@@ -135,8 +135,8 @@
                   "Value": "${catalog_leases_table_name}"
                 },
                 {
-                  "Name": "SPUR_CATALOG_S3_URI",
-                  "Value": "${catalog_s3_uri}"
+                  "Name": "SPUR_CATALOG_DSN",
+                  "Value": "${catalog_dsn}"
                 },
                 {
                   "Name": "SPUR_CONTEXT_DUCKLAKE_DATA_PATH",
@@ -232,8 +232,8 @@
                   "Value": "${catalog_leases_table_name}"
                 },
                 {
-                  "Name": "SPUR_CATALOG_S3_URI",
-                  "Value": "${catalog_s3_uri}"
+                  "Name": "SPUR_CATALOG_DSN",
+                  "Value": "${catalog_dsn}"
                 },
                 {
                   "Name": "SPUR_CONTEXT_DUCKLAKE_DATA_PATH",

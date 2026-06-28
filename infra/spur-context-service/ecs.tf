@@ -74,12 +74,19 @@ resource "aws_ecs_task_definition" "worker" {
           value = aws_dynamodb_table.catalog_leases.name
         },
         {
-          name  = "SPUR_CATALOG_S3_URI"
-          value = var.catalog_s3_uri
+          name  = "SPUR_CATALOG_DSN"
+          value = local.aurora_catalog_dsn
         },
         {
           name  = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH"
           value = local.context_ducklake_data_path
+        }
+      ]
+
+      secrets = [
+        {
+          name      = "SPUR_CATALOG_PASSWORD"
+          valueFrom = local.aurora_master_password_valuearn
         }
       ]
     }

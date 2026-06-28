@@ -5,7 +5,7 @@
 //!     --artifact-dir /path/to/.spur/graph \
 //!     --source-root /path/to/serde/source \
 //!     --catalog index.ducklake \
-//!     --upload-s3 <s3://spur-context/catalog/catalog.ducklake>
+//!     --upload-s3 <s3://your-context-bucket/catalog/catalog.ducklake>
 
 use std::path::PathBuf;
 
