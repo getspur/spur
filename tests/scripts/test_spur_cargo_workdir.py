@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SPUR_CARGO = ROOT / "scripts" / "spur-cargo"
@@ -92,7 +94,10 @@ printf 'args=%s\\n' "$*" >> {record}
     ]
 
 
-def test_spur_cargo_graph_embed_routes_through_remote_graph_build(tmp_path: Path):
+@pytest.mark.parametrize("subcommand", ["graph-embed", "embed", "embedding"])
+def test_spur_cargo_embed_routes_through_remote_graph_build(
+    tmp_path: Path, subcommand: str
+):
     record = tmp_path / "remote-record"
     remote = tmp_path / "remote-build.sh"
     write_executable(
@@ -119,7 +124,7 @@ exit 99
     )
 
     subprocess.run(
-        [str(SPUR_CARGO), "graph-embed", "--quiet"],
+        [str(SPUR_CARGO), subcommand, "--quiet"],
         cwd=ROOT,
         env=env,
         check=True,
