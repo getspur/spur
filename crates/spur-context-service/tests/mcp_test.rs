@@ -15,7 +15,7 @@ use duckdb::{params, Connection};
 use serde_json::{json, Value};
 use spur_context_service::catalog::{
     compact_gold_and_export_snapshot, connect_frozen_snapshot, CatalogResolver,
-    SnapshotCleanupOptions,
+    FrozenSnapshotManifest, SnapshotCleanupOptions,
 };
 use spur_context_service::jobs::{
     CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore,
@@ -299,7 +299,10 @@ async fn external_code_read_accepts_search_uri_for_ambiguous_symbol_name() -> Re
     .await?;
 
     assert_eq!(search["total_matches"], 1);
-    assert_eq!(search["candidates"][0]["selector"], "pkg:demo@1.0.0::Buffer");
+    assert_eq!(
+        search["candidates"][0]["selector"],
+        "pkg:demo@1.0.0::Buffer"
+    );
     let uri = search["candidates"][0]["uri"]
         .as_str()
         .context("search candidate URI")?;
@@ -370,7 +373,10 @@ async fn external_call_graph_accepts_search_uri_selectors() -> Result<()> {
         callees["callees"][0]["callee"]["stable_symbol_id"],
         "bbbbbbbbbbbbbbbb"
     );
-    assert_eq!(callees["callees"][1]["edge"]["target_label"], "external::Thing");
+    assert_eq!(
+        callees["callees"][1]["edge"]["target_label"],
+        "external::Thing"
+    );
     Ok(())
 }
 
@@ -613,12 +619,8 @@ async fn external_index_status_repairs_stale_succeeded_execution() -> Result<()>
         error: None,
     }));
 
-    let response = route_index_status(
-        &json!({ "job_id": job.job_id }),
-        &jobs,
-        Some(&checker),
-    )
-    .await?;
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
 
     assert_eq!(response["status"], "complete");
     assert_eq!(response["snapshot_id"], 777);
@@ -640,12 +642,8 @@ async fn external_index_status_reconciles_failed_execution() -> Result<()> {
         error: Some("fetch: clone failed".to_owned()),
     }));
 
-    let response = route_index_status(
-        &json!({ "job_id": job.job_id }),
-        &jobs,
-        Some(&checker),
-    )
-    .await?;
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
 
     assert_eq!(response["status"], "failed");
     assert_eq!(response["error"]["code"], "fetch");
@@ -670,7 +668,8 @@ async fn external_index_status_without_checker_returns_stale_job() -> Result<()>
 }
 
 #[tokio::test]
-async fn external_index_status_returns_dynamodb_state_when_describe_execution_fails() -> Result<()> {
+async fn external_index_status_returns_dynamodb_state_when_describe_execution_fails() -> Result<()>
+{
     let jobs = FakeJobStore::default();
     let job = jobs.seed_queued_job("arn:transient", |record| {
         record.status = JobStatus::Running;
@@ -679,12 +678,8 @@ async fn external_index_status_returns_dynamodb_state_when_describe_execution_fa
     });
     let checker = StubExecutionStatusChecker::fail("temporary sfn outage");
 
-    let response = route_index_status(
-        &json!({ "job_id": job.job_id }),
-        &jobs,
-        Some(&checker),
-    )
-    .await?;
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
 
     assert_eq!(response["status"], "running");
     assert_eq!(response["stage"], "building_graph");
@@ -838,8 +833,13 @@ async fn search_uri(
     if let Some(symbol_kind) = symbol_kind {
         args["symbol_kind"] = json!(symbol_kind);
     }
-    let response = handle_tool("external_code_search", &args, &fixture.conn, &fixture.catalog)
-        .await?;
+    let response = handle_tool(
+        "external_code_search",
+        &args,
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
     response["candidates"][0]["uri"]
         .as_str()
         .map(str::to_owned)
@@ -940,7 +940,7 @@ impl FrozenServingFixture {
             },
         )?;
 
-        let snapshot_path = catalog_snapshot_path(&data_path);
+        let snapshot_path = catalog_snapshot_path(&data_path)?;
         assert!(
             snapshot_path.is_file(),
             "expected frozen serving snapshot at {}",
@@ -1038,11 +1038,17 @@ fn flush_inlined_ducklake_data(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn catalog_snapshot_path(data_path: &str) -> PathBuf {
-    PathBuf::from(data_path)
+fn catalog_snapshot_path(data_path: &str) -> Result<PathBuf> {
+    let pointer_path = PathBuf::from(data_path)
         .join("gold")
         .join("catalog-snapshot")
-        .join("spur_context.ducklake")
+        .join("current.json");
+    let pointer: FrozenSnapshotManifest = serde_json::from_slice(
+        &fs::read(&pointer_path)
+            .with_context(|| format!("read snapshot pointer {}", pointer_path.display()))?,
+    )
+    .context("parse snapshot pointer")?;
+    Ok(PathBuf::from(pointer.snapshot_uri))
 }
 
 fn create_query_schema(conn: &Connection) -> Result<()> {
@@ -1670,9 +1676,7 @@ impl ExecutionStatusChecker for StubExecutionStatusChecker {
         self.described_arns.lock().unwrap().push(arn.to_owned());
         match &self.result {
             StubExecutionResult::Ok(outcome) => Ok(outcome.clone()),
-            StubExecutionResult::Err(message) => {
-                Err(McpHandlerError::Internal(message.clone()))
-            }
+            StubExecutionResult::Err(message) => Err(McpHandlerError::Internal(message.clone())),
         }
     }
 }
@@ -1800,7 +1804,11 @@ impl JobStore for FakeJobStore {
     ) -> spur_context_service::jobs::Result<()> {
         let mut state = self.state.lock().expect("fake store lock");
         let key = record.key();
-        if state.dedupe.get(&key).is_some_and(|job_id| job_id == &record.job_id) {
+        if state
+            .dedupe
+            .get(&key)
+            .is_some_and(|job_id| job_id == &record.job_id)
+        {
             state.dedupe.remove(&key);
         }
         Ok(())
