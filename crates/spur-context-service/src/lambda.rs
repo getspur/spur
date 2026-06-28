@@ -268,7 +268,7 @@ async fn prepare_catalog_source(
     catalog_etag: Option<String>,
 ) -> Result<PreparedCatalog, Error> {
     if let Some(uri) = parse_s3_uri(&catalog_dsn)? {
-        let data_path = catalog_data_path(&catalog_dsn);
+        let data_path = catalog_data_path(&catalog_dsn)?;
         let local_path = local_snapshot_path(&catalog_dsn, catalog_etag.as_deref())?;
         if !local_path.is_file() {
             download_catalog_snapshot(&uri, &local_path).await?;
@@ -352,15 +352,18 @@ async fn catalog_etag(catalog_dsn: &str) -> Result<Option<String>, Error> {
     Ok(output.e_tag().map(str::to_owned))
 }
 
-fn catalog_data_path(snapshot_uri: &str) -> String {
+fn catalog_data_path(snapshot_uri: &str) -> Result<String, Error> {
     if let Ok(path) = env::var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH") {
         if !path.trim().is_empty() {
-            return path;
+            return Ok(path);
         }
     }
 
-    infer_data_path_from_snapshot_uri(snapshot_uri)
-        .unwrap_or_else(|| catalog::DEFAULT_DATA_PATH.to_owned())
+    infer_data_path_from_snapshot_uri(snapshot_uri).ok_or_else(|| {
+        lambda_error(
+            "SPUR_CONTEXT_DUCKLAKE_DATA_PATH must be set when the frozen snapshot URI does not include /gold/catalog-snapshot/",
+        )
+    })
 }
 
 fn infer_data_path_from_snapshot_uri(snapshot_uri: &str) -> Option<String> {
@@ -760,7 +763,7 @@ mod tests {
 
     #[test]
     fn remote_catalog_dsn_reinitializes_when_etag_changes() {
-        let s3_dsn = "s3://spur-context/catalog/catalog.ducklake";
+        let s3_dsn = "s3://example-context/catalog/catalog.ducklake";
 
         assert!(should_initialize_catalog(
             None,
