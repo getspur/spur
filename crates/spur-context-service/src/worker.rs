@@ -47,8 +47,9 @@ const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
 const CATALOG_PASSWORD_SECRET_ARN_ENV: &str = "SPUR_CATALOG_PASSWORD_SECRET_ARN";
 const CATALOG_LEASE_DURATION_SECS: i64 = 10 * 60;
 const CATALOG_LEASE_RENEW_INTERVAL_SECS: u64 = 60;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JobFromLayer {
+    #[default]
     Source,
     Bronze,
     Silver,
@@ -62,12 +63,6 @@ impl JobFromLayer {
             "silver" => Ok(Self::Silver),
             other => bail!("unsupported --from-layer `{other}`"),
         }
-    }
-}
-
-impl Default for JobFromLayer {
-    fn default() -> Self {
-        Self::Source
     }
 }
 
@@ -571,6 +566,12 @@ pub async fn prepare_job_with_services(
     graph_builder: &dyn GraphArtifactBuilder,
 ) -> Result<PreparedJob, WorkerError> {
     let workspace = TempWorkspace::new(&env.job_id)?;
+    let build_services = BuildPersistServices {
+        bronze_registry,
+        silver_registry,
+        silver_store,
+        graph_builder,
+    };
     match env.from_layer {
         JobFromLayer::Source => {
             let source_dest = workspace.path.join("source");
@@ -585,10 +586,7 @@ pub async fn prepare_job_with_services(
                 stage,
                 workspace,
                 source_path,
-                bronze_registry,
-                silver_registry,
-                silver_store,
-                graph_builder,
+                &build_services,
             )
             .await
         }
@@ -617,10 +615,7 @@ pub async fn prepare_job_with_services(
                 stage,
                 workspace,
                 source_path,
-                bronze_registry,
-                silver_registry,
-                silver_store,
-                graph_builder,
+                &build_services,
             )
             .await
         }
@@ -643,25 +638,33 @@ pub async fn prepare_job_with_services(
     }
 }
 
+struct BuildPersistServices<'a> {
+    bronze_registry: &'a dyn BronzeRawSourceRegistry,
+    silver_registry: &'a dyn SilverGraphArtifactRegistry,
+    silver_store: &'a dyn SilverArtifactStore,
+    graph_builder: &'a dyn GraphArtifactBuilder,
+}
+
 async fn build_persist_and_prepare_with_services(
     env: &JobEnv,
     stage: &StageTracker,
     workspace: TempWorkspace,
     source_path: PathBuf,
-    bronze_registry: &dyn BronzeRawSourceRegistry,
-    silver_registry: &dyn SilverGraphArtifactRegistry,
-    silver_store: &dyn SilverArtifactStore,
-    graph_builder: &dyn GraphArtifactBuilder,
+    services: &BuildPersistServices<'_>,
 ) -> Result<PreparedJob, WorkerError> {
     let artifact_base = artifact_dir();
     stage.set_async("build_graph").await;
     let stage_started = log_stage_started("build_graph");
-    let artifact_dir = graph_builder.build(&source_path, &artifact_base).await?;
+    let artifact_dir = services
+        .graph_builder
+        .build(&source_path, &artifact_base)
+        .await?;
     log_stage_completed("build_graph", stage_started);
 
     stage.set_async("persist_silver").await;
     let stage_started = log_stage_started("persist_silver");
-    let bronze_content_sha256 = bronze_registry
+    let bronze_content_sha256 = services
+        .bronze_registry
         .lookup(&env.source, &env.package, &env.revision)
         .await?
         .map(|row| row.content_sha256)
@@ -677,8 +680,8 @@ async fn build_persist_and_prepare_with_services(
         &artifact_dir,
         &bronze_content_sha256,
         &builder_version,
-        silver_store,
-        silver_registry,
+        services.silver_store,
+        services.silver_registry,
     )
     .await?;
     let silver_artifact_dir = workspace.path.join("silver_artifact");
@@ -686,7 +689,7 @@ async fn build_persist_and_prepare_with_services(
         &persisted_silver.row.manifest_uri,
         &persisted_silver.manifest,
         &silver_artifact_dir,
-        silver_store,
+        services.silver_store,
     )
     .await?;
     log_stage_completed("persist_silver", stage_started);
