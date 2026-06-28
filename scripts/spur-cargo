@@ -21,6 +21,9 @@
 #       worktree, not an out-of-tree path like /tmp — only worktree changes are
 #       synced back. For an interactive run (TUI, a local server/port, anything
 #       needing live stdin or localhost) use SPUR_REMOTE=0 to force it local.
+#   embed  — graph-embed: convenience shortcut for `run -p spur-cli -- graph
+#       build --workspace ...`, so Gemma section embeddings and graph sidecars
+#       are generated remotely by default and synced back with other run outputs.
 #   local  — fmt / everything else: always local (remote is meaningless).
 #
 # Local execution injects scripts/sccache-worktree.sh as RUSTC_WRAPPER.
@@ -118,6 +121,29 @@ if [[ ! -d "$WORKDIR" ]]; then
 fi
 WORKDIR=$(cd "$WORKDIR" && pwd -P)
 cd "$WORKDIR"
+
+# ---- wrapper shortcut expansion -------------------------------------------
+# Keep this as a thin argv rewrite so the existing `run` remote execution and
+# sync-back contract remains the only implementation of remote file download.
+case "${1:-}" in
+    graph-embed)
+        shift
+        GRAPH_BUILD_ARGV=("$@")
+        DEFAULT_WORKSPACE=1
+        for arg in "${GRAPH_BUILD_ARGV[@]}"; do
+            case "$arg" in
+                --root|--root=*|--workspace)
+                    DEFAULT_WORKSPACE=0
+                    ;;
+            esac
+        done
+        if [[ $DEFAULT_WORKSPACE -eq 1 ]]; then
+            set -- run -p spur-cli -- graph build --workspace "${GRAPH_BUILD_ARGV[@]}"
+        else
+            set -- run -p spur-cli -- graph build "${GRAPH_BUILD_ARGV[@]}"
+        fi
+        ;;
+esac
 
 # ---- routing ---------------------------------------------------------------
 # Remote is the default for heavy compiles; lightweight subcommands auto-run
