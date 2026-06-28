@@ -8,7 +8,7 @@ use std::future::Future;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +37,8 @@ const DEFAULT_CHECKPOINT_BUCKET: &str = "spur-context";
 const DEFAULT_BRONZE_BUCKET: &str = "spur-context";
 const DEFAULT_SILVER_BUCKET: &str = "spur-context";
 const DEFAULT_TARBALL_SIZE_CAP_BYTES: usize = 500 * 1024 * 1024;
+const DEFAULT_GIT_SIZE_CAP_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_BUILD_SECONDS: u64 = 30 * 60;
 const HTTP_HEADER_CAP_BYTES: usize = 64 * 1024;
 const ECS_CREDENTIALS_CAP_BYTES: usize = 64 * 1024;
 const EMBEDDING_GEMMA_EMBED_MODEL_NAME: &str = "EmbeddingGemma300M";
@@ -2166,7 +2168,7 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
         source_path.display(),
         artifact_dir.display()
     );
-    let status = Command::new("spur")
+    let mut child = Command::new("spur")
         .env(GRAPH_SKIP_SECTION_EMBEDDINGS_ENV, "1")
         .args([
             "graph",
@@ -2177,10 +2179,16 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
             &artifact_dir.to_string_lossy(),
             "--no-analyst",
         ])
-        .status()
+        .spawn()
         .map_err(|error| {
             WorkerError::Build(format!("failed to run `spur graph build`: {error}"))
         })?;
+    let status = wait_for_child_with_timeout(
+        &mut child,
+        max_build_duration(),
+        "`spur graph build`",
+        started,
+    )?;
 
     if !status.success() {
         return Err(WorkerError::Build(format!(
@@ -2197,6 +2205,41 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
     Ok(())
 }
 
+fn wait_for_child_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+    label: &str,
+    started: Instant,
+) -> Result<ExitStatus, WorkerError> {
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| WorkerError::Build(format!("failed to wait for {label}: {error}")))?
+        {
+            return Ok(status);
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(WorkerError::Build(format!(
+                "{label} timed out after {} (limit {})",
+                format_duration(started.elapsed()),
+                format_duration_limit(timeout)
+            )));
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn max_build_duration() -> Duration {
+    Duration::from_secs(env_u64(
+        "SPUR_CONTEXT_MAX_BUILD_SECONDS",
+        DEFAULT_MAX_BUILD_SECONDS,
+    ))
+}
+
 fn log_stage_started(stage: &str) -> Instant {
     eprintln!("[worker] stage {stage} started");
     Instant::now()
@@ -2211,6 +2254,14 @@ fn log_stage_completed(stage: &str, started: Instant) {
 
 fn format_duration(duration: Duration) -> String {
     format!("{}.{:03}s", duration.as_secs(), duration.subsec_millis())
+}
+
+fn format_duration_limit(duration: Duration) -> String {
+    if duration.subsec_millis() == 0 {
+        format!("{}s", duration.as_secs())
+    } else {
+        format_duration(duration)
+    }
 }
 
 pub fn translate(artifact_dir: &Path, env: &JobEnv) -> Result<TranslateStats, WorkerError> {
@@ -2316,6 +2367,7 @@ fn fetch_git_with_archive(
     dest: &Path,
 ) -> Result<FetchedSourceArchive, WorkerError> {
     let source_path = fetch_git(source_url, revision, dest)?;
+    enforce_source_tree_cap(&source_path, "git")?;
     let archive_path = archive_path_for_restore(dest, "gitbundle");
     if archive_path.exists() {
         fs::remove_file(&archive_path).map_err(|error| {
@@ -2387,10 +2439,12 @@ fn fetch_tarball_with_archive(
     }
     download_tarball(source_url, &archive)?;
     extract_archive(&archive, dest)?;
+    let source_path = single_extracted_root(dest).unwrap_or_else(|| dest.to_path_buf());
+    enforce_source_tree_cap(&source_path, "tarball")?;
 
     let (content_sha256, bytes) = archive_metadata(&archive)?;
     Ok(FetchedSourceArchive {
-        source_path: single_extracted_root(dest).unwrap_or_else(|| dest.to_path_buf()),
+        source_path,
         archive_path: archive,
         extension,
         content_sha256,
@@ -2449,6 +2503,7 @@ fn restore_git_bundle(archive: &Path, revision: &str, dest: &Path) -> Result<Pat
         )));
     }
 
+    enforce_source_tree_cap(dest, "git")?;
     Ok(dest.to_path_buf())
 }
 
@@ -2462,7 +2517,9 @@ fn restore_tarball_archive(archive: &Path, dest: &Path) -> Result<PathBuf, Worke
         WorkerError::Fetch(format!("failed to create `{}`: {error}", dest.display()))
     })?;
     extract_archive(archive, dest)?;
-    Ok(single_extracted_root(dest).unwrap_or_else(|| dest.to_path_buf()))
+    let source_path = single_extracted_root(dest).unwrap_or_else(|| dest.to_path_buf());
+    enforce_source_tree_cap(&source_path, "tarball")?;
+    Ok(source_path)
 }
 
 fn archive_extension_for_tarball_url(source_url: &str) -> &'static str {
@@ -2716,7 +2773,56 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<(), WorkerError> {
             command_stderr(&output)
         )));
     }
+    let source_path = single_extracted_root(dest).unwrap_or_else(|| dest.to_path_buf());
+    enforce_source_tree_cap(&source_path, "tarball")?;
     Ok(())
+}
+
+fn enforce_source_tree_cap(source_path: &Path, source_kind: &str) -> Result<(), WorkerError> {
+    let cap = source_size_cap_bytes(source_kind);
+    let bytes = source_tree_size_bytes(source_path, cap)?;
+    if bytes > cap as u64 {
+        return Err(WorkerError::Fetch(format!(
+            "source tree exceeded size cap: {bytes} > {cap}"
+        )));
+    }
+    Ok(())
+}
+
+fn source_tree_size_bytes(path: &Path, cap: usize) -> Result<u64, WorkerError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        WorkerError::Fetch(format!(
+            "failed to stat source path `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+
+    let mut total = 0_u64;
+    let entries = fs::read_dir(path).map_err(|error| {
+        WorkerError::Fetch(format!(
+            "failed to read source dir `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            WorkerError::Fetch(format!(
+                "failed to read source dir entry in `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        total = total.saturating_add(source_tree_size_bytes(&entry.path(), cap)?);
+        if total > cap as u64 {
+            return Ok(total);
+        }
+    }
+    Ok(total)
 }
 
 fn validate_tar_entries(archive: &Path) -> Result<(), WorkerError> {
@@ -3704,10 +3810,45 @@ fn artifact_dir() -> PathBuf {
 }
 
 fn tarball_size_cap_bytes() -> usize {
-    optional_env("SPUR_CONTEXT_WORKER_TARBALL_CAP_BYTES")
+    env_usize(
+        "SPUR_CONTEXT_MAX_TARBALL_BYTES",
+        DEFAULT_TARBALL_SIZE_CAP_BYTES,
+    )
+}
+
+fn source_size_cap_bytes(source_kind: &str) -> usize {
+    optional_env("SPUR_CONTEXT_MAX_SOURCE_BYTES")
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_TARBALL_SIZE_CAP_BYTES)
+        .unwrap_or_else(|| match source_kind {
+            "git" => env_usize("SPUR_CONTEXT_MAX_GIT_BYTES", DEFAULT_GIT_SIZE_CAP_BYTES),
+            "tarball" => env_usize(
+                "SPUR_CONTEXT_MAX_TARBALL_BYTES",
+                DEFAULT_TARBALL_SIZE_CAP_BYTES,
+            ),
+            _ => DEFAULT_GIT_SIZE_CAP_BYTES,
+        })
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    optional_env(name)
+        .or_else(|| {
+            if name == "SPUR_CONTEXT_MAX_TARBALL_BYTES" {
+                optional_env("SPUR_CONTEXT_WORKER_TARBALL_CAP_BYTES")
+            } else {
+                None
+            }
+        })
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    optional_env(name)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 fn failure_error_code(error: &WorkerError) -> String {

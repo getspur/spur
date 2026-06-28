@@ -80,7 +80,21 @@ pub struct ApiGatewayAuthorizer {
     #[serde(rename = "principalId", default)]
     pub principal_id: Option<String>,
     #[serde(default)]
+    pub iam: Option<IamAuthorizer>,
+    #[serde(default)]
     pub jwt: Option<JwtAuthorizer>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IamAuthorizer {
+    #[serde(rename = "userArn", default)]
+    pub user_arn: Option<String>,
+    #[serde(rename = "callerId", default)]
+    pub caller_id: Option<String>,
+    #[serde(rename = "userId", default)]
+    pub user_id: Option<String>,
+    #[serde(rename = "accountId", default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,11 +145,24 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
         Err(error) => return tool_error_response(error),
     };
 
+    let authenticated_caller = match request.tool.as_str() {
+        "external_index" | "external_index_status" => {
+            Some(match authenticated_caller_id(&event.payload) {
+                Ok(caller_id) => caller_id,
+                Err(error) => return auth_error_response(error),
+            })
+        }
+        _ => None,
+    };
+
     let result = match request.tool.as_str() {
         "external_index_status" => {
             let jobs = job_store();
             let checker = status_checker();
-            route_index_status_control_plane(&request.args, &jobs, &checker).await
+            let caller_id = authenticated_caller
+                .as_deref()
+                .expect("external_index_status authenticated caller should be available");
+            route_index_status_control_plane(&request.args, &jobs, &checker, caller_id).await
         }
         "external_index" => {
             let prepared_catalog = prepare_catalog().await?;
@@ -144,8 +171,10 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
             let db = catalog.connection();
             let jobs = job_store();
             let sfn_client = sfn_client()?;
-            let caller_id = caller_id(&event.payload);
-            mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, &caller_id).await
+            let caller_id = authenticated_caller
+                .as_deref()
+                .expect("external_index authenticated caller should be available");
+            mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, caller_id).await
         }
         _ => {
             let prepared_catalog = prepare_catalog().await?;
@@ -175,8 +204,9 @@ pub async fn route_index_status_control_plane(
     args: &Value,
     jobs: &dyn JobStore,
     checker: &dyn mcp::ExecutionStatusChecker,
+    caller_id: &str,
 ) -> Result<Value, McpHandlerError> {
-    mcp::route_index_status(args, jobs, Some(checker)).await
+    mcp::route_index_status_for_caller(args, jobs, Some(checker), caller_id).await
 }
 
 fn parse_tool_request(request: &ApiGatewayRequest) -> Result<ToolRequest, McpHandlerError> {
@@ -688,6 +718,7 @@ fn s3_client_from_env() -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(config.build())
 }
 
+#[cfg(test)]
 fn caller_id(request: &ApiGatewayRequest) -> String {
     request
         .request_context
@@ -697,6 +728,7 @@ fn caller_id(request: &ApiGatewayRequest) -> String {
                 .authorizer
                 .as_ref()
                 .and_then(jwt_caller_id)
+                .or_else(|| context.authorizer.as_ref().and_then(iam_caller_id))
                 .or_else(|| {
                     context
                         .authorizer
@@ -726,9 +758,48 @@ fn caller_id(request: &ApiGatewayRequest) -> String {
         .to_owned()
 }
 
+fn authenticated_caller_id(request: &ApiGatewayRequest) -> Result<String, McpHandlerError> {
+    request
+        .request_context
+        .as_ref()
+        .and_then(|context| {
+            context
+                .authorizer
+                .as_ref()
+                .and_then(jwt_caller_id)
+                .or_else(|| context.authorizer.as_ref().and_then(iam_caller_id))
+                .or_else(|| {
+                    context
+                        .authorizer
+                        .as_ref()
+                        .and_then(|authorizer| non_blank(authorizer.principal_id.as_deref()))
+                })
+                .or_else(|| {
+                    context
+                        .identity
+                        .as_ref()
+                        .and_then(|identity| non_blank(identity.user_arn.as_deref()))
+                })
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            McpHandlerError::InvalidParams(
+                "authenticated caller is required for mutating context-service tools".to_owned(),
+            )
+        })
+}
+
 fn jwt_caller_id(authorizer: &ApiGatewayAuthorizer) -> Option<&str> {
     let claims = authorizer.jwt.as_ref()?.claims.as_ref()?;
     claim_str(claims, "sub").or_else(|| claim_str(claims, "principal_id"))
+}
+
+fn iam_caller_id(authorizer: &ApiGatewayAuthorizer) -> Option<&str> {
+    let iam = authorizer.iam.as_ref()?;
+    non_blank(iam.user_arn.as_deref())
+        .or_else(|| non_blank(iam.caller_id.as_deref()))
+        .or_else(|| non_blank(iam.user_id.as_deref()))
+        .or_else(|| non_blank(iam.account_id.as_deref()))
 }
 
 fn claim_str<'a>(claims: &'a Value, key: &str) -> Option<&'a str> {
@@ -776,6 +847,18 @@ impl mcp::IndexExecutionStarter for SfnIndexExecutionStarter {
 fn tool_error_response(error: McpHandlerError) -> Result<ApiGatewayResponse, Error> {
     json_response(
         200,
+        &json!({
+            "error": {
+                "code": error.json_rpc_code(),
+                "message": error.to_string()
+            }
+        }),
+    )
+}
+
+fn auth_error_response(error: McpHandlerError) -> Result<ApiGatewayResponse, Error> {
+    json_response(
+        401,
         &json!({
             "error": {
                 "code": error.json_rpc_code(),
@@ -865,6 +948,39 @@ mod tests {
         }));
 
         assert_eq!(caller_id(&request), "rest-principal");
+    }
+
+    #[test]
+    fn authenticated_caller_id_accepts_http_api_iam_user_arn() {
+        let request = request_from_context(json!({
+            "authorizer": {
+                "iam": {
+                    "userArn": "arn:aws:iam::123456789012:role/context-indexer",
+                    "callerId": "AROATEST:session"
+                }
+            },
+            "http": {
+                "sourceIp": "203.0.113.24"
+            }
+        }));
+
+        assert_eq!(
+            authenticated_caller_id(&request).expect("IAM caller should authenticate"),
+            "arn:aws:iam::123456789012:role/context-indexer"
+        );
+    }
+
+    #[test]
+    fn authenticated_caller_id_rejects_source_ip_only_request() {
+        let request = request_from_context(json!({
+            "http": {
+                "sourceIp": "203.0.113.24"
+            }
+        }));
+
+        let error = authenticated_caller_id(&request).unwrap_err();
+
+        assert!(error.to_string().contains("authenticated caller"));
     }
 
     #[test]
