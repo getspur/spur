@@ -1,5 +1,8 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
@@ -262,6 +265,141 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
     )?
     .context("snapshot should serve translated symbol")?;
     assert_eq!(source.file_path, "src/lib.rs");
+    Ok(())
+}
+
+#[test]
+fn concurrent_translates_publish_distinct_generations_and_complete_snapshot() -> Result<()> {
+    let root = unique_temp_dir("translate-concurrent-publish")?;
+    let (catalog_dsn, data_path) = match (
+        std::env::var("SPUR_CONTEXT_AURORA_TEST_DSN"),
+        std::env::var("SPUR_CONTEXT_AURORA_TEST_DATA_PATH"),
+        std::env::var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH"),
+    ) {
+        (Ok(catalog_dsn), Ok(data_path), Ok(ducklake_data_path))
+            if ducklake_data_path == data_path =>
+        {
+            (catalog_dsn, data_path)
+        }
+        _ => {
+            eprintln!(
+                "skipping Aurora concurrent ingest test; set SPUR_CONTEXT_AURORA_TEST_DSN, SPUR_CONTEXT_AURORA_TEST_DATA_PATH, and matching SPUR_CONTEXT_DUCKLAKE_DATA_PATH"
+            );
+            return Ok(());
+        }
+    };
+    initialize_catalog(&catalog_dsn, &data_path)?;
+
+    let run_suffix = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("run")
+        .replace('-', "_");
+    let jobs = [
+        (format!("demo_alpha_{run_suffix}"), "1.0.0".to_owned()),
+        (format!("demo_beta_{run_suffix}"), "1.1.0".to_owned()),
+        (format!("demo_gamma_{run_suffix}"), "1.2.0".to_owned()),
+    ];
+    let start = Arc::new(Barrier::new(jobs.len()));
+    let mut handles = Vec::new();
+
+    for (package, revision) in jobs.iter().cloned() {
+        let artifact_dir = root.join(format!("artifact-{package}"));
+        fs::create_dir_all(&artifact_dir)
+            .with_context(|| format!("create artifact dir for {package}"))?;
+        write_artifact_fixture(&artifact_dir)?;
+
+        let catalog_dsn = catalog_dsn.clone();
+        let start = Arc::clone(&start);
+        handles.push(thread::spawn(move || -> Result<()> {
+            start.wait();
+            translate_artifact_to_ducklake(&TranslateOptions {
+                source: SOURCE.to_owned(),
+                package,
+                revision,
+                revision_kind: "semver".to_owned(),
+                artifact_dir,
+                artifact_manifest: None,
+                source_root: None,
+                catalog_dsn,
+                lineage: None,
+                allow_missing_embeddings: false,
+            })?;
+            Ok(())
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("concurrent translate thread panicked"))??;
+    }
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let mut stmt = conn
+        .prepare(
+            r"
+            SELECT package, revision, generation
+            FROM gold.package_catalog
+            WHERE source = ?
+            ORDER BY package
+            ",
+        )
+        .context("prepare package catalog read")?;
+    let rows = stmt
+        .query_map(params![SOURCE], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect package catalog rows")?;
+    let expected_packages = jobs
+        .iter()
+        .map(|(package, _)| package.as_str())
+        .collect::<HashSet<_>>();
+    let rows = rows
+        .into_iter()
+        .filter(|(package, _, _)| expected_packages.contains(package.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), jobs.len());
+    let generations = rows
+        .iter()
+        .map(|(_, _, generation)| *generation)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        generations.len(),
+        jobs.len(),
+        "concurrent ingests must reserve distinct generations: {rows:?}"
+    );
+
+    for (package, revision) in &jobs {
+        for table in ["nodes", "edges", "files", "package_catalog"] {
+            let count: i64 = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM gold.{table} WHERE source = ? AND package = ? AND revision = ?"
+                ),
+                params![SOURCE, package, revision],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                count, 1,
+                "gold.{table} should contain exactly one row for {package}@{revision}"
+            );
+        }
+    }
+
+    let snapshot_path = catalog_snapshot_path(&data_path)?;
+    let snapshot_resolver =
+        CatalogResolver::new_with_data_path(&snapshot_path.display().to_string(), &data_path)?;
+    for (package, revision) in &jobs {
+        let resolved = snapshot_resolver.resolve(SOURCE, package, revision)?;
+        assert_eq!(resolved.package, *package);
+        assert_eq!(resolved.revision, *revision);
+    }
+
     Ok(())
 }
 
@@ -944,11 +1082,11 @@ fn silver_manifest_for_fixture() -> SilverManifest {
 
 fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
     let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
-    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-        .context("load ducklake/sqlite extensions")?;
+    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; INSTALL postgres; LOAD ducklake; LOAD sqlite; LOAD postgres;")
+        .context("load ducklake/sqlite/postgres extensions")?;
     conn.execute_batch(&format!(
         "ATTACH 'ducklake:{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
-        escape_sql_literal(catalog_dsn),
+        escape_sql_literal(ducklake_attach_dsn(catalog_dsn)),
         escape_sql_literal(data_path)
     ))
     .context("attach ducklake")?;
@@ -958,15 +1096,19 @@ fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
 
 fn attach_ducklake(catalog_dsn: &str, data_path: &str) -> Result<Connection> {
     let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
-    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-        .context("load ducklake/sqlite extensions")?;
+    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; INSTALL postgres; LOAD ducklake; LOAD sqlite; LOAD postgres;")
+        .context("load ducklake/sqlite/postgres extensions")?;
     conn.execute_batch(&format!(
         "ATTACH 'ducklake:{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
-        escape_sql_literal(catalog_dsn),
+        escape_sql_literal(ducklake_attach_dsn(catalog_dsn)),
         escape_sql_literal(data_path)
     ))
     .context("attach ducklake")?;
     Ok(conn)
+}
+
+fn ducklake_attach_dsn(catalog_dsn: &str) -> &str {
+    catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn)
 }
 
 fn unique_temp_dir(name: &str) -> Result<PathBuf> {
