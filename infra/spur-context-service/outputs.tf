@@ -43,6 +43,16 @@ output "context_ducklake_data_path" {
   value       = local.context_ducklake_data_path
 }
 
+output "aurora_catalog_endpoint" {
+  description = "Aurora Postgres endpoint for the live ingest catalog"
+  value       = aws_rds_cluster.catalog.endpoint
+}
+
+output "aurora_catalog_secret_arn" {
+  description = "Secrets Manager ARN for the RDS-managed Aurora master credentials"
+  value       = local.aurora_master_secret_arn
+}
+
 output "worker_checkpoint_uri_template" {
   description = "Checkpoint URI template passed to Step Functions for per-job worker checkpoint objects"
   value       = local.worker_checkpoint_uri_template

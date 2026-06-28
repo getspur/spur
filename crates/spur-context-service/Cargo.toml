@@ -42,6 +42,7 @@ async-trait = "0.1"
 aws-config = "1"
 aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
+aws-sdk-secretsmanager = "1"
 aws-sdk-sfn = "1"
 clap = { version = "4", features = ["derive", "env"] }
 # DuckDB v1.5.4 (crate 1.10504.0) — DuckLake 1.0 with S3 write support.
