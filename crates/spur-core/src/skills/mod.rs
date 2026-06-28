@@ -1209,6 +1209,27 @@ mod tests {
     }
 
     #[test]
+    fn code_explore_skill_documents_external_package_tools() {
+        let fake = PathBuf::from("/nonexistent");
+        let body = load_skill("code-explore", &fake).unwrap();
+        for keyword in [
+            "external_knowledge_context",
+            "external_code_search",
+            "external_code_read",
+            "external_code_callers",
+            "external_code_callees",
+            "external_index",
+            "external_index_status",
+            "pkg:serde@1.0.197::Deserialize",
+        ] {
+            assert!(
+                body.contains(keyword),
+                "code-explore must document external package MCP support via `{keyword}`"
+            );
+        }
+    }
+
+    #[test]
     fn code_explore_description_names_all_three_layers() {
         let raw = all_bundled_raw().get("code-explore").unwrap();
         let parsed = frontmatter::parse_source(raw);
