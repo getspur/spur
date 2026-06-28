@@ -51,6 +51,7 @@ fn main() -> Result<()> {
         artifact_manifest: None,
         source_root,
         catalog_dsn: catalog.clone(),
+        lineage: None,
     };
 
     eprintln!("[index] translating {source}/{package}@{revision} ...");

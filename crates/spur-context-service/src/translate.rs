@@ -10,11 +10,13 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
 use serde::Deserialize;
 
+use crate::catalog::{export_frozen_snapshot, gold_table};
 use crate::medallion::SilverManifest;
 
-const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
+const DEFAULT_DATA_PATH: &str = "s3://spur-context/gold/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
 const DEFAULT_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
+const DEFAULT_TRANSLATE_SCHEMA_VERSION: &str = "translate-v1";
 pub(crate) const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
 
 #[derive(Debug)]
@@ -124,12 +126,21 @@ pub struct TranslateOptions {
     pub artifact_manifest: Option<SilverManifest>,
     pub source_root: Option<PathBuf>,
     pub catalog_dsn: String,
+    pub lineage: Option<TranslateLineage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslateStats {
     pub rows_inserted: HashMap<String, usize>,
     pub snapshot_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslateLineage {
+    pub bronze_content_sha256: String,
+    pub silver_graph_content_hash: String,
+    pub builder_version: String,
+    pub translate_schema_version: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,22 +177,30 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     load_ducklake_extensions(&conn, &opts.catalog_dsn, &data_path)?;
     attach_ducklake(&conn, &opts.catalog_dsn, &data_path)?;
     ensure_catalog_schema(&conn)?;
+    // Generation monotonicity currently depends on the catalog lease serializing
+    // translate workers. Before the lease is removed for concurrent Aurora writers,
+    // replace this MAX()+1 allocator with an atomic reservation or Postgres sequence.
+    let generation = next_generation(&conn)?;
 
     let mut rows_inserted = HashMap::new();
     run_transaction(&conn, || {
-        delete_existing_revision_rows(&conn, opts)?;
-        insert_structural_tables(&conn, opts, revision, &mut rows_inserted)?;
-        insert_git_tables(&conn, opts, revision, &mut rows_inserted)
+        delete_generation_rows(&conn, opts, generation)?;
+        insert_structural_tables(&conn, opts, revision, generation, &mut rows_inserted)?;
+        insert_git_tables(&conn, opts, revision, generation, &mut rows_inserted)
     })
     .context("failed to translate artifact tables into DuckLake")?;
-    let embeddings_translated = insert_sidecar_tables(&conn, opts, revision, &mut rows_inserted)
-        .context("failed to translate artifact sidecars into DuckLake")?;
+    let embeddings_translated =
+        insert_sidecar_tables(&conn, opts, revision, generation, &mut rows_inserted)
+            .context("failed to translate artifact sidecars into DuckLake")?;
 
     let snapshot_id = latest_snapshot_id(&conn).context("failed to read DuckLake snapshot id")?;
+    validate_generation(&conn, opts, generation, &rows_inserted)
+        .context("failed to validate translated gold generation")?;
     write_catalog_metadata(
         &conn,
         opts,
         revision,
+        generation,
         snapshot_id,
         embeddings_translated,
         &rows_inserted,
@@ -210,6 +229,8 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     // the worker uploads the catalog metadata back to S3.
     conn.execute("FORCE CHECKPOINT", [])
         .context("failed to force checkpoint DuckLake")?;
+    export_frozen_snapshot(&opts.catalog_dsn, &data_path)
+        .context("failed to export frozen DuckLake catalog snapshot")?;
 
     Ok(TranslateStats {
         rows_inserted,
@@ -222,7 +243,7 @@ pub fn update_refs(db: &Connection, source: &str, package: &str, revision: &str)
         db.query_row(
             r"
             SELECT revision_kind
-            FROM package_catalog
+            FROM gold.package_catalog
             WHERE source = ? AND package = ? AND revision = ?
             ORDER BY indexed_at DESC NULLS LAST
             LIMIT 1
@@ -298,6 +319,7 @@ fn insert_structural_tables(
     conn: &Connection,
     opts: &TranslateOptions,
     revision: RevisionParts,
+    generation: i64,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<()> {
     let nodes = required_artifact_file(opts, "nodes.parquet")?;
@@ -313,12 +335,12 @@ fn insert_structural_tables(
         &read_parquet_source(&nodes),
         &format!(
             r"
-            INSERT INTO nodes (
+            INSERT INTO gold.nodes (
                 stable_symbol_id, package, source, revision, revision_kind,
                 semver_major, semver_minor, semver_patch,
                 file_path, byte_range_start, byte_range_end,
                 line_start, line_end, entity_name, qualified_name,
-                symbol_kind, anchor_hash, enclosing_scope
+                symbol_kind, anchor_hash, enclosing_scope, generation
             )
             SELECT
                 stable_symbol_id,
@@ -331,7 +353,8 @@ fn insert_structural_tables(
                 {patch} AS semver_patch,
                 file_path, byte_range_start, byte_range_end,
                 line_start, line_end, entity_name, qualified_name,
-                symbol_kind, anchor_hash, enclosing_scope
+                symbol_kind, anchor_hash, enclosing_scope,
+                {generation} AS generation
             FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
@@ -341,6 +364,7 @@ fn insert_structural_tables(
             major = sql_i32(revision.major),
             minor = sql_i32(revision.minor),
             patch = sql_i32(revision.patch),
+            generation = generation,
         ),
         rows_inserted,
     )?;
@@ -351,12 +375,12 @@ fn insert_structural_tables(
         &read_parquet_source(&edges),
         &format!(
             r"
-            INSERT INTO edges (
+            INSERT INTO gold.edges (
                 source_stable_id, target_stable_id, target_package, target_label,
                 package, source, revision, revision_kind,
                 semver_major, semver_minor, semver_patch,
                 relation, edge_kind, confidence, confidence_score,
-                bind_method, receiver_text, scope_text
+                bind_method, receiver_text, scope_text, generation
             )
             SELECT
                 source_stable_id,
@@ -372,7 +396,8 @@ fn insert_structural_tables(
                 {patch} AS semver_patch,
                 relation, edge_kind, confidence,
                 confidence_score::DOUBLE AS confidence_score,
-                bind_method, receiver_text, scope_text
+                bind_method, receiver_text, scope_text,
+                {generation} AS generation
             FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
@@ -382,6 +407,7 @@ fn insert_structural_tables(
             major = sql_i32(revision.major),
             minor = sql_i32(revision.minor),
             patch = sql_i32(revision.patch),
+            generation = generation,
         ),
         rows_inserted,
     )?;
@@ -392,12 +418,12 @@ fn insert_structural_tables(
         &read_parquet_source(&unresolved),
         &format!(
             r"
-            INSERT INTO edges_unresolved (
+            INSERT INTO gold.edges_unresolved (
                 source_stable_id, target_label, target_package,
                 package, source, revision, revision_kind,
                 semver_major, semver_minor, semver_patch,
                 relation, edge_kind, confidence, confidence_score,
-                bind_method, receiver_text, scope_text
+                bind_method, receiver_text, scope_text, generation
             )
             SELECT
                 source_stable_id,
@@ -412,7 +438,8 @@ fn insert_structural_tables(
                 {patch} AS semver_patch,
                 relation, edge_kind, confidence,
                 confidence_score::DOUBLE AS confidence_score,
-                bind_method, receiver_text, scope_text
+                bind_method, receiver_text, scope_text,
+                {generation} AS generation
             FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
@@ -422,6 +449,7 @@ fn insert_structural_tables(
             major = sql_i32(revision.major),
             minor = sql_i32(revision.minor),
             patch = sql_i32(revision.patch),
+            generation = generation,
         ),
         rows_inserted,
     )?;
@@ -441,10 +469,10 @@ fn insert_structural_tables(
         &read_parquet_source(&files),
         &format!(
             r"
-            INSERT INTO files (
+            INSERT INTO gold.files (
                 stable_file_id, file_path, source_text,
                 package, source, revision, revision_kind,
-                semver_major, semver_minor, semver_patch
+                semver_major, semver_minor, semver_patch, generation
             )
             SELECT
                 artifact_files.stable_file_id,
@@ -456,7 +484,8 @@ fn insert_structural_tables(
                 {rev_kind} AS revision_kind,
                 {major} AS semver_major,
                 {minor} AS semver_minor,
-                {patch} AS semver_patch
+                {patch} AS semver_patch,
+                {generation} AS generation
             FROM __SOURCE_SQL__ AS artifact_files
             {source_text_join}
             ",
@@ -469,6 +498,7 @@ fn insert_structural_tables(
             major = sql_i32(revision.major),
             minor = sql_i32(revision.minor),
             patch = sql_i32(revision.patch),
+            generation = generation,
         ),
         rows_inserted,
     )?;
@@ -479,10 +509,10 @@ fn insert_structural_tables(
         &read_parquet_source(&file_manifests),
         &format!(
             r"
-            INSERT INTO file_manifests (
+            INSERT INTO gold.file_manifests (
                 stable_file_id, path, content_oid, node_ids,
                 package, source, revision, revision_kind,
-                semver_major, semver_minor, semver_patch
+                semver_major, semver_minor, semver_patch, generation
             )
             SELECT
                 stable_file_id,
@@ -495,7 +525,8 @@ fn insert_structural_tables(
                 {rev_kind} AS revision_kind,
                 {major} AS semver_major,
                 {minor} AS semver_minor,
-                {patch} AS semver_patch
+                {patch} AS semver_patch,
+                {generation} AS generation
             FROM __SOURCE_SQL__
             ",
             package = sql_string(&opts.package),
@@ -505,6 +536,7 @@ fn insert_structural_tables(
             major = sql_i32(revision.major),
             minor = sql_i32(revision.minor),
             patch = sql_i32(revision.patch),
+            generation = generation,
         ),
         rows_inserted,
     )?;
@@ -586,6 +618,7 @@ fn insert_git_tables(
     conn: &Connection,
     opts: &TranslateOptions,
     revision: RevisionParts,
+    generation: i64,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<()> {
     if opts.revision_kind != "git_sha" {
@@ -602,10 +635,10 @@ fn insert_git_tables(
             &commits,
             &format!(
                 r"
-                INSERT INTO commits (
+                INSERT INTO gold.commits (
                     sha, parents, author_time, author_name, author_email, summary,
                     package, source, revision, revision_kind,
-                    semver_major, semver_minor, semver_patch
+                    semver_major, semver_minor, semver_patch, generation
                 )
                 SELECT
                     sha, parents, author_time, author_name, author_email, summary,
@@ -615,7 +648,8 @@ fn insert_git_tables(
                     {rev_kind} AS revision_kind,
                     {major} AS semver_major,
                     {minor} AS semver_minor,
-                    {patch} AS semver_patch
+                    {patch} AS semver_patch,
+                    {generation} AS generation
                 FROM __SOURCE_SQL__
                 ",
                 package = sql_string(&opts.package),
@@ -625,6 +659,7 @@ fn insert_git_tables(
                 major = sql_i32(revision.major),
                 minor = sql_i32(revision.minor),
                 patch = sql_i32(revision.patch),
+                generation = generation,
             ),
             rows_inserted,
         )?;
@@ -643,11 +678,11 @@ fn insert_git_tables(
             &snapshots,
             &format!(
                 r"
-                INSERT INTO symbol_snapshots (
+                INSERT INTO gold.symbol_snapshots (
                     stable_symbol_id, commit, package, source, revision, revision_kind,
                     semver_major, semver_minor, semver_patch,
                     file_path, entity_name, symbol_kind, enclosing_scope,
-                    byte_range, line_range, anchor_hash
+                    byte_range, line_range, anchor_hash, generation
                 )
                 SELECT
                     key_stable_symbol_id AS stable_symbol_id,
@@ -665,7 +700,8 @@ fn insert_git_tables(
                     enclosing_scope,
                     [byte_range_start::INTEGER, byte_range_end::INTEGER] AS byte_range,
                     [line_range_start::INTEGER, line_range_end::INTEGER] AS line_range,
-                    anchor_hash
+                    anchor_hash,
+                    {generation} AS generation
                 FROM __SOURCE_SQL__
                 ",
                 package = sql_string(&opts.package),
@@ -675,6 +711,7 @@ fn insert_git_tables(
                 major = sql_i32(revision.major),
                 minor = sql_i32(revision.minor),
                 patch = sql_i32(revision.patch),
+                generation = generation,
             ),
             rows_inserted,
         )?;
@@ -693,10 +730,10 @@ fn insert_git_tables(
             &temporal_edges,
             &format!(
                 r"
-                INSERT INTO temporal_edges (
+                INSERT INTO gold.temporal_edges (
                     source_endpoint, target_endpoint, relation, change_kind, parent,
                     package, source, revision, revision_kind,
-                    semver_major, semver_minor, semver_patch
+                    semver_major, semver_minor, semver_patch, generation
                 )
                 SELECT
                     json_object(
@@ -720,7 +757,8 @@ fn insert_git_tables(
                     {rev_kind} AS revision_kind,
                     {major} AS semver_major,
                     {minor} AS semver_minor,
-                    {patch} AS semver_patch
+                    {patch} AS semver_patch,
+                    {generation} AS generation
                 FROM __SOURCE_SQL__
                 ",
                 package = sql_string(&opts.package),
@@ -730,6 +768,7 @@ fn insert_git_tables(
                 major = sql_i32(revision.major),
                 minor = sql_i32(revision.minor),
                 patch = sql_i32(revision.patch),
+                generation = generation,
             ),
             rows_inserted,
         )?;
@@ -744,16 +783,17 @@ fn insert_sidecar_tables(
     conn: &Connection,
     opts: &TranslateOptions,
     revision: RevisionParts,
+    generation: i64,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
-    let symbols_translated = insert_symbol_embeddings(conn, opts, revision, rows_inserted)
+    let symbols_translated = insert_symbol_embeddings(conn, opts, revision, generation, rows_inserted)
         .with_context(|| {
             format!(
                 "failed to translate `{}`",
                 opts.artifact_dir.join("code_symbols.lance").display()
             )
         })?;
-    insert_section_bodies(conn, opts, revision, rows_inserted).with_context(|| {
+    insert_section_bodies(conn, opts, revision, generation, rows_inserted).with_context(|| {
         format!(
             "failed to translate `{}`",
             opts.artifact_dir.join("sections.lancedb").display()
@@ -766,6 +806,7 @@ fn insert_symbol_embeddings(
     conn: &Connection,
     opts: &TranslateOptions,
     revision: RevisionParts,
+    generation: i64,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
     let sidecar_path = opts.artifact_dir.join("code_symbols.lance");
@@ -814,11 +855,11 @@ fn insert_symbol_embeddings(
 
     let template = format!(
         r"
-        INSERT INTO symbol_embeddings (
+        INSERT INTO gold.symbol_embeddings (
             stable_symbol_id, package, source, revision, revision_kind,
             semver_major, semver_minor, semver_patch,
             file_path, entity_name, qualified_name, symbol_kind,
-            embedding, embedding_model, embedding_input_hash, embed_text_version
+            embedding, embedding_model, embedding_input_hash, embed_text_version, generation
         )
         SELECT
             stable_symbol_id,
@@ -836,7 +877,8 @@ fn insert_symbol_embeddings(
             {embedding_expr}::FLOAT[] AS embedding,
             {model_expr} AS embedding_model,
             {input_hash_expr} AS embedding_input_hash,
-            {embed_text_version} AS embed_text_version
+            {embed_text_version} AS embed_text_version,
+            {generation} AS generation
         FROM __SOURCE_SQL__
         ",
         package = sql_string(&opts.package),
@@ -850,6 +892,7 @@ fn insert_symbol_embeddings(
         model_expr = model_expr,
         input_hash_expr = input_hash_expr,
         embed_text_version = sql_string(DEFAULT_EMBED_TEXT_VERSION),
+        generation = generation,
     );
 
     match insert_from_source(
@@ -877,6 +920,7 @@ fn insert_section_bodies(
     conn: &Connection,
     opts: &TranslateOptions,
     revision: RevisionParts,
+    generation: i64,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
     let sidecar_path = opts.artifact_dir.join("sections.lancedb");
@@ -946,11 +990,11 @@ fn insert_section_bodies(
 
     let template = format!(
         r"
-        INSERT INTO section_bodies (
+        INSERT INTO gold.section_bodies (
             section_id, package, source, revision, revision_kind,
             semver_major, semver_minor, semver_patch,
             file_path, title, body_text, body_hash, token_count,
-            vector, embedding_model, embedding_input_hash, embed_text_version
+            vector, embedding_model, embedding_input_hash, embed_text_version, generation
         )
         SELECT
             {section_id_expr} AS section_id,
@@ -969,7 +1013,8 @@ fn insert_section_bodies(
             {vector_expr} AS vector,
             {model_expr} AS embedding_model,
             {input_hash_expr} AS embedding_input_hash,
-            {embed_text_version} AS embed_text_version
+            {embed_text_version} AS embed_text_version,
+            {generation} AS generation
         FROM __SOURCE_SQL__
         ",
         section_id_expr = section_id_expr,
@@ -987,6 +1032,7 @@ fn insert_section_bodies(
         model_expr = model_expr,
         input_hash_expr = input_hash_expr,
         embed_text_version = sql_string(DEFAULT_EMBED_TEXT_VERSION),
+        generation = generation,
     );
 
     match insert_from_source(
@@ -1010,6 +1056,7 @@ fn write_catalog_metadata(
     conn: &Connection,
     opts: &TranslateOptions,
     revision: RevisionParts,
+    generation: i64,
     snapshot_id: i64,
     embeddings_translated: bool,
     rows_inserted: &HashMap<String, usize>,
@@ -1020,21 +1067,27 @@ fn write_catalog_metadata(
     } else {
         "skipped"
     };
+    let lineage = opts.lineage.clone().unwrap_or_else(default_lineage);
 
     run_transaction(conn, || {
         conn.execute(
-            "DELETE FROM package_catalog WHERE source = ? AND package = ? AND revision = ?",
+            "DELETE FROM gold.package_catalog WHERE source = ? AND package = ? AND revision = ?",
             params![opts.source, opts.package, opts.revision],
         )
         .context("failed to delete existing package_catalog row")?;
         conn.execute(
             r"
-            INSERT INTO package_catalog (
+            INSERT INTO gold.package_catalog (
                 source, package, revision, revision_kind,
                 semver_major, semver_minor, semver_patch,
-                snapshot_id, indexed_at, index_status, embeddings_status, row_counts
+                snapshot_id, indexed_at, index_status, embeddings_status, row_counts,
+                generation, bronze_content_sha256, silver_graph_content_hash,
+                builder_version, translate_schema_version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'complete', ?, CAST(? AS JSON))
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'complete', ?, CAST(? AS JSON),
+                ?, ?, ?, ?, ?
+            )
             ",
             params![
                 opts.source,
@@ -1046,7 +1099,12 @@ fn write_catalog_metadata(
                 revision.patch,
                 snapshot_id,
                 embeddings_status,
-                row_counts
+                row_counts,
+                generation,
+                lineage.bronze_content_sha256,
+                lineage.silver_graph_content_hash,
+                lineage.builder_version,
+                lineage.translate_schema_version,
             ],
         )
         .context("failed to insert package_catalog row")?;
@@ -1055,11 +1113,72 @@ fn write_catalog_metadata(
     })
 }
 
-fn delete_existing_revision_rows(conn: &Connection, opts: &TranslateOptions) -> Result<()> {
+fn default_lineage() -> TranslateLineage {
+    TranslateLineage {
+        bronze_content_sha256: "unknown".to_owned(),
+        silver_graph_content_hash: "unknown".to_owned(),
+        builder_version: "unknown".to_owned(),
+        translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
+    }
+}
+
+fn next_generation(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(generation), 0)::BIGINT + 1 FROM gold.package_catalog",
+        [],
+        |row| row.get(0),
+    )
+    .context("failed to allocate next gold generation")
+}
+
+fn delete_generation_rows(conn: &Connection, opts: &TranslateOptions, generation: i64) -> Result<()> {
     for table in REVISION_TABLES {
-        let sql = format!("DELETE FROM {table} WHERE source = ? AND package = ? AND revision = ?");
-        conn.execute(&sql, params![opts.source, opts.package, opts.revision])
+        let sql = format!(
+            "DELETE FROM {} WHERE source = ? AND package = ? AND revision = ? AND generation = ?",
+            gold_table(table)
+        );
+        conn.execute(
+            &sql,
+            params![opts.source, opts.package, opts.revision, generation],
+        )
             .with_context(|| format!("failed to delete existing rows from {table}"))?;
+    }
+    Ok(())
+}
+
+fn validate_generation(
+    conn: &Connection,
+    opts: &TranslateOptions,
+    generation: i64,
+    rows_inserted: &HashMap<String, usize>,
+) -> Result<()> {
+    for table in REVISION_TABLES {
+        let expected = *rows_inserted.get(*table).unwrap_or(&0) as i64;
+        let sql = format!(
+            "SELECT COUNT(*)::BIGINT FROM {} WHERE source = ? AND package = ? AND revision = ? AND generation = ?",
+            gold_table(table)
+        );
+        let actual: i64 = conn
+            .query_row(
+                &sql,
+                params![opts.source, opts.package, opts.revision, generation],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("failed to validate gold.{table} row count"))?;
+        if actual != expected {
+            bail!(
+                "gold.{table} generation {generation} row count mismatch: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    let lineage = opts.lineage.clone().unwrap_or_else(default_lineage);
+    if lineage.bronze_content_sha256.trim().is_empty()
+        || lineage.silver_graph_content_hash.trim().is_empty()
+        || lineage.builder_version.trim().is_empty()
+        || lineage.translate_schema_version.trim().is_empty()
+    {
+        bail!("gold lineage values must be non-empty before publish");
     }
     Ok(())
 }
@@ -1088,7 +1207,7 @@ fn insert_from_source(
     // Verify the data actually landed in the DuckLake table
     let verify_count: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*)::BIGINT FROM {table}"),
+            &format!("SELECT COUNT(*)::BIGINT FROM {}", gold_table(table)),
             [],
             |row| row.get(0),
         )
@@ -1126,7 +1245,7 @@ fn update_latest_semver_ref(
         db.query_row(
             r"
             SELECT revision
-            FROM package_catalog
+            FROM gold.package_catalog
             WHERE source = ? AND package = ? AND revision_kind = 'semver'
             ORDER BY
                 semver_major DESC NULLS LAST,
@@ -1155,7 +1274,7 @@ fn update_existing_git_refs(
 ) -> Result<()> {
     db.execute(
         r"
-        UPDATE refs
+        UPDATE gold.refs
         SET updated_at = CURRENT_TIMESTAMP
         WHERE source = ?
           AND package = ?
@@ -1176,13 +1295,13 @@ fn replace_ref(
     revision: &str,
 ) -> Result<()> {
     db.execute(
-        "DELETE FROM refs WHERE source = ? AND package = ? AND ref_name = ?",
+        "DELETE FROM gold.refs WHERE source = ? AND package = ? AND ref_name = ?",
         params![source, package, ref_name],
     )
     .context("failed to delete existing ref")?;
     db.execute(
         r"
-        INSERT INTO refs (source, package, ref_name, revision, updated_at)
+        INSERT INTO gold.refs (source, package, ref_name, revision, updated_at)
         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
         ",
         params![source, package, ref_name, revision],

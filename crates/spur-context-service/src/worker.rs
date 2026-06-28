@@ -28,7 +28,8 @@ use crate::catalog::connect_ducklake_with_data_path;
 use crate::jobs::{DynamoDbJobStore, JobStatus, JobStore};
 use crate::medallion::{SilverManifest, SilverManifestFile, SILVER_PREFIX};
 use crate::translate::{
-    translate_artifact_to_ducklake, TranslateOptions, TranslateStats, CATALOG_TABLES_SQL,
+    translate_artifact_to_ducklake, TranslateLineage, TranslateOptions, TranslateStats,
+    CATALOG_TABLES_SQL,
 };
 
 const DEFAULT_ARTIFACT_DIR: &str = "/tmp/artifact";
@@ -143,6 +144,12 @@ impl StageTracker {
     }
 }
 
+impl Default for StageTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 struct StageReporter {
     job_id: String,
@@ -220,7 +227,7 @@ pub async fn run_job_and_report_with_services(
                     if let Err(sfn_err) = send_task_failure(env, &error_code, &error_detail).await {
                         eprintln!("[worker] SendTaskFailure also failed: {sfn_err:#}");
                     }
-                    return Err(error);
+                    Err(error)
                 }
             }
         }
@@ -422,6 +429,12 @@ async fn prepare_job(
         source_path,
         artifact_dir: silver_artifact_dir,
         artifact_manifest: Some(persisted_silver.manifest),
+        lineage: Some(TranslateLineage {
+            bronze_content_sha256: persisted_silver.row.bronze_content_sha256,
+            silver_graph_content_hash: persisted_silver.row.graph_content_hash,
+            builder_version: persisted_silver.row.builder_version,
+            translate_schema_version: "translate-v1".to_owned(),
+        }),
     })
 }
 
@@ -436,6 +449,7 @@ fn translate_prepared_blocking(
         &prepared.artifact_dir,
         Some(&prepared.source_path),
         prepared.artifact_manifest.clone(),
+        prepared.lineage.clone(),
         env,
     )?;
     log_stage_completed("translate", stage_started);
@@ -1722,7 +1736,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 pub fn translate(artifact_dir: &Path, env: &JobEnv) -> Result<TranslateStats, WorkerError> {
-    translate_with_source_root(artifact_dir, None, None, env)
+    translate_with_source_root(artifact_dir, None, None, None, env)
 }
 
 pub async fn handle_spot_interruption(
@@ -2333,6 +2347,7 @@ fn translate_with_source_root(
     artifact_dir: &Path,
     source_root: Option<&Path>,
     artifact_manifest: Option<SilverManifest>,
+    lineage: Option<TranslateLineage>,
     env: &JobEnv,
 ) -> Result<TranslateStats, WorkerError> {
     let revision_kind = if env.revision.contains('.') {
@@ -2367,6 +2382,7 @@ fn translate_with_source_root(
         artifact_manifest,
         source_root: source_root.map(|p| p.to_path_buf()),
         catalog_dsn: env.catalog_dsn.clone(),
+        lineage,
     };
 
     eprintln!("[worker] running Rust API translate...");
@@ -3221,6 +3237,7 @@ struct PreparedJob {
     source_path: PathBuf,
     artifact_dir: PathBuf,
     artifact_manifest: Option<SilverManifest>,
+    lineage: Option<TranslateLineage>,
 }
 
 #[derive(Debug)]
