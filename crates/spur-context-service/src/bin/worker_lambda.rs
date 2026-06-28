@@ -16,6 +16,14 @@ struct LambdaWorkerEvent {
     source: String,
     source_url: String,
     source_kind: String,
+    #[serde(default)]
+    limits: Option<LambdaWorkerLimits>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LambdaWorkerLimits {
+    max_source_bytes: Option<u64>,
+    max_build_seconds: Option<u64>,
 }
 
 #[tokio::main]
@@ -34,6 +42,7 @@ async fn main() -> Result<(), Error> {
 
 async fn handler(event: LambdaEvent<LambdaWorkerEvent>) -> Result<Value, Error> {
     let payload = event.payload;
+    apply_limits(payload.limits.as_ref());
     let catalog_dsn = std::env::var("SPUR_CATALOG_DSN")
         .or_else(|_| std::env::var("SPUR_CATALOG_S3_URI"))
         .context("SPUR_CATALOG_DSN or SPUR_CATALOG_S3_URI must be set")?;
@@ -61,6 +70,18 @@ async fn handler(event: LambdaEvent<LambdaWorkerEvent>) -> Result<Value, Error> 
             "error": worker_error_code(&error),
             "cause": format!("{error:#}"),
         })),
+    }
+}
+
+fn apply_limits(limits: Option<&LambdaWorkerLimits>) {
+    let Some(limits) = limits else {
+        return;
+    };
+    if let Some(value) = limits.max_source_bytes {
+        std::env::set_var("SPUR_CONTEXT_MAX_SOURCE_BYTES", value.to_string());
+    }
+    if let Some(value) = limits.max_build_seconds {
+        std::env::set_var("SPUR_CONTEXT_MAX_BUILD_SECONDS", value.to_string());
     }
 }
 

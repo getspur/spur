@@ -80,6 +80,18 @@ resource "aws_ecs_task_definition" "worker" {
         {
           name  = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH"
           value = local.context_ducklake_data_path
+        },
+        {
+          name  = "SPUR_CONTEXT_MAX_TARBALL_BYTES"
+          value = tostring(var.context_max_tarball_bytes)
+        },
+        {
+          name  = "SPUR_CONTEXT_MAX_GIT_BYTES"
+          value = tostring(var.context_max_git_bytes)
+        },
+        {
+          name  = "SPUR_CONTEXT_MAX_BUILD_SECONDS"
+          value = tostring(var.context_max_build_seconds)
         }
       ]
 
