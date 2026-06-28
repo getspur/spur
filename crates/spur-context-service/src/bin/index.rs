@@ -48,6 +48,7 @@ fn main() -> Result<()> {
         revision: revision.clone(),
         revision_kind: revision_kind_for_revision(revision).to_owned(),
         artifact_dir: artifact_dir.clone(),
+        artifact_manifest: None,
         source_root,
         catalog_dsn: catalog.clone(),
     };
