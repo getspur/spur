@@ -450,12 +450,16 @@ fn write_artifact_fixture_with_symbol_vector(
 
 fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
     let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
-    let sql = include_str!("../sql/init_catalog.sql")
-        .replace("INSTALL postgres;", "INSTALL sqlite;")
-        .replace("LOAD postgres;", "LOAD sqlite;")
-        .replace("__CATALOG_DSN__", &escape_sql_literal(catalog_dsn))
-        .replace("s3://spur-context/data/", &escape_sql_literal(data_path));
-    conn.execute_batch(&sql).context("execute init catalog sql")
+    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
+        .context("load ducklake/sqlite extensions")?;
+    conn.execute_batch(&format!(
+        "ATTACH 'ducklake:{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
+        escape_sql_literal(catalog_dsn),
+        escape_sql_literal(data_path)
+    ))
+    .context("attach ducklake")?;
+    conn.execute_batch(include_str!("../sql/catalog_tables.sql"))
+        .context("execute catalog tables sql")
 }
 
 fn attach_ducklake(catalog_dsn: &str, data_path: &str) -> Result<Connection> {
