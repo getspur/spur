@@ -91,9 +91,9 @@ struct ToolRequest {
     args: Value,
 }
 
-#[expect(
-    clippy::unused_async,
-    reason = "cargo-lambda handler entry point is required to be async"
+#[allow(
+    clippy::await_holding_lock,
+    reason = "route_index only consults the catalog before its first await"
 )]
 pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGatewayResponse, Error> {
     let request = parse_tool_request(&event.payload);
