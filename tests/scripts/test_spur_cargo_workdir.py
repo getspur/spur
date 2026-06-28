@@ -95,7 +95,7 @@ printf 'args=%s\\n' "$*" >> {record}
 
 
 @pytest.mark.parametrize("subcommand", ["graph-embed", "embed", "embedding"])
-def test_spur_cargo_embed_routes_through_remote_graph_build(
+def test_spur_cargo_embed_routes_through_remote_graph_embed(
     tmp_path: Path, subcommand: str
 ):
     record = tmp_path / "remote-record"
@@ -132,7 +132,37 @@ exit 99
 
     assert record.read_text().splitlines() == [
         f"pwd={ROOT}",
-        "args=--auto-spin -- run -p spur-cli -- graph build --workspace --quiet",
+        "args=--auto-spin -- run -p spur-cli -- graph embed --workspace --quiet",
+    ]
+
+
+def test_spur_cargo_embed_without_args_routes_through_remote_graph_embed(
+    tmp_path: Path,
+):
+    record = tmp_path / "remote-record"
+    remote = tmp_path / "remote-build.sh"
+    write_executable(
+        remote,
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf 'pwd=%s\n' "$PWD" > {record}
+printf 'args=%s\n' "$*" >> {record}
+""",
+    )
+    env = base_env(tmp_path)
+    env.update(
+        {
+            "SPUR_CLOUD_BUILD_SH": str(remote),
+            "SPUR_CLOUD": "test-cloud",
+            "SPUR_CLOUD_FALLBACK": "",
+        }
+    )
+
+    subprocess.run([str(SPUR_CARGO), "embed"], cwd=ROOT, env=env, check=True)
+
+    assert record.read_text().splitlines() == [
+        f"pwd={ROOT}",
+        "args=--auto-spin -- run -p spur-cli -- graph embed --workspace",
     ]
 
 

@@ -12,7 +12,7 @@ use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPo
 use spur_graph::store::lance_sections::{
     backfill_missing_vectors, SectionEmbeddingOptions, SectionSidecarOptions,
     SectionSidecarProgressCallback, SectionSidecarProgressEvent, SidecarDelta, SidecarPhase,
-    SidecarRowScope, VectorBackfillStats,
+    SidecarRowScope, VectorBackfillStats, VectorBackfillTableStats,
 };
 use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
@@ -40,7 +40,9 @@ pub struct GraphBuildOptions {
 pub struct GraphVectorBackfillOptions {
     pub root: Option<PathBuf>,
     pub workspace: bool,
-    pub output: Option<PathBuf>,
+    pub artifact_dir: Option<PathBuf>,
+    pub embed_code_symbols: bool,
+    pub embed_sections: bool,
     pub quiet: bool,
 }
 
@@ -56,7 +58,7 @@ pub fn backfill_vectors(options: GraphVectorBackfillOptions) -> anyhow::Result<(
     let root = root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize root `{}`", root.display()))?;
-    let explicit_output = options.output;
+    let explicit_output = options.artifact_dir;
     let env_output = std::env::var_os("SPUR_CODE_GRAPH_INDEX").map(PathBuf::from);
     let uses_output_override = explicit_output.is_some() || env_output.is_some();
     let output = explicit_output
@@ -73,9 +75,17 @@ pub fn backfill_vectors(options: GraphVectorBackfillOptions) -> anyhow::Result<(
             resolved.path.display()
         );
     }
-    let stats = backfill_missing_vectors(&resolved.path, SectionEmbeddingOptions::from_env())?;
+    let embedding_options = SectionEmbeddingOptions::from_env_with_skip_overrides(
+        !options.embed_sections,
+        !options.embed_code_symbols,
+    );
+    let started = Instant::now();
+    let stats = backfill_missing_vectors(&resolved.path, embedding_options)?;
     if !options.quiet {
-        report_vector_backfill_stats(stats);
+        println!(
+            "{}",
+            format_vector_backfill_stats(stats, started.elapsed().as_secs_f64())
+        );
     }
     Ok(())
 }
@@ -809,16 +819,33 @@ fn sidecar_row_label(row_scope: SidecarRowScope) -> &'static str {
     }
 }
 
-fn report_vector_backfill_stats(stats: VectorBackfillStats) {
-    println!(
-        "[spur] Vector backfill ready: sections filled {}/{} eligible rows ({} null vectors); code symbols filled {}/{} eligible rows ({} null vectors)",
-        fmt_thousands(stats.sections.filled_rows),
-        fmt_thousands(stats.sections.eligible_rows),
-        fmt_thousands(stats.sections.null_vector_rows),
-        fmt_thousands(stats.code_symbols.filled_rows),
-        fmt_thousands(stats.code_symbols.eligible_rows),
-        fmt_thousands(stats.code_symbols.null_vector_rows)
-    );
+fn format_vector_backfill_stats(stats: VectorBackfillStats, elapsed_secs: f64) -> String {
+    format!(
+        "[spur] Vector fill: code_symbols {}; sections {}; elapsed={elapsed_secs:.2}s",
+        format_vector_backfill_table_stats(stats.code_symbols),
+        format_vector_backfill_table_stats(stats.sections)
+    )
+}
+
+fn format_vector_backfill_table_stats(stats: VectorBackfillTableStats) -> String {
+    format!(
+        "total={} existing={} new={} skipped={}",
+        fmt_thousands(stats.total_rows),
+        fmt_thousands(existing_vector_rows(stats)),
+        fmt_thousands(stats.filled_rows),
+        fmt_thousands(skipped_vector_rows(stats))
+    )
+}
+
+fn existing_vector_rows(stats: VectorBackfillTableStats) -> usize {
+    stats.total_rows.saturating_sub(stats.null_vector_rows)
+}
+
+fn skipped_vector_rows(stats: VectorBackfillTableStats) -> usize {
+    stats
+        .total_rows
+        .saturating_sub(existing_vector_rows(stats))
+        .saturating_sub(stats.filled_rows)
 }
 
 fn merge_temporal_artifact(artifact: &mut GraphIndexArtifact, temporal: GraphIndexArtifact) {
@@ -1021,6 +1048,8 @@ fn language_counts_from_artifact(
 
 #[cfg(test)]
 mod tests {
+    use spur_graph::store::lance_sections::{VectorBackfillStats, VectorBackfillTableStats};
+
     struct EnvGuard {
         key: &'static str,
         previous: Option<std::ffi::OsString>,
@@ -1087,6 +1116,29 @@ mod tests {
         assert_eq!(super::fmt_thousands(12), "12");
         assert_eq!(super::fmt_thousands(1_234), "1,234");
         assert_eq!(super::fmt_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn format_vector_backfill_stats_includes_row_accounting_and_elapsed() {
+        let stats = VectorBackfillStats {
+            code_symbols: VectorBackfillTableStats {
+                total_rows: 12,
+                null_vector_rows: 5,
+                eligible_rows: 4,
+                filled_rows: 3,
+            },
+            sections: VectorBackfillTableStats {
+                total_rows: 7,
+                null_vector_rows: 3,
+                eligible_rows: 2,
+                filled_rows: 2,
+            },
+        };
+
+        assert_eq!(
+            super::format_vector_backfill_stats(stats, 1.25),
+            "[spur] Vector fill: code_symbols total=12 existing=7 new=3 skipped=2; sections total=7 existing=4 new=2 skipped=1; elapsed=1.25s"
+        );
     }
 
     #[test]
