@@ -1,5 +1,21 @@
 data "aws_caller_identity" "current" {}
 
+resource "aws_iam_policy" "context_service_invoke" {
+  name        = "SpurContextServiceInvoke"
+  description = "Allows SigV4 callers to invoke the SPUR context-service HTTP API"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "execute-api:Invoke"
+      ]
+      Resource = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
+    }]
+  })
+}
+
 resource "aws_iam_role" "lambda" {
   name = "spur-context-lambda"
 

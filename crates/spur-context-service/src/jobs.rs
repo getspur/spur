@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use aws_sdk_dynamodb::{
     error::SdkError,
     operation::transact_write_items::TransactWriteItemsError,
-    types::{AttributeValue, Delete, Put, ReturnValue, TransactWriteItem},
+    types::{AttributeValue, Delete, Put, ReturnValue, TransactWriteItem, Update},
     Client as DynamoDbClient,
 };
 use uuid::Uuid;
@@ -22,6 +22,11 @@ pub type Result<T> = std::result::Result<T, JobsError>;
 const DEFAULT_INDEX_JOBS_TABLE: &str = "spur-context-index-jobs";
 const JOB_PK_PREFIX: &str = "JOB#";
 const DEDUPE_PK_PREFIX: &str = "DEDUP#";
+const CALLER_QUOTA_PK_PREFIX: &str = "CALLER_QUOTA#";
+const CALLER_RATE_PK_PREFIX: &str = "CALLER_RATE#";
+const ACTIVE_JOB_PK_PREFIX: &str = "ACTIVE_JOB#";
+const ACTIVE_JOB_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+const RATE_WINDOW_TTL_SECS: u64 = 10 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -136,6 +141,24 @@ pub trait JobStore: Send + Sync {
     async fn create_or_get_active_job(&self, request: CreateJobRequest)
         -> Result<CreateJobOutcome>;
 
+    async fn check_index_rate_limit(
+        &self,
+        caller_id: &str,
+        max_requests_per_minute: u32,
+    ) -> Result<()> {
+        let _ = (caller_id, max_requests_per_minute);
+        Ok(())
+    }
+
+    async fn create_or_get_active_job_with_limit(
+        &self,
+        request: CreateJobRequest,
+        max_active_jobs_per_caller: u32,
+    ) -> Result<CreateJobOutcome> {
+        let _ = max_active_jobs_per_caller;
+        self.create_or_get_active_job(request).await
+    }
+
     async fn record_execution_started(
         &self,
         job_id: &str,
@@ -232,10 +255,56 @@ impl DynamoDbJobStore {
 
 #[async_trait]
 impl JobStore for DynamoDbJobStore {
+    async fn check_index_rate_limit(
+        &self,
+        caller_id: &str,
+        max_requests_per_minute: u32,
+    ) -> Result<()> {
+        if max_requests_per_minute == 0 {
+            return Err(JobsError::RateLimited);
+        }
+        let now = now_unix_secs();
+        let update = caller_rate_acquire_update(
+            &self.table_name,
+            caller_id,
+            now / 60,
+            now,
+            max_requests_per_minute,
+        )?;
+        let result = self
+            .client
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().update(update).build())
+            .send()
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) if is_transaction_conflict(&error) => Err(JobsError::RateLimited),
+            Err(error) => Err(dynamodb_error(error)),
+        }
+    }
+
     async fn create_or_get_active_job(
         &self,
         request: CreateJobRequest,
     ) -> Result<CreateJobOutcome> {
+        self.create_or_get_active_job_with_limit(request, u32::MAX)
+            .await
+    }
+
+    async fn create_or_get_active_job_with_limit(
+        &self,
+        request: CreateJobRequest,
+        max_active_jobs_per_caller: u32,
+    ) -> Result<CreateJobOutcome> {
+        let key = request.key();
+        if max_active_jobs_per_caller == 0 {
+            if let Some(existing) = self.lookup_dedupe_job(&key).await? {
+                return Ok(CreateJobOutcome::Existing(existing));
+            }
+            return Err(JobsError::ConcurrentLimit);
+        }
+
         let now = now_string();
         let record = JobRecord {
             job_id: Uuid::new_v4().to_string(),
@@ -257,7 +326,6 @@ impl JobStore for DynamoDbJobStore {
             created_at: now.clone(),
             updated_at: now,
         };
-        let key = request.key();
         let job_put = Put::builder()
             .table_name(&self.table_name)
             .set_item(Some(job_item(&record)))
@@ -270,23 +338,36 @@ impl JobStore for DynamoDbJobStore {
             .condition_expression("attribute_not_exists(pk)")
             .build()
             .map_err(dynamodb_error)?;
+        let active_put = Put::builder()
+            .table_name(&self.table_name)
+            .set_item(Some(active_job_item(&record)))
+            .condition_expression("attribute_not_exists(pk)")
+            .build()
+            .map_err(dynamodb_error)?;
+        let quota_update = caller_quota_acquire_update(
+            &self.table_name,
+            &request.caller_id,
+            max_active_jobs_per_caller,
+        )?;
 
         let result = self
             .client
             .transact_write_items()
             .transact_items(TransactWriteItem::builder().put(job_put).build())
             .transact_items(TransactWriteItem::builder().put(dedupe_put).build())
+            .transact_items(TransactWriteItem::builder().put(active_put).build())
+            .transact_items(TransactWriteItem::builder().update(quota_update).build())
             .send()
             .await;
 
         match result {
             Ok(_) => Ok(CreateJobOutcome::Created(record)),
             Err(error) if is_transaction_conflict(&error) => {
-                let existing = self
-                    .lookup_dedupe_job(&key)
-                    .await?
-                    .ok_or(JobsError::Conflict)?;
-                Ok(CreateJobOutcome::Existing(existing))
+                if let Some(existing) = self.lookup_dedupe_job(&key).await? {
+                    Ok(CreateJobOutcome::Existing(existing))
+                } else {
+                    Err(JobsError::ConcurrentLimit)
+                }
             }
             Err(error) => Err(dynamodb_error(error)),
         }
@@ -377,6 +458,7 @@ impl JobStore for DynamoDbJobStore {
             )
             .await?;
         self.release_dedupe_if_owner(&record).await?;
+        self.release_active_job_if_owner(&record).await?;
         Ok(record)
     }
 
@@ -409,6 +491,7 @@ impl JobStore for DynamoDbJobStore {
             )
             .await?;
         self.release_dedupe_if_owner(&record).await?;
+        self.release_active_job_if_owner(&record).await?;
         Ok(record)
     }
 
@@ -441,6 +524,31 @@ impl JobStore for DynamoDbJobStore {
     }
 }
 
+impl DynamoDbJobStore {
+    async fn release_active_job_if_owner(&self, record: &JobRecord) -> Result<()> {
+        let delete = Delete::builder()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(active_job_pk(&record.job_id)))
+            .condition_expression("job_id = :job_id")
+            .expression_attribute_values(":job_id", AttributeValue::S(record.job_id.clone()))
+            .build()
+            .map_err(dynamodb_error)?;
+        let update = caller_quota_release_update(&self.table_name, &record.caller_id)?;
+        let result = self
+            .client
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().delete(delete).build())
+            .transact_items(TransactWriteItem::builder().update(update).build())
+            .send()
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) if is_transaction_conflict(&error) => Ok(()),
+            Err(error) => Err(dynamodb_error(error)),
+        }
+    }
+}
+
 fn job_pk(job_id: &str) -> String {
     format!("{JOB_PK_PREFIX}{job_id}")
 }
@@ -452,12 +560,31 @@ fn dedupe_pk(key: &JobKey) -> String {
     )
 }
 
+fn caller_quota_pk(caller_id: &str) -> String {
+    format!("{CALLER_QUOTA_PK_PREFIX}{caller_id}")
+}
+
+fn caller_rate_pk(caller_id: &str, window_epoch_minute: u64) -> String {
+    format!("{CALLER_RATE_PK_PREFIX}{caller_id}#{window_epoch_minute}")
+}
+
+fn active_job_pk(job_id: &str) -> String {
+    format!("{ACTIVE_JOB_PK_PREFIX}{job_id}")
+}
+
 fn now_string() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     millis.to_string()
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn job_item(record: &JobRecord) -> HashMap<String, AttributeValue> {
@@ -527,6 +654,145 @@ fn job_item(record: &JobRecord) -> HashMap<String, AttributeValue> {
     insert_optional_string(&mut item, "error_code", record.error_code.as_deref());
     insert_optional_string(&mut item, "error_detail", record.error_detail.as_deref());
     item
+}
+
+fn active_job_item(record: &JobRecord) -> HashMap<String, AttributeValue> {
+    let mut item = HashMap::new();
+    item.insert(
+        "pk".to_string(),
+        AttributeValue::S(active_job_pk(&record.job_id)),
+    );
+    item.insert(
+        "item_type".to_string(),
+        AttributeValue::S("active_job".to_string()),
+    );
+    item.insert(
+        "job_id".to_string(),
+        AttributeValue::S(record.job_id.clone()),
+    );
+    item.insert(
+        "caller_id".to_string(),
+        AttributeValue::S(record.caller_id.clone()),
+    );
+    item.insert(
+        "created_at".to_string(),
+        AttributeValue::S(record.created_at.clone()),
+    );
+    item.insert(
+        "expires_at".to_string(),
+        AttributeValue::N((now_unix_secs() + ACTIVE_JOB_TTL_SECS).to_string()),
+    );
+    item
+}
+
+fn caller_quota_acquire_update(
+    table_name: &str,
+    caller_id: &str,
+    max_active_jobs_per_caller: u32,
+) -> Result<Update> {
+    let mut names = HashMap::new();
+    names.insert("#updated_at".to_string(), "updated_at".to_string());
+    let mut values = HashMap::new();
+    values.insert(":one".to_string(), AttributeValue::N("1".to_string()));
+    values.insert(
+        ":limit".to_string(),
+        AttributeValue::N(max_active_jobs_per_caller.to_string()),
+    );
+    values.insert(
+        ":item_type".to_string(),
+        AttributeValue::S("caller_quota".to_string()),
+    );
+    values.insert(":updated_at".to_string(), AttributeValue::S(now_string()));
+    values.insert(
+        ":expires_at".to_string(),
+        AttributeValue::N((now_unix_secs() + ACTIVE_JOB_TTL_SECS).to_string()),
+    );
+    Update::builder()
+        .table_name(table_name)
+        .key("pk", AttributeValue::S(caller_quota_pk(caller_id)))
+        .update_expression(
+            "SET item_type = if_not_exists(item_type, :item_type), #updated_at = :updated_at, expires_at = :expires_at ADD active_count :one",
+        )
+        .condition_expression("attribute_not_exists(active_count) OR active_count < :limit")
+        .set_expression_attribute_names(Some(names))
+        .set_expression_attribute_values(Some(values))
+        .build()
+        .map_err(dynamodb_error)
+}
+
+fn caller_rate_acquire_update(
+    table_name: &str,
+    caller_id: &str,
+    window_epoch_minute: u64,
+    now_unix_secs: u64,
+    max_requests_per_minute: u32,
+) -> Result<Update> {
+    let mut names = HashMap::new();
+    names.insert("#updated_at".to_string(), "updated_at".to_string());
+    let mut values = HashMap::new();
+    values.insert(":one".to_string(), AttributeValue::N("1".to_string()));
+    values.insert(
+        ":limit".to_string(),
+        AttributeValue::N(max_requests_per_minute.to_string()),
+    );
+    values.insert(
+        ":item_type".to_string(),
+        AttributeValue::S("caller_rate".to_string()),
+    );
+    values.insert(
+        ":caller_id".to_string(),
+        AttributeValue::S(caller_id.to_owned()),
+    );
+    values.insert(
+        ":window_epoch_minute".to_string(),
+        AttributeValue::N(window_epoch_minute.to_string()),
+    );
+    values.insert(":updated_at".to_string(), AttributeValue::S(now_string()));
+    values.insert(
+        ":expires_at".to_string(),
+        AttributeValue::N((now_unix_secs + RATE_WINDOW_TTL_SECS).to_string()),
+    );
+    Update::builder()
+        .table_name(table_name)
+        .key(
+            "pk",
+            AttributeValue::S(caller_rate_pk(caller_id, window_epoch_minute)),
+        )
+        .update_expression(
+            "SET item_type = if_not_exists(item_type, :item_type), caller_id = if_not_exists(caller_id, :caller_id), window_epoch_minute = if_not_exists(window_epoch_minute, :window_epoch_minute), #updated_at = :updated_at, expires_at = :expires_at ADD request_count :one",
+        )
+        .condition_expression("attribute_not_exists(request_count) OR request_count < :limit")
+        .set_expression_attribute_names(Some(names))
+        .set_expression_attribute_values(Some(values))
+        .build()
+        .map_err(dynamodb_error)
+}
+
+fn caller_quota_release_update(table_name: &str, caller_id: &str) -> Result<Update> {
+    let mut names = HashMap::new();
+    names.insert("#updated_at".to_string(), "updated_at".to_string());
+    let mut values = HashMap::new();
+    values.insert(":one".to_string(), AttributeValue::N("1".to_string()));
+    values.insert(
+        ":minus_one".to_string(),
+        AttributeValue::N("-1".to_string()),
+    );
+    values.insert(":updated_at".to_string(), AttributeValue::S(now_string()));
+    values.insert(
+        ":expires_at".to_string(),
+        AttributeValue::N((now_unix_secs() + ACTIVE_JOB_TTL_SECS).to_string()),
+    );
+    Update::builder()
+        .table_name(table_name)
+        .key("pk", AttributeValue::S(caller_quota_pk(caller_id)))
+        .update_expression(
+            "SET #updated_at = :updated_at, expires_at = :expires_at ADD active_count :minus_one",
+        )
+        .condition_expression("active_count >= :one")
+        .set_expression_attribute_names(Some(names))
+        .set_expression_attribute_values(Some(values))
+        .build()
+        .map_err(dynamodb_error)
 }
 
 fn dedupe_item(key: &JobKey, record: &JobRecord) -> HashMap<String, AttributeValue> {
@@ -724,6 +990,10 @@ pub enum JobsError {
     Db(Box<dyn StdError + Send + Sync>),
     #[error("conflicting index job")]
     Conflict,
+    #[error("caller has too many active index jobs")]
+    ConcurrentLimit,
+    #[error("caller exceeded the indexing rate limit")]
+    RateLimited,
     #[error("index job not found")]
     NotFound,
 }
