@@ -63,6 +63,28 @@ ARN is present.
 ./deploy.sh --local-zip /path/to/lambda.zip
 ```
 
+## Graviton2-safe CPU baseline
+
+Deployable arm64 artifacts for this service must target Graviton2-class hosts:
+the serving Lambda bootstrap, the Lambda worker image binary, the Fargate worker
+image binary, and the `spur` binary copied into worker images. Build them through
+`deploy.sh`, which sources `graviton2-baseline.sh` and exports guarded
+`RUSTFLAGS`, `CFLAGS`, and `CXXFLAGS` for those artifact builds.
+
+The allowed Rust `target-cpu` values for deployable artifacts are
+`neoverse-n1` or `generic`; C/C++ flags must use `-mcpu=neoverse-n1` or a
+generic `-march=armv8-a...` baseline. Do not use `neoverse-v2` for Lambda or
+Fargate artifacts: Lambda arm64 and Fargate arm64 run on Graviton2-compatible
+hardware, while the remote build VM may support newer instructions. Normal
+local/dev `scripts/spur-cargo` builds may continue to use the VM default; this
+rule only applies to artifacts deployed by `infra/spur-context-service`.
+
+Run the guard regression check after changing these scripts:
+
+```bash
+bash infra/spur-context-service/test-graviton2-baseline.sh
+```
+
 ## Provisioned Concurrency
 
 To eliminate cold start entirely, set `concurrent_warm_instances`:
