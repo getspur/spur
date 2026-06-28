@@ -182,6 +182,13 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
         with:
           version: "v0.15.0"
+      - name: Configure macOS clang runtime link args
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          clang_rt="$(clang -print-resource-dir)/lib/darwin/libclang_rt.osx.a"
+          test -f "$clang_rt"
+          echo "RUSTFLAGS=${RUSTFLAGS:-} -C link-arg=$clang_rt" >> "$GITHUB_ENV"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
