@@ -515,6 +515,19 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_graph_backfill_vectors_command() {
+        Cli::command()
+            .try_get_matches_from([
+                "spur",
+                "graph",
+                "backfill-vectors",
+                "--workspace",
+                "--quiet",
+            ])
+            .expect("graph backfill-vectors should parse");
+    }
+
+    #[test]
     fn cli_accepts_graph_mcp_subcommand() {
         let root = PathBuf::from(".");
         let matches = Cli::command()
@@ -777,6 +790,21 @@ enum GraphCommands {
         /// Maximum commits per temporal shard.
         #[arg(long, hide = true, default_value_t = 5_000, value_name = "N")]
         temporal_max_commits_per_shard: usize,
+    },
+    /// Fill missing vectors in an existing graph sidecar without rebuilding the graph.
+    BackfillVectors {
+        /// Worktree root used to resolve the current graph artifact.
+        #[arg(long, conflicts_with = "workspace")]
+        root: Option<PathBuf>,
+        /// Resolve the current graph artifact from the worktree root.
+        #[arg(long)]
+        workspace: bool,
+        /// Existing artifact directory. Defaults to SPUR_CODE_GRAPH_INDEX or .spur/graph.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Suppress progress output.
+        #[arg(long)]
+        quiet: bool,
     },
     /// Run the code-graph MCP server over stdio, exposing the `code_*` tools
     /// (resolve/search/read/callers/callees/subgraph/history) against the
@@ -1309,6 +1337,17 @@ async fn run() -> Result<()> {
                     commands::graph::build(options)
                 }
             }
+            GraphCommands::BackfillVectors {
+                root,
+                workspace,
+                output,
+                quiet,
+            } => commands::graph::backfill_vectors(commands::graph::GraphVectorBackfillOptions {
+                root,
+                workspace,
+                output,
+                quiet,
+            }),
             GraphCommands::Mcp { root } => commands::mcp::run_graph_server(root).await,
         },
         Commands::Mcp { root } => commands::mcp::run_bundled_server(root).await,
