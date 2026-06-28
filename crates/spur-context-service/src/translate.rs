@@ -13,7 +13,7 @@ use serde::Deserialize;
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
 const DEFAULT_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
-const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
+pub(crate) const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
 
 #[derive(Debug)]
 struct AwsCredentials {
