@@ -181,6 +181,7 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
     load_ducklake_extensions(&conn, &catalog_dsn, &data_path)?;
     attach_ducklake(&conn, &catalog_dsn, &data_path)?;
+    acquire_postgres_gold_publish_lock(&conn, &catalog_dsn)?;
     ensure_catalog_schema(&conn)?;
     let generation = next_generation(&conn, &catalog_dsn)?;
 
@@ -1229,6 +1230,36 @@ fn postgres_generation_allocator_sql(alias: &str) -> PostgresGenerationAllocator
     }
 }
 
+fn acquire_postgres_gold_publish_lock(conn: &Connection, catalog_dsn: &str) -> Result<()> {
+    if !is_postgres_catalog(catalog_dsn) {
+        return Ok(());
+    }
+
+    let alias = format!("spur_publish_{}", uuid::Uuid::new_v4().simple());
+    let dsn = postgres_metadata_dsn(catalog_dsn_with_env_password(catalog_dsn).as_str());
+    conn.execute_batch(&format!(
+        "ATTACH '{}' AS {alias} (TYPE postgres);",
+        escape_sql_literal(&dsn)
+    ))
+    .context("failed to attach Postgres gold publish lock")?;
+
+    let sql = postgres_gold_publish_lock_sql(&alias);
+    conn.query_row(&sql.acquire_lock, [], |_| Ok(()))
+        .context("failed to acquire Postgres gold publish lock")
+}
+
+struct PostgresGoldPublishLockSql {
+    acquire_lock: String,
+}
+
+fn postgres_gold_publish_lock_sql(alias: &str) -> PostgresGoldPublishLockSql {
+    PostgresGoldPublishLockSql {
+        acquire_lock: format!(
+            "SELECT locked FROM postgres_query('{alias}', 'SELECT TRUE AS locked FROM pg_advisory_lock(7830668896113191951)')"
+        ),
+    }
+}
+
 fn reserve_transactional_generation(conn: &Connection) -> Result<i64> {
     run_transaction(conn, || {
         conn.execute(
@@ -2070,6 +2101,22 @@ mod tests {
             !sql.reserve_generation.to_ascii_uppercase().contains("MAX("),
             "generation allocation must not use MAX()+1: {}",
             sql.reserve_generation
+        );
+    }
+
+    #[test]
+    fn postgres_gold_publish_lock_uses_advisory_session_lock() {
+        let sql = postgres_gold_publish_lock_sql("pg_publish");
+
+        assert!(
+            sql.acquire_lock.contains("pg_advisory_lock"),
+            "Aurora gold publish must use a Postgres advisory lock: {}",
+            sql.acquire_lock
+        );
+        assert!(
+            sql.acquire_lock.contains("postgres_query('pg_publish'"),
+            "lock SQL must run against the attached Postgres metadata catalog: {}",
+            sql.acquire_lock
         );
     }
 }
