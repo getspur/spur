@@ -6,6 +6,7 @@ pub mod jobs;
 pub mod knowledge;
 #[cfg(feature = "lambda")]
 pub mod lambda;
+pub mod medallion;
 pub mod mcp;
 pub mod query;
 pub mod translate;
