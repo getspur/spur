@@ -294,6 +294,10 @@ CREATE TABLE IF NOT EXISTS gold.symbol_snapshots AS SELECT * FROM symbol_snapsho
 CREATE TABLE IF NOT EXISTS gold.temporal_edges AS SELECT * FROM temporal_edges LIMIT 0;
 CREATE TABLE IF NOT EXISTS gold.package_catalog AS SELECT * FROM package_catalog LIMIT 0;
 CREATE TABLE IF NOT EXISTS gold.refs AS SELECT * FROM refs LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.generation_allocator (
+    allocator_id INTEGER,
+    next_generation BIGINT
+);
 
 ALTER TABLE gold.nodes ADD COLUMN IF NOT EXISTS generation BIGINT;
 ALTER TABLE gold.edges ADD COLUMN IF NOT EXISTS generation BIGINT;
@@ -323,3 +327,8 @@ ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS translate_schema_versi
 ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS embed_text_version VARCHAR;
 ALTER TABLE gold.package_catalog SET PARTITIONED BY (source, package);
 ALTER TABLE gold.refs SET PARTITIONED BY (source, package);
+INSERT INTO gold.generation_allocator (allocator_id, next_generation)
+SELECT 1, 1
+WHERE NOT EXISTS (
+    SELECT 1 FROM gold.generation_allocator WHERE allocator_id = 1
+);
