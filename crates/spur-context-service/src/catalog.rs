@@ -382,7 +382,7 @@ pub(crate) fn export_frozen_snapshot(
                     location.local_manifest_path.display()
                 );
             }
-            publish_snapshot_pointer(&location, &manifest)?;
+            publish_snapshot_pointer_if_current_not_newer(&location, &manifest)?;
             return Ok(location.local_path);
         }
     } else if location.local_path.exists() || location.local_manifest_path.exists() {
@@ -394,7 +394,7 @@ pub(crate) fn export_frozen_snapshot(
                     location.local_manifest_path.display()
                 );
             }
-            publish_snapshot_pointer(&location, &manifest)?;
+            publish_snapshot_pointer_if_current_not_newer(&location, &manifest)?;
             return Ok(location.local_path);
         }
         bail!(
@@ -428,7 +428,7 @@ pub(crate) fn export_frozen_snapshot(
 
     publish_snapshot_file(&location)?;
     publish_snapshot_manifest(&location, &manifest)?;
-    publish_snapshot_pointer(&location, &manifest)?;
+    publish_snapshot_pointer_if_current_not_newer(&location, &manifest)?;
 
     Ok(location.local_path)
 }
@@ -790,6 +790,61 @@ fn publish_snapshot_pointer(
         publish_local_snapshot_pointer(&location.local_pointer_path, manifest)?;
     }
     Ok(())
+}
+
+fn publish_snapshot_pointer_if_current_not_newer(
+    location: &SnapshotLocation,
+    manifest: &FrozenSnapshotManifest,
+) -> Result<()> {
+    if let Some(current) = read_snapshot_pointer(location)? {
+        current.ensure_published()?;
+        if current.generation > manifest.generation {
+            return Ok(());
+        }
+        if current.generation == manifest.generation
+            && current.snapshot_uri != manifest.snapshot_uri
+        {
+            bail!(
+                "live frozen snapshot pointer for generation {} points at `{}`, not `{}`",
+                current.generation,
+                current.snapshot_uri,
+                manifest.snapshot_uri
+            );
+        }
+    }
+    publish_snapshot_pointer(location, manifest)
+}
+
+fn read_snapshot_pointer(location: &SnapshotLocation) -> Result<Option<FrozenSnapshotManifest>> {
+    let bytes = if let Some(uri) = &location.s3_pointer_uri {
+        match get_s3_object_bytes(uri) {
+            Ok(bytes) => bytes,
+            Err(error) if is_s3_not_found_error(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    } else {
+        match fs::read(&location.local_pointer_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to read frozen snapshot pointer `{}`",
+                        location.local_pointer_path.display()
+                    )
+                });
+            }
+        }
+    };
+    FrozenSnapshotManifest::from_json_slice(&bytes).map(Some)
+}
+
+fn is_s3_not_found_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("NoSuchKey")
+        || message.contains("NotFound")
+        || message.contains("Not Found")
+        || message.contains("404")
 }
 
 fn read_snapshot_manifest(location: &SnapshotLocation) -> Result<FrozenSnapshotManifest> {
@@ -1448,6 +1503,27 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn export_does_not_move_live_pointer_to_older_generation() -> Result<()> {
+        let root = unique_temp_dir("snapshot-pointer-monotonic")?;
+        let data_path = root.join("data");
+        let data_path = data_path.display().to_string();
+        let older_location = SnapshotLocation::for_data_path_and_generation(&data_path, 10)?;
+        let newer_location = SnapshotLocation::for_data_path_and_generation(&data_path, 11)?;
+        seed_published_snapshot(&older_location, &data_path, 10)?;
+        seed_published_snapshot(&newer_location, &data_path, 11)?;
+
+        let newer_manifest = read_snapshot_manifest(&newer_location)?;
+        publish_local_snapshot_pointer(&newer_location.local_pointer_path, &newer_manifest)?;
+
+        export_frozen_snapshot("sqlite:/unused/catalog.sqlite", &data_path, 10)?;
+
+        let current = read_local_snapshot_pointer(&newer_location.local_pointer_path)?;
+        assert_eq!(current.generation, 11);
+        assert_eq!(current.snapshot_uri, newer_manifest.snapshot_uri);
+        Ok(())
+    }
+
     fn unique_temp_dir(prefix: &str) -> Result<PathBuf> {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1456,6 +1532,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("{prefix}-{nanos}-{}", std::process::id()));
         fs::create_dir_all(&dir).with_context(|| format!("create temp dir `{}`", dir.display()))?;
         Ok(dir)
+    }
+
+    fn seed_published_snapshot(
+        location: &SnapshotLocation,
+        data_path: &str,
+        generation: i64,
+    ) -> Result<()> {
+        if let Some(parent) = location.local_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create snapshot dir `{}`", parent.display()))?;
+        }
+        fs::write(
+            &location.local_path,
+            format!("snapshot generation {generation}"),
+        )
+        .with_context(|| format!("write snapshot `{}`", location.local_path.display()))?;
+        let (sha256, bytes) = file_sha256_and_len(&location.local_path)?;
+        let manifest = FrozenSnapshotManifest::published(
+            generation,
+            location.snapshot_uri.clone(),
+            data_path.to_owned(),
+            sha256,
+            bytes,
+        );
+        publish_snapshot_manifest(location, &manifest)
     }
 
     #[test]
