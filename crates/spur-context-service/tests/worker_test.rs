@@ -22,11 +22,11 @@ use spur_context_service::jobs::{
 };
 use spur_context_service::worker::{
     build_graph, fetch_source, fetch_source_with_bronze_services, handle_spot_interruption,
-    persist_silver_graph_artifact, retrieve_bronze_source_by_coordinate,
+    persist_silver_graph_artifact, prepare_job_with_services, retrieve_bronze_source_by_coordinate,
     run_job_and_record_with_services, upload_with_owned_catalog_lease, BronzeArchiveStore,
     BronzeRawSource, BronzeRawSourceRegistry, CatalogDownload, CatalogLease, CatalogLeaseStore,
-    JobEnv, SilverArtifactStore, SilverGraphArtifact, SilverGraphArtifactRegistry,
-    SilverUploadedFile, StageTracker, WorkerError,
+    GraphArtifactBuilder, JobEnv, JobFromLayer, SilverArtifactStore, SilverGraphArtifact,
+    SilverGraphArtifactRegistry, SilverUploadedFile, StageTracker, WorkerError,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -61,6 +61,53 @@ fn job_env_from_env_reads_catalog_dsn() -> Result<()> {
     );
     assert_eq!(env.source_kind, "tarball");
     assert_eq!(env.catalog_dsn, "sqlite:/tmp/catalog.sqlite");
+    assert_eq!(env.from_layer, JobFromLayer::Source);
+    Ok(())
+}
+
+#[test]
+fn job_env_from_env_args_parses_reprocess_from_layer() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env = EnvGuard::set_all([
+        ("TASK_TOKEN", "task-token"),
+        ("JOB_ID", "job-123"),
+        ("PACKAGE", "serde"),
+        ("REVISION", "1.0.197"),
+        ("SOURCE", "registry:crates-io"),
+        (
+            "SOURCE_URL",
+            "https://crates.io/api/v1/crates/serde/1.0.197/download",
+        ),
+        ("SOURCE_KIND", "tarball"),
+        ("SPUR_CATALOG_DSN", "sqlite:/tmp/catalog.sqlite"),
+    ]);
+
+    let env = JobEnv::from_env_args(["worker", "--from-layer", "silver"])?;
+
+    assert_eq!(env.from_layer, JobFromLayer::Silver);
+    Ok(())
+}
+
+#[test]
+fn job_env_from_env_args_rejects_unknown_reprocess_layer() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env = EnvGuard::set_all([
+        ("TASK_TOKEN", "task-token"),
+        ("JOB_ID", "job-123"),
+        ("PACKAGE", "serde"),
+        ("REVISION", "1.0.197"),
+        ("SOURCE", "registry:crates-io"),
+        (
+            "SOURCE_URL",
+            "https://crates.io/api/v1/crates/serde/1.0.197/download",
+        ),
+        ("SOURCE_KIND", "tarball"),
+        ("SPUR_CATALOG_DSN", "sqlite:/tmp/catalog.sqlite"),
+    ]);
+
+    let error = JobEnv::from_env_args(["worker", "--from-layer", "raw"]).unwrap_err();
+
+    assert!(error.to_string().contains("unsupported --from-layer `raw`"));
     Ok(())
 }
 
@@ -292,6 +339,106 @@ async fn silver_upload_writes_validates_manifest_before_registering() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn reprocess_from_silver_downloads_registered_silver_without_fetch_or_build() -> Result<()> {
+    let root = unique_temp_dir("worker-reprocess-silver")?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let manifest = worker_silver_manifest();
+    let silver_store = FakeSilverArtifactStore::with_manifest(events.clone(), manifest.clone());
+    let silver_registry = FakeSilverRegistry::with_row(events.clone(), silver_row(&manifest));
+    let bronze_registry = FakeBronzeRegistry::default();
+    let bronze_store = FakeBronzeArchiveStore::default();
+    let graph_builder = FakeGraphBuilder::default();
+    let mut env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+    env.from_layer = JobFromLayer::Silver;
+
+    let prepared = prepare_job_with_services(
+        &env,
+        &StageTracker::new(),
+        &bronze_registry,
+        &bronze_store,
+        &silver_registry,
+        &silver_store,
+        &graph_builder,
+    )
+    .await?;
+
+    assert_eq!(bronze_store.downloads(), 0);
+    assert_eq!(bronze_store.uploads(), 0);
+    assert_eq!(graph_builder.calls(), 0);
+    assert_eq!(silver_registry.lookups(), 1);
+    assert_eq!(silver_registry.registers(), 0);
+    assert_eq!(prepared.source_path(), None);
+    assert!(prepared.artifact_dir().join("nodes.parquet").is_file());
+    assert_eq!(prepared.artifact_manifest(), Some(&manifest));
+    let lineage = prepared.lineage().context("lineage should be stamped")?;
+    assert_eq!(lineage.bronze_content_sha256, "bronze-sha256");
+    assert_eq!(lineage.silver_graph_content_hash, "graph-hash-123");
+    assert_eq!(lineage.builder_version, "builder-v1");
+    assert_eq!(lineage.translate_schema_version, "translate-v1");
+    assert_eq!(lineage.embed_text_version, "v4-embeddinggemma-300m-titled");
+
+    drop(prepared);
+    fs::remove_dir_all(root).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn reprocess_from_bronze_restores_bronze_and_persists_rebuilt_silver() -> Result<()> {
+    let root = unique_temp_dir("worker-reprocess-bronze")?;
+    let artifact_dir = root.join("artifact");
+    let artifact_dir_str = artifact_dir.display().to_string();
+    let _env_guard = EnvGuard::set_all([
+        (
+            "SPUR_CONTEXT_WORKER_ARTIFACT_DIR",
+            artifact_dir_str.as_str(),
+        ),
+        ("SPUR_GRAPH_BUILDER_VERSION", "builder-v1"),
+    ]);
+    let archive = demo_tarball(&root)?;
+    let archive_bytes = fs::read(&archive).context("read archive")?;
+    let bronze_store = FakeBronzeArchiveStore::default();
+    let content_sha256 = bronze_store.seed_object(
+        "bronze/registry:crates-io/demo/0.1.0/source.tar.gz",
+        archive_bytes,
+    );
+    let bronze_registry = FakeBronzeRegistry::with_row(bronze_row(
+        "http://127.0.0.1:1/unreachable.tar.gz",
+        &content_sha256,
+        fs::metadata(&archive)?.len(),
+    ));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let silver_store = FakeSilverArtifactStore::new(events.clone());
+    let silver_registry = FakeSilverRegistry::new(events.clone());
+    let graph_builder = FakeGraphBuilder::writes_fixture();
+    let mut env = demo_job_env("http://127.0.0.1:1/unreachable.tar.gz");
+    env.from_layer = JobFromLayer::Bronze;
+
+    let prepared = prepare_job_with_services(
+        &env,
+        &StageTracker::new(),
+        &bronze_registry,
+        &bronze_store,
+        &silver_registry,
+        &silver_store,
+        &graph_builder,
+    )
+    .await?;
+
+    assert_eq!(bronze_store.downloads(), 1);
+    assert_eq!(bronze_store.uploads(), 0);
+    assert_eq!(bronze_registry.registers(), 0);
+    assert_eq!(graph_builder.calls(), 1);
+    let rows = silver_registry.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].bronze_content_sha256, content_sha256);
+    assert_eq!(rows[0].builder_version, "builder-v1");
+    assert!(prepared.source_path().is_some());
+    assert!(prepared.artifact_dir().join("nodes.parquet").is_file());
+    assert!(prepared.artifact_manifest().is_some());
+    Ok(())
+}
+
 #[test]
 fn fetch_source_rejects_localhost_url_without_escape_hatch() -> Result<()> {
     let _guard = ENV_LOCK.lock().unwrap();
@@ -333,6 +480,7 @@ async fn spot_interruption_handler_writes_checkpoint() -> Result<()> {
         source_url: "https://github.com/example/demo.git".to_owned(),
         source_kind: "git".to_owned(),
         catalog_dsn: "sqlite:/tmp/catalog.sqlite".to_owned(),
+        from_layer: JobFromLayer::Source,
     };
 
     handle_spot_interruption(&env, "translate").await?;
@@ -393,6 +541,7 @@ async fn lambda_worker_records_failed_job_without_sfn_callback() -> Result<()> {
         source_url: "https://github.com/example/demo".to_owned(),
         source_kind: "unsupported".to_owned(),
         catalog_dsn: "sqlite:/tmp/catalog.sqlite".to_owned(),
+        from_layer: JobFromLayer::Source,
     };
 
     let err = run_job_and_record_with_services(&env, store.clone(), leases)
@@ -546,6 +695,7 @@ async fn spot_interruption_handler_writes_checkpoint_to_s3() -> Result<()> {
         source_url: "https://github.com/example/demo.git".to_owned(),
         source_kind: "git".to_owned(),
         catalog_dsn: "sqlite:/tmp/catalog.sqlite".to_owned(),
+        from_layer: JobFromLayer::Source,
     };
 
     handle_spot_interruption(&env, "fetch").await?;
@@ -642,6 +792,7 @@ fn demo_job_env(source_url: &str) -> JobEnv {
         source_url: source_url.to_owned(),
         source_kind: "tarball".to_owned(),
         catalog_dsn: "sqlite:/tmp/catalog.sqlite".to_owned(),
+        from_layer: JobFromLayer::Source,
     }
 }
 
@@ -701,6 +852,28 @@ fn write_silver_artifact_fixture(artifact_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn worker_silver_manifest() -> spur_context_service::medallion::SilverManifest {
+    spur_context_service::medallion::SilverManifest {
+        schema_hash: "sha256:test-schema".to_owned(),
+        files: [
+            "nodes.parquet",
+            "edges.parquet",
+            "edges_unresolved.parquet",
+            "files.parquet",
+            "file_manifests.parquet",
+            "code_symbols.lance/part.parquet",
+            "sections.lancedb/part.parquet",
+        ]
+        .into_iter()
+        .map(|path| spur_context_service::medallion::SilverManifestFile {
+            path: path.to_owned(),
+            size_bytes: 1,
+            etag: format!("\"{path}\""),
+        })
+        .collect(),
+    }
+}
+
 fn event_index(events: &[String], prefix: &str) -> Option<usize> {
     events
         .iter()
@@ -726,6 +899,68 @@ fn bronze_row(source_url: &str, content_sha256: &str, bytes: u64) -> BronzeRawSo
     }
 }
 
+fn silver_row(manifest: &spur_context_service::medallion::SilverManifest) -> SilverGraphArtifact {
+    SilverGraphArtifact {
+        source: "registry:crates-io".to_owned(),
+        package: "demo".to_owned(),
+        version: "0.1.0".to_owned(),
+        revision_kind: "semver".to_owned(),
+        semver_major: Some(0),
+        semver_minor: Some(1),
+        semver_patch: Some(0),
+        bronze_content_sha256: "bronze-sha256".to_owned(),
+        builder_version: "builder-v1".to_owned(),
+        graph_content_hash: "graph-hash-123".to_owned(),
+        artifact_s3_prefix: "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/"
+            .to_owned(),
+        manifest_uri:
+            "s3://silver-test/silver/registry:crates-io/demo/0.1.0/builder-v1/manifest.json"
+                .to_owned(),
+        manifest_schema_hash: manifest.schema_hash.clone(),
+        node_count: 7,
+        edge_count: 11,
+        file_count: 3,
+        embedding_count: 5,
+        built_at: 1_800_000_000,
+        build_status: "success".to_owned(),
+    }
+}
+
+#[derive(Default)]
+struct FakeGraphBuilder {
+    calls: AtomicUsize,
+    write_fixture: bool,
+}
+
+impl FakeGraphBuilder {
+    fn writes_fixture() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            write_fixture: true,
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl GraphArtifactBuilder for FakeGraphBuilder {
+    async fn build(
+        &self,
+        _source_path: &Path,
+        artifact_base: &Path,
+    ) -> Result<PathBuf, WorkerError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.write_fixture {
+            write_silver_artifact_fixture(artifact_base)
+                .map_err(|error| WorkerError::Build(format!("write fake artifact: {error:#}")))?;
+        }
+        Ok(artifact_base.to_path_buf())
+    }
+}
+
 struct FakeSilverArtifactStore {
     events: Arc<Mutex<Vec<String>>>,
     manifest: Mutex<Option<spur_context_service::medallion::SilverManifest>>,
@@ -736,6 +971,16 @@ impl FakeSilverArtifactStore {
         Self {
             events,
             manifest: Mutex::new(None),
+        }
+    }
+
+    fn with_manifest(
+        events: Arc<Mutex<Vec<String>>>,
+        manifest: spur_context_service::medallion::SilverManifest,
+    ) -> Self {
+        Self {
+            events,
+            manifest: Mutex::new(Some(manifest)),
         }
     }
 
@@ -790,19 +1035,43 @@ impl SilverArtifactStore for FakeSilverArtifactStore {
         Ok(())
     }
 
+    async fn download_manifest(
+        &self,
+        manifest_uri: &str,
+    ) -> Result<spur_context_service::medallion::SilverManifest, WorkerError> {
+        self.events
+            .lock()
+            .expect("events lock")
+            .push(format!("download_manifest:{manifest_uri}"));
+        self.manifest()
+            .ok_or_else(|| WorkerError::Build("missing fake silver manifest".to_owned()))
+    }
+
     async fn download_manifest_file(
         &self,
-        _manifest_uri: &str,
-        _relative_path: &str,
-        _dest: &Path,
+        manifest_uri: &str,
+        relative_path: &str,
+        dest: &Path,
     ) -> Result<(), WorkerError> {
-        unimplemented!("not needed for silver upload test")
+        self.events
+            .lock()
+            .expect("events lock")
+            .push(format!("download_file:{manifest_uri}:{relative_path}"));
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| WorkerError::Build(format!("fake mkdir: {error}")))?;
+        }
+        fs::write(dest, format!("fixture:{relative_path}"))
+            .map_err(|error| WorkerError::Build(format!("fake silver download: {error}")))?;
+        Ok(())
     }
 }
 
 struct FakeSilverRegistry {
     events: Arc<Mutex<Vec<String>>>,
     rows: Mutex<Vec<SilverGraphArtifact>>,
+    lookups: AtomicUsize,
+    registers: AtomicUsize,
 }
 
 impl FakeSilverRegistry {
@@ -810,17 +1079,59 @@ impl FakeSilverRegistry {
         Self {
             events,
             rows: Mutex::new(Vec::new()),
+            lookups: AtomicUsize::new(0),
+            registers: AtomicUsize::new(0),
+        }
+    }
+
+    fn with_row(events: Arc<Mutex<Vec<String>>>, row: SilverGraphArtifact) -> Self {
+        Self {
+            events,
+            rows: Mutex::new(vec![row]),
+            lookups: AtomicUsize::new(0),
+            registers: AtomicUsize::new(0),
         }
     }
 
     fn rows(&self) -> Vec<SilverGraphArtifact> {
         self.rows.lock().expect("silver registry lock").clone()
     }
+
+    fn lookups(&self) -> usize {
+        self.lookups.load(Ordering::SeqCst)
+    }
+
+    fn registers(&self) -> usize {
+        self.registers.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl SilverGraphArtifactRegistry for FakeSilverRegistry {
+    async fn lookup(
+        &self,
+        source: &str,
+        package: &str,
+        version: &str,
+    ) -> Result<Option<SilverGraphArtifact>, WorkerError> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .rows
+            .lock()
+            .expect("silver registry lock")
+            .iter()
+            .rev()
+            .find(|row| {
+                row.source == source
+                    && row.package == package
+                    && row.version == version
+                    && row.build_status == "success"
+            })
+            .cloned())
+    }
+
     async fn register(&self, row: &SilverGraphArtifact) -> Result<(), WorkerError> {
+        self.registers.fetch_add(1, Ordering::SeqCst);
         self.events
             .lock()
             .expect("events lock")

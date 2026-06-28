@@ -78,6 +78,7 @@ fn catalog_tables_sql_creates_medallion_schemas_and_gold_catalog_columns() -> Re
         "silver_graph_content_hash",
         "builder_version",
         "translate_schema_version",
+        "embed_text_version",
     ] {
         assert_eq!(
             nullable_column_count(&conn, "gold", "package_catalog", column)?,

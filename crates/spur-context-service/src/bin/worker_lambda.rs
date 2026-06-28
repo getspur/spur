@@ -6,7 +6,7 @@ use anyhow::Context as _;
 use lambda_runtime::{Error, LambdaEvent};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use spur_context_service::worker::{run_job_and_record, JobEnv};
+use spur_context_service::worker::{run_job_and_record, JobEnv, JobFromLayer};
 
 #[derive(Debug, Deserialize)]
 struct LambdaWorkerEvent {
@@ -47,6 +47,7 @@ async fn handler(event: LambdaEvent<LambdaWorkerEvent>) -> Result<Value, Error> 
         source_url: payload.source_url,
         source_kind: payload.source_kind,
         catalog_dsn,
+        from_layer: JobFromLayer::Source,
     };
 
     match run_job_and_record(&env).await {
