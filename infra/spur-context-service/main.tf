@@ -66,6 +66,51 @@ resource "aws_dynamodb_table" "catalog_leases" {
   }
 }
 
+resource "aws_db_subnet_group" "catalog" {
+  name        = "${var.aurora_cluster_identifier}-subnets"
+  description = "Private subnets for the SPUR context ingest catalog"
+  subnet_ids  = local.aurora_subnet_ids
+}
+
+resource "aws_rds_cluster" "catalog" {
+  cluster_identifier = var.aurora_cluster_identifier
+
+  engine         = "aurora-postgresql"
+  engine_mode    = "provisioned"
+  engine_version = var.aurora_engine_version
+  database_name  = var.aurora_database_name
+
+  master_username             = var.aurora_master_username
+  manage_master_user_password = true
+
+  db_subnet_group_name   = aws_db_subnet_group.catalog.name
+  vpc_security_group_ids = [aws_security_group.catalog_db.id]
+
+  backup_retention_period = var.aurora_backup_retention_days
+  copy_tags_to_snapshot   = true
+  deletion_protection     = var.aurora_deletion_protection
+  skip_final_snapshot     = true
+  storage_encrypted       = true
+
+  serverlessv2_scaling_configuration {
+    min_capacity             = 0
+    max_capacity             = var.aurora_max_acu
+    seconds_until_auto_pause = var.aurora_seconds_until_auto_pause
+  }
+}
+
+resource "aws_rds_cluster_instance" "catalog_writer" {
+  identifier         = "${var.aurora_cluster_identifier}-writer-1"
+  cluster_identifier = aws_rds_cluster.catalog.id
+
+  engine         = aws_rds_cluster.catalog.engine
+  engine_version = aws_rds_cluster.catalog.engine_version
+  instance_class = "db.serverless"
+
+  db_subnet_group_name = aws_db_subnet_group.catalog.name
+  publicly_accessible  = false
+}
+
 resource "aws_cloudwatch_log_group" "lambda" {
   name              = "/aws/lambda/spur-context-service"
   retention_in_days = 14

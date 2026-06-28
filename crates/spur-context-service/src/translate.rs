@@ -10,10 +10,11 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
 use serde::Deserialize;
 
-use crate::catalog::{export_frozen_snapshot, gold_table};
+use crate::catalog::{
+    catalog_dsn_with_env_password, ducklake_data_path, export_frozen_snapshot, gold_table,
+};
 use crate::medallion::SilverManifest;
 
-const DEFAULT_DATA_PATH: &str = "s3://spur-context/gold/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
 pub const DEFAULT_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
 pub const DEFAULT_TRANSLATE_SCHEMA_VERSION: &str = "translate-v1";
@@ -173,11 +174,12 @@ impl SidecarSource {
 pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<TranslateStats> {
     validate_options(opts)?;
     let revision = revision_parts(&opts.revision, &opts.revision_kind)?;
-    let data_path = ducklake_data_path(&opts.catalog_dsn)?;
+    let catalog_dsn = catalog_dsn_with_env_password(&opts.catalog_dsn);
+    let data_path = ducklake_data_path(&catalog_dsn)?;
 
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
-    load_ducklake_extensions(&conn, &opts.catalog_dsn, &data_path)?;
-    attach_ducklake(&conn, &opts.catalog_dsn, &data_path)?;
+    load_ducklake_extensions(&conn, &catalog_dsn, &data_path)?;
+    attach_ducklake(&conn, &catalog_dsn, &data_path)?;
     ensure_catalog_schema(&conn)?;
     // Generation monotonicity currently depends on the catalog lease serializing
     // translate workers. Before the lease is removed for concurrent Aurora writers,
@@ -231,7 +233,7 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     // the worker uploads the catalog metadata back to S3.
     conn.execute("FORCE CHECKPOINT", [])
         .context("failed to force checkpoint DuckLake")?;
-    export_frozen_snapshot(&opts.catalog_dsn, &data_path)
+    export_frozen_snapshot(&catalog_dsn, &data_path)
         .context("failed to export frozen DuckLake catalog snapshot")?;
 
     Ok(TranslateStats {
@@ -1725,42 +1727,6 @@ fn run_transaction<T>(conn: &Connection, f: impl FnOnce() -> Result<T>) -> Resul
     }
 }
 
-fn ducklake_data_path(catalog_dsn: &str) -> Result<String> {
-    if let Ok(path) = std::env::var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH") {
-        if !path.trim().is_empty() {
-            create_local_data_path_if_needed(&path)?;
-            return Ok(path);
-        }
-    }
-
-    if let Some(sqlite_path) = sqlite_catalog_path(catalog_dsn) {
-        let path = sqlite_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("data");
-        fs::create_dir_all(&path)
-            .with_context(|| format!("failed to create DuckLake data path `{}`", path.display()))?;
-        return Ok(path.display().to_string());
-    }
-
-    Ok(DEFAULT_DATA_PATH.to_owned())
-}
-
-fn create_local_data_path_if_needed(path: &str) -> Result<()> {
-    if path.contains("://") || path == ":memory:" {
-        return Ok(());
-    }
-    fs::create_dir_all(path)
-        .with_context(|| format!("failed to create DuckLake data path `{path}`"))?;
-    Ok(())
-}
-
-fn sqlite_catalog_path(catalog_dsn: &str) -> Option<PathBuf> {
-    let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
-    let path = dsn.strip_prefix("sqlite:")?;
-    (path != ":memory:").then(|| PathBuf::from(path))
-}
-
 fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
     conn.execute_batch("INSTALL ducklake; LOAD ducklake;")
         .context("failed to load ducklake extension")?;
@@ -1941,6 +1907,13 @@ fn skip_lance_sidecar_or_fail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().expect("env lock should not be poisoned")
+    }
 
     #[test]
     fn insert_from_source_fails_when_landed_delta_mismatches_source_count() -> Result<()> {
@@ -1989,5 +1962,25 @@ mod tests {
         );
         assert!(!rows_inserted.contains_key("nodes"));
         Ok(())
+    }
+
+    #[test]
+    fn ducklake_data_path_requires_env_for_postgres_catalog() {
+        let _guard = lock_env();
+        let previous = std::env::var_os("SPUR_CONTEXT_DUCKLAKE_DATA_PATH");
+        std::env::remove_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH");
+
+        let error = ducklake_data_path("postgres:host=localhost port=5432 dbname=spur_context")
+            .expect_err("postgres catalogs must not fall back to a hard-coded S3 data path");
+
+        match previous {
+            Some(value) => std::env::set_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH", value),
+            None => std::env::remove_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH"),
+        }
+
+        assert!(
+            format!("{error:#}").contains("SPUR_CONTEXT_DUCKLAKE_DATA_PATH"),
+            "unexpected error: {error:#}"
+        );
     }
 }
