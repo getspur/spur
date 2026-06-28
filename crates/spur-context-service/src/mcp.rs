@@ -401,9 +401,7 @@ pub async fn route_index(
             let _ = jobs
                 .mark_failed(&job.job_id, "record_execution_started", &detail)
                 .await;
-            return Err(jobs_error(
-                "external_index record_execution_started failed",
-            )(error));
+            return Err(jobs_error("external_index record_execution_started failed")(error));
         }
     };
 
@@ -885,7 +883,7 @@ fn updated_at_age(updated_at: &str) -> Option<Duration> {
         .as_millis();
     let elapsed = now_millis.saturating_sub(updated_millis);
     Some(Duration::from_millis(
-        elapsed.min(u128::from(u64::MAX)) as u64,
+        elapsed.min(u128::from(u64::MAX)) as u64
     ))
 }
 
