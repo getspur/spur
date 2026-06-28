@@ -17,9 +17,9 @@ variable "lambda_zip_path" {
 }
 
 variable "catalog_s3_uri" {
-  description = "S3 URI of the DuckLake catalog file"
+  description = "S3 URI of the frozen serving DuckLake snapshot pointer or snapshot file"
   type        = string
-  default     = "s3://spur-context/catalog/catalog.ducklake"
+  default     = "s3://spur-context/gold/catalog-snapshot/current.json"
 }
 
 variable "context_ducklake_data_path" {
