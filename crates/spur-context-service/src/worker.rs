@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::abuse;
 use crate::catalog::connect_ducklake_with_data_path;
 use crate::jobs::{DynamoDbJobStore, JobStatus, JobStore};
+use crate::medallion::{SilverManifest, SilverManifestFile, SILVER_PREFIX};
 use crate::translate::{
     translate_artifact_to_ducklake, TranslateOptions, TranslateStats, CATALOG_TABLES_SQL,
 };
@@ -33,6 +34,7 @@ use crate::translate::{
 const DEFAULT_ARTIFACT_DIR: &str = "/tmp/artifact";
 const DEFAULT_CHECKPOINT_BUCKET: &str = "spur-context";
 const DEFAULT_BRONZE_BUCKET: &str = "spur-context";
+const DEFAULT_SILVER_BUCKET: &str = "spur-context";
 const DEFAULT_TARBALL_SIZE_CAP_BYTES: usize = 500 * 1024 * 1024;
 const HTTP_HEADER_CAP_BYTES: usize = 64 * 1024;
 const ECS_CREDENTIALS_CAP_BYTES: usize = 64 * 1024;
@@ -400,10 +402,26 @@ async fn prepare_job(
     .map_err(|error| WorkerError::Build(format!("worker join failed: {error}")))??;
     log_stage_completed("build_graph", stage_started);
 
+    stage.set_async("persist_silver").await;
+    let stage_started = log_stage_started("persist_silver");
+    let persisted_silver =
+        persist_silver_graph_artifact_with_default_services(env, &artifact_dir, leases).await?;
+    let silver_artifact_dir = workspace.path.join("silver_artifact");
+    let silver_store = S3SilverArtifactStore::new(silver_bucket());
+    download_silver_artifact_from_manifest(
+        &persisted_silver.row.manifest_uri,
+        &persisted_silver.manifest,
+        &silver_artifact_dir,
+        &silver_store,
+    )
+    .await?;
+    log_stage_completed("persist_silver", stage_started);
+
     Ok(PreparedJob {
         _workspace: workspace,
         source_path,
-        artifact_dir,
+        artifact_dir: silver_artifact_dir,
+        artifact_manifest: Some(persisted_silver.manifest),
     })
 }
 
@@ -414,8 +432,12 @@ fn translate_prepared_blocking(
 ) -> Result<TranslateStats, WorkerError> {
     stage.set_current("translate");
     let stage_started = log_stage_started("translate");
-    let stats =
-        translate_with_source_root(&prepared.artifact_dir, Some(&prepared.source_path), env)?;
+    let stats = translate_with_source_root(
+        &prepared.artifact_dir,
+        Some(&prepared.source_path),
+        prepared.artifact_manifest.clone(),
+        env,
+    )?;
     log_stage_completed("translate", stage_started);
     stage.set_current("complete");
     Ok(stats)
@@ -460,6 +482,62 @@ pub trait BronzeArchiveStore: Send + Sync {
         content_sha256: &str,
         path: &Path,
     ) -> Result<String, WorkerError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SilverGraphArtifact {
+    pub source: String,
+    pub package: String,
+    pub version: String,
+    pub revision_kind: String,
+    pub semver_major: Option<i32>,
+    pub semver_minor: Option<i32>,
+    pub semver_patch: Option<i32>,
+    pub bronze_content_sha256: String,
+    pub builder_version: String,
+    pub graph_content_hash: String,
+    pub artifact_s3_prefix: String,
+    pub manifest_uri: String,
+    pub manifest_schema_hash: String,
+    pub node_count: u64,
+    pub edge_count: u64,
+    pub file_count: u64,
+    pub embedding_count: u64,
+    pub built_at: i64,
+    pub build_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SilverUploadedFile {
+    pub s3_uri: String,
+    pub etag: String,
+    pub size_bytes: u64,
+}
+
+#[async_trait]
+pub trait SilverArtifactStore: Send + Sync {
+    async fn upload_file(&self, key: &str, path: &Path) -> Result<SilverUploadedFile, WorkerError>;
+    async fn upload_manifest(
+        &self,
+        key: &str,
+        manifest: &SilverManifest,
+    ) -> Result<String, WorkerError>;
+    async fn validate_manifest(
+        &self,
+        manifest_uri: &str,
+        manifest: &SilverManifest,
+    ) -> Result<(), WorkerError>;
+    async fn download_manifest_file(
+        &self,
+        manifest_uri: &str,
+        relative_path: &str,
+        dest: &Path,
+    ) -> Result<(), WorkerError>;
+}
+
+#[async_trait]
+pub trait SilverGraphArtifactRegistry: Send + Sync {
+    async fn register(&self, row: &SilverGraphArtifact) -> Result<(), WorkerError>;
 }
 
 #[derive(Debug)]
@@ -709,6 +787,111 @@ async fn release_bronze_catalog_lease_best_effort(
     }
 }
 
+async fn persist_silver_graph_artifact_with_default_services(
+    env: &JobEnv,
+    artifact_dir: &Path,
+    leases: &dyn CatalogLeaseStore,
+) -> Result<PersistedSilverArtifact, WorkerError> {
+    let bronze_content_sha256 = registered_bronze_content_sha256(env).await?;
+    let builder_version = silver_builder_version(artifact_dir)?;
+    let store = S3SilverArtifactStore::new(silver_bucket());
+
+    if env.catalog_dsn.starts_with("s3://") {
+        let lease = leases
+            .acquire(&env.catalog_dsn, &env.job_id)
+            .await
+            .map_err(|error| {
+                WorkerError::Build(format!("acquire silver catalog lease: {error:#}"))
+            })?;
+        let result = async {
+            let catalog_dl = CatalogDownload::fetch(&env.catalog_dsn)
+                .await
+                .map_err(|error| {
+                    WorkerError::Build(format!("download silver catalog: {error:#}"))
+                })?;
+            let Some(catalog_dl) = catalog_dl else {
+                return Err(WorkerError::Build(
+                    "S3 silver catalog download returned no local catalog".to_owned(),
+                ));
+            };
+            let registry =
+                DuckLakeSilverRegistry::new(catalog_dl.local_path().to_string_lossy().to_string());
+            let persisted = persist_silver_graph_artifact_with_manifest(
+                env,
+                artifact_dir,
+                &bronze_content_sha256,
+                &builder_version,
+                &store,
+                &registry,
+            )
+            .await?;
+            upload_with_owned_catalog_lease(leases, &lease, || catalog_dl.upload())
+                .await
+                .map_err(|error| WorkerError::Build(format!("upload silver catalog: {error:#}")))?;
+            Ok(persisted)
+        }
+        .await;
+        release_bronze_catalog_lease_best_effort(leases, &lease, env).await;
+        return result;
+    }
+
+    let registry = DuckLakeSilverRegistry::new(env.catalog_dsn.clone());
+    persist_silver_graph_artifact_with_manifest(
+        env,
+        artifact_dir,
+        &bronze_content_sha256,
+        &builder_version,
+        &store,
+        &registry,
+    )
+    .await
+}
+
+async fn registered_bronze_content_sha256(env: &JobEnv) -> Result<String, WorkerError> {
+    let row = if env.catalog_dsn.starts_with("s3://") {
+        lookup_bronze_row_in_s3_catalog(env).await?
+    } else {
+        let registry = DuckLakeBronzeRegistry::new(env.catalog_dsn.clone());
+        registry
+            .lookup(&env.source, &env.package, &env.revision)
+            .await?
+    };
+    row.map(|row| row.content_sha256).ok_or_else(|| {
+        WorkerError::Build(format!(
+            "bronze raw source missing after fetch for {}/{}/{}",
+            env.source, env.package, env.revision
+        ))
+    })
+}
+
+fn silver_builder_version(artifact_dir: &Path) -> Result<String, WorkerError> {
+    if let Some(version) = optional_env("SPUR_GRAPH_BUILDER_VERSION") {
+        return Ok(version);
+    }
+    let manifest_path = artifact_dir.join("manifest.json");
+    let content = fs::read_to_string(&manifest_path).map_err(|error| {
+        WorkerError::Build(format!(
+            "failed to read graph artifact manifest `{}`: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let manifest: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+        WorkerError::Build(format!(
+            "invalid graph artifact manifest `{}`: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let schema = manifest
+        .pointer("/schema_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown-schema");
+    let extractor = manifest
+        .pointer("/extractor_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown-extractor");
+    Ok(format!("{schema}:{extractor}"))
+}
+
 pub fn fetch_source(
     source_url: &str,
     source_kind: &str,
@@ -915,6 +1098,563 @@ impl BronzeArchiveStore for S3BronzeArchiveStore {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DuckLakeSilverRegistry {
+    catalog_dsn: String,
+}
+
+impl DuckLakeSilverRegistry {
+    pub fn new(catalog_dsn: impl Into<String>) -> Self {
+        Self {
+            catalog_dsn: catalog_dsn.into(),
+        }
+    }
+
+    fn connect(&self) -> Result<Connection, WorkerError> {
+        let data_path = bronze_ducklake_data_path(&self.catalog_dsn)
+            .map_err(|error| WorkerError::Build(format!("silver catalog data path: {error}")))?;
+        let conn = connect_ducklake_with_data_path(&self.catalog_dsn, &data_path)
+            .map_err(|error| WorkerError::Build(format!("connect silver catalog: {error:#}")))?;
+        conn.execute_batch(CATALOG_TABLES_SQL).map_err(|error| {
+            WorkerError::Build(format!("ensure silver graph_artifacts schema: {error:#}"))
+        })?;
+        Ok(conn)
+    }
+}
+
+#[async_trait]
+impl SilverGraphArtifactRegistry for DuckLakeSilverRegistry {
+    async fn register(&self, row: &SilverGraphArtifact) -> Result<(), WorkerError> {
+        let node_count = i64::try_from(row.node_count)
+            .map_err(|_| WorkerError::Build(format!("node count too large: {}", row.node_count)))?;
+        let edge_count = i64::try_from(row.edge_count)
+            .map_err(|_| WorkerError::Build(format!("edge count too large: {}", row.edge_count)))?;
+        let file_count = i64::try_from(row.file_count)
+            .map_err(|_| WorkerError::Build(format!("file count too large: {}", row.file_count)))?;
+        let embedding_count = i64::try_from(row.embedding_count).map_err(|_| {
+            WorkerError::Build(format!(
+                "embedding count too large: {}",
+                row.embedding_count
+            ))
+        })?;
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO silver.graph_artifacts (
+                source, package, version, revision_kind,
+                semver_major, semver_minor, semver_patch,
+                bronze_content_sha256, builder_version, graph_content_hash,
+                artifact_s3_prefix, manifest_uri, manifest_schema_hash,
+                node_count, edge_count, file_count, embedding_count,
+                built_at, build_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(to_timestamp(?) AS TIMESTAMP), ?)
+            "#,
+            params![
+                row.source,
+                row.package,
+                row.version,
+                row.revision_kind,
+                row.semver_major,
+                row.semver_minor,
+                row.semver_patch,
+                row.bronze_content_sha256,
+                row.builder_version,
+                row.graph_content_hash,
+                row.artifact_s3_prefix,
+                row.manifest_uri,
+                row.manifest_schema_hash,
+                node_count,
+                edge_count,
+                file_count,
+                embedding_count,
+                row.built_at,
+                row.build_status,
+            ],
+        )
+        .map_err(|error| WorkerError::Build(format!("register silver graph artifact: {error}")))?;
+        conn.execute("FORCE CHECKPOINT", [])
+            .map_err(|error| WorkerError::Build(format!("checkpoint silver catalog: {error}")))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct S3SilverArtifactStore {
+    bucket: String,
+}
+
+impl S3SilverArtifactStore {
+    pub fn new(bucket: impl Into<String>) -> Self {
+        Self {
+            bucket: bucket.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl SilverArtifactStore for S3SilverArtifactStore {
+    async fn upload_file(&self, key: &str, path: &Path) -> Result<SilverUploadedFile, WorkerError> {
+        let data = tokio::fs::read(path).await.map_err(|error| {
+            WorkerError::Build(format!(
+                "failed to read silver file `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        let size_bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        let resp = s3_client()
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .if_none_match("*")
+            .body(ByteStream::from(data))
+            .send()
+            .await
+            .map_err(|error| WorkerError::Build(format!("upload silver file `{key}`: {error}")))?;
+        let etag = resp
+            .e_tag()
+            .ok_or_else(|| WorkerError::Build(format!("silver upload `{key}` returned no ETag")))?
+            .to_owned();
+        Ok(SilverUploadedFile {
+            s3_uri: format!("s3://{}/{key}", self.bucket),
+            etag,
+            size_bytes,
+        })
+    }
+
+    async fn upload_manifest(
+        &self,
+        key: &str,
+        manifest: &SilverManifest,
+    ) -> Result<String, WorkerError> {
+        let data = serde_json::to_vec_pretty(manifest)
+            .map_err(|error| WorkerError::Build(format!("encode silver manifest: {error}")))?;
+        s3_client()
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .if_none_match("*")
+            .content_type("application/json")
+            .body(ByteStream::from(data))
+            .send()
+            .await
+            .map_err(|error| {
+                WorkerError::Build(format!("upload silver manifest `{key}`: {error}"))
+            })?;
+        Ok(format!("s3://{}/{key}", self.bucket))
+    }
+
+    async fn validate_manifest(
+        &self,
+        manifest_uri: &str,
+        manifest: &SilverManifest,
+    ) -> Result<(), WorkerError> {
+        let parsed = parse_s3_uri(manifest_uri)
+            .map_err(|error| WorkerError::Build(format!("invalid silver manifest URI: {error}")))?;
+        let resp = s3_client()
+            .get_object()
+            .bucket(&parsed.bucket)
+            .key(&parsed.key)
+            .send()
+            .await
+            .map_err(|error| WorkerError::Build(format!("download silver manifest: {error}")))?;
+        let body =
+            resp.body.collect().await.map_err(|error| {
+                WorkerError::Build(format!("read silver manifest body: {error}"))
+            })?;
+        let uploaded: SilverManifest =
+            serde_json::from_slice(&body.into_bytes()).map_err(|error| {
+                WorkerError::Build(format!("parse uploaded silver manifest: {error}"))
+            })?;
+        if &uploaded != manifest {
+            return Err(WorkerError::Build(
+                "uploaded silver manifest does not match local manifest".to_owned(),
+            ));
+        }
+
+        for file in &manifest.files {
+            validate_silver_manifest_path(&file.path)?;
+            let key = silver_manifest_file_key(&parsed.key, &file.path)?;
+            let head = s3_client()
+                .head_object()
+                .bucket(&parsed.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|error| {
+                    WorkerError::Build(format!("head silver file `{key}`: {error}"))
+                })?;
+            let content_length = head.content_length().unwrap_or_default();
+            let content_length = u64::try_from(content_length).unwrap_or(u64::MAX);
+            if content_length != file.size_bytes {
+                return Err(WorkerError::Build(format!(
+                    "silver manifest size mismatch for `{}`: manifest {} != S3 {}",
+                    file.path, file.size_bytes, content_length
+                )));
+            }
+            let etag = head.e_tag().unwrap_or_default();
+            if etag != file.etag {
+                return Err(WorkerError::Build(format!(
+                    "silver manifest ETag mismatch for `{}`: manifest {} != S3 {}",
+                    file.path, file.etag, etag
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn download_manifest_file(
+        &self,
+        manifest_uri: &str,
+        relative_path: &str,
+        dest: &Path,
+    ) -> Result<(), WorkerError> {
+        validate_silver_manifest_path(relative_path)?;
+        let parsed = parse_s3_uri(manifest_uri)
+            .map_err(|error| WorkerError::Build(format!("invalid silver manifest URI: {error}")))?;
+        let key = silver_manifest_file_key(&parsed.key, relative_path)?;
+        let resp = s3_client()
+            .get_object()
+            .bucket(&parsed.bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|error| {
+                WorkerError::Build(format!("download silver file `{key}`: {error}"))
+            })?;
+        let body =
+            resp.body.collect().await.map_err(|error| {
+                WorkerError::Build(format!("read silver file `{key}`: {error}"))
+            })?;
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                WorkerError::Build(format!(
+                    "failed to create silver download dir `{}`: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        tokio::fs::write(dest, body.into_bytes())
+            .await
+            .map_err(|error| {
+                WorkerError::Build(format!(
+                    "failed to write silver download `{}`: {error}",
+                    dest.display()
+                ))
+            })?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedSilverArtifact {
+    pub row: SilverGraphArtifact,
+    pub manifest: SilverManifest,
+}
+
+pub async fn persist_silver_graph_artifact(
+    env: &JobEnv,
+    artifact_dir: &Path,
+    bronze_content_sha256: &str,
+    builder_version: &str,
+    store: &dyn SilverArtifactStore,
+    registry: &dyn SilverGraphArtifactRegistry,
+) -> Result<SilverGraphArtifact, WorkerError> {
+    let persisted = persist_silver_graph_artifact_with_manifest(
+        env,
+        artifact_dir,
+        bronze_content_sha256,
+        builder_version,
+        store,
+        registry,
+    )
+    .await?;
+    Ok(persisted.row)
+}
+
+async fn persist_silver_graph_artifact_with_manifest(
+    env: &JobEnv,
+    artifact_dir: &Path,
+    bronze_content_sha256: &str,
+    builder_version: &str,
+    store: &dyn SilverArtifactStore,
+    registry: &dyn SilverGraphArtifactRegistry,
+) -> Result<PersistedSilverArtifact, WorkerError> {
+    let metadata = read_graph_artifact_metadata(artifact_dir)?;
+    let prefix =
+        silver_artifact_key_prefix(&env.source, &env.package, &env.revision, builder_version);
+    let artifact_s3_prefix = format!("s3://{}/{prefix}", silver_bucket());
+
+    let mut manifest_files = Vec::new();
+    for relative_path in collect_silver_artifact_files(artifact_dir)? {
+        validate_silver_manifest_path(&relative_path)?;
+        let path = artifact_dir.join(path_from_manifest_relative(&relative_path));
+        let uploaded = store
+            .upload_file(&format!("{prefix}{relative_path}"), &path)
+            .await?;
+        manifest_files.push(SilverManifestFile {
+            path: relative_path,
+            size_bytes: uploaded.size_bytes,
+            etag: uploaded.etag,
+        });
+    }
+    validate_required_silver_files(&manifest_files)?;
+
+    let manifest = SilverManifest {
+        schema_hash: metadata.schema_hash.clone(),
+        files: manifest_files,
+    };
+    let manifest_key = format!("{prefix}manifest.json");
+    let manifest_uri = store.upload_manifest(&manifest_key, &manifest).await?;
+    store.validate_manifest(&manifest_uri, &manifest).await?;
+
+    let revision = revision_metadata(&env.revision);
+    let row = SilverGraphArtifact {
+        source: env.source.clone(),
+        package: env.package.clone(),
+        version: env.revision.clone(),
+        revision_kind: revision.kind,
+        semver_major: revision.semver_major,
+        semver_minor: revision.semver_minor,
+        semver_patch: revision.semver_patch,
+        bronze_content_sha256: bronze_content_sha256.to_owned(),
+        builder_version: builder_version.to_owned(),
+        graph_content_hash: metadata.graph_content_hash,
+        artifact_s3_prefix,
+        manifest_uri,
+        manifest_schema_hash: metadata.schema_hash,
+        node_count: metadata.node_count,
+        edge_count: metadata.edge_count,
+        file_count: metadata.file_count,
+        embedding_count: metadata.embedding_count,
+        built_at: unix_secs_i64(),
+        build_status: "success".to_owned(),
+    };
+    registry.register(&row).await?;
+    Ok(PersistedSilverArtifact { row, manifest })
+}
+
+pub async fn download_silver_artifact_from_manifest(
+    manifest_uri: &str,
+    manifest: &SilverManifest,
+    dest: &Path,
+    store: &dyn SilverArtifactStore,
+) -> Result<(), WorkerError> {
+    prepare_artifact_dir(dest)?;
+    for file in &manifest.files {
+        validate_silver_manifest_path(&file.path)?;
+        let dest_path = dest.join(path_from_manifest_relative(&file.path));
+        store
+            .download_manifest_file(manifest_uri, &file.path, &dest_path)
+            .await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphArtifactMetadata {
+    graph_content_hash: String,
+    schema_hash: String,
+    node_count: u64,
+    edge_count: u64,
+    file_count: u64,
+    embedding_count: u64,
+}
+
+fn read_graph_artifact_metadata(artifact_dir: &Path) -> Result<GraphArtifactMetadata, WorkerError> {
+    let manifest_path = artifact_dir.join("manifest.json");
+    let content = fs::read_to_string(&manifest_path).map_err(|error| {
+        WorkerError::Build(format!(
+            "failed to read graph artifact manifest `{}`: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let manifest: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+        WorkerError::Build(format!(
+            "invalid graph artifact manifest `{}`: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let graph_content_hash = json_string(&manifest, "/graph_content_hash")?;
+    let schema_hash = silver_schema_hash(&manifest);
+    let node_count = json_u64(&manifest, "/row_counts/nodes");
+    let edge_count = json_u64(&manifest, "/row_counts/edges");
+    let file_count = json_u64(&manifest, "/row_counts/files");
+    let embedding_count = json_u64(&manifest, "/sidecar_row_counts/code_symbols");
+    Ok(GraphArtifactMetadata {
+        graph_content_hash,
+        schema_hash,
+        node_count,
+        edge_count,
+        file_count,
+        embedding_count,
+    })
+}
+
+fn json_string(manifest: &serde_json::Value, pointer: &str) -> Result<String, WorkerError> {
+    manifest
+        .pointer(pointer)
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| WorkerError::Build(format!("graph artifact manifest missing `{pointer}`")))
+}
+
+fn json_u64(manifest: &serde_json::Value, pointer: &str) -> u64 {
+    manifest
+        .pointer(pointer)
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default()
+}
+
+fn silver_schema_hash(manifest: &serde_json::Value) -> String {
+    let identity = json!({
+        "graph_index_version": manifest.pointer("/graph_index_version").cloned().unwrap_or(serde_json::Value::Null),
+        "schema_version": manifest.pointer("/schema_version").cloned().unwrap_or(serde_json::Value::Null),
+        "manifest_version": manifest.pointer("/manifest_version").cloned().unwrap_or(serde_json::Value::Null),
+        "extractor_version": manifest.pointer("/extractor_version").cloned().unwrap_or(serde_json::Value::Null),
+    });
+    format!("sha256:{}", sha256_hex(&identity.to_string()))
+}
+
+fn collect_silver_artifact_files(artifact_dir: &Path) -> Result<Vec<String>, WorkerError> {
+    let mut files = Vec::new();
+    collect_silver_artifact_files_inner(artifact_dir, artifact_dir, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_silver_artifact_files_inner(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<String>,
+) -> Result<(), WorkerError> {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| {
+            WorkerError::Build(format!("failed to read `{}`: {error}", dir.display()))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            WorkerError::Build(format!(
+                "failed to read entry in `{}`: {error}",
+                dir.display()
+            ))
+        })?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_silver_artifact_files_inner(root, &path, files)?;
+        } else if path.is_file() {
+            let relative = relative_manifest_path(root, &path)?;
+            if relative == "manifest.json" {
+                continue;
+            }
+            files.push(relative);
+        }
+    }
+    Ok(())
+}
+
+fn relative_manifest_path(root: &Path, path: &Path) -> Result<String, WorkerError> {
+    let relative = path.strip_prefix(root).map_err(|error| {
+        WorkerError::Build(format!(
+            "silver artifact path `{}` is not under `{}`: {error}",
+            path.display(),
+            root.display()
+        ))
+    })?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(WorkerError::Build(format!(
+                    "invalid silver artifact path `{}`",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+fn validate_required_silver_files(files: &[SilverManifestFile]) -> Result<(), WorkerError> {
+    for required in [
+        "nodes.parquet",
+        "edges.parquet",
+        "edges_unresolved.parquet",
+        "files.parquet",
+        "file_manifests.parquet",
+    ] {
+        if !files.iter().any(|file| file.path == required) {
+            return Err(WorkerError::Build(format!(
+                "silver artifact missing required file `{required}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_silver_manifest_path(path: &str) -> Result<(), WorkerError> {
+    if path.trim().is_empty() || path.contains('\\') {
+        return Err(WorkerError::Build(format!(
+            "invalid silver manifest path `{path}`"
+        )));
+    }
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err(WorkerError::Build(format!(
+            "silver manifest path must be relative: `{path}`"
+        )));
+    }
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(WorkerError::Build(format!(
+                    "silver manifest path escapes artifact root: `{path}`"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn path_from_manifest_relative(relative_path: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for part in relative_path.split('/') {
+        path.push(part);
+    }
+    path
+}
+
+fn silver_artifact_key_prefix(
+    source: &str,
+    package: &str,
+    version: &str,
+    builder_version: &str,
+) -> String {
+    format!("{SILVER_PREFIX}/{source}/{package}/{version}/{builder_version}/")
+}
+
+fn silver_manifest_file_key(
+    manifest_key: &str,
+    relative_path: &str,
+) -> Result<String, WorkerError> {
+    validate_silver_manifest_path(relative_path)?;
+    let prefix = manifest_key.strip_suffix("manifest.json").ok_or_else(|| {
+        WorkerError::Build(format!(
+            "silver manifest key must end with manifest.json: `{manifest_key}`"
+        ))
+    })?;
+    Ok(format!("{prefix}{relative_path}"))
+}
+
 pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), WorkerError> {
     fs::create_dir_all(artifact_dir).map_err(|error| {
         WorkerError::Build(format!(
@@ -982,7 +1722,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 pub fn translate(artifact_dir: &Path, env: &JobEnv) -> Result<TranslateStats, WorkerError> {
-    translate_with_source_root(artifact_dir, None, env)
+    translate_with_source_root(artifact_dir, None, None, env)
 }
 
 pub async fn handle_spot_interruption(
@@ -1349,6 +2089,10 @@ fn bronze_bucket() -> String {
     optional_env("SPUR_CONTEXT_BRONZE_BUCKET").unwrap_or_else(|| DEFAULT_BRONZE_BUCKET.to_owned())
 }
 
+fn silver_bucket() -> String {
+    optional_env("SPUR_CONTEXT_SILVER_BUCKET").unwrap_or_else(|| DEFAULT_SILVER_BUCKET.to_owned())
+}
+
 fn bronze_ducklake_data_path(catalog_dsn: &str) -> Result<String, WorkerError> {
     if let Some(path) = optional_env("SPUR_CONTEXT_DUCKLAKE_DATA_PATH") {
         create_local_bronze_data_path_if_needed(&path)?;
@@ -1588,6 +2332,7 @@ fn resolve_graph_artifact_dir(artifact_base: &Path) -> Result<PathBuf, WorkerErr
 fn translate_with_source_root(
     artifact_dir: &Path,
     source_root: Option<&Path>,
+    artifact_manifest: Option<SilverManifest>,
     env: &JobEnv,
 ) -> Result<TranslateStats, WorkerError> {
     let revision_kind = if env.revision.contains('.') {
@@ -1619,6 +2364,7 @@ fn translate_with_source_root(
         revision: env.revision.clone(),
         revision_kind: revision_kind.to_owned(),
         artifact_dir: actual_artifact,
+        artifact_manifest,
         source_root: source_root.map(|p| p.to_path_buf()),
         catalog_dsn: env.catalog_dsn.clone(),
     };
@@ -2474,6 +3220,7 @@ struct PreparedJob {
     _workspace: TempWorkspace,
     source_path: PathBuf,
     artifact_dir: PathBuf,
+    artifact_manifest: Option<SilverManifest>,
 }
 
 #[derive(Debug)]
