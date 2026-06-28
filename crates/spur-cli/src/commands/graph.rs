@@ -10,8 +10,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use spur_graph::git_walk::{run_full_walk_into, GitWalkConfig};
 use spur_graph::store::commit_index::{save_artifact, save_pointer, CommitIndexPointer};
 use spur_graph::store::lance_sections::{
-    SectionSidecarOptions, SectionSidecarProgressCallback, SectionSidecarProgressEvent,
-    SidecarDelta, SidecarPhase, SidecarRowScope,
+    backfill_missing_vectors, SectionEmbeddingOptions, SectionSidecarOptions,
+    SectionSidecarProgressCallback, SectionSidecarProgressEvent, SidecarDelta, SidecarPhase,
+    SidecarRowScope, VectorBackfillStats,
 };
 use spur_graph::store::{ArtifactStagingDir, TemporalShardSink};
 use spur_graph::{
@@ -35,15 +36,48 @@ pub struct GraphBuildOptions {
     pub temporal_shard_config: TemporalShardConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct GraphVectorBackfillOptions {
+    pub root: Option<PathBuf>,
+    pub workspace: bool,
+    pub output: Option<PathBuf>,
+    pub quiet: bool,
+}
+
 pub fn build(options: GraphBuildOptions) -> anyhow::Result<()> {
     build_with_embedding_overrides(options, false, false)
 }
 
-pub fn build_with_section_embedding_override(
-    options: GraphBuildOptions,
-    no_section_embeddings: bool,
-) -> anyhow::Result<()> {
-    build_with_embedding_overrides(options, no_section_embeddings, false)
+pub fn backfill_vectors(options: GraphVectorBackfillOptions) -> anyhow::Result<()> {
+    let root = match (options.root, options.workspace) {
+        (Some(path), _) => path,
+        (None, _) => resolve_worktree_root_from(std::env::current_dir()?),
+    };
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize root `{}`", root.display()))?;
+    let explicit_output = options.output;
+    let env_output = std::env::var_os("SPUR_CODE_GRAPH_INDEX").map(PathBuf::from);
+    let uses_output_override = explicit_output.is_some() || env_output.is_some();
+    let output = explicit_output
+        .or(env_output)
+        .unwrap_or_else(|| root.join(DEFAULT_GRAPH_INDEX_PATH));
+    if uses_output_override {
+        reject_legacy_output_path(&output)?;
+    }
+    let resolved = resolve_artifact_location(&root, Some(&output))?;
+
+    if !options.quiet {
+        println!(
+            "[spur] Backfilling graph vectors for {}",
+            resolved.path.display()
+        );
+    }
+    let stats = backfill_missing_vectors(&resolved.path, SectionEmbeddingOptions::from_env())?;
+    if !options.quiet {
+        report_vector_backfill_stats(stats);
+    }
+    Ok(())
 }
 
 pub fn build_with_embedding_overrides(
@@ -773,6 +807,18 @@ fn sidecar_row_label(row_scope: SidecarRowScope) -> &'static str {
         SidecarRowScope::Full => "rows",
         SidecarRowScope::Delta => "delta rows",
     }
+}
+
+fn report_vector_backfill_stats(stats: VectorBackfillStats) {
+    println!(
+        "[spur] Vector backfill ready: sections filled {}/{} eligible rows ({} null vectors); code symbols filled {}/{} eligible rows ({} null vectors)",
+        fmt_thousands(stats.sections.filled_rows),
+        fmt_thousands(stats.sections.eligible_rows),
+        fmt_thousands(stats.sections.null_vector_rows),
+        fmt_thousands(stats.code_symbols.filled_rows),
+        fmt_thousands(stats.code_symbols.eligible_rows),
+        fmt_thousands(stats.code_symbols.null_vector_rows)
+    );
 }
 
 fn merge_temporal_artifact(artifact: &mut GraphIndexArtifact, temporal: GraphIndexArtifact) {
