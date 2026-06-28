@@ -15,8 +15,8 @@ use crate::medallion::SilverManifest;
 
 const DEFAULT_DATA_PATH: &str = "s3://spur-context/gold/data/";
 const DEFAULT_EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
-const DEFAULT_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
-const DEFAULT_TRANSLATE_SCHEMA_VERSION: &str = "translate-v1";
+pub const DEFAULT_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
+pub const DEFAULT_TRANSLATE_SCHEMA_VERSION: &str = "translate-v1";
 pub(crate) const CATALOG_TABLES_SQL: &str = include_str!("../sql/catalog_tables.sql");
 
 #[derive(Debug)]
@@ -141,6 +141,7 @@ pub struct TranslateLineage {
     pub silver_graph_content_hash: String,
     pub builder_version: String,
     pub translate_schema_version: String,
+    pub embed_text_version: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -786,13 +787,15 @@ fn insert_sidecar_tables(
     generation: i64,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
-    let symbols_translated = insert_symbol_embeddings(conn, opts, revision, generation, rows_inserted)
-        .with_context(|| {
-            format!(
-                "failed to translate `{}`",
-                opts.artifact_dir.join("code_symbols.lance").display()
-            )
-        })?;
+    let symbols_translated =
+        insert_symbol_embeddings(conn, opts, revision, generation, rows_inserted).with_context(
+            || {
+                format!(
+                    "failed to translate `{}`",
+                    opts.artifact_dir.join("code_symbols.lance").display()
+                )
+            },
+        )?;
     insert_section_bodies(conn, opts, revision, generation, rows_inserted).with_context(|| {
         format!(
             "failed to translate `{}`",
@@ -1082,11 +1085,11 @@ fn write_catalog_metadata(
                 semver_major, semver_minor, semver_patch,
                 snapshot_id, indexed_at, index_status, embeddings_status, row_counts,
                 generation, bronze_content_sha256, silver_graph_content_hash,
-                builder_version, translate_schema_version
+                builder_version, translate_schema_version, embed_text_version
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'complete', ?, CAST(? AS JSON),
-                ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?
             )
             ",
             params![
@@ -1105,6 +1108,7 @@ fn write_catalog_metadata(
                 lineage.silver_graph_content_hash,
                 lineage.builder_version,
                 lineage.translate_schema_version,
+                lineage.embed_text_version,
             ],
         )
         .context("failed to insert package_catalog row")?;
@@ -1119,6 +1123,7 @@ fn default_lineage() -> TranslateLineage {
         silver_graph_content_hash: "unknown".to_owned(),
         builder_version: "unknown".to_owned(),
         translate_schema_version: DEFAULT_TRANSLATE_SCHEMA_VERSION.to_owned(),
+        embed_text_version: DEFAULT_EMBED_TEXT_VERSION.to_owned(),
     }
 }
 
@@ -1131,7 +1136,11 @@ fn next_generation(conn: &Connection) -> Result<i64> {
     .context("failed to allocate next gold generation")
 }
 
-fn delete_generation_rows(conn: &Connection, opts: &TranslateOptions, generation: i64) -> Result<()> {
+fn delete_generation_rows(
+    conn: &Connection,
+    opts: &TranslateOptions,
+    generation: i64,
+) -> Result<()> {
     for table in REVISION_TABLES {
         let sql = format!(
             "DELETE FROM {} WHERE source = ? AND package = ? AND revision = ? AND generation = ?",
@@ -1141,7 +1150,7 @@ fn delete_generation_rows(conn: &Connection, opts: &TranslateOptions, generation
             &sql,
             params![opts.source, opts.package, opts.revision, generation],
         )
-            .with_context(|| format!("failed to delete existing rows from {table}"))?;
+        .with_context(|| format!("failed to delete existing rows from {table}"))?;
     }
     Ok(())
 }
