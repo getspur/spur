@@ -163,6 +163,32 @@ idempotent re-ingest in one mechanism.
 Publish is atomic at the pointer flip: readers either see the previous complete generation or
 the new one, never a partial write (R3).
 
+### Aurora concurrent-ingest model
+
+Aurora ingest uses **Postgres-level serialization for the gold publish critical section**.
+It does **not** reuse the DynamoDB catalog lease that protects the old S3
+download→modify→upload catalog path; that lease would serialize too much and defeat the
+reason for moving the catalog into Aurora. It also does **not** rely on per-package
+transaction isolation alone.
+
+The implementation acquires a catalog-wide Postgres advisory session lock before DuckLake
+schema setup, generation reservation, gold table writes, `gold.package_catalog`/`refs`
+publish, and frozen snapshot export. The generation allocator remains the
+`public.spur_context_gold_generation_seq` sequence from p0 snapshot publication; the lock is
+needed because a sequence gives globally unique numbers but does not make allocation order
+match commit/export order. Without the lock, worker A could reserve generation 10, worker B
+could reserve and publish generation 11, and then worker A could finish last and move the
+serving snapshot pointer backward or export a snapshot that does not contain all committed
+packages.
+
+This is a deliberate throughput tradeoff: FETCH and BUILD still run fully in parallel, and
+Aurora can still accept concurrent bronze/silver/control-plane reads and writes, but each
+catalog has **one TRANSLATE/gold publish lane**. The ceiling is therefore roughly
+`1 / (gold translate + validation + snapshot export duration)` per catalog. If that becomes
+too low, the next scaling move is catalog sharding or true per-package serving snapshots with
+per-package publish locks; do not remove the publish lock while the live serving snapshot is
+catalog-wide.
+
 ## 8. Serving path
 
 Serving Lambda (non-VPC) resolves `(source, package, ref/revision)` against the per-package
@@ -276,6 +302,12 @@ upgrade and is the only phase carrying the §9 risk.
   schema-qualified translate + generation flip.
 - Full-lineage integration test: fetch→bronze→silver→gold asserting registries + identity tuples.
 - Publish-atomicity test: a reader never sees a partial generation; pointer flip is all-or-nothing.
+- Aurora concurrent-ingest integration test: with `SPUR_CONTEXT_AURORA_TEST_DSN`,
+  `SPUR_CONTEXT_AURORA_TEST_DATA_PATH`, and matching `SPUR_CONTEXT_DUCKLAKE_DATA_PATH`, run
+  multiple package translates concurrently and assert distinct generations, no cross-package
+  row interference, and a live snapshot that resolves every package. Without those env vars,
+  the test is skipped; SQLite is not a valid stand-in because DuckLake/SQLite serializes or
+  fails during concurrent schema setup.
 - Snapshot-fence test: simulate compaction/cleanup; assert serving snapshot never references a
   deleted file (the §9 guarantee).
 - Reprocess tests: gold-from-silver without refetch; silver-from-bronze.
