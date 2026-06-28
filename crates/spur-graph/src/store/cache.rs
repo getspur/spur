@@ -1008,7 +1008,8 @@ mod tests {
     fn skip_embedding_sidecar_options() -> SectionSidecarOptions {
         SectionSidecarOptions {
             embedding: SectionEmbeddingOptions {
-                skip_embeddings: true,
+                skip_section_embeddings: true,
+                skip_code_symbol_embeddings: true,
                 batch_size: 64,
             },
             write_batch_size: 512,

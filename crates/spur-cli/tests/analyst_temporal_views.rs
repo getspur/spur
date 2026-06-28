@@ -466,7 +466,8 @@ fn analyst_build_uses_complete_lance_sidecar_for_hybrid_search() {
         tempdir.path(),
         &artifact_dir,
         SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: true,
             batch_size: 64,
         },
     );
@@ -517,7 +518,8 @@ fn analyst_build_uses_complete_lance_sidecar_for_hybrid_search_without_temporal(
         tempdir.path(),
         &artifact_dir,
         SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: true,
             batch_size: 64,
         },
     );
@@ -584,7 +586,8 @@ fn analyst_build_degrades_to_bm25_when_sidecar_manifest_incomplete() {
         tempdir.path(),
         &artifact_dir,
         SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: true,
             batch_size: 64,
         },
     );
@@ -676,7 +679,8 @@ fn analyst_build_degrades_to_bm25_when_code_symbols_sidecar_missing() {
         tempdir.path(),
         &artifact_dir,
         SectionEmbeddingOptions {
-            skip_embeddings: true,
+            skip_section_embeddings: true,
+            skip_code_symbol_embeddings: true,
             batch_size: 64,
         },
     );
