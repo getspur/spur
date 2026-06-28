@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use duckdb::Connection;
-use spur_context_service::catalog::CatalogResolver;
+use spur_context_service::catalog::{
+    compact_gold_and_export_snapshot, CatalogResolver, SnapshotCleanupOptions,
+};
 
 const SOURCE: &str = "registry:crates-io";
 const PACKAGE: &str = "serde";
@@ -42,6 +44,7 @@ fn catalog_tables_sql_creates_medallion_schemas_and_gold_catalog_columns() -> Re
             "symbol_kind",
             "anchor_hash",
             "enclosing_scope",
+            "generation",
         ]
     );
 
@@ -82,6 +85,50 @@ fn catalog_tables_sql_creates_medallion_schemas_and_gold_catalog_columns() -> Re
             "gold.package_catalog must have nullable column {column}"
         );
     }
+
+    for table in [
+        "nodes",
+        "edges",
+        "edges_unresolved",
+        "files",
+        "file_manifests",
+        "section_bodies",
+        "symbol_embeddings",
+        "commits",
+        "symbol_snapshots",
+        "temporal_edges",
+    ] {
+        assert_eq!(
+            nullable_column_count(&conn, "gold", table, "generation")?,
+            1,
+            "gold.{table} must carry generation for immutable publish builds"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn snapshot_cleanup_fence_rejects_windows_shorter_than_republish_lag() -> Result<()> {
+    let root = unique_temp_dir("cleanup-fence")?;
+    fs::create_dir_all(root.join("data")).context("create ducklake data dir")?;
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = root.join("data").display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+
+    let err = compact_gold_and_export_snapshot(
+        &catalog_dsn,
+        &data_path,
+        SnapshotCleanupOptions {
+            older_than: Duration::from_secs(60),
+            republish_lag: Duration::from_secs(300),
+        },
+    )
+    .expect_err("cleanup older_than shorter than republish lag must be rejected");
+
+    assert!(
+        format!("{err:#}").contains("older_than must be >= republish_lag"),
+        "unexpected error: {err:#}"
+    );
     Ok(())
 }
 

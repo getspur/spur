@@ -1,5 +1,6 @@
 //! Query builders for the external code context MCP tools.
 
+use crate::catalog::readable_table;
 use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection, Row, ToSql};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,65 @@ const PKG_SYMBOL_URI_PREFIX: &str = "pkg-symbol://";
 const CALL_EDGE_KIND_CALLS: &str = "calls";
 const CALL_EDGE_KIND_DYN: &str = "calls_dyn";
 const CALL_EDGE_KIND_HOF: &str = "references_hof";
+
+#[derive(Debug)]
+struct QueryTables {
+    nodes: String,
+    files: String,
+    edges: String,
+    edges_unresolved: String,
+    refs: String,
+    package_catalog: String,
+    uses_gold: bool,
+}
+
+impl QueryTables {
+    fn load(db: &Connection) -> Result<Self> {
+        let nodes = readable_table(db, "nodes")?;
+        let uses_gold = nodes.starts_with("gold.");
+        Ok(Self {
+            nodes,
+            files: readable_table(db, "files")?,
+            edges: readable_table(db, "edges")?,
+            edges_unresolved: readable_table(db, "edges_unresolved")?,
+            refs: readable_table(db, "refs")?,
+            package_catalog: readable_table(db, "package_catalog")?,
+            uses_gold,
+        })
+    }
+
+    fn published_filter(&self, alias: &str) -> String {
+        if self.uses_gold {
+            format!(
+                r"
+                AND {alias}.generation = (
+                    SELECT pc.generation
+                    FROM {} pc
+                    WHERE pc.source = {alias}.source
+                      AND pc.package = {alias}.package
+                      AND pc.revision = {alias}.revision
+                    LIMIT 1
+                )
+                ",
+                self.package_catalog
+            )
+        } else {
+            String::new()
+        }
+    }
+
+    fn same_generation_join(&self, left: &str, right: &str) -> &'static str {
+        if self.uses_gold {
+            match (left, right) {
+                ("n", "e") => "AND n.generation = e.generation",
+                ("f", "n") => "AND f.generation = n.generation",
+                _ => "",
+            }
+        } else {
+            ""
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,8 +195,13 @@ pub struct ResolvedSymbol {
 }
 
 pub fn search_symbols(db: &Connection, opts: &SearchOptions) -> Result<CodeSearchResult> {
+    let tables = QueryTables::load(db)?;
     let (count_where, count_params, _) = search_filter(opts);
-    let count_sql = format!("SELECT COUNT(*) FROM nodes {count_where}");
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM {} n {count_where} {}",
+        tables.nodes,
+        tables.published_filter("n")
+    );
     let total_matches = query_count(db, &count_sql, count_params)
         .context("failed to count matching code symbols")?;
 
@@ -158,11 +223,14 @@ pub fn search_symbols(db: &Connection, opts: &SearchOptions) -> Result<CodeSearc
             line_end,
             symbol_kind,
             enclosing_scope
-        FROM nodes
+        FROM {nodes} n
         {select_where}
+        {published_filter}
         {order_by}
         LIMIT {limit_param}
-        "
+        ",
+        nodes = tables.nodes,
+        published_filter = tables.published_filter("n")
     );
     let candidates = collect_rows(db, &select_sql, select_params, |row| {
         code_candidate_from_row(row, 0)
@@ -181,37 +249,47 @@ pub fn read_symbol(
     selector: &str,
     context_lines: usize,
 ) -> Result<Option<SymbolSource>> {
+    let tables = QueryTables::load(db)?;
     let Some(symbol) = resolve_required(db, selector)? else {
         return Ok(None);
     };
 
+    let sql = format!(
+        r"
+        SELECT
+            n.stable_symbol_id,
+            n.source,
+            n.package,
+            n.revision,
+            n.file_path,
+            n.byte_range_start,
+            n.byte_range_end,
+            n.line_start,
+            n.line_end,
+            n.qualified_name,
+            f.source_text
+        FROM {nodes} n
+        LEFT JOIN {files} f
+          ON f.source = n.source
+         AND f.package = n.package
+         AND f.revision = n.revision
+         AND f.file_path = n.file_path
+         {files_generation_join}
+        WHERE n.source = $1
+          AND n.package = $2
+          AND n.revision = $3
+          AND n.stable_symbol_id = $4
+          {published_filter}
+        LIMIT 1
+        ",
+        nodes = tables.nodes,
+        files = tables.files,
+        files_generation_join = tables.same_generation_join("f", "n"),
+        published_filter = tables.published_filter("n")
+    );
     let row = optional_no_rows(
         db.query_row(
-            r"
-            SELECT
-                n.stable_symbol_id,
-                n.source,
-                n.package,
-                n.revision,
-                n.file_path,
-                n.byte_range_start,
-                n.byte_range_end,
-                n.line_start,
-                n.line_end,
-                n.qualified_name,
-                f.source_text
-            FROM nodes n
-            LEFT JOIN files f
-              ON f.source = n.source
-             AND f.package = n.package
-             AND f.revision = n.revision
-             AND f.file_path = n.file_path
-            WHERE n.source = $1
-              AND n.package = $2
-              AND n.revision = $3
-              AND n.stable_symbol_id = $4
-            LIMIT 1
-            ",
+            &sql,
             params![
                 symbol.source,
                 symbol.package,
@@ -372,8 +450,8 @@ pub fn resolve_selector(db: &Connection, selector: &str) -> Result<SelectorResol
 }
 
 fn resolved_callers(db: &Connection, target: &ResolvedNode) -> Result<Vec<CallerRecord>> {
-    collect_rows(
-        db,
+    let tables = QueryTables::load(db)?;
+    let sql = format!(
         r"
         SELECT
             n.source,
@@ -398,20 +476,30 @@ fn resolved_callers(db: &Connection, target: &ResolvedNode) -> Result<Vec<Caller
             e.bind_method,
             e.receiver_text,
             e.scope_text
-        FROM edges e
-        JOIN nodes n
+        FROM {edges} e
+        JOIN {nodes} n
           ON n.source = e.source
          AND n.package = e.package
          AND n.revision = e.revision
          AND n.stable_symbol_id = e.source_stable_id
+         {node_edge_generation_join}
         WHERE e.source = $1
           AND e.package = $2
           AND e.revision = $3
           AND e.target_stable_id = $4
           AND e.relation = 'calls'
           AND e.edge_kind IN ('calls', 'calls_dyn', 'references_hof')
+          {published_filter}
         ORDER BY n.file_path, n.line_start, n.line_end, n.qualified_name, e.edge_kind
         ",
+        edges = tables.edges,
+        nodes = tables.nodes,
+        node_edge_generation_join = tables.same_generation_join("n", "e"),
+        published_filter = tables.published_filter("e")
+    );
+    collect_rows(
+        db,
+        &sql,
         SqlParams::from_values([
             target.source.clone(),
             target.package.clone(),
@@ -430,8 +518,8 @@ fn resolved_callers(db: &Connection, target: &ResolvedNode) -> Result<Vec<Caller
 }
 
 fn unresolved_callers(db: &Connection, target: &ResolvedNode) -> Result<Vec<CallerRecord>> {
-    collect_rows(
-        db,
+    let tables = QueryTables::load(db)?;
+    let sql = format!(
         r"
         SELECT
             n.source,
@@ -456,20 +544,30 @@ fn unresolved_callers(db: &Connection, target: &ResolvedNode) -> Result<Vec<Call
             e.bind_method,
             e.receiver_text,
             e.scope_text
-        FROM edges_unresolved e
-        JOIN nodes n
+        FROM {edges_unresolved} e
+        JOIN {nodes} n
           ON n.source = e.source
          AND n.package = e.package
          AND n.revision = e.revision
          AND n.stable_symbol_id = e.source_stable_id
+         {node_edge_generation_join}
         WHERE e.source = $1
           AND e.package = $2
           AND e.revision = $3
           AND e.target_label IN ($4, $5, $6)
           AND e.relation = 'calls'
           AND e.edge_kind IN ('calls', 'calls_dyn', 'references_hof')
+          {published_filter}
         ORDER BY n.file_path, n.line_start, n.line_end, n.qualified_name, e.edge_kind
         ",
+        edges_unresolved = tables.edges_unresolved,
+        nodes = tables.nodes,
+        node_edge_generation_join = tables.same_generation_join("n", "e"),
+        published_filter = tables.published_filter("e")
+    );
+    collect_rows(
+        db,
+        &sql,
         SqlParams::from_values([
             target.source.clone(),
             target.package.clone(),
@@ -490,8 +588,8 @@ fn unresolved_callers(db: &Connection, target: &ResolvedNode) -> Result<Vec<Call
 }
 
 fn resolved_callees(db: &Connection, source: &ResolvedNode) -> Result<Vec<CalleeRecord>> {
-    collect_rows(
-        db,
+    let tables = QueryTables::load(db)?;
+    let sql = format!(
         r"
         SELECT
             n.source,
@@ -516,20 +614,30 @@ fn resolved_callees(db: &Connection, source: &ResolvedNode) -> Result<Vec<Callee
             e.bind_method,
             e.receiver_text,
             e.scope_text
-        FROM edges e
-        JOIN nodes n
+        FROM {edges} e
+        JOIN {nodes} n
           ON n.source = e.source
          AND n.package = e.package
          AND n.revision = e.revision
          AND n.stable_symbol_id = e.target_stable_id
+         {node_edge_generation_join}
         WHERE e.source = $1
           AND e.package = $2
           AND e.revision = $3
           AND e.source_stable_id = $4
           AND e.relation = 'calls'
           AND e.edge_kind IN ('calls', 'calls_dyn', 'references_hof')
+          {published_filter}
         ORDER BY n.file_path, n.line_start, n.line_end, n.qualified_name, e.edge_kind
         ",
+        edges = tables.edges,
+        nodes = tables.nodes,
+        node_edge_generation_join = tables.same_generation_join("n", "e"),
+        published_filter = tables.published_filter("e")
+    );
+    collect_rows(
+        db,
+        &sql,
         SqlParams::from_values([
             source.source.clone(),
             source.package.clone(),
@@ -548,8 +656,8 @@ fn resolved_callees(db: &Connection, source: &ResolvedNode) -> Result<Vec<Callee
 }
 
 fn unresolved_callees(db: &Connection, source: &ResolvedNode) -> Result<Vec<CalleeRecord>> {
-    collect_rows(
-        db,
+    let tables = QueryTables::load(db)?;
+    let sql = format!(
         r"
         SELECT
             e.source_stable_id,
@@ -563,15 +671,22 @@ fn unresolved_callees(db: &Connection, source: &ResolvedNode) -> Result<Vec<Call
             e.bind_method,
             e.receiver_text,
             e.scope_text
-        FROM edges_unresolved e
+        FROM {edges_unresolved} e
         WHERE e.source = $1
           AND e.package = $2
           AND e.revision = $3
           AND e.source_stable_id = $4
           AND e.relation = 'calls'
           AND e.edge_kind IN ('calls', 'calls_dyn', 'references_hof')
+          {published_filter}
         ORDER BY e.target_package NULLS LAST, e.target_label, e.edge_kind
         ",
+        edges_unresolved = tables.edges_unresolved,
+        published_filter = tables.published_filter("e")
+    );
+    collect_rows(
+        db,
+        &sql,
         SqlParams::from_values([
             source.source.clone(),
             source.package.clone(),
@@ -596,6 +711,7 @@ fn selector_candidates(
     revision: Option<&str>,
     name: &str,
 ) -> Result<Vec<CodeCandidate>> {
+    let tables = QueryTables::load(db)?;
     let (revision_filter, params) = if let Some(revision) = revision {
         (
             "AND revision = $3 AND (qualified_name = $4 OR entity_name = $4)",
@@ -626,12 +742,15 @@ fn selector_candidates(
             line_end,
             symbol_kind,
             enclosing_scope
-        FROM nodes
+        FROM {nodes} n
         WHERE source = $1
           AND package = $2
           {revision_filter}
+          {published_filter}
         ORDER BY file_path, line_start, line_end, qualified_name, stable_symbol_id
-        "
+        ",
+        nodes = tables.nodes,
+        published_filter = tables.published_filter("n")
     );
     collect_rows(db, &sql, params, |row| code_candidate_from_row(row, 0))
         .context("failed to resolve external code selector")
@@ -682,17 +801,24 @@ fn stable_selector_node(
     db: &Connection,
     parsed: &ParsedStableSelector,
 ) -> Result<Option<ResolvedNode>> {
+    let tables = QueryTables::load(db)?;
+    let sql = format!(
+        r"
+        SELECT stable_symbol_id, source, package, revision, entity_name, qualified_name
+        FROM {nodes} n
+        WHERE source = $1
+          AND package = $2
+          AND revision = $3
+          AND stable_symbol_id = $4
+          {published_filter}
+        LIMIT 1
+        ",
+        nodes = tables.nodes,
+        published_filter = tables.published_filter("n")
+    );
     optional_no_rows(
         db.query_row(
-            r"
-            SELECT stable_symbol_id, source, package, revision, entity_name, qualified_name
-            FROM nodes
-            WHERE source = $1
-              AND package = $2
-              AND revision = $3
-              AND stable_symbol_id = $4
-            LIMIT 1
-            ",
+            &sql,
             params![
                 &parsed.source,
                 &parsed.package,
@@ -715,21 +841,26 @@ fn stable_selector_node(
 }
 
 fn latest_revision(db: &Connection, source: &str, package: &str) -> Result<Option<String>> {
-    if !table_exists(db, "refs")? {
+    let tables = QueryTables::load(db)?;
+    if tables.refs == "refs" && !table_exists(db, "refs")? {
         return Ok(None);
     }
 
+    let sql = format!(
+        r"
+        SELECT revision
+        FROM {refs}
+        WHERE source = $1
+          AND package = $2
+          AND ref_name = 'latest'
+        ORDER BY updated_at DESC NULLS LAST, revision DESC
+        LIMIT 1
+        ",
+        refs = tables.refs
+    );
     optional_no_rows(
         db.query_row(
-            r"
-            SELECT revision
-            FROM refs
-            WHERE source = $1
-              AND package = $2
-              AND ref_name = 'latest'
-            ORDER BY updated_at DESC NULLS LAST, revision DESC
-            LIMIT 1
-            ",
+            &sql,
             params![source, package],
             |row| row.get(0),
         ),
