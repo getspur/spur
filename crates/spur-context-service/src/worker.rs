@@ -24,7 +24,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::abuse;
-use crate::catalog::connect_ducklake_with_data_path;
+use crate::catalog::{connect_ducklake_with_data_path, ducklake_data_path};
 use crate::jobs::{DynamoDbJobStore, JobStatus, JobStore};
 use crate::medallion::{SilverManifest, SilverManifestFile, SILVER_PREFIX};
 use crate::translate::{
@@ -43,6 +43,8 @@ const EMBEDDING_GEMMA_EMBED_MODEL_NAME: &str = "EmbeddingGemma300M";
 const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
 const GRAPH_SKIP_SECTION_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 const DEFAULT_CATALOG_LEASES_TABLE: &str = "spur-context-catalog-leases";
+const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
+const CATALOG_PASSWORD_SECRET_ARN_ENV: &str = "SPUR_CATALOG_PASSWORD_SECRET_ARN";
 const CATALOG_LEASE_DURATION_SECS: i64 = 10 * 60;
 const CATALOG_LEASE_RENEW_INTERVAL_SECS: u64 = 60;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +362,7 @@ async fn run_job_with_stage(
     jobs: Arc<dyn JobStore>,
     leases: Arc<dyn CatalogLeaseStore>,
 ) -> Result<TranslateStats, WorkerError> {
+    ensure_catalog_password_env().await?;
     let prepared = prepare_job(&env, &stage, leases.as_ref()).await?;
 
     let mut lease = None;
@@ -386,9 +389,6 @@ async fn run_job_with_stage(
         let local_env: JobEnv = if let Some(ref dl) = catalog_dl {
             let mut local = env.clone();
             local.catalog_dsn = dl.local_path.to_string_lossy().to_string();
-            // Data files go directly to S3 — the translate step uses FORCE CHECKPOINT
-            // to flush all data to S3 before the connection drops.
-            std::env::set_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH", "s3://spur-context/data/");
             local
         } else {
             env.clone()
@@ -2583,41 +2583,52 @@ fn silver_bucket() -> String {
 }
 
 fn bronze_ducklake_data_path(catalog_dsn: &str) -> Result<String, WorkerError> {
-    if let Some(path) = optional_env("SPUR_CONTEXT_DUCKLAKE_DATA_PATH") {
-        create_local_bronze_data_path_if_needed(&path)?;
-        return Ok(path);
-    }
-    if let Some(sqlite_path) = bronze_sqlite_catalog_path(catalog_dsn) {
-        let path = sqlite_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("data");
-        fs::create_dir_all(&path).map_err(|error| {
-            WorkerError::Fetch(format!(
-                "failed to create DuckLake data path `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        return Ok(path.display().to_string());
-    }
-    Ok("s3://spur-context/data/".to_owned())
+    ducklake_data_path(catalog_dsn).map_err(|error| WorkerError::Fetch(format!("{error:#}")))
 }
 
-fn create_local_bronze_data_path_if_needed(path: &str) -> Result<(), WorkerError> {
-    if path.contains("://") || path == ":memory:" {
+async fn ensure_catalog_password_env() -> Result<(), WorkerError> {
+    if optional_env(CATALOG_PASSWORD_ENV).is_some() {
         return Ok(());
     }
-    fs::create_dir_all(path).map_err(|error| {
-        WorkerError::Fetch(format!(
-            "failed to create DuckLake data path `{path}`: {error}"
-        ))
-    })
+
+    let Some(secret_arn) = optional_env(CATALOG_PASSWORD_SECRET_ARN_ENV) else {
+        return Ok(());
+    };
+
+    let output = secretsmanager_client()
+        .get_secret_value()
+        .secret_id(secret_arn)
+        .send()
+        .await
+        .map_err(|error| WorkerError::Fetch(format!("get catalog password secret: {error}")))?;
+    let secret_string = output
+        .secret_string()
+        .ok_or_else(|| WorkerError::Fetch("catalog password secret has no string".to_owned()))?;
+    let password = catalog_password_from_secret_string(secret_string)?;
+    std::env::set_var(CATALOG_PASSWORD_ENV, password);
+    Ok(())
 }
 
-fn bronze_sqlite_catalog_path(catalog_dsn: &str) -> Option<PathBuf> {
-    let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
-    let path = dsn.strip_prefix("sqlite:")?;
-    (path != ":memory:").then(|| PathBuf::from(path))
+fn catalog_password_from_secret_string(secret: &str) -> Result<String, WorkerError> {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        return Err(WorkerError::Fetch(
+            "catalog password secret is empty".to_owned(),
+        ));
+    }
+
+    if trimmed.starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(trimmed)
+            .map_err(|error| WorkerError::Fetch(format!("parse catalog secret JSON: {error}")))?;
+        let password = value
+            .get("password")
+            .and_then(serde_json::Value::as_str)
+            .filter(|password| !password.is_empty())
+            .ok_or_else(|| WorkerError::Fetch("catalog secret JSON missing password".to_owned()))?;
+        return Ok(password.to_owned());
+    }
+
+    Ok(secret.to_owned())
 }
 
 fn download_tarball(source_url: &str, archive: &Path) -> Result<(), WorkerError> {
@@ -3440,6 +3451,27 @@ fn dynamodb_client() -> DynamoDbClient {
     DynamoDbClient::from_conf(builder.build())
 }
 
+fn secretsmanager_client() -> aws_sdk_secretsmanager::Client {
+    let mut builder = aws_sdk_secretsmanager::Config::builder()
+        .behavior_version(aws_sdk_secretsmanager::config::BehaviorVersion::latest())
+        .region(aws_sdk_secretsmanager::config::Region::new(aws_region()));
+    if let Some(endpoint) = aws_endpoint_url("SECRETSMANAGER") {
+        builder = builder.endpoint_url(endpoint);
+    }
+    if let Some(credentials) = aws_credentials_for_secretsmanager() {
+        builder = builder.credentials_provider(credentials);
+    } else if aws_endpoint_url("SECRETSMANAGER").is_some() {
+        builder = builder.credentials_provider(aws_sdk_secretsmanager::config::Credentials::new(
+            "test",
+            "test",
+            None,
+            None,
+            "LocalEndpoint",
+        ));
+    }
+    aws_sdk_secretsmanager::Client::from_conf(builder.build())
+}
+
 fn aws_credentials_for_sfn() -> Option<aws_sdk_sfn::config::Credentials> {
     credential_parts().map(|parts| {
         aws_sdk_sfn::config::Credentials::new(
@@ -3467,6 +3499,18 @@ fn aws_credentials_for_s3() -> Option<aws_sdk_s3::config::Credentials> {
 fn aws_credentials_for_dynamodb() -> Option<aws_sdk_dynamodb::config::Credentials> {
     credential_parts().map(|parts| {
         aws_sdk_dynamodb::config::Credentials::new(
+            parts.access_key_id,
+            parts.secret_access_key,
+            parts.session_token,
+            None,
+            parts.provider_name,
+        )
+    })
+}
+
+fn aws_credentials_for_secretsmanager() -> Option<aws_sdk_secretsmanager::config::Credentials> {
+    credential_parts().map(|parts| {
+        aws_sdk_secretsmanager::config::Credentials::new(
             parts.access_key_id,
             parts.secret_access_key,
             parts.session_token,
@@ -3853,6 +3897,13 @@ struct Checkpoint<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().expect("env lock should not be poisoned")
+    }
 
     #[test]
     fn worker_failure_code_is_stable_and_bounded() {
@@ -3877,6 +3928,46 @@ mod tests {
         assert_eq!(
             failure_error_code(&WorkerError::SpotInterrupted),
             "spot_interrupted"
+        );
+    }
+
+    #[test]
+    fn bronze_ducklake_data_path_requires_env_for_postgres_catalog() {
+        let _guard = lock_env();
+        let previous = std::env::var_os("SPUR_CONTEXT_DUCKLAKE_DATA_PATH");
+        std::env::remove_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH");
+
+        let error =
+            bronze_ducklake_data_path("postgres:host=localhost port=5432 dbname=spur_context")
+                .expect_err("postgres catalogs must not fall back to a hard-coded S3 data path");
+
+        match previous {
+            Some(value) => std::env::set_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH", value),
+            None => std::env::remove_var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH"),
+        }
+
+        assert!(
+            format!("{error:#}").contains("SPUR_CONTEXT_DUCKLAKE_DATA_PATH"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn catalog_password_from_rds_secret_json_reads_password() {
+        assert_eq!(
+            catalog_password_from_secret_string(
+                r#"{"username":"spur_context","password":"secret-value","engine":"postgres"}"#
+            )
+            .expect("password should parse"),
+            "secret-value"
+        );
+    }
+
+    #[test]
+    fn catalog_password_from_plain_secret_uses_secret_string() {
+        assert_eq!(
+            catalog_password_from_secret_string("plain-secret").expect("password should parse"),
+            "plain-secret"
         );
     }
 }

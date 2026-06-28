@@ -7,7 +7,8 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use aws_sdk_s3::primitives::ByteStream;
 use duckdb::{params, Connection};
 
-pub const DEFAULT_DATA_PATH: &str = "s3://spur-context/gold/data/";
+pub(crate) const DUCKLAKE_DATA_PATH_ENV: &str = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH";
+const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
 const SNAPSHOT_RELATIVE_PATH: &str = "gold/catalog-snapshot/spur_context.ducklake";
 const SNAPSHOT_INDEXES: &[(&str, &str, &str)] = &[
     (
@@ -75,7 +76,8 @@ pub struct SnapshotCleanupOptions {
 
 impl CatalogResolver {
     pub fn new(catalog_dsn: &str) -> Result<Self> {
-        Self::new_with_data_path(catalog_dsn, DEFAULT_DATA_PATH)
+        let data_path = ducklake_data_path(catalog_dsn)?;
+        Self::new_with_data_path(catalog_dsn, &data_path)
     }
 
     pub fn new_with_data_path(catalog_dsn: &str, data_path: &str) -> Result<Self> {
@@ -205,7 +207,8 @@ impl CatalogResolver {
 }
 
 pub fn connect_ducklake(catalog_dsn: &str) -> Result<Connection> {
-    connect_ducklake_with_data_path(catalog_dsn, DEFAULT_DATA_PATH)
+    let data_path = ducklake_data_path(catalog_dsn)?;
+    connect_ducklake_with_data_path(catalog_dsn, &data_path)
 }
 
 pub fn connect_frozen_snapshot(snapshot_path: &Path, data_path: &str) -> Result<Connection> {
@@ -226,24 +229,25 @@ pub fn connect_frozen_snapshot(snapshot_path: &Path, data_path: &str) -> Result<
 }
 
 pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Result<Connection> {
+    let catalog_dsn = catalog_dsn_with_env_password(catalog_dsn);
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
-    load_ducklake_extensions(&conn, catalog_dsn)?;
+    load_ducklake_extensions(&conn, &catalog_dsn)?;
 
-    if data_path.starts_with("s3://") && !is_remote_catalog(catalog_dsn) {
+    if data_path.starts_with("s3://") && !is_remote_catalog(&catalog_dsn) {
         let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
         conn.execute_batch(&format!(
             "INSTALL httpfs; LOAD httpfs; \
              CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
         ))
-        .context("failed to load httpfs for S3 data path")?;
+            .context("failed to load httpfs for S3 data path")?;
     }
 
-    if is_remote_catalog(catalog_dsn) {
+    if is_remote_catalog(&catalog_dsn) {
         conn.execute_batch("SET unsafe_disable_etag_checks = true;")
             .context("failed to disable etag checks for remote catalog")?;
     }
 
-    attach_ducklake(&conn, catalog_dsn, data_path)?;
+    attach_ducklake(&conn, &catalog_dsn, data_path)?;
 
     Ok(conn)
 }
@@ -368,6 +372,36 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
     Ok(())
 }
 
+pub(crate) fn ducklake_data_path(catalog_dsn: &str) -> Result<String> {
+    if let Ok(path) = std::env::var(DUCKLAKE_DATA_PATH_ENV) {
+        if !path.trim().is_empty() {
+            create_local_data_path_if_needed(&path)?;
+            return Ok(path);
+        }
+    }
+
+    if let Some(sqlite_path) = sqlite_catalog_path(catalog_dsn) {
+        let path = sqlite_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("data");
+        fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create DuckLake data path `{}`", path.display()))?;
+        return Ok(path.display().to_string());
+    }
+
+    bail!("{DUCKLAKE_DATA_PATH_ENV} must be set for non-local DuckLake catalogs")
+}
+
+fn create_local_data_path_if_needed(path: &str) -> Result<()> {
+    if path.contains("://") || path == ":memory:" {
+        return Ok(());
+    }
+    fs::create_dir_all(path)
+        .with_context(|| format!("failed to create DuckLake data path `{path}`"))?;
+    Ok(())
+}
+
 fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
     if is_remote_catalog(catalog_dsn) {
         conn.execute_batch(&format!(
@@ -485,10 +519,11 @@ fn snapshot_s3_uri(data_path: &str) -> String {
 }
 
 fn copy_ducklake_metadata_tables(catalog_dsn: &str, snapshot_path: &Path) -> Result<()> {
+    let catalog_dsn = catalog_dsn_with_env_password(catalog_dsn);
     let conn = Connection::open_in_memory().context("failed to open snapshot exporter DuckDB")?;
     conn.execute_batch("INSTALL sqlite; INSTALL postgres; LOAD sqlite; LOAD postgres;")
         .context("failed to load metadata backend extensions")?;
-    let source = attach_metadata_catalog(&conn, catalog_dsn)?;
+    let source = attach_metadata_catalog(&conn, &catalog_dsn)?;
     conn.execute_batch(&format!(
         "ATTACH '{}' AS snap;",
         escape_sql_literal(&snapshot_path.display().to_string())
@@ -834,10 +869,56 @@ fn is_postgres_catalog(catalog_dsn: &str) -> bool {
         || dsn.starts_with("postgresql://")
 }
 
+pub(crate) fn catalog_dsn_with_env_password(catalog_dsn: &str) -> String {
+    if !is_postgres_catalog(catalog_dsn) || postgres_dsn_has_password(catalog_dsn) {
+        return catalog_dsn.to_owned();
+    }
+
+    let Ok(password) = std::env::var(CATALOG_PASSWORD_ENV) else {
+        return catalog_dsn.to_owned();
+    };
+    if password.is_empty() {
+        return catalog_dsn.to_owned();
+    }
+
+    if catalog_dsn.starts_with("postgres:") || catalog_dsn.starts_with("ducklake:postgres:") {
+        format!(
+            "{catalog_dsn} password='{}'",
+            escape_libpq_keyword_value(&password)
+        )
+    } else {
+        catalog_dsn.to_owned()
+    }
+}
+
+fn postgres_dsn_has_password(catalog_dsn: &str) -> bool {
+    let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
+    dsn.contains(" password=")
+        || dsn.starts_with("postgres:password=")
+        || dsn.starts_with("postgresql:password=")
+        || dsn.contains("://")
+            && dsn.split_once("://").is_some_and(|(_, rest)| {
+                rest.split_once('@')
+                    .map(|(authority, _)| authority.contains(':'))
+                    .unwrap_or(false)
+            })
+}
+
+fn escape_libpq_keyword_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().expect("env lock should not be poisoned")
+    }
 
     #[test]
     fn metadata_copy_failure_does_not_leave_partial_snapshot_tables() -> Result<()> {
@@ -897,5 +978,42 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("{prefix}-{nanos}-{}", std::process::id()));
         fs::create_dir_all(&dir).with_context(|| format!("create temp dir `{}`", dir.display()))?;
         Ok(dir)
+    }
+
+    #[test]
+    fn postgres_catalog_dsn_uses_secret_password_env() {
+        let _guard = lock_env();
+        let previous = std::env::var_os("SPUR_CATALOG_PASSWORD");
+        std::env::set_var("SPUR_CATALOG_PASSWORD", "sec'ret\\value");
+
+        let dsn = catalog_dsn_with_env_password(
+            "postgres:host=aurora.example port=5432 dbname=spur_context user=spur_context",
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("SPUR_CATALOG_PASSWORD", value),
+            None => std::env::remove_var("SPUR_CATALOG_PASSWORD"),
+        }
+
+        assert_eq!(
+            dsn,
+            "postgres:host=aurora.example port=5432 dbname=spur_context user=spur_context password='sec\\'ret\\\\value'"
+        );
+    }
+
+    #[test]
+    fn postgres_catalog_dsn_keeps_existing_password() {
+        let _guard = lock_env();
+        let previous = std::env::var_os("SPUR_CATALOG_PASSWORD");
+        std::env::set_var("SPUR_CATALOG_PASSWORD", "from-secret");
+
+        let dsn = catalog_dsn_with_env_password("postgres:host=aurora password=already-present");
+
+        match previous {
+            Some(value) => std::env::set_var("SPUR_CATALOG_PASSWORD", value),
+            None => std::env::remove_var("SPUR_CATALOG_PASSWORD"),
+        }
+
+        assert_eq!(dsn, "postgres:host=aurora password=already-present");
     }
 }

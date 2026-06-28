@@ -27,18 +27,26 @@ resource "aws_lambda_function" "worker" {
     size = var.worker_lambda_ephemeral_storage_mb
   }
 
+  vpc_config {
+    subnet_ids         = var.worker_subnets
+    security_group_ids = [aws_security_group.worker.id]
+  }
+
   environment {
     variables = {
-      SPUR_INDEX_JOBS_TABLE           = aws_dynamodb_table.index_jobs.name
-      SPUR_CATALOG_LEASES_TABLE       = aws_dynamodb_table.catalog_leases.name
-      SPUR_CATALOG_S3_URI             = var.catalog_s3_uri
-      SPUR_CONTEXT_DUCKLAKE_DATA_PATH = local.context_ducklake_data_path
-      SPUR_CONTEXT_WORKER_LAMBDA_MODE = "1"
+      SPUR_INDEX_JOBS_TABLE            = aws_dynamodb_table.index_jobs.name
+      SPUR_CATALOG_LEASES_TABLE        = aws_dynamodb_table.catalog_leases.name
+      SPUR_CATALOG_DSN                 = local.aurora_catalog_dsn
+      SPUR_CATALOG_PASSWORD_SECRET_ARN = local.aurora_master_secret_arn
+      SPUR_CONTEXT_DUCKLAKE_DATA_PATH  = local.context_ducklake_data_path
+      SPUR_CONTEXT_WORKER_LAMBDA_MODE  = "1"
     }
   }
 
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic,
+    aws_iam_role_policy_attachment.lambda_vpc_access,
+    aws_iam_role_policy.lambda_catalog_secret,
     aws_cloudwatch_log_group.worker_lambda,
   ]
 }

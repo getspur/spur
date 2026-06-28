@@ -28,6 +28,60 @@ variable "context_ducklake_data_path" {
   default     = null
 }
 
+variable "aurora_cluster_identifier" {
+  description = "Aurora Serverless v2 cluster identifier for the live DuckLake ingest catalog"
+  type        = string
+  default     = "spur-context-catalog"
+}
+
+variable "aurora_database_name" {
+  description = "Postgres database name for the live DuckLake ingest catalog"
+  type        = string
+  default     = "spur_context"
+}
+
+variable "aurora_master_username" {
+  description = "Aurora master username. The password is generated and stored by RDS in Secrets Manager."
+  type        = string
+  default     = "spur_context"
+}
+
+variable "aurora_engine_version" {
+  description = "Aurora PostgreSQL engine version. Null lets RDS choose the regional default."
+  type        = string
+  default     = null
+}
+
+variable "aurora_subnets" {
+  description = "Private subnet IDs for Aurora. Defaults to worker_subnets when null."
+  type        = list(string)
+  default     = null
+}
+
+variable "aurora_max_acu" {
+  description = "Maximum Aurora Serverless v2 capacity in ACUs"
+  type        = number
+  default     = 4
+}
+
+variable "aurora_seconds_until_auto_pause" {
+  description = "Seconds of inactivity before Aurora Serverless v2 auto-pauses at 0 ACU"
+  type        = number
+  default     = 300
+}
+
+variable "aurora_backup_retention_days" {
+  description = "Aurora backup retention period in days"
+  type        = number
+  default     = 7
+}
+
+variable "aurora_deletion_protection" {
+  description = "Enable deletion protection on the Aurora catalog cluster"
+  type        = bool
+  default     = true
+}
+
 variable "index_jobs_table_name" {
   description = "DynamoDB table name for context-service index job records and dedupe pointers"
   type        = string
@@ -105,6 +159,10 @@ variable "worker_lambda_provisioned_concurrency" {
 }
 
 locals {
-  context_ducklake_data_path     = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/data/")
-  worker_checkpoint_uri_template = "s3://${var.bucket_name}/jobs/{}/checkpoint.json"
+  context_ducklake_data_path      = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/data/")
+  worker_checkpoint_uri_template  = "s3://${var.bucket_name}/jobs/{}/checkpoint.json"
+  aurora_subnet_ids               = var.aurora_subnets != null ? var.aurora_subnets : var.worker_subnets
+  aurora_catalog_dsn              = "postgres:host=${aws_rds_cluster.catalog.endpoint} port=${aws_rds_cluster.catalog.port} dbname=${var.aurora_database_name} user=${var.aurora_master_username} sslmode=require"
+  aurora_master_secret_arn        = aws_rds_cluster.catalog.master_user_secret[0].secret_arn
+  aurora_master_password_valuearn = "${local.aurora_master_secret_arn}:password::"
 }
