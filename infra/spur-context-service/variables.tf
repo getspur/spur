@@ -112,6 +112,56 @@ variable "concurrent_warm_instances" {
   default     = 0
 }
 
+# ─── Public API Abuse Controls ────────────────────────────────────────────────
+
+variable "api_throttle_rate_limit" {
+  description = "API Gateway account-level route throttle rate in requests per second"
+  type        = number
+  default     = 20
+}
+
+variable "api_throttle_burst_limit" {
+  description = "API Gateway account-level route throttle burst"
+  type        = number
+  default     = 40
+}
+
+variable "index_rate_limit_per_minute" {
+  description = "Per authenticated caller external_index fixed-window rate limit"
+  type        = number
+  default     = 10
+}
+
+variable "index_max_concurrent_jobs_per_caller" {
+  description = "Maximum queued/running external_index jobs per authenticated caller"
+  type        = number
+  default     = 2
+}
+
+variable "context_max_tarball_bytes" {
+  description = "Maximum downloaded tarball bytes for external_index"
+  type        = number
+  default     = 524288000
+}
+
+variable "context_max_git_bytes" {
+  description = "Maximum fetched git source tree bytes for external_index"
+  type        = number
+  default     = 2147483648
+}
+
+variable "context_max_build_seconds" {
+  description = "Maximum spur graph build runtime for an indexing worker"
+  type        = number
+  default     = 1800
+}
+
+variable "allowed_source_domains" {
+  description = "Optional source_url domain allow-list for external_index; empty allows public non-private domains"
+  type        = list(string)
+  default     = []
+}
+
 # ─── On-Demand Indexing ──────────────────────────────────────────────────────
 
 variable "vpc_id" {

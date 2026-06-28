@@ -463,6 +463,38 @@ fn fetch_source_rejects_localhost_url_without_escape_hatch() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn fetch_source_rejects_extracted_source_over_configured_cap() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env_guard = EnvGuard::set_all([
+        ("SPUR_CONTEXT_WORKER_SKIP_ABUSE_REVALIDATE", "1"),
+        ("SPUR_CONTEXT_MAX_SOURCE_BYTES", "128"),
+    ]);
+    let root = unique_temp_dir("worker-source-size-cap")?;
+    let fixture = root.join("fixture").join("demo-0.1.0");
+    fs::create_dir_all(fixture.join("src")).context("create fixture")?;
+    fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .context("write manifest")?;
+    fs::write(fixture.join("src/lib.rs"), "x".repeat(1024)).context("write large lib")?;
+    let archive = root.join("demo.tar.gz");
+    create_tarball(root.join("fixture").as_path(), &archive)?;
+    let source_url = serve_once(fs::read(&archive).context("read archive")?);
+
+    let err = fetch_source(&source_url, "tarball", "0.1.0", &root.join("fetch")).unwrap_err();
+
+    match err {
+        WorkerError::Fetch(detail) => {
+            assert!(detail.contains("source tree exceeded size cap"));
+            assert!(detail.contains("128"));
+        }
+        other => panic!("expected fetch error, got {other:?}"),
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn spot_interruption_handler_writes_checkpoint() -> Result<()> {
     let _guard = ENV_LOCK.lock().unwrap();
@@ -651,6 +683,47 @@ fn build_graph_invokes_spur_with_progress_visible() -> Result<()> {
     assert!(record.contains("--no-analyst"));
     assert!(!record.contains("--quiet"));
     assert!(record.contains("skip_embeddings=1"));
+    Ok(())
+}
+
+#[test]
+fn build_graph_kills_spur_after_configured_timeout() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = unique_temp_dir("worker-build-graph-timeout")?;
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).context("create fake bin dir")?;
+    let fake_spur = bin_dir.join("spur");
+    fs::write(&fake_spur, "#!/usr/bin/env bash\nsleep 2\nexit 0\n").context("write fake spur")?;
+    let mut perms = fs::metadata(&fake_spur)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        perms.set_mode(0o755);
+    }
+    fs::set_permissions(&fake_spur, perms).context("chmod fake spur")?;
+
+    let source = root.join("source");
+    fs::create_dir_all(&source).context("create source")?;
+    let artifact = root.join("artifact");
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let _env = EnvGuard::set_all([
+        ("PATH", path.as_str()),
+        ("SPUR_CONTEXT_MAX_BUILD_SECONDS", "1"),
+    ]);
+
+    let err = build_graph(&source, &artifact).unwrap_err();
+
+    match err {
+        WorkerError::Build(detail) => {
+            assert!(detail.contains("timed out"));
+            assert!(detail.contains("1s"));
+        }
+        other => panic!("expected build error, got {other:?}"),
+    }
     Ok(())
 }
 

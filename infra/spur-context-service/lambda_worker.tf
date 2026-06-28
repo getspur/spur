@@ -40,6 +40,9 @@ resource "aws_lambda_function" "worker" {
       SPUR_CATALOG_PASSWORD_SECRET_ARN = local.aurora_master_secret_arn
       SPUR_CONTEXT_DUCKLAKE_DATA_PATH  = local.context_ducklake_data_path
       SPUR_CONTEXT_WORKER_LAMBDA_MODE  = "1"
+      SPUR_CONTEXT_MAX_TARBALL_BYTES   = tostring(var.context_max_tarball_bytes)
+      SPUR_CONTEXT_MAX_GIT_BYTES       = tostring(var.context_max_git_bytes)
+      SPUR_CONTEXT_MAX_BUILD_SECONDS   = tostring(var.context_max_build_seconds)
     }
   }
 

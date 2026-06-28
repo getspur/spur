@@ -13,7 +13,8 @@
           "revision.$": "$.revision",
           "source.$": "$.source",
           "source_url.$": "$.source_url",
-          "source_kind.$": "$.source_kind"
+          "source_kind.$": "$.source_kind",
+          "limits.$": "$.limits"
         }
       },
       "ResultPath": "$.lambdaResult",
@@ -71,7 +72,7 @@
     "RunBuild": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
-      "TimeoutSeconds": 3600,
+      "TimeoutSeconds": ${worker_ecs_timeout_sec},
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
@@ -143,6 +144,14 @@
                   "Value": "${context_ducklake_data_path}"
                 },
                 {
+                  "Name": "SPUR_CONTEXT_MAX_SOURCE_BYTES",
+                  "Value.$": "States.Format('{}', $.limits.max_source_bytes)"
+                },
+                {
+                  "Name": "SPUR_CONTEXT_MAX_BUILD_SECONDS",
+                  "Value.$": "States.Format('{}', $.limits.max_build_seconds)"
+                },
+                {
                   "Name": "SPUR_CONTEXT_WORKER_CHECKPOINT_URI",
                   "Value.$": "States.Format('${worker_checkpoint_uri_template}', $.job_id)"
                 }
@@ -173,7 +182,7 @@
     "FallbackBuild": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
-      "TimeoutSeconds": 3600,
+      "TimeoutSeconds": ${worker_ecs_timeout_sec},
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
@@ -238,6 +247,14 @@
                 {
                   "Name": "SPUR_CONTEXT_DUCKLAKE_DATA_PATH",
                   "Value": "${context_ducklake_data_path}"
+                },
+                {
+                  "Name": "SPUR_CONTEXT_MAX_SOURCE_BYTES",
+                  "Value.$": "States.Format('{}', $.limits.max_source_bytes)"
+                },
+                {
+                  "Name": "SPUR_CONTEXT_MAX_BUILD_SECONDS",
+                  "Value.$": "States.Format('{}', $.limits.max_build_seconds)"
                 },
                 {
                   "Name": "SPUR_CONTEXT_WORKER_CHECKPOINT_URI",
