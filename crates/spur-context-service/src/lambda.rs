@@ -1,14 +1,27 @@
 //! AWS Lambda HTTP entry point for the context-service MCP surface.
+//!
+//! Serving intentionally reads only the published frozen DuckLake catalog
+//! snapshot from S3 plus the S3 gold data files. It must not attach the live
+//! ingest catalog backend, including Aurora/Postgres.
+//!
+//! The PoC measured roughly 15s cold starts from DuckDB import, extension
+//! loading, and snapshot download, while warm invokes were fast. For
+//! latency-sensitive serving, use provisioned concurrency, keep DuckDB
+//! extensions baked into the Lambda package, and trim the package if init time
+//! stays high.
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use lambda_runtime::{Error, LambdaEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::catalog::{self, CatalogResolver};
 use crate::jobs::{DynamoDbJobStore, JobStore};
@@ -21,6 +34,22 @@ pub struct CatalogCacheEntry {
     catalog_dsn: String,
     catalog_etag: Option<String>,
     resolver: CatalogResolver,
+}
+
+struct PreparedCatalog {
+    cache_key: String,
+    catalog_etag: Option<String>,
+    source: PreparedCatalogSource,
+}
+
+enum PreparedCatalogSource {
+    FrozenSnapshot {
+        local_path: PathBuf,
+        data_path: String,
+    },
+    Direct {
+        catalog_dsn: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,11 +138,9 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
             route_index_status_control_plane(&request.args, &jobs, &checker).await
         }
         "external_index" => {
-            let catalog_dsn = catalog_dsn()?;
-            let catalog_etag = catalog_etag(&catalog_dsn).await?;
+            let prepared_catalog = prepare_catalog().await?;
             let mut catalog_guard = catalog_resolver()?;
-            let catalog =
-                initialized_catalog(&mut catalog_guard, &catalog_dsn, catalog_etag.as_deref())?;
+            let catalog = initialized_catalog(&mut catalog_guard, &prepared_catalog)?;
             let db = catalog.connection();
             let jobs = job_store();
             let sfn_client = sfn_client()?;
@@ -121,11 +148,9 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
             mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, &caller_id).await
         }
         _ => {
-            let catalog_dsn = catalog_dsn()?;
-            let catalog_etag = catalog_etag(&catalog_dsn).await?;
+            let prepared_catalog = prepare_catalog().await?;
             let mut catalog_guard = catalog_resolver()?;
-            let catalog =
-                initialized_catalog(&mut catalog_guard, &catalog_dsn, catalog_etag.as_deref())?;
+            let catalog = initialized_catalog(&mut catalog_guard, &prepared_catalog)?;
             let db = catalog.connection();
             mcp::handle_tool_sync(&request.tool, &request.args, db, catalog)
         }
@@ -197,19 +222,32 @@ fn catalog_resolver() -> Result<MutexGuard<'static, Option<CatalogCacheEntry>>, 
 
 fn initialized_catalog<'a>(
     guard: &'a mut MutexGuard<'static, Option<CatalogCacheEntry>>,
-    catalog_dsn: &str,
-    catalog_etag: Option<&str>,
+    prepared_catalog: &PreparedCatalog,
 ) -> Result<&'a CatalogResolver, Error> {
     let cached_dsn = guard.as_ref().map(|entry| entry.catalog_dsn.as_str());
     let cached_etag = guard
         .as_ref()
         .and_then(|entry| entry.catalog_etag.as_deref());
+    let catalog_etag = prepared_catalog.catalog_etag.as_deref();
 
-    if should_initialize_catalog(cached_dsn, cached_etag, catalog_dsn, catalog_etag) {
-        let conn = catalog::connect_ducklake(catalog_dsn).map_err(Error::from)?;
+    if should_initialize_catalog(
+        cached_dsn,
+        cached_etag,
+        &prepared_catalog.cache_key,
+        catalog_etag,
+    ) {
+        let conn = match &prepared_catalog.source {
+            PreparedCatalogSource::FrozenSnapshot {
+                local_path,
+                data_path,
+            } => catalog::connect_frozen_snapshot(local_path, data_path).map_err(Error::from)?,
+            PreparedCatalogSource::Direct { catalog_dsn } => {
+                catalog::connect_ducklake(catalog_dsn).map_err(Error::from)?
+            }
+        };
         **guard = Some(CatalogCacheEntry {
-            catalog_dsn: catalog_dsn.to_owned(),
-            catalog_etag: catalog_etag.map(str::to_owned),
+            catalog_dsn: prepared_catalog.cache_key.clone(),
+            catalog_etag: prepared_catalog.catalog_etag.clone(),
             resolver: CatalogResolver::from_connection(conn),
         });
     }
@@ -217,6 +255,45 @@ fn initialized_catalog<'a>(
         .as_ref()
         .map(|entry| &entry.resolver)
         .ok_or_else(|| lambda_error("catalog resolver cache did not initialize"))
+}
+
+async fn prepare_catalog() -> Result<PreparedCatalog, Error> {
+    let catalog_dsn = catalog_dsn()?;
+    let catalog_etag = catalog_etag(&catalog_dsn).await?;
+    prepare_catalog_source(catalog_dsn, catalog_etag).await
+}
+
+async fn prepare_catalog_source(
+    catalog_dsn: String,
+    catalog_etag: Option<String>,
+) -> Result<PreparedCatalog, Error> {
+    if let Some(uri) = parse_s3_uri(&catalog_dsn)? {
+        let data_path = catalog_data_path(&catalog_dsn);
+        let local_path = local_snapshot_path(&catalog_dsn, catalog_etag.as_deref())?;
+        if !local_path.is_file() {
+            download_catalog_snapshot(&uri, &local_path).await?;
+        }
+        return Ok(PreparedCatalog {
+            cache_key: format!("{catalog_dsn}\n{data_path}"),
+            catalog_etag,
+            source: PreparedCatalogSource::FrozenSnapshot {
+                local_path,
+                data_path,
+            },
+        });
+    }
+
+    if is_postgres_catalog_dsn(&catalog_dsn) {
+        return Err(lambda_error(
+            "serving requires SPUR_CATALOG_S3_URI to point at a frozen DuckLake snapshot; refusing to connect to Postgres",
+        ));
+    }
+
+    Ok(PreparedCatalog {
+        cache_key: catalog_dsn.clone(),
+        catalog_etag,
+        source: PreparedCatalogSource::Direct { catalog_dsn },
+    })
 }
 
 fn should_initialize_catalog(
@@ -241,13 +318,23 @@ fn should_initialize_catalog(
 }
 
 fn catalog_dsn() -> Result<String, Error> {
-    env::var("SPUR_CATALOG_S3_URI")
-        .or_else(|_| env::var("SPUR_CATALOG_DSN"))
-        .map_err(|error| {
-            lambda_error(format!(
-                "SPUR_CATALOG_S3_URI (or SPUR_CATALOG_DSN) environment variable is required: {error}"
-            ))
-        })
+    if let Ok(value) = env::var("SPUR_CATALOG_S3_URI") {
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+    }
+
+    let catalog_dsn = env::var("SPUR_CATALOG_DSN").map_err(|error| {
+        lambda_error(format!(
+            "SPUR_CATALOG_S3_URI environment variable is required for serving: {error}"
+        ))
+    })?;
+    if is_postgres_catalog_dsn(&catalog_dsn) {
+        return Err(lambda_error(
+            "SPUR_CATALOG_S3_URI must point at the frozen serving snapshot; SPUR_CATALOG_DSN Postgres catalogs are ingest-only",
+        ));
+    }
+    Ok(catalog_dsn)
 }
 
 async fn catalog_etag(catalog_dsn: &str) -> Result<Option<String>, Error> {
@@ -263,6 +350,96 @@ async fn catalog_etag(catalog_dsn: &str) -> Result<Option<String>, Error> {
         .await
         .map_err(|error| lambda_error(format!("failed to read catalog ETag: {error}")))?;
     Ok(output.e_tag().map(str::to_owned))
+}
+
+fn catalog_data_path(snapshot_uri: &str) -> String {
+    if let Ok(path) = env::var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH") {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+
+    infer_data_path_from_snapshot_uri(snapshot_uri)
+        .unwrap_or_else(|| catalog::DEFAULT_DATA_PATH.to_owned())
+}
+
+fn infer_data_path_from_snapshot_uri(snapshot_uri: &str) -> Option<String> {
+    let marker = "/gold/catalog-snapshot/";
+    let prefix = snapshot_uri.split_once(marker)?.0;
+    Some(format!("{prefix}/gold/data/"))
+}
+
+fn local_snapshot_path(catalog_dsn: &str, catalog_etag: Option<&str>) -> Result<PathBuf, Error> {
+    let mut hasher = Sha256::new();
+    hasher.update(catalog_dsn.as_bytes());
+    if let Some(etag) = catalog_etag {
+        hasher.update(b"\0");
+        hasher.update(etag.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let suffix = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    let dir = env::temp_dir().join("spur-context-service-catalog");
+    fs::create_dir_all(&dir).map_err(|error| {
+        lambda_error(format!(
+            "failed to create catalog snapshot cache dir `{}`: {error}",
+            dir.display()
+        ))
+    })?;
+    Ok(dir.join(format!("catalog-{suffix}.ducklake")))
+}
+
+async fn download_catalog_snapshot(uri: &S3Uri, local_path: &Path) -> Result<(), Error> {
+    if let Some(parent) = local_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            lambda_error(format!(
+                "failed to create catalog snapshot dir `{}`: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let output = aws_clients()
+        .s3
+        .get_object()
+        .bucket(&uri.bucket)
+        .key(&uri.key)
+        .send()
+        .await
+        .map_err(|error| lambda_error(format!("failed to download catalog snapshot: {error}")))?;
+    let bytes = output.body.collect().await.map_err(|error| {
+        lambda_error(format!(
+            "failed to read catalog snapshot download body: {error}"
+        ))
+    })?;
+
+    let tmp_path = local_path.with_file_name(format!(
+        ".{}.{}.tmp",
+        local_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("catalog.ducklake"),
+        std::process::id()
+    ));
+    tokio::fs::write(&tmp_path, bytes.into_bytes())
+        .await
+        .map_err(|error| {
+            lambda_error(format!(
+                "failed to write catalog snapshot `{}`: {error}",
+                tmp_path.display()
+            ))
+        })?;
+    tokio::fs::rename(&tmp_path, local_path)
+        .await
+        .map_err(|error| {
+            lambda_error(format!(
+                "failed to install catalog snapshot `{}`: {error}",
+                local_path.display()
+            ))
+        })
 }
 
 struct S3Uri {
@@ -286,6 +463,13 @@ fn parse_s3_uri(uri: &str) -> Result<Option<S3Uri>, Error> {
         bucket: bucket.to_owned(),
         key: key.to_owned(),
     }))
+}
+
+fn is_postgres_catalog_dsn(catalog_dsn: &str) -> bool {
+    let dsn = catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn);
+    dsn.starts_with("postgres:")
+        || dsn.starts_with("postgresql:")
+        || dsn.starts_with("postgresql://")
 }
 
 fn job_store() -> DynamoDbJobStore {

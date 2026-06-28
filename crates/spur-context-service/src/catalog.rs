@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use aws_sdk_s3::primitives::ByteStream;
 use duckdb::{params, Connection};
 
-const DEFAULT_DATA_PATH: &str = "s3://spur-context/gold/data/";
+pub const DEFAULT_DATA_PATH: &str = "s3://spur-context/gold/data/";
 const SNAPSHOT_RELATIVE_PATH: &str = "gold/catalog-snapshot/spur_context.ducklake";
 const SNAPSHOT_INDEXES: &[(&str, &str, &str)] = &[
     (
@@ -218,6 +218,23 @@ pub fn connect_ducklake(catalog_dsn: &str) -> Result<Connection> {
     connect_ducklake_with_data_path(catalog_dsn, DEFAULT_DATA_PATH)
 }
 
+pub fn connect_frozen_snapshot(snapshot_path: &Path, data_path: &str) -> Result<Connection> {
+    let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
+    load_ducklake_extensions(&conn, &snapshot_path.display().to_string())?;
+
+    if data_path.starts_with("s3://") {
+        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+        conn.execute_batch(&format!(
+            "INSTALL httpfs; LOAD httpfs; \
+             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
+        ))
+        .context("failed to load httpfs for frozen snapshot S3 data path")?;
+    }
+
+    attach_frozen_snapshot(&conn, snapshot_path, data_path)?;
+    Ok(conn)
+}
+
 pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Result<Connection> {
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
     load_ducklake_extensions(&conn, catalog_dsn)?;
@@ -381,6 +398,16 @@ fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Res
         ))
         .context("failed to attach DuckLake catalog")
     }
+}
+
+fn attach_frozen_snapshot(conn: &Connection, snapshot_path: &Path, data_path: &str) -> Result<()> {
+    let attach_uri = format!("ducklake:{}", snapshot_path.display());
+    conn.execute_batch(&format!(
+        "ATTACH '{}' AS spur_context (DATA_PATH '{}', READ_ONLY); USE spur_context;",
+        escape_sql_literal(&attach_uri),
+        escape_sql_literal(data_path)
+    ))
+    .context("failed to attach frozen DuckLake snapshot")
 }
 
 fn escape_sql_literal(value: &str) -> String {
