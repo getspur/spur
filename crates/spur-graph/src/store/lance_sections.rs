@@ -371,6 +371,7 @@ pub struct VectorBackfillStats {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VectorBackfillTableStats {
+    pub total_rows: usize,
     pub null_vector_rows: usize,
     pub eligible_rows: usize,
     pub filled_rows: usize,
@@ -2843,10 +2844,10 @@ async fn backfill_missing_vectors_async_with_embedding_model_and_embedder<F>(
 where
     F: FnMut(SidecarPhase, &[&str]) -> Result<Vec<Vec<f32>>>,
 {
-    let sections =
-        backfill_section_vectors(artifact_dir, options, embedding_model, &mut embed_batch).await?;
     let code_symbols =
         backfill_symbol_vectors(artifact_dir, options, embedding_model, &mut embed_batch).await?;
+    let sections =
+        backfill_section_vectors(artifact_dir, options, embedding_model, &mut embed_batch).await?;
     Ok(VectorBackfillStats {
         sections,
         code_symbols,
@@ -2886,14 +2887,21 @@ where
     let Some(table) = open_section_table_for_backfill(artifact_dir).await? else {
         return Ok(VectorBackfillTableStats::default());
     };
+    let total_rows = count_backfill_table_rows(&table, "section sidecar").await?;
     if !table_has_vector_identity_columns(&table, "section sidecar").await {
-        return Ok(VectorBackfillTableStats::default());
+        let null_vector_rows = count_backfill_null_vector_rows(&table, "section sidecar").await?;
+        return Ok(VectorBackfillTableStats {
+            total_rows,
+            null_vector_rows,
+            ..VectorBackfillTableStats::default()
+        });
     }
     let (null_vector_rows, mut rows) = load_section_backfill_rows(&table, embedding_model).await?;
     let eligible_rows = rows.len();
     apply_backfill_embeddings_to_section_rows(&mut rows, options, embedding_model, embed_batch);
     let filled_rows = merge_backfilled_section_rows(&table, rows).await?;
     Ok(VectorBackfillTableStats {
+        total_rows,
         null_vector_rows,
         eligible_rows,
         filled_rows,
@@ -2915,18 +2923,43 @@ where
     let Some(table) = open_symbol_table_for_backfill(artifact_dir).await? else {
         return Ok(VectorBackfillTableStats::default());
     };
+    let total_rows = count_backfill_table_rows(&table, "code symbol sidecar").await?;
     if !table_has_vector_identity_columns(&table, "code symbol sidecar").await {
-        return Ok(VectorBackfillTableStats::default());
+        let null_vector_rows =
+            count_backfill_null_vector_rows(&table, "code symbol sidecar").await?;
+        return Ok(VectorBackfillTableStats {
+            total_rows,
+            null_vector_rows,
+            ..VectorBackfillTableStats::default()
+        });
     }
     let (null_vector_rows, mut rows) = load_symbol_backfill_rows(&table, embedding_model).await?;
     let eligible_rows = rows.len();
     apply_backfill_embeddings_to_symbol_rows(&mut rows, options, embedding_model, embed_batch);
     let filled_rows = merge_backfilled_symbol_rows(&table, rows).await?;
     Ok(VectorBackfillTableStats {
+        total_rows,
         null_vector_rows,
         eligible_rows,
         filled_rows,
     })
+}
+
+async fn count_backfill_table_rows(table: &lancedb::Table, table_label: &str) -> Result<usize> {
+    table
+        .count_rows(None)
+        .await
+        .with_context(|| format!("failed to count LanceDB {table_label} rows"))
+}
+
+async fn count_backfill_null_vector_rows(
+    table: &lancedb::Table,
+    table_label: &str,
+) -> Result<usize> {
+    table
+        .count_rows(Some("vector IS NULL".to_owned()))
+        .await
+        .with_context(|| format!("failed to count missing LanceDB {table_label} vectors"))
 }
 
 async fn open_section_table_for_backfill(artifact_dir: &Path) -> Result<Option<lancedb::Table>> {
@@ -6849,6 +6882,49 @@ mod tests {
         assert_eq!(stored("section:missing").vector, Some(fake_vector(42.0)));
         assert!(!stored("section:stale").has_vector);
         assert!(!stored("section:h1").has_vector);
+    }
+
+    #[tokio::test]
+    async fn vector_backfill_prioritizes_code_symbol_vectors_before_sections_by_default() {
+        let sidecar_dir = tempfile::tempdir().expect("sidecar");
+        let section = versioned_section_row("section:missing", "docs/missing.md", "hash-section");
+        let symbol = symbol_row_fixture("sym-missing", "symbol text");
+        write_previous_section_sidecar_rows(sidecar_dir.path(), vec![section]).await;
+        write_previous_symbol_sidecar_rows(sidecar_dir.path(), vec![symbol]).await;
+
+        let mut calls = Vec::new();
+        let stats = backfill_missing_vectors_with(
+            sidecar_dir.path(),
+            SectionEmbeddingOptions {
+                skip_section_embeddings: false,
+                skip_code_symbol_embeddings: false,
+                batch_size: 8,
+            },
+            |phase, texts| {
+                calls.push(phase);
+                let value = match phase {
+                    SidecarPhase::CodeSymbols => 31.0,
+                    SidecarPhase::Sections => 42.0,
+                };
+                Ok(texts.iter().map(|_| fake_vector(value)).collect())
+            },
+        )
+        .await
+        .expect("backfill all vectors");
+
+        assert_eq!(
+            calls,
+            vec![SidecarPhase::CodeSymbols, SidecarPhase::Sections]
+        );
+        assert_eq!(stats.code_symbols.total_rows, 1);
+        assert_eq!(stats.code_symbols.filled_rows, 1);
+        assert_eq!(stats.sections.total_rows, 1);
+        assert_eq!(stats.sections.filled_rows, 1);
+
+        let symbol_rows = read_stored_symbol_rows(sidecar_dir.path()).await;
+        assert_eq!(symbol_rows[0].vector, Some(fake_vector(31.0)));
+        let section_rows = read_stored_section_rows(sidecar_dir.path()).await;
+        assert_eq!(section_rows[0].vector, Some(fake_vector(42.0)));
     }
 
     #[tokio::test]
