@@ -253,6 +253,9 @@ index replay) and safe-degradation durability — so the §9 fence is proven, no
   `init_catalog.sql`. Exit: DDL + manifest spec reviewed; columns additive.
 - **Phase 1 — Persist bronze (R1).** Upload to content-hash prefix; `bronze.raw_sources`;
   dedup by `content_sha256`; lifecycle rule. Exit: re-request skips fetch; retrieval test passes.
+  Lifecycle follow-up: configure the bronze S3 bucket/prefix to move `bronze/*` objects to
+  Intelligent-Tiering after 30 days and retain only the latest-N noncurrent objects per
+  coordinate/version policy once the infra phase owns bucket rules.
 - **Phase 2 — Persist silver + manifest (R2 substrate).** Immutable prefix + validated manifest;
   `silver.graph_artifacts`; translate reads manifest files. Exit: silver registered with
   `graph_content_hash` + `builder_version`.

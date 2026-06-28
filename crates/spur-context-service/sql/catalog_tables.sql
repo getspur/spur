@@ -16,13 +16,17 @@ CREATE TABLE IF NOT EXISTS bronze.raw_sources (
     semver_minor INTEGER,
     semver_patch INTEGER,
     source_kind VARCHAR,
-    source_uri VARCHAR,
-    artifact_s3_uri VARCHAR,
+    source_url VARCHAR,
+    s3_uri VARCHAR,
     content_sha256 VARCHAR,
-    size_bytes UBIGINT,
-    etag VARCHAR,
-    fetched_at TIMESTAMP
+    bytes UBIGINT,
+    fetched_at TIMESTAMP,
+    fetch_status VARCHAR
 );
+ALTER TABLE bronze.raw_sources ADD COLUMN IF NOT EXISTS source_url VARCHAR;
+ALTER TABLE bronze.raw_sources ADD COLUMN IF NOT EXISTS s3_uri VARCHAR;
+ALTER TABLE bronze.raw_sources ADD COLUMN IF NOT EXISTS bytes UBIGINT;
+ALTER TABLE bronze.raw_sources ADD COLUMN IF NOT EXISTS fetch_status VARCHAR;
 ALTER TABLE bronze.raw_sources SET PARTITIONED BY (source, package);
 
 CREATE TABLE IF NOT EXISTS silver.graph_artifacts (
