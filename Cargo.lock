@@ -9907,7 +9907,7 @@ dependencies = [
 
 [[package]]
 name = "spur-acp"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -9941,7 +9941,7 @@ dependencies = [
 
 [[package]]
 name = "spur-analyst"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arrow-array 58.1.0",
@@ -9966,7 +9966,7 @@ dependencies = [
 
 [[package]]
 name = "spur-blob-store"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9983,7 +9983,7 @@ dependencies = [
 
 [[package]]
 name = "spur-bot"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -10005,7 +10005,7 @@ dependencies = [
 
 [[package]]
 name = "spur-cli"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -10049,7 +10049,7 @@ dependencies = [
 
 [[package]]
 name = "spur-context"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10068,7 +10068,7 @@ dependencies = [
 
 [[package]]
 name = "spur-core"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -10123,7 +10123,7 @@ dependencies = [
 
 [[package]]
 name = "spur-cost"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10140,7 +10140,7 @@ dependencies = [
 
 [[package]]
 name = "spur-graph"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arrow-array 58.1.0",
@@ -10183,12 +10183,13 @@ dependencies = [
  "tree-sitter-md",
  "tree-sitter-python",
  "tree-sitter-rust",
+ "tree-sitter-sequel",
  "tree-sitter-typescript",
 ]
 
 [[package]]
 name = "spur-interactive"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10202,7 +10203,7 @@ dependencies = [
 
 [[package]]
 name = "spur-license"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -10228,7 +10229,7 @@ dependencies = [
 
 [[package]]
 name = "spur-license-admin"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -10247,7 +10248,7 @@ dependencies = [
 
 [[package]]
 name = "spur-mcp"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10268,7 +10269,7 @@ dependencies = [
 
 [[package]]
 name = "spur-pm"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10302,7 +10303,7 @@ dependencies = [
 
 [[package]]
 name = "spur-telemetry"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -10323,7 +10324,7 @@ dependencies = [
 
 [[package]]
 name = "spur-test-madsim"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "madsim",
  "madsim-tokio",
@@ -10331,7 +10332,7 @@ dependencies = [
 
 [[package]]
 name = "spur-tui"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -10378,7 +10379,7 @@ dependencies = [
 
 [[package]]
 name = "spur-worktree"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11429,6 +11430,16 @@ name = "tree-sitter-rust"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-sequel"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -12805,7 +12816,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "1.6.0"
+version = "1.7.0"
 
 [[package]]
 name = "xxhash-rust"
