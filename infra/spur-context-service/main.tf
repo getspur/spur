@@ -144,10 +144,16 @@ resource "aws_lambda_function" "service" {
 
   environment {
     variables = {
-      SPUR_CATALOG_S3_URI          = var.catalog_s3_uri
-      SPUR_INDEX_STATE_MACHINE_ARN = aws_sfn_state_machine.index_build.arn
-      SPUR_INDEX_JOBS_TABLE        = aws_dynamodb_table.index_jobs.name
-      SPUR_CATALOG_LEASES_TABLE    = aws_dynamodb_table.catalog_leases.name
+      SPUR_CATALOG_S3_URI                       = var.catalog_s3_uri
+      SPUR_INDEX_STATE_MACHINE_ARN              = aws_sfn_state_machine.index_build.arn
+      SPUR_INDEX_JOBS_TABLE                     = aws_dynamodb_table.index_jobs.name
+      SPUR_CATALOG_LEASES_TABLE                 = aws_dynamodb_table.catalog_leases.name
+      SPUR_INDEX_RATE_LIMIT_PER_MINUTE          = tostring(var.index_rate_limit_per_minute)
+      SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER = tostring(var.index_max_concurrent_jobs_per_caller)
+      SPUR_CONTEXT_MAX_TARBALL_BYTES            = tostring(var.context_max_tarball_bytes)
+      SPUR_CONTEXT_MAX_GIT_BYTES                = tostring(var.context_max_git_bytes)
+      SPUR_CONTEXT_MAX_BUILD_SECONDS            = tostring(var.context_max_build_seconds)
+      SPUR_CONTEXT_ALLOWED_SOURCE_DOMAINS       = join(",", var.allowed_source_domains)
     }
   }
 
@@ -167,7 +173,32 @@ resource "aws_lambda_provisioned_concurrency_config" "warm" {
 resource "aws_apigatewayv2_api" "http" {
   name          = "spur-context-service"
   protocol_type = "HTTP"
-  target        = aws_lambda_function.service.arn
+}
+
+resource "aws_apigatewayv2_integration" "lambda" {
+  api_id                 = aws_apigatewayv2_api.http.id
+  integration_type       = "AWS_PROXY"
+  integration_method     = "POST"
+  integration_uri        = aws_lambda_function.service.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "default" {
+  api_id             = aws_apigatewayv2_api.http.id
+  route_key          = "$default"
+  target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  authorization_type = "AWS_IAM"
+}
+
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.http.id
+  name        = "$default"
+  auto_deploy = true
+
+  default_route_settings {
+    throttling_burst_limit = var.api_throttle_burst_limit
+    throttling_rate_limit  = var.api_throttle_rate_limit
+  }
 }
 
 resource "aws_lambda_permission" "apigw" {

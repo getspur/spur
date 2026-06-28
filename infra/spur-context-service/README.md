@@ -6,11 +6,11 @@ plus the on-demand indexing worker control plane.
 ## Architecture
 
 ```
-Client → API Gateway (HTTP) → Lambda (ARM64, provided.al2023)
+Client → API Gateway (HTTP, AWS_IAM) → Lambda (ARM64, provided.al2023)
                                 ├── DuckDB + DuckLake reads
                                 │       ↓
                                 │   S3 (.ducklake catalog + Parquet data via httpfs)
-                                ├── DynamoDB job/status/dedupe records
+                                ├── DynamoDB job/status/dedupe/quota records
                                 └── Step Functions DescribeExecution repair
 
 external_index → DynamoDB job + dedupe → Step Functions → Lambda worker
@@ -25,7 +25,8 @@ external_index → DynamoDB job + dedupe → Step Functions → Lambda worker
 
 DuckLake/S3 is the data plane for indexed package rows, refs, catalog metadata,
 and Parquet files. DynamoDB is the production control plane for job status,
-idempotency, execution ARNs, and catalog write leases.
+idempotency, execution ARNs, per-caller active-job quotas, and catalog write
+leases.
 
 The deployed ECS fallback image includes both `/usr/local/bin/spur-context-worker`
 and `/usr/local/bin/spur`; `deploy.sh` smoke-tests both before Terraform applies
@@ -40,18 +41,53 @@ ARN is present.
 | Resource | Purpose |
 |---|---|
 | `aws_s3_bucket.data` | DuckLake catalog (.ducklake) + Parquet data files |
-| `aws_dynamodb_table.index_jobs` | Job records, active dedupe pointers, execution ARNs |
+| `aws_dynamodb_table.index_jobs` | Job records, active dedupe pointers, caller quota records, execution ARNs |
 | `aws_dynamodb_table.catalog_leases` | Serialized DuckLake catalog write leases |
 | `aws_lambda_function.service` | ARM64 Lambda, 1024MB, 30s timeout |
 | `aws_sfn_state_machine.index_build` | Lambda-first on-demand indexing orchestration |
 | `aws_lambda_function.worker` | Fast-start indexing worker image |
 | `aws_ecs_cluster.indexing` / task definition | Fargate fallback worker runtime |
 | `aws_apigatewayv2_api.http` | HTTP API front door |
+| `aws_iam_policy.context_service_invoke` | Same-account SigV4 invoke policy for allowed callers |
 | `aws_iam_role.lambda` | Execution role with S3 read, DynamoDB, SFN + CloudWatch Logs |
 | `aws_iam_role.worker_task` | ECS fallback worker role with S3, DynamoDB, SFN callback permissions |
 | `aws_cloudwatch_log_group.lambda` | 14-day retention |
 | `aws_cloudwatch_log_group.worker_lambda` | Lambda worker logs |
 | `aws_cloudwatch_log_group.worker` | Worker task logs |
+
+## Authentication And Abuse Controls
+
+The public API route uses API Gateway `AWS_IAM`; callers must sign requests with
+SigV4 and have `execute-api:Invoke` permission. The Lambda still rejects
+mutating tools (`external_index`, `external_index_status`) unless API Gateway
+passes an authenticated JWT/IAM/principal identity, so an accidentally
+unauthenticated route does not silently fall back to source IP identity.
+
+`external_index` applies three layers of controls:
+
+- API Gateway route throttling via `api_throttle_rate_limit` and
+  `api_throttle_burst_limit`.
+- Per authenticated caller DynamoDB-backed fixed-window rate limiting and an
+  active-job cap. The active-job cap is atomic with job creation and is released
+  when a job reaches a terminal state.
+- Source and build caps. URL size hints are checked before job creation; workers
+  revalidate URLs, cap tarball downloads/source trees, and kill `spur graph
+  build` after `context_max_build_seconds`.
+
+## Tenant Isolation Notes
+
+This deployment intentionally indexes public external packages into one shared
+catalog and S3 bucket. Tenants do not receive direct S3, Aurora, DynamoDB, or
+Step Functions access; their isolation boundary is the signed API caller, the
+per-caller quota records, and the package coordinate stored on each job and
+catalog row.
+
+The shared catalog/bucket model is acceptable only for public package indexing.
+Do not use it for private tenant source or tenant-confidential artifacts without
+adding tenant-scoped catalog filtering, per-tenant S3 prefixes and IAM policies,
+and API response authorization checks. Current workers serialize catalog writes
+with DynamoDB leases, but they do not provide private data-plane isolation inside
+the shared DuckLake catalog.
 
 ## Deploy
 
@@ -106,6 +142,14 @@ terraform apply -var concurrent_warm_instances=1
 | `lambda_memory_mb` | `1024` | Lambda memory |
 | `lambda_timeout_sec` | `30` | Lambda timeout |
 | `concurrent_warm_instances` | `0` | Provisioned concurrency |
+| `api_throttle_rate_limit` | `20` | API Gateway route throttle rate per second |
+| `api_throttle_burst_limit` | `40` | API Gateway route throttle burst |
+| `index_rate_limit_per_minute` | `10` | Per-caller `external_index` requests per minute |
+| `index_max_concurrent_jobs_per_caller` | `2` | Per-caller queued/running index job cap |
+| `context_max_tarball_bytes` | `524288000` | Tarball download/source cap |
+| `context_max_git_bytes` | `2147483648` | Git source tree cap |
+| `context_max_build_seconds` | `1800` | Worker `spur graph build` timeout |
+| `allowed_source_domains` | `[]` | Optional `source_url` domain allow-list |
 | `vpc_id` | n/a | VPC for ECS worker tasks |
 | `worker_subnets` | `[]` | Subnets for ECS worker tasks |
 | `worker_ecr_image` | n/a | ECS fallback worker image URI built by `deploy.sh` |
