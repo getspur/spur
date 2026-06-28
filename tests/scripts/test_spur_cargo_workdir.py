@@ -92,6 +92,45 @@ printf 'args=%s\\n' "$*" >> {record}
     ]
 
 
+def test_spur_cargo_graph_embed_routes_through_remote_graph_build(tmp_path: Path):
+    record = tmp_path / "remote-record"
+    remote = tmp_path / "remote-build.sh"
+    write_executable(
+        remote,
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf 'pwd=%s\\n' "$PWD" > {record}
+printf 'args=%s\\n' "$*" >> {record}
+""",
+    )
+    write_executable(
+        tmp_path / "cargo",
+        """#!/usr/bin/env bash
+exit 99
+""",
+    )
+    env = base_env(tmp_path)
+    env.update(
+        {
+            "SPUR_CLOUD_BUILD_SH": str(remote),
+            "SPUR_CLOUD": "test-cloud",
+            "SPUR_CLOUD_FALLBACK": "",
+        }
+    )
+
+    subprocess.run(
+        [str(SPUR_CARGO), "graph-embed", "--quiet"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+    )
+
+    assert record.read_text().splitlines() == [
+        f"pwd={ROOT}",
+        "args=--auto-spin -- run -p spur-cli -- graph build --workspace --quiet",
+    ]
+
+
 def test_remote_build_helpers_run_cargo_from_invocation_directory():
     for relative_path in [
         "scripts/cloud-build/build.sh",
