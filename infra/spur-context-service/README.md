@@ -97,7 +97,63 @@ the shared DuckLake catalog.
 
 # Or use an existing zip
 ./deploy.sh --local-zip /path/to/lambda.zip
+
+# Build the serving Lambda zip without touching Terraform-managed resources
+./deploy.sh --skip-worker --package-only
 ```
+
+## CI/CD
+
+The context-service GitHub Actions workflow lives at
+`.github/workflows/context-service.yml`.
+
+Pull requests and pushes that touch this service run:
+
+- `scripts/spur-cargo --workdir crates/spur-context-service test --all-features`
+- deploy-script guardrails in `tests/scripts/test_spur_context_service_deploy.py`
+- `infra/spur-context-service/test-graviton2-baseline.sh`
+
+Real AWS artifact builds are gated through `workflow_dispatch` and the
+`context-service-staging` environment. Set `build_aws_artifacts=true` to push
+the Graviton2-safe worker images through `build-and-push-remote.sh` and build
+the serving Lambda zip through `deploy.sh --skip-worker --package-only`. The
+workflow does not run Terraform.
+
+Required repository/environment configuration:
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `CONTEXT_SERVICE_AWS_ROLE_ARN` | secret | AWS role assumed by GitHub OIDC for ECR, Lambda, S3, and smoke access |
+| `CONTEXT_SERVICE_AWS_REGION` | variable | AWS region, defaults to `ap-southeast-5` |
+| `CONTEXT_SERVICE_BUILD_CLOUD` | variable | Remote build cloud selector, defaults to `aws-my` |
+| `CONTEXT_SERVICE_STAGING_LAMBDA` | variable | Staging serving Lambda name for the smoke test |
+| `CONTEXT_SERVICE_STAGING_SOURCE_BUCKET` | variable | Bucket where the smoke uploads its tiny source tarball |
+| `CONTEXT_SERVICE_STAGING_DATA_BUCKET` | variable | Bucket containing bronze, silver, and gold medallion objects |
+
+## Staging E2E Smoke
+
+Run the staging smoke locally after authenticating to AWS:
+
+```bash
+export AWS_REGION=ap-southeast-5
+export SPUR_CONTEXT_SMOKE_LAMBDA=spur-context-service
+export SPUR_CONTEXT_SMOKE_SOURCE_BUCKET=spur-context-staging
+export SPUR_CONTEXT_SMOKE_DATA_BUCKET=spur-context-staging
+python3 infra/spur-context-service/smoke-staging-e2e.py
+```
+
+The smoke publishes a tiny Rust package tarball, calls `external_index`, waits
+for the real worker to complete, checks the bronze source object, silver
+artifact prefix, gold frozen snapshot pointer, non-zero `symbol_embeddings`, and
+then serves `external_code_search`, `external_code_read`, and
+`external_knowledge_context` from the staging Lambda.
+
+Serving is intentionally zero-Postgres: the script fails if the serving Lambda
+is configured with a Postgres `SPUR_CATALOG_DSN`, or if `SPUR_CATALOG_S3_URI`
+does not point at the frozen snapshot pointer
+`s3://<bucket>/gold/catalog-snapshot/current.json`. Set
+`SPUR_CONTEXT_SMOKE_ALLOW_NON_POINTER_SNAPSHOT=1` only for a temporary staging
+debug run against a direct S3 `.ducklake` snapshot.
 
 ## Graviton2-safe CPU baseline
 
@@ -135,7 +191,7 @@ terraform apply -var concurrent_warm_instances=1
 |---|---|---|
 | `aws_region` | `ap-southeast-5` | AWS region |
 | `bucket_name` | `spur-context` | S3 bucket for data |
-| `catalog_s3_uri` | `s3://spur-context/catalog/catalog.ducklake` | DuckLake catalog path |
+| `catalog_s3_uri` | `s3://spur-context/gold/catalog-snapshot/current.json` | Frozen serving DuckLake snapshot pointer or snapshot file |
 | `context_ducklake_data_path` | `s3://<bucket_name>/data/` | DuckLake data path passed to worker jobs |
 | `index_jobs_table_name` | `spur-context-index-jobs` | DynamoDB table for job records and dedupe |
 | `catalog_leases_table_name` | `spur-context-catalog-leases` | DynamoDB table for catalog leases |
