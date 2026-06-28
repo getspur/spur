@@ -47,6 +47,7 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
         lineage: None,
+        allow_missing_embeddings: false,
     })?;
 
     assert!(stats.snapshot_id >= 0);
@@ -173,6 +174,7 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
         source_root: Some(source_root),
         catalog_dsn: catalog_dsn.clone(),
         lineage: Some(translate_lineage()),
+        allow_missing_embeddings: false,
     })?;
 
     assert!(stats.snapshot_id >= 0);
@@ -292,6 +294,7 @@ fn failed_republish_leaves_previous_gold_generation_readable() -> Result<()> {
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
         lineage: Some(translate_lineage()),
+        allow_missing_embeddings: false,
     })
     .expect_err("invalid sidecar must reject the new generation");
 
@@ -336,6 +339,7 @@ fn exported_snapshot_serves_after_compaction_cleanup_fence_cycle() -> Result<()>
         source_root: Some(source_root),
         catalog_dsn: catalog_dsn.clone(),
         lineage: Some(translate_lineage()),
+        allow_missing_embeddings: false,
     })?;
 
     compact_gold_and_export_snapshot(
@@ -385,6 +389,7 @@ fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
         lineage: None,
+        allow_missing_embeddings: true,
     })?;
 
     assert_eq!(stats.rows_inserted.get("nodes"), Some(&1));
@@ -423,6 +428,78 @@ fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
 }
 
 #[test]
+fn expected_embeddings_fail_when_symbol_vectors_land_zero_rows() -> Result<()> {
+    let root = unique_temp_dir("translate-expected-embeddings-zero")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture_with_symbol_vector(&artifact_dir, "CAST(NULL AS FLOAT[])")?;
+
+    let error = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: None,
+        catalog_dsn,
+        lineage: None,
+        allow_missing_embeddings: false,
+    })
+    .expect_err("expected embeddings should reject zero symbol embedding rows");
+
+    assert!(
+        format!("{error:#}").contains("expected symbol embeddings"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn expected_embeddings_fail_when_lance_sidecars_are_missing() -> Result<()> {
+    let root = unique_temp_dir("translate-expected-embeddings-missing")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+    fs::remove_file(artifact_dir.join("code_symbols.lance").join("part.parquet"))
+        .context("remove code symbol sidecar parquet")?;
+    fs::remove_file(artifact_dir.join("sections.lancedb").join("part.parquet"))
+        .context("remove section sidecar parquet")?;
+
+    let error = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: None,
+        catalog_dsn,
+        lineage: None,
+        allow_missing_embeddings: false,
+    })
+    .expect_err("expected embeddings should reject missing Lance sidecars");
+
+    assert!(
+        format!("{error:#}").contains("expected symbol embeddings"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn skipped_lance_sidecars_do_not_poison_required_graph_commits() -> Result<()> {
     let root = unique_temp_dir("translate-skipped-lance-sidecars")?;
     let artifact_dir = root.join("artifact");
@@ -449,6 +526,7 @@ fn skipped_lance_sidecars_do_not_poison_required_graph_commits() -> Result<()> {
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
         lineage: None,
+        allow_missing_embeddings: true,
     })?;
 
     assert_eq!(stats.rows_inserted.get("nodes"), Some(&1));
@@ -490,6 +568,7 @@ fn manifest_translate_ignores_unlisted_sidecar_files() -> Result<()> {
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
         lineage: None,
+        allow_missing_embeddings: false,
     })?;
 
     assert_eq!(stats.rows_inserted.get("symbol_embeddings"), Some(&1));
@@ -530,6 +609,7 @@ fn translated_artifact_read_symbol_returns_source_from_package_tree() -> Result<
         source_root: Some(source_root),
         catalog_dsn: catalog_dsn.clone(),
         lineage: None,
+        allow_missing_embeddings: false,
     })?;
 
     let conn = attach_ducklake(&catalog_dsn, &data_path)?;
@@ -565,6 +645,7 @@ fn translated_artifact_vector_search_returns_ranked_symbol() -> Result<()> {
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
         lineage: None,
+        allow_missing_embeddings: false,
     })?;
 
     let conn = attach_ducklake(&catalog_dsn, &data_path)?;
