@@ -5,6 +5,7 @@
 #   ./deploy.sh                    # build Lambda + worker, terraform apply
 #   ./deploy.sh --local-zip path   # skip Lambda build, use existing zip
 #   ./deploy.sh --skip-worker      # skip worker image build/push
+#   ./deploy.sh --skip-worker --package-only # build Lambda zip, skip terraform
 #   ./deploy.sh --worker-image-only # build/push worker images, print ECS image URI
 #
 # Prerequisites:
@@ -250,6 +251,7 @@ main() {
     local local_zip=""
     local skip_worker=false
     local worker_image_only=false
+    local package_only=false
     local worker_image_uri=""
     local worker_lambda_image_uri=""
 
@@ -258,9 +260,15 @@ main() {
             --local-zip)   local_zip="$2"; shift 2 ;;
             --skip-worker) skip_worker=true; shift ;;
             --worker-image-only) worker_image_only=true; shift ;;
+            --package-only) package_only=true; shift ;;
             *) break ;;
         esac
     done
+
+    if [[ "$worker_image_only" == "true" && "$package_only" == "true" ]]; then
+        log "--worker-image-only and --package-only are mutually exclusive"
+        exit 2
+    fi
 
     # Build + push worker container image (unless --skip-worker).
     if [[ "$skip_worker" == "false" ]]; then
@@ -293,6 +301,12 @@ main() {
         download_extensions
         build_binary
         package_zip "$zip_path"
+    fi
+
+    if [[ "$package_only" == "true" ]]; then
+        log "package-only requested; skipping terraform"
+        echo "$zip_path"
+        exit 0
     fi
 
     log "running terraform..."

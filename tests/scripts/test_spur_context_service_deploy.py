@@ -5,14 +5,19 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_SH = ROOT / "infra" / "spur-context-service" / "deploy.sh"
 REMOTE_BUILD_SH = ROOT / "infra" / "spur-context-service" / "build-and-push-remote.sh"
 INFRA_DIR = ROOT / "infra" / "spur-context-service"
+CONTEXT_SERVICE_WORKFLOW = ROOT / ".github" / "workflows" / "context-service.yml"
+STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
 
 
 def test_deploy_builds_standalone_context_service_from_crate_workdir():
     script = DEPLOY_SH.read_text()
 
-    assert "scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release" in script
-    assert "scripts/spur-cargo --workdir crates/spur-context-service build --features worker --release" in script
-    assert "scripts/spur-cargo build -p spur-cli --release" in script
+    assert 'run_graviton2_safe_cargo "serving Lambda bootstrap"' in script
+    assert "--workdir crates/spur-context-service build --features lambda --release" in script
+    assert 'run_graviton2_safe_cargo "Fargate worker binary"' in script
+    assert "--workdir crates/spur-context-service build --features worker --release" in script
+    assert 'run_graviton2_safe_cargo "spur CLI worker image dependency"' in script
+    assert "build -p spur-cli --release" in script
     assert (
         'fetch_remote_worktree_file '
         'crates/spur-context-service/target/release/spur-context-service '
@@ -45,7 +50,8 @@ def test_deploy_builds_lambda_worker_image_for_fast_start():
 
     assert "worker-lambda" in cargo_toml
     assert "spur-context-worker-lambda" in cargo_toml
-    assert "scripts/spur-cargo --workdir crates/spur-context-service build --features worker-lambda --release" in script
+    assert 'run_graviton2_safe_cargo "worker Lambda image binary"' in script
+    assert "--workdir crates/spur-context-service build --features worker-lambda --release" in script
     assert "WORKER_LAMBDA_ECR_REPO" in script
     assert "COPY spur-context-worker-lambda /usr/local/bin/spur-context-worker-lambda" in script
     assert 'ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]' in script
@@ -66,6 +72,16 @@ def test_deploy_rebuilds_lambda_zip_by_default():
     assert "etag   = filemd5(var.lambda_zip_path)" not in lambda_zip
 
 
+def test_deploy_can_package_lambda_without_terraform_apply():
+    script = DEPLOY_SH.read_text()
+
+    assert "./deploy.sh --skip-worker --package-only" in script
+    assert "package_only=false" in script
+    assert "--package-only) package_only=true" in script
+    assert 'if [[ "$package_only" == "true" ]]' in script
+    assert script.index('if [[ "$package_only" == "true" ]]') < script.index("terraform init")
+
+
 def test_remote_worker_image_script_delegates_to_canonical_deploy_path():
     script = REMOTE_BUILD_SH.read_text()
 
@@ -82,6 +98,43 @@ def test_remote_docker_build_accepts_multiple_remote_binaries():
     assert 'REMOTE_BINARIES+=("$2")' in script
     assert 'for remote_binary in "${REMOTE_BINARIES[@]}"' in script
     assert "docker build --platform linux/arm64 --provenance=false" in script
+
+
+def test_context_service_workflow_runs_tests_and_gated_aws_artifacts():
+    workflow = CONTEXT_SERVICE_WORKFLOW.read_text()
+
+    assert "workflow_dispatch:" in workflow
+    assert "build_aws_artifacts:" in workflow
+    assert "run_staging_smoke:" in workflow
+    assert "scripts/spur-cargo --workdir crates/spur-context-service test --all-features" in workflow
+    assert "infra/spur-context-service/build-and-push-remote.sh" in workflow
+    assert "infra/spur-context-service/deploy.sh --skip-worker --package-only" in workflow
+    assert "infra/spur-context-service/smoke-staging-e2e.py" in workflow
+    assert "CONTEXT_SERVICE_AWS_ROLE_ARN" in workflow
+    assert "context-service-staging" in workflow
+    assert "terraform apply" not in workflow
+
+
+def test_staging_smoke_codifies_e1_real_worker_and_frozen_serving():
+    script = STAGING_SMOKE.read_text()
+    readme = (INFRA_DIR / "README.md").read_text()
+
+    assert "external_index" in script
+    assert "external_index_status" in script
+    assert "external_code_search" in script
+    assert "external_code_read" in script
+    assert "external_knowledge_context" in script
+    assert "symbol_embeddings" in script
+    assert "bronze/{source}/{package}/{revision}/source.tar.gz" in script
+    assert "silver/{source}/{package}/{revision}/" in script
+    assert "gold/catalog-snapshot/current.json" in script
+    assert "get-function-configuration" in script
+    assert "SPUR_CATALOG_DSN" in script
+    assert "postgres" in script
+    assert "aws lambda invoke" in script
+    assert "aws s3 presign" in script
+    assert "SPUR_CONTEXT_SMOKE_SOURCE_BUCKET" in readme
+    assert "smoke-staging-e2e.py" in readme
 
 
 def test_worker_checkpoint_uri_is_per_job_object_from_state_machine():
