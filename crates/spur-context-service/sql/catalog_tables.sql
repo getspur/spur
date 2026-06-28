@@ -47,8 +47,10 @@ CREATE TABLE IF NOT EXISTS silver.graph_artifacts (
     edge_count UBIGINT,
     file_count UBIGINT,
     embedding_count UBIGINT,
-    built_at TIMESTAMP
+    built_at TIMESTAMP,
+    build_status VARCHAR
 );
+ALTER TABLE silver.graph_artifacts ADD COLUMN IF NOT EXISTS build_status VARCHAR;
 ALTER TABLE silver.graph_artifacts SET PARTITIONED BY (source, package);
 
 CREATE TABLE IF NOT EXISTS nodes (
