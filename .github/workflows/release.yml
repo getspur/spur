@@ -116,6 +116,7 @@ jobs:
       # Match the default AWS cloud-build backend: release builds use the shared
       # S3-backed sccache bucket warmed by remote builds.
       RUSTC_WRAPPER: sccache
+      CARGO_BUILD_RUSTC_WRAPPER: sccache
       AWS_REGION: ap-southeast-5
       SCCACHE_BUCKET: wiilearn-spur-sccache-apse5
       SCCACHE_REGION: ap-southeast-5
@@ -124,7 +125,12 @@ jobs:
       SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY: l0
       SCCACHE_DIR: ${{ github.workspace }}/.sccache
       SCCACHE_CACHE_SIZE: 10G
+      SCCACHE_ERROR_LOG: ${{ github.workspace }}/sccache.log
       CARGO_INCREMENTAL: "0"
+      # onnxruntime/CoreML and other C/C++ deps are built with the macOS SDK
+      # available on the runner. Keep Rust's final link target aligned with
+      # those objects instead of cargo-dist/rustc's older macOS 11 default.
+      MACOSX_DEPLOYMENT_TARGET: ${{ contains(join(matrix.targets, ','), 'apple-darwin') && '14.0' || '' }}
       # Route build-script C/C++/asm compiles through sccache too, mirroring
       # scripts/cloud-build/startup-aws.sh.
       CC: "sccache cc"
@@ -217,6 +223,7 @@ jobs:
       # Keep any global rebuild path on the same shared sccache backend as the
       # local artifact builders and AWS cloud-build VM.
       RUSTC_WRAPPER: sccache
+      CARGO_BUILD_RUSTC_WRAPPER: sccache
       AWS_REGION: ap-southeast-5
       SCCACHE_BUCKET: wiilearn-spur-sccache-apse5
       SCCACHE_REGION: ap-southeast-5
@@ -225,6 +232,7 @@ jobs:
       SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY: l0
       SCCACHE_DIR: ${{ github.workspace }}/.sccache
       SCCACHE_CACHE_SIZE: 10G
+      SCCACHE_ERROR_LOG: ${{ github.workspace }}/sccache.log
       CARGO_INCREMENTAL: "0"
       CC: "sccache cc"
       CXX: "sccache c++"
