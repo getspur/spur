@@ -22,9 +22,9 @@
 #       synced back. For an interactive run (TUI, a local server/port, anything
 #       needing live stdin or localhost) use SPUR_REMOTE=0 to force it local.
 #   embed  — graph-embed / embed / embedding: convenience shortcuts for
-#       `run -p spur-cli -- graph build --workspace ...`, so Gemma section
-#       embeddings and graph sidecars are generated remotely by default and
-#       synced back with other run outputs.
+#       `run -p spur-cli -- graph embed --workspace ...`, so existing graph
+#       artifacts are vector-filled remotely by default and synced back with
+#       other run outputs.
 #   local  — fmt / everything else: always local (remote is meaningless).
 #
 # Local execution injects scripts/sccache-worktree.sh as RUSTC_WRAPPER.
@@ -129,9 +129,8 @@ cd "$WORKDIR"
 case "${1:-}" in
     graph-embed|embed|embedding)
         shift
-        GRAPH_BUILD_ARGV=("$@")
         DEFAULT_WORKSPACE=1
-        for arg in "${GRAPH_BUILD_ARGV[@]}"; do
+        for arg in "$@"; do
             case "$arg" in
                 --root|--root=*|--workspace)
                     DEFAULT_WORKSPACE=0
@@ -139,9 +138,9 @@ case "${1:-}" in
             esac
         done
         if [[ $DEFAULT_WORKSPACE -eq 1 ]]; then
-            set -- run -p spur-cli -- graph build --workspace "${GRAPH_BUILD_ARGV[@]}"
+            set -- run -p spur-cli -- graph embed --workspace "$@"
         else
-            set -- run -p spur-cli -- graph build "${GRAPH_BUILD_ARGV[@]}"
+            set -- run -p spur-cli -- graph embed "$@"
         fi
         ;;
 esac
