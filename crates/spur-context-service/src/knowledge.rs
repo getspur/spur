@@ -1,5 +1,6 @@
 //! Knowledge-context retrieval for external packages.
 
+use crate::catalog::readable_table;
 use anyhow::{anyhow, Context as _, Result};
 use duckdb::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,49 @@ const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
 const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 0.80;
 const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
+
+#[derive(Debug)]
+struct KnowledgeTables {
+    nodes: String,
+    section_bodies: String,
+    symbol_embeddings: String,
+    package_catalog: String,
+    uses_gold: bool,
+}
+
+impl KnowledgeTables {
+    fn load(db: &Connection) -> Result<Self> {
+        let nodes = readable_table(db, "nodes")?;
+        let uses_gold = nodes.starts_with("gold.");
+        Ok(Self {
+            nodes,
+            section_bodies: readable_table(db, "section_bodies")?,
+            symbol_embeddings: readable_table(db, "symbol_embeddings")?,
+            package_catalog: readable_table(db, "package_catalog")?,
+            uses_gold,
+        })
+    }
+
+    fn published_filter(&self, alias: &str) -> String {
+        if self.uses_gold {
+            format!(
+                r"
+                AND {alias}.generation = (
+                    SELECT pc.generation
+                    FROM {} pc
+                    WHERE pc.source = {alias}.source
+                      AND pc.package = {alias}.package
+                      AND pc.revision = {alias}.revision
+                    LIMIT 1
+                )
+                ",
+                self.package_catalog
+            )
+        } else {
+            String::new()
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -153,9 +197,9 @@ fn query_bm25_candidates(
     query: &str,
     limit: usize,
 ) -> Result<Vec<KnowledgeCandidate>> {
-    let mut stmt = db
-        .prepare(
-            r"
+    let tables = KnowledgeTables::load(db)?;
+    let sql = format!(
+        r"
             WITH corpus AS (
                 SELECT
                     'doc:' || section_id AS candidate_key,
@@ -166,11 +210,12 @@ fn query_bm25_candidates(
                     CAST(NULL AS VARCHAR) AS qualified_name,
                     CAST('section' AS VARCHAR) AS symbol_kind,
                     COALESCE(title, '') || ' ' || COALESCE(body_text, '') AS search_text
-                FROM section_bodies
+                FROM {section_bodies} sb
                 WHERE source = $2
                   AND package = $3
                   AND revision = $4
                   AND $5 IN ('all', 'docs')
+                  {section_published_filter}
                 UNION ALL
                 SELECT
                     'code:' || stable_symbol_id AS candidate_key,
@@ -181,12 +226,13 @@ fn query_bm25_candidates(
                     qualified_name,
                     symbol_kind,
                     COALESCE(entity_name, '') || ' ' || COALESCE(qualified_name, '') AS search_text
-                FROM nodes
+                FROM {nodes} n
                 WHERE source = $2
                   AND package = $3
                   AND revision = $4
                   AND $5 IN ('all', 'code')
                   AND COALESCE(symbol_kind, '') NOT IN ('section', 'mcp_tool')
+                  {node_published_filter}
             ),
             query_runs AS (
                 SELECT run
@@ -293,7 +339,13 @@ fn query_bm25_candidates(
             ORDER BY score DESC NULLS LAST, file_path, title, stable_symbol_id
             LIMIT $6
             ",
-        )
+        section_bodies = tables.section_bodies,
+        nodes = tables.nodes,
+        section_published_filter = tables.published_filter("sb"),
+        node_published_filter = tables.published_filter("n")
+    );
+    let mut stmt = db
+        .prepare(&sql)
         .context("failed to prepare BM25 knowledge query")?;
     let rows = stmt
         .query_map(
@@ -318,6 +370,7 @@ fn query_vector_candidates(
     query_vec_sql: &str,
     limit: usize,
 ) -> Result<Vec<KnowledgeCandidate>> {
+    let tables = KnowledgeTables::load(db)?;
     let mut branches = Vec::new();
     if matches!(opts.scope, KnowledgeScope::All | KnowledgeScope::Code) {
         branches.push(format!(
@@ -332,17 +385,20 @@ fn query_vector_candidates(
                 list_cosine_distance(embedding, {query_vec_sql}) AS distance,
                 'primary' AS neighbor_kind,
                 'hybrid-code' AS grounding
-            FROM symbol_embeddings
+            FROM {symbol_embeddings} se
             WHERE source = $1
               AND package = $2
               AND revision = $3
               AND embedding_model = $4
               AND embed_text_version = $5
-            "
+              {published_filter}
+            ",
+            symbol_embeddings = tables.symbol_embeddings,
+            published_filter = tables.published_filter("se")
         ));
     }
     if matches!(opts.scope, KnowledgeScope::All | KnowledgeScope::Docs)
-        && section_vector_columns_available(db)
+        && section_vector_columns_available(db, &tables.section_bodies)
     {
         branches.push(format!(
             r"
@@ -356,14 +412,17 @@ fn query_vector_candidates(
                 list_cosine_distance(vector, {query_vec_sql}) AS distance,
                 CAST(NULL AS VARCHAR) AS neighbor_kind,
                 'hybrid-doc' AS grounding
-            FROM section_bodies
+            FROM {section_bodies} sb
             WHERE source = $1
               AND package = $2
               AND revision = $3
               AND embedding_model = $4
               AND embed_text_version = $5
               AND vector IS NOT NULL
-            "
+              {published_filter}
+            ",
+            section_bodies = tables.section_bodies,
+            published_filter = tables.published_filter("sb")
         ));
     }
     if branches.is_empty() {
@@ -676,8 +735,8 @@ fn confidence_score_thresholds(grounding: &str) -> (f64, f64) {
     }
 }
 
-fn section_vector_columns_available(db: &Connection) -> bool {
-    let Ok(columns) = table_columns(db, "section_bodies") else {
+fn section_vector_columns_available(db: &Connection, table: &str) -> bool {
+    let Ok(columns) = table_columns(db, table) else {
         return false;
     };
     ["vector", "embedding_model", "embed_text_version"]
@@ -703,15 +762,20 @@ fn query_graph_content_hash(db: &Connection, opts: &KnowledgeContextOptions) -> 
     })
     .ok()
     .or_else(|| {
-        db.query_row(
+        let tables = KnowledgeTables::load(db).ok()?;
+        let sql = format!(
             r"
-            SELECT graph_content_hash
-            FROM package_catalog
+            SELECT silver_graph_content_hash
+            FROM {package_catalog}
             WHERE source = $1
               AND package = $2
               AND revision = $3
             LIMIT 1
             ",
+            package_catalog = tables.package_catalog
+        );
+        db.query_row(
+            &sql,
             params![opts.source, opts.package, opts.revision],
             |row| row.get(0),
         )
