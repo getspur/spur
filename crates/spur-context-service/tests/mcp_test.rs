@@ -449,6 +449,139 @@ async fn external_knowledge_context_uses_precomputed_query_vector_for_hybrid_hit
 }
 
 #[tokio::test]
+async fn external_tools_support_multi_round_agent_eval_flow() -> Result<()> {
+    let fixture = McpFixture::new("multi-round-eval")?;
+
+    let pack = handle_tool(
+        "external_knowledge_context",
+        &json!({
+            "query": "alpha beta external thing",
+            "package": PACKAGE,
+            "ref": "latest",
+            "scope": "all",
+            "limit": 8
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+
+    let alpha = pack["primary_evidence"]
+        .as_array()
+        .context("primary_evidence array")?
+        .iter()
+        .find(|evidence| evidence["stable_symbol_id"] == "pkg:demo@1.0.0::demo::alpha")
+        .context("alpha evidence")?;
+    let alpha_selector = alpha["stable_symbol_id"]
+        .as_str()
+        .context("alpha selector")?;
+    assert_next_tools(
+        alpha,
+        alpha_selector,
+        [
+            "external_code_read",
+            "external_code_callers",
+            "external_code_callees",
+        ],
+    )?;
+
+    let alpha_source = handle_tool(
+        "external_code_read",
+        &json!({
+            "selector": alpha_selector,
+            "context_lines": 0
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert!(alpha_source["source"]
+        .as_str()
+        .context("alpha source")?
+        .contains("external::Thing::new();"));
+
+    let alpha_callees = handle_tool(
+        "external_code_callees",
+        &json!({
+            "selector": alpha_selector,
+            "include_unresolved": false
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(alpha_callees["counts_by_kind"]["calls"], 1);
+    assert_eq!(alpha_callees["counts_by_kind"]["unresolved"], 0);
+    assert_eq!(alpha_callees["unresolved_sample"], json!([]));
+    assert_eq!(
+        alpha_callees["callees"]
+            .as_array()
+            .context("alpha callees")?
+            .len(),
+        1
+    );
+
+    let alpha_callees_with_unresolved = handle_tool(
+        "external_code_callees",
+        &json!({
+            "selector": alpha_selector,
+            "include_unresolved": true
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(alpha_callees_with_unresolved["counts_by_kind"]["calls"], 2);
+    assert_eq!(
+        alpha_callees_with_unresolved["unresolved_sample"],
+        json!(["external::Thing"])
+    );
+    assert_eq!(
+        alpha_callees_with_unresolved["callees"]
+            .as_array()
+            .context("alpha callees with unresolved")?
+            .len(),
+        2
+    );
+
+    let beta_uri = search_uri(&fixture, "bet", Some("function")).await?;
+    let beta_source = handle_tool(
+        "external_code_read",
+        &json!({
+            "selector": beta_uri,
+            "context_lines": 0
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(beta_source["stable_symbol_id"], "bbbbbbbbbbbbbbbb");
+
+    let beta_callers = handle_tool(
+        "external_code_callers",
+        &json!({
+            "selector": beta_source["selector"],
+            "include_unresolved": true
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(beta_callers["counts_by_kind"]["calls"], 1);
+    assert_eq!(beta_callers["counts_by_kind"]["calls_dyn"], 1);
+    assert_eq!(beta_callers["counts_by_kind"]["references_hof"], 1);
+    assert_eq!(beta_callers["counts_by_kind"]["unresolved"], 1);
+    assert_eq!(
+        beta_callers["callers"]
+            .as_array()
+            .context("beta callers")?
+            .len(),
+        3
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn handler_reports_unknown_tool_missing_args_and_missing_package() -> Result<()> {
     let fixture = McpFixture::new("errors")?;
 
@@ -724,6 +857,88 @@ async fn external_index_returns_existing_deduped_job_without_starting_execution(
 }
 
 #[tokio::test]
+async fn external_index_status_supports_cold_index_then_retry_eval_flow() -> Result<()> {
+    let fixture = McpFixture::new("index-multi-round")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let queued = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source": "registry:crates-io",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-multi-round",
+    )
+    .await?;
+
+    assert_eq!(queued["status"], "queued");
+    assert_eq!(queued["job_id"], "job-1");
+    assert_eq!(sfn.started_count(), 1);
+
+    let retry_before_catalog = handle_tool(
+        "external_code_search",
+        &json!({
+            "query": "alpha",
+            "package": PACKAGE,
+            "revision": "main"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await
+    .expect_err("cold revision should not be queryable before catalog is populated");
+    assert!(matches!(retry_before_catalog, McpHandlerError::NotFound(_)));
+
+    jobs.update_job("job-1", |record| {
+        record.updated_at = "0".to_owned();
+    })?;
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Succeeded,
+        output: Some(json!({
+            "snapshot_id": 101,
+            "rows_inserted": {
+                "nodes": 9,
+                "edges": 4
+            }
+        })),
+        error: None,
+    }));
+
+    let complete = route_index_status(&json!({ "job_id": "job-1" }), &jobs, Some(&checker)).await?;
+
+    assert_eq!(complete["status"], "complete");
+    assert_eq!(complete["snapshot_id"], 101);
+    assert_eq!(checker.described_arns(), ["arn:stub:job-1"]);
+
+    move_fixture_to_revision(&fixture, "main", "git")?;
+    let retry_after_catalog = handle_tool(
+        "external_code_search",
+        &json!({
+            "query": "alpha",
+            "package": PACKAGE,
+            "revision": "main"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+
+    assert_eq!(retry_after_catalog["total_matches"], 1);
+    assert_eq!(
+        retry_after_catalog["candidates"][0]["selector"],
+        "pkg:demo@main::demo::alpha"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_index_rejects_localhost_source_url_before_starting_job() -> Result<()> {
     let fixture = McpFixture::new("index-abuse")?;
     let jobs = FakeJobStore::default();
@@ -749,6 +964,23 @@ async fn external_index_rejects_localhost_source_url_before_starting_job() -> Re
         .context("reason string")?
         .contains("source_url targets localhost"));
     assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+fn assert_next_tools<const N: usize>(
+    evidence: &Value,
+    selector: &str,
+    expected_tools: [&str; N],
+) -> Result<()> {
+    let next = evidence["next"].as_array().context("next array")?;
+    for tool in expected_tools {
+        assert!(
+            next.iter().any(|entry| {
+                entry["tool"] == tool && entry["selector"].as_str() == Some(selector)
+            }),
+            "missing {tool} next entry for {selector}: {next:?}"
+        );
+    }
     Ok(())
 }
 
@@ -823,6 +1055,57 @@ fn move_fixture_to_source(fixture: &McpFixture, source: &str) -> Result<()> {
             )
             .with_context(|| format!("move catalog fixture table {table} to source {source}"))?;
     }
+    Ok(())
+}
+
+fn move_fixture_to_revision(
+    fixture: &McpFixture,
+    revision: &str,
+    revision_kind: &str,
+) -> Result<()> {
+    for table in [
+        "nodes",
+        "edges",
+        "edges_unresolved",
+        "files",
+        "section_bodies",
+        "symbol_embeddings",
+    ] {
+        fixture
+            .conn
+            .execute(
+                &format!(
+                    "UPDATE {table} SET revision = ?, revision_kind = ? WHERE revision = '1.0.0'"
+                ),
+                params![revision, revision_kind],
+            )
+            .with_context(|| format!("move query fixture table {table} to revision {revision}"))?;
+    }
+
+    fixture
+        .conn
+        .execute(
+            "UPDATE refs SET revision = ? WHERE revision = '1.0.0'",
+            params![revision],
+        )
+        .with_context(|| format!("move query refs to revision {revision}"))?;
+
+    fixture
+        .catalog
+        .connection()
+        .execute(
+            "UPDATE package_catalog SET revision = ?, revision_kind = ?, snapshot_id = 101 WHERE revision = '1.0.0'",
+            params![revision, revision_kind],
+        )
+        .with_context(|| format!("move catalog fixture to revision {revision}"))?;
+    fixture
+        .catalog
+        .connection()
+        .execute(
+            "UPDATE refs SET revision = ? WHERE revision = '1.0.0'",
+            params![revision],
+        )
+        .with_context(|| format!("move catalog refs to revision {revision}"))?;
     Ok(())
 }
 
