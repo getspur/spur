@@ -515,8 +515,47 @@ mod cli_parse_tests {
     }
 
     #[test]
-    fn cli_accepts_graph_backfill_vectors_command() {
+    fn cli_accepts_graph_embed_command_with_artifact_dir_and_scopes() {
+        let artifact_dir = PathBuf::from(".spur/graph/CURRENT");
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "spur",
+                "graph",
+                "embed",
+                "--artifact-dir",
+                ".spur/graph/CURRENT",
+                "--code-symbols",
+                "--sections",
+                "--quiet",
+            ])
+            .expect("graph embed should parse");
+
+        assert_eq!(matches.subcommand_name(), Some("graph"));
+        let (_, graph) = matches.subcommand().expect("graph subcommand");
+        assert_eq!(graph.subcommand_name(), Some("embed"));
+        let (_, embed) = graph.subcommand().expect("graph embed subcommand");
+        assert_eq!(
+            embed.get_one::<PathBuf>("artifact_dir"),
+            Some(&artifact_dir)
+        );
+        assert!(embed.get_flag("code_symbols"));
+        assert!(embed.get_flag("sections"));
+        assert!(embed.get_flag("quiet"));
+    }
+
+    #[test]
+    fn cli_accepts_graph_embed_only_scope_shortcuts() {
         Cli::command()
+            .try_get_matches_from(["spur", "graph", "embed", "--code-symbols-only"])
+            .expect("graph embed --code-symbols-only should parse");
+        Cli::command()
+            .try_get_matches_from(["spur", "graph", "embed", "--sections-only"])
+            .expect("graph embed --sections-only should parse");
+    }
+
+    #[test]
+    fn cli_accepts_graph_backfill_vectors_compat_alias() {
+        let matches = Cli::command()
             .try_get_matches_from([
                 "spur",
                 "graph",
@@ -525,6 +564,9 @@ mod cli_parse_tests {
                 "--quiet",
             ])
             .expect("graph backfill-vectors should parse");
+
+        let (_, graph) = matches.subcommand().expect("graph subcommand");
+        assert_eq!(graph.subcommand_name(), Some("embed"));
     }
 
     #[test]
@@ -791,17 +833,30 @@ enum GraphCommands {
         #[arg(long, hide = true, default_value_t = 5_000, value_name = "N")]
         temporal_max_commits_per_shard: usize,
     },
-    /// Fill missing vectors in an existing graph sidecar without rebuilding the graph.
-    BackfillVectors {
+    /// Fill missing vectors in an existing graph artifact without rebuilding the graph.
+    #[command(alias = "backfill-vectors")]
+    Embed {
         /// Worktree root used to resolve the current graph artifact.
         #[arg(long, conflicts_with = "workspace")]
         root: Option<PathBuf>,
         /// Resolve the current graph artifact from the worktree root.
         #[arg(long)]
         workspace: bool,
-        /// Existing artifact directory. Defaults to SPUR_CODE_GRAPH_INDEX or .spur/graph.
+        /// Existing artifact directory. Defaults to SPUR_CODE_GRAPH_INDEX or the worktree graph CURRENT pointer.
+        #[arg(long = "artifact-dir", alias = "output", value_name = "PATH")]
+        artifact_dir: Option<PathBuf>,
+        /// Fill code-symbol vectors. Defaults to both code symbols and sections when no scope flag is set.
         #[arg(long)]
-        output: Option<PathBuf>,
+        code_symbols: bool,
+        /// Fill section vectors. Defaults to both code symbols and sections when no scope flag is set.
+        #[arg(long)]
+        sections: bool,
+        /// Fill only code-symbol vectors.
+        #[arg(long, conflicts_with_all = ["code_symbols", "sections", "sections_only"])]
+        code_symbols_only: bool,
+        /// Fill only section vectors.
+        #[arg(long, conflicts_with_all = ["sections", "code_symbols", "code_symbols_only"])]
+        sections_only: bool,
         /// Suppress progress output.
         #[arg(long)]
         quiet: bool,
@@ -819,6 +874,24 @@ enum GraphCommands {
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
     },
+}
+
+fn graph_embed_scope(
+    code_symbols: bool,
+    sections: bool,
+    code_symbols_only: bool,
+    sections_only: bool,
+) -> (bool, bool) {
+    if code_symbols_only {
+        return (true, false);
+    }
+    if sections_only {
+        return (false, true);
+    }
+    if code_symbols || sections {
+        return (code_symbols, sections);
+    }
+    (true, true)
 }
 
 #[derive(Debug, Subcommand)]
@@ -1337,17 +1410,27 @@ async fn run() -> Result<()> {
                     commands::graph::build(options)
                 }
             }
-            GraphCommands::BackfillVectors {
+            GraphCommands::Embed {
                 root,
                 workspace,
-                output,
+                artifact_dir,
+                code_symbols,
+                sections,
+                code_symbols_only,
+                sections_only,
                 quiet,
-            } => commands::graph::backfill_vectors(commands::graph::GraphVectorBackfillOptions {
-                root,
-                workspace,
-                output,
-                quiet,
-            }),
+            } => {
+                let (embed_code_symbols, embed_sections) =
+                    graph_embed_scope(code_symbols, sections, code_symbols_only, sections_only);
+                commands::graph::backfill_vectors(commands::graph::GraphVectorBackfillOptions {
+                    root,
+                    workspace,
+                    artifact_dir,
+                    embed_code_symbols,
+                    embed_sections,
+                    quiet,
+                })
+            }
             GraphCommands::Mcp { root } => commands::mcp::run_graph_server(root).await,
         },
         Commands::Mcp { root } => commands::mcp::run_bundled_server(root).await,
