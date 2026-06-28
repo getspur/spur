@@ -54,7 +54,6 @@ impl JobStatus {
             _ => Err(InvalidJobStatus(value.to_string())),
         }
     }
-
 }
 
 impl fmt::Display for JobStatus {
@@ -134,20 +133,17 @@ pub enum CreateJobOutcome {
 
 #[async_trait]
 pub trait JobStore: Send + Sync {
-    async fn create_or_get_active_job(
-        &self,
-        request: CreateJobRequest,
-    ) -> Result<CreateJobOutcome>;
+    async fn create_or_get_active_job(&self, request: CreateJobRequest)
+        -> Result<CreateJobOutcome>;
 
-    async fn record_execution_started(&self, job_id: &str, execution_arn: &str)
-        -> Result<JobRecord>;
-
-    async fn update_stage(
+    async fn record_execution_started(
         &self,
         job_id: &str,
-        status: JobStatus,
-        stage: &str,
+        execution_arn: &str,
     ) -> Result<JobRecord>;
+
+    async fn update_stage(&self, job_id: &str, status: JobStatus, stage: &str)
+        -> Result<JobRecord>;
 
     async fn mark_complete(
         &self,
@@ -286,7 +282,10 @@ impl JobStore for DynamoDbJobStore {
         match result {
             Ok(_) => Ok(CreateJobOutcome::Created(record)),
             Err(error) if is_transaction_conflict(&error) => {
-                let existing = self.lookup_dedupe_job(&key).await?.ok_or(JobsError::Conflict)?;
+                let existing = self
+                    .lookup_dedupe_job(&key)
+                    .await?
+                    .ok_or(JobsError::Conflict)?;
                 Ok(CreateJobOutcome::Existing(existing))
             }
             Err(error) => Err(dynamodb_error(error)),
@@ -392,7 +391,10 @@ impl JobStore for DynamoDbJobStore {
             ":status".to_string(),
             AttributeValue::S(JobStatus::Failed.as_str().to_string()),
         );
-        values.insert(":error_code".to_string(), AttributeValue::S(code.to_string()));
+        values.insert(
+            ":error_code".to_string(),
+            AttributeValue::S(code.to_string()),
+        );
         values.insert(
             ":error_detail".to_string(),
             AttributeValue::S(detail.to_string()),
@@ -461,7 +463,10 @@ fn now_string() -> String {
 fn job_item(record: &JobRecord) -> HashMap<String, AttributeValue> {
     let mut item = HashMap::new();
     item.insert("pk".to_string(), AttributeValue::S(job_pk(&record.job_id)));
-    item.insert("item_type".to_string(), AttributeValue::S("job".to_string()));
+    item.insert(
+        "item_type".to_string(),
+        AttributeValue::S("job".to_string()),
+    );
     item.insert(
         "job_id".to_string(),
         AttributeValue::S(record.job_id.clone()),
@@ -535,10 +540,7 @@ fn dedupe_item(key: &JobKey, record: &JobRecord) -> HashMap<String, AttributeVal
         "job_id".to_string(),
         AttributeValue::S(record.job_id.clone()),
     );
-    item.insert(
-        "source".to_string(),
-        AttributeValue::S(key.source.clone()),
-    );
+    item.insert("source".to_string(), AttributeValue::S(key.source.clone()));
     item.insert(
         "package".to_string(),
         AttributeValue::S(key.package.clone()),
@@ -596,9 +598,9 @@ fn job_record_from_item(item: &HashMap<String, AttributeValue>) -> Result<JobRec
         source_kind: string_attr(item, "source_kind")?,
         caller_id: string_attr(item, "caller_id")?,
         execution_arn: optional_string_attr(item, "execution_arn")?,
-        attempt: number_attr(item, "attempt")?
-            .parse()
-            .map_err(|error| malformed_item(format!("invalid attempt value for job item: {error}")))?,
+        attempt: number_attr(item, "attempt")?.parse().map_err(|error| {
+            malformed_item(format!("invalid attempt value for job item: {error}"))
+        })?,
         stage: optional_string_attr(item, "stage")?,
         snapshot_id: optional_number_attr(item, "snapshot_id")?,
         row_counts: optional_json_attr(item, "row_counts")?,
@@ -617,7 +619,10 @@ fn string_attr(item: &HashMap<String, AttributeValue>, name: &str) -> Result<Str
     }
 }
 
-fn optional_string_attr(item: &HashMap<String, AttributeValue>, name: &str) -> Result<Option<String>> {
+fn optional_string_attr(
+    item: &HashMap<String, AttributeValue>,
+    name: &str,
+) -> Result<Option<String>> {
     match item.get(name) {
         Some(AttributeValue::S(value)) => Ok(Some(value.clone())),
         Some(_) => Err(malformed_item(format!("attribute {name} is not a string"))),
@@ -635,9 +640,10 @@ fn number_attr(item: &HashMap<String, AttributeValue>, name: &str) -> Result<Str
 
 fn optional_number_attr(item: &HashMap<String, AttributeValue>, name: &str) -> Result<Option<i64>> {
     match item.get(name) {
-        Some(AttributeValue::N(value)) => value.parse().map(Some).map_err(|error| {
-            malformed_item(format!("invalid number attribute {name}: {error}"))
-        }),
+        Some(AttributeValue::N(value)) => value
+            .parse()
+            .map(Some)
+            .map_err(|error| malformed_item(format!("invalid number attribute {name}: {error}"))),
         Some(_) => Err(malformed_item(format!("attribute {name} is not a number"))),
         None => Ok(None),
     }
@@ -648,9 +654,9 @@ fn optional_json_attr(
     name: &str,
 ) -> Result<Option<serde_json::Value>> {
     match item.get(name) {
-        Some(AttributeValue::S(value)) => serde_json::from_str(value).map(Some).map_err(|error| {
-            malformed_item(format!("invalid json attribute {name}: {error}"))
-        }),
+        Some(AttributeValue::S(value)) => serde_json::from_str(value)
+            .map(Some)
+            .map_err(|error| malformed_item(format!("invalid json attribute {name}: {error}"))),
         Some(_) => Err(malformed_item(format!(
             "attribute {name} is not a json string"
         ))),
@@ -669,11 +675,13 @@ fn is_transaction_conflict(error: &SdkError<TransactWriteItemsError>) -> bool {
 
 fn transact_write_error_is_conflict(error: &TransactWriteItemsError) -> bool {
     match error {
-        TransactWriteItemsError::TransactionCanceledException(error) => error
-            .cancellation_reasons()
-            .iter()
-            .any(|reason| cancellation_reason_is_conflict(reason.code()))
-            || error.message().is_some_and(transaction_conflict_message),
+        TransactWriteItemsError::TransactionCanceledException(error) => {
+            error
+                .cancellation_reasons()
+                .iter()
+                .any(|reason| cancellation_reason_is_conflict(reason.code()))
+                || error.message().is_some_and(transaction_conflict_message)
+        }
         TransactWriteItemsError::TransactionInProgressException(_) => true,
         _ => transaction_conflict_message(&error.to_string()),
     }
@@ -690,9 +698,7 @@ fn transaction_conflict_message(message: &str) -> bool {
 }
 
 fn dynamodb_error(error: impl fmt::Display) -> JobsError {
-    JobsError::Db(Box::new(StringJobError(format!(
-        "dynamodb error: {error}"
-    ))))
+    JobsError::Db(Box::new(StringJobError(format!("dynamodb error: {error}"))))
 }
 
 fn malformed_item(message: String) -> JobsError {
@@ -744,30 +750,27 @@ mod tests {
 
     #[test]
     fn transaction_canceled_conditional_check_is_conflict() {
-        let error =
-            TransactWriteItemsError::TransactionCanceledException(transaction_canceled_with_reason(
-                "ConditionalCheckFailed",
-            ));
+        let error = TransactWriteItemsError::TransactionCanceledException(
+            transaction_canceled_with_reason("ConditionalCheckFailed"),
+        );
 
         assert!(transact_write_error_is_conflict(&error));
     }
 
     #[test]
     fn transaction_canceled_transaction_conflict_is_conflict() {
-        let error =
-            TransactWriteItemsError::TransactionCanceledException(transaction_canceled_with_reason(
-                "TransactionConflict",
-            ));
+        let error = TransactWriteItemsError::TransactionCanceledException(
+            transaction_canceled_with_reason("TransactionConflict"),
+        );
 
         assert!(transact_write_error_is_conflict(&error));
     }
 
     #[test]
     fn transaction_canceled_validation_error_is_not_conflict() {
-        let error =
-            TransactWriteItemsError::TransactionCanceledException(transaction_canceled_with_reason(
-                "ValidationError",
-            ));
+        let error = TransactWriteItemsError::TransactionCanceledException(
+            transaction_canceled_with_reason("ValidationError"),
+        );
 
         assert!(!transact_write_error_is_conflict(&error));
     }

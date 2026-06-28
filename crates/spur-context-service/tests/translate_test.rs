@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use duckdb::{params, Connection};
-use spur_context_service::catalog::{compact_gold_and_export_snapshot, CatalogResolver, SnapshotCleanupOptions};
+use spur_context_service::catalog::{
+    compact_gold_and_export_snapshot, CatalogResolver, SnapshotCleanupOptions,
+};
 use spur_context_service::knowledge::{
     query_knowledge_context, KnowledgeContextOptions, KnowledgeScope,
 };
@@ -200,7 +202,15 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
         WHERE source = ? AND package = ? AND revision = ?
         ",
         params![SOURCE, PACKAGE, REVISION],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
     )?;
     assert!(generation > 0);
     assert_eq!(bronze_content_sha256, "bronze-sha256");
@@ -224,7 +234,10 @@ fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapsho
             params![SOURCE, PACKAGE, REVISION, generation],
             |row| row.get(0),
         )?;
-        assert_eq!(generation_count, 1, "gold.{table} must be stamped with generation");
+        assert_eq!(
+            generation_count, 1,
+            "gold.{table} must be stamped with generation"
+        );
     }
 
     let snapshot_path = catalog_snapshot_path(&data_path);
@@ -808,6 +821,7 @@ fn translate_lineage() -> TranslateLineage {
         silver_graph_content_hash: "graph-hash-123".to_owned(),
         builder_version: "builder-v1".to_owned(),
         translate_schema_version: "translate-v1".to_owned(),
+        embed_text_version: EMBED_TEXT_VERSION.to_owned(),
     }
 }
 

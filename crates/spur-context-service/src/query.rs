@@ -859,11 +859,7 @@ fn latest_revision(db: &Connection, source: &str, package: &str) -> Result<Optio
         refs = tables.refs
     );
     optional_no_rows(
-        db.query_row(
-            &sql,
-            params![source, package],
-            |row| row.get(0),
-        ),
+        db.query_row(&sql, params![source, package], |row| row.get(0)),
         "failed to resolve latest package revision",
     )
 }
@@ -922,10 +918,7 @@ fn parse_pkg_symbol_uri(selector: &str) -> Option<ParsedStableSelector> {
     let revision = parts.next()?;
     let package = parts.next()?;
     let source = parts.next()?;
-    if source.is_empty()
-        || package.is_empty()
-        || revision.is_empty()
-        || stable_symbol_id.is_empty()
+    if source.is_empty() || package.is_empty() || revision.is_empty() || stable_symbol_id.is_empty()
     {
         return None;
     }
