@@ -3,6 +3,8 @@
 #
 # Usage:
 #   ./deploy.sh                    # build Lambda + worker, terraform apply
+#   ./deploy.sh --env prod         # deploy with prod backend + var file
+#   ./deploy.sh --backend-config backends/prod.s3.tfbackend --var-file env/prod.tfvars
 #   ./deploy.sh --local-zip path   # skip Lambda build, use existing zip
 #   ./deploy.sh --skip-worker      # skip worker image build/push
 #   ./deploy.sh --skip-worker --package-only # build Lambda zip, skip terraform
@@ -504,6 +506,9 @@ main() {
     local package_only=false
     local BUILD_MODE="${SPUR_CONTEXT_SERVICE_BUILD_MODE:-remote}"
     local PUSH_IMAGES
+    local environment="staging"
+    local backend_config=""
+    local var_file=""
     local worker_image_uri=""
     local worker_lambda_image_uri=""
 
@@ -518,11 +523,17 @@ main() {
             --build-mode) BUILD_MODE="$2"; shift 2 ;;
             --no-push) PUSH_IMAGES=false; shift ;;
             --push) PUSH_IMAGES=true; shift ;;
+            --env) environment="$2"; shift 2 ;;
+            --backend-config|-backend-config) backend_config="$2"; shift 2 ;;
+            --var-file|-var-file) var_file="$2"; shift 2 ;;
             *) break ;;
         esac
     done
 
     validate_build_mode
+
+    backend_config="${backend_config:-backends/${environment}.s3.tfbackend}"
+    var_file="${var_file:-env/${environment}.tfvars}"
 
     if [[ "$worker_image_only" == "true" && "$package_only" == "true" ]]; then
         log "--worker-image-only and --package-only are mutually exclusive"
@@ -579,9 +590,18 @@ main() {
 
     log "running terraform..."
     cd "$INFRA_DIR"
-    terraform init -upgrade
+    if [[ ! -f "$backend_config" ]]; then
+        log "backend config not found: $backend_config"
+        exit 2
+    fi
+    if [[ ! -f "$var_file" ]]; then
+        log "variable file not found: $var_file"
+        exit 2
+    fi
 
-    local tf_vars=(-var "lambda_zip_path=$tf_zip_path")
+    terraform init -upgrade -backend-config="$backend_config"
+
+    local tf_vars=(-var-file="$var_file" -var "lambda_zip_path=$tf_zip_path")
     if [[ -n "$worker_image_uri" ]]; then
         tf_vars+=(-var "worker_ecr_image=$worker_image_uri")
     else
@@ -599,6 +619,7 @@ main() {
         fi
     fi
 
+    terraform plan "${tf_vars[@]}"
     terraform apply "${tf_vars[@]}" -auto-approve
 
     log "deployed. API URL:"
