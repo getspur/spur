@@ -34,10 +34,6 @@ base64 = "0.22"
 # 5.8.0 already includes EmbeddingGemma300M. Newer 5.x releases pull ORT
 # rc.11/rc.12 binaries that require newer Linux runtime symbols on the build VM.
 fastembed = { version = "=5.8.0", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries"] }
-# Direct use is limited to pinning FastEmbed sessions to ORT's CPU/MLAS path.
-# Do not enable the xnnpack feature here; Lambda Graviton2 must not execute
-# XNNPACK/KleidiAI SVE/SME kernels.
-ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray", "std"] }
 lance-index = { workspace = true }
 lancedb = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
