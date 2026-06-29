@@ -9,6 +9,7 @@ use duckdb::{params, Connection};
 use sha2::{Digest, Sha256};
 
 pub(crate) const DUCKLAKE_DATA_PATH_ENV: &str = "SPUR_CONTEXT_DUCKLAKE_DATA_PATH";
+pub(crate) const DUCKDB_EXTENSION_DIR_ENV: &str = "SPUR_CONTEXT_DUCKDB_EXTENSION_DIR";
 const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
 const SNAPSHOT_POINTER_RELATIVE_PATH: &str = "gold/catalog-snapshot/current.json";
 const SNAPSHOT_GENERATIONS_RELATIVE_DIR: &str = "gold/catalog-snapshot/generations";
@@ -44,6 +45,50 @@ pub(crate) fn is_remote_catalog(catalog_dsn: &str) -> bool {
     catalog_dsn.starts_with("s3://")
         || catalog_dsn.starts_with("https://")
         || catalog_dsn.starts_with("http://")
+}
+
+pub(crate) fn duckdb_extension_load_sql(extension: &str) -> String {
+    debug_assert!(extension
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'));
+    match duckdb_extension_dir() {
+        Some(dir) => format!(
+            "SET extension_directory = '{}'; \
+             SET autoinstall_known_extensions = false; \
+             LOAD {extension};",
+            escape_sql_literal(&dir)
+        ),
+        None => format!("INSTALL {extension}; LOAD {extension};"),
+    }
+}
+
+pub(crate) fn load_duckdb_extension(
+    conn: &Connection,
+    extension: &str,
+    context: &'static str,
+) -> Result<()> {
+    conn.execute_batch(&duckdb_extension_load_sql(extension))
+        .context(context)
+}
+
+fn load_duckdb_extensions(
+    conn: &Connection,
+    extensions: &[&str],
+    context: &'static str,
+) -> Result<()> {
+    let sql = extensions
+        .iter()
+        .map(|extension| duckdb_extension_load_sql(extension))
+        .collect::<Vec<_>>()
+        .join(" ");
+    conn.execute_batch(&sql).context(context)
+}
+
+fn duckdb_extension_dir() -> Option<String> {
+    std::env::var(DUCKDB_EXTENSION_DIR_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug)]
@@ -298,11 +343,15 @@ pub fn connect_frozen_snapshot(snapshot_path: &Path, data_path: &str) -> Result<
 
     if data_path.starts_with("s3://") {
         let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+        load_duckdb_extension(
+            &conn,
+            "httpfs",
+            "failed to load httpfs for frozen snapshot S3 data path",
+        )?;
         conn.execute_batch(&format!(
-            "INSTALL httpfs; LOAD httpfs; \
-             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
+            "CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
         ))
-        .context("failed to load httpfs for frozen snapshot S3 data path")?;
+        .context("failed to configure S3 credentials for frozen snapshot data path")?;
     }
 
     attach_frozen_snapshot(&conn, snapshot_path, data_path)?;
@@ -316,11 +365,11 @@ pub fn connect_ducklake_with_data_path(catalog_dsn: &str, data_path: &str) -> Re
 
     if data_path.starts_with("s3://") && !is_remote_catalog(&catalog_dsn) {
         let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+        load_duckdb_extension(&conn, "httpfs", "failed to load httpfs for S3 data path")?;
         conn.execute_batch(&format!(
-            "INSTALL httpfs; LOAD httpfs; \
-             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
+            "CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
         ))
-            .context("failed to load httpfs for S3 data path")?;
+            .context("failed to configure S3 credentials for DuckLake data path")?;
     }
 
     if is_remote_catalog(&catalog_dsn) {
@@ -490,19 +539,25 @@ fn optional_no_rows<T>(result: duckdb::Result<T>, context: &'static str) -> Resu
 }
 
 fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> {
-    conn.execute_batch("INSTALL ducklake; LOAD ducklake;")
-        .context("failed to load ducklake extension")?;
+    load_duckdb_extension(conn, "ducklake", "failed to load ducklake extension")?;
 
     if is_remote_catalog(catalog_dsn) {
         let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+        load_duckdb_extension(
+            conn,
+            "httpfs",
+            "failed to load httpfs extension for remote DuckLake catalog",
+        )?;
         conn.execute_batch(&format!(
-            "INSTALL httpfs; LOAD httpfs; \
-             CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
+            "CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{region}');",
         ))
-        .context("failed to load httpfs extension for remote DuckLake catalog")?;
+        .context("failed to configure S3 credentials for remote DuckLake catalog")?;
     } else if catalog_dsn.starts_with("sqlite:") || catalog_dsn.starts_with("ducklake:sqlite:") {
-        conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
-            .context("failed to load sqlite extension for DuckLake catalog")?;
+        load_duckdb_extension(
+            conn,
+            "sqlite",
+            "failed to load sqlite extension for DuckLake catalog",
+        )?;
     } else if catalog_dsn.starts_with("postgres:")
         || catalog_dsn.starts_with("postgresql:")
         || catalog_dsn.starts_with("postgresql://")
@@ -510,8 +565,11 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str) -> Result<()> 
         || catalog_dsn.starts_with("ducklake:postgresql:")
         || catalog_dsn.starts_with("ducklake:postgresql://")
     {
-        conn.execute_batch("INSTALL postgres; LOAD postgres;")
-            .context("failed to load postgres extension for DuckLake catalog")?;
+        load_duckdb_extension(
+            conn,
+            "postgres",
+            "failed to load postgres extension for DuckLake catalog",
+        )?;
     }
 
     Ok(())
@@ -920,8 +978,11 @@ fn file_sha256_and_len(path: &Path) -> Result<(String, u64)> {
 fn copy_ducklake_metadata_tables(catalog_dsn: &str, snapshot_path: &Path) -> Result<()> {
     let catalog_dsn = catalog_dsn_with_env_password(catalog_dsn);
     let conn = Connection::open_in_memory().context("failed to open snapshot exporter DuckDB")?;
-    conn.execute_batch("INSTALL sqlite; INSTALL postgres; LOAD sqlite; LOAD postgres;")
-        .context("failed to load metadata backend extensions")?;
+    load_duckdb_extensions(
+        &conn,
+        &["sqlite", "postgres"],
+        "failed to load metadata backend extensions",
+    )?;
     let source = attach_metadata_catalog(&conn, &catalog_dsn)?;
     conn.execute_batch(&format!(
         "ATTACH '{}' AS snap;",
@@ -1610,5 +1671,52 @@ mod tests {
         assert!(!is_s3_not_found_error(&anyhow!(
             "service error: SlowDown: please reduce your request rate"
         )));
+    }
+
+    #[test]
+    fn duckdb_extension_loading_uses_env_directory_offline() {
+        let _guard = lock_env();
+        let previous = std::env::var_os(DUCKDB_EXTENSION_DIR_ENV);
+        std::env::set_var(
+            DUCKDB_EXTENSION_DIR_ENV,
+            "/opt/duckdb/extensions/with ' quote",
+        );
+
+        let ducklake_sql = duckdb_extension_load_sql("ducklake");
+        let httpfs_sql = duckdb_extension_load_sql("httpfs");
+
+        match previous {
+            Some(value) => std::env::set_var(DUCKDB_EXTENSION_DIR_ENV, value),
+            None => std::env::remove_var(DUCKDB_EXTENSION_DIR_ENV),
+        }
+
+        assert_eq!(
+            ducklake_sql,
+            "SET extension_directory = '/opt/duckdb/extensions/with '' quote'; \
+             SET autoinstall_known_extensions = false; \
+             LOAD ducklake;"
+        );
+        assert_eq!(
+            httpfs_sql,
+            "SET extension_directory = '/opt/duckdb/extensions/with '' quote'; \
+             SET autoinstall_known_extensions = false; \
+             LOAD httpfs;"
+        );
+    }
+
+    #[test]
+    fn duckdb_extension_loading_preserves_home_directory_flow_when_env_unset() {
+        let _guard = lock_env();
+        let previous = std::env::var_os(DUCKDB_EXTENSION_DIR_ENV);
+        std::env::remove_var(DUCKDB_EXTENSION_DIR_ENV);
+
+        let sql = duckdb_extension_load_sql("httpfs");
+
+        match previous {
+            Some(value) => std::env::set_var(DUCKDB_EXTENSION_DIR_ENV, value),
+            None => std::env::remove_var(DUCKDB_EXTENSION_DIR_ENV),
+        }
+
+        assert_eq!(sql, "INSTALL httpfs; LOAD httpfs;");
     }
 }
