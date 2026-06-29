@@ -4119,3 +4119,5 @@ mod tests {
         );
     }
 }
+
+// build-marker: force fresh relink for graviton2 no-ORT worker
