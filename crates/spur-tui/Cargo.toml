@@ -7,16 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["markdown", "analytics"]
+default = ["markdown", "analytics", "core-embed", "graph-embed"]
 markdown = ["dep:tui-markdown", "dep:ratatui-core", "dep:mermaid-rs-renderer", "dep:mermaid-text", "dep:ratatui-image", "dep:resvg", "dep:pulldown-cmark"]
 analytics = ["dep:spur-context", "spur-context/duckdb", "dep:spur-cost", "dep:directories"]
+core-embed = ["spur-core/embed"]
+graph-embed = ["spur-graph/embed"]
 
 [dependencies]
 spur-acp = { workspace = true }
 spur-context = { workspace = true, optional = true }
 spur-cost = { workspace = true, optional = true }
-spur-core = { workspace = true }
-spur-graph = { workspace = true }
+spur-core = { workspace = true, default-features = false }
+spur-graph = { workspace = true, default-features = false }
 spur-pm = { workspace = true }
 spur-license = { workspace = true }
 agent-client-protocol = { workspace = true }

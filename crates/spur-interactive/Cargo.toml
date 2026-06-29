@@ -5,13 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["core-embed"]
+core-embed = ["spur-core/embed"]
+
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 spur-acp = { workspace = true }
-spur-core = { workspace = true }
+spur-core = { workspace = true, default-features = false }
 spur-pm = { workspace = true }
 
 [dev-dependencies]
