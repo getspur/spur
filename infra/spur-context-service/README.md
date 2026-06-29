@@ -139,14 +139,24 @@ export AWS_REGION=ap-southeast-5
 export SPUR_CONTEXT_SMOKE_LAMBDA=spur-context-service
 export SPUR_CONTEXT_SMOKE_SOURCE_BUCKET=spur-context-staging
 export SPUR_CONTEXT_SMOKE_DATA_BUCKET=spur-context-staging
-python3 infra/spur-context-service/smoke-staging-e2e.py
+
+# No-ingest preflight: validates required env, AWS STS auth, and Lambda
+# serving catalog config without uploading a fixture or calling external_index.
+infra/spur-context-service/smoke-staging-e2e.sh --preflight
+
+# Full E2E smoke: uploads the fixture and invokes real ingest.
+infra/spur-context-service/smoke-staging-e2e.sh
 ```
 
-The smoke publishes a tiny Rust package tarball, calls `external_index`, waits
-for the real worker to complete, checks the bronze source object, silver
-artifact prefix, gold frozen snapshot pointer, non-zero `symbol_embeddings`, and
-then serves `external_code_search`, `external_code_read`, and
-`external_knowledge_context` from the staging Lambda.
+The full smoke publishes a tiny Rust package tarball, calls `external_index`,
+waits for the real worker to complete, checks the bronze source object at
+`bronze/{source}/{package}/{revision}/source.tar.gz`, the silver artifact
+manifest at `silver/{source}/{package}/{revision}/{builder_version}/manifest.json`,
+the gold frozen snapshot pointer at `gold/catalog-snapshot/current.json`,
+non-zero `symbol_embeddings`, and then serves `external_code_search`,
+`external_code_read`, and `external_knowledge_context` from the staging Lambda.
+The `source` path component is the worker's verbatim source coordinate, such as
+`registry:crates-io`.
 
 Serving is intentionally zero-Postgres: the script fails if the serving Lambda
 is configured with a Postgres `SPUR_CATALOG_DSN`, or if `SPUR_CATALOG_S3_URI`
