@@ -35,6 +35,42 @@ def test_deploy_builds_standalone_context_service_from_crate_workdir():
     assert "scripts/spur-cargo build -p spur-context-service" not in script
 
 
+def test_deploy_has_selectable_self_contained_buildx_path_with_baseline_flags():
+    script = DEPLOY_SH.read_text()
+
+    assert 'BUILD_MODE="${SPUR_CONTEXT_SERVICE_BUILD_MODE:-remote}"' in script
+    assert "--build-mode) BUILD_MODE=\"$2\"" in script
+    assert "--no-push) PUSH_IMAGES=false" in script
+    assert "build_self_contained_artifacts()" in script
+    assert "prepare_self_contained_build_context()" in script
+    assert 'git -C "$REPO_ROOT" archive --format=tar HEAD' in script
+    assert "buildx build" in script
+    assert "--platform linux/arm64 --provenance=false" in script
+    assert "--output \"type=local,dest=$export_dir\"" in script
+    assert 'assert_graviton2_safe_flags "self-contained buildx artifacts"' in script
+    assert 'RUSTFLAGS="$SPUR_CONTEXT_GRAVITON2_RUSTFLAGS"' in script
+    assert 'CFLAGS="$SPUR_CONTEXT_GRAVITON2_CFLAGS"' in script
+    assert 'CXXFLAGS="$SPUR_CONTEXT_GRAVITON2_CXXFLAGS"' in script
+    assert "SPUR_CONTEXT_GRAVITON2_RUSTFLAGS" in script
+    assert "SPUR_CONTEXT_GRAVITON2_CFLAGS" in script
+    assert "SPUR_CONTEXT_GRAVITON2_CXXFLAGS" in script
+    assert "fetch_remote_worktree_file" in script
+
+
+def test_self_contained_worker_images_build_locally_without_ecr_mutations_by_default():
+    script = DEPLOY_SH.read_text()
+
+    assert "build_local_worker_images()" in script
+    assert 'local output_dir="$REPO_ROOT/target/lambda"' in script
+    assert '--output "type=docker,dest=$output_dir/spur-context-worker-image.tar"' in script
+    assert '--output "type=docker,dest=$output_dir/spur-context-worker-lambda-image.tar"' in script
+    assert 'if [[ "$PUSH_IMAGES" == "true" ]]' in script
+    assert "build_and_push_worker_image" in script
+    assert "build_and_push_worker_lambda_image" in script
+    assert 'aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO"' in script
+    assert 'aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO"' in script
+
+
 def test_deploy_worker_image_contains_worker_and_spur_binaries():
     deploy_sh = DEPLOY_SH.read_text()
 
@@ -85,6 +121,8 @@ def test_deploy_can_package_lambda_without_terraform_apply():
 def test_remote_worker_image_script_delegates_to_canonical_deploy_path():
     script = REMOTE_BUILD_SH.read_text()
 
+    assert 'SPUR_CONTEXT_SERVICE_BUILD_MODE="${SPUR_CONTEXT_SERVICE_BUILD_MODE:-remote}"' in script
+    assert "export SPUR_CONTEXT_SERVICE_BUILD_MODE" in script
     assert 'exec "$SCRIPT_DIR/deploy.sh"' in script
     assert "COPY spur-context-worker /usr/local/bin/spur-context-worker" not in script
     assert "COPY spur /usr/local/bin/spur" not in script
@@ -107,8 +145,15 @@ def test_context_service_workflow_runs_tests_and_gated_aws_artifacts():
     assert "build_aws_artifacts:" in workflow
     assert "run_staging_smoke:" in workflow
     assert "scripts/spur-cargo --workdir crates/spur-context-service test --all-features" in workflow
+    assert 'SPUR_CONTEXT_SERVICE_BUILD_MODE: "self-contained"' in workflow
+    assert 'SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "0"' in workflow
+    assert 'SPUR_REMOTE: "1"' not in workflow.split("build-aws-artifacts:", 1)[1].split("staging-smoke:", 1)[0]
+    assert "docker/setup-qemu-action@v3" in workflow
+    assert "docker/setup-buildx-action@v3" in workflow
     assert "infra/spur-context-service/build-and-push-remote.sh" in workflow
     assert "infra/spur-context-service/deploy.sh --skip-worker --package-only" in workflow
+    assert "spur-context-service-worker-images" in workflow
+    assert "target/lambda/*worker*image.tar" in workflow
     assert "infra/spur-context-service/smoke-staging-e2e.py" in workflow
     assert "CONTEXT_SERVICE_AWS_ROLE_ARN" in workflow
     assert "context-service-staging" in workflow
