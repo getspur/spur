@@ -21,9 +21,10 @@ use spur_context_service::jobs::{
     CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
 };
 use spur_context_service::mcp::{
-    handle_tool, route_index, route_index_status, route_index_status_for_caller, tool_definitions,
-    ExecutionOutcome, ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest,
-    IndexExecutionStarter, McpHandlerError,
+    handle_tool, handle_tool_without_catalog, route_index, route_index_status,
+    route_index_status_for_caller, route_index_without_catalog, tool_definitions, ExecutionOutcome,
+    ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter,
+    McpHandlerError,
 };
 
 const PACKAGE: &str = "demo";
@@ -680,6 +681,68 @@ async fn handler_reports_unknown_tool_missing_args_and_missing_package() -> Resu
 }
 
 #[tokio::test]
+async fn missing_serving_catalog_returns_empty_read_tool_results() -> Result<()> {
+    let search = handle_tool_without_catalog(
+        "external_code_search",
+        &json!({
+            "query": "alpha",
+            "package": PACKAGE,
+            "limit": 20
+        }),
+    )?;
+    assert_eq!(search["total_matches"], 0);
+    assert_eq!(search["truncated"], false);
+    assert_eq!(search["candidates"], json!([]));
+
+    let source = handle_tool_without_catalog(
+        "external_code_read",
+        &json!({
+            "selector": "pkg:demo@latest::demo::alpha",
+            "context_lines": 0
+        }),
+    )?;
+    assert!(source.is_null());
+
+    let callers = handle_tool_without_catalog(
+        "external_code_callers",
+        &json!({
+            "selector": "pkg:demo@latest::demo::alpha",
+            "include_unresolved": true
+        }),
+    )?;
+    assert_eq!(callers["callers"], json!([]));
+    assert_eq!(callers["counts_by_kind"]["calls"], 0);
+    assert_eq!(callers["unresolved_sample"], json!([]));
+
+    let callees = handle_tool_without_catalog(
+        "external_code_callees",
+        &json!({
+            "selector": "pkg:demo@latest::demo::alpha",
+            "include_unresolved": true
+        }),
+    )?;
+    assert_eq!(callees["callees"], json!([]));
+    assert_eq!(callees["counts_by_kind"]["calls"], 0);
+    assert_eq!(callees["unresolved_sample"], json!([]));
+
+    let knowledge = handle_tool_without_catalog(
+        "external_knowledge_context",
+        &json!({
+            "query": "how does alpha work",
+            "package": PACKAGE,
+            "limit": 8
+        }),
+    )?;
+    assert_eq!(knowledge["answerable"], false);
+    assert_eq!(knowledge["confidence"], "low");
+    assert_eq!(knowledge["primary_evidence"], json!([]));
+    assert_eq!(knowledge["supporting_docs"], json!([]));
+    assert_eq!(knowledge["candidates"]["total"], 0);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_index_rejects_missing_source_url() -> Result<()> {
     let fixture = McpFixture::new("index-missing-source-url")?;
     let jobs = FakeJobStore::default();
@@ -701,6 +764,34 @@ async fn external_index_rejects_missing_source_url() -> Result<()> {
 
     assert!(matches!(error, McpHandlerError::InvalidParams(_)));
     assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_without_serving_catalog_starts_execution() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index_without_catalog(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &jobs,
+        &sfn,
+        "caller-bootstrap",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    assert_eq!(response["job_id"], "job-1");
+    assert_eq!(response["execution_arn"], "arn:stub:job-1");
+    assert_eq!(response["revision"], "main");
+    assert_eq!(sfn.started_count(), 1);
+    let stored = jobs.lookup_job_sync("job-1").context("created job")?;
+    assert_eq!(stored.caller_id, "caller-bootstrap");
     Ok(())
 }
 

@@ -166,18 +166,28 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
         }
         "external_index" => {
             let prepared_catalog = prepare_catalog().await?;
-            let mut catalog_guard = catalog_resolver()?;
-            let catalog = initialized_catalog(&mut catalog_guard, &prepared_catalog)?;
-            let db = catalog.connection();
             let jobs = job_store();
             let sfn_client = sfn_client()?;
             let caller_id = authenticated_caller
                 .as_deref()
                 .expect("external_index authenticated caller should be available");
-            mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, caller_id).await
+            if let Some(prepared_catalog) = prepared_catalog {
+                let mut catalog_guard = catalog_resolver()?;
+                let catalog = initialized_catalog(&mut catalog_guard, &prepared_catalog)?;
+                let db = catalog.connection();
+                mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, caller_id).await
+            } else {
+                mcp::route_index_without_catalog(&request.args, &jobs, &sfn_client, caller_id).await
+            }
         }
         _ => {
             let prepared_catalog = prepare_catalog().await?;
+            let Some(prepared_catalog) = prepared_catalog else {
+                return match mcp::handle_tool_without_catalog(&request.tool, &request.args) {
+                    Ok(value) => json_response(200, &value),
+                    Err(error) => tool_error_response(error),
+                };
+            };
             let mut catalog_guard = catalog_resolver()?;
             let catalog = initialized_catalog(&mut catalog_guard, &prepared_catalog)?;
             let db = catalog.connection();
@@ -287,15 +297,17 @@ fn initialized_catalog<'a>(
         .ok_or_else(|| lambda_error("catalog resolver cache did not initialize"))
 }
 
-async fn prepare_catalog() -> Result<PreparedCatalog, Error> {
+async fn prepare_catalog() -> Result<Option<PreparedCatalog>, Error> {
     let catalog_dsn = catalog_dsn()?;
     prepare_catalog_source(catalog_dsn).await
 }
 
-async fn prepare_catalog_source(catalog_dsn: String) -> Result<PreparedCatalog, Error> {
+async fn prepare_catalog_source(catalog_dsn: String) -> Result<Option<PreparedCatalog>, Error> {
     if let Some(uri) = parse_s3_uri(&catalog_dsn)? {
         if uri.key.ends_with(".json") {
-            let pointer = download_snapshot_pointer(&uri).await?;
+            let Some(pointer) = download_snapshot_pointer(&uri).await? else {
+                return Ok(None);
+            };
             let Some(snapshot_uri) = parse_s3_uri(&pointer.manifest.snapshot_uri)? else {
                 return Err(lambda_error(format!(
                     "snapshot pointer must reference an S3 snapshot URI, got `{}`",
@@ -310,7 +322,7 @@ async fn prepare_catalog_source(catalog_dsn: String) -> Result<PreparedCatalog, 
                 download_catalog_snapshot(&snapshot_uri, &local_path).await?;
             }
             verify_local_snapshot_hash(&local_path, &pointer.manifest.sha256)?;
-            return Ok(PreparedCatalog {
+            return Ok(Some(PreparedCatalog {
                 cache_key: snapshot_pointer_cache_key(
                     &catalog_dsn,
                     pointer.pointer_etag.as_deref(),
@@ -321,7 +333,7 @@ async fn prepare_catalog_source(catalog_dsn: String) -> Result<PreparedCatalog, 
                     local_path,
                     data_path: pointer.manifest.data_path,
                 },
-            });
+            }));
         }
 
         let catalog_etag = catalog_etag(&catalog_dsn).await?;
@@ -330,14 +342,14 @@ async fn prepare_catalog_source(catalog_dsn: String) -> Result<PreparedCatalog, 
         if !local_path.is_file() {
             download_catalog_snapshot(&uri, &local_path).await?;
         }
-        return Ok(PreparedCatalog {
+        return Ok(Some(PreparedCatalog {
             cache_key: format!("{catalog_dsn}\n{data_path}"),
             catalog_etag,
             source: PreparedCatalogSource::FrozenSnapshot {
                 local_path,
                 data_path,
             },
-        });
+        }));
     }
 
     let catalog_etag = None;
@@ -347,11 +359,11 @@ async fn prepare_catalog_source(catalog_dsn: String) -> Result<PreparedCatalog, 
         ));
     }
 
-    Ok(PreparedCatalog {
+    Ok(Some(PreparedCatalog {
         cache_key: catalog_dsn.clone(),
         catalog_etag,
         source: PreparedCatalogSource::Direct { catalog_dsn },
-    })
+    }))
 }
 
 fn should_initialize_catalog(
@@ -415,15 +427,26 @@ struct SnapshotPointerDownload {
     pointer_etag: Option<String>,
 }
 
-async fn download_snapshot_pointer(uri: &S3Uri) -> Result<SnapshotPointerDownload, Error> {
-    let output = aws_clients()
+async fn download_snapshot_pointer(uri: &S3Uri) -> Result<Option<SnapshotPointerDownload>, Error> {
+    let output = match aws_clients()
         .s3
         .get_object()
         .bucket(&uri.bucket)
         .key(&uri.key)
         .send()
         .await
-        .map_err(|error| lambda_error(format!("failed to download catalog pointer: {error}")))?;
+    {
+        Ok(output) => output,
+        Err(error) => {
+            let error = anyhow::Error::new(error);
+            if catalog::is_s3_not_found_error(&error) {
+                return Ok(None);
+            }
+            return Err(lambda_error(format!(
+                "failed to download catalog pointer: {error:#}"
+            )));
+        }
+    };
     let pointer_etag = output.e_tag().map(str::to_owned);
     let bytes = output.body.collect().await.map_err(|error| {
         lambda_error(format!(
@@ -433,10 +456,10 @@ async fn download_snapshot_pointer(uri: &S3Uri) -> Result<SnapshotPointerDownloa
     let bytes = bytes.into_bytes();
     let manifest =
         catalog::FrozenSnapshotManifest::from_json_slice(bytes.as_ref()).map_err(Error::from)?;
-    Ok(SnapshotPointerDownload {
+    Ok(Some(SnapshotPointerDownload {
         manifest,
         pointer_etag,
-    })
+    }))
 }
 
 fn snapshot_pointer_cache_key(
