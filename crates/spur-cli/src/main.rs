@@ -2757,5 +2757,3 @@ mod resolve_landing_tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 }
-
-// build-marker: force fresh relink for graviton2 no-ORT worker (deploy dbc423721)
