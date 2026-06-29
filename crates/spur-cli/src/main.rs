@@ -515,6 +515,32 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_graph_build_with_both_embedding_skip_flags() {
+        let cli = Cli::parse_from([
+            "spur",
+            "graph",
+            "build",
+            "--workspace",
+            "--no-section-embeddings",
+            "--no-code-symbol-embeddings",
+        ]);
+
+        let Commands::Graph {
+            command:
+                GraphCommands::Build {
+                    no_section_embeddings,
+                    no_code_symbol_embeddings,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected graph build command");
+        };
+        assert!(no_section_embeddings);
+        assert!(no_code_symbol_embeddings);
+    }
+
+    #[test]
     fn cli_accepts_graph_embed_command_with_artifact_dir_and_scopes() {
         let artifact_dir = PathBuf::from(".spur/graph/CURRENT");
         let matches = Cli::command()
