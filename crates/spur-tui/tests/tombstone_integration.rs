@@ -418,6 +418,47 @@ fn tombstone_remote_queue_cancel_via_undo() {
 }
 
 #[test]
+fn review_tombstone_uses_plan_inspector_view_for_undo() {
+    let mut app = App::new_for_tests();
+    let session_id = spur_acp::SessionId("brain-1".into());
+    process_action(
+        &mut app,
+        Action::NavigateTo(ViewId::PlanInspector(session_id.clone())),
+    );
+    app.add_pending_review_for_test("exec-1", 1);
+
+    process_action(
+        &mut app,
+        Action::SubmitReview {
+            executor_id: "exec-1".into(),
+            attempt_n: 1,
+            decision: ReviewDecision::Approve,
+        },
+    );
+
+    let source_view = ViewId::PlanInspector(session_id);
+    assert!(
+        app.tombstones_for_test().has(&source_view),
+        "review tombstone must be installed on the originating Plan Inspector view"
+    );
+    assert!(
+        !app.tombstones_for_test().has(&ViewId::Dashboard),
+        "Plan Inspector review must not install a Dashboard tombstone"
+    );
+
+    app.handle_undo_for_test();
+
+    assert!(!app.tombstones_for_test().has(&source_view));
+    assert!(!app.user_input_sent_for_test());
+    assert!(
+        app.transient_hint_text()
+            .unwrap_or("")
+            .contains("Cancelled"),
+        "expected cancel confirmation from Plan Inspector undo"
+    );
+}
+
+#[test]
 fn tombstone_remote_queue_displaced_by_next_review_dispatches_first_immediately() {
     let mut app = App::new_for_tests();
     app.add_pending_review_for_test("exec-1", 1);
