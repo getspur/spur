@@ -14,7 +14,10 @@ use crate::{
 use futures::future::join_all;
 use serde_json::{json, Value};
 #[cfg(feature = "embed")]
-use spur_graph::{embedding_query_text_for_model, EmbeddingModelSelection, EMBED_MODEL_ENV};
+use spur_graph::{
+    embedding_query_text_for_model, ensure_fastembed_ort_environment_initialized,
+    EmbeddingModelSelection, EMBED_MODEL_ENV,
+};
 use spur_graph::{resolve_worktree_root_from, EMBEDDING_VECTOR_DIMENSIONS};
 
 use super::McpHandlerError;
@@ -435,6 +438,7 @@ fn load_embed_model(
         model = embedding_model.model_name(),
         "Loading embedding model for knowledge_context_pack hybrid search"
     );
+    ensure_fastembed_ort_environment_initialized()?;
     fastembed::TextEmbedding::try_new(
         fastembed::InitOptions::new(embedding_model.fastembed_model())
             .with_show_download_progress(false),
