@@ -876,20 +876,22 @@ enum GraphCommands {
     },
 }
 
-fn graph_embed_scope(
+struct GraphEmbedScopeFlags {
     code_symbols: bool,
     sections: bool,
     code_symbols_only: bool,
     sections_only: bool,
-) -> (bool, bool) {
-    if code_symbols_only {
+}
+
+fn graph_embed_scope(flags: GraphEmbedScopeFlags) -> (bool, bool) {
+    if flags.code_symbols_only {
         return (true, false);
     }
-    if sections_only {
+    if flags.sections_only {
         return (false, true);
     }
-    if code_symbols || sections {
-        return (code_symbols, sections);
+    if flags.code_symbols || flags.sections {
+        return (flags.code_symbols, flags.sections);
     }
     (true, true)
 }
@@ -1421,7 +1423,12 @@ async fn run() -> Result<()> {
                 quiet,
             } => {
                 let (embed_code_symbols, embed_sections) =
-                    graph_embed_scope(code_symbols, sections, code_symbols_only, sections_only);
+                    graph_embed_scope(GraphEmbedScopeFlags {
+                        code_symbols,
+                        sections,
+                        code_symbols_only,
+                        sections_only,
+                    });
                 commands::graph::backfill_vectors(commands::graph::GraphVectorBackfillOptions {
                     root,
                     workspace,

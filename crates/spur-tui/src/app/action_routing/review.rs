@@ -1,7 +1,7 @@
 use super::*;
 
 impl App {
-    pub(super) fn process_review(&mut self, action: Action) -> Option<Action> {
+    pub(super) fn process_review(&mut self, action: Action, source_view: ViewId) -> Option<Action> {
         match action {
             Action::SubmitReview {
                 executor_id,
@@ -26,7 +26,7 @@ impl App {
                 };
                 let now = Instant::now();
                 let displaced = self.tombstones.install_and_get_displaced(Tombstone {
-                    view: ViewId::Dashboard,
+                    view: source_view,
                     kind: TombstoneKind::QueuedRemote {
                         pending: pending_dispatch,
                     },
