@@ -32,7 +32,7 @@ EXT_PLATFORM="linux_arm64"
 # "postgres_scanner" (the bare "postgres" name 404s). `LOAD postgres` resolves
 # the alias to the postgres_scanner file, so bundling postgres_scanner makes the
 # offline `LOAD postgres` succeed.
-EXTENSIONS=("httpfs" "ducklake" "postgres_scanner")
+EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "aws" "parquet" "json")
 WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"
 
 # Worker container config.  The image is built on the remote VM (x86_64 for
@@ -335,6 +335,7 @@ COPY spur /usr/local/bin/spur
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/httpfs.duckdb_extension
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/ducklake.duckdb_extension
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/postgres_scanner.duckdb_extension
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/aws.duckdb_extension
 RUN /usr/local/bin/spur --version
 RUN /usr/local/bin/spur-context-worker || true
 CMD ["/usr/local/bin/spur-context-worker"]
@@ -355,6 +356,7 @@ COPY spur /usr/local/bin/spur
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/httpfs.duckdb_extension
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/ducklake.duckdb_extension
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/postgres_scanner.duckdb_extension
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/aws.duckdb_extension
 RUN /usr/local/bin/spur --version
 RUN /usr/local/bin/spur-context-worker-lambda --smoke
 ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]
