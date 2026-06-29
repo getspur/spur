@@ -193,6 +193,21 @@ pub fn handle_tool_sync(
     }
 }
 
+pub fn handle_tool_without_catalog(name: &str, args: &Value) -> Result<Value, McpHandlerError> {
+    match name {
+        "external_code_search" => handle_code_search_without_catalog(args),
+        "external_code_read" => handle_code_read_without_catalog(args),
+        "external_code_callers" => handle_code_callers_without_catalog(args),
+        "external_code_callees" => handle_code_callees_without_catalog(args),
+        "external_knowledge_context" => handle_knowledge_context_without_catalog(args),
+        "external_index" => handle_index_requires_lambda(args),
+        "external_index_status" => handle_index_status_requires_lambda(args),
+        other => Err(McpHandlerError::InvalidParams(format!(
+            "unknown context-service MCP tool: {other}"
+        ))),
+    }
+}
+
 fn handle_code_search(
     args: &Value,
     db: &Connection,
@@ -219,6 +234,16 @@ fn handle_code_search(
     json_value(result)
 }
 
+fn handle_code_search_without_catalog(args: &Value) -> Result<Value, McpHandlerError> {
+    let args: CodeSearchArgs = parse_args(args)?;
+    args.validate()?;
+    json_value(query::CodeSearchResult {
+        candidates: Vec::new(),
+        total_matches: 0,
+        truncated: false,
+    })
+}
+
 fn handle_code_read(
     args: &Value,
     db: &Connection,
@@ -230,6 +255,11 @@ fn handle_code_read(
         .map_err(internal_error("external_code_read failed"))?
         .ok_or_else(|| McpHandlerError::NotFound(format!("symbol not found: {}", args.selector)))?;
     json_value(source)
+}
+
+fn handle_code_read_without_catalog(args: &Value) -> Result<Value, McpHandlerError> {
+    let _args: CodeReadArgs = parse_args(args)?;
+    Ok(Value::Null)
 }
 
 fn handle_code_callers(
@@ -244,6 +274,15 @@ fn handle_code_callers(
     json_value(result)
 }
 
+fn handle_code_callers_without_catalog(args: &Value) -> Result<Value, McpHandlerError> {
+    let _args: CodeCallersArgs = parse_args(args)?;
+    json_value(query::CallerResult {
+        callers: Vec::new(),
+        counts_by_kind: query::CountsByKind::default(),
+        unresolved_sample: Vec::new(),
+    })
+}
+
 fn handle_code_callees(
     args: &Value,
     db: &Connection,
@@ -254,6 +293,15 @@ fn handle_code_callees(
     let result = query::find_callees(db, &selector, args.include_unresolved.unwrap_or(false))
         .map_err(internal_error("external_code_callees failed"))?;
     json_value(result)
+}
+
+fn handle_code_callees_without_catalog(args: &Value) -> Result<Value, McpHandlerError> {
+    let _args: CodeCalleesArgs = parse_args(args)?;
+    json_value(query::CalleeResult {
+        callees: Vec::new(),
+        counts_by_kind: query::CountsByKind::default(),
+        unresolved_sample: Vec::new(),
+    })
 }
 
 fn handle_knowledge_context(
@@ -281,6 +329,25 @@ fn handle_knowledge_context(
     json_value(result)
 }
 
+fn handle_knowledge_context_without_catalog(args: &Value) -> Result<Value, McpHandlerError> {
+    let args: KnowledgeContextArgs = parse_args(args)?;
+    args.validate()?;
+    json_value(knowledge::KnowledgeContextResult {
+        primary_evidence: Vec::new(),
+        supporting_docs: Vec::new(),
+        confidence: "low".to_owned(),
+        answerable: false,
+        graph_content_hash: None,
+        candidates: knowledge::KnowledgeCandidateSummary {
+            total: 0,
+            returned_primary: 0,
+            returned_supporting_docs: 0,
+            total_code: 0,
+            total_docs: 0,
+        },
+    })
+}
+
 fn handle_index_requires_lambda(args: &Value) -> Result<Value, McpHandlerError> {
     let args: ExternalIndexArgs = parse_args(args)?;
     args.validate()?;
@@ -305,6 +372,29 @@ pub async fn route_index(
     args: &Value,
     _db: &Connection,
     catalog: &CatalogResolver,
+    jobs: &dyn JobStore,
+    sfn_client: &impl IndexExecutionStarter,
+    caller_id: &str,
+) -> Result<Value, McpHandlerError> {
+    route_index_inner(args, Some(catalog), jobs, sfn_client, caller_id).await
+}
+
+pub async fn route_index_without_catalog(
+    args: &Value,
+    jobs: &dyn JobStore,
+    sfn_client: &impl IndexExecutionStarter,
+    caller_id: &str,
+) -> Result<Value, McpHandlerError> {
+    route_index_inner(args, None, jobs, sfn_client, caller_id).await
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "warm-path dedup borrows a DuckDB-backed catalog resolver across async job-store calls"
+)]
+async fn route_index_inner(
+    args: &Value,
+    catalog: Option<&CatalogResolver>,
     jobs: &dyn JobStore,
     sfn_client: &impl IndexExecutionStarter,
     caller_id: &str,
@@ -348,14 +438,16 @@ pub async fn route_index(
     let limits = index_resource_limits(source_kind);
 
     if !args.force.unwrap_or(false) {
-        if let Some(resolved) =
-            lookup_complete_catalog_revision(catalog, source, &args.package, revision)?
-        {
-            return Ok(json!({
-                "status": "complete",
-                "snapshot_id": resolved.snapshot_id,
-                "revision": resolved.revision
-            }));
+        if let Some(catalog) = catalog {
+            if let Some(resolved) =
+                lookup_complete_catalog_revision(catalog, source, &args.package, revision)?
+            {
+                return Ok(json!({
+                    "status": "complete",
+                    "snapshot_id": resolved.snapshot_id,
+                    "revision": resolved.revision
+                }));
+            }
         }
     }
 
