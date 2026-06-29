@@ -7,10 +7,12 @@
 #   ./deploy.sh --skip-worker      # skip worker image build/push
 #   ./deploy.sh --skip-worker --package-only # build Lambda zip, skip terraform
 #   ./deploy.sh --worker-image-only # build/push worker images, print ECS image URI
+#   ./deploy.sh --build-mode self-contained --no-push --worker-image-only
 #
 # Prerequisites:
-#   - scripts/spur-cargo (remote Graviton4 VM; deploy builds force a
-#     Graviton2-safe arm64 CPU baseline)
+#   - scripts/spur-cargo (remote mode) or docker buildx + QEMU
+#     (self-contained mode); deploy builds force a Graviton2-safe arm64 CPU
+#     baseline in both paths
 #   - terraform >= 1.5
 #   - docker (for worker container build)
 #   - AWS credentials with Lambda/S3/IAM/ECR/ECS/SFN access
@@ -31,15 +33,147 @@ EXTENSIONS=("httpfs" "ducklake")
 WORKER_ECR_REPO="spur-context-worker"
 WORKER_LAMBDA_ECR_REPO="spur-context-worker-lambda"
 WORKER_IMAGE_TAG="latest"
-AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 AWS_REGION_VAL="$(cd "$INFRA_DIR" && terraform output -raw aws_region 2>/dev/null || echo ap-southeast-5)"
 WORKER_IMAGE_URI=""
 WORKER_LAMBDA_IMAGE_URI=""
+SELF_CONTAINED_EXPORT_DIR=""
 
 log() { echo "[deploy] $*" >&2; }
 
 # shellcheck source=infra/spur-context-service/graviton2-baseline.sh
 source "$SCRIPT_DIR/graviton2-baseline.sh"
+
+aws_account_id() {
+    if [[ -z "${AWS_ACCOUNT_ID:-}" ]]; then
+        AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+    fi
+    echo "$AWS_ACCOUNT_ID"
+}
+
+ecr_image_tag() {
+    local repo="$1"
+    echo "$(aws_account_id).dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${repo}:${WORKER_IMAGE_TAG}"
+}
+
+normalize_push_images() {
+    case "${SPUR_CONTEXT_SERVICE_PUSH_IMAGES:-1}" in
+        1 | true | TRUE | yes | YES | on | ON) echo true ;;
+        0 | false | FALSE | no | NO | off | OFF) echo false ;;
+        *)
+            log "SPUR_CONTEXT_SERVICE_PUSH_IMAGES must be true/false or 1/0"
+            exit 2
+            ;;
+    esac
+}
+
+validate_build_mode() {
+    case "$BUILD_MODE" in
+        remote | self-contained) ;;
+        *)
+            log "unknown build mode: $BUILD_MODE"
+            log "expected --build-mode remote or --build-mode self-contained"
+            exit 2
+            ;;
+    esac
+}
+
+write_self_contained_build_dockerfile() {
+    local dockerfile="$1"
+    cat > "$dockerfile" <<'DOCKERFILE'
+# syntax=docker/dockerfile:1.7
+FROM --platform=$TARGETPLATFORM rust:1.88-bookworm AS builder
+
+ARG RUSTFLAGS
+ARG CFLAGS
+ARG CXXFLAGS
+
+ENV CARGO_TERM_COLOR=always \
+    CARGO_INCREMENTAL=0 \
+    CI=true \
+    SPUR_REMOTE=0 \
+    SPUR_SCCACHE_S3=0 \
+    AWS_RUSTFLAGS_DEFAULT="${RUSTFLAGS}" \
+    RUSTFLAGS="${RUSTFLAGS}" \
+    CFLAGS="${CFLAGS}" \
+    CXXFLAGS="${CXXFLAGS}"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential pkg-config libssl-dev cmake clang lld protobuf-compiler \
+        git ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /mnt/cargo/rust-lld-driver \
+    && ln -sf "$(command -v ld.lld)" /mnt/cargo/rust-lld-driver/ld.lld
+
+WORKDIR /workspace
+COPY . .
+
+RUN scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release
+RUN scripts/spur-cargo --workdir crates/spur-context-service build --features worker --release
+RUN scripts/spur-cargo --workdir crates/spur-context-service build --features worker-lambda --release
+RUN scripts/spur-cargo build -p spur-cli --release
+
+RUN mkdir -p /out \
+    && cp crates/spur-context-service/target/release/spur-context-service /out/bootstrap \
+    && cp crates/spur-context-service/target/release/spur-context-worker /out/spur-context-worker \
+    && cp crates/spur-context-service/target/release/spur-context-worker-lambda /out/spur-context-worker-lambda \
+    && cp target/release/spur /out/spur
+
+FROM scratch AS artifacts
+COPY --from=builder /out/ /
+DOCKERFILE
+}
+
+prepare_self_contained_build_context() {
+    local context_dir="$BUILD_DIR/self-contained-context"
+    rm -rf "$context_dir"
+    mkdir -p "$context_dir"
+
+    # Keep generated target/ artifacts out of the docker build context. CI runs
+    # this path from a checked-out commit, so a tracked-source archive is the
+    # reproducible source of truth for the arm64 build container.
+    git -C "$REPO_ROOT" archive --format=tar HEAD | tar -xf - -C "$context_dir"
+    echo "$context_dir"
+}
+
+ensure_self_contained_artifacts() {
+    if [[ -n "$SELF_CONTAINED_EXPORT_DIR" ]]; then
+        return
+    fi
+
+    assert_graviton2_safe_flags "self-contained buildx artifacts" \
+        "$SPUR_CONTEXT_GRAVITON2_RUSTFLAGS" \
+        "$SPUR_CONTEXT_GRAVITON2_CFLAGS" \
+        "$SPUR_CONTEXT_GRAVITON2_CXXFLAGS"
+
+    local export_dir="$BUILD_DIR/self-contained-artifacts"
+    local dockerfile="$BUILD_DIR/self-contained-build.Dockerfile"
+    local context_dir
+    mkdir -p "$export_dir"
+    write_self_contained_build_dockerfile "$dockerfile"
+    context_dir="$(prepare_self_contained_build_context)"
+
+    log "building self-contained arm64 artifacts with docker buildx (neoverse-n1)..."
+    RUSTFLAGS="$SPUR_CONTEXT_GRAVITON2_RUSTFLAGS" \
+    CFLAGS="$SPUR_CONTEXT_GRAVITON2_CFLAGS" \
+    CXXFLAGS="$SPUR_CONTEXT_GRAVITON2_CXXFLAGS" \
+        docker buildx build \
+            --platform linux/arm64 --provenance=false \
+            --build-arg "RUSTFLAGS=$SPUR_CONTEXT_GRAVITON2_RUSTFLAGS" \
+            --build-arg "CFLAGS=$SPUR_CONTEXT_GRAVITON2_CFLAGS" \
+            --build-arg "CXXFLAGS=$SPUR_CONTEXT_GRAVITON2_CXXFLAGS" \
+            --target artifacts \
+            --output "type=local,dest=$export_dir" \
+            -f "$dockerfile" \
+            "$context_dir"
+
+    SELF_CONTAINED_EXPORT_DIR="$export_dir"
+}
+
+build_self_contained_artifacts() {
+    ensure_self_contained_artifacts
+}
 
 remote_worktree_key() {
     local git_toplevel worktree_key default_remote_namespace remote_namespace
@@ -108,6 +242,13 @@ download_extensions() {
 }
 
 build_binary() {
+    if [[ "${BUILD_MODE:-remote}" == "self-contained" ]]; then
+        ensure_self_contained_artifacts
+        cp "$SELF_CONTAINED_EXPORT_DIR/bootstrap" "$BUILD_DIR/bootstrap"
+        chmod +x "$BUILD_DIR/bootstrap"
+        return
+    fi
+
     log "building on remote Graviton4 VM (portable arm64 for Lambda: neoverse-n1)..."
     cd "$REPO_ROOT"
     # spur-context-service is excluded from the workspace (standalone Cargo.toml
@@ -118,6 +259,11 @@ build_binary() {
 }
 
 build_spur_cli() {
+    if [[ "${BUILD_MODE:-remote}" == "self-contained" ]]; then
+        ensure_self_contained_artifacts
+        return
+    fi
+
     log "building spur CLI (portable arm64 neoverse-n1 for worker image)..."
     cd "$REPO_ROOT"
     run_graviton2_safe_cargo "spur CLI worker image dependency" \
@@ -133,6 +279,11 @@ package_zip() {
 }
 
 build_worker() {
+    if [[ "${BUILD_MODE:-remote}" == "self-contained" ]]; then
+        ensure_self_contained_artifacts
+        return
+    fi
+
     log "building worker binary (--features worker, arm64 neoverse-n1 for Fargate)..."
     cd "$REPO_ROOT"
     # Fargate ARM64 runs on Graviton2 (neoverse-n1). The build VM's default
@@ -145,10 +296,109 @@ build_worker() {
 }
 
 build_worker_lambda() {
+    if [[ "${BUILD_MODE:-remote}" == "self-contained" ]]; then
+        ensure_self_contained_artifacts
+        return
+    fi
+
     log "building Lambda worker binary (--features worker-lambda, arm64 neoverse-n1)..."
     cd "$REPO_ROOT"
     run_graviton2_safe_cargo "worker Lambda image binary" \
         --workdir crates/spur-context-service build --features worker-lambda --release
+}
+
+write_worker_image_dockerfile() {
+    local dockerfile="$1"
+    cat > "$dockerfile" <<'DOCKERFILE'
+FROM debian:bookworm-slim
+LABEL io.spur.cpu-baseline="graviton2-safe"
+RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY spur-context-worker /usr/local/bin/spur-context-worker
+COPY spur /usr/local/bin/spur
+RUN /usr/local/bin/spur --version
+RUN /usr/local/bin/spur-context-worker || true
+CMD ["/usr/local/bin/spur-context-worker"]
+DOCKERFILE
+}
+
+write_worker_lambda_image_dockerfile() {
+    local dockerfile="$1"
+    cat > "$dockerfile" <<'DOCKERFILE'
+FROM debian:bookworm-slim
+LABEL io.spur.cpu-baseline="graviton2-safe"
+RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY spur-context-worker-lambda /usr/local/bin/spur-context-worker-lambda
+COPY spur /usr/local/bin/spur
+RUN /usr/local/bin/spur --version
+RUN /usr/local/bin/spur-context-worker-lambda --smoke
+ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]
+DOCKERFILE
+}
+
+build_local_worker_images() {
+    ensure_self_contained_artifacts
+
+    local output_dir="$REPO_ROOT/target/lambda"
+    local worker_context="$BUILD_DIR/worker-image-context"
+    local worker_lambda_context="$BUILD_DIR/worker-lambda-image-context"
+    local worker_dockerfile="$worker_context/Dockerfile"
+    local worker_lambda_dockerfile="$worker_lambda_context/Dockerfile"
+    mkdir -p "$output_dir" "$worker_context" "$worker_lambda_context"
+
+    cp "$SELF_CONTAINED_EXPORT_DIR/spur-context-worker" "$worker_context/spur-context-worker"
+    cp "$SELF_CONTAINED_EXPORT_DIR/spur" "$worker_context/spur"
+    cp "$SELF_CONTAINED_EXPORT_DIR/spur-context-worker-lambda" "$worker_lambda_context/spur-context-worker-lambda"
+    cp "$SELF_CONTAINED_EXPORT_DIR/spur" "$worker_lambda_context/spur"
+    chmod +x \
+        "$worker_context/spur-context-worker" \
+        "$worker_context/spur" \
+        "$worker_lambda_context/spur-context-worker-lambda" \
+        "$worker_lambda_context/spur"
+    write_worker_image_dockerfile "$worker_dockerfile"
+    write_worker_lambda_image_dockerfile "$worker_lambda_dockerfile"
+
+    if [[ "$PUSH_IMAGES" == "true" ]]; then
+        aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
+            || aws ecr create-repository --repository-name "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
+        aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
+            || aws ecr create-repository --repository-name "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
+
+        WORKER_IMAGE_URI="$(ecr_image_tag "$WORKER_ECR_REPO")"
+        WORKER_LAMBDA_IMAGE_URI="$(ecr_image_tag "$WORKER_LAMBDA_ECR_REPO")"
+
+        log "building and pushing self-contained worker image: $WORKER_IMAGE_URI"
+        docker buildx build \
+            --platform linux/arm64 --provenance=false \
+            --push \
+            --tag "$WORKER_IMAGE_URI" \
+            "$worker_context"
+
+        log "building and pushing self-contained worker Lambda image: $WORKER_LAMBDA_IMAGE_URI"
+        docker buildx build \
+            --platform linux/arm64 --provenance=false \
+            --push \
+            --tag "$WORKER_LAMBDA_IMAGE_URI" \
+            "$worker_lambda_context"
+    else
+        WORKER_IMAGE_URI="${WORKER_ECR_REPO}:${WORKER_IMAGE_TAG}"
+        WORKER_LAMBDA_IMAGE_URI="${WORKER_LAMBDA_ECR_REPO}:${WORKER_IMAGE_TAG}"
+
+        log "building self-contained worker image tar: $output_dir/spur-context-worker-image.tar"
+        docker buildx build \
+            --platform linux/arm64 --provenance=false \
+            --tag "$WORKER_IMAGE_URI" \
+            --output "type=docker,dest=$output_dir/spur-context-worker-image.tar" \
+            "$worker_context"
+
+        log "building self-contained worker Lambda image tar: $output_dir/spur-context-worker-lambda-image.tar"
+        docker buildx build \
+            --platform linux/arm64 --provenance=false \
+            --tag "$WORKER_LAMBDA_IMAGE_URI" \
+            --output "type=docker,dest=$output_dir/spur-context-worker-lambda-image.tar" \
+            "$worker_lambda_context"
+    fi
 }
 
 build_and_push_worker_image() {
@@ -158,8 +408,8 @@ build_and_push_worker_image() {
     aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
         || aws ecr create-repository --repository-name "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
 
-    local ecr_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${WORKER_ECR_REPO}"
-    local full_tag="${ecr_uri}:${WORKER_IMAGE_TAG}"
+    local full_tag
+    full_tag="$(ecr_image_tag "$WORKER_ECR_REPO")"
     local worker_dockerfile="$BUILD_DIR/worker-image.Dockerfile"
     cat > "$worker_dockerfile" <<'DOCKERFILE'
 FROM debian:bookworm-slim
@@ -197,8 +447,8 @@ build_and_push_worker_lambda_image() {
     aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
         || aws ecr create-repository --repository-name "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
 
-    local ecr_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${WORKER_LAMBDA_ECR_REPO}"
-    local full_tag="${ecr_uri}:${WORKER_IMAGE_TAG}"
+    local full_tag
+    full_tag="$(ecr_image_tag "$WORKER_LAMBDA_ECR_REPO")"
     local worker_lambda_dockerfile="$BUILD_DIR/worker-lambda-image.Dockerfile"
     cat > "$worker_lambda_dockerfile" <<'DOCKERFILE'
 FROM debian:bookworm-slim
@@ -252,8 +502,12 @@ main() {
     local skip_worker=false
     local worker_image_only=false
     local package_only=false
+    local BUILD_MODE="${SPUR_CONTEXT_SERVICE_BUILD_MODE:-remote}"
+    local PUSH_IMAGES
     local worker_image_uri=""
     local worker_lambda_image_uri=""
+
+    PUSH_IMAGES="$(normalize_push_images)"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -261,12 +515,22 @@ main() {
             --skip-worker) skip_worker=true; shift ;;
             --worker-image-only) worker_image_only=true; shift ;;
             --package-only) package_only=true; shift ;;
+            --build-mode) BUILD_MODE="$2"; shift 2 ;;
+            --no-push) PUSH_IMAGES=false; shift ;;
+            --push) PUSH_IMAGES=true; shift ;;
             *) break ;;
         esac
     done
 
+    validate_build_mode
+
     if [[ "$worker_image_only" == "true" && "$package_only" == "true" ]]; then
         log "--worker-image-only and --package-only are mutually exclusive"
+        exit 2
+    fi
+
+    if [[ "$BUILD_MODE" == "remote" && "$PUSH_IMAGES" != "true" && "$skip_worker" == "false" ]]; then
+        log "--no-push requires --build-mode self-contained for worker image builds"
         exit 2
     fi
 
@@ -275,8 +539,12 @@ main() {
         build_spur_cli
         build_worker
         build_worker_lambda
-        build_and_push_worker_image
-        build_and_push_worker_lambda_image
+        if [[ "$BUILD_MODE" == "self-contained" ]]; then
+            build_local_worker_images
+        else
+            build_and_push_worker_image
+            build_and_push_worker_lambda_image
+        fi
         worker_image_uri="$WORKER_IMAGE_URI"
         worker_lambda_image_uri="$WORKER_LAMBDA_IMAGE_URI"
     fi

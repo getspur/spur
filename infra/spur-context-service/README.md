@@ -100,6 +100,11 @@ the shared DuckLake catalog.
 
 # Build the serving Lambda zip without touching Terraform-managed resources
 ./deploy.sh --skip-worker --package-only
+
+# Build arm64 worker image tarballs locally through docker buildx, without ECR
+SPUR_CONTEXT_SERVICE_BUILD_MODE=self-contained \
+SPUR_CONTEXT_SERVICE_PUSH_IMAGES=0 \
+./build-and-push-remote.sh --no-push
 ```
 
 ## CI/CD
@@ -114,10 +119,22 @@ Pull requests and pushes that touch this service run:
 - `infra/spur-context-service/test-graviton2-baseline.sh`
 
 Real AWS artifact builds are gated through `workflow_dispatch` and the
-`context-service-staging` environment. Set `build_aws_artifacts=true` to push
-the Graviton2-safe worker images through `build-and-push-remote.sh` and build
-the serving Lambda zip through `deploy.sh --skip-worker --package-only`. The
-workflow does not run Terraform.
+`context-service-staging` environment. Set `build_aws_artifacts=true` to build
+the Graviton2-safe worker image tarballs and serving Lambda zip. CI defaults to
+`SPUR_CONTEXT_SERVICE_BUILD_MODE=self-contained` and
+`SPUR_CONTEXT_SERVICE_PUSH_IMAGES=0`, so it uses docker buildx with
+`--platform linux/arm64 --provenance=false` and does not depend on the remote
+builder VM, create ECR repositories, push images, or run Terraform.
+
+Operator-run pushes remain available by leaving the default
+`SPUR_CONTEXT_SERVICE_BUILD_MODE=remote` in `build-and-push-remote.sh`.
+Set `SPUR_CLOUD` when the remote builder cloud should differ from the
+`scripts/spur-cargo` default:
+
+```bash
+SPUR_CONTEXT_SERVICE_BUILD_MODE=remote ./build-and-push-remote.sh
+./deploy.sh --skip-worker --package-only
+```
 
 Required repository/environment configuration:
 
@@ -125,7 +142,6 @@ Required repository/environment configuration:
 |---|---|---|
 | `CONTEXT_SERVICE_AWS_ROLE_ARN` | secret | AWS role assumed by GitHub OIDC for ECR, Lambda, S3, and smoke access |
 | `CONTEXT_SERVICE_AWS_REGION` | variable | AWS region, defaults to `ap-southeast-5` |
-| `CONTEXT_SERVICE_BUILD_CLOUD` | variable | Remote build cloud selector, defaults to `aws-my` |
 | `CONTEXT_SERVICE_STAGING_LAMBDA` | variable | Staging serving Lambda name for the smoke test |
 | `CONTEXT_SERVICE_STAGING_SOURCE_BUCKET` | variable | Bucket where the smoke uploads its tiny source tarball |
 | `CONTEXT_SERVICE_STAGING_DATA_BUCKET` | variable | Bucket containing bronze, silver, and gold medallion objects |
@@ -161,7 +177,9 @@ Deployable arm64 artifacts for this service must target Graviton2-class hosts:
 the serving Lambda bootstrap, the Lambda worker image binary, the Fargate worker
 image binary, and the `spur` binary copied into worker images. Build them through
 `deploy.sh`, which sources `graviton2-baseline.sh` and exports guarded
-`RUSTFLAGS`, `CFLAGS`, and `CXXFLAGS` for those artifact builds.
+`RUSTFLAGS`, `CFLAGS`, and `CXXFLAGS` for those artifact builds. The
+self-contained docker buildx path reuses the same helper constants and exports
+them into the arm64 build container before compiling.
 
 The allowed Rust `target-cpu` values for deployable artifacts are
 `neoverse-n1` or `generic`; C/C++ flags must use `-mcpu=neoverse-n1` or a
