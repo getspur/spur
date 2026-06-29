@@ -17,10 +17,9 @@ pub use build::{
 };
 pub use canonical_hash::artifact_content_hash_blake3_hex;
 pub use lance_sections::{
-    embedding_query_text_for_model, ensure_fastembed_ort_environment_initialized,
-    write_sections_dataset, EmbeddingModelSelection, CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE,
-    EMBEDDING_GEMMA_EMBED_MODEL_NAME, EMBEDDING_VECTOR_DIMENSIONS, EMBED_MODEL_ENV,
-    SECTIONS_DATASET_DIR, SECTIONS_TABLE,
+    embedding_query_text_for_model, write_sections_dataset, EmbeddingModelSelection,
+    CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, EMBEDDING_GEMMA_EMBED_MODEL_NAME,
+    EMBEDDING_VECTOR_DIMENSIONS, EMBED_MODEL_ENV, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
 };
 pub use parquet::{
     load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,
