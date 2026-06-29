@@ -10162,6 +10162,7 @@ dependencies = [
  "lance-index",
  "lancedb",
  "libc",
+ "ort",
  "parquet",
  "petgraph 0.6.5",
  "pretty_assertions",

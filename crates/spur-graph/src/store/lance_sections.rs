@@ -17,6 +17,7 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexConfig, IndexType};
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use lancedb::table::OptimizeAction;
+use ort::execution_providers::{CPUExecutionProvider, ExecutionProviderDispatch};
 
 use crate::content_hash::blake3_hex;
 use crate::store::parquet::GraphArtifactSidecarRowCounts;
@@ -44,6 +45,10 @@ const EMBEDDING_GEMMA_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled"
 const EMBEDDING_GEMMA_SYMBOL_EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
 const EMBEDDING_INPUT_HASH_COLUMN: &str = "embedding_input_hash";
 const EMBEDDING_MODEL_COLUMN: &str = "embedding_model";
+const FASTEMBED_ORT_CPU_EXECUTION_PROVIDER_NAME: &str = "CPUExecutionProvider";
+const FASTEMBED_ORT_EXECUTION_PROVIDER_NAMES: &[&str] =
+    &[FASTEMBED_ORT_CPU_EXECUTION_PROVIDER_NAME];
+const FASTEMBED_UNSAFE_ORT_EXECUTION_PROVIDER_MARKERS: &[&str] = &["Xnnpack", "XNNPACK"];
 const INDEX_REBUILD_MIN_ROWS: usize = 50;
 const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 // Integration tests spawn the debug-built CLI; keep this hook out of release builds.
@@ -2707,18 +2712,63 @@ fn embed_model_cell(
     &EMBEDDING_GEMMA_EMBED_MODEL
 }
 
+fn fastembed_init_options(embedding_model: EmbeddingModelSelection) -> InitOptions {
+    let mut init_options = InitOptions::new(embedding_model.fastembed_model())
+        .with_show_download_progress(true)
+        .with_execution_providers(fastembed_ort_execution_providers());
+
+    if let Some(cache_dir) = fastembed_cache_dir() {
+        init_options = init_options.with_cache_dir(cache_dir);
+    }
+
+    init_options
+}
+
+fn fastembed_ort_execution_providers() -> Vec<ExecutionProviderDispatch> {
+    // Lambda Graviton2 lacks the /sys cpuinfo files XNNPACK uses; keep FastEmbed
+    // on ORT's CPU/MLAS path so SVE/SME kernels are not dispatch candidates.
+    let provider_names = fastembed_ort_execution_provider_names();
+    assert_fastembed_ort_execution_provider_names_are_safe(&provider_names);
+
+    let providers = vec![CPUExecutionProvider::default().build()];
+    assert_fastembed_ort_execution_providers_are_safe(&providers);
+    providers
+}
+
+fn fastembed_ort_execution_provider_names() -> Vec<&'static str> {
+    FASTEMBED_ORT_EXECUTION_PROVIDER_NAMES.to_vec()
+}
+
+fn assert_fastembed_ort_execution_provider_names_are_safe(provider_names: &[&str]) {
+    assert_eq!(
+        provider_names, FASTEMBED_ORT_EXECUTION_PROVIDER_NAMES,
+        "fastembed must stay pinned to ORT CPUExecutionProvider"
+    );
+    for marker in FASTEMBED_UNSAFE_ORT_EXECUTION_PROVIDER_MARKERS {
+        assert!(
+            !provider_names.iter().any(|name| name.contains(marker)),
+            "fastembed must not register {marker} on Lambda Graviton2"
+        );
+    }
+}
+
+fn assert_fastembed_ort_execution_providers_are_safe(providers: &[ExecutionProviderDispatch]) {
+    let provider_debug = format!("{providers:?}");
+    for marker in FASTEMBED_UNSAFE_ORT_EXECUTION_PROVIDER_MARKERS {
+        assert!(
+            !provider_debug.contains(marker),
+            "fastembed must not register {marker} on Lambda Graviton2"
+        );
+    }
+}
+
 fn shared_embed_model(
     embedding_model: EmbeddingModelSelection,
     embedding_kind: &'static str,
 ) -> Option<&'static Mutex<TextEmbedding>> {
     embed_model_cell(embedding_model)
         .get_or_init(|| {
-            let mut init_options = InitOptions::new(embedding_model.fastembed_model())
-                .with_show_download_progress(true);
-
-            if let Some(cache_dir) = fastembed_cache_dir() {
-                init_options = init_options.with_cache_dir(cache_dir);
-            }
+            let init_options = fastembed_init_options(embedding_model);
 
             match TextEmbedding::try_new(init_options) {
                 Ok(model) => Some(Mutex::new(model)),
@@ -4754,6 +4804,26 @@ mod tests {
         assert_eq!(
             EmbeddingModelSelection::EmbeddingGemma300M.fastembed_model(),
             EmbeddingModel::EmbeddingGemma300M
+        );
+    }
+
+    #[test]
+    fn fastembed_init_options_pin_cpu_execution_provider() {
+        let provider_names: Vec<&'static str> = fastembed_ort_execution_provider_names();
+        let init_options = fastembed_init_options(EmbeddingModelSelection::EmbeddingGemma300M);
+        let provider_debug = format!("{:?}", init_options.execution_providers);
+
+        assert_eq!(provider_names, vec!["CPUExecutionProvider"]);
+        assert!(provider_debug.contains("CPUExecutionProvider"));
+        assert!(
+            !provider_names
+                .iter()
+                .any(|name: &&str| name.contains("Xnnpack") || name.contains("XNNPACK")),
+            "fastembed must not register XNNPACK on Lambda Graviton2"
+        );
+        assert!(
+            !provider_debug.contains("Xnnpack") && !provider_debug.contains("XNNPACK"),
+            "fastembed InitOptions must not register XNNPACK on Lambda Graviton2"
         );
     }
 
