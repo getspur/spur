@@ -44,6 +44,9 @@ const ECS_CREDENTIALS_CAP_BYTES: usize = 64 * 1024;
 const EMBEDDING_GEMMA_EMBED_MODEL_NAME: &str = "EmbeddingGemma300M";
 const EMBED_MODEL_ENV: &str = "SPUR_EMBEDDING_MODEL";
 const GRAPH_SKIP_SECTION_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
+// Graviton2/neoverse-n1 Lambda cannot run the prebuilt ONNX Runtime's SVE/SME
+// kernels; skip code-symbol embeddings too so `spur graph build` never loads ORT.
+const GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS";
 const DEFAULT_CATALOG_LEASES_TABLE: &str = "spur-context-catalog-leases";
 const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
 const CATALOG_PASSWORD_SECRET_ARN_ENV: &str = "SPUR_CATALOG_PASSWORD_SECRET_ARN";
@@ -2170,6 +2173,7 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
     );
     let mut child = Command::new("spur")
         .env(GRAPH_SKIP_SECTION_EMBEDDINGS_ENV, "1")
+        .env(GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS_ENV, "1")
         .args([
             "graph",
             "build",
