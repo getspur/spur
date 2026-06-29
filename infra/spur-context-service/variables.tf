@@ -197,7 +197,7 @@ variable "vpc_endpoint_region" {
   default     = null
 
   validation {
-    condition     = var.vpc_endpoint_region == null || length(trimspace(var.vpc_endpoint_region)) > 0
+    condition     = var.vpc_endpoint_region == null ? true : length(trimspace(var.vpc_endpoint_region)) > 0
     error_message = "vpc_endpoint_region must be null or a non-empty region name."
   }
 }
