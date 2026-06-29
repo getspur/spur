@@ -839,7 +839,7 @@ fn read_snapshot_pointer(location: &SnapshotLocation) -> Result<Option<FrozenSna
     FrozenSnapshotManifest::from_json_slice(&bytes).map(Some)
 }
 
-fn is_s3_not_found_error(error: &anyhow::Error) -> bool {
+pub(crate) fn is_s3_not_found_error(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}");
     message.contains("NoSuchKey")
         || message.contains("NotFound")
@@ -1594,5 +1594,21 @@ mod tests {
         }
 
         assert_eq!(dsn, "postgres:host=aurora password=already-present");
+    }
+
+    #[test]
+    fn s3_not_found_classifier_does_not_swallow_permission_errors() {
+        assert!(is_s3_not_found_error(&anyhow!(
+            "service error: NoSuchKey: key gold/catalog-snapshot/current.json does not exist"
+        )));
+        assert!(is_s3_not_found_error(&anyhow!(
+            "service error: Not Found (status 404)"
+        )));
+        assert!(!is_s3_not_found_error(&anyhow!(
+            "service error: AccessDenied: missing s3:GetObject permission"
+        )));
+        assert!(!is_s3_not_found_error(&anyhow!(
+            "service error: SlowDown: please reduce your request rate"
+        )));
     }
 }
