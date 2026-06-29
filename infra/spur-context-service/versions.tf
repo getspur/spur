@@ -1,7 +1,7 @@
 terraform {
   required_version = ">= 1.5"
 
-  backend "s3" {}
+  # backend "s3" {}  # TEMP: neutralized for local-state in-place upgrade trial; restore before commit
 
   required_providers {
     aws = {
