@@ -17,7 +17,6 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexConfig, IndexType};
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use lancedb::table::OptimizeAction;
-use ort::execution_providers::{CPUExecutionProvider, ExecutionProviderDispatch};
 
 use crate::content_hash::blake3_hex;
 use crate::store::parquet::GraphArtifactSidecarRowCounts;
@@ -45,10 +44,6 @@ const EMBEDDING_GEMMA_EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled"
 const EMBEDDING_GEMMA_SYMBOL_EMBED_TEXT_VERSION: &str = "v3-embeddinggemma-300m";
 const EMBEDDING_INPUT_HASH_COLUMN: &str = "embedding_input_hash";
 const EMBEDDING_MODEL_COLUMN: &str = "embedding_model";
-const FASTEMBED_ORT_CPU_EXECUTION_PROVIDER_NAME: &str = "CPUExecutionProvider";
-const FASTEMBED_ORT_EXECUTION_PROVIDER_NAMES: &[&str] =
-    &[FASTEMBED_ORT_CPU_EXECUTION_PROVIDER_NAME];
-const FASTEMBED_UNSAFE_ORT_EXECUTION_PROVIDER_MARKERS: &[&str] = &["Xnnpack", "XNNPACK"];
 const INDEX_REBUILD_MIN_ROWS: usize = 50;
 const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 // Integration tests spawn the debug-built CLI; keep this hook out of release builds.
@@ -56,7 +51,6 @@ const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
 
 static EMBEDDING_GEMMA_EMBED_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
-static FASTEMBED_ORT_ENVIRONMENT_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingModelSelection {
@@ -712,7 +706,8 @@ async fn write_sections_dataset_async_with_embedding_model(
                 },
             );
         }
-        let embeddings_available = embedding_eligible_rows > 0 && embedder.prepare_model();
+        let embeddings_available =
+            embedder.prepare_model_for_eligible_rows(embedding_eligible_rows);
         emit_progress(
             progress,
             SectionSidecarProgressEvent::BatchStarted {
@@ -996,7 +991,7 @@ async fn write_symbol_rows_dataset_async(
             .filter(|row| !row.embed_text.trim().is_empty() && row.vector.is_none())
             .count();
         let embeddings_available =
-            embedding_eligible_rows > 0 && !embedding_options.skip_code_symbol_embeddings;
+            embedder.prepare_model_for_eligible_rows(embedding_eligible_rows);
         emit_progress(
             progress,
             SectionSidecarProgressEvent::BatchStarted {
@@ -2270,8 +2265,9 @@ impl SectionEmbedder {
         self.service.needs_model_init()
     }
 
-    fn prepare_model(&mut self) -> bool {
-        self.service.prepare_model("section")
+    fn prepare_model_for_eligible_rows(&mut self, eligible_rows: usize) -> bool {
+        self.service
+            .prepare_model_for_eligible_rows(eligible_rows, "section")
     }
 
     async fn embed_rows_with_progress<F>(&mut self, rows: &mut [SectionRow], on_chunk_started: F)
@@ -2337,6 +2333,11 @@ impl SymbolEmbedder {
                 embedding_model,
             ),
         }
+    }
+
+    fn prepare_model_for_eligible_rows(&mut self, eligible_rows: usize) -> bool {
+        self.service
+            .prepare_model_for_eligible_rows(eligible_rows, "code symbol")
     }
 
     // Kept for future callers or tests; production path uses embed_rows_with_progress.
@@ -2420,6 +2421,14 @@ impl TextEmbeddingService {
             return false;
         }
         self.model(embedding_kind).is_some()
+    }
+
+    fn prepare_model_for_eligible_rows(
+        &mut self,
+        eligible_rows: usize,
+        embedding_kind: &'static str,
+    ) -> bool {
+        eligible_rows > 0 && self.prepare_model(embedding_kind)
     }
 
     async fn embed_inputs_with_progress<F>(
@@ -2713,29 +2722,9 @@ fn embed_model_cell(
     &EMBEDDING_GEMMA_EMBED_MODEL
 }
 
-pub fn ensure_fastembed_ort_environment_initialized() -> std::result::Result<(), String> {
-    FASTEMBED_ORT_ENVIRONMENT_INIT
-        .get_or_init(commit_fastembed_ort_environment)
-        .clone()
-}
-
-fn commit_fastembed_ort_environment() -> std::result::Result<(), String> {
-    match ort::init().commit() {
-        Ok(_) => Ok(()),
-        Err(error) if is_ort_environment_already_committed_error(&error) => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn is_ort_environment_already_committed_error(error: &ort::Error) -> bool {
-    let message = error.message().to_ascii_lowercase();
-    message.contains("already") && (message.contains("commit") || message.contains("environment"))
-}
-
 fn fastembed_init_options(embedding_model: EmbeddingModelSelection) -> InitOptions {
-    let mut init_options = InitOptions::new(embedding_model.fastembed_model())
-        .with_show_download_progress(true)
-        .with_execution_providers(fastembed_ort_execution_providers());
+    let mut init_options =
+        InitOptions::new(embedding_model.fastembed_model()).with_show_download_progress(true);
 
     if let Some(cache_dir) = fastembed_cache_dir() {
         init_options = init_options.with_cache_dir(cache_dir);
@@ -2744,60 +2733,12 @@ fn fastembed_init_options(embedding_model: EmbeddingModelSelection) -> InitOptio
     init_options
 }
 
-fn fastembed_ort_execution_providers() -> Vec<ExecutionProviderDispatch> {
-    // Lambda Graviton2 lacks the /sys cpuinfo files XNNPACK uses; keep FastEmbed
-    // on ORT's CPU/MLAS path so SVE/SME kernels are not dispatch candidates.
-    let provider_names = fastembed_ort_execution_provider_names();
-    assert_fastembed_ort_execution_provider_names_are_safe(&provider_names);
-
-    let providers = vec![CPUExecutionProvider::default().build()];
-    assert_fastembed_ort_execution_providers_are_safe(&providers);
-    providers
-}
-
-fn fastembed_ort_execution_provider_names() -> Vec<&'static str> {
-    FASTEMBED_ORT_EXECUTION_PROVIDER_NAMES.to_vec()
-}
-
-fn assert_fastembed_ort_execution_provider_names_are_safe(provider_names: &[&str]) {
-    assert_eq!(
-        provider_names, FASTEMBED_ORT_EXECUTION_PROVIDER_NAMES,
-        "fastembed must stay pinned to ORT CPUExecutionProvider"
-    );
-    for marker in FASTEMBED_UNSAFE_ORT_EXECUTION_PROVIDER_MARKERS {
-        assert!(
-            !provider_names.iter().any(|name| name.contains(marker)),
-            "fastembed must not register {marker} on Lambda Graviton2"
-        );
-    }
-}
-
-fn assert_fastembed_ort_execution_providers_are_safe(providers: &[ExecutionProviderDispatch]) {
-    let provider_debug = format!("{providers:?}");
-    for marker in FASTEMBED_UNSAFE_ORT_EXECUTION_PROVIDER_MARKERS {
-        assert!(
-            !provider_debug.contains(marker),
-            "fastembed must not register {marker} on Lambda Graviton2"
-        );
-    }
-}
-
 fn shared_embed_model(
     embedding_model: EmbeddingModelSelection,
     embedding_kind: &'static str,
 ) -> Option<&'static Mutex<TextEmbedding>> {
     embed_model_cell(embedding_model)
         .get_or_init(|| {
-            if let Err(error) = ensure_fastembed_ort_environment_initialized() {
-                tracing::warn!(
-                    %error,
-                    embedding_kind,
-                    model = embedding_model.model_name(),
-                    "onnx runtime environment unavailable; skipping embeddings"
-                );
-                return None;
-            }
-
             let init_options = fastembed_init_options(embedding_model);
 
             match TextEmbedding::try_new(init_options) {
@@ -4838,41 +4779,6 @@ mod tests {
     }
 
     #[test]
-    fn fastembed_init_options_pin_cpu_execution_provider() {
-        let provider_names: Vec<&'static str> = fastembed_ort_execution_provider_names();
-        let init_options = fastembed_init_options(EmbeddingModelSelection::EmbeddingGemma300M);
-        let provider_debug = format!("{:?}", init_options.execution_providers);
-
-        assert_eq!(provider_names, vec!["CPUExecutionProvider"]);
-        assert!(provider_debug.contains("CPUExecutionProvider"));
-        assert!(
-            !provider_names
-                .iter()
-                .any(|name: &&str| name.contains("Xnnpack") || name.contains("XNNPACK")),
-            "fastembed must not register XNNPACK on Lambda Graviton2"
-        );
-        assert!(
-            !provider_debug.contains("Xnnpack") && !provider_debug.contains("XNNPACK"),
-            "fastembed InitOptions must not register XNNPACK on Lambda Graviton2"
-        );
-    }
-
-    #[test]
-    fn fastembed_ort_environment_init_is_idempotent_and_keeps_cpu_provider_pin() {
-        ensure_fastembed_ort_environment_initialized().expect("first ORT environment init");
-        ensure_fastembed_ort_environment_initialized().expect("second ORT environment init");
-
-        let provider_names = fastembed_ort_execution_provider_names();
-        let init_options = fastembed_init_options(EmbeddingModelSelection::EmbeddingGemma300M);
-        let provider_debug = format!("{:?}", init_options.execution_providers);
-
-        assert_eq!(provider_names, vec!["CPUExecutionProvider"]);
-        assert!(provider_debug.contains("CPUExecutionProvider"));
-        assert!(!provider_debug.contains("Xnnpack"));
-        assert!(!provider_debug.contains("XNNPACK"));
-    }
-
-    #[test]
     #[ignore = "downloads and loads the large EmbeddingGemma300M FastEmbed model"]
     fn fastembed_smoke_constructs_model_and_returns_expected_dimensions() {
         let mut service = TextEmbeddingService::new(
@@ -5719,6 +5625,46 @@ mod tests {
                 |_| panic!("code-symbol embedder should not be called"),
             ),
             vec![None]
+        );
+    }
+
+    #[test]
+    fn env_skipped_embedding_options_do_not_request_fastembed_model_for_either_phase() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::set(SECTION_EMBED_SKIP_ENV, "1");
+        let _code_symbol_skip = EnvGuard::set(CODE_SYMBOL_EMBED_SKIP_ENV, "1");
+        let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "1");
+
+        assert_skipped_options_do_not_request_fastembed_model(SectionEmbeddingOptions::from_env());
+    }
+
+    #[test]
+    fn override_skipped_embedding_options_do_not_request_fastembed_model_for_either_phase() {
+        let _lock = env_lock();
+        let _skip = EnvGuard::remove(SECTION_EMBED_SKIP_ENV);
+        let _code_symbol_skip = EnvGuard::remove(CODE_SYMBOL_EMBED_SKIP_ENV);
+        let _batch = EnvGuard::set(SECTION_EMBED_BATCH_SIZE_ENV, "1");
+
+        assert_skipped_options_do_not_request_fastembed_model(
+            SectionEmbeddingOptions::from_env_with_skip_overrides(true, true),
+        );
+    }
+
+    fn assert_skipped_options_do_not_request_fastembed_model(options: SectionEmbeddingOptions) {
+        let mut section_embedder =
+            SectionEmbedder::new(options, EmbeddingModelSelection::EmbeddingGemma300M);
+        let mut symbol_embedder =
+            SymbolEmbedder::new(options, EmbeddingModelSelection::EmbeddingGemma300M);
+
+        assert!(!section_embedder.prepare_model_for_eligible_rows(1));
+        assert!(!symbol_embedder.prepare_model_for_eligible_rows(1));
+        assert!(!section_embedder.service.model_requested);
+        assert!(!symbol_embedder.service.model_requested);
+        assert!(
+            embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M)
+                .get()
+                .is_none(),
+            "skipped embeddings must not initialize the shared FastEmbed model"
         );
     }
 
