@@ -1,14 +1,25 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use duckdb::{params, Connection};
+use spur_context_service::catalog::{
+    compact_gold_and_export_snapshot, CatalogResolver, FrozenSnapshotManifest,
+    SnapshotCleanupOptions,
+};
 use spur_context_service::knowledge::{
     query_knowledge_context, KnowledgeContextOptions, KnowledgeScope,
 };
+use spur_context_service::medallion::{SilverManifest, SilverManifestFile};
 use spur_context_service::query::read_symbol;
-use spur_context_service::translate::{translate_artifact_to_ducklake, TranslateOptions};
+use spur_context_service::translate::{
+    translate_artifact_to_ducklake, TranslateLineage, TranslateOptions,
+};
+use std::time::Duration;
 
 const SOURCE: &str = "registry:crates-io";
 const PACKAGE: &str = "demo";
@@ -36,8 +47,11 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir: artifact_dir.clone(),
+        artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
+        lineage: None,
+        allow_missing_embeddings: false,
     })?;
 
     assert!(stats.snapshot_id >= 0);
@@ -59,7 +73,7 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
         i32,
         i32,
     ) = conn.query_row(
-        "SELECT source, package, revision, revision_kind, semver_major, semver_minor, semver_patch FROM nodes",
+        "SELECT source, package, revision, revision_kind, semver_major, semver_minor, semver_patch FROM gold.nodes",
         [],
         |row| {
             Ok((
@@ -80,21 +94,21 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
     assert_eq!((major, minor, patch), (1, 2, 3));
 
     let package_catalog_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM package_catalog WHERE source = ? AND package = ? AND revision = ? AND index_status = 'complete'",
+        "SELECT COUNT(*) FROM gold.package_catalog WHERE source = ? AND package = ? AND revision = ? AND index_status = 'complete'",
         params![SOURCE, PACKAGE, REVISION],
         |row| row.get(0),
     )?;
     assert_eq!(package_catalog_count, 1);
 
     let embeddings_status: String = conn.query_row(
-        "SELECT embeddings_status FROM package_catalog WHERE source = ? AND package = ? AND revision = ?",
+        "SELECT embeddings_status FROM gold.package_catalog WHERE source = ? AND package = ? AND revision = ?",
         params![SOURCE, PACKAGE, REVISION],
         |row| row.get(0),
     )?;
     assert_eq!(embeddings_status, "complete");
 
     let latest_revision: String = conn.query_row(
-        "SELECT revision FROM refs WHERE source = ? AND package = ? AND ref_name = 'latest'",
+        "SELECT revision FROM gold.refs WHERE source = ? AND package = ? AND ref_name = 'latest'",
         params![SOURCE, PACKAGE],
         |row| row.get(0),
     )?;
@@ -109,7 +123,11 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
         "section_bodies",
         "symbol_embeddings",
     ] {
-        assert_eq!(table_row_count(&conn, table)?, 1, "row count for {table}");
+        assert_eq!(
+            table_row_count(&conn, &format!("gold.{table}"))?,
+            1,
+            "row count for gold.{table}"
+        );
     }
 
     let (section_vector_len, section_model, section_input_hash, section_text_version): (
@@ -120,7 +138,7 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
     ) = conn.query_row(
         r"
         SELECT array_length(vector), embedding_model, embedding_input_hash, embed_text_version
-        FROM section_bodies
+        FROM gold.section_bodies
         ",
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -130,6 +148,360 @@ fn translates_spur_graph_artifact_into_ducklake_tables() -> Result<()> {
     assert_eq!(section_input_hash, "section-embed-hash");
     assert_eq!(section_text_version, EMBED_TEXT_VERSION);
 
+    Ok(())
+}
+
+#[test]
+fn translate_publishes_schema_qualified_gold_generation_with_lineage_and_snapshot() -> Result<()> {
+    let root = unique_temp_dir("translate-gold-generation")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(source_root.join("src")).context("create source src dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+    fs::write(source_root.join("src/lib.rs"), "pub fn alpha() {}\n")
+        .context("write source file")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+
+    let stats = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: Some(source_root),
+        catalog_dsn: catalog_dsn.clone(),
+        lineage: Some(translate_lineage()),
+        allow_missing_embeddings: false,
+    })?;
+
+    assert!(stats.snapshot_id >= 0);
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    assert_eq!(table_row_count(&conn, "nodes")?, 0);
+    assert_eq!(table_row_count(&conn, "package_catalog")?, 0);
+    assert_eq!(table_row_count(&conn, "gold.nodes")?, 1);
+    assert_eq!(table_row_count(&conn, "gold.symbol_embeddings")?, 1);
+    assert_eq!(table_row_count(&conn, "gold.section_bodies")?, 1);
+
+    let (
+        generation,
+        bronze_content_sha256,
+        silver_graph_content_hash,
+        builder_version,
+        translate_schema_version,
+    ): (i64, String, String, String, String) = conn.query_row(
+        r"
+        SELECT
+            generation,
+            bronze_content_sha256,
+            silver_graph_content_hash,
+            builder_version,
+            translate_schema_version
+        FROM gold.package_catalog
+        WHERE source = ? AND package = ? AND revision = ?
+        ",
+        params![SOURCE, PACKAGE, REVISION],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
+    assert!(generation > 0);
+    assert_eq!(bronze_content_sha256, "bronze-sha256");
+    assert_eq!(silver_graph_content_hash, "graph-hash-123");
+    assert_eq!(builder_version, "builder-v1");
+    assert_eq!(translate_schema_version, "translate-v1");
+
+    for table in [
+        "nodes",
+        "edges",
+        "edges_unresolved",
+        "files",
+        "file_manifests",
+        "section_bodies",
+        "symbol_embeddings",
+    ] {
+        let generation_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM gold.{table} WHERE source = ? AND package = ? AND revision = ? AND generation = ?"
+            ),
+            params![SOURCE, PACKAGE, REVISION, generation],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            generation_count, 1,
+            "gold.{table} must be stamped with generation"
+        );
+    }
+
+    let snapshot_path = catalog_snapshot_path(&data_path)?;
+    assert!(
+        snapshot_path.is_file(),
+        "translate must export frozen snapshot to {}",
+        snapshot_path.display()
+    );
+
+    let snapshot_resolver =
+        CatalogResolver::new_with_data_path(&snapshot_path.display().to_string(), &data_path)?;
+    let resolved = snapshot_resolver.resolve(SOURCE, PACKAGE, REVISION)?;
+    assert_eq!(resolved.revision, REVISION);
+
+    let source = read_symbol(
+        snapshot_resolver.connection(),
+        "pkg:demo@1.2.3::demo::alpha",
+        0,
+    )?
+    .context("snapshot should serve translated symbol")?;
+    assert_eq!(source.file_path, "src/lib.rs");
+    Ok(())
+}
+
+#[test]
+fn concurrent_translates_publish_distinct_generations_and_complete_snapshot() -> Result<()> {
+    let root = unique_temp_dir("translate-concurrent-publish")?;
+    let (catalog_dsn, data_path) = match (
+        std::env::var("SPUR_CONTEXT_AURORA_TEST_DSN"),
+        std::env::var("SPUR_CONTEXT_AURORA_TEST_DATA_PATH"),
+        std::env::var("SPUR_CONTEXT_DUCKLAKE_DATA_PATH"),
+    ) {
+        (Ok(catalog_dsn), Ok(data_path), Ok(ducklake_data_path))
+            if ducklake_data_path == data_path =>
+        {
+            (catalog_dsn, data_path)
+        }
+        _ => {
+            eprintln!(
+                "skipping Aurora concurrent ingest test; set SPUR_CONTEXT_AURORA_TEST_DSN, SPUR_CONTEXT_AURORA_TEST_DATA_PATH, and matching SPUR_CONTEXT_DUCKLAKE_DATA_PATH"
+            );
+            return Ok(());
+        }
+    };
+    initialize_catalog(&catalog_dsn, &data_path)?;
+
+    let run_suffix = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("run")
+        .replace('-', "_");
+    let jobs = [
+        (format!("demo_alpha_{run_suffix}"), "1.0.0".to_owned()),
+        (format!("demo_beta_{run_suffix}"), "1.1.0".to_owned()),
+        (format!("demo_gamma_{run_suffix}"), "1.2.0".to_owned()),
+    ];
+    let start = Arc::new(Barrier::new(jobs.len()));
+    let mut handles = Vec::new();
+
+    for (package, revision) in jobs.iter().cloned() {
+        let artifact_dir = root.join(format!("artifact-{package}"));
+        fs::create_dir_all(&artifact_dir)
+            .with_context(|| format!("create artifact dir for {package}"))?;
+        write_artifact_fixture(&artifact_dir)?;
+
+        let catalog_dsn = catalog_dsn.clone();
+        let start = Arc::clone(&start);
+        handles.push(thread::spawn(move || -> Result<()> {
+            start.wait();
+            translate_artifact_to_ducklake(&TranslateOptions {
+                source: SOURCE.to_owned(),
+                package,
+                revision,
+                revision_kind: "semver".to_owned(),
+                artifact_dir,
+                artifact_manifest: None,
+                source_root: None,
+                catalog_dsn,
+                lineage: None,
+                allow_missing_embeddings: false,
+            })?;
+            Ok(())
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("concurrent translate thread panicked"))??;
+    }
+
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let mut stmt = conn
+        .prepare(
+            r"
+            SELECT package, revision, generation
+            FROM gold.package_catalog
+            WHERE source = ?
+            ORDER BY package
+            ",
+        )
+        .context("prepare package catalog read")?;
+    let rows = stmt
+        .query_map(params![SOURCE], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect package catalog rows")?;
+    let expected_packages = jobs
+        .iter()
+        .map(|(package, _)| package.as_str())
+        .collect::<HashSet<_>>();
+    let rows = rows
+        .into_iter()
+        .filter(|(package, _, _)| expected_packages.contains(package.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), jobs.len());
+    let generations = rows
+        .iter()
+        .map(|(_, _, generation)| *generation)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        generations.len(),
+        jobs.len(),
+        "concurrent ingests must reserve distinct generations: {rows:?}"
+    );
+
+    for (package, revision) in &jobs {
+        for table in ["nodes", "edges", "files", "package_catalog"] {
+            let count: i64 = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM gold.{table} WHERE source = ? AND package = ? AND revision = ?"
+                ),
+                params![SOURCE, package, revision],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                count, 1,
+                "gold.{table} should contain exactly one row for {package}@{revision}"
+            );
+        }
+    }
+
+    let snapshot_path = catalog_snapshot_path(&data_path)?;
+    let snapshot_resolver =
+        CatalogResolver::new_with_data_path(&snapshot_path.display().to_string(), &data_path)?;
+    for (package, revision) in &jobs {
+        let resolved = snapshot_resolver.resolve(SOURCE, package, revision)?;
+        assert_eq!(resolved.package, *package);
+        assert_eq!(resolved.revision, *revision);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn failed_republish_leaves_previous_gold_generation_readable() -> Result<()> {
+    let root = unique_temp_dir("translate-no-half-publish")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    seed_published_gold_symbol(&conn, 41)?;
+    drop(conn);
+
+    write_artifact_fixture(&artifact_dir)?;
+    write_invalid_symbol_sidecar_without_embedding(
+        &artifact_dir.join("code_symbols.lance").join("part.parquet"),
+    )?;
+
+    let error = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: None,
+        catalog_dsn: catalog_dsn.clone(),
+        lineage: Some(translate_lineage()),
+        allow_missing_embeddings: false,
+    })
+    .expect_err("invalid sidecar must reject the new generation");
+
+    assert!(
+        format!("{error:#}").contains("missing vector/embedding"),
+        "unexpected error: {error:#}"
+    );
+
+    let resolver = CatalogResolver::new_with_data_path(&catalog_dsn, &data_path)?;
+    let resolved = resolver.resolve(SOURCE, PACKAGE, REVISION)?;
+    assert_eq!(resolved.snapshot_id, 4100);
+    let source = read_symbol(resolver.connection(), "pkg:demo@1.2.3::demo::alpha", 0)?
+        .context("previous generation should remain readable")?;
+    assert_eq!(source.source, "pub fn old_alpha() {}\n");
+    Ok(())
+}
+
+#[test]
+fn exported_snapshot_serves_after_compaction_cleanup_fence_cycle() -> Result<()> {
+    let root = unique_temp_dir("translate-snapshot-cleanup")?;
+    let artifact_dir = root.join("artifact");
+    let source_root = root.join("source");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(source_root.join("src")).context("create source src dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+    fs::write(source_root.join("src/lib.rs"), "pub fn alpha() {}\n")
+        .context("write source file")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+
+    translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: Some(source_root),
+        catalog_dsn: catalog_dsn.clone(),
+        lineage: Some(translate_lineage()),
+        allow_missing_embeddings: false,
+    })?;
+
+    compact_gold_and_export_snapshot(
+        &catalog_dsn,
+        &data_path,
+        SnapshotCleanupOptions {
+            older_than: Duration::from_secs(3600),
+            republish_lag: Duration::from_secs(300),
+        },
+    )?;
+
+    let snapshot_path = catalog_snapshot_path(&data_path)?;
+    let snapshot_resolver =
+        CatalogResolver::new_with_data_path(&snapshot_path.display().to_string(), &data_path)?;
+    let resolved = snapshot_resolver.resolve_latest(SOURCE, PACKAGE)?;
+    assert_eq!(resolved.revision, REVISION);
+    let source = read_symbol(
+        snapshot_resolver.connection(),
+        "pkg:demo@1.2.3::demo::alpha",
+        0,
+    )?
+    .context("snapshot should still serve after cleanup fence")?;
+    assert_eq!(source.file_path, "src/lib.rs");
     Ok(())
 }
 
@@ -152,8 +524,11 @@ fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
+        artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
+        lineage: None,
+        allow_missing_embeddings: true,
     })?;
 
     assert_eq!(stats.rows_inserted.get("nodes"), Some(&1));
@@ -162,12 +537,12 @@ fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
 
     let conn = attach_ducklake(&catalog_dsn, &data_path)?;
     let embeddings_status: String = conn.query_row(
-        "SELECT embeddings_status FROM package_catalog WHERE source = ? AND package = ? AND revision = ?",
+        "SELECT embeddings_status FROM gold.package_catalog WHERE source = ? AND package = ? AND revision = ?",
         params![SOURCE, PACKAGE, REVISION],
         |row| row.get(0),
     )?;
     assert_eq!(embeddings_status, "skipped");
-    assert_eq!(table_row_count(&conn, "symbol_embeddings")?, 0);
+    assert_eq!(table_row_count(&conn, "gold.symbol_embeddings")?, 0);
 
     let result = query_knowledge_context(
         &conn,
@@ -187,6 +562,78 @@ fn translates_artifact_without_symbol_vectors_as_bm25_only() -> Result<()> {
             .iter()
             .any(|item| item.grounding == "bm25-code"),
         "expected BM25 code evidence without embeddings"
+    );
+    Ok(())
+}
+
+#[test]
+fn expected_embeddings_fail_when_symbol_vectors_land_zero_rows() -> Result<()> {
+    let root = unique_temp_dir("translate-expected-embeddings-zero")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture_with_symbol_vector(&artifact_dir, "CAST(NULL AS FLOAT[])")?;
+
+    let error = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: None,
+        catalog_dsn,
+        lineage: None,
+        allow_missing_embeddings: false,
+    })
+    .expect_err("expected embeddings should reject zero symbol embedding rows");
+
+    assert!(
+        format!("{error:#}").contains("expected symbol embeddings"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn expected_embeddings_fail_when_lance_sidecars_are_missing() -> Result<()> {
+    let root = unique_temp_dir("translate-expected-embeddings-missing")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+    fs::remove_file(artifact_dir.join("code_symbols.lance").join("part.parquet"))
+        .context("remove code symbol sidecar parquet")?;
+    fs::remove_file(artifact_dir.join("sections.lancedb").join("part.parquet"))
+        .context("remove section sidecar parquet")?;
+
+    let error = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: None,
+        source_root: None,
+        catalog_dsn,
+        lineage: None,
+        allow_missing_embeddings: false,
+    })
+    .expect_err("expected embeddings should reject missing Lance sidecars");
+
+    assert!(
+        format!("{error:#}").contains("expected symbol embeddings"),
+        "unexpected error: {error:#}"
     );
     Ok(())
 }
@@ -214,8 +661,11 @@ fn skipped_lance_sidecars_do_not_poison_required_graph_commits() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
+        artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
+        lineage: None,
+        allow_missing_embeddings: true,
     })?;
 
     assert_eq!(stats.rows_inserted.get("nodes"), Some(&1));
@@ -224,11 +674,49 @@ fn skipped_lance_sidecars_do_not_poison_required_graph_commits() -> Result<()> {
 
     let conn = attach_ducklake(&catalog_dsn, &data_path)?;
     let durable_nodes: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM nodes WHERE source = ? AND package = ? AND revision = ?",
+        "SELECT COUNT(*) FROM gold.nodes WHERE source = ? AND package = ? AND revision = ?",
         params![SOURCE, PACKAGE, REVISION],
         |row| row.get(0),
     )?;
     assert_eq!(durable_nodes, 1);
+    Ok(())
+}
+
+#[test]
+fn manifest_translate_ignores_unlisted_sidecar_files() -> Result<()> {
+    let root = unique_temp_dir("translate-manifest-sidecars")?;
+    let artifact_dir = root.join("artifact");
+    let data_path = root.join("data");
+    fs::create_dir_all(&artifact_dir).context("create artifact dir")?;
+    fs::create_dir_all(&data_path).context("create ducklake data dir")?;
+
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = data_path.display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+    write_artifact_fixture(&artifact_dir)?;
+    write_unlisted_symbol_sidecar_row(&artifact_dir.join("code_symbols.lance/stale.parquet"))?;
+    let manifest = silver_manifest_for_fixture();
+
+    let stats = translate_artifact_to_ducklake(&TranslateOptions {
+        source: SOURCE.to_owned(),
+        package: PACKAGE.to_owned(),
+        revision: REVISION.to_owned(),
+        revision_kind: "semver".to_owned(),
+        artifact_dir,
+        artifact_manifest: Some(manifest),
+        source_root: None,
+        catalog_dsn: catalog_dsn.clone(),
+        lineage: None,
+        allow_missing_embeddings: false,
+    })?;
+
+    assert_eq!(stats.rows_inserted.get("symbol_embeddings"), Some(&1));
+    let conn = attach_ducklake(&catalog_dsn, &data_path)?;
+    let embedded_symbols: Vec<String> = collect_strings(
+        &conn,
+        "SELECT stable_symbol_id FROM gold.symbol_embeddings ORDER BY stable_symbol_id",
+    )?;
+    assert_eq!(embedded_symbols, ["sym-alpha"]);
     Ok(())
 }
 
@@ -256,8 +744,11 @@ fn translated_artifact_read_symbol_returns_source_from_package_tree() -> Result<
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
+        artifact_manifest: None,
         source_root: Some(source_root),
         catalog_dsn: catalog_dsn.clone(),
+        lineage: None,
+        allow_missing_embeddings: false,
     })?;
 
     let conn = attach_ducklake(&catalog_dsn, &data_path)?;
@@ -289,8 +780,11 @@ fn translated_artifact_vector_search_returns_ranked_symbol() -> Result<()> {
         revision: REVISION.to_owned(),
         revision_kind: "semver".to_owned(),
         artifact_dir,
+        artifact_manifest: None,
         source_root: None,
         catalog_dsn: catalog_dsn.clone(),
+        lineage: None,
+        allow_missing_embeddings: false,
     })?;
 
     let conn = attach_ducklake(&catalog_dsn, &data_path)?;
@@ -448,27 +942,173 @@ fn write_artifact_fixture_with_symbol_vector(
     Ok(())
 }
 
+fn write_unlisted_symbol_sidecar_row(path: &Path) -> Result<()> {
+    let conn = Connection::open_in_memory().context("open stale sidecar writer duckdb")?;
+    let symbols_path = sql_path(path);
+    conn.execute_batch(&format!(
+        r#"
+        COPY (
+            SELECT
+                'sym-stale' AS stable_symbol_id,
+                'src/stale.rs' AS file_path,
+                'demo::stale' AS qualified_name,
+                'stale' AS entity_name,
+                'function' AS symbol_kind,
+                'pub fn stale() {{}}' AS embed_text,
+                list_transform(range(0, 768), x -> 0.5::FLOAT) AS vector,
+                'stale-code-hash' AS content_hash,
+                'stale-embed-hash' AS embedding_input_hash,
+                '{EMBEDDING_MODEL}' AS embedding_model
+        ) TO '{symbols_path}' (FORMAT PARQUET);
+        "#
+    ))
+    .context("write unlisted symbol sidecar row")
+}
+
+fn write_invalid_symbol_sidecar_without_embedding(path: &Path) -> Result<()> {
+    let conn = Connection::open_in_memory().context("open invalid sidecar writer duckdb")?;
+    let symbols_path = sql_path(path);
+    conn.execute_batch(&format!(
+        r#"
+        COPY (
+            SELECT
+                'sym-alpha' AS stable_symbol_id,
+                'src/lib.rs' AS file_path,
+                'demo::alpha' AS qualified_name,
+                'alpha' AS entity_name,
+                'function' AS symbol_kind,
+                'pub fn alpha() {{}}' AS embed_text
+        ) TO '{symbols_path}' (FORMAT PARQUET);
+        "#
+    ))
+    .context("write invalid symbol sidecar row")
+}
+
+fn seed_published_gold_symbol(conn: &Connection, generation: i64) -> Result<()> {
+    conn.execute_batch(&format!(
+        r#"
+        INSERT INTO gold.nodes (
+            stable_symbol_id, package, source, revision, revision_kind,
+            semver_major, semver_minor, semver_patch,
+            file_path, byte_range_start, byte_range_end,
+            line_start, line_end, entity_name, qualified_name,
+            symbol_kind, anchor_hash, enclosing_scope, generation
+        )
+        VALUES (
+            'sym-alpha', '{PACKAGE}', '{SOURCE}', '{REVISION}', 'semver',
+            1, 2, 3,
+            'src/lib.rs', 0, 22,
+            1, 1, 'alpha', 'demo::alpha',
+            'function', 'old-anchor', NULL, {generation}
+        );
+
+        INSERT INTO gold.files (
+            stable_file_id, file_path, source_text,
+            package, source, revision, revision_kind,
+            semver_major, semver_minor, semver_patch, generation
+        )
+        VALUES (
+            'file-old', 'src/lib.rs', 'pub fn old_alpha() {{}}
+',
+            '{PACKAGE}', '{SOURCE}', '{REVISION}', 'semver',
+            1, 2, 3, {generation}
+        );
+
+        INSERT INTO gold.package_catalog (
+            source, package, revision, revision_kind,
+            semver_major, semver_minor, semver_patch,
+            snapshot_id, indexed_at, index_status, embeddings_status, row_counts,
+            generation, bronze_content_sha256, silver_graph_content_hash,
+            builder_version, translate_schema_version
+        )
+        VALUES (
+            '{SOURCE}', '{PACKAGE}', '{REVISION}', 'semver',
+            1, 2, 3,
+            4100, CURRENT_TIMESTAMP, 'complete', 'skipped', CAST('{{"nodes":1}}' AS JSON),
+            {generation}, 'old-bronze', 'old-graph', 'old-builder', 'old-translate'
+        );
+
+        INSERT INTO gold.refs (source, package, ref_name, revision, updated_at)
+        VALUES ('{SOURCE}', '{PACKAGE}', 'latest', '{REVISION}', CURRENT_TIMESTAMP);
+        "#
+    ))
+    .context("seed published gold generation")
+}
+
+fn translate_lineage() -> TranslateLineage {
+    TranslateLineage {
+        bronze_content_sha256: "bronze-sha256".to_owned(),
+        silver_graph_content_hash: "graph-hash-123".to_owned(),
+        builder_version: "builder-v1".to_owned(),
+        translate_schema_version: "translate-v1".to_owned(),
+        embed_text_version: EMBED_TEXT_VERSION.to_owned(),
+    }
+}
+
+fn catalog_snapshot_path(data_path: &str) -> Result<PathBuf> {
+    let pointer_path = PathBuf::from(data_path)
+        .join("gold")
+        .join("catalog-snapshot")
+        .join("current.json");
+    let pointer: FrozenSnapshotManifest = serde_json::from_slice(
+        &fs::read(&pointer_path)
+            .with_context(|| format!("read snapshot pointer {}", pointer_path.display()))?,
+    )
+    .context("parse snapshot pointer")?;
+    Ok(PathBuf::from(pointer.snapshot_uri))
+}
+
+fn silver_manifest_for_fixture() -> SilverManifest {
+    SilverManifest {
+        schema_hash: "sha256:test-schema".to_owned(),
+        files: [
+            "nodes.parquet",
+            "edges.parquet",
+            "edges_unresolved.parquet",
+            "files.parquet",
+            "file_manifests.parquet",
+            "code_symbols.lance/part.parquet",
+            "sections.lancedb/part.parquet",
+        ]
+        .into_iter()
+        .map(|path| SilverManifestFile {
+            path: path.to_owned(),
+            size_bytes: 1,
+            etag: format!("\"{path}\""),
+        })
+        .collect(),
+    }
+}
+
 fn initialize_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
     let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
-    let sql = include_str!("../sql/init_catalog.sql")
-        .replace("INSTALL postgres;", "INSTALL sqlite;")
-        .replace("LOAD postgres;", "LOAD sqlite;")
-        .replace("__CATALOG_DSN__", &escape_sql_literal(catalog_dsn))
-        .replace("s3://spur-context/data/", &escape_sql_literal(data_path));
-    conn.execute_batch(&sql).context("execute init catalog sql")
+    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; INSTALL postgres; LOAD ducklake; LOAD sqlite; LOAD postgres;")
+        .context("load ducklake/sqlite/postgres extensions")?;
+    conn.execute_batch(&format!(
+        "ATTACH 'ducklake:{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
+        escape_sql_literal(ducklake_attach_dsn(catalog_dsn)),
+        escape_sql_literal(data_path)
+    ))
+    .context("attach ducklake")?;
+    conn.execute_batch(include_str!("../sql/catalog_tables.sql"))
+        .context("execute catalog tables sql")
 }
 
 fn attach_ducklake(catalog_dsn: &str, data_path: &str) -> Result<Connection> {
     let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
-    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; LOAD ducklake; LOAD sqlite;")
-        .context("load ducklake/sqlite extensions")?;
+    conn.execute_batch("INSTALL ducklake; INSTALL sqlite; INSTALL postgres; LOAD ducklake; LOAD sqlite; LOAD postgres;")
+        .context("load ducklake/sqlite/postgres extensions")?;
     conn.execute_batch(&format!(
         "ATTACH 'ducklake:{}' AS spur_context (DATA_PATH '{}'); USE spur_context;",
-        escape_sql_literal(catalog_dsn),
+        escape_sql_literal(ducklake_attach_dsn(catalog_dsn)),
         escape_sql_literal(data_path)
     ))
     .context("attach ducklake")?;
     Ok(conn)
+}
+
+fn ducklake_attach_dsn(catalog_dsn: &str) -> &str {
+    catalog_dsn.strip_prefix("ducklake:").unwrap_or(catalog_dsn)
 }
 
 fn unique_temp_dir(name: &str) -> Result<PathBuf> {
@@ -498,6 +1138,13 @@ fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
         row.get(0)
     })
     .with_context(|| format!("count rows in {table}"))
+}
+
+fn collect_strings(conn: &Connection, sql: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(sql).context("prepare string collection")?;
+    stmt.query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("collect strings")
 }
 
 fn unit_vector(index: usize) -> Vec<f32> {
