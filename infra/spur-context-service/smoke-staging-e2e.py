@@ -62,6 +62,11 @@ class SmokeConfig:
     poll_seconds: int
     run_id: str
     package: str
+    # The no-embed worker image (fastembed/ORT compiled out for Graviton2
+    # Lambda) produces zero embeddings by design. When false, the smoke asserts
+    # the structural medallion (nodes/edges) translated and serves, and skips
+    # the vector-backed evidence check. Default on for embed-capable deploys.
+    expect_embeddings: bool
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,6 +109,7 @@ def load_config() -> SmokeConfig:
         poll_seconds=int(env("SPUR_CONTEXT_SMOKE_POLL_SECONDS", str(DEFAULT_POLL_SECONDS))),
         run_id=run_id,
         package=env("SPUR_CONTEXT_SMOKE_PACKAGE", f"spur-context-smoke-{run_id}"),
+        expect_embeddings=env("SPUR_CONTEXT_SMOKE_EXPECT_EMBEDDINGS", "1") == "1",
     )
 
 
@@ -180,7 +186,7 @@ def run_full_smoke(config: SmokeConfig) -> int:
             timeout_seconds=config.timeout_seconds,
             poll_seconds=config.poll_seconds,
         )
-        assert_nonzero_embeddings(status)
+        assert_row_counts(status, expect_embeddings=config.expect_embeddings)
         assert_medallion_objects(
             bucket=config.data_bucket,
             source=config.source,
@@ -190,7 +196,12 @@ def run_full_smoke(config: SmokeConfig) -> int:
             region=config.region,
         )
         assert_serving_queries(
-            invoker, config.source, config.package, config.revision, config.run_id
+            invoker,
+            config.source,
+            config.package,
+            config.revision,
+            config.run_id,
+            expect_embeddings=config.expect_embeddings,
         )
 
         print("[context-smoke] ok")
@@ -433,14 +444,26 @@ def wait_for_complete_job(
     raise SmokeFailure(f"timed out waiting for job {job_id}: {json.dumps(last_status)}")
 
 
-def assert_nonzero_embeddings(status: dict[str, Any]) -> None:
+def assert_row_counts(status: dict[str, Any], *, expect_embeddings: bool) -> None:
     row_counts = status.get("row_counts") or {}
-    symbol_embeddings = int(row_counts.get("symbol_embeddings") or 0)
-    if symbol_embeddings <= 0:
+    if expect_embeddings:
+        symbol_embeddings = int(row_counts.get("symbol_embeddings") or 0)
+        if symbol_embeddings <= 0:
+            raise SmokeFailure(
+                f"expected non-zero symbol_embeddings row count, got {json.dumps(row_counts)}"
+            )
+        print(f"[context-smoke] symbol_embeddings={symbol_embeddings}")
+        return
+    # No-embed deployment: prove the structural medallion translated instead.
+    nodes = int(row_counts.get("nodes") or 0)
+    if nodes <= 0:
         raise SmokeFailure(
-            f"expected non-zero symbol_embeddings row count, got {json.dumps(row_counts)}"
+            f"expected non-zero structural node row count, got {json.dumps(row_counts)}"
         )
-    print(f"[context-smoke] symbol_embeddings={symbol_embeddings}")
+    print(
+        f"[context-smoke] no-embed mode: nodes={nodes} "
+        f"symbol_embeddings={int(row_counts.get('symbol_embeddings') or 0)} (expected 0)"
+    )
 
 
 def assert_medallion_objects(
@@ -501,6 +524,8 @@ def assert_serving_queries(
     package: str,
     revision: str,
     run_id: str,
+    *,
+    expect_embeddings: bool = True,
 ) -> None:
     search = invoker.call_tool(
         "external_code_search",
@@ -528,6 +553,16 @@ def assert_serving_queries(
     )
     if "e1_expected_symbol" not in str(source_response.get("source") or ""):
         raise SmokeFailure(f"external_code_read returned unexpected source: {source_response}")
+
+    if not expect_embeddings:
+        # No-embed deployment: no vectors exist, so the hybrid/vector-backed
+        # evidence path is not exercised. The structural search + read above
+        # already proves the gold snapshot serves correctly.
+        print(
+            "[context-smoke] no-embed mode: serving structural queries returned "
+            "expected symbol (vector-backed evidence check skipped)"
+        )
+        return
 
     query_vec = [0.0] * VECTOR_DIMENSIONS
     query_vec[0] = 1.0
