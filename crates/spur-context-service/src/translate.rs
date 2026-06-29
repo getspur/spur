@@ -853,6 +853,16 @@ fn insert_symbol_embeddings(
         "vector"
     } else if columns.contains("embedding") {
         "embedding"
+    } else if opts.allow_missing_embeddings {
+        // Embedding-free artifact (e.g. the no-embed worker, where `spur graph
+        // build` writes symbol rows without a vector column). Skip the symbol
+        // embeddings table gracefully rather than failing translation.
+        warn_skip_sidecar(
+            &sidecar_path,
+            &anyhow::anyhow!("code symbol sidecar is missing vector/embedding column"),
+        );
+        rows_inserted.insert("symbol_embeddings".to_owned(), 0);
+        return Ok(false);
     } else {
         bail!("code symbol sidecar is missing vector/embedding column");
     };
