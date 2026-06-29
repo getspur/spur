@@ -4,7 +4,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "embed")]
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Context as _, Result};
 use arrow_array::{
@@ -13,6 +15,7 @@ use arrow_array::{
 };
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Schema};
+#[cfg(feature = "embed")]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::index::{scalar::FtsIndexBuilder, Index, IndexConfig, IndexType};
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
@@ -50,6 +53,7 @@ const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 #[cfg(debug_assertions)]
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
 
+#[cfg(feature = "embed")]
 static EMBEDDING_GEMMA_EMBED_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +98,7 @@ impl EmbeddingModelSelection {
         EMBEDDING_VECTOR_DIMENSIONS
     }
 
+    #[cfg(feature = "embed")]
     pub fn fastembed_model(self) -> EmbeddingModel {
         EmbeddingModel::EmbeddingGemma300M
     }
@@ -2411,16 +2416,32 @@ impl TextEmbeddingService {
     }
 
     fn needs_model_init(&self) -> bool {
-        !self.skip_embeddings
-            && !self.model_requested
-            && embed_model_cell(self.embedding_model).get().is_none()
+        if self.skip_embeddings || self.model_requested {
+            return false;
+        }
+        #[cfg(feature = "embed")]
+        {
+            embed_model_cell(self.embedding_model).get().is_none()
+        }
+        #[cfg(not(feature = "embed"))]
+        {
+            false
+        }
     }
 
     fn prepare_model(&mut self, embedding_kind: &'static str) -> bool {
         if self.skip_embeddings {
             return false;
         }
-        self.model(embedding_kind).is_some()
+        #[cfg(feature = "embed")]
+        {
+            self.model(embedding_kind).is_some()
+        }
+        #[cfg(not(feature = "embed"))]
+        {
+            let _ = embedding_kind;
+            false
+        }
     }
 
     fn prepare_model_for_eligible_rows(
@@ -2508,11 +2529,13 @@ impl TextEmbeddingService {
         result
     }
 
+    #[cfg(feature = "embed")]
     fn model(&mut self, embedding_kind: &'static str) -> Option<&'static Mutex<TextEmbedding>> {
         self.model_requested = true;
         shared_embed_model(self.embedding_model, embedding_kind)
     }
 
+    #[cfg(feature = "embed")]
     fn embed_texts_locally(
         &mut self,
         texts: &[&str],
@@ -2530,6 +2553,20 @@ impl TextEmbeddingService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         model.embed(texts, None)
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn embed_texts_locally(
+        &mut self,
+        _texts: &[&str],
+        embedding_kind: &'static str,
+    ) -> Result<Vec<Vec<f32>>> {
+        tracing::debug!(
+            embedding_kind,
+            model = self.embedding_model.model_name(),
+            "embedding support disabled at compile time; skipping embeddings"
+        );
+        Ok(Vec::new())
     }
 }
 
@@ -2716,12 +2753,14 @@ where
     result
 }
 
+#[cfg(feature = "embed")]
 fn embed_model_cell(
     _embedding_model: EmbeddingModelSelection,
 ) -> &'static OnceLock<Option<Mutex<TextEmbedding>>> {
     &EMBEDDING_GEMMA_EMBED_MODEL
 }
 
+#[cfg(feature = "embed")]
 fn fastembed_init_options(embedding_model: EmbeddingModelSelection) -> InitOptions {
     let mut init_options =
         InitOptions::new(embedding_model.fastembed_model()).with_show_download_progress(true);
@@ -2733,6 +2772,7 @@ fn fastembed_init_options(embedding_model: EmbeddingModelSelection) -> InitOptio
     init_options
 }
 
+#[cfg(feature = "embed")]
 fn shared_embed_model(
     embedding_model: EmbeddingModelSelection,
     embedding_kind: &'static str,
@@ -3928,6 +3968,7 @@ fn sql_string_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+#[cfg(feature = "embed")]
 fn fastembed_cache_dir() -> Option<PathBuf> {
     // Check XDG_CACHE_HOME first (Linux/Unix)
     if let Ok(xdg_cache) = std::env::var("XDG_CACHE_HOME") {
