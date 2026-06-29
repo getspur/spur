@@ -56,6 +56,7 @@ const INDEX_REBUILD_MIN_PCT: f64 = 0.1;
 const SECTION_SIDECAR_TEST_FAIL_ENV: &str = "SPUR_GRAPH_TEST_FAIL_SECTION_SIDECAR";
 
 static EMBEDDING_GEMMA_EMBED_MODEL: OnceLock<Option<Mutex<TextEmbedding>>> = OnceLock::new();
+static FASTEMBED_ORT_ENVIRONMENT_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingModelSelection {
@@ -2712,6 +2713,25 @@ fn embed_model_cell(
     &EMBEDDING_GEMMA_EMBED_MODEL
 }
 
+pub fn ensure_fastembed_ort_environment_initialized() -> std::result::Result<(), String> {
+    FASTEMBED_ORT_ENVIRONMENT_INIT
+        .get_or_init(commit_fastembed_ort_environment)
+        .clone()
+}
+
+fn commit_fastembed_ort_environment() -> std::result::Result<(), String> {
+    match ort::init().commit() {
+        Ok(_) => Ok(()),
+        Err(error) if is_ort_environment_already_committed_error(&error) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn is_ort_environment_already_committed_error(error: &ort::Error) -> bool {
+    let message = error.message().to_ascii_lowercase();
+    message.contains("already") && (message.contains("commit") || message.contains("environment"))
+}
+
 fn fastembed_init_options(embedding_model: EmbeddingModelSelection) -> InitOptions {
     let mut init_options = InitOptions::new(embedding_model.fastembed_model())
         .with_show_download_progress(true)
@@ -2768,6 +2788,16 @@ fn shared_embed_model(
 ) -> Option<&'static Mutex<TextEmbedding>> {
     embed_model_cell(embedding_model)
         .get_or_init(|| {
+            if let Err(error) = ensure_fastembed_ort_environment_initialized() {
+                tracing::warn!(
+                    %error,
+                    embedding_kind,
+                    model = embedding_model.model_name(),
+                    "onnx runtime environment unavailable; skipping embeddings"
+                );
+                return None;
+            }
+
             let init_options = fastembed_init_options(embedding_model);
 
             match TextEmbedding::try_new(init_options) {
@@ -4825,6 +4855,45 @@ mod tests {
             !provider_debug.contains("Xnnpack") && !provider_debug.contains("XNNPACK"),
             "fastembed InitOptions must not register XNNPACK on Lambda Graviton2"
         );
+    }
+
+    #[test]
+    fn fastembed_ort_environment_init_is_idempotent_and_keeps_cpu_provider_pin() {
+        ensure_fastembed_ort_environment_initialized().expect("first ORT environment init");
+        ensure_fastembed_ort_environment_initialized().expect("second ORT environment init");
+
+        let provider_names = fastembed_ort_execution_provider_names();
+        let init_options = fastembed_init_options(EmbeddingModelSelection::EmbeddingGemma300M);
+        let provider_debug = format!("{:?}", init_options.execution_providers);
+
+        assert_eq!(provider_names, vec!["CPUExecutionProvider"]);
+        assert!(provider_debug.contains("CPUExecutionProvider"));
+        assert!(!provider_debug.contains("Xnnpack"));
+        assert!(!provider_debug.contains("XNNPACK"));
+    }
+
+    #[test]
+    #[ignore = "downloads and loads the large EmbeddingGemma300M FastEmbed model"]
+    fn fastembed_smoke_constructs_model_and_returns_expected_dimensions() {
+        let mut service = TextEmbeddingService::new(
+            SectionEmbeddingOptions {
+                batch_size: 1,
+                ..SectionEmbeddingOptions::default()
+            },
+            false,
+            EmbeddingModelSelection::EmbeddingGemma300M,
+        );
+        let text = embedding_query_text_for_model(
+            "default logger smoke",
+            EmbeddingModelSelection::EmbeddingGemma300M,
+        );
+
+        let embeddings = service
+            .embed_texts_locally(&[text.as_ref()], "fastembed smoke")
+            .expect("embedding smoke should run");
+
+        assert_eq!(embeddings.len(), 1);
+        assert_eq!(embeddings[0].len(), EMBEDDING_VECTOR_DIMENSIONS);
     }
 
     #[test]
