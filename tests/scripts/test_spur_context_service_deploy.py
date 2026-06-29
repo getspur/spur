@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_SH = ROOT / "infra" / "spur-context-service" / "deploy.sh"
 REMOTE_BUILD_SH = ROOT / "infra" / "spur-context-service" / "build-and-push-remote.sh"
 INFRA_DIR = ROOT / "infra" / "spur-context-service"
+VERSIONS_TF = INFRA_DIR / "versions.tf"
 CONTEXT_SERVICE_WORKFLOW = ROOT / ".github" / "workflows" / "context-service.yml"
 STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
 
@@ -64,7 +65,7 @@ def test_deploy_rebuilds_lambda_zip_by_default():
 
     assert 'local tf_zip_path="../../target/lambda/spur-context-service.zip"' in script
     assert 'tf_zip_path="$local_zip"' in script
-    assert 'tf_vars=(-var "lambda_zip_path=$tf_zip_path")' in script
+    assert 'tf_vars=(-var-file="$var_file" -var "lambda_zip_path=$tf_zip_path")' in script
     assert 'elif [[ ! -f "$zip_path" ]]' not in script
     assert 'rm -f "$zip_path"' in script
     lambda_zip = main_tf.split('resource "aws_s3_object" "lambda_zip"', 1)[1]
@@ -80,6 +81,41 @@ def test_deploy_can_package_lambda_without_terraform_apply():
     assert "--package-only) package_only=true" in script
     assert 'if [[ "$package_only" == "true" ]]' in script
     assert script.index('if [[ "$package_only" == "true" ]]') < script.index("terraform init")
+
+
+def test_terraform_uses_partial_s3_backend_and_environment_files():
+    versions_tf = VERSIONS_TF.read_text()
+
+    assert 'backend "s3" {}' in versions_tf
+
+    for environment in ("staging", "prod"):
+        backend_config = INFRA_DIR / "backends" / f"{environment}.s3.tfbackend"
+        var_file = INFRA_DIR / "env" / f"{environment}.tfvars"
+
+        assert backend_config.exists()
+        backend_text = backend_config.read_text()
+        assert "bucket" in backend_text
+        assert "key" in backend_text
+        assert "region" in backend_text
+        assert "dynamodb_table" in backend_text
+
+        assert var_file.exists()
+        assert "vpc_id" in var_file.read_text()
+
+
+def test_deploy_passes_backend_config_and_var_file_to_terraform():
+    script = DEPLOY_SH.read_text()
+
+    assert 'local environment="staging"' in script
+    assert "--env)" in script
+    assert "--backend-config|-backend-config)" in script
+    assert "--var-file|-var-file)" in script
+    assert 'backend_config="${backend_config:-backends/${environment}.s3.tfbackend}"' in script
+    assert 'var_file="${var_file:-env/${environment}.tfvars}"' in script
+    assert 'terraform init -upgrade -backend-config="$backend_config"' in script
+    assert 'tf_vars=(-var-file="$var_file" -var "lambda_zip_path=$tf_zip_path")' in script
+    assert 'terraform plan "${tf_vars[@]}"' in script
+    assert 'terraform apply "${tf_vars[@]}" -auto-approve' in script
 
 
 def test_remote_worker_image_script_delegates_to_canonical_deploy_path():
