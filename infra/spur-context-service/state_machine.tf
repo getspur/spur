@@ -45,6 +45,28 @@ resource "aws_security_group" "worker" {
   }
 }
 
+# Security group for interface VPC endpoints. Workers connect to AWS APIs over
+# private DNS on 443; gateway endpoints use route tables instead of SGs.
+resource "aws_security_group" "vpc_endpoints" {
+  count = var.create_vpc_endpoints ? 1 : 0
+
+  name        = "spur-context-vpc-endpoints"
+  description = "Private AWS service endpoints for indexing workers"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description     = "HTTPS from indexing workers"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.worker.id]
+  }
+
+  tags = {
+    Name = "spur-context-vpc-endpoints"
+  }
+}
+
 # Security group for Aurora — Postgres is reachable only from worker tasks.
 resource "aws_security_group" "catalog_db" {
   name        = "spur-context-catalog-db"
