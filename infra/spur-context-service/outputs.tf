@@ -3,6 +3,11 @@ output "api_url" {
   value       = aws_apigatewayv2_api.http.api_endpoint
 }
 
+output "api_invoke_policy_arn" {
+  description = "IAM policy ARN for SigV4 callers allowed to invoke the context-service API"
+  value       = aws_iam_policy.context_service_invoke.arn
+}
+
 output "lambda_function_name" {
   description = "Lambda function name"
   value       = aws_lambda_function.service.function_name
@@ -41,6 +46,16 @@ output "catalog_leases_table_arn" {
 output "context_ducklake_data_path" {
   description = "DuckLake data path passed to worker tasks"
   value       = local.context_ducklake_data_path
+}
+
+output "aurora_catalog_endpoint" {
+  description = "Aurora Postgres endpoint for the live ingest catalog"
+  value       = aws_rds_cluster.catalog.endpoint
+}
+
+output "aurora_catalog_secret_arn" {
+  description = "Secrets Manager ARN for the RDS-managed Aurora master credentials"
+  value       = local.aurora_master_secret_arn
 }
 
 output "worker_checkpoint_uri_template" {

@@ -5,7 +5,7 @@
 //!     --artifact-dir /path/to/.spur/graph \
 //!     --source-root /path/to/serde/source \
 //!     --catalog index.ducklake \
-//!     --upload-s3 <s3://spur-context/catalog/catalog.ducklake>
+//!     --upload-s3 <s3://your-context-bucket/catalog/catalog.ducklake>
 
 use std::path::PathBuf;
 
@@ -32,6 +32,12 @@ fn main() -> Result<()> {
                 .long("source")
                 .default_value("registry:crates-io"),
         )
+        .arg(
+            Arg::new("allow-missing-embeddings")
+                .long("allow-missing-embeddings")
+                .action(clap::ArgAction::SetTrue)
+                .help("Allow publishing BM25-only artifacts with no embedding sidecars"),
+        )
         .get_matches();
 
     let package = matches.get_one::<String>("package").unwrap();
@@ -41,6 +47,7 @@ fn main() -> Result<()> {
     let catalog = matches.get_one::<String>("catalog").unwrap();
     let upload_s3 = matches.get_one::<String>("upload-s3").cloned();
     let source = matches.get_one::<String>("source").unwrap();
+    let allow_missing_embeddings = matches.get_flag("allow-missing-embeddings");
 
     let opts = TranslateOptions {
         source: source.clone(),
@@ -48,8 +55,11 @@ fn main() -> Result<()> {
         revision: revision.clone(),
         revision_kind: revision_kind_for_revision(revision).to_owned(),
         artifact_dir: artifact_dir.clone(),
+        artifact_manifest: None,
         source_root,
         catalog_dsn: catalog.clone(),
+        lineage: None,
+        allow_missing_embeddings,
     };
 
     eprintln!("[index] translating {source}/{package}@{revision} ...");
