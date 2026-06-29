@@ -31,7 +31,8 @@ def test_deploy_builds_standalone_context_service_from_crate_workdir():
     ) in script
     assert '--remote-binary "$(remote_target_path target/release/spur)"' in script
     assert "fetch_remote_target_file target/release/spur" not in script
-    assert "--context-dir \"$worker_context\"" not in script
+    assert '--context-dir "$worker_context"' in script
+    assert '--context-dir "$worker_lambda_context"' in script
     assert 'worker_image_uri="$(build_and_push_worker_image)"' not in script
     assert "scripts/spur-cargo run --workdir crates/spur-context-service" not in script
     assert "scripts/spur-cargo build -p spur-context-service" not in script
@@ -80,6 +81,33 @@ def test_deploy_worker_image_contains_worker_and_spur_binaries():
     assert "COPY spur /usr/local/bin/spur" in deploy_sh
     assert "spur --version" in deploy_sh
     assert "spur-context-worker" in deploy_sh
+
+
+def test_worker_images_bundle_duckdb_extensions_for_offline_loads():
+    script = DEPLOY_SH.read_text()
+
+    assert 'WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"' in script
+    assert 'EXTENSIONS=("httpfs" "ducklake" "postgres")' in script
+    assert 'copy_worker_extensions "$worker_context"' in script
+    assert 'copy_worker_extensions "$worker_lambda_context"' in script
+    assert "COPY duckdb-extensions/ /opt/duckdb/extensions/" in script
+    assert (
+        "ENV SPUR_CONTEXT_DUCKDB_EXTENSION_DIR=/opt/duckdb/extensions"
+        in script
+    )
+    assert (
+        "test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/httpfs.duckdb_extension"
+        in script
+    )
+    assert (
+        "test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/ducklake.duckdb_extension"
+        in script
+    )
+    assert (
+        "test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/postgres.duckdb_extension"
+        in script
+    )
+    assert script.index("download_extensions") < script.index("build_and_push_worker_image")
 
 
 def test_deploy_builds_lambda_worker_image_for_fast_start():
