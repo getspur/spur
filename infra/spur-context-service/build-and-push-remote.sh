@@ -7,4 +7,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+SPUR_CONTEXT_SERVICE_BUILD_MODE="${SPUR_CONTEXT_SERVICE_BUILD_MODE:-remote}"
+export SPUR_CONTEXT_SERVICE_BUILD_MODE
+
 exec "$SCRIPT_DIR/deploy.sh" --worker-image-only "$@"

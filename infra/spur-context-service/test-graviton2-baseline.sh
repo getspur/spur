@@ -87,6 +87,14 @@ grep -q 'run_graviton2_safe_cargo "worker Lambda image binary"' "$DEPLOY" \
     || fail "worker Lambda image build is not guarded"
 grep -q 'run_graviton2_safe_cargo "spur CLI worker image dependency"' "$DEPLOY" \
     || fail "worker image spur CLI build is not guarded"
+grep -q 'assert_graviton2_safe_flags "self-contained buildx artifacts"' "$DEPLOY" \
+    || fail "self-contained buildx artifacts are not guarded"
+grep -q 'RUSTFLAGS="$SPUR_CONTEXT_GRAVITON2_RUSTFLAGS"' "$DEPLOY" \
+    || fail "self-contained buildx path does not export guarded RUSTFLAGS"
+grep -q 'docker buildx build' "$DEPLOY" \
+    || fail "self-contained buildx path is missing"
+grep -q -- '--platform linux/arm64 --provenance=false' "$DEPLOY" \
+    || fail "self-contained buildx path does not force linux/arm64 without provenance"
 grep -q -- '--worker-image-only' "$WRAPPER" \
     || fail "remote worker image wrapper no longer delegates to deploy.sh"
 grep -q 'Graviton2-safe CPU baseline' "$README" \
