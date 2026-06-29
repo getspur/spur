@@ -107,9 +107,34 @@ the shared DuckLake catalog.
 
 ## Deploy
 
+Terraform uses a partial S3 backend declared in `versions.tf`:
+`backend "s3" {}`. The backend is configured per environment at init time,
+and variable values are loaded from `env/<environment>.tfvars`. The committed
+`terraform.tfvars` file is placeholder-only and is not the deployment source.
+
+Before the first deployment, an operator must bootstrap the remote-state
+resources once outside this module:
+
+- S3 bucket for Terraform state.
+- DynamoDB table for Terraform state locking.
+
+Do not create those bootstrap resources by applying this Terraform module.
+Record their names in `backends/staging.s3.tfbackend` and
+`backends/prod.s3.tfbackend`, replacing the placeholder bucket and lock table
+names.
+
 ```bash
-# Full build + package + deploy
+# Full build + package + deploy to staging.
+# Uses backends/staging.s3.tfbackend and env/staging.tfvars.
 ./deploy.sh
+
+# Deploy to prod.
+./deploy.sh --env prod
+
+# Or provide explicit files.
+./deploy.sh \
+  --backend-config backends/prod.s3.tfbackend \
+  --var-file env/prod.tfvars
 
 # Or use an existing zip
 ./deploy.sh --local-zip /path/to/lambda.zip
@@ -121,6 +146,15 @@ the shared DuckLake catalog.
 SPUR_CONTEXT_SERVICE_BUILD_MODE=self-contained \
 SPUR_CONTEXT_SERVICE_PUSH_IMAGES=0 \
 ./build-and-push-remote.sh --no-push
+```
+
+For manual Terraform operations, always pass the matching backend config and
+variable file:
+
+```bash
+terraform init -backend-config=backends/staging.s3.tfbackend
+terraform plan -var-file=env/staging.tfvars
+terraform apply -var-file=env/staging.tfvars
 ```
 
 ## CI/CD
@@ -269,18 +303,9 @@ terraform apply -var concurrent_warm_instances=1
 | Default (no concurrency) | 432ms | ~1950ms | ~100ms |
 | With provisioned concurrency | — | — | ~100ms (always warm) |
 
-## Remote State (optional)
+## Remote State
 
-For production, migrate to S3 backend:
-
-```bash
-# Create state bucket
-aws s3 mb s3://spur-tf-state --region ap-southeast-5
-
-# Add to versions.tf:
-# backend "s3" {
-#   bucket = "spur-tf-state"
-#   key    = "spur-context-service/terraform.tfstate"
-#   region = "ap-southeast-5"
-# }
-```
+Remote state is required for team deployments. This module intentionally keeps
+only a partial S3 backend in source control. Initialize each environment with
+its own backend config so staging and prod use separate state keys and share
+the bootstrap lock table configured by `dynamodb_table`.
