@@ -87,7 +87,7 @@ def test_worker_images_bundle_duckdb_extensions_for_offline_loads():
     script = DEPLOY_SH.read_text()
 
     assert 'WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"' in script
-    assert 'EXTENSIONS=("httpfs" "ducklake" "postgres_scanner")' in script
+    assert 'EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "aws" "parquet" "json")' in script
     assert 'copy_worker_extensions "$worker_context"' in script
     assert 'copy_worker_extensions "$worker_lambda_context"' in script
     assert "COPY duckdb-extensions/ /opt/duckdb/extensions/" in script
