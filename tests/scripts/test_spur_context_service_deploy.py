@@ -7,6 +7,7 @@ REMOTE_BUILD_SH = ROOT / "infra" / "spur-context-service" / "build-and-push-remo
 INFRA_DIR = ROOT / "infra" / "spur-context-service"
 CONTEXT_SERVICE_WORKFLOW = ROOT / ".github" / "workflows" / "context-service.yml"
 STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
+STAGING_SMOKE_ENTRYPOINT = INFRA_DIR / "smoke-staging-e2e.sh"
 
 
 def test_deploy_builds_standalone_context_service_from_crate_workdir():
@@ -164,6 +165,9 @@ def test_staging_smoke_codifies_e1_real_worker_and_frozen_serving():
     script = STAGING_SMOKE.read_text()
     readme = (INFRA_DIR / "README.md").read_text()
 
+    assert "argparse" in script
+    assert "--preflight" in script
+    assert "run_preflight" in script
     assert "external_index" in script
     assert "external_index_status" in script
     assert "external_code_search" in script
@@ -171,15 +175,37 @@ def test_staging_smoke_codifies_e1_real_worker_and_frozen_serving():
     assert "external_knowledge_context" in script
     assert "symbol_embeddings" in script
     assert "bronze/{source}/{package}/{revision}/source.tar.gz" in script
-    assert "silver/{source}/{package}/{revision}/" in script
+    assert "silver/{source}/{package}/{revision}/{builder_version}/manifest.json" in script
     assert "gold/catalog-snapshot/current.json" in script
     assert "get-function-configuration" in script
+    assert "sts" in script
+    assert "get-caller-identity" in script
     assert "SPUR_CATALOG_DSN" in script
     assert "postgres" in script
     assert "aws lambda invoke" in script
     assert "aws s3 presign" in script
     assert "SPUR_CONTEXT_SMOKE_SOURCE_BUCKET" in readme
-    assert "smoke-staging-e2e.py" in readme
+    assert "smoke-staging-e2e.sh --preflight" in readme
+    assert "smoke-staging-e2e.sh" in readme
+
+
+def test_staging_smoke_entrypoint_runs_python_script():
+    script = STAGING_SMOKE_ENTRYPOINT.read_text()
+
+    assert "set -euo pipefail" in script
+    assert 'exec python3 "$SCRIPT_DIR/smoke-staging-e2e.py" "$@"' in script
+
+
+def test_staging_smoke_preflight_does_not_ingest():
+    script = STAGING_SMOKE.read_text()
+
+    preflight = script.split("def run_preflight", 1)[1].split("def ", 1)[0]
+    assert "caller_identity_arn" in preflight
+    assert "verify_serving_uses_frozen_s3_catalog" in preflight
+    assert "upload_fixture_source" not in preflight
+    assert "presign_fixture_source" not in preflight
+    assert "external_index" not in preflight
+    assert "LambdaInvoker" not in preflight
 
 
 def test_worker_checkpoint_uri_is_per_job_object_from_state_machine():
