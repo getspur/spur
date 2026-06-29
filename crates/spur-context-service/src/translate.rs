@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::catalog::{
     catalog_dsn_with_env_password, ducklake_data_path, export_frozen_snapshot, gold_table,
-    postgres_metadata_dsn,
+    load_duckdb_extension, postgres_metadata_dsn,
 };
 use crate::medallion::SilverManifest;
 
@@ -1825,8 +1825,7 @@ fn run_transaction<T>(conn: &Connection, f: impl FnOnce() -> Result<T>) -> Resul
 }
 
 fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
-    conn.execute_batch("INSTALL ducklake; LOAD ducklake;")
-        .context("failed to load ducklake extension")?;
+    load_duckdb_extension(conn, "ducklake", "failed to load ducklake extension")?;
 
     // Always load httpfs + S3 credentials when either the catalog OR the data
     // path is on S3. The catalog may be local (downloaded via CatalogDownload)
@@ -1851,35 +1850,49 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str, data_path: &st
                 } else {
                     String::new()
                 };
+                load_duckdb_extension(
+                    conn,
+                    "httpfs",
+                    "failed to load httpfs with explicit S3 credentials",
+                )?;
                 conn.execute_batch(&format!(
-                    "INSTALL httpfs; LOAD httpfs; \
-                     CREATE OR REPLACE SECRET s3_creds (TYPE s3, \
+                    "CREATE OR REPLACE SECRET s3_creds (TYPE s3, \
                      KEY_ID '{}', SECRET '{}', REGION '{}'{});",
                     c.access_key_id.replace('\'', "''"),
                     c.secret_access_key.replace('\'', "''"),
                     region,
                     token_clause,
                 ))
-                .context("failed to load httpfs with explicit S3 credentials")?;
+                .context("failed to configure explicit S3 credentials")?;
             }
             None => {
                 eprintln!(
                     "[translate] no explicit AWS creds found, falling back to credential_chain"
                 );
+                load_duckdb_extension(
+                    conn,
+                    "httpfs",
+                    "failed to load httpfs extension for S3 access",
+                )?;
                 conn.execute_batch(&format!(
-                    "INSTALL httpfs; LOAD httpfs; \
-                     CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{}');",
+                    "CREATE OR REPLACE SECRET s3_creds (TYPE s3, PROVIDER credential_chain, REGION '{}');",
                     region,
                 ))
-                .context("failed to load httpfs extension for S3 access")?;
+                .context("failed to configure S3 credentials")?;
             }
         }
     } else if is_sqlite_catalog(catalog_dsn) {
-        conn.execute_batch("INSTALL sqlite; LOAD sqlite;")
-            .context("failed to load sqlite extension for DuckLake catalog")?;
+        load_duckdb_extension(
+            conn,
+            "sqlite",
+            "failed to load sqlite extension for DuckLake catalog",
+        )?;
     } else if is_postgres_catalog(catalog_dsn) {
-        conn.execute_batch("INSTALL postgres; LOAD postgres;")
-            .context("failed to load postgres extension for DuckLake catalog")?;
+        load_duckdb_extension(
+            conn,
+            "postgres",
+            "failed to load postgres extension for DuckLake catalog",
+        )?;
     }
 
     Ok(())
