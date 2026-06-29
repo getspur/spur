@@ -1,4 +1,6 @@
-# Example terraform.tfvars — copy to terraform.tfvars and fill in.
+# Example variables. Copy this shape into env/<environment>.tfvars or an
+# uncommitted override file; deploy.sh passes env/staging.tfvars by default.
+# Do not commit real account, network, image, or secret values.
 #
 # Lambda configuration
 lambda_memory_mb          = 2048
