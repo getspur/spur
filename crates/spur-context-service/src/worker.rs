@@ -47,6 +47,14 @@ const GRAPH_SKIP_SECTION_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDI
 // Graviton2/neoverse-n1 Lambda cannot run the prebuilt ONNX Runtime's SVE/SME
 // kernels; skip code-symbol embeddings too so `spur graph build` never loads ORT.
 const GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS_ENV: &str = "SPUR_GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS";
+// This worker image bundles the embedding-free `spur` CLI (built with
+// `--no-default-features --features worker-no-embed`, so fastembed/ORT is not
+// linked) and always runs `spur graph build` with embeddings skipped. The
+// silver manifest's `sidecar_row_counts/code_symbols` counts symbol ROWS, not
+// embedding vectors, so it stays non-zero even when no embeddings were produced
+// — it cannot be used to detect embedding-free artifacts. Tie the build-time
+// skip and the translate-time tolerance to this single source of truth.
+const WORKER_SKIPS_EMBEDDINGS: bool = true;
 const DEFAULT_CATALOG_LEASES_TABLE: &str = "spur-context-catalog-leases";
 const CATALOG_PASSWORD_ENV: &str = "SPUR_CATALOG_PASSWORD";
 const CATALOG_PASSWORD_SECRET_ARN_ENV: &str = "SPUR_CATALOG_PASSWORD_SECRET_ARN";
@@ -751,7 +759,7 @@ fn prepared_job_from_silver(
     row: SilverGraphArtifact,
     manifest: SilverManifest,
 ) -> PreparedJob {
-    let allow_missing_embeddings = row.embedding_count == 0;
+    let allow_missing_embeddings = WORKER_SKIPS_EMBEDDINGS || row.embedding_count == 0;
     PreparedJob {
         _workspace: workspace,
         source_path,
@@ -2171,22 +2179,24 @@ pub fn build_graph(source_path: &Path, artifact_dir: &Path) -> Result<(), Worker
         source_path.display(),
         artifact_dir.display()
     );
-    let mut child = Command::new("spur")
-        .env(GRAPH_SKIP_SECTION_EMBEDDINGS_ENV, "1")
-        .env(GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS_ENV, "1")
-        .args([
-            "graph",
-            "build",
-            "--root",
-            &source_path.to_string_lossy(),
-            "--output",
-            &artifact_dir.to_string_lossy(),
-            "--no-analyst",
-        ])
-        .spawn()
-        .map_err(|error| {
-            WorkerError::Build(format!("failed to run `spur graph build`: {error}"))
-        })?;
+    let mut command = Command::new("spur");
+    if WORKER_SKIPS_EMBEDDINGS {
+        command
+            .env(GRAPH_SKIP_SECTION_EMBEDDINGS_ENV, "1")
+            .env(GRAPH_SKIP_CODE_SYMBOL_EMBEDDINGS_ENV, "1");
+    }
+    command.args([
+        "graph",
+        "build",
+        "--root",
+        &source_path.to_string_lossy(),
+        "--output",
+        &artifact_dir.to_string_lossy(),
+        "--no-analyst",
+    ]);
+    let mut child = command.spawn().map_err(|error| {
+        WorkerError::Build(format!("failed to run `spur graph build`: {error}"))
+    })?;
     let status = wait_for_child_with_timeout(
         &mut child,
         max_build_duration(),
@@ -4119,5 +4129,3 @@ mod tests {
         );
     }
 }
-
-// build-marker: force fresh relink for graviton2 no-ORT worker
