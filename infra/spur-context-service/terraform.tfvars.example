@@ -5,6 +5,16 @@ lambda_memory_mb          = 2048
 lambda_timeout_sec        = 30
 concurrent_warm_instances = 1
 
+# Public API abuse controls
+api_throttle_rate_limit                  = 20
+api_throttle_burst_limit                 = 40
+index_rate_limit_per_minute              = 10
+index_max_concurrent_jobs_per_caller     = 2
+context_max_tarball_bytes                = 524288000
+context_max_git_bytes                    = 2147483648
+context_max_build_seconds                = 1800
+allowed_source_domains                   = []
+
 # On-demand indexing — required for v2
 # VPC with NAT gateway or VPC endpoints for S3 + Step Functions API egress.
 vpc_id = "vpc-xxxxxxxx"
