@@ -28,6 +28,19 @@ and Parquet files. DynamoDB is the production control plane for job status,
 idempotency, execution ARNs, per-caller active-job quotas, and catalog write
 leases.
 
+The indexing worker Lambda and ECS fallback run inside `worker_subnets`. The
+default network model is NAT-free for AWS service access: Terraform creates S3
+and DynamoDB gateway endpoints on `worker_route_table_ids`, plus private-DNS
+interface endpoints in `worker_subnets` for Step Functions, Secrets Manager,
+ECR API, ECR Docker registry, CloudWatch Logs, and STS. The interface endpoint
+security group accepts HTTPS only from the worker security group. Operators who
+already provide NAT or equivalent shared endpoints can set
+`create_vpc_endpoints=false`.
+
+VPC endpoints do not provide arbitrary public internet egress. Source URLs that
+must be fetched from the public internet still need a separate egress path, or
+should be staged in S3 so the worker reaches them through the S3 endpoint.
+
 The deployed ECS fallback image includes both `/usr/local/bin/spur-context-worker`
 and `/usr/local/bin/spur`; `deploy.sh` smoke-tests both before Terraform applies
 the task definition. The Lambda fast-path image includes
@@ -54,6 +67,9 @@ ARN is present.
 | `aws_cloudwatch_log_group.lambda` | 14-day retention |
 | `aws_cloudwatch_log_group.worker_lambda` | Lambda worker logs |
 | `aws_cloudwatch_log_group.worker` | Worker task logs |
+| `aws_vpc_endpoint.gateway` | S3 and DynamoDB gateway endpoints for worker route tables |
+| `aws_vpc_endpoint.interface` | Private-DNS endpoints for worker AWS API access |
+| `aws_security_group.vpc_endpoints` | HTTPS ingress from worker tasks to interface endpoints |
 
 ## Authentication And Abuse Controls
 
@@ -207,7 +223,10 @@ terraform apply -var concurrent_warm_instances=1
 | `context_max_build_seconds` | `1800` | Worker `spur graph build` timeout |
 | `allowed_source_domains` | `[]` | Optional `source_url` domain allow-list |
 | `vpc_id` | n/a | VPC for ECS worker tasks |
-| `worker_subnets` | `[]` | Subnets for ECS worker tasks |
+| `worker_subnets` | n/a | Private subnets for Lambda and ECS worker tasks |
+| `worker_route_table_ids` | `[]` | Route tables associated with `worker_subnets`; required when `create_vpc_endpoints=true` |
+| `create_vpc_endpoints` | `true` | Create NAT-free worker endpoints for S3, DynamoDB, Step Functions, Secrets Manager, ECR, CloudWatch Logs, and STS |
+| `vpc_endpoint_region` | `null` | Optional endpoint service-name region override; defaults to `aws_region` |
 | `worker_ecr_image` | n/a | ECS fallback worker image URI built by `deploy.sh` |
 | `worker_lambda_image` | n/a | Lambda fast-path worker image URI built by `deploy.sh` |
 | `worker_lambda_memory_mb` | `3008` | Lambda worker memory for this account/region cap |

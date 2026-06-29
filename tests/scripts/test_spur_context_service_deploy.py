@@ -201,6 +201,51 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
     assert '"s3:DeleteObject"' in lambda_s3_policy
 
 
+def test_nat_free_worker_vpc_endpoints_are_declared():
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+    state_machine_tf = (INFRA_DIR / "state_machine.tf").read_text()
+    endpoints_tf = (INFRA_DIR / "vpc_endpoints.tf").read_text()
+    outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
+
+    assert 'variable "create_vpc_endpoints"' in variables_tf
+    assert "default     = true" in variables_tf
+    assert 'variable "worker_route_table_ids"' in variables_tf
+    assert 'variable "vpc_endpoint_region"' in variables_tf
+
+    for service in (
+        "s3",
+        "dynamodb",
+        "states",
+        "secretsmanager",
+        "ecr.api",
+        "ecr.dkr",
+        "logs",
+        "sts",
+    ):
+        assert f'com.amazonaws.${{local.vpc_endpoint_region}}.{service}' in endpoints_tf
+
+    gateway_endpoint = endpoints_tf.split('resource "aws_vpc_endpoint" "gateway"', 1)[1]
+    assert 'vpc_endpoint_type = "Gateway"' in gateway_endpoint
+    assert "route_table_ids   = var.worker_route_table_ids" in gateway_endpoint
+
+    interface_endpoint = endpoints_tf.split('resource "aws_vpc_endpoint" "interface"', 1)[1]
+    assert 'vpc_endpoint_type   = "Interface"' in interface_endpoint
+    assert "subnet_ids" in interface_endpoint
+    assert "= var.worker_subnets" in interface_endpoint
+    assert "private_dns_enabled = true" in interface_endpoint
+    assert "security_group_ids  = [aws_security_group.vpc_endpoints[0].id]" in interface_endpoint
+
+    endpoint_sg = state_machine_tf.split('resource "aws_security_group" "vpc_endpoints"', 1)[1]
+    assert "count = var.create_vpc_endpoints ? 1 : 0" in endpoint_sg
+    assert "from_port       = 443" in endpoint_sg
+    assert "to_port         = 443" in endpoint_sg
+    assert 'protocol        = "tcp"' in endpoint_sg
+    assert "security_groups = [aws_security_group.worker.id]" in endpoint_sg
+
+    assert 'output "gateway_vpc_endpoint_ids"' in outputs_tf
+    assert 'output "interface_vpc_endpoint_ids"' in outputs_tf
+
+
 def test_catalog_lease_ttl_uses_worker_expiry_field():
     main_tf = (INFRA_DIR / "main.tf").read_text()
 
