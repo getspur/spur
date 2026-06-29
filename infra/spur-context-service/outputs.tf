@@ -103,6 +103,21 @@ output "worker_lambda_alias_arn" {
   value       = aws_lambda_alias.worker_live.arn
 }
 
+output "gateway_vpc_endpoint_ids" {
+  description = "Gateway VPC endpoint IDs for S3 and DynamoDB, keyed by service"
+  value       = { for name, endpoint in aws_vpc_endpoint.gateway : name => endpoint.id }
+}
+
+output "interface_vpc_endpoint_ids" {
+  description = "Interface VPC endpoint IDs for worker AWS API access, keyed by service"
+  value       = { for name, endpoint in aws_vpc_endpoint.interface : name => endpoint.id }
+}
+
+output "vpc_endpoint_security_group_id" {
+  description = "Security group ID attached to interface VPC endpoints, or null when endpoint creation is disabled"
+  value       = try(aws_security_group.vpc_endpoints[0].id, null)
+}
+
 output "worker_log_group" {
   description = "CloudWatch log group for worker tasks"
   value       = aws_cloudwatch_log_group.worker.name

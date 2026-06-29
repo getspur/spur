@@ -170,8 +170,36 @@ variable "vpc_id" {
 }
 
 variable "worker_subnets" {
-  description = "Subnets for ECS worker tasks (need NAT gateway or VPC endpoints for S3/SFN)"
+  description = "Private subnets for Lambda and ECS worker tasks. By default this module creates NAT-free VPC endpoints in these subnets."
   type        = list(string)
+}
+
+variable "worker_route_table_ids" {
+  description = "Route table IDs associated with worker_subnets for S3 and DynamoDB gateway endpoints. Required when create_vpc_endpoints is true."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for route_table_id in var.worker_route_table_ids : length(trimspace(route_table_id)) > 0])
+    error_message = "worker_route_table_ids entries must be non-empty route table IDs."
+  }
+}
+
+variable "create_vpc_endpoints" {
+  description = "Create NAT-free VPC endpoints for worker access to S3, DynamoDB, Step Functions, Secrets Manager, ECR, CloudWatch Logs, and STS. Disable only when worker_subnets already have equivalent NAT or endpoints."
+  type        = bool
+  default     = true
+}
+
+variable "vpc_endpoint_region" {
+  description = "Optional region override for AWS VPC endpoint service names. Defaults to aws_region."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.vpc_endpoint_region == null || length(trimspace(var.vpc_endpoint_region)) > 0
+    error_message = "vpc_endpoint_region must be null or a non-empty region name."
+  }
 }
 
 variable "worker_ecr_image" {
