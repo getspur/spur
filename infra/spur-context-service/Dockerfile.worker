@@ -1,8 +1,21 @@
 FROM arm64v8/debian:bookworm-slim
 
+# The copied worker binary must be built through graviton2-baseline.sh. Lambda
+# arm64 and Fargate arm64 both run on Graviton2-class hosts, so image assembly
+# must not depend on newer build-VM CPU tuning.
+LABEL io.spur.cpu-baseline="graviton2-safe"
+
+ARG DUCKDB_VERSION=v1.5.4
+ARG DUCKDB_PLATFORM=linux_arm64
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates \
+    && apt-get install -y --no-install-recommends git curl tar unzip gzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p "/root/.duckdb/extensions/${DUCKDB_VERSION}/${DUCKDB_PLATFORM}" \
+    && curl -fsSL "https://extensions.duckdb.org/${DUCKDB_VERSION}/${DUCKDB_PLATFORM}/lance.duckdb_extension.gz" \
+        | gzip -dc > "/root/.duckdb/extensions/${DUCKDB_VERSION}/${DUCKDB_PLATFORM}/lance.duckdb_extension" \
+    && chmod 0644 "/root/.duckdb/extensions/${DUCKDB_VERSION}/${DUCKDB_PLATFORM}/lance.duckdb_extension"
 
 WORKDIR /workspace
 COPY worker-bin /usr/local/bin/spur-context-worker

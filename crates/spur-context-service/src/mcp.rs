@@ -1,8 +1,8 @@
 //! MCP tool definitions and handlers for the external code context service.
 
+use std::env;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_sdk_sfn::types::ExecutionStatus as AwsExecutionStatus;
@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::abuse::{self, RateLimiter, SourceKind, ValidateOptions};
-use crate::catalog::{CatalogResolver, ResolvedRevision};
+use crate::abuse::{self, SourceKind, ValidateOptions};
+use crate::catalog::{readable_table, CatalogResolver, ResolvedRevision};
 use crate::jobs::{CreateJobOutcome, CreateJobRequest, JobRecord, JobStatus, JobStore, JobsError};
 use crate::knowledge::{self, KnowledgeContextOptions, KnowledgeScope};
 use crate::query::{self, SearchMode, SearchOptions};
@@ -22,10 +22,13 @@ const DEFAULT_INDEX_SOURCE: &str = "git:custom";
 const DEFAULT_REF: &str = "latest";
 const KNOWLEDGE_QUERY_VECTOR_DIMENSIONS: usize = 768;
 const RATE_LIMIT_RETRY_AFTER_SECONDS: u64 = 60;
+const DEFAULT_TARBALL_SIZE_CAP_BYTES: u64 = 500_u64 * 1024 * 1024;
+const DEFAULT_GIT_SIZE_CAP_BYTES: u64 = 2_u64 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_BUILD_SECONDS: u64 = 30 * 60;
+const DEFAULT_MAX_CONCURRENT_JOBS_PER_CALLER: u32 = 2;
+const DEFAULT_CALLS_PER_MINUTE: u32 = 10;
 const DESCRIBE_EXECUTION_TIMEOUT: Duration = Duration::from_secs(2);
 const STALE_JOB_REPAIR_AFTER: Duration = Duration::from_secs(60);
-
-static INDEX_RATE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 /// Metadata for a single context-service MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +43,12 @@ pub struct ToolDefinition {
 pub struct IndexExecutionRequest {
     pub name: String,
     pub input: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndexResourceLimits {
+    max_source_bytes: u64,
+    max_build_seconds: u64,
 }
 
 pub trait IndexExecutionStarter {
@@ -303,36 +312,40 @@ pub async fn route_index(
     let args: ExternalIndexArgs = parse_args(args)?;
     args.validate()?;
 
-    let parsed_url =
-        match abuse::validate(&args.source_url, &ValidateOptions::default()).and_then(|parsed| {
-            abuse::resolve_and_check_dns(&parsed)?;
-            Ok(parsed)
-        }) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                return Ok(json!({
-                    "status": "rejected",
-                    "reason": format!("source_url: {error}")
-                }));
-            }
-        };
+    let validate_options = index_validate_options();
+    let parsed_url = match abuse::validate(&args.source_url, &validate_options).and_then(|parsed| {
+        abuse::resolve_and_check_dns(&parsed)?;
+        Ok(parsed)
+    }) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Ok(json!({
+                "status": "rejected",
+                "reason": format!("source_url: {error}")
+            }));
+        }
+    };
 
-    if INDEX_RATE_LIMITER
-        .get_or_init(RateLimiter::default)
-        .check(caller_id)
-        .is_err()
+    match jobs
+        .check_index_rate_limit(caller_id, index_rate_limit_per_minute())
+        .await
     {
-        return Ok(json!({
-            "status": "rejected",
-            "reason": "rate_limit",
-            "retry_after_seconds": RATE_LIMIT_RETRY_AFTER_SECONDS
-        }));
+        Ok(()) => {}
+        Err(JobsError::RateLimited) => {
+            return Ok(json!({
+                "status": "rejected",
+                "reason": "rate_limit",
+                "retry_after_seconds": RATE_LIMIT_RETRY_AFTER_SECONDS
+            }));
+        }
+        Err(error) => return Err(jobs_error("external_index rate limit failed")(error)),
     }
 
     let source = args.source();
     let revision = args.revision.trim();
     let source_url_hash = source_url_hash(&args.source_url);
     let source_kind = args.source_kind(parsed_url.source_kind);
+    let limits = index_resource_limits(source_kind);
 
     if !args.force.unwrap_or(false) {
         if let Some(resolved) =
@@ -346,18 +359,34 @@ pub async fn route_index(
         }
     }
 
-    let outcome = jobs
-        .create_or_get_active_job(CreateJobRequest {
-            source: source.to_owned(),
-            package: args.package.clone(),
-            revision: revision.to_owned(),
-            source_url: args.source_url.clone(),
-            source_url_hash: source_url_hash.clone(),
-            source_kind: source_kind_label(source_kind).to_owned(),
-            caller_id: caller_id.to_owned(),
-        })
+    let max_active_jobs = index_max_concurrent_jobs_per_caller();
+    let outcome = match jobs
+        .create_or_get_active_job_with_limit(
+            CreateJobRequest {
+                source: source.to_owned(),
+                package: args.package.clone(),
+                revision: revision.to_owned(),
+                source_url: args.source_url.clone(),
+                source_url_hash: source_url_hash.clone(),
+                source_kind: source_kind_label(source_kind).to_owned(),
+                caller_id: caller_id.to_owned(),
+            },
+            max_active_jobs,
+        )
         .await
-        .map_err(jobs_error("external_index create_or_get_active_job failed"))?;
+    {
+        Ok(outcome) => outcome,
+        Err(JobsError::ConcurrentLimit) => {
+            return Ok(json!({
+                "status": "rejected",
+                "reason": "concurrent_job_limit",
+                "max_active_jobs_per_caller": max_active_jobs
+            }));
+        }
+        Err(error) => {
+            return Err(jobs_error("external_index create_or_get_active_job failed")(error));
+        }
+    };
 
     let job = match outcome {
         CreateJobOutcome::Created(record) => record,
@@ -373,7 +402,11 @@ pub async fn route_index(
         "revision": revision,
         "source_url": args.source_url,
         "source_kind": source_kind_label(source_kind),
-        "caller_id": caller_id
+        "caller_id": caller_id,
+        "limits": {
+            "max_source_bytes": limits.max_source_bytes,
+            "max_build_seconds": limits.max_build_seconds
+        }
     });
     let execution_arn = match sfn_client
         .start_execution(IndexExecutionRequest {
@@ -401,9 +434,7 @@ pub async fn route_index(
             let _ = jobs
                 .mark_failed(&job.job_id, "record_execution_started", &detail)
                 .await;
-            return Err(jobs_error(
-                "external_index record_execution_started failed",
-            )(error));
+            return Err(jobs_error("external_index record_execution_started failed")(error));
         }
     };
 
@@ -415,6 +446,24 @@ pub async fn route_index_status(
     jobs: &dyn JobStore,
     checker: Option<&dyn ExecutionStatusChecker>,
 ) -> Result<Value, McpHandlerError> {
+    route_index_status_inner(args, jobs, checker, None).await
+}
+
+pub async fn route_index_status_for_caller(
+    args: &Value,
+    jobs: &dyn JobStore,
+    checker: Option<&dyn ExecutionStatusChecker>,
+    caller_id: &str,
+) -> Result<Value, McpHandlerError> {
+    route_index_status_inner(args, jobs, checker, Some(caller_id)).await
+}
+
+async fn route_index_status_inner(
+    args: &Value,
+    jobs: &dyn JobStore,
+    checker: Option<&dyn ExecutionStatusChecker>,
+    caller_id: Option<&str>,
+) -> Result<Value, McpHandlerError> {
     let args: ExternalIndexStatusArgs = parse_args(args)?;
     args.validate()?;
     let Some(record) = jobs
@@ -424,6 +473,10 @@ pub async fn route_index_status(
     else {
         return Ok(json!({ "status": "not_found" }));
     };
+
+    if caller_id.is_some_and(|caller_id| record.caller_id != caller_id) {
+        return Ok(json!({ "status": "not_found" }));
+    }
 
     let record = update_stale_job(record, jobs, checker).await?;
     Ok(index_status_response(&record))
@@ -673,14 +726,19 @@ fn lookup_complete_catalog_revision(
         }
     };
 
+    let package_catalog = readable_table(catalog.connection(), "package_catalog")
+        .map_err(|error| McpHandlerError::Internal(format!("{error:#}")))?;
+    let sql = format!(
+        r"
+        SELECT index_status
+        FROM {package_catalog}
+        WHERE source = ? AND package = ? AND revision = ?
+        LIMIT 1
+        "
+    );
     let status: Option<String> = optional_no_rows(
         catalog.connection().query_row(
-            r"
-            SELECT index_status
-            FROM package_catalog
-            WHERE source = ? AND package = ? AND revision = ?
-            LIMIT 1
-            ",
+            &sql,
             params![source, package, resolved.revision.as_str()],
             |row| row.get(0),
         ),
@@ -777,6 +835,8 @@ fn jobs_error(context: &'static str) -> impl FnOnce(JobsError) -> McpHandlerErro
     move |error| match error {
         JobsError::NotFound => McpHandlerError::NotFound(format!("{context}: {error}")),
         JobsError::Conflict => McpHandlerError::Internal(format!("{context}: {error}")),
+        JobsError::ConcurrentLimit => McpHandlerError::Internal(format!("{context}: {error}")),
+        JobsError::RateLimited => McpHandlerError::Internal(format!("{context}: {error}")),
         JobsError::Db(error) => McpHandlerError::Internal(format!("{context}: {error}")),
     }
 }
@@ -880,7 +940,7 @@ fn updated_at_age(updated_at: &str) -> Option<Duration> {
         .as_millis();
     let elapsed = now_millis.saturating_sub(updated_millis);
     Some(Duration::from_millis(
-        elapsed.min(u128::from(u64::MAX)) as u64,
+        elapsed.min(u128::from(u64::MAX)) as u64
     ))
 }
 
@@ -947,6 +1007,66 @@ fn source_kind_label(source_kind: SourceKind) -> &'static str {
         SourceKind::Git => "git",
         SourceKind::Tarball => "tarball",
     }
+}
+
+fn index_validate_options() -> ValidateOptions {
+    ValidateOptions {
+        tarball_size_cap_bytes: env_u64(
+            "SPUR_CONTEXT_MAX_TARBALL_BYTES",
+            DEFAULT_TARBALL_SIZE_CAP_BYTES,
+        ),
+        git_size_cap_bytes: env_u64("SPUR_CONTEXT_MAX_GIT_BYTES", DEFAULT_GIT_SIZE_CAP_BYTES),
+        allowed_domains: env::var("SPUR_CONTEXT_ALLOWED_SOURCE_DOMAINS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn index_resource_limits(source_kind: SourceKind) -> IndexResourceLimits {
+    let max_source_bytes = match source_kind {
+        SourceKind::Git => env_u64("SPUR_CONTEXT_MAX_GIT_BYTES", DEFAULT_GIT_SIZE_CAP_BYTES),
+        SourceKind::Tarball => env_u64(
+            "SPUR_CONTEXT_MAX_TARBALL_BYTES",
+            DEFAULT_TARBALL_SIZE_CAP_BYTES,
+        ),
+    };
+    IndexResourceLimits {
+        max_source_bytes,
+        max_build_seconds: env_u64("SPUR_CONTEXT_MAX_BUILD_SECONDS", DEFAULT_MAX_BUILD_SECONDS),
+    }
+}
+
+fn index_rate_limit_per_minute() -> u32 {
+    env_u32("SPUR_INDEX_RATE_LIMIT_PER_MINUTE", DEFAULT_CALLS_PER_MINUTE)
+}
+
+fn index_max_concurrent_jobs_per_caller() -> u32 {
+    env_u32(
+        "SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER",
+        DEFAULT_MAX_CONCURRENT_JOBS_PER_CALLER,
+    )
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 fn active_job_response(record: &JobRecord) -> Value {

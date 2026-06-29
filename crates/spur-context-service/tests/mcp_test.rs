@@ -13,14 +13,17 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use duckdb::{params, Connection};
 use serde_json::{json, Value};
-use spur_context_service::catalog::CatalogResolver;
+use spur_context_service::catalog::{
+    compact_gold_and_export_snapshot, connect_frozen_snapshot, CatalogResolver,
+    FrozenSnapshotManifest, SnapshotCleanupOptions,
+};
 use spur_context_service::jobs::{
-    CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore,
+    CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
 };
 use spur_context_service::mcp::{
-    handle_tool, route_index, route_index_status, tool_definitions, ExecutionOutcome,
-    ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest, IndexExecutionStarter,
-    McpHandlerError,
+    handle_tool, route_index, route_index_status, route_index_status_for_caller, tool_definitions,
+    ExecutionOutcome, ExecutionOutcomeStatus, ExecutionStatusChecker, IndexExecutionRequest,
+    IndexExecutionStarter, McpHandlerError,
 };
 
 const PACKAGE: &str = "demo";
@@ -124,6 +127,64 @@ async fn external_code_search_resolves_latest_and_returns_candidates() -> Result
         "bbbbbbbbbbbbbbbb"
     );
     assert_eq!(response["candidates"][0]["revision"], REVISION);
+    Ok(())
+}
+
+#[tokio::test]
+async fn serving_uses_frozen_snapshot_when_postgres_catalog_is_unreachable() -> Result<()> {
+    let fixture = FrozenServingFixture::new("serving-frozen-snapshot")?;
+    let snapshot_conn = connect_frozen_snapshot(&fixture.snapshot_path, &fixture.data_path)
+        .context("serving should attach the frozen snapshot without a live catalog backend")?;
+    let catalog = CatalogResolver::from_connection(snapshot_conn);
+
+    let response = handle_tool(
+        "external_code_search",
+        &json!({
+            "query": "bet",
+            "package": PACKAGE,
+            "limit": 20
+        }),
+        catalog.connection(),
+        &catalog,
+    )
+    .await?;
+
+    assert_eq!(response["total_matches"], 1);
+    assert_eq!(
+        response["candidates"][0]["stable_symbol_id"],
+        "bbbbbbbbbbbbbbbb"
+    );
+    assert_eq!(response["candidates"][0]["revision"], REVISION);
+
+    let source = handle_tool(
+        "external_code_read",
+        &json!({
+            "selector": "pkg:demo@latest::demo::beta",
+            "context_lines": 0
+        }),
+        catalog.connection(),
+        &catalog,
+    )
+    .await?;
+
+    assert_eq!(source["file_path"], "src/lib.rs");
+    assert_eq!(source["source"], "pub fn beta() {\n}\n");
+
+    let write_error = catalog
+        .connection()
+        .execute(
+            "INSERT INTO gold.refs VALUES ('registry:crates-io', 'demo', 'mutable', '1.0.0', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .expect_err("serving must attach the frozen snapshot read-only");
+    assert!(
+        write_error.to_string().contains("read-only")
+            || write_error.to_string().contains("read only"),
+        "unexpected write error: {write_error}"
+    );
+
+    let _postgres_catalog_that_must_not_be_used =
+        "ducklake:postgresql://127.0.0.1:1/spur_context?connect_timeout=1";
     Ok(())
 }
 
@@ -238,7 +299,10 @@ async fn external_code_read_accepts_search_uri_for_ambiguous_symbol_name() -> Re
     .await?;
 
     assert_eq!(search["total_matches"], 1);
-    assert_eq!(search["candidates"][0]["selector"], "pkg:demo@1.0.0::Buffer");
+    assert_eq!(
+        search["candidates"][0]["selector"],
+        "pkg:demo@1.0.0::Buffer"
+    );
     let uri = search["candidates"][0]["uri"]
         .as_str()
         .context("search candidate URI")?;
@@ -309,7 +373,10 @@ async fn external_call_graph_accepts_search_uri_selectors() -> Result<()> {
         callees["callees"][0]["callee"]["stable_symbol_id"],
         "bbbbbbbbbbbbbbbb"
     );
-    assert_eq!(callees["callees"][1]["edge"]["target_label"], "external::Thing");
+    assert_eq!(
+        callees["callees"][1]["edge"]["target_label"],
+        "external::Thing"
+    );
     Ok(())
 }
 
@@ -648,9 +715,38 @@ async fn external_index_status_returns_not_found_for_unknown_job() -> Result<()>
 }
 
 #[tokio::test]
+async fn external_index_status_for_caller_hides_jobs_owned_by_other_callers() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let job = jobs.seed_queued_job("arn:other-caller", |record| {
+        record.caller_id = "caller-a".to_owned();
+    });
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Succeeded,
+        output: Some(json!({
+            "snapshot_id": 777,
+        })),
+        error: None,
+    }));
+
+    let response = route_index_status_for_caller(
+        &json!({ "job_id": job.job_id }),
+        &jobs,
+        Some(&checker),
+        "caller-b",
+    )
+    .await?;
+
+    assert_eq!(response, json!({ "status": "not_found" }));
+    assert_eq!(checker.described_arns(), Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test]
 async fn lambda_index_status_route_does_not_require_catalog_initialization() -> Result<()> {
     let jobs = FakeJobStore::default();
-    let job = jobs.seed_queued_job("arn:lambda-status", |_| {});
+    let job = jobs.seed_queued_job("arn:lambda-status", |record| {
+        record.caller_id = "caller-lambda-status".to_owned();
+    });
     let job_id = job.job_id.clone();
     let checker = StubExecutionStatusChecker::new(None);
 
@@ -658,6 +754,7 @@ async fn lambda_index_status_route_does_not_require_catalog_initialization() -> 
         &json!({ "job_id": job_id.clone() }),
         &jobs,
         &checker,
+        "caller-lambda-status",
     )
     .await?;
 
@@ -685,12 +782,8 @@ async fn external_index_status_repairs_stale_succeeded_execution() -> Result<()>
         error: None,
     }));
 
-    let response = route_index_status(
-        &json!({ "job_id": job.job_id }),
-        &jobs,
-        Some(&checker),
-    )
-    .await?;
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
 
     assert_eq!(response["status"], "complete");
     assert_eq!(response["snapshot_id"], 777);
@@ -712,12 +805,8 @@ async fn external_index_status_reconciles_failed_execution() -> Result<()> {
         error: Some("fetch: clone failed".to_owned()),
     }));
 
-    let response = route_index_status(
-        &json!({ "job_id": job.job_id }),
-        &jobs,
-        Some(&checker),
-    )
-    .await?;
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
 
     assert_eq!(response["status"], "failed");
     assert_eq!(response["error"]["code"], "fetch");
@@ -742,7 +831,8 @@ async fn external_index_status_without_checker_returns_stale_job() -> Result<()>
 }
 
 #[tokio::test]
-async fn external_index_status_returns_dynamodb_state_when_describe_execution_fails() -> Result<()> {
+async fn external_index_status_returns_dynamodb_state_when_describe_execution_fails() -> Result<()>
+{
     let jobs = FakeJobStore::default();
     let job = jobs.seed_queued_job("arn:transient", |record| {
         record.status = JobStatus::Running;
@@ -751,12 +841,8 @@ async fn external_index_status_returns_dynamodb_state_when_describe_execution_fa
     });
     let checker = StubExecutionStatusChecker::fail("temporary sfn outage");
 
-    let response = route_index_status(
-        &json!({ "job_id": job.job_id }),
-        &jobs,
-        Some(&checker),
-    )
-    .await?;
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
 
     assert_eq!(response["status"], "running");
     assert_eq!(response["stage"], "building_graph");
@@ -824,6 +910,94 @@ async fn external_index_creates_job_starts_execution_and_records_arn() -> Result
     assert_eq!(stored.execution_arn.as_deref(), Some("arn:stub:job-1"));
     assert_eq!(stored.caller_id, "caller-create");
     assert_eq!(stored.source_kind, "git");
+    let started = sfn.started_requests();
+    assert_eq!(
+        started[0].input["limits"],
+        json!({
+            "max_source_bytes": 2147483648_u64,
+            "max_build_seconds": 1800_u64
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_rejects_when_caller_concurrent_cap_is_full() -> Result<()> {
+    let fixture = McpFixture::new("index-concurrent-cap")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+    jobs.seed_queued_job("arn:busy-a", |record| {
+        record.caller_id = "caller-full".to_owned();
+        record.revision = "busy-a".to_owned();
+    });
+    jobs.seed_queued_job("arn:busy-b", |record| {
+        record.caller_id = "caller-full".to_owned();
+        record.revision = "busy-b".to_owned();
+    });
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "new-work",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-full",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "rejected");
+    assert_eq!(response["reason"], "concurrent_job_limit");
+    assert_eq!(sfn.started_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_rejects_when_caller_rate_limit_is_full() -> Result<()> {
+    let fixture = McpFixture::new("index-rate-limit")?;
+    let jobs = FakeJobStore::default();
+    jobs.set_rate_limit_per_minute(1);
+    let sfn = StubIndexExecutionStarter::default();
+
+    let first = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "rate-a",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-rate-limited",
+    )
+    .await?;
+
+    assert_eq!(first["status"], "queued");
+
+    let second = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "rate-b",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-rate-limited",
+    )
+    .await?;
+
+    assert_eq!(second["status"], "rejected");
+    assert_eq!(second["reason"], "rate_limit");
+    assert_eq!(sfn.started_count(), 1);
     Ok(())
 }
 
@@ -1009,8 +1183,13 @@ async fn search_uri(
     if let Some(symbol_kind) = symbol_kind {
         args["symbol_kind"] = json!(symbol_kind);
     }
-    let response = handle_tool("external_code_search", &args, &fixture.conn, &fixture.catalog)
-        .await?;
+    let response = handle_tool(
+        "external_code_search",
+        &args,
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
     response["candidates"][0]["uri"]
         .as_str()
         .map(str::to_owned)
@@ -1136,6 +1315,141 @@ impl McpFixture {
             _root: root,
         })
     }
+}
+
+struct FrozenServingFixture {
+    snapshot_path: PathBuf,
+    data_path: String,
+    _root: PathBuf,
+}
+
+impl FrozenServingFixture {
+    fn new(name: &str) -> Result<Self> {
+        let root = unique_temp_dir(name)?;
+        let data_path = root.join("data");
+        fs::create_dir_all(&data_path).context("create frozen serving data dir")?;
+
+        let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+        let data_path = data_path.display().to_string();
+        initialize_gold_serving_catalog(&catalog_dsn, &data_path)?;
+        compact_gold_and_export_snapshot(
+            &catalog_dsn,
+            &data_path,
+            SnapshotCleanupOptions {
+                older_than: std::time::Duration::from_secs(3600),
+                republish_lag: std::time::Duration::from_secs(300),
+            },
+        )?;
+
+        let snapshot_path = catalog_snapshot_path(&data_path)?;
+        assert!(
+            snapshot_path.is_file(),
+            "expected frozen serving snapshot at {}",
+            snapshot_path.display()
+        );
+
+        Ok(Self {
+            snapshot_path,
+            data_path,
+            _root: root,
+        })
+    }
+}
+
+fn initialize_gold_serving_catalog(catalog_dsn: &str, data_path: &str) -> Result<()> {
+    let conn = Connection::open_in_memory().context("open frozen serving setup DuckDB")?;
+    attach_ducklake(&conn, catalog_dsn, data_path)?;
+    conn.execute_batch(include_str!("../sql/catalog_tables.sql"))
+        .context("create medallion catalog tables")?;
+
+    let source_text = "pub fn beta() {\n}\n";
+    conn.execute(
+        r"
+        INSERT INTO gold.files (
+            stable_file_id, file_path, source_text,
+            package, source, revision, revision_kind,
+            semver_major, semver_minor, semver_patch, generation
+        )
+        VALUES (
+            'file-demo-lib', 'src/lib.rs', ?,
+            'demo', 'registry:crates-io', '1.0.0', 'semver',
+            1, 0, 0, 7
+        )
+        ",
+        params![source_text],
+    )
+    .context("insert frozen serving file")?;
+    conn.execute(
+        r"
+        INSERT INTO gold.nodes (
+            stable_symbol_id, package, source, revision, revision_kind,
+            semver_major, semver_minor, semver_patch, file_path,
+            byte_range_start, byte_range_end, line_start, line_end,
+            entity_name, qualified_name, symbol_kind, anchor_hash,
+            enclosing_scope, generation
+        )
+        VALUES (
+            'bbbbbbbbbbbbbbbb', 'demo', 'registry:crates-io', '1.0.0', 'semver',
+            1, 0, 0, 'src/lib.rs',
+            0, ?, 1, 2,
+            'beta', 'demo::beta', 'function', 'anchor-beta',
+            NULL, 7
+        )
+        ",
+        params![source_text.len() as i64],
+    )
+    .context("insert frozen serving node")?;
+    conn.execute_batch(
+        r#"
+        INSERT INTO gold.package_catalog (
+            source, package, revision, revision_kind,
+            semver_major, semver_minor, semver_patch,
+            snapshot_id, indexed_at, index_status, embeddings_status, row_counts,
+            generation, bronze_content_sha256, silver_graph_content_hash,
+            builder_version, translate_schema_version
+        )
+        VALUES (
+            'registry:crates-io', 'demo', '1.0.0', 'semver',
+            1, 0, 0,
+            777, TIMESTAMP '2026-06-28 00:00:00',
+            'complete', 'skipped', '{"nodes":1}',
+            7, 'bronze-fixture', 'graph-fixture', 'builder-fixture', 'translate-fixture'
+        );
+
+        INSERT INTO gold.refs (source, package, ref_name, revision, updated_at)
+        VALUES (
+            'registry:crates-io', 'demo', 'latest', '1.0.0',
+            TIMESTAMP '2026-06-28 00:01:00'
+        );
+        "#,
+    )
+    .context("insert frozen serving catalog metadata")?;
+    flush_inlined_ducklake_data(&conn)?;
+    conn.execute("FORCE CHECKPOINT", [])
+        .context("checkpoint frozen serving fixture")?;
+    Ok(())
+}
+
+fn flush_inlined_ducklake_data(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("CALL ducklake_flush_inlined_data('spur_context')")
+        .context("prepare ducklake_flush_inlined_data")?;
+    let mut rows = stmt.query([]).context("execute ducklake flush")?;
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
+fn catalog_snapshot_path(data_path: &str) -> Result<PathBuf> {
+    let pointer_path = PathBuf::from(data_path)
+        .join("gold")
+        .join("catalog-snapshot")
+        .join("current.json");
+    let pointer: FrozenSnapshotManifest = serde_json::from_slice(
+        &fs::read(&pointer_path)
+            .with_context(|| format!("read snapshot pointer {}", pointer_path.display()))?,
+    )
+    .context("parse snapshot pointer")?;
+    Ok(PathBuf::from(pointer.snapshot_uri))
 }
 
 fn create_query_schema(conn: &Connection) -> Result<()> {
@@ -1709,6 +2023,10 @@ impl StubIndexExecutionStarter {
     fn started_count(&self) -> usize {
         self.started.lock().unwrap().len()
     }
+
+    fn started_requests(&self) -> Vec<IndexExecutionRequest> {
+        self.started.lock().unwrap().clone()
+    }
 }
 
 impl IndexExecutionStarter for StubIndexExecutionStarter {
@@ -1763,9 +2081,7 @@ impl ExecutionStatusChecker for StubExecutionStatusChecker {
         self.described_arns.lock().unwrap().push(arn.to_owned());
         match &self.result {
             StubExecutionResult::Ok(outcome) => Ok(outcome.clone()),
-            StubExecutionResult::Err(message) => {
-                Err(McpHandlerError::Internal(message.clone()))
-            }
+            StubExecutionResult::Err(message) => Err(McpHandlerError::Internal(message.clone())),
         }
     }
 }
@@ -1780,13 +2096,42 @@ struct FakeJobStore {
 struct FakeJobState {
     jobs: HashMap<String, JobRecord>,
     dedupe: HashMap<JobKey, String>,
+    rate_limit_max: Option<u32>,
+    rate_counts: HashMap<String, u32>,
 }
 
 #[async_trait]
 impl JobStore for FakeJobStore {
+    async fn check_index_rate_limit(
+        &self,
+        caller_id: &str,
+        max_requests_per_minute: u32,
+    ) -> spur_context_service::jobs::Result<()> {
+        let mut state = self.state.lock().expect("fake store lock");
+        let max = state.rate_limit_max.unwrap_or(max_requests_per_minute);
+        if max == 0 {
+            return Err(JobsError::RateLimited);
+        }
+        let count = state.rate_counts.entry(caller_id.to_owned()).or_default();
+        if *count >= max {
+            return Err(JobsError::RateLimited);
+        }
+        *count += 1;
+        Ok(())
+    }
+
     async fn create_or_get_active_job(
         &self,
         request: CreateJobRequest,
+    ) -> spur_context_service::jobs::Result<CreateJobOutcome> {
+        self.create_or_get_active_job_with_limit(request, u32::MAX)
+            .await
+    }
+
+    async fn create_or_get_active_job_with_limit(
+        &self,
+        request: CreateJobRequest,
+        max_active_jobs_per_caller: u32,
     ) -> spur_context_service::jobs::Result<CreateJobOutcome> {
         let key = request.key();
         let mut state = self.state.lock().expect("fake store lock");
@@ -1794,6 +2139,18 @@ impl JobStore for FakeJobStore {
             if let Some(record) = state.jobs.get(job_id) {
                 return Ok(CreateJobOutcome::Existing(record.clone()));
             }
+        }
+
+        let active_jobs = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.caller_id == request.caller_id
+                    && matches!(record.status, JobStatus::Queued | JobStatus::Running)
+            })
+            .count();
+        if active_jobs >= max_active_jobs_per_caller as usize {
+            return Err(JobsError::ConcurrentLimit);
         }
 
         let job_id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
@@ -1893,7 +2250,11 @@ impl JobStore for FakeJobStore {
     ) -> spur_context_service::jobs::Result<()> {
         let mut state = self.state.lock().expect("fake store lock");
         let key = record.key();
-        if state.dedupe.get(&key).is_some_and(|job_id| job_id == &record.job_id) {
+        if state
+            .dedupe
+            .get(&key)
+            .is_some_and(|job_id| job_id == &record.job_id)
+        {
             state.dedupe.remove(&key);
         }
         Ok(())
@@ -1901,6 +2262,10 @@ impl JobStore for FakeJobStore {
 }
 
 impl FakeJobStore {
+    fn set_rate_limit_per_minute(&self, max: u32) {
+        self.state.lock().expect("fake store lock").rate_limit_max = Some(max);
+    }
+
     fn seed_queued_job(
         &self,
         execution_arn: &str,
