@@ -51,7 +51,7 @@ enum TaskIssueState {
     Error(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum PlanInspectorConfirm {
     Start {
         plan_id: String,
@@ -64,6 +64,16 @@ enum PlanInspectorConfirm {
         status: String,
         attempt: u32,
         max_attempts: u32,
+    },
+    Review {
+        plan_id: String,
+        task_id: String,
+        task_name: String,
+        status: String,
+        executor_id: String,
+        attempt_n: u32,
+        decision: spur_core::ReviewDecision,
+        feedback: Option<String>,
     },
 }
 
@@ -478,6 +488,68 @@ impl PlanInspectorView {
         None
     }
 
+    fn review_selected_task(
+        &mut self,
+        plan: &TrackedPlan,
+        lineage: &spur_core::ExecutorLineage,
+        key: char,
+    ) -> Option<Action> {
+        if self.open_issue_id.is_some() || !matches!(self.mode, PlanInspectorMode::Browse) {
+            return None;
+        }
+
+        let Some(task) = self.selected_task(plan) else {
+            return Some(Action::FlashHint {
+                message: "Cannot review: no selected task".into(),
+            });
+        };
+
+        if !is_reviewable_task_status(&task.status) {
+            return Some(Action::FlashHint {
+                message: format!("Cannot review: task {} is {}", task.task_id, task.status),
+            });
+        }
+
+        let Some(delegation_id) = task.delegation_id.as_ref() else {
+            return Some(Action::FlashHint {
+                message: format!("Cannot review: task {} has no delegation", task.task_id),
+            });
+        };
+        let Some(executor_id) = lineage
+            .executor_id_for_delegation(&spur_acp::domain::delegation::DelegationId(
+                delegation_id.clone(),
+            ))
+            .map(|id| id.0.clone())
+        else {
+            return Some(Action::FlashHint {
+                message: format!("Cannot review: task {} has no linked worker", task.task_id),
+            });
+        };
+        let Some(pending_review) = lineage
+            .node(&ExecutorId(executor_id.clone()))
+            .and_then(|node| node.pending_review.as_ref())
+        else {
+            return Some(Action::FlashHint {
+                message: format!("Cannot review: task {} has no pending review", task.task_id),
+            });
+        };
+
+        let feedback = task.feedback.clone();
+        let decision = plan_review_decision_for_key(key, feedback.clone())?;
+
+        self.confirm = Some(PlanInspectorConfirm::Review {
+            plan_id: plan.plan_id.clone(),
+            task_id: task.task_id.clone(),
+            task_name: task.task_name.clone(),
+            status: task.status.clone(),
+            executor_id,
+            attempt_n: pending_review.attempt_n,
+            decision,
+            feedback,
+        });
+        None
+    }
+
     fn confirm_action(&mut self) -> Option<Action> {
         let confirm = self.confirm.take()?;
         match confirm {
@@ -487,6 +559,16 @@ impl PlanInspectorView {
             } => Some(Action::RetryPlanTask {
                 plan_id: Some(plan_id),
                 issue_id,
+            }),
+            PlanInspectorConfirm::Review {
+                executor_id,
+                attempt_n,
+                decision,
+                ..
+            } => Some(Action::SubmitReview {
+                executor_id,
+                attempt_n,
+                decision,
             }),
         }
     }
@@ -778,6 +860,14 @@ impl View for PlanInspectorView {
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
                     return self.retry_selected_task(plan);
+                }
+                KeyCode::Char(ch @ ('a' | 'd' | 'c'))
+                    if key.modifiers.is_empty()
+                        && self
+                            .selected_task(plan)
+                            .is_some_and(|task| is_reviewable_task_status(&task.status)) =>
+                {
+                    return self.review_selected_task(plan, ctx.lineage, ch);
                 }
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     if let Some(task) = self.selected_task(plan) {
@@ -1089,6 +1179,11 @@ impl View for PlanInspectorView {
             .and_then(|plan| self.selected_task(plan))
             .map(is_retryable_task)
             .unwrap_or(false);
+        let selected_task_reviewable = self
+            .active_plan(ctx)
+            .and_then(|plan| self.selected_task(plan))
+            .map(|task| is_reviewable_task_status(&task.status))
+            .unwrap_or(false);
 
         let enter_hint = if self.open_issue_id.is_some() {
             "Enter: close issue detail"
@@ -1112,6 +1207,11 @@ impl View for PlanInspectorView {
         } else {
             ""
         };
+        let review_hint = if self.open_issue_id.is_none() && selected_task_reviewable {
+            "  a: approve  d: reject  c: changes"
+        } else {
+            ""
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 footer_hint(
@@ -1119,6 +1219,7 @@ impl View for PlanInspectorView {
                     enter_hint,
                     peek_hint,
                     retry_hint,
+                    review_hint,
                     scroll_hint,
                     self.open_issue_id.is_none() && self.active_plan(ctx).is_some(),
                 ),
@@ -1137,7 +1238,14 @@ impl PlanInspectorView {
         let Some(confirm) = self.confirm.as_ref() else {
             return;
         };
-        let popup = centered_rect(area, 72, 9);
+        let popup_height = match confirm {
+            PlanInspectorConfirm::Review {
+                feedback: Some(feedback),
+                ..
+            } if !feedback.trim().is_empty() => 10,
+            _ => 9,
+        };
+        let popup = centered_rect(area, 72, popup_height);
         frame.render_widget(Clear, popup);
 
         let (title, verb, body) = match confirm {
@@ -1171,6 +1279,32 @@ impl PlanInspectorView {
                     Line::from("  This requeues the selected task for another worker attempt."),
                 ],
             ),
+            PlanInspectorConfirm::Review {
+                plan_id,
+                task_id,
+                task_name,
+                status,
+                attempt_n,
+                decision,
+                feedback,
+                ..
+            } => {
+                let mut lines = vec![
+                    Line::from(format!("  Plan: {plan_id}")),
+                    Line::from(format!("  Task: {task_id} - {task_name}")),
+                    Line::from(format!("  Status: {status}")),
+                    Line::from(format!("  Attempt: {attempt_n}")),
+                    Line::from(format!("  Decision: {}", review_decision_verb(decision))),
+                ];
+                if let Some(feedback) = feedback.as_ref().filter(|text| !text.trim().is_empty()) {
+                    let max_feedback = popup.width.saturating_sub(14) as usize;
+                    lines.push(Line::from(format!(
+                        "  Feedback: {}",
+                        truncate_display(feedback, max_feedback)
+                    )));
+                }
+                (" Review Task ", review_decision_verb(decision), lines)
+            }
         };
 
         let mut lines = body;
@@ -1297,10 +1431,49 @@ fn is_retryable_task_status(status: &str) -> bool {
     matches!(status, "failed" | "rejected" | "error")
 }
 
+fn is_reviewable_task_status(status: &str) -> bool {
+    status == "awaiting_review"
+}
+
 fn is_retryable_task(task: &spur_core::TrackedTask) -> bool {
     task.issue_id.is_some()
         && is_retryable_task_status(&task.status)
         && task.attempt < task.max_attempts
+}
+
+fn plan_review_decision_for_key(
+    key: char,
+    feedback: Option<String>,
+) -> Option<spur_core::ReviewDecision> {
+    match key {
+        'a' => crate::components::review_card::decision_for_key('A', None),
+        'd' => crate::components::review_card::decision_for_key(
+            'D',
+            Some(feedback_or_default(
+                feedback,
+                "Rejected from Plan Inspector",
+            )),
+        ),
+        'c' => Some(spur_core::ReviewDecision::Modify {
+            note: feedback_or_default(feedback, "Changes requested from Plan Inspector"),
+        }),
+        _ => None,
+    }
+}
+
+fn feedback_or_default(feedback: Option<String>, default: &'static str) -> String {
+    feedback
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| default.into())
+}
+
+fn review_decision_verb(decision: &spur_core::ReviewDecision) -> &'static str {
+    match decision {
+        spur_core::ReviewDecision::Approve => "Approve",
+        spur_core::ReviewDecision::Reject { .. } => "Reject",
+        spur_core::ReviewDecision::Modify { .. } => "Request changes",
+        spur_core::ReviewDecision::Retry { .. } => "Retry",
+    }
 }
 
 fn format_age(secs: u64) -> String {
@@ -1333,13 +1506,14 @@ fn footer_hint(
     enter_hint: &str,
     peek_hint: &str,
     retry_hint: &str,
+    review_hint: &str,
     scroll_hint: &str,
     show_start: bool,
 ) -> String {
     let start_hint = if show_start { "  r: start/resume" } else { "" };
     let full = format!(
-        " h/l: lane  j/k: task  b: blocker  {}  o: work item{}{}{}  g/G: ends  Alt+P/Esc: close {}",
-        enter_hint, start_hint, retry_hint, peek_hint, scroll_hint
+        " h/l: lane  j/k: task  b: blocker  {}  o: work item{}{}{}{}  g/G: ends  Alt+P/Esc: close {}",
+        enter_hint, start_hint, retry_hint, review_hint, peek_hint, scroll_hint
     );
     if full.chars().count() <= width as usize {
         return full;
@@ -1356,9 +1530,14 @@ fn footer_hint(
     } else {
         "  R: retry"
     };
+    let compact_review = if review_hint.is_empty() {
+        ""
+    } else {
+        "  a/d/c: review"
+    };
     let compact = format!(
-        " h/l lane  j/k task  b blocker  {}  o item{}{}{}  Esc close",
-        enter_hint, compact_start, compact_retry, compact_peek
+        " h/l lane  j/k task  b blocker  {}  o item{}{}{}{}  Esc close",
+        enter_hint, compact_start, compact_retry, compact_review, compact_peek
     );
     if compact.chars().count() <= width as usize {
         return compact;
@@ -1366,8 +1545,8 @@ fn footer_hint(
 
     truncate_display(
         &format!(
-            " j/k task  b blocker{}{}  Esc close",
-            compact_start, compact_retry
+            " j/k task  b blocker{}{}{}  Esc close",
+            compact_start, compact_retry, compact_review
         ),
         width as usize,
     )
@@ -1422,8 +1601,8 @@ fn action_line(
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use spur_acp::{
-        LifecycleState, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, SessionId, SpurEvent,
-        SpurEventBody,
+        LifecycleState, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, ReviewKind,
+        ReviewPayload, SessionId, SpurEvent, SpurEventBody,
     };
     use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
 
@@ -1620,6 +1799,55 @@ mod tests {
         projection
     }
 
+    fn projection_with_awaiting_review_task(
+        session_id: &SessionId,
+        feedback: Option<&str>,
+        delegation_id: Option<&str>,
+    ) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "running".into(),
+                progress: "0/1 done".into(),
+                next_action: "review worker output".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    awaiting_review: 1,
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "t-12".into(),
+                    task_name: "Stage A".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-epic.1".into()),
+                    issue_title: None,
+                    status: "awaiting_review".into(),
+                    attempt: 2,
+                    max_attempts: 3,
+                    depends_on: Vec::new(),
+                    blocked_by: Vec::new(),
+                    unblocks: Vec::new(),
+                    summary: Some("Worker says Stage A is ready".into()),
+                    feedback: feedback.map(str::to_string),
+                    error: None,
+                    worker_branch: Some("worker/stage-a".into()),
+                    delegation_id: delegation_id.map(str::to_string),
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "operator review".into(),
+                }],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
     fn projection_with_epic_and_worker(session_id: &SessionId) -> PlanProjectionStore {
         projection_with_epic_and_worker_for_delegation(session_id, "deleg-12")
     }
@@ -1773,6 +2001,36 @@ mod tests {
             from: session_id.clone(),
             request_id: delegation_id.into(),
             executor_id: worker_session.into(),
+        }));
+        lineage
+    }
+
+    fn lineage_with_pending_review_for_delegation(
+        session_id: &SessionId,
+        task_id: &str,
+        worker_session: &str,
+        delegation_id: &str,
+        attempt_n: u32,
+    ) -> ExecutorLineage {
+        let mut lineage = lineage_with_worker_for_task_and_delegation(
+            session_id,
+            task_id,
+            worker_session,
+            delegation_id,
+        );
+        lineage.apply(&SpurEvent::now(SpurEventBody::ExecutorReviewRequested {
+            id: worker_session.into(),
+            attempt_n,
+            kind: ReviewKind::Completion,
+            payload: ReviewPayload {
+                summary: "worker ready for review".into(),
+                diff_summary: None,
+                pr_url: None,
+                error: None,
+                delegation_plan: None,
+                chosen_matches_dispatched: None,
+                peer_influence: None,
+            },
         }));
         lineage
     }
@@ -2034,6 +2292,7 @@ mod tests {
             "  s: stream peek  S: jump to worker",
             "",
             "",
+            "",
             true,
         );
 
@@ -2071,6 +2330,45 @@ mod tests {
         assert!(
             dump.contains("R: retry"),
             "expected footer to advertise retry for eligible task:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn footer_advertises_review_only_for_awaiting_review_task() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_awaiting_review_task(
+            &session_id,
+            Some("please add tests"),
+            Some("deleg-12"),
+        );
+        let lineage = lineage_with_pending_review_for_delegation(
+            &session_id,
+            "t-12",
+            "worker-session-1",
+            "deleg-12",
+            2,
+        );
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+        let backend = ratatui::backend::TestBackend::new(180, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let dump = format!("{:?}", terminal.backend().buffer());
+        let has_full_review_hint = dump.contains("a: approve")
+            && dump.contains("d: reject")
+            && dump.contains("c: changes");
+        assert!(
+            has_full_review_hint || dump.contains("a/d/c: review"),
+            "expected footer to advertise review decisions for awaiting review task:\n{dump}"
         );
     }
 
@@ -2407,6 +2705,163 @@ mod tests {
         let mut peek_view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
         peek_view.enter_stream_peek("worker-session-1".into(), "t-12".into());
         let peek_action = peek_view.handle_key_with_worker_streams(key_char('R'), &mut ws, &ctx);
+        assert!(peek_action.is_none());
+        assert!(peek_view.confirm.is_none());
+        assert!(matches!(
+            peek_view.mode(),
+            PlanInspectorMode::StreamPeek { .. }
+        ));
+    }
+
+    #[test]
+    fn reviewable_selected_task_opens_review_confirmation() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_awaiting_review_task(
+            &session_id,
+            Some("please add tests"),
+            Some("deleg-12"),
+        );
+        let lineage = lineage_with_pending_review_for_delegation(
+            &session_id,
+            "t-12",
+            "worker-session-1",
+            "deleg-12",
+            2,
+        );
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('a'), &ctx);
+
+        assert!(
+            action.is_none(),
+            "a should open confirmation before dispatch"
+        );
+        assert!(
+            view.confirm.is_some(),
+            "awaiting_review task should open a review confirmation"
+        );
+    }
+
+    #[test]
+    fn enter_from_approve_review_confirmation_dispatches_submit_review_action() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_awaiting_review_task(
+            &session_id,
+            Some("please add tests"),
+            Some("deleg-12"),
+        );
+        let lineage = lineage_with_pending_review_for_delegation(
+            &session_id,
+            "t-12",
+            "worker-session-1",
+            "deleg-12",
+            2,
+        );
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_char('a'), &ctx).is_none());
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::SubmitReview {
+                executor_id,
+                attempt_n: 2,
+                decision: spur_core::ReviewDecision::Approve,
+            }) if executor_id == "worker-session-1"
+        ));
+    }
+
+    #[test]
+    fn request_changes_review_confirmation_uses_task_feedback() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_awaiting_review_task(
+            &session_id,
+            Some("please add tests"),
+            Some("deleg-12"),
+        );
+        let lineage = lineage_with_pending_review_for_delegation(
+            &session_id,
+            "t-12",
+            "worker-session-1",
+            "deleg-12",
+            2,
+        );
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_char('c'), &ctx).is_none());
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(matches!(
+            action,
+            Some(Action::SubmitReview {
+                executor_id,
+                attempt_n: 2,
+                decision: spur_core::ReviewDecision::Modify { note },
+            }) if executor_id == "worker-session-1" && note == "please add tests"
+        ));
+    }
+
+    #[test]
+    fn review_missing_pending_review_flashes_hint() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_awaiting_review_task(
+            &session_id,
+            Some("please add tests"),
+            Some("deleg-12"),
+        );
+        let lineage = lineage_with_worker_for_task_and_delegation(
+            &session_id,
+            "t-12",
+            "worker-session-1",
+            "deleg-12",
+        );
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_char('a'), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::FlashHint { message })
+                if message == "Cannot review: task t-12 has no pending review"
+        ));
+    }
+
+    #[test]
+    fn review_modal_focus_does_not_leak_through_issue_detail_or_stream_peek() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_awaiting_review_task(
+            &session_id,
+            Some("please add tests"),
+            Some("deleg-12"),
+        );
+        let lineage = lineage_with_pending_review_for_delegation(
+            &session_id,
+            "t-12",
+            "worker-session-1",
+            "deleg-12",
+            2,
+        );
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+
+        let mut issue_view = PlanInspectorView::new_for_plan(session_id.clone(), "plan-1".into());
+        issue_view.set_selected_task_id_for_tests(Some("t-12".into()));
+        issue_view.set_open_issue_id_for_tests(Some("bd-epic.1".into()));
+        let issue_action = issue_view.handle_key_with_worker_streams(key_char('a'), &mut ws, &ctx);
+        assert!(issue_action.is_none());
+        assert!(issue_view.confirm.is_none());
+        assert!(matches!(issue_view.mode(), PlanInspectorMode::Browse));
+
+        let mut peek_view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        peek_view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+        let peek_action = peek_view.handle_key_with_worker_streams(key_char('a'), &mut ws, &ctx);
         assert!(peek_action.is_none());
         assert!(peek_view.confirm.is_none());
         assert!(matches!(
