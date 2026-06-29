@@ -1,0 +1,10 @@
+# Partial S3 backend config for the prod environment.
+#
+# Bootstrap these resources once outside this Terraform module before running
+# `terraform init -backend-config=backends/prod.s3.tfbackend`.
+# The S3 bucket stores state; the DynamoDB table provides state locking.
+bucket         = "replace-me-spur-terraform-state"
+key            = "spur-context-service/prod/terraform.tfstate"
+region         = "ap-southeast-5"
+dynamodb_table = "replace-me-spur-terraform-locks"
+encrypt        = true
