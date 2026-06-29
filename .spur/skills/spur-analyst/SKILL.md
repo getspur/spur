@@ -3,7 +3,7 @@ name: spur-analyst
 description: "Use this when a code question needs aggregation, time-series, multi-table JOIN, ranking, or property-graph path traversal — anything beyond what the per-symbol `code_*` MCP tools can answer in one call. Establishes the spur-analyst DuckDB graph index as the SQL substrate for hotspot detection, churn-weighted impact analysis, co-change rings, reachability paths, and graph algorithms via DuckPGQ + Onager extensions."
 role: both
 ---
-<!-- SPUR-MANAGED v=1 skill=spur-analyst sha256=fbe369f192c5d3c45597aa9bd7e88509ae490dfd5e98692b0abd3dd0c427e9bf -->
+<!-- SPUR-MANAGED v=1 skill=spur-analyst sha256=414fe69a165d155480c4de307079edea589f8534e21a4176cbf2daa5e795910c -->
 
 # Spur Analyst — Graph Database Analysis
 
@@ -31,7 +31,7 @@ Before writing any SQL against this database, run a schema discovery query first
 
 If the question is "show me one symbol's bytes" — use `code_read_symbol`. If it's "show me 20 symbols ranked by something" — use spur-analyst.
 
-This is **layer 3 of the retrieval stack** (see the code-explore skill): `knowledge_context_pack` orients, `code_*` works one symbol at a time, spur-analyst answers set-shaped questions. Hand-chaining many `code_callers`/`code_callees` calls to build a ranking, closure, or path is the signal to switch to SQL here.
+This is **layer 3 of the retrieval stack** (see the code-explore skill): `knowledge_context_pack_2` orients, `code_*` works one symbol at a time, spur-analyst answers set-shaped questions. Hand-chaining many `code_callers`/`code_callees` calls to build a ranking, closure, or path is the signal to switch to SQL here.
 
 ## Database inventory
 
