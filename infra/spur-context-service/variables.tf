@@ -23,7 +23,7 @@ variable "catalog_s3_uri" {
 }
 
 variable "context_ducklake_data_path" {
-  description = "DuckLake data path used by worker translate jobs. Defaults to s3://<bucket_name>/data/."
+  description = "DuckLake data path used by worker translate jobs. Must end in /gold/data so the frozen snapshot pointer lands at s3://<bucket>/gold/catalog-snapshot/current.json. Defaults to s3://<bucket_name>/gold/data/."
   type        = string
   default     = null
 }
@@ -237,7 +237,12 @@ variable "worker_lambda_provisioned_concurrency" {
 }
 
 locals {
-  context_ducklake_data_path      = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/data/")
+  # Must end in `/gold/data` so catalog.rs `snapshot_base_uri` strips that
+  # suffix to derive the bucket root and writes the frozen snapshot pointer at
+  # `s3://<bucket>/gold/catalog-snapshot/current.json` — matching the serving
+  # `catalog_s3_uri` default. A bare `.../data/` path offsets the entire gold
+  # layer one level deep (`.../data/gold/...`) and serving never finds it.
+  context_ducklake_data_path      = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/gold/data/")
   worker_checkpoint_uri_template  = "s3://${var.bucket_name}/jobs/{}/checkpoint.json"
   aurora_subnet_ids               = var.aurora_subnets != null ? var.aurora_subnets : var.worker_subnets
   aurora_catalog_dsn              = "postgres:host=${aws_rds_cluster.catalog.endpoint} port=${aws_rds_cluster.catalog.port} dbname=${var.aurora_database_name} user=${var.aurora_master_username} sslmode=require"
