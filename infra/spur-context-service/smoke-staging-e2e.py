@@ -16,6 +16,7 @@ GitHub Actions without adding Python package dependencies.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pathlib
@@ -26,6 +27,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -36,53 +38,132 @@ DEFAULT_POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_POINTER_KEY = "gold/catalog-snapshot/current.json"
 VECTOR_DIMENSIONS = 768
+BRONZE_SOURCE_KEY_TEMPLATE = "bronze/{source}/{package}/{revision}/source.tar.gz"
+SILVER_MANIFEST_KEY_TEMPLATE = (
+    "silver/{source}/{package}/{revision}/{builder_version}/manifest.json"
+)
 
 
 class SmokeFailure(RuntimeError):
     pass
 
 
-def main() -> int:
+@dataclass(frozen=True)
+class SmokeConfig:
+    region: str
+    source_bucket: str
+    data_bucket: str
+    lambda_name: str
+    source: str
+    revision: str
+    s3_prefix: str
+    pointer_key: str
+    timeout_seconds: int
+    poll_seconds: int
+    run_id: str
+    package: str
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    require_aws_cli()
+    config = load_config()
+    if args.preflight:
+        return run_preflight(config)
+    return run_full_smoke(config)
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="validate env, AWS auth, and serving Lambda catalog config without ingest",
+    )
+    return parser.parse_args(argv)
+
+
+def load_config() -> SmokeConfig:
     region = env("AWS_REGION", env("AWS_DEFAULT_REGION", DEFAULT_REGION))
     source_bucket = require_env("SPUR_CONTEXT_SMOKE_SOURCE_BUCKET")
-    data_bucket = env("SPUR_CONTEXT_SMOKE_DATA_BUCKET", source_bucket)
-    lambda_name = require_env("SPUR_CONTEXT_SMOKE_LAMBDA")
-    source = env("SPUR_CONTEXT_SMOKE_SOURCE", DEFAULT_SOURCE)
-    revision = env("SPUR_CONTEXT_SMOKE_REVISION", DEFAULT_REVISION)
-    s3_prefix = env("SPUR_CONTEXT_SMOKE_S3_PREFIX", "smoke/context-service")
-    pointer_key = env("SPUR_CONTEXT_SMOKE_SNAPSHOT_POINTER_KEY", DEFAULT_POINTER_KEY)
-    timeout_seconds = int(env("SPUR_CONTEXT_SMOKE_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
-    poll_seconds = int(env("SPUR_CONTEXT_SMOKE_POLL_SECONDS", str(DEFAULT_POLL_SECONDS)))
-
     run_id = env("SPUR_CONTEXT_SMOKE_RUN_ID", uuid.uuid4().hex[:12])
-    package = env("SPUR_CONTEXT_SMOKE_PACKAGE", f"spur-context-smoke-{run_id}")
+    return SmokeConfig(
+        region=region,
+        source_bucket=source_bucket,
+        data_bucket=env("SPUR_CONTEXT_SMOKE_DATA_BUCKET", source_bucket),
+        lambda_name=require_env("SPUR_CONTEXT_SMOKE_LAMBDA"),
+        source=env("SPUR_CONTEXT_SMOKE_SOURCE", DEFAULT_SOURCE),
+        revision=env("SPUR_CONTEXT_SMOKE_REVISION", DEFAULT_REVISION),
+        s3_prefix=env("SPUR_CONTEXT_SMOKE_S3_PREFIX", "smoke/context-service"),
+        pointer_key=normalize_pointer_key(
+            env("SPUR_CONTEXT_SMOKE_SNAPSHOT_POINTER_KEY", DEFAULT_POINTER_KEY)
+        ),
+        timeout_seconds=int(
+            env("SPUR_CONTEXT_SMOKE_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
+        ),
+        poll_seconds=int(env("SPUR_CONTEXT_SMOKE_POLL_SECONDS", str(DEFAULT_POLL_SECONDS))),
+        run_id=run_id,
+        package=env("SPUR_CONTEXT_SMOKE_PACKAGE", f"spur-context-smoke-{run_id}"),
+    )
 
-    print(f"[context-smoke] run_id={run_id}")
-    print(f"[context-smoke] package={package} revision={revision}")
-    print(f"[context-smoke] lambda={lambda_name} region={region}")
 
-    verify_serving_uses_frozen_s3_catalog(lambda_name, region, pointer_key)
-    caller_arn = env("SPUR_CONTEXT_SMOKE_CALLER_ARN", caller_identity_arn(region))
+def normalize_pointer_key(pointer_key: str) -> str:
+    normalized = pointer_key.strip("/")
+    if not normalized:
+        raise SmokeFailure("SPUR_CONTEXT_SMOKE_SNAPSHOT_POINTER_KEY must not be empty")
+    return normalized
+
+
+def run_preflight(config: SmokeConfig) -> int:
+    print(f"[context-smoke] preflight lambda={config.lambda_name} region={config.region}")
+    print(f"[context-smoke] source_bucket={config.source_bucket} data_bucket={config.data_bucket}")
+    caller_arn = caller_identity_arn(config.region)
+    print(f"[context-smoke] aws caller={caller_arn}")
+    verify_serving_uses_frozen_s3_catalog(
+        config.lambda_name,
+        config.region,
+        config.pointer_key,
+        allow_non_pointer_snapshot=False,
+    )
+    print("[context-smoke] preflight ok")
+    return 0
+
+
+def run_full_smoke(config: SmokeConfig) -> int:
+    print(f"[context-smoke] run_id={config.run_id}")
+    print(f"[context-smoke] package={config.package} revision={config.revision}")
+    print(f"[context-smoke] lambda={config.lambda_name} region={config.region}")
+
+    verify_serving_uses_frozen_s3_catalog(
+        config.lambda_name,
+        config.region,
+        config.pointer_key,
+        allow_non_pointer_snapshot=env("SPUR_CONTEXT_SMOKE_ALLOW_NON_POINTER_SNAPSHOT", "0")
+        == "1",
+    )
+    caller_arn = env("SPUR_CONTEXT_SMOKE_CALLER_ARN", caller_identity_arn(config.region))
 
     with tempfile.TemporaryDirectory(prefix="spur-context-smoke-") as tmp:
         tmp_path = pathlib.Path(tmp)
-        archive = write_fixture_tarball(tmp_path, package, revision)
+        archive = write_fixture_tarball(tmp_path, config.package, config.revision)
         source_key = upload_fixture_source(
             archive=archive,
-            bucket=source_bucket,
-            prefix=s3_prefix,
-            run_id=run_id,
-            region=region,
+            bucket=config.source_bucket,
+            prefix=config.s3_prefix,
+            run_id=config.run_id,
+            region=config.region,
         )
-        source_url = presign_fixture_source(source_bucket, source_key, region)
+        source_url = presign_fixture_source(config.source_bucket, source_key, config.region)
 
-        invoker = LambdaInvoker(lambda_name=lambda_name, region=region, caller_arn=caller_arn)
+        invoker = LambdaInvoker(
+            lambda_name=config.lambda_name, region=config.region, caller_arn=caller_arn
+        )
         index_response = invoker.call_tool(
             "external_index",
             {
-                "source": source,
-                "package": package,
-                "revision": revision,
+                "source": config.source,
+                "package": config.package,
+                "revision": config.revision,
                 "source_url": source_url,
                 "source_kind": "tarball",
                 "force": True,
@@ -96,23 +177,34 @@ def main() -> int:
         status = wait_for_complete_job(
             invoker=invoker,
             job_id=job_id,
-            timeout_seconds=timeout_seconds,
-            poll_seconds=poll_seconds,
+            timeout_seconds=config.timeout_seconds,
+            poll_seconds=config.poll_seconds,
         )
         assert_nonzero_embeddings(status)
         assert_medallion_objects(
-            bucket=data_bucket,
-            source=source,
-            package=package,
-            revision=revision,
-            pointer_key=pointer_key,
-            region=region,
+            bucket=config.data_bucket,
+            source=config.source,
+            package=config.package,
+            revision=config.revision,
+            pointer_key=config.pointer_key,
+            region=config.region,
         )
-        assert_serving_queries(invoker, source, package, revision, run_id)
+        assert_serving_queries(
+            invoker, config.source, config.package, config.revision, config.run_id
+        )
 
         print("[context-smoke] ok")
         if env("SPUR_CONTEXT_SMOKE_CLEANUP_SOURCE", "0") == "1":
-            run(["aws", "s3", "rm", f"s3://{source_bucket}/{source_key}", "--region", region])
+            run(
+                [
+                    "aws",
+                    "s3",
+                    "rm",
+                    f"s3://{config.source_bucket}/{source_key}",
+                    "--region",
+                    config.region,
+                ]
+            )
     return 0
 
 
@@ -179,7 +271,13 @@ class LambdaInvoker:
             out_path.unlink(missing_ok=True)
 
 
-def verify_serving_uses_frozen_s3_catalog(lambda_name: str, region: str, pointer_key: str) -> None:
+def verify_serving_uses_frozen_s3_catalog(
+    lambda_name: str,
+    region: str,
+    pointer_key: str,
+    *,
+    allow_non_pointer_snapshot: bool,
+) -> None:
     config = run_json(
         [
             "aws",
@@ -202,8 +300,18 @@ def verify_serving_uses_frozen_s3_catalog(lambda_name: str, region: str, pointer
         raise SmokeFailure(
             "serving Lambda must not use SPUR_CATALOG_DSN/Postgres; Postgres is ingest-only"
         )
-    if env("SPUR_CONTEXT_SMOKE_ALLOW_NON_POINTER_SNAPSHOT", "0") != "1":
+    if allow_non_pointer_snapshot:
+        print(
+            "[context-smoke] allowing non-pointer snapshot because "
+            "SPUR_CONTEXT_SMOKE_ALLOW_NON_POINTER_SNAPSHOT=1"
+        )
+    else:
         expected_suffix = "/" + pointer_key.strip("/")
+        if not catalog_uri.endswith(".json"):
+            raise SmokeFailure(
+                "serving Lambda SPUR_CATALOG_S3_URI must be an S3 frozen snapshot pointer "
+                f"JSON, got {catalog_uri}"
+            )
         if not catalog_uri.endswith(expected_suffix):
             raise SmokeFailure(
                 f"serving Lambda SPUR_CATALOG_S3_URI must end with {expected_suffix}, got {catalog_uri}"
@@ -344,16 +452,47 @@ def assert_medallion_objects(
     pointer_key: str,
     region: str,
 ) -> None:
-    bronze_key = "bronze/{source}/{package}/{revision}/source.tar.gz".format(
+    bronze_key = BRONZE_SOURCE_KEY_TEMPLATE.format(
         source=source, package=package, revision=revision
     )
-    silver_prefix = "silver/{source}/{package}/{revision}/".format(
-        source=source, package=package, revision=revision
-    )
+    silver_prefix = silver_artifact_revision_prefix(source, package, revision)
     assert_s3_object(bucket, bronze_key, region)
-    assert_s3_prefix(bucket, silver_prefix, region)
+    assert_silver_artifact_manifest(bucket, silver_prefix, source, package, revision, region)
     assert_s3_object(bucket, pointer_key, region)
     print("[context-smoke] medallion objects present")
+
+
+def silver_artifact_revision_prefix(source: str, package: str, revision: str) -> str:
+    return f"silver/{source}/{package}/{revision}/"
+
+
+def assert_silver_artifact_manifest(
+    bucket: str,
+    silver_prefix: str,
+    source: str,
+    package: str,
+    revision: str,
+    region: str,
+) -> None:
+    keys = list_s3_keys(bucket, silver_prefix, region)
+    for key in keys:
+        if not key.startswith(silver_prefix):
+            continue
+        relative = key[len(silver_prefix) :]
+        parts = relative.split("/")
+        if len(parts) == 2 and parts[0] and parts[1] == "manifest.json":
+            print(f"[context-smoke] silver manifest=s3://{bucket}/{key}")
+            return
+    expected = SILVER_MANIFEST_KEY_TEMPLATE.format(
+        source=source,
+        package=package,
+        revision=revision,
+        builder_version="<builder-version>",
+    )
+    raise SmokeFailure(
+        f"expected silver artifact manifest at s3://{bucket}/{expected}; "
+        f"found {json.dumps(keys[:10])}"
+    )
 
 
 def assert_serving_queries(
@@ -430,6 +569,12 @@ def assert_s3_object(bucket: str, key: str, region: str) -> None:
 
 
 def assert_s3_prefix(bucket: str, prefix: str, region: str) -> None:
+    keys = list_s3_keys(bucket, prefix, region)
+    if not keys:
+        raise SmokeFailure(f"expected at least one object under s3://{bucket}/{prefix}")
+
+
+def list_s3_keys(bucket: str, prefix: str, region: str) -> list[str]:
     result = run_json(
         [
             "aws",
@@ -440,13 +585,12 @@ def assert_s3_prefix(bucket: str, prefix: str, region: str) -> None:
             "--prefix",
             prefix,
             "--max-items",
-            "1",
+            "1000",
             "--region",
             region,
         ]
     )
-    if not result.get("Contents"):
-        raise SmokeFailure(f"expected at least one object under s3://{bucket}/{prefix}")
+    return [str(item.get("Key") or "") for item in result.get("Contents") or [] if item.get("Key")]
 
 
 def require_json_string(value: dict[str, Any], key: str) -> str:
@@ -483,6 +627,11 @@ def require_env(name: str) -> str:
     return value
 
 
+def require_aws_cli() -> None:
+    if shutil.which("aws") is None:
+        raise SmokeFailure("aws CLI is required")
+
+
 def env(name: str, default: str | None = None) -> str:
     value = os.environ.get(name)
     if value is None or value.strip() == "":
@@ -491,9 +640,6 @@ def env(name: str, default: str | None = None) -> str:
 
 
 if __name__ == "__main__":
-    if shutil.which("aws") is None:
-        print("[context-smoke] aws CLI is required", file=sys.stderr)
-        raise SystemExit(2)
     try:
         raise SystemExit(main())
     except SmokeFailure as error:
