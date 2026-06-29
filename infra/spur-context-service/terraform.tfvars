@@ -1,9 +1,28 @@
+# Placeholder-only defaults. Deployments should pass env/<environment>.tfvars
+# explicitly through deploy.sh or terraform -var-file; do not commit real
+# account, network, image, or secret values here.
+
 aws_region = "ap-southeast-5"
-vpc_id     = "vpc-09cf36dda830b0acf"
+
+lambda_memory_mb          = 2048
+lambda_timeout_sec        = 30
+concurrent_warm_instances = 0
+
+api_throttle_rate_limit              = 20
+api_throttle_burst_limit             = 40
+index_rate_limit_per_minute          = 10
+index_max_concurrent_jobs_per_caller = 2
+context_max_tarball_bytes            = 524288000
+context_max_git_bytes                = 2147483648
+context_max_build_seconds            = 1800
+allowed_source_domains               = []
+
+vpc_id = "vpc-xxxxxxxx"
+
 worker_subnets = [
-  "subnet-0786603110b1af180",
-  "subnet-03e3cdf70f69ab456",
-  "subnet-0e57004af78597f73",
+  "subnet-xxxxxxxx",
+  "subnet-yyyyyyyy",
 ]
-worker_ecr_image    = "065285885105.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker:latest"
-worker_lambda_image = "065285885105.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker-lambda:latest"
+
+worker_ecr_image    = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker:latest"
+worker_lambda_image = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker-lambda:latest"
