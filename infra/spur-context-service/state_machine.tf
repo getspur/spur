@@ -14,9 +14,10 @@ resource "aws_sfn_state_machine" "index_build" {
       worker_taskdef_arn             = aws_ecs_task_definition.worker.arn
       worker_lambda_arn              = aws_lambda_alias.worker_live.arn
       worker_lambda_timeout_sec      = var.worker_lambda_timeout_sec
+      worker_ecs_timeout_sec         = var.context_max_build_seconds + 900
       index_jobs_table_name          = aws_dynamodb_table.index_jobs.name
       catalog_leases_table_name      = aws_dynamodb_table.catalog_leases.name
-      catalog_s3_uri                 = var.catalog_s3_uri
+      catalog_dsn                    = local.aurora_catalog_dsn
       context_ducklake_data_path     = local.context_ducklake_data_path
       worker_checkpoint_uri_template = local.worker_checkpoint_uri_template
       subnets_json                   = jsonencode(var.worker_subnets)
@@ -41,5 +42,24 @@ resource "aws_security_group" "worker" {
 
   tags = {
     Name = "spur-context-worker"
+  }
+}
+
+# Security group for Aurora — Postgres is reachable only from worker tasks.
+resource "aws_security_group" "catalog_db" {
+  name        = "spur-context-catalog-db"
+  description = "Aurora Postgres ingest catalog access"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description     = "Postgres from indexing workers"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.worker.id]
+  }
+
+  tags = {
+    Name = "spur-context-catalog-db"
   }
 }

@@ -3,6 +3,56 @@
 -- CREATE TABLE IF NOT EXISTS is idempotent. ALTER TABLE SET PARTITIONED BY
 -- is also idempotent in DuckLake (no-op if already partitioned).
 
+CREATE SCHEMA IF NOT EXISTS bronze;
+CREATE SCHEMA IF NOT EXISTS silver;
+CREATE SCHEMA IF NOT EXISTS gold;
+
+CREATE TABLE IF NOT EXISTS bronze.raw_sources (
+    source VARCHAR,
+    package VARCHAR,
+    version VARCHAR,
+    revision_kind VARCHAR,
+    semver_major INTEGER,
+    semver_minor INTEGER,
+    semver_patch INTEGER,
+    source_kind VARCHAR,
+    source_url VARCHAR,
+    s3_uri VARCHAR,
+    content_sha256 VARCHAR,
+    bytes UBIGINT,
+    fetched_at TIMESTAMP,
+    fetch_status VARCHAR
+);
+ALTER TABLE bronze.raw_sources ADD COLUMN IF NOT EXISTS source_url VARCHAR;
+ALTER TABLE bronze.raw_sources ADD COLUMN IF NOT EXISTS s3_uri VARCHAR;
+ALTER TABLE bronze.raw_sources ADD COLUMN IF NOT EXISTS bytes UBIGINT;
+ALTER TABLE bronze.raw_sources ADD COLUMN IF NOT EXISTS fetch_status VARCHAR;
+ALTER TABLE bronze.raw_sources SET PARTITIONED BY (source, package);
+
+CREATE TABLE IF NOT EXISTS silver.graph_artifacts (
+    source VARCHAR,
+    package VARCHAR,
+    version VARCHAR,
+    revision_kind VARCHAR,
+    semver_major INTEGER,
+    semver_minor INTEGER,
+    semver_patch INTEGER,
+    bronze_content_sha256 VARCHAR,
+    builder_version VARCHAR,
+    graph_content_hash VARCHAR,
+    artifact_s3_prefix VARCHAR,
+    manifest_uri VARCHAR,
+    manifest_schema_hash VARCHAR,
+    node_count UBIGINT,
+    edge_count UBIGINT,
+    file_count UBIGINT,
+    embedding_count UBIGINT,
+    built_at TIMESTAMP,
+    build_status VARCHAR
+);
+ALTER TABLE silver.graph_artifacts ADD COLUMN IF NOT EXISTS build_status VARCHAR;
+ALTER TABLE silver.graph_artifacts SET PARTITIONED BY (source, package);
+
 CREATE TABLE IF NOT EXISTS nodes (
     stable_symbol_id VARCHAR,
     package VARCHAR,
@@ -207,8 +257,20 @@ CREATE TABLE IF NOT EXISTS package_catalog (
     indexed_at TIMESTAMP,
     index_status VARCHAR,
     embeddings_status VARCHAR,
-    row_counts JSON
+    row_counts JSON,
+    generation BIGINT,
+    bronze_content_sha256 VARCHAR,
+    silver_graph_content_hash VARCHAR,
+    builder_version VARCHAR,
+    translate_schema_version VARCHAR,
+    embed_text_version VARCHAR
 );
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS bronze_content_sha256 VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS silver_graph_content_hash VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS builder_version VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS translate_schema_version VARCHAR;
+ALTER TABLE package_catalog ADD COLUMN IF NOT EXISTS embed_text_version VARCHAR;
 ALTER TABLE package_catalog SET PARTITIONED BY (source, package);
 
 CREATE TABLE IF NOT EXISTS refs (
@@ -219,3 +281,54 @@ CREATE TABLE IF NOT EXISTS refs (
     updated_at TIMESTAMP
 );
 ALTER TABLE refs SET PARTITIONED BY (source, package);
+
+CREATE TABLE IF NOT EXISTS gold.nodes AS SELECT * FROM nodes LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.edges AS SELECT * FROM edges LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.edges_unresolved AS SELECT * FROM edges_unresolved LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.files AS SELECT * FROM files LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.file_manifests AS SELECT * FROM file_manifests LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.section_bodies AS SELECT * FROM section_bodies LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.symbol_embeddings AS SELECT * FROM symbol_embeddings LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.commits AS SELECT * FROM commits LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.symbol_snapshots AS SELECT * FROM symbol_snapshots LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.temporal_edges AS SELECT * FROM temporal_edges LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.package_catalog AS SELECT * FROM package_catalog LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.refs AS SELECT * FROM refs LIMIT 0;
+CREATE TABLE IF NOT EXISTS gold.generation_allocator (
+    allocator_id INTEGER,
+    next_generation BIGINT
+);
+
+ALTER TABLE gold.nodes ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.edges ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.edges_unresolved ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.files ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.file_manifests ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.section_bodies ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.symbol_embeddings ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.commits ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.symbol_snapshots ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.temporal_edges ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.nodes SET PARTITIONED BY (source, package);
+ALTER TABLE gold.edges SET PARTITIONED BY (source, package);
+ALTER TABLE gold.edges_unresolved SET PARTITIONED BY (source, package);
+ALTER TABLE gold.files SET PARTITIONED BY (source, package);
+ALTER TABLE gold.file_manifests SET PARTITIONED BY (source, package);
+ALTER TABLE gold.section_bodies SET PARTITIONED BY (source, package);
+ALTER TABLE gold.symbol_embeddings SET PARTITIONED BY (source, package);
+ALTER TABLE gold.commits SET PARTITIONED BY (source, package);
+ALTER TABLE gold.symbol_snapshots SET PARTITIONED BY (source, package);
+ALTER TABLE gold.temporal_edges SET PARTITIONED BY (source, package);
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS generation BIGINT;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS bronze_content_sha256 VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS silver_graph_content_hash VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS builder_version VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS translate_schema_version VARCHAR;
+ALTER TABLE gold.package_catalog ADD COLUMN IF NOT EXISTS embed_text_version VARCHAR;
+ALTER TABLE gold.package_catalog SET PARTITIONED BY (source, package);
+ALTER TABLE gold.refs SET PARTITIONED BY (source, package);
+INSERT INTO gold.generation_allocator (allocator_id, next_generation)
+SELECT 1, 1
+WHERE NOT EXISTS (
+    SELECT 1 FROM gold.generation_allocator WHERE allocator_id = 1
+);

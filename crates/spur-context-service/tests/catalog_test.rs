@@ -1,40 +1,30 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use duckdb::Connection;
-use spur_context_service::catalog::CatalogResolver;
+use spur_context_service::catalog::{
+    compact_gold_and_export_snapshot, CatalogResolver, SnapshotCleanupOptions,
+};
 
 const SOURCE: &str = "registry:crates-io";
 const PACKAGE: &str = "serde";
 
 #[test]
-fn init_catalog_sql_creates_expected_nodes_schema() -> Result<()> {
-    let root = unique_temp_dir("init-sql")?;
+fn catalog_tables_sql_creates_medallion_schemas_and_gold_catalog_columns() -> Result<()> {
+    let root = unique_temp_dir("catalog-tables-sql")?;
     fs::create_dir_all(root.join("data")).context("create ducklake data dir")?;
     let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
     let data_path = root.join("data").display().to_string();
 
-    let sql = include_str!("../sql/init_catalog.sql")
-        .replace("INSTALL postgres;", "INSTALL sqlite;")
-        .replace("LOAD postgres;", "LOAD sqlite;")
-        .replace("__CATALOG_DSN__", &escape_sql_literal(&catalog_dsn))
-        .replace("s3://spur-context/data/", &escape_sql_literal(&data_path));
-
     let conn = Connection::open_in_memory().context("open in-memory duckdb")?;
-    conn.execute_batch(&sql)
-        .context("execute init catalog sql")?;
-
-    let mut stmt = conn
-        .prepare("PRAGMA table_info('nodes')")
-        .context("inspect nodes schema")?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    attach_ducklake(&conn, &catalog_dsn, &data_path)?;
+    conn.execute_batch(include_str!("../sql/catalog_tables.sql"))
+        .context("execute catalog tables sql")?;
 
     assert_eq!(
-        columns,
+        columns_for(&conn, "gold", "nodes")?,
         [
             "stable_symbol_id",
             "package",
@@ -54,9 +44,103 @@ fn init_catalog_sql_creates_expected_nodes_schema() -> Result<()> {
             "symbol_kind",
             "anchor_hash",
             "enclosing_scope",
+            "generation",
         ]
     );
+
+    assert_eq!(table_exists(&conn, "bronze", "raw_sources")?, 1);
+    assert_eq!(table_exists(&conn, "silver", "graph_artifacts")?, 1);
+    assert_eq!(table_exists(&conn, "gold", "package_catalog")?, 1);
+
+    assert_eq!(
+        columns_for(&conn, "bronze", "raw_sources")?,
+        [
+            "source",
+            "package",
+            "version",
+            "revision_kind",
+            "semver_major",
+            "semver_minor",
+            "semver_patch",
+            "source_kind",
+            "source_url",
+            "s3_uri",
+            "content_sha256",
+            "bytes",
+            "fetched_at",
+            "fetch_status",
+        ]
+    );
+
+    for column in [
+        "generation",
+        "bronze_content_sha256",
+        "silver_graph_content_hash",
+        "builder_version",
+        "translate_schema_version",
+        "embed_text_version",
+    ] {
+        assert_eq!(
+            nullable_column_count(&conn, "gold", "package_catalog", column)?,
+            1,
+            "gold.package_catalog must have nullable column {column}"
+        );
+    }
+
+    for table in [
+        "nodes",
+        "edges",
+        "edges_unresolved",
+        "files",
+        "file_manifests",
+        "section_bodies",
+        "symbol_embeddings",
+        "commits",
+        "symbol_snapshots",
+        "temporal_edges",
+    ] {
+        assert_eq!(
+            nullable_column_count(&conn, "gold", table, "generation")?,
+            1,
+            "gold.{table} must carry generation for immutable publish builds"
+        );
+    }
     Ok(())
+}
+
+#[test]
+fn snapshot_cleanup_fence_rejects_windows_shorter_than_republish_lag() -> Result<()> {
+    let root = unique_temp_dir("cleanup-fence")?;
+    fs::create_dir_all(root.join("data")).context("create ducklake data dir")?;
+    let catalog_dsn = format!("sqlite:{}", root.join("catalog.sqlite").display());
+    let data_path = root.join("data").display().to_string();
+    initialize_catalog(&catalog_dsn, &data_path)?;
+
+    let err = compact_gold_and_export_snapshot(
+        &catalog_dsn,
+        &data_path,
+        SnapshotCleanupOptions {
+            older_than: Duration::from_secs(60),
+            republish_lag: Duration::from_secs(300),
+        },
+    )
+    .expect_err("cleanup older_than shorter than republish lag must be rejected");
+
+    assert!(
+        format!("{err:#}").contains("older_than must be >= republish_lag"),
+        "unexpected error: {err:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn duplicate_init_catalog_sql_is_removed_to_prevent_schema_drift() {
+    assert!(
+        !PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("sql/init_catalog.sql")
+            .exists(),
+        "catalog DDL must live only in sql/catalog_tables.sql"
+    );
 }
 
 #[test]
@@ -268,4 +352,54 @@ fn unique_temp_dir(name: &str) -> Result<PathBuf> {
 
 fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn table_exists(conn: &Connection, schema: &str, table: &str) -> Result<i64> {
+    conn.query_row(
+        r"
+        SELECT COUNT(*)
+        FROM information_schema.tables
+        WHERE table_schema = ? AND table_name = ?
+        ",
+        [schema, table],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("check table exists {schema}.{table}"))
+}
+
+fn columns_for(conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            r"
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = ? AND table_name = ?
+            ORDER BY ordinal_position
+            ",
+        )
+        .with_context(|| format!("inspect columns for {schema}.{table}"))?;
+    stmt.query_map([schema, table], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("collect columns for {schema}.{table}"))
+}
+
+fn nullable_column_count(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<i64> {
+    conn.query_row(
+        r"
+        SELECT COUNT(*)
+        FROM information_schema.columns
+        WHERE table_schema = ?
+          AND table_name = ?
+          AND column_name = ?
+          AND is_nullable = 'YES'
+        ",
+        [schema, table, column],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("check nullable column {schema}.{table}.{column}"))
 }
