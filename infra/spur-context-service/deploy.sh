@@ -119,7 +119,7 @@ COPY . .
 RUN scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release
 RUN scripts/spur-cargo --workdir crates/spur-context-service build --features worker --release
 RUN scripts/spur-cargo --workdir crates/spur-context-service build --features worker-lambda --release
-RUN scripts/spur-cargo build -p spur-cli --release
+RUN scripts/spur-cargo build -p spur-cli --release --no-default-features --features worker-no-embed
 
 RUN mkdir -p /out \
     && cp crates/spur-context-service/target/release/spur-context-service /out/bootstrap \
@@ -281,7 +281,7 @@ build_spur_cli() {
     log "building spur CLI (portable arm64 neoverse-n1 for worker image)..."
     cd "$REPO_ROOT"
     run_graviton2_safe_cargo "spur CLI worker image dependency" \
-        build -p spur-cli --release
+        build -p spur-cli --release --no-default-features --features worker-no-embed
 }
 
 package_zip() {
