@@ -122,17 +122,17 @@ licenseseat = "=0.5.3"
 spur-acp = { path = "crates/spur-acp" }
 spur-blob-store = { path = "crates/spur-blob-store" }
 spur-mcp = { path = "crates/spur-mcp" }
-spur-core = { path = "crates/spur-core" }
+spur-core = { path = "crates/spur-core", default-features = false }
 spur-pm = { path = "crates/spur-pm" }
 spur-worktree = { path = "crates/spur-worktree" }
 spur-cost = { path = "crates/spur-cost" }
 spur-license = { path = "crates/spur-license" }
-spur-tui = { path = "crates/spur-tui" }
-spur-interactive = { path = "crates/spur-interactive" }
+spur-tui = { path = "crates/spur-tui", default-features = false }
+spur-interactive = { path = "crates/spur-interactive", default-features = false }
 spur-bot = { path = "crates/spur-bot" }
 spur-context = { path = "crates/spur-context" }
 spur-context-service = { path = "crates/spur-context-service" }
-spur-graph = { path = "crates/spur-graph" }
+spur-graph = { path = "crates/spur-graph", default-features = false }
 spur-analyst = { path = "crates/spur-analyst", default-features = false }
 
 

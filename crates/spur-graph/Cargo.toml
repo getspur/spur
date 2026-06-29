@@ -11,6 +11,8 @@ autobenches = false
 dist = false
 
 [features]
+default = ["embed"]
+embed = ["dep:fastembed"]
 perf-gates = []
 test-support = []
 
@@ -33,7 +35,7 @@ arrow-schema = { workspace = true }
 base64 = "0.22"
 # 5.8.0 already includes EmbeddingGemma300M. Newer 5.x releases pull ORT
 # rc.11/rc.12 binaries that require newer Linux runtime symbols on the build VM.
-fastembed = { version = "=5.8.0", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries"] }
+fastembed = { version = "=5.8.0", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries"], optional = true }
 lance-index = { workspace = true }
 lancedb = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
