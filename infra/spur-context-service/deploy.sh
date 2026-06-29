@@ -28,7 +28,8 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 
 DUCKDB_VERSION="1.5.4"
 EXT_PLATFORM="linux_arm64"
-EXTENSIONS=("httpfs" "ducklake")
+EXTENSIONS=("httpfs" "ducklake" "postgres")
+WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"
 
 # Worker container config.  The image is built on the remote VM (x86_64 for
 # Fargate compatibility) and pushed to ECR.
@@ -243,6 +244,13 @@ download_extensions() {
     done
 }
 
+copy_worker_extensions() {
+    local context_dir="$1"
+    local dest="$context_dir/duckdb-extensions"
+    mkdir -p "$dest"
+    cp -R "$BUILD_DIR/.duckdb/extensions/." "$dest/"
+}
+
 build_binary() {
     if [[ "${BUILD_MODE:-remote}" == "self-contained" ]]; then
         ensure_self_contained_artifacts
@@ -311,13 +319,18 @@ build_worker_lambda() {
 
 write_worker_image_dockerfile() {
     local dockerfile="$1"
-    cat > "$dockerfile" <<'DOCKERFILE'
+    cat > "$dockerfile" <<DOCKERFILE
 FROM debian:bookworm-slim
 LABEL io.spur.cpu-baseline="graviton2-safe"
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+ENV SPUR_CONTEXT_DUCKDB_EXTENSION_DIR=/opt/duckdb/extensions
 WORKDIR /workspace
+COPY duckdb-extensions/ /opt/duckdb/extensions/
 COPY spur-context-worker /usr/local/bin/spur-context-worker
 COPY spur /usr/local/bin/spur
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/httpfs.duckdb_extension
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/ducklake.duckdb_extension
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/postgres.duckdb_extension
 RUN /usr/local/bin/spur --version
 RUN /usr/local/bin/spur-context-worker || true
 CMD ["/usr/local/bin/spur-context-worker"]
@@ -326,13 +339,18 @@ DOCKERFILE
 
 write_worker_lambda_image_dockerfile() {
     local dockerfile="$1"
-    cat > "$dockerfile" <<'DOCKERFILE'
+    cat > "$dockerfile" <<DOCKERFILE
 FROM debian:bookworm-slim
 LABEL io.spur.cpu-baseline="graviton2-safe"
 RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+ENV SPUR_CONTEXT_DUCKDB_EXTENSION_DIR=/opt/duckdb/extensions
 WORKDIR /workspace
+COPY duckdb-extensions/ /opt/duckdb/extensions/
 COPY spur-context-worker-lambda /usr/local/bin/spur-context-worker-lambda
 COPY spur /usr/local/bin/spur
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/httpfs.duckdb_extension
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/ducklake.duckdb_extension
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/postgres.duckdb_extension
 RUN /usr/local/bin/spur --version
 RUN /usr/local/bin/spur-context-worker-lambda --smoke
 ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]
@@ -353,6 +371,8 @@ build_local_worker_images() {
     cp "$SELF_CONTAINED_EXPORT_DIR/spur" "$worker_context/spur"
     cp "$SELF_CONTAINED_EXPORT_DIR/spur-context-worker-lambda" "$worker_lambda_context/spur-context-worker-lambda"
     cp "$SELF_CONTAINED_EXPORT_DIR/spur" "$worker_lambda_context/spur"
+    copy_worker_extensions "$worker_context"
+    copy_worker_extensions "$worker_lambda_context"
     chmod +x \
         "$worker_context/spur-context-worker" \
         "$worker_context/spur" \
@@ -412,18 +432,11 @@ build_and_push_worker_image() {
 
     local full_tag
     full_tag="$(ecr_image_tag "$WORKER_ECR_REPO")"
-    local worker_dockerfile="$BUILD_DIR/worker-image.Dockerfile"
-    cat > "$worker_dockerfile" <<'DOCKERFILE'
-FROM debian:bookworm-slim
-LABEL io.spur.cpu-baseline="graviton2-safe"
-RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
-WORKDIR /workspace
-COPY spur-context-worker /usr/local/bin/spur-context-worker
-COPY spur /usr/local/bin/spur
-RUN /usr/local/bin/spur --version
-RUN /usr/local/bin/spur-context-worker || true
-CMD ["/usr/local/bin/spur-context-worker"]
-DOCKERFILE
+    local worker_context="$BUILD_DIR/worker-image-context"
+    local worker_dockerfile="$worker_context/Dockerfile"
+    mkdir -p "$worker_context"
+    copy_worker_extensions "$worker_context"
+    write_worker_image_dockerfile "$worker_dockerfile"
 
     # Build the Docker image entirely on the remote VM and push to ECR — no
     # local Docker needed. The VM has Docker installed via startup-aws.sh and
@@ -434,7 +447,8 @@ DOCKERFILE
     scripts/cloud-build/docker-build.sh \
         --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker)" \
         --remote-binary "$(remote_target_path target/release/spur)" \
-        --dockerfile "$worker_dockerfile" \
+        --context-dir "$worker_context" \
+        --dockerfile Dockerfile \
         --tag "$full_tag"
 
     smoke_worker_image "$full_tag"
@@ -451,24 +465,18 @@ build_and_push_worker_lambda_image() {
 
     local full_tag
     full_tag="$(ecr_image_tag "$WORKER_LAMBDA_ECR_REPO")"
-    local worker_lambda_dockerfile="$BUILD_DIR/worker-lambda-image.Dockerfile"
-    cat > "$worker_lambda_dockerfile" <<'DOCKERFILE'
-FROM debian:bookworm-slim
-LABEL io.spur.cpu-baseline="graviton2-safe"
-RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
-WORKDIR /workspace
-COPY spur-context-worker-lambda /usr/local/bin/spur-context-worker-lambda
-COPY spur /usr/local/bin/spur
-RUN /usr/local/bin/spur --version
-RUN /usr/local/bin/spur-context-worker-lambda --smoke
-ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]
-DOCKERFILE
+    local worker_lambda_context="$BUILD_DIR/worker-lambda-image-context"
+    local worker_lambda_dockerfile="$worker_lambda_context/Dockerfile"
+    mkdir -p "$worker_lambda_context"
+    copy_worker_extensions "$worker_lambda_context"
+    write_worker_lambda_image_dockerfile "$worker_lambda_dockerfile"
 
     cd "$REPO_ROOT"
     scripts/cloud-build/docker-build.sh \
         --remote-binary "$(remote_worktree_path crates/spur-context-service/target/release/spur-context-worker-lambda)" \
         --remote-binary "$(remote_target_path target/release/spur)" \
-        --dockerfile "$worker_lambda_dockerfile" \
+        --context-dir "$worker_lambda_context" \
+        --dockerfile Dockerfile \
         --tag "$full_tag"
 
     log "worker Lambda image pushed: $full_tag"
@@ -547,6 +555,7 @@ main() {
 
     # Build + push worker container image (unless --skip-worker).
     if [[ "$skip_worker" == "false" ]]; then
+        download_extensions
         build_spur_cli
         build_worker
         build_worker_lambda
