@@ -109,7 +109,8 @@ impl App {
             | Action::FocusWorkerInDashboard { .. }) => self.process_agents_focus(action),
 
             action @ (Action::SubmitReview { .. } | Action::SubmitReviewDispatch { .. }) => {
-                self.process_review(action)
+                let source_view = self.current_view.clone();
+                self.process_review(action, source_view)
             }
             Action::PermissionGrant(choice) => self.process_permission(choice),
 
