@@ -13,7 +13,8 @@
           "revision.$": "$.revision",
           "source.$": "$.source",
           "source_url.$": "$.source_url",
-          "source_kind.$": "$.source_kind"
+          "source_kind.$": "$.source_kind",
+          "limits.$": "$.limits"
         }
       },
       "ResultPath": "$.lambdaResult",
@@ -71,7 +72,7 @@
     "RunBuild": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
-      "TimeoutSeconds": 3600,
+      "TimeoutSeconds": ${worker_ecs_timeout_sec},
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
@@ -135,12 +136,20 @@
                   "Value": "${catalog_leases_table_name}"
                 },
                 {
-                  "Name": "SPUR_CATALOG_S3_URI",
-                  "Value": "${catalog_s3_uri}"
+                  "Name": "SPUR_CATALOG_DSN",
+                  "Value": "${catalog_dsn}"
                 },
                 {
                   "Name": "SPUR_CONTEXT_DUCKLAKE_DATA_PATH",
                   "Value": "${context_ducklake_data_path}"
+                },
+                {
+                  "Name": "SPUR_CONTEXT_MAX_SOURCE_BYTES",
+                  "Value.$": "States.Format('{}', $.limits.max_source_bytes)"
+                },
+                {
+                  "Name": "SPUR_CONTEXT_MAX_BUILD_SECONDS",
+                  "Value.$": "States.Format('{}', $.limits.max_build_seconds)"
                 },
                 {
                   "Name": "SPUR_CONTEXT_WORKER_CHECKPOINT_URI",
@@ -173,7 +182,7 @@
     "FallbackBuild": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
-      "TimeoutSeconds": 3600,
+      "TimeoutSeconds": ${worker_ecs_timeout_sec},
       "Parameters": {
         "Cluster": "${cluster_arn}",
         "TaskDefinition": "${worker_taskdef_arn}",
@@ -232,12 +241,20 @@
                   "Value": "${catalog_leases_table_name}"
                 },
                 {
-                  "Name": "SPUR_CATALOG_S3_URI",
-                  "Value": "${catalog_s3_uri}"
+                  "Name": "SPUR_CATALOG_DSN",
+                  "Value": "${catalog_dsn}"
                 },
                 {
                   "Name": "SPUR_CONTEXT_DUCKLAKE_DATA_PATH",
                   "Value": "${context_ducklake_data_path}"
+                },
+                {
+                  "Name": "SPUR_CONTEXT_MAX_SOURCE_BYTES",
+                  "Value.$": "States.Format('{}', $.limits.max_source_bytes)"
+                },
+                {
+                  "Name": "SPUR_CONTEXT_MAX_BUILD_SECONDS",
+                  "Value.$": "States.Format('{}', $.limits.max_build_seconds)"
                 },
                 {
                   "Name": "SPUR_CONTEXT_WORKER_CHECKPOINT_URI",

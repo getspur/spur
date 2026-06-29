@@ -17,15 +17,69 @@ variable "lambda_zip_path" {
 }
 
 variable "catalog_s3_uri" {
-  description = "S3 URI of the DuckLake catalog file"
+  description = "S3 URI of the frozen serving DuckLake snapshot pointer or snapshot file"
   type        = string
-  default     = "s3://spur-context/catalog/catalog.ducklake"
+  default     = "s3://spur-context/gold/catalog-snapshot/current.json"
 }
 
 variable "context_ducklake_data_path" {
   description = "DuckLake data path used by worker translate jobs. Defaults to s3://<bucket_name>/data/."
   type        = string
   default     = null
+}
+
+variable "aurora_cluster_identifier" {
+  description = "Aurora Serverless v2 cluster identifier for the live DuckLake ingest catalog"
+  type        = string
+  default     = "spur-context-catalog"
+}
+
+variable "aurora_database_name" {
+  description = "Postgres database name for the live DuckLake ingest catalog"
+  type        = string
+  default     = "spur_context"
+}
+
+variable "aurora_master_username" {
+  description = "Aurora master username. The password is generated and stored by RDS in Secrets Manager."
+  type        = string
+  default     = "spur_context"
+}
+
+variable "aurora_engine_version" {
+  description = "Aurora PostgreSQL engine version. Null lets RDS choose the regional default."
+  type        = string
+  default     = null
+}
+
+variable "aurora_subnets" {
+  description = "Private subnet IDs for Aurora. Defaults to worker_subnets when null."
+  type        = list(string)
+  default     = null
+}
+
+variable "aurora_max_acu" {
+  description = "Maximum Aurora Serverless v2 capacity in ACUs"
+  type        = number
+  default     = 4
+}
+
+variable "aurora_seconds_until_auto_pause" {
+  description = "Seconds of inactivity before Aurora Serverless v2 auto-pauses at 0 ACU"
+  type        = number
+  default     = 300
+}
+
+variable "aurora_backup_retention_days" {
+  description = "Aurora backup retention period in days"
+  type        = number
+  default     = 7
+}
+
+variable "aurora_deletion_protection" {
+  description = "Enable deletion protection on the Aurora catalog cluster"
+  type        = bool
+  default     = true
 }
 
 variable "index_jobs_table_name" {
@@ -56,6 +110,56 @@ variable "concurrent_warm_instances" {
   description = "Provisioned concurrency (0 = disabled, eliminates cold start when > 0)"
   type        = number
   default     = 0
+}
+
+# ─── Public API Abuse Controls ────────────────────────────────────────────────
+
+variable "api_throttle_rate_limit" {
+  description = "API Gateway account-level route throttle rate in requests per second"
+  type        = number
+  default     = 20
+}
+
+variable "api_throttle_burst_limit" {
+  description = "API Gateway account-level route throttle burst"
+  type        = number
+  default     = 40
+}
+
+variable "index_rate_limit_per_minute" {
+  description = "Per authenticated caller external_index fixed-window rate limit"
+  type        = number
+  default     = 10
+}
+
+variable "index_max_concurrent_jobs_per_caller" {
+  description = "Maximum queued/running external_index jobs per authenticated caller"
+  type        = number
+  default     = 2
+}
+
+variable "context_max_tarball_bytes" {
+  description = "Maximum downloaded tarball bytes for external_index"
+  type        = number
+  default     = 524288000
+}
+
+variable "context_max_git_bytes" {
+  description = "Maximum fetched git source tree bytes for external_index"
+  type        = number
+  default     = 2147483648
+}
+
+variable "context_max_build_seconds" {
+  description = "Maximum spur graph build runtime for an indexing worker"
+  type        = number
+  default     = 1800
+}
+
+variable "allowed_source_domains" {
+  description = "Optional source_url domain allow-list for external_index; empty allows public non-private domains"
+  type        = list(string)
+  default     = []
 }
 
 # ─── On-Demand Indexing ──────────────────────────────────────────────────────
@@ -105,6 +209,10 @@ variable "worker_lambda_provisioned_concurrency" {
 }
 
 locals {
-  context_ducklake_data_path     = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/data/")
-  worker_checkpoint_uri_template = "s3://${var.bucket_name}/jobs/{}/checkpoint.json"
+  context_ducklake_data_path      = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/data/")
+  worker_checkpoint_uri_template  = "s3://${var.bucket_name}/jobs/{}/checkpoint.json"
+  aurora_subnet_ids               = var.aurora_subnets != null ? var.aurora_subnets : var.worker_subnets
+  aurora_catalog_dsn              = "postgres:host=${aws_rds_cluster.catalog.endpoint} port=${aws_rds_cluster.catalog.port} dbname=${var.aurora_database_name} user=${var.aurora_master_username} sslmode=require"
+  aurora_master_secret_arn        = aws_rds_cluster.catalog.master_user_secret[0].secret_arn
+  aurora_master_password_valuearn = "${local.aurora_master_secret_arn}:password::"
 }
