@@ -39,6 +39,62 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
+resource "aws_iam_role" "source_fetcher_lambda" {
+  name = "spur-context-source-fetcher-lambda"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "source_fetcher_lambda" {
+  name = "SourceFetcherAccess"
+  role = aws_iam_role.source_fetcher_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.source_fetcher_lambda.arn}:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:AbortMultipartUpload"
+        ]
+        Resource = "${aws_s3_bucket.data.arn}/fetch/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.data.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "fetch",
+              "fetch/*"
+            ]
+          }
+        }
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "lambda_catalog_secret" {
   name = "CatalogSecretAccess"
   role = aws_iam_role.lambda.id
@@ -211,6 +267,23 @@ resource "aws_iam_role_policy" "sfn_lambda" {
       Resource = [
         aws_lambda_function.worker.arn,
         aws_lambda_alias.worker_live.arn
+      ]
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "sfn_source_fetcher_lambda" {
+  name = "LambdaInvokeSourceFetcher"
+  role = aws_iam_role.sfn.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["lambda:InvokeFunction"]
+      Resource = [
+        aws_lambda_function.source_fetcher.arn,
+        aws_lambda_alias.source_fetcher_live.arn
       ]
     }]
   })
