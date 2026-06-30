@@ -427,22 +427,20 @@ def test_state_machine_fetches_source_and_normalizes_worker_input():
         "function:spur-context-source-fetcher:live"
     )
     assert fetch_source["ResultPath"] == "$.fetchResult"
+    # No Catch: a deterministic fetcher failure (it throws) fails the execution
+    # and does NOT route to the VPC worker. The fetcher's success payload has no
+    # `status` field, so FetchSource goes straight to PrepareFetchedWorkerInput
+    # (a Choice on a missing path would be a runtime error).
     assert "Catch" not in fetch_source
-    assert fetch_source["Next"] == "CheckFetchSource"
+    assert fetch_source["Next"] == "PrepareFetchedWorkerInput"
     assert fetch_source["Retry"][0]["ErrorEquals"] == [
         "Lambda.ServiceException",
         "Lambda.AWSLambdaException",
         "Lambda.SdkClientException",
         "Lambda.TooManyRequestsException",
     ]
-
-    assert states["CheckFetchSource"]["Default"] == "PrepareFetchedWorkerInput"
-    assert states["CheckFetchSource"]["Choices"][0] == {
-        "Variable": "$.fetchResult.Payload.status",
-        "StringEquals": "failed",
-        "Next": "FetchSourceFailed",
-    }
-    assert states["FetchSourceFailed"]["Type"] == "Fail"
+    assert "CheckFetchSource" not in states
+    assert "FetchSourceFailed" not in states
 
     original_worker_input = states["PrepareOriginalWorkerInput"]["Parameters"]
     assert original_worker_input["source_url.$"] == "$.source_url"
