@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, package, and deploy spur-context-service Lambda + indexing worker.
+# Build, package, and deploy spur-context-service Lambda, indexing worker, and source fetcher.
 #
 # Usage:
 #   ./deploy.sh                    # build Lambda + worker, terraform apply
@@ -8,7 +8,7 @@
 #   ./deploy.sh --local-zip path   # skip Lambda build, use existing zip
 #   ./deploy.sh --skip-worker      # skip worker image build/push
 #   ./deploy.sh --skip-worker --package-only # build Lambda zip, skip terraform
-#   ./deploy.sh --worker-image-only # build/push worker images, print ECS image URI
+#   ./deploy.sh --worker-image-only # build/push worker/fetcher images, print ECS image URI
 #   ./deploy.sh --build-mode self-contained --no-push --worker-image-only
 #
 # Prerequisites:
@@ -33,16 +33,19 @@ EXT_PLATFORM="linux_arm64"
 # the alias to the postgres_scanner file, so bundling postgres_scanner makes the
 # offline `LOAD postgres` succeed.
 EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "sqlite_scanner" "aws" "parquet" "json")
+# shellcheck disable=SC2034
 WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"
 
 # Worker container config.  The image is built on the remote VM (x86_64 for
 # Fargate compatibility) and pushed to ECR.
 WORKER_ECR_REPO="spur-context-worker"
 WORKER_LAMBDA_ECR_REPO="spur-context-worker-lambda"
+SOURCE_FETCHER_LAMBDA_ECR_REPO="spur-context-source-fetcher"
 WORKER_IMAGE_TAG="latest"
 AWS_REGION_VAL="$(cd "$INFRA_DIR" && terraform output -raw aws_region 2>/dev/null || echo ap-southeast-5)"
 WORKER_IMAGE_URI=""
 WORKER_LAMBDA_IMAGE_URI=""
+SOURCE_FETCHER_LAMBDA_IMAGE_URI=""
 SELF_CONTAINED_EXPORT_DIR=""
 
 log() { echo "[deploy] $*" >&2; }
@@ -119,12 +122,14 @@ COPY . .
 RUN scripts/spur-cargo --workdir crates/spur-context-service build --features lambda --release
 RUN scripts/spur-cargo --workdir crates/spur-context-service build --features worker --release
 RUN scripts/spur-cargo --workdir crates/spur-context-service build --features worker-lambda --release
+RUN scripts/spur-cargo build -p spur-context-fetcher --release
 RUN scripts/spur-cargo build -p spur-cli --release --no-default-features --features worker-no-embed
 
 RUN mkdir -p /out \
     && cp crates/spur-context-service/target/release/spur-context-service /out/bootstrap \
     && cp crates/spur-context-service/target/release/spur-context-worker /out/spur-context-worker \
     && cp crates/spur-context-service/target/release/spur-context-worker-lambda /out/spur-context-worker-lambda \
+    && cp target/release/spur-context-fetcher-lambda /out/spur-context-fetcher-lambda \
     && cp target/release/spur /out/spur
 
 FROM scratch AS artifacts
@@ -321,6 +326,18 @@ build_worker_lambda() {
         --workdir crates/spur-context-service build --features worker-lambda --release
 }
 
+build_source_fetcher_lambda() {
+    if [[ "${BUILD_MODE:-remote}" == "self-contained" ]]; then
+        ensure_self_contained_artifacts
+        return
+    fi
+
+    log "building source fetcher Lambda binary (arm64 neoverse-n1)..."
+    cd "$REPO_ROOT"
+    run_graviton2_safe_cargo "source fetcher Lambda image binary" \
+        build -p spur-context-fetcher --release
+}
+
 write_worker_image_dockerfile() {
     local dockerfile="$1"
     cat > "$dockerfile" <<DOCKERFILE
@@ -365,38 +382,60 @@ ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]
 DOCKERFILE
 }
 
+write_source_fetcher_lambda_image_dockerfile() {
+    local dockerfile="$1"
+    cat > "$dockerfile" <<DOCKERFILE
+FROM debian:bookworm-slim
+LABEL io.spur.cpu-baseline="graviton2-safe"
+RUN apt-get update && apt-get install -y --no-install-recommends git curl tar unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+ENV GIT_TERMINAL_PROMPT=0
+WORKDIR /workspace
+COPY spur-context-fetcher-lambda /usr/local/bin/spur-context-fetcher-lambda
+RUN /usr/local/bin/spur-context-fetcher-lambda --smoke
+ENTRYPOINT ["/usr/local/bin/spur-context-fetcher-lambda"]
+DOCKERFILE
+}
+
 build_local_worker_images() {
     ensure_self_contained_artifacts
 
     local output_dir="$REPO_ROOT/target/lambda"
     local worker_context="$BUILD_DIR/worker-image-context"
     local worker_lambda_context="$BUILD_DIR/worker-lambda-image-context"
+    local source_fetcher_context="$BUILD_DIR/source-fetcher-image-context"
     local worker_dockerfile="$worker_context/Dockerfile"
     local worker_lambda_dockerfile="$worker_lambda_context/Dockerfile"
-    mkdir -p "$output_dir" "$worker_context" "$worker_lambda_context"
+    local source_fetcher_dockerfile="$source_fetcher_context/Dockerfile"
+    mkdir -p "$output_dir" "$worker_context" "$worker_lambda_context" "$source_fetcher_context"
 
     cp "$SELF_CONTAINED_EXPORT_DIR/spur-context-worker" "$worker_context/spur-context-worker"
     cp "$SELF_CONTAINED_EXPORT_DIR/spur" "$worker_context/spur"
     cp "$SELF_CONTAINED_EXPORT_DIR/spur-context-worker-lambda" "$worker_lambda_context/spur-context-worker-lambda"
     cp "$SELF_CONTAINED_EXPORT_DIR/spur" "$worker_lambda_context/spur"
+    cp "$SELF_CONTAINED_EXPORT_DIR/spur-context-fetcher-lambda" "$source_fetcher_context/spur-context-fetcher-lambda"
     copy_worker_extensions "$worker_context"
     copy_worker_extensions "$worker_lambda_context"
     chmod +x \
         "$worker_context/spur-context-worker" \
         "$worker_context/spur" \
         "$worker_lambda_context/spur-context-worker-lambda" \
-        "$worker_lambda_context/spur"
+        "$worker_lambda_context/spur" \
+        "$source_fetcher_context/spur-context-fetcher-lambda"
     write_worker_image_dockerfile "$worker_dockerfile"
     write_worker_lambda_image_dockerfile "$worker_lambda_dockerfile"
+    write_source_fetcher_lambda_image_dockerfile "$source_fetcher_dockerfile"
 
     if [[ "$PUSH_IMAGES" == "true" ]]; then
         aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
             || aws ecr create-repository --repository-name "$WORKER_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
         aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
             || aws ecr create-repository --repository-name "$WORKER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
+        aws ecr describe-repositories --repository-names "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
+            || aws ecr create-repository --repository-name "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
 
         WORKER_IMAGE_URI="$(ecr_image_tag "$WORKER_ECR_REPO")"
         WORKER_LAMBDA_IMAGE_URI="$(ecr_image_tag "$WORKER_LAMBDA_ECR_REPO")"
+        SOURCE_FETCHER_LAMBDA_IMAGE_URI="$(ecr_image_tag "$SOURCE_FETCHER_LAMBDA_ECR_REPO")"
 
         log "building and pushing self-contained worker image: $WORKER_IMAGE_URI"
         docker buildx build \
@@ -411,9 +450,17 @@ build_local_worker_images() {
             --push \
             --tag "$WORKER_LAMBDA_IMAGE_URI" \
             "$worker_lambda_context"
+
+        log "building and pushing self-contained source fetcher Lambda image: $SOURCE_FETCHER_LAMBDA_IMAGE_URI"
+        docker buildx build \
+            --platform linux/arm64 --provenance=false \
+            --push \
+            --tag "$SOURCE_FETCHER_LAMBDA_IMAGE_URI" \
+            "$source_fetcher_context"
     else
         WORKER_IMAGE_URI="${WORKER_ECR_REPO}:${WORKER_IMAGE_TAG}"
         WORKER_LAMBDA_IMAGE_URI="${WORKER_LAMBDA_ECR_REPO}:${WORKER_IMAGE_TAG}"
+        SOURCE_FETCHER_LAMBDA_IMAGE_URI="${SOURCE_FETCHER_LAMBDA_ECR_REPO}:${WORKER_IMAGE_TAG}"
 
         log "building self-contained worker image tar: $output_dir/spur-context-worker-image.tar"
         docker buildx build \
@@ -428,6 +475,13 @@ build_local_worker_images() {
             --tag "$WORKER_LAMBDA_IMAGE_URI" \
             --output "type=docker,dest=$output_dir/spur-context-worker-lambda-image.tar" \
             "$worker_lambda_context"
+
+        log "building self-contained source fetcher Lambda image tar: $output_dir/spur-context-source-fetcher-image.tar"
+        docker buildx build \
+            --platform linux/arm64 --provenance=false \
+            --tag "$SOURCE_FETCHER_LAMBDA_IMAGE_URI" \
+            --output "type=docker,dest=$output_dir/spur-context-source-fetcher-image.tar" \
+            "$source_fetcher_context"
     fi
 }
 
@@ -491,6 +545,32 @@ build_and_push_worker_lambda_image() {
     WORKER_LAMBDA_IMAGE_URI="$full_tag"
 }
 
+build_and_push_source_fetcher_lambda_image() {
+    log "building Docker image for spur-context-source-fetcher Lambda (remote Docker build on VM)..."
+
+    aws ecr describe-repositories --repository-names "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" 2>/dev/null \
+        || aws ecr create-repository --repository-name "$SOURCE_FETCHER_LAMBDA_ECR_REPO" --region "$AWS_REGION_VAL" >/dev/null
+
+    local full_tag
+    full_tag="$(ecr_image_tag "$SOURCE_FETCHER_LAMBDA_ECR_REPO")"
+    local source_fetcher_context="$BUILD_DIR/source-fetcher-image-context"
+    local source_fetcher_dockerfile="$source_fetcher_context/Dockerfile"
+    mkdir -p "$source_fetcher_context"
+    write_source_fetcher_lambda_image_dockerfile "$source_fetcher_dockerfile"
+
+    cd "$REPO_ROOT"
+    scripts/cloud-build/docker-build.sh \
+        --remote-binary "$(remote_target_path target/release/spur-context-fetcher-lambda)" \
+        --context-dir "$source_fetcher_context" \
+        --dockerfile Dockerfile \
+        --tag "$full_tag"
+
+    smoke_source_fetcher_image "$full_tag"
+
+    log "source fetcher Lambda image pushed: $full_tag"
+    SOURCE_FETCHER_LAMBDA_IMAGE_URI="$full_tag"
+}
+
 smoke_worker_image() {
     local full_tag="$1"
     local cloud_dir="$REPO_ROOT/scripts/cloud-build"
@@ -502,6 +582,27 @@ EOF
 )
 
     log "running worker image smoke checks on remote VM..."
+    (
+        SCRIPT_DIR="$cloud_dir"
+        # shellcheck disable=SC1091
+        source "$SCRIPT_DIR/config.env"
+        # shellcheck disable=SC1090
+        source "$SCRIPT_DIR/provider-${SPUR_CLOUD}.sh"
+        provider_choose_transport
+        provider_remote_ssh --command="$smoke_command"
+    )
+}
+
+smoke_source_fetcher_image() {
+    local full_tag="$1"
+    local cloud_dir="$REPO_ROOT/scripts/cloud-build"
+    local smoke_command
+    smoke_command=$(cat <<EOF
+docker run --rm "$full_tag" /usr/local/bin/spur-context-fetcher-lambda --smoke
+EOF
+)
+
+    log "running source fetcher image smoke check on remote VM..."
     (
         SCRIPT_DIR="$cloud_dir"
         # shellcheck disable=SC1091
@@ -527,6 +628,7 @@ main() {
     local var_file=""
     local worker_image_uri=""
     local worker_lambda_image_uri=""
+    local source_fetcher_lambda_image_uri=""
 
     PUSH_IMAGES="$(normalize_push_images)"
 
@@ -567,22 +669,27 @@ main() {
         build_spur_cli
         build_worker
         build_worker_lambda
+        build_source_fetcher_lambda
         if [[ "$BUILD_MODE" == "self-contained" ]]; then
             build_local_worker_images
         else
             build_and_push_worker_image
             build_and_push_worker_lambda_image
+            build_and_push_source_fetcher_lambda_image
         fi
         worker_image_uri="$WORKER_IMAGE_URI"
         worker_lambda_image_uri="$WORKER_LAMBDA_IMAGE_URI"
+        source_fetcher_lambda_image_uri="$SOURCE_FETCHER_LAMBDA_IMAGE_URI"
+        log "worker ECS image URI: $worker_image_uri"
+        log "worker Lambda image URI: $worker_lambda_image_uri"
+        log "source fetcher Lambda image URI: $source_fetcher_lambda_image_uri"
     fi
 
     if [[ "$worker_image_only" == "true" ]]; then
-        if [[ -z "$worker_image_uri" || -z "$worker_lambda_image_uri" ]]; then
+        if [[ -z "$worker_image_uri" || -z "$worker_lambda_image_uri" || -z "$source_fetcher_lambda_image_uri" ]]; then
             log "--worker-image-only requires worker image builds; do not combine it with --skip-worker"
             exit 2
         fi
-        log "worker Lambda image URI: $worker_lambda_image_uri"
         echo "$worker_image_uri"
         exit 0
     fi
@@ -633,6 +740,14 @@ main() {
         worker_lambda_image_uri="$(terraform output -raw worker_lambda_image_uri 2>/dev/null || true)"
         if [[ -n "$worker_lambda_image_uri" ]]; then
             tf_vars+=(-var "worker_lambda_image=$worker_lambda_image_uri")
+        fi
+    fi
+    if [[ -n "$source_fetcher_lambda_image_uri" ]]; then
+        tf_vars+=(-var "source_fetcher_lambda_image=$source_fetcher_lambda_image_uri")
+    else
+        source_fetcher_lambda_image_uri="$(terraform output -raw source_fetcher_lambda_image_uri 2>/dev/null || true)"
+        if [[ -n "$source_fetcher_lambda_image_uri" ]]; then
+            tf_vars+=(-var "source_fetcher_lambda_image=$source_fetcher_lambda_image_uri")
         fi
     fi
 
