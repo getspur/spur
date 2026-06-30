@@ -30,6 +30,17 @@ fn abuse_accepts_https_git_https_and_git_ssh_schemes() {
 }
 
 #[test]
+fn abuse_rejects_url_embedded_credentials() {
+    let err = validate(
+        "https://token:secret@github.com/getspur/spur.git",
+        &default_opts(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err, AbuseError::EmbeddedCredentials);
+}
+
+#[test]
 fn abuse_infers_source_kind_from_url_suffix() {
     let git = validate("https://github.com/getspur/spur.git", &default_opts()).unwrap();
     let tarball = validate("https://example.com/spur.tar.gz", &default_opts()).unwrap();
