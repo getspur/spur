@@ -10067,6 +10067,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "spur-context-source"
+version = "1.7.0"
+
+[[package]]
 name = "spur-core"
 version = "1.7.0"
 dependencies = [

@@ -435,6 +435,7 @@ async fn route_index_inner(
     let revision = args.revision.trim();
     let source_url_hash = source_url_hash(&args.source_url);
     let source_kind = args.source_kind(parsed_url.source_kind);
+    let prefetch_source = should_prefetch_source(source_kind, &parsed_url.hostname);
     let limits = index_resource_limits(source_kind);
 
     if !args.force.unwrap_or(false) {
@@ -494,6 +495,7 @@ async fn route_index_inner(
         "revision": revision,
         "source_url": args.source_url,
         "source_kind": source_kind_label(source_kind),
+        "prefetch_source": prefetch_source,
         "caller_id": caller_id,
         "limits": {
             "max_source_bytes": limits.max_source_bytes,
@@ -1101,6 +1103,39 @@ fn source_kind_label(source_kind: SourceKind) -> &'static str {
     }
 }
 
+fn should_prefetch_source(source_kind: SourceKind, hostname: &str) -> bool {
+    match source_kind {
+        SourceKind::Git => true,
+        SourceKind::Tarball => !is_s3_https_hostname(hostname),
+    }
+}
+
+fn is_s3_https_hostname(hostname: &str) -> bool {
+    let Some(prefix) = hostname.strip_suffix(".amazonaws.com") else {
+        return false;
+    };
+
+    if prefix == "s3" {
+        return true;
+    }
+
+    if let Some(region) = prefix.strip_prefix("s3.") {
+        return is_single_label(region);
+    }
+
+    if let Some(bucket) = prefix.strip_suffix(".s3") {
+        return !bucket.is_empty();
+    }
+
+    prefix
+        .rsplit_once(".s3.")
+        .is_some_and(|(bucket, region)| !bucket.is_empty() && is_single_label(region))
+}
+
+fn is_single_label(value: &str) -> bool {
+    !value.is_empty() && !value.contains('.')
+}
+
 fn index_validate_options() -> ValidateOptions {
     ValidateOptions {
         tarball_size_cap_bytes: env_u64(
@@ -1456,5 +1491,45 @@ fn external_index_status_def() -> ToolDefinition {
             },
             "additionalProperties": false
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s3_https_hostname_detection_accepts_supported_forms() {
+        for hostname in [
+            "bucket.s3.amazonaws.com",
+            "bucket.s3.us-east-1.amazonaws.com",
+            "s3.amazonaws.com",
+            "s3.us-east-1.amazonaws.com",
+            "dotted.bucket.s3.us-east-1.amazonaws.com",
+        ] {
+            assert!(is_s3_https_hostname(hostname), "{hostname}");
+        }
+    }
+
+    #[test]
+    fn s3_https_hostname_detection_rejects_non_s3_hosts() {
+        for hostname in [
+            "example.com",
+            "s3.example.com",
+            "bucket.s3.amazonaws.com.evil.test",
+            "s3.amazonaws.com.evil.test",
+        ] {
+            assert!(!is_s3_https_hostname(hostname), "{hostname}");
+        }
+    }
+
+    #[test]
+    fn prefetch_source_follows_source_kind_and_s3_tarball_rules() {
+        assert!(should_prefetch_source(SourceKind::Git, "github.com"));
+        assert!(should_prefetch_source(SourceKind::Tarball, "example.com"));
+        assert!(!should_prefetch_source(
+            SourceKind::Tarball,
+            "bucket.s3.us-east-1.amazonaws.com"
+        ));
     }
 }
