@@ -1,0 +1,12 @@
+[package]
+name = "spur-context-source"
+description = "Shared source URL validation for SPUR context indexing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
