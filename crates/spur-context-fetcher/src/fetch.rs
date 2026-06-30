@@ -302,11 +302,12 @@ fn fetch_git_archive_inner(
             "-C".to_owned(),
             path_arg(repo_dir),
             "checkout".to_owned(),
-            // `--end-of-options` already prevents `revision` from being parsed
-            // as an option (injection guard). Do NOT add a trailing `--`: after
-            // `--end-of-options` git treats `--` as a literal second reference,
-            // producing "fatal: only one reference expected, 2 given".
-            "--end-of-options".to_owned(),
+            // Plain `checkout <revision>`. Option-injection is already prevented
+            // by `validate_git_revision` (rejects leading `-` and restricts the
+            // charset), so no separator is needed. `--end-of-options` is NOT
+            // portable to `git checkout` in the pinned git — it is parsed as a
+            // pathspec ("pathspec '--end-of-options' did not match") — and a
+            // trailing `--` after it yields a phantom second reference.
             revision.to_owned(),
         ],
         env: git_env(),
