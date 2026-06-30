@@ -302,9 +302,12 @@ fn fetch_git_archive_inner(
             "-C".to_owned(),
             path_arg(repo_dir),
             "checkout".to_owned(),
+            // `--end-of-options` already prevents `revision` from being parsed
+            // as an option (injection guard). Do NOT add a trailing `--`: after
+            // `--end-of-options` git treats `--` as a literal second reference,
+            // producing "fatal: only one reference expected, 2 given".
             "--end-of-options".to_owned(),
             revision.to_owned(),
-            "--".to_owned(),
         ],
         env: git_env(),
     })?;

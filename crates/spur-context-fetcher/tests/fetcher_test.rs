@@ -122,7 +122,6 @@ fn git_fetch_uses_hardened_clone_checkout_archive_and_cleanup() {
             "checkout",
             "--end-of-options",
             "abc123",
-            "--",
         ]
     );
     assert_eq!(runner.commands[2].program, "tar");
