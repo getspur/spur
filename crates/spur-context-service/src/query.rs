@@ -911,22 +911,42 @@ fn parse_pkg_selector(selector: &str) -> Option<ParsedSelector> {
     })
 }
 
+/// Encode one `pkg-symbol://` path component so it contains no `/`. Each of
+/// source/package/revision can legitimately contain slashes (github
+/// `owner/repo` packages, `feature/x` git revisions, `git:host/owner/repo`
+/// sources), which would otherwise make the 4-component URI ambiguous. Encode
+/// `%` first, then `/`, so `decode_uri_component` is an exact inverse.
+fn encode_uri_component(value: &str) -> String {
+    value.replace('%', "%25").replace('/', "%2F")
+}
+
+/// Inverse of [`encode_uri_component`]. Decode `/` before `%`. A plain
+/// (already slash-free, `%`-free) component decodes to itself, so simple URIs
+/// remain unaffected.
+fn decode_uri_component(value: &str) -> String {
+    value.replace("%2F", "/").replace("%25", "%")
+}
+
 fn parse_pkg_symbol_uri(selector: &str) -> Option<ParsedStableSelector> {
     let body = selector.trim().strip_prefix(PKG_SYMBOL_URI_PREFIX)?;
-    let mut parts = body.rsplitn(4, '/');
-    let stable_symbol_id = parts.next()?;
-    let revision = parts.next()?;
-    let package = parts.next()?;
-    let source = parts.next()?;
+    // Components are slash-encoded, so there are exactly three separator slashes.
+    let parts: Vec<&str> = body.split('/').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let source = decode_uri_component(parts[0]);
+    let package = decode_uri_component(parts[1]);
+    let revision = decode_uri_component(parts[2]);
+    let stable_symbol_id = decode_uri_component(parts[3]);
     if source.is_empty() || package.is_empty() || revision.is_empty() || stable_symbol_id.is_empty()
     {
         return None;
     }
     Some(ParsedStableSelector {
-        source: source.to_owned(),
-        package: package.to_owned(),
-        revision: revision.to_owned(),
-        stable_symbol_id: stable_symbol_id.to_owned(),
+        source,
+        package,
+        revision,
+        stable_symbol_id,
     })
 }
 
@@ -1029,7 +1049,13 @@ fn code_candidate_from_row(row: &Row<'_>, offset: usize) -> duckdb::Result<CodeC
         qualified_name.as_str()
     };
     let selector = format!("pkg:{package}@{revision}::{selector_name}");
-    let uri = format!("pkg-symbol://{source}/{package}/{revision}/{stable_symbol_id}");
+    let uri = format!(
+        "pkg-symbol://{}/{}/{}/{}",
+        encode_uri_component(&source),
+        encode_uri_component(&package),
+        encode_uri_component(&revision),
+        encode_uri_component(&stable_symbol_id),
+    );
 
     Ok(CodeCandidate {
         selector,
@@ -1285,5 +1311,70 @@ impl SqlParams {
             .iter()
             .map(|value| value.as_ref() as &dyn ToSql)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod pkg_symbol_uri_tests {
+    use super::{decode_uri_component, encode_uri_component, parse_pkg_symbol_uri};
+
+    fn build_uri(source: &str, package: &str, revision: &str, id: &str) -> String {
+        format!(
+            "pkg-symbol://{}/{}/{}/{}",
+            encode_uri_component(source),
+            encode_uri_component(package),
+            encode_uri_component(revision),
+            encode_uri_component(id),
+        )
+    }
+
+    #[test]
+    fn round_trips_simple_components() {
+        let uri = build_uri("registry:crates-io", "memchr", "0.1.0", "465192211e73e0bf");
+        let parsed = parse_pkg_symbol_uri(&uri).expect("parse");
+        assert_eq!(parsed.source, "registry:crates-io");
+        assert_eq!(parsed.package, "memchr");
+        assert_eq!(parsed.revision, "0.1.0");
+        assert_eq!(parsed.stable_symbol_id, "465192211e73e0bf");
+    }
+
+    #[test]
+    fn round_trips_github_owner_repo_package_with_slash() {
+        let uri = build_uri("github", "BurntSushi/memchr", "master", "465192211e73e0bf");
+        // Exactly one encoded slash inside the package; URI has 3 literal slashes.
+        assert_eq!(uri.matches('/').count(), 3 + "pkg-symbol://".matches('/').count());
+        let parsed = parse_pkg_symbol_uri(&uri).expect("parse");
+        assert_eq!(parsed.source, "github");
+        assert_eq!(parsed.package, "BurntSushi/memchr");
+        assert_eq!(parsed.revision, "master");
+        assert_eq!(parsed.stable_symbol_id, "465192211e73e0bf");
+    }
+
+    #[test]
+    fn round_trips_slashy_source_and_revision() {
+        let uri = build_uri(
+            "git:github.com/DeusData/codebase-memory-mcp",
+            "DeusData/codebase-memory-mcp",
+            "feature/x",
+            "abcd1234",
+        );
+        let parsed = parse_pkg_symbol_uri(&uri).expect("parse");
+        assert_eq!(parsed.source, "git:github.com/DeusData/codebase-memory-mcp");
+        assert_eq!(parsed.package, "DeusData/codebase-memory-mcp");
+        assert_eq!(parsed.revision, "feature/x");
+        assert_eq!(parsed.stable_symbol_id, "abcd1234");
+    }
+
+    #[test]
+    fn rejects_wrong_segment_count() {
+        assert!(parse_pkg_symbol_uri("pkg-symbol://only/three/parts").is_none());
+        assert!(parse_pkg_symbol_uri("not-a-pkg-symbol-uri").is_none());
+    }
+
+    #[test]
+    fn decode_is_inverse_of_encode() {
+        for raw in ["a/b%c", "100%/done", "plain", "a%2Fb"] {
+            assert_eq!(decode_uri_component(&encode_uri_component(raw)), raw);
+        }
     }
 }
