@@ -13,7 +13,13 @@ Client → API Gateway (HTTP, AWS_IAM) → Lambda (ARM64, provided.al2023)
                                 ├── DynamoDB job/status/dedupe/quota records
                                 └── Step Functions DescribeExecution repair
 
-external_index → DynamoDB job + dedupe → Step Functions → Lambda worker
+external_index → DynamoDB job + dedupe → Step Functions → source fetcher Lambda
+                                                   │          │
+                                                   │          └── public HTTPS/git source
+                                                   │              → S3 fetch artifact
+                                                   │              → presigned HTTPS URL
+                                                   ↓
+                                            Lambda worker
                                                    │
                                                    └── ECS worker fallback
                                                        for Lambda platform
@@ -28,6 +34,13 @@ and Parquet files. DynamoDB is the production control plane for job status,
 idempotency, execution ARNs, per-caller active-job quotas, and catalog write
 leases.
 
+The source fetcher Lambda is deliberately outside the worker VPC. Public GitHub
+and non-S3 HTTPS tarball inputs take the fetch-split path: Step Functions invokes
+the fetcher, the fetcher validates and downloads the public source, normalizes it
+to `source.tar.gz`, stages it under `s3://<bucket>/fetch/<job_id>/source.tar.gz`,
+and returns a presigned HTTPS S3 URL. The worker backends then consume that URL
+as a normal tarball. Raw `s3://` URLs are not part of the handoff contract.
+
 The indexing worker Lambda and ECS fallback run inside `worker_subnets`. The
 default network model is NAT-free for AWS service access: Terraform creates S3
 and DynamoDB gateway endpoints on `worker_route_table_ids`, plus private-DNS
@@ -37,9 +50,10 @@ security group accepts HTTPS only from the worker security group. Operators who
 already provide NAT or equivalent shared endpoints can set
 `create_vpc_endpoints=false`.
 
-VPC endpoints do not provide arbitrary public internet egress. Source URLs that
-must be fetched from the public internet still need a separate egress path, or
-should be staged in S3 so the worker reaches them through the S3 endpoint.
+VPC endpoints do not provide arbitrary public internet egress. Presigned S3
+HTTPS tarballs already staged in S3 skip the fetcher (`prefetch_source=false`)
+and go directly to the worker through the S3 endpoint; public GitHub and generic
+internet tarballs use `FetchSource` first.
 
 The deployed ECS fallback image includes both `/usr/local/bin/spur-context-worker`
 and `/usr/local/bin/spur`; `deploy.sh` smoke-tests both before Terraform applies
@@ -59,6 +73,7 @@ ARN is present.
 | `aws_lambda_function.service` | ARM64 Lambda, 1024MB, 30s timeout |
 | `aws_sfn_state_machine.index_build` | Lambda-first on-demand indexing orchestration |
 | `aws_lambda_function.worker` | Fast-start indexing worker image |
+| `aws_lambda_function.source_fetcher` | Non-VPC public source fetcher image |
 | `aws_ecs_cluster.indexing` / task definition | Fargate fallback worker runtime |
 | `aws_apigatewayv2_api.http` | HTTP API front door |
 | `aws_iam_policy.context_service_invoke` | Same-account SigV4 invoke policy for allowed callers |
@@ -66,6 +81,7 @@ ARN is present.
 | `aws_iam_role.worker_task` | ECS fallback worker role with S3, DynamoDB, SFN callback permissions |
 | `aws_cloudwatch_log_group.lambda` | 14-day retention |
 | `aws_cloudwatch_log_group.worker_lambda` | Lambda worker logs |
+| `aws_cloudwatch_log_group.source_fetcher_lambda` | Source fetcher Lambda logs |
 | `aws_cloudwatch_log_group.worker` | Worker task logs |
 | `aws_vpc_endpoint.gateway` | S3 and DynamoDB gateway endpoints for worker route tables |
 | `aws_vpc_endpoint.interface` | Private-DNS endpoints for worker AWS API access |
@@ -142,7 +158,7 @@ names.
 # Build the serving Lambda zip without touching Terraform-managed resources
 ./deploy.sh --skip-worker --package-only
 
-# Build arm64 worker image tarballs locally through docker buildx, without ECR
+# Build arm64 worker/fetcher image tarballs locally through docker buildx, without ECR
 SPUR_CONTEXT_SERVICE_BUILD_MODE=self-contained \
 SPUR_CONTEXT_SERVICE_PUSH_IMAGES=0 \
 ./build-and-push-remote.sh --no-push
@@ -153,8 +169,18 @@ variable file:
 
 ```bash
 terraform init -backend-config=backends/staging.s3.tfbackend
-terraform plan -var-file=env/staging.tfvars
-terraform apply -var-file=env/staging.tfvars
+terraform plan \
+  -var-file=env/staging.tfvars \
+  -var="lambda_zip_path=../../target/lambda/spur-context-service.zip" \
+  -var="worker_ecr_image=<ecs-worker-image-uri>" \
+  -var="worker_lambda_image=<worker-lambda-image-uri>" \
+  -var="source_fetcher_lambda_image=<source-fetcher-lambda-image-uri>"
+terraform apply \
+  -var-file=env/staging.tfvars \
+  -var="lambda_zip_path=../../target/lambda/spur-context-service.zip" \
+  -var="worker_ecr_image=<ecs-worker-image-uri>" \
+  -var="worker_lambda_image=<worker-lambda-image-uri>" \
+  -var="source_fetcher_lambda_image=<source-fetcher-lambda-image-uri>"
 ```
 
 ## CI/CD
@@ -170,7 +196,7 @@ Pull requests and pushes that touch this service run:
 
 Real AWS artifact builds are gated through `workflow_dispatch` and the
 `context-service-staging` environment. Set `build_aws_artifacts=true` to build
-the Graviton2-safe worker image tarballs and serving Lambda zip. CI defaults to
+the Graviton2-safe worker/fetcher image tarballs and serving Lambda zip. CI defaults to
 `SPUR_CONTEXT_SERVICE_BUILD_MODE=self-contained` and
 `SPUR_CONTEXT_SERVICE_PUSH_IMAGES=0`, so it uses docker buildx with
 `--platform linux/arm64 --provenance=false` and does not depend on the remote
@@ -212,17 +238,36 @@ infra/spur-context-service/smoke-staging-e2e.sh --preflight
 
 # Full E2E smoke: uploads the fixture and invokes real ingest.
 infra/spur-context-service/smoke-staging-e2e.sh
+
+# FetchSource E2E smoke: indexes a public GitHub repo through the non-VPC
+# source fetcher, asserts Step Functions visited FetchSource, then checks
+# medallion objects and serving queries.
+infra/spur-context-service/smoke-staging-e2e.sh --github-source
 ```
 
-The full smoke publishes a tiny Rust package tarball, calls `external_index`,
-waits for the real worker to complete, checks the bronze source object at
+The default full smoke publishes a tiny Rust package tarball to S3, presigns it,
+and calls `external_index` with that presigned HTTPS S3 URL. That smoke must
+stay on the `prefetch_source=false` path so it proves the existing presigned-S3
+tarball handoff remains green.
+
+The GitHub smoke calls `external_index` with a public GitHub `git+https` URL
+(`SPUR_CONTEXT_SMOKE_GITHUB_URL`, default
+`git+https://github.com/BurntSushi/memchr.git`) and `source_kind=git`. It waits
+for completion, calls `aws stepfunctions get-execution-history`, asserts the
+execution visited `FetchSource`, and then checks medallion objects plus serving
+queries. The caller running this smoke needs `states:GetExecutionHistory` for
+the returned execution ARN in addition to the Lambda/S3/STS permissions used by
+the default smoke.
+
+Both full smoke modes wait for the real worker to complete, check the bronze
+source object at
 `bronze/{source}/{package}/{revision}/source.tar.gz`, the silver artifact
 manifest at `silver/{source}/{package}/{revision}/{builder_version}/manifest.json`,
 the gold frozen snapshot pointer at `gold/catalog-snapshot/current.json`,
 non-zero `symbol_embeddings`, and then serves `external_code_search`,
 `external_code_read`, and `external_knowledge_context` from the staging Lambda.
 The `source` path component is the worker's verbatim source coordinate, such as
-`registry:crates-io`.
+`registry:crates-io` or `github`.
 
 Serving is intentionally zero-Postgres: the script fails if the serving Lambda
 is configured with a Postgres `SPUR_CATALOG_DSN`, or if `SPUR_CATALOG_S3_URI`

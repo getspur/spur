@@ -50,5 +50,24 @@ create_vpc_endpoints = true
 #   docker push <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker:latest
 #   docker build -t <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker-lambda:latest .
 #   docker push <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-worker-lambda:latest
-worker_ecr_image    = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker:latest"
-worker_lambda_image = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker-lambda:latest"
+#   docker build -t <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-source-fetcher:latest .
+#   docker push <acct>.dkr.ecr.<region>.amazonaws.com/spur-context-source-fetcher:latest
+worker_ecr_image            = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker:latest"
+worker_lambda_image         = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker-lambda:latest"
+source_fetcher_lambda_image = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-source-fetcher:latest"
+
+# Lambda worker and source-fetcher sizing.
+worker_lambda_memory_mb                     = 3008
+worker_lambda_timeout_sec                   = 900
+worker_lambda_ephemeral_storage_mb          = 10240
+worker_lambda_provisioned_concurrency       = 0
+source_fetcher_lambda_memory_mb             = 1024
+source_fetcher_lambda_timeout_sec           = 900
+source_fetcher_lambda_ephemeral_storage_mb = 10240
+
+# Fetch-split handoff. The non-VPC source fetcher stages normalized archives
+# under s3://<bucket>/fetch/<job_id>/source.tar.gz and returns a presigned HTTPS
+# URL for the VPC worker. Keep this longer than the Lambda timeout plus ECS
+# fallback window.
+source_fetch_presign_seconds   = 21600
+fetch_artifact_retention_days = 7
