@@ -57,6 +57,7 @@ pub struct ParsedSourceUrl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbuseError {
     ForbiddenScheme,
+    EmbeddedCredentials,
     ForbiddenIpRange,
     LinkLocal,
     AwsMetadata,
@@ -70,6 +71,7 @@ impl fmt::Display for AbuseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ForbiddenScheme => f.write_str("source_url scheme is not allowed"),
+            Self::EmbeddedCredentials => f.write_str("source_url embeds credentials"),
             Self::ForbiddenIpRange => f.write_str("source_url resolves to a forbidden IP range"),
             Self::LinkLocal => f.write_str("source_url resolves to a link-local address"),
             Self::AwsMetadata => f.write_str("source_url targets the AWS metadata service"),
@@ -234,7 +236,7 @@ fn parse_source_url(source_url: &str) -> Result<RawSourceUrl<'_>, AbuseError> {
 
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
-    let hostname = extract_hostname(authority)?;
+    let hostname = extract_hostname(authority, scheme == "git+ssh")?;
     let tail_without_fragment = rest[authority_end..]
         .split_once('#')
         .map_or(&rest[authority_end..], |(tail, _)| tail);
@@ -252,14 +254,16 @@ fn parse_source_url(source_url: &str) -> Result<RawSourceUrl<'_>, AbuseError> {
     })
 }
 
-fn extract_hostname(authority: &str) -> Result<String, AbuseError> {
+fn extract_hostname(authority: &str, allow_userinfo: bool) -> Result<String, AbuseError> {
     if authority.is_empty() {
         return Err(AbuseError::ForbiddenScheme);
     }
 
-    let host_port = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host_port)| host_port);
+    let host_port = match authority.rsplit_once('@') {
+        Some((_userinfo, host_port)) if allow_userinfo => host_port,
+        Some((_userinfo, _host_port)) => return Err(AbuseError::EmbeddedCredentials),
+        None => authority,
+    };
 
     if let Some(bracketed) = host_port.strip_prefix('[') {
         let Some(end) = bracketed.find(']') else {
