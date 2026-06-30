@@ -428,6 +428,9 @@ max_requests_per_second = 20
 [delegation]
 inline_wait_ms = 0
 
+[context_service]
+url = "https://n1sbuuxt9k.execute-api.ap-southeast-5.amazonaws.com"
+
 [delegation.normalize]
 bypass_hooks = false
 
