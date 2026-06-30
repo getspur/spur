@@ -154,6 +154,7 @@ resource "aws_lambda_function" "service" {
       SPUR_CONTEXT_MAX_GIT_BYTES                = tostring(var.context_max_git_bytes)
       SPUR_CONTEXT_MAX_BUILD_SECONDS            = tostring(var.context_max_build_seconds)
       SPUR_CONTEXT_ALLOWED_SOURCE_DOMAINS       = join(",", var.allowed_source_domains)
+      SPUR_CONTEXT_ALLOW_ANONYMOUS_MUTATIONS    = var.allow_anonymous_mutations ? "1" : "0"
     }
   }
 
