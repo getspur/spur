@@ -1,3 +1,5 @@
+import json
+import re
 from pathlib import Path
 
 
@@ -9,6 +11,43 @@ VERSIONS_TF = INFRA_DIR / "versions.tf"
 CONTEXT_SERVICE_WORKFLOW = ROOT / ".github" / "workflows" / "context-service.yml"
 STAGING_SMOKE = INFRA_DIR / "smoke-staging-e2e.py"
 STAGING_SMOKE_ENTRYPOINT = INFRA_DIR / "smoke-staging-e2e.sh"
+
+
+def render_index_build_asl():
+    template = (INFRA_DIR / "index_build_asl.json").read_text()
+    values = {
+        "cluster_arn": "arn:aws:ecs:ap-southeast-5:123456789012:cluster/spur-context",
+        "worker_taskdef_arn": (
+            "arn:aws:ecs:ap-southeast-5:123456789012:"
+            "task-definition/spur-context-worker:1"
+        ),
+        "worker_lambda_arn": (
+            "arn:aws:lambda:ap-southeast-5:123456789012:"
+            "function:spur-context-worker:live"
+        ),
+        "source_fetch_lambda_arn": (
+            "arn:aws:lambda:ap-southeast-5:123456789012:"
+            "function:spur-context-source-fetcher:live"
+        ),
+        "worker_lambda_timeout_sec": "900",
+        "source_fetcher_lambda_timeout_sec": "900",
+        "worker_ecs_timeout_sec": "2700",
+        "index_jobs_table_name": "spur-context-index-jobs",
+        "catalog_leases_table_name": "spur-context-catalog-leases",
+        "catalog_dsn": (
+            "postgres:host=writer.example.com port=5432 dbname=spur_context "
+            "user=spur_context sslmode=require"
+        ),
+        "context_ducklake_data_path": "s3://spur-context/gold/data/",
+        "worker_checkpoint_uri_template": (
+            "s3://spur-context/jobs/{}/checkpoint.json"
+        ),
+        "subnets_json": json.dumps(["subnet-123"]),
+        "security_groups_json": json.dumps(["sg-123"]),
+    }
+
+    rendered = re.sub(r"\${([A-Za-z0-9_]+)}", lambda m: values[m.group(1)], template)
+    return json.loads(rendered)
 
 
 def test_deploy_builds_standalone_context_service_from_crate_workdir():
@@ -290,7 +329,7 @@ def test_worker_checkpoint_uri_is_per_job_object_from_state_machine():
     assert '"Name": "SPUR_CONTEXT_WORKER_CHECKPOINT_URI"' in asl
     assert (
         '"Value.$": "States.Format('
-        "'${worker_checkpoint_uri_template}', $.job_id"
+        "'${worker_checkpoint_uri_template}', $.workerInput.job_id"
         ')"'
     ) in asl
     assert "/jobs/{}/checkpoint.json" in variables_tf
@@ -305,10 +344,20 @@ def test_state_machine_does_not_retry_worker_reported_failures():
 
 def test_state_machine_invokes_lambda_worker_before_ecs_fallback():
     asl = (INFRA_DIR / "index_build_asl.json").read_text()
+    rendered = render_index_build_asl()
     state_machine_tf = (INFRA_DIR / "state_machine.tf").read_text()
     iam_tf = (INFRA_DIR / "iam.tf").read_text()
 
-    assert '"StartAt": "RunLambdaBuild"' in asl
+    assert rendered["StartAt"] == "RouteSource"
+    assert '"StartAt": "RouteSource"' in asl
+    assert rendered["States"]["RouteSource"]["Default"] == "PrepareOriginalWorkerInput"
+    assert (
+        rendered["States"]["RouteSource"]["Choices"][0]["Variable"]
+        == "$.prefetch_source"
+    )
+    assert rendered["States"]["RouteSource"]["Choices"][0]["BooleanEquals"] is True
+    assert rendered["States"]["RouteSource"]["Choices"][0]["Next"] == "FetchSource"
+    assert rendered["States"]["PrepareOriginalWorkerInput"]["Next"] == "RunLambdaBuild"
     assert '"Resource": "arn:aws:states:::lambda:invoke"' in asl
     assert '"FunctionName": "${worker_lambda_arn}"' in asl
     assert '"Next": "CheckLambdaBuild"' in asl
@@ -317,7 +366,139 @@ def test_state_machine_invokes_lambda_worker_before_ecs_fallback():
     assert '"Lambda.Unknown"' in asl
     assert '"Sandbox.Timedout"' in asl
     assert "worker_lambda_arn" in state_machine_tf
+    assert "source_fetch_lambda_arn" in state_machine_tf
     assert 'Action = ["lambda:InvokeFunction"]' in iam_tf
+
+
+def test_state_machine_fetches_source_and_normalizes_worker_input():
+    rendered = render_index_build_asl()
+    states = rendered["States"]
+
+    fetch_source = states["FetchSource"]
+    assert fetch_source["Resource"] == "arn:aws:states:::lambda:invoke"
+    assert (
+        fetch_source["Parameters"]["FunctionName"]
+        == "arn:aws:lambda:ap-southeast-5:123456789012:"
+        "function:spur-context-source-fetcher:live"
+    )
+    assert fetch_source["ResultPath"] == "$.fetchResult"
+    assert "Catch" not in fetch_source
+    assert fetch_source["Next"] == "CheckFetchSource"
+    assert fetch_source["Retry"][0]["ErrorEquals"] == [
+        "Lambda.ServiceException",
+        "Lambda.AWSLambdaException",
+        "Lambda.SdkClientException",
+        "Lambda.TooManyRequestsException",
+    ]
+
+    assert states["CheckFetchSource"]["Default"] == "PrepareFetchedWorkerInput"
+    assert states["CheckFetchSource"]["Choices"][0] == {
+        "Variable": "$.fetchResult.Payload.status",
+        "StringEquals": "failed",
+        "Next": "FetchSourceFailed",
+    }
+    assert states["FetchSourceFailed"]["Type"] == "Fail"
+
+    original_worker_input = states["PrepareOriginalWorkerInput"]["Parameters"]
+    assert original_worker_input["source_url.$"] == "$.source_url"
+    assert original_worker_input["source_kind.$"] == "$.source_kind"
+
+    fetched_worker_input = states["PrepareFetchedWorkerInput"]["Parameters"]
+    assert fetched_worker_input["job_id.$"] == "$.job_id"
+    assert fetched_worker_input["source_url.$"] == "$.fetchResult.Payload.source_url"
+    assert fetched_worker_input["source_kind.$"] == "$.fetchResult.Payload.source_kind"
+    assert states["PrepareFetchedWorkerInput"]["ResultPath"] == "$.workerInput"
+
+    lambda_payload = states["RunLambdaBuild"]["Parameters"]["Payload"]
+    assert lambda_payload["source_url.$"] == "$.workerInput.source_url"
+    assert lambda_payload["source_kind.$"] == "$.workerInput.source_kind"
+
+    for state_name in ("RunBuild", "FallbackBuild"):
+        env = {
+            item["Name"]: item
+            for item in states[state_name]["Parameters"]["Overrides"][
+                "ContainerOverrides"
+            ][0]["Environment"]
+        }
+        assert env["SOURCE_URL"]["Value.$"] == "$.workerInput.source_url"
+        assert env["SOURCE_KIND"]["Value.$"] == "$.workerInput.source_kind"
+
+
+def test_source_fetcher_lambda_is_non_vpc_and_least_privilege():
+    source_fetcher_tf = (INFRA_DIR / "source_fetcher_lambda.tf").read_text()
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+    state_machine_tf = (INFRA_DIR / "state_machine.tf").read_text()
+    iam_tf = (INFRA_DIR / "iam.tf").read_text()
+    main_tf = (INFRA_DIR / "main.tf").read_text()
+
+    assert 'resource "aws_lambda_function" "source_fetcher"' in source_fetcher_tf
+    assert 'resource "aws_lambda_alias" "source_fetcher_live"' in source_fetcher_tf
+    assert 'resource "aws_cloudwatch_log_group" "source_fetcher_lambda"' in source_fetcher_tf
+    assert "image_uri     = var.source_fetcher_lambda_image" in source_fetcher_tf
+    assert "timeout       = var.source_fetcher_lambda_timeout_sec" in source_fetcher_tf
+    assert "memory_size   = var.source_fetcher_lambda_memory_mb" in source_fetcher_tf
+    assert "source_fetcher_lambda_ephemeral_storage_mb" in source_fetcher_tf
+    assert "vpc_config" not in source_fetcher_tf
+    for env_name in (
+        "SPUR_CONTEXT_FETCH_BUCKET",
+        "SPUR_CONTEXT_FETCH_PREFIX",
+        "SPUR_CONTEXT_MAX_TARBALL_BYTES",
+        "SPUR_CONTEXT_MAX_GIT_BYTES",
+        "SPUR_CONTEXT_ALLOWED_SOURCE_DOMAINS",
+        "SPUR_CONTEXT_FETCH_PRESIGN_SECONDS",
+    ):
+        assert env_name in source_fetcher_tf
+
+    for variable_name in (
+        "source_fetcher_lambda_image",
+        "source_fetcher_lambda_timeout_sec",
+        "source_fetcher_lambda_memory_mb",
+        "source_fetcher_lambda_ephemeral_storage_mb",
+        "source_fetch_presign_seconds",
+        "fetch_artifact_retention_days",
+    ):
+        assert f'variable "{variable_name}"' in variables_tf
+    assert "default     = 900" in variables_tf
+    assert "default     = 1024" in variables_tf
+    assert "default     = 10240" in variables_tf
+    assert "default     = 21600" in variables_tf
+    assert "default     = 7" in variables_tf
+
+    assert "source_fetch_lambda_arn" in state_machine_tf
+    assert "aws_lambda_alias.source_fetcher_live.arn" in state_machine_tf
+
+    assert 'resource "aws_iam_role" "source_fetcher_lambda"' in iam_tf
+    source_fetcher_policy = iam_tf.split(
+        'resource "aws_iam_role_policy" "source_fetcher_lambda"', 1
+    )[1].split('resource "aws_iam_role_policy" "lambda_catalog_secret"', 1)[0]
+    assert '"logs:CreateLogStream"' in source_fetcher_policy
+    assert '"logs:PutLogEvents"' in source_fetcher_policy
+    assert '"s3:PutObject"' in source_fetcher_policy
+    assert '"s3:GetObject"' in source_fetcher_policy
+    assert '"s3:AbortMultipartUpload"' in source_fetcher_policy
+    assert '"s3:ListBucket"' in source_fetcher_policy
+    assert '"${aws_s3_bucket.data.arn}/fetch/*"' in source_fetcher_policy
+    assert '"s3:prefix"' in source_fetcher_policy
+    for forbidden in (
+        "secretsmanager:",
+        "dynamodb:",
+        "states:",
+        "ec2:",
+        "AWSLambdaVPCAccessExecutionRole",
+    ):
+        assert forbidden not in source_fetcher_policy
+
+    assert 'resource "aws_iam_role_policy" "sfn_source_fetcher_lambda"' in iam_tf
+    sfn_fetcher_policy = iam_tf.split(
+        'resource "aws_iam_role_policy" "sfn_source_fetcher_lambda"', 1
+    )[1]
+    assert "aws_lambda_function.source_fetcher.arn" in sfn_fetcher_policy
+    assert "aws_lambda_alias.source_fetcher_live.arn" in sfn_fetcher_policy
+
+    assert 'resource "aws_s3_bucket_lifecycle_configuration" "data"' in main_tf
+    assert 'prefix = "fetch/"' in main_tf
+    assert "days = var.fetch_artifact_retention_days" in main_tf
+    assert "noncurrent_version_expiration" in main_tf
 
 
 def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
