@@ -1,0 +1,36 @@
+[package]
+name = "spur-context-fetcher"
+description = "Non-VPC source fetch Lambda for SPUR context indexing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "spur-context-fetcher-lambda"
+path = "src/bin/lambda.rs"
+
+[dependencies]
+async-trait = "0.1"
+aws-config = "1"
+aws-sdk-s3 = "1"
+flate2 = "1"
+futures-util = "0.3"
+lambda_runtime = { version = "1.2.1", features = ["concurrency-tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+spur-context-source = { path = "../spur-context-source" }
+tar = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
