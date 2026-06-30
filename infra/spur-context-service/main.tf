@@ -10,6 +10,27 @@ resource "aws_s3_bucket_versioning" "data" {
   }
 }
 
+resource "aws_s3_bucket_lifecycle_configuration" "data" {
+  bucket = aws_s3_bucket.data.id
+
+  rule {
+    id     = "expire-fetch-artifacts"
+    status = "Enabled"
+
+    filter {
+      prefix = "fetch/"
+    }
+
+    expiration {
+      days = var.fetch_artifact_retention_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.fetch_artifact_retention_days
+    }
+  }
+}
+
 resource "aws_s3_bucket_ownership_controls" "data" {
   bucket = aws_s3_bucket.data.id
 
