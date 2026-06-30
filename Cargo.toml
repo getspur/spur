@@ -19,6 +19,7 @@ members = [
     "crates/spur-test-madsim",
     "crates/spur-context",
     "crates/spur-context-source",
+    "crates/spur-context-fetcher",
     "crates/spur-graph",
     "xtask",
 ]
@@ -133,6 +134,7 @@ spur-interactive = { path = "crates/spur-interactive", default-features = false 
 spur-bot = { path = "crates/spur-bot" }
 spur-context = { path = "crates/spur-context" }
 spur-context-source = { path = "crates/spur-context-source" }
+spur-context-fetcher = { path = "crates/spur-context-fetcher" }
 spur-context-service = { path = "crates/spur-context-service" }
 spur-graph = { path = "crates/spur-graph", default-features = false }
 spur-analyst = { path = "crates/spur-analyst", default-features = false }
