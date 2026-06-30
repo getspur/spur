@@ -796,6 +796,81 @@ async fn external_index_without_serving_catalog_starts_execution() -> Result<()>
 }
 
 #[tokio::test]
+async fn external_index_payload_prefetches_github_git_sources() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index_without_catalog(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": "https://github.com/getspur/spur",
+        }),
+        &jobs,
+        &sfn,
+        "caller-prefetch-github",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    let started = sfn.started_requests();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].input["source_kind"], "git");
+    assert_eq!(started[0].input["prefetch_source"], json!(true));
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_payload_prefetches_non_s3_https_tarballs() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index_without_catalog(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": "https://example.com/x.tar.gz",
+        }),
+        &jobs,
+        &sfn,
+        "caller-prefetch-tarball",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    let started = sfn.started_requests();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].input["source_kind"], "tarball");
+    assert_eq!(started[0].input["prefetch_source"], json!(true));
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_payload_skips_prefetch_for_presigned_s3_https_tarballs() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+
+    let response = route_index_without_catalog(
+        &json!({
+            "package": PACKAGE,
+            "revision": "main",
+            "source_url": "https://s3.amazonaws.com/spur-context-test/source.tar.gz?X-Amz-Expires=3600&X-Amz-Signature=test",
+        }),
+        &jobs,
+        &sfn,
+        "caller-prefetch-s3",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "queued");
+    let started = sfn.started_requests();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].input["source_kind"], "tarball");
+    assert_eq!(started[0].input["prefetch_source"], json!(false));
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_index_status_returns_not_found_for_unknown_job() -> Result<()> {
     let jobs = FakeJobStore::default();
 
