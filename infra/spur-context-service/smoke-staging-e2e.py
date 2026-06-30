@@ -34,6 +34,11 @@ from typing import Any
 DEFAULT_REGION = "ap-southeast-5"
 DEFAULT_SOURCE = "registry:crates-io"
 DEFAULT_REVISION = "0.1.0"
+DEFAULT_GITHUB_SOURCE = "github"
+DEFAULT_GITHUB_PACKAGE = "BurntSushi/memchr"
+DEFAULT_GITHUB_REVISION = "master"
+DEFAULT_GITHUB_URL = "git+https://github.com/BurntSushi/memchr.git"
+DEFAULT_GITHUB_SYMBOL_QUERY = "memchr"
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_POINTER_KEY = "gold/catalog-snapshot/current.json"
@@ -62,6 +67,10 @@ class SmokeConfig:
     poll_seconds: int
     run_id: str
     package: str
+    mode: str
+    source_url: str
+    source_kind: str
+    symbol_query: str
     # The no-embed worker image (fastembed/ORT compiled out for Graviton2
     # Lambda) produces zero embeddings by design. When false, the smoke asserts
     # the structural medallion (nodes/edges) translated and serves, and skips
@@ -72,7 +81,7 @@ class SmokeConfig:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     require_aws_cli()
-    config = load_config()
+    config = load_config(args)
     if args.preflight:
         return run_preflight(config)
     return run_full_smoke(config)
@@ -85,20 +94,43 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="validate env, AWS auth, and serving Lambda catalog config without ingest",
     )
+    parser.add_argument(
+        "--github-source",
+        action="store_true",
+        help="index a public GitHub repository and assert the Step Functions FetchSource path",
+    )
     return parser.parse_args(argv)
 
 
-def load_config() -> SmokeConfig:
+def load_config(args: argparse.Namespace) -> SmokeConfig:
     region = env("AWS_REGION", env("AWS_DEFAULT_REGION", DEFAULT_REGION))
     source_bucket = require_env("SPUR_CONTEXT_SMOKE_SOURCE_BUCKET")
     run_id = env("SPUR_CONTEXT_SMOKE_RUN_ID", uuid.uuid4().hex[:12])
+    if args.github_source:
+        mode = "github"
+        source = env("SPUR_CONTEXT_SMOKE_GITHUB_SOURCE", DEFAULT_GITHUB_SOURCE)
+        revision = env("SPUR_CONTEXT_SMOKE_GITHUB_REVISION", DEFAULT_GITHUB_REVISION)
+        package = env("SPUR_CONTEXT_SMOKE_GITHUB_PACKAGE", DEFAULT_GITHUB_PACKAGE)
+        source_url = env("SPUR_CONTEXT_SMOKE_GITHUB_URL", DEFAULT_GITHUB_URL)
+        source_kind = "git"
+        symbol_query = env(
+            "SPUR_CONTEXT_SMOKE_GITHUB_SYMBOL_QUERY", DEFAULT_GITHUB_SYMBOL_QUERY
+        )
+    else:
+        mode = "presigned-s3-tarball"
+        source = env("SPUR_CONTEXT_SMOKE_SOURCE", DEFAULT_SOURCE)
+        revision = env("SPUR_CONTEXT_SMOKE_REVISION", DEFAULT_REVISION)
+        package = env("SPUR_CONTEXT_SMOKE_PACKAGE", f"spur-context-smoke-{run_id}")
+        source_url = ""
+        source_kind = "tarball"
+        symbol_query = "e1_expected_symbol"
     return SmokeConfig(
         region=region,
         source_bucket=source_bucket,
         data_bucket=env("SPUR_CONTEXT_SMOKE_DATA_BUCKET", source_bucket),
         lambda_name=require_env("SPUR_CONTEXT_SMOKE_LAMBDA"),
-        source=env("SPUR_CONTEXT_SMOKE_SOURCE", DEFAULT_SOURCE),
-        revision=env("SPUR_CONTEXT_SMOKE_REVISION", DEFAULT_REVISION),
+        source=source,
+        revision=revision,
         s3_prefix=env("SPUR_CONTEXT_SMOKE_S3_PREFIX", "smoke/context-service"),
         pointer_key=normalize_pointer_key(
             env("SPUR_CONTEXT_SMOKE_SNAPSHOT_POINTER_KEY", DEFAULT_POINTER_KEY)
@@ -108,7 +140,11 @@ def load_config() -> SmokeConfig:
         ),
         poll_seconds=int(env("SPUR_CONTEXT_SMOKE_POLL_SECONDS", str(DEFAULT_POLL_SECONDS))),
         run_id=run_id,
-        package=env("SPUR_CONTEXT_SMOKE_PACKAGE", f"spur-context-smoke-{run_id}"),
+        package=package,
+        mode=mode,
+        source_url=source_url,
+        source_kind=source_kind,
+        symbol_query=symbol_query,
         expect_embeddings=env("SPUR_CONTEXT_SMOKE_EXPECT_EMBEDDINGS", "1") == "1",
     )
 
@@ -139,6 +175,7 @@ def run_full_smoke(config: SmokeConfig) -> int:
     print(f"[context-smoke] run_id={config.run_id}")
     print(f"[context-smoke] package={config.package} revision={config.revision}")
     print(f"[context-smoke] lambda={config.lambda_name} region={config.region}")
+    print(f"[context-smoke] mode={config.mode}")
 
     verify_serving_uses_frozen_s3_catalog(
         config.lambda_name,
@@ -148,7 +185,17 @@ def run_full_smoke(config: SmokeConfig) -> int:
         == "1",
     )
     caller_arn = env("SPUR_CONTEXT_SMOKE_CALLER_ARN", caller_identity_arn(config.region))
+    invoker = LambdaInvoker(
+        lambda_name=config.lambda_name, region=config.region, caller_arn=caller_arn
+    )
 
+    if config.mode == "github":
+        return run_github_source_smoke(config, invoker)
+    return run_presigned_s3_tarball_smoke(config, invoker)
+
+
+def run_presigned_s3_tarball_smoke(config: SmokeConfig, invoker: "LambdaInvoker") -> int:
+    print("[context-smoke] source path=presigned S3 tarball (prefetch_source=false)")
     with tempfile.TemporaryDirectory(prefix="spur-context-smoke-") as tmp:
         tmp_path = pathlib.Path(tmp)
         archive = write_fixture_tarball(tmp_path, config.package, config.revision)
@@ -161,9 +208,6 @@ def run_full_smoke(config: SmokeConfig) -> int:
         )
         source_url = presign_fixture_source(config.source_bucket, source_key, config.region)
 
-        invoker = LambdaInvoker(
-            lambda_name=config.lambda_name, region=config.region, caller_arn=caller_arn
-        )
         index_response = invoker.call_tool(
             "external_index",
             {
@@ -171,7 +215,7 @@ def run_full_smoke(config: SmokeConfig) -> int:
                 "package": config.package,
                 "revision": config.revision,
                 "source_url": source_url,
-                "source_kind": "tarball",
+                "source_kind": config.source_kind,
                 "force": True,
             },
         )
@@ -201,6 +245,7 @@ def run_full_smoke(config: SmokeConfig) -> int:
             config.package,
             config.revision,
             config.run_id,
+            config.symbol_query,
             expect_embeddings=config.expect_embeddings,
         )
 
@@ -216,6 +261,55 @@ def run_full_smoke(config: SmokeConfig) -> int:
                     config.region,
                 ]
             )
+    return 0
+
+
+def run_github_source_smoke(config: SmokeConfig, invoker: "LambdaInvoker") -> int:
+    print(f"[context-smoke] github_source_url={config.source_url}")
+    index_response = invoker.call_tool(
+        "external_index",
+        {
+            "source": config.source,
+            "package": config.package,
+            "revision": config.revision,
+            "source_url": config.source_url,
+            "source_kind": "git",
+            "force": True,
+        },
+    )
+    if index_response.get("status") == "complete":
+        raise SmokeFailure("external_index returned a warm catalog hit; expected FetchSource path")
+    job_id = require_json_string(index_response, "job_id")
+    print(f"[context-smoke] job_id={job_id}")
+
+    status = wait_for_complete_job(
+        invoker=invoker,
+        job_id=job_id,
+        timeout_seconds=config.timeout_seconds,
+        poll_seconds=config.poll_seconds,
+    )
+    execution_arn = require_json_string(status, "execution_arn")
+    assert_stepfunctions_visited_state(execution_arn, "FetchSource", config.region)
+    assert_row_counts(status, expect_embeddings=config.expect_embeddings)
+    assert_medallion_objects(
+        bucket=config.data_bucket,
+        source=config.source,
+        package=config.package,
+        revision=config.revision,
+        pointer_key=config.pointer_key,
+        region=config.region,
+    )
+    assert_serving_queries(
+        invoker,
+        config.source,
+        config.package,
+        config.revision,
+        config.run_id,
+        config.symbol_query,
+        expect_embeddings=config.expect_embeddings,
+    )
+
+    print("[context-smoke] ok")
     return 0
 
 
@@ -518,12 +612,41 @@ def assert_silver_artifact_manifest(
     )
 
 
+def assert_stepfunctions_visited_state(execution_arn: str, state_name: str, region: str) -> None:
+    history = run_json(
+        [
+            "aws",
+            "stepfunctions",
+            "get-execution-history",
+            "--execution-arn",
+            execution_arn,
+            "--max-results",
+            "1000",
+            "--region",
+            region,
+        ]
+    )
+    visited = []
+    for event in history.get("events") or []:
+        for details_key in ("stateEnteredEventDetails", "stateExitedEventDetails"):
+            details = event.get(details_key) or {}
+            name = details.get("name")
+            if isinstance(name, str):
+                visited.append(name)
+    if state_name not in visited:
+        raise SmokeFailure(
+            f"expected Step Functions execution to visit {state_name}; visited {visited}"
+        )
+    print(f"[context-smoke] Step Functions visited {state_name}")
+
+
 def assert_serving_queries(
     invoker: LambdaInvoker,
     source: str,
     package: str,
     revision: str,
     run_id: str,
+    symbol_query: str,
     *,
     expect_embeddings: bool = True,
 ) -> None:
@@ -533,7 +656,7 @@ def assert_serving_queries(
             "source": source,
             "package": package,
             "revision": revision,
-            "query": "e1_expected_symbol",
+            "query": symbol_query,
             "symbol_kind": "function",
             "limit": 5,
         },
@@ -551,7 +674,7 @@ def assert_serving_queries(
             "context_lines": 0,
         },
     )
-    if "e1_expected_symbol" not in str(source_response.get("source") or ""):
+    if symbol_query not in str(source_response.get("source") or ""):
         raise SmokeFailure(f"external_code_read returned unexpected source: {source_response}")
 
     if not expect_embeddings:

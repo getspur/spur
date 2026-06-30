@@ -106,11 +106,14 @@ def test_self_contained_worker_images_build_locally_without_ecr_mutations_by_def
     assert 'local output_dir="$REPO_ROOT/target/lambda"' in script
     assert '--output "type=docker,dest=$output_dir/spur-context-worker-image.tar"' in script
     assert '--output "type=docker,dest=$output_dir/spur-context-worker-lambda-image.tar"' in script
+    assert '--output "type=docker,dest=$output_dir/spur-context-source-fetcher-image.tar"' in script
     assert 'if [[ "$PUSH_IMAGES" == "true" ]]' in script
     assert "build_and_push_worker_image" in script
     assert "build_and_push_worker_lambda_image" in script
+    assert "build_and_push_source_fetcher_lambda_image" in script
     assert 'aws ecr describe-repositories --repository-names "$WORKER_ECR_REPO"' in script
     assert 'aws ecr describe-repositories --repository-names "$WORKER_LAMBDA_ECR_REPO"' in script
+    assert 'aws ecr describe-repositories --repository-names "$SOURCE_FETCHER_LAMBDA_ECR_REPO"' in script
 
 
 def test_deploy_worker_image_contains_worker_and_spur_binaries():
@@ -168,6 +171,30 @@ def test_deploy_builds_lambda_worker_image_for_fast_start():
     assert "COPY spur-context-worker-lambda /usr/local/bin/spur-context-worker-lambda" in script
     assert 'ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]' in script
     assert '-var "worker_lambda_image=' in script
+
+
+def test_deploy_builds_source_fetcher_lambda_image_and_passes_to_terraform():
+    script = DEPLOY_SH.read_text()
+    cargo_toml = (ROOT / "crates" / "spur-context-fetcher" / "Cargo.toml").read_text()
+    outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
+
+    assert "spur-context-fetcher-lambda" in cargo_toml
+    assert 'SOURCE_FETCHER_LAMBDA_ECR_REPO="spur-context-source-fetcher"' in script
+    assert "SOURCE_FETCHER_LAMBDA_IMAGE_URI" in script
+    assert 'run_graviton2_safe_cargo "source fetcher Lambda image binary"' in script
+    assert "build -p spur-context-fetcher --release" in script
+    assert "build_and_push_source_fetcher_lambda_image" in script
+    assert 'aws ecr describe-repositories --repository-names "$SOURCE_FETCHER_LAMBDA_ECR_REPO"' in script
+    assert "write_source_fetcher_lambda_image_dockerfile" in script
+    assert "COPY spur-context-fetcher-lambda /usr/local/bin/spur-context-fetcher-lambda" in script
+    assert "/usr/local/bin/spur-context-fetcher-lambda --smoke" in script
+    assert 'ENTRYPOINT ["/usr/local/bin/spur-context-fetcher-lambda"]' in script
+    assert "spur-context-source-fetcher-image.tar" in script
+    assert '--remote-binary "$(remote_target_path target/release/spur-context-fetcher-lambda)"' in script
+    assert '-var "source_fetcher_lambda_image=' in script
+    assert "terraform output -raw source_fetcher_lambda_image_uri" in script
+    assert "source fetcher Lambda image URI:" in script
+    assert 'output "source_fetcher_lambda_image_uri"' in outputs_tf
 
 
 def test_deploy_rebuilds_lambda_zip_by_default():
@@ -294,9 +321,27 @@ def test_staging_smoke_codifies_e1_real_worker_and_frozen_serving():
     assert "postgres" in script
     assert "aws lambda invoke" in script
     assert "aws s3 presign" in script
+    assert "prefetch_source=false" in script
     assert "SPUR_CONTEXT_SMOKE_SOURCE_BUCKET" in readme
     assert "smoke-staging-e2e.sh --preflight" in readme
     assert "smoke-staging-e2e.sh" in readme
+
+
+def test_staging_smoke_codifies_github_fetch_source_path():
+    script = STAGING_SMOKE.read_text()
+    readme = (INFRA_DIR / "README.md").read_text()
+
+    assert "--github-source" in script
+    assert "SPUR_CONTEXT_SMOKE_GITHUB_URL" in script
+    assert "git+https://github.com/" in script
+    assert '"source_kind": "git"' in script
+    assert "assert_stepfunctions_visited_state" in script
+    assert "get-execution-history" in script
+    assert "FetchSource" in script
+    assert "SPUR_CONTEXT_SMOKE_GITHUB_SYMBOL_QUERY" in script
+    assert "smoke-staging-e2e.sh --github-source" in readme
+    assert "FetchSource" in readme
+    assert "presigned HTTPS" in readme
 
 
 def test_staging_smoke_entrypoint_runs_python_script():
@@ -499,6 +544,17 @@ def test_source_fetcher_lambda_is_non_vpc_and_least_privilege():
     assert 'prefix = "fetch/"' in main_tf
     assert "days = var.fetch_artifact_retention_days" in main_tf
     assert "noncurrent_version_expiration" in main_tf
+
+
+def test_tfvars_example_documents_source_fetcher_image_and_tuning_knobs():
+    tfvars = (INFRA_DIR / "terraform.tfvars.example").read_text()
+
+    assert "source_fetcher_lambda_image" in tfvars
+    assert "source_fetcher_lambda_timeout_sec" in tfvars
+    assert "source_fetcher_lambda_memory_mb" in tfvars
+    assert "source_fetcher_lambda_ephemeral_storage_mb" in tfvars
+    assert "source_fetch_presign_seconds" in tfvars
+    assert "fetch_artifact_retention_days" in tfvars
 
 
 def test_lambda_worker_resource_is_configured_for_fast_start_mvp():

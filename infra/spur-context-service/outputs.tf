@@ -93,6 +93,11 @@ output "worker_lambda_image_uri" {
   value       = var.worker_lambda_image
 }
 
+output "source_fetcher_lambda_image_uri" {
+  description = "ECR image URI used by the non-VPC source fetcher Lambda"
+  value       = var.source_fetcher_lambda_image
+}
+
 output "worker_lambda_function_name" {
   description = "Lambda function name for the indexing worker fast path"
   value       = aws_lambda_function.worker.function_name
