@@ -1,12 +1,23 @@
 {
-  "StartAt": "RunLambdaBuild",
+  "StartAt": "RouteSource",
   "States": {
-    "RunLambdaBuild": {
+    "RouteSource": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.prefetch_source",
+          "BooleanEquals": true,
+          "Next": "FetchSource"
+        }
+      ],
+      "Default": "PrepareOriginalWorkerInput"
+    },
+    "FetchSource": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
-      "TimeoutSeconds": ${worker_lambda_timeout_sec},
+      "TimeoutSeconds": ${source_fetcher_lambda_timeout_sec},
       "Parameters": {
-        "FunctionName": "${worker_lambda_arn}",
+        "FunctionName": "${source_fetch_lambda_arn}",
         "Payload": {
           "job_id.$": "$.job_id",
           "package.$": "$.package",
@@ -15,6 +26,82 @@
           "source_url.$": "$.source_url",
           "source_kind.$": "$.source_kind",
           "limits.$": "$.limits"
+        }
+      },
+      "ResultPath": "$.fetchResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "CheckFetchSource"
+    },
+    "CheckFetchSource": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.fetchResult.Payload.status",
+          "StringEquals": "failed",
+          "Next": "FetchSourceFailed"
+        }
+      ],
+      "Default": "PrepareFetchedWorkerInput"
+    },
+    "FetchSourceFailed": {
+      "Type": "Fail",
+      "Error": "source_fetch_failed",
+      "Cause": "Source fetcher reported deterministic source fetch failure"
+    },
+    "PrepareFetchedWorkerInput": {
+      "Type": "Pass",
+      "Parameters": {
+        "job_id.$": "$.job_id",
+        "package.$": "$.package",
+        "revision.$": "$.revision",
+        "source.$": "$.source",
+        "source_url.$": "$.fetchResult.Payload.source_url",
+        "source_kind.$": "$.fetchResult.Payload.source_kind",
+        "limits.$": "$.limits"
+      },
+      "ResultPath": "$.workerInput",
+      "Next": "RunLambdaBuild"
+    },
+    "PrepareOriginalWorkerInput": {
+      "Type": "Pass",
+      "Parameters": {
+        "job_id.$": "$.job_id",
+        "package.$": "$.package",
+        "revision.$": "$.revision",
+        "source.$": "$.source",
+        "source_url.$": "$.source_url",
+        "source_kind.$": "$.source_kind",
+        "limits.$": "$.limits"
+      },
+      "ResultPath": "$.workerInput",
+      "Next": "RunLambdaBuild"
+    },
+    "RunLambdaBuild": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "TimeoutSeconds": ${worker_lambda_timeout_sec},
+      "Parameters": {
+        "FunctionName": "${worker_lambda_arn}",
+        "Payload": {
+          "job_id.$": "$.workerInput.job_id",
+          "package.$": "$.workerInput.package",
+          "revision.$": "$.workerInput.revision",
+          "source.$": "$.workerInput.source",
+          "source_url.$": "$.workerInput.source_url",
+          "source_kind.$": "$.workerInput.source_kind",
+          "limits.$": "$.workerInput.limits"
         }
       },
       "ResultPath": "$.lambdaResult",
@@ -105,27 +192,27 @@
                 },
                 {
                   "Name": "JOB_ID",
-                  "Value.$": "$.job_id"
+                  "Value.$": "$.workerInput.job_id"
                 },
                 {
                   "Name": "PACKAGE",
-                  "Value.$": "$.package"
+                  "Value.$": "$.workerInput.package"
                 },
                 {
                   "Name": "REVISION",
-                  "Value.$": "$.revision"
+                  "Value.$": "$.workerInput.revision"
                 },
                 {
                   "Name": "SOURCE",
-                  "Value.$": "$.source"
+                  "Value.$": "$.workerInput.source"
                 },
                 {
                   "Name": "SOURCE_URL",
-                  "Value.$": "$.source_url"
+                  "Value.$": "$.workerInput.source_url"
                 },
                 {
                   "Name": "SOURCE_KIND",
-                  "Value.$": "$.source_kind"
+                  "Value.$": "$.workerInput.source_kind"
                 },
                 {
                   "Name": "SPUR_INDEX_JOBS_TABLE",
@@ -145,15 +232,15 @@
                 },
                 {
                   "Name": "SPUR_CONTEXT_MAX_SOURCE_BYTES",
-                  "Value.$": "States.Format('{}', $.limits.max_source_bytes)"
+                  "Value.$": "States.Format('{}', $.workerInput.limits.max_source_bytes)"
                 },
                 {
                   "Name": "SPUR_CONTEXT_MAX_BUILD_SECONDS",
-                  "Value.$": "States.Format('{}', $.limits.max_build_seconds)"
+                  "Value.$": "States.Format('{}', $.workerInput.limits.max_build_seconds)"
                 },
                 {
                   "Name": "SPUR_CONTEXT_WORKER_CHECKPOINT_URI",
-                  "Value.$": "States.Format('${worker_checkpoint_uri_template}', $.job_id)"
+                  "Value.$": "States.Format('${worker_checkpoint_uri_template}', $.workerInput.job_id)"
                 }
               ]
             }
@@ -210,27 +297,27 @@
                 },
                 {
                   "Name": "JOB_ID",
-                  "Value.$": "$.job_id"
+                  "Value.$": "$.workerInput.job_id"
                 },
                 {
                   "Name": "PACKAGE",
-                  "Value.$": "$.package"
+                  "Value.$": "$.workerInput.package"
                 },
                 {
                   "Name": "REVISION",
-                  "Value.$": "$.revision"
+                  "Value.$": "$.workerInput.revision"
                 },
                 {
                   "Name": "SOURCE",
-                  "Value.$": "$.source"
+                  "Value.$": "$.workerInput.source"
                 },
                 {
                   "Name": "SOURCE_URL",
-                  "Value.$": "$.source_url"
+                  "Value.$": "$.workerInput.source_url"
                 },
                 {
                   "Name": "SOURCE_KIND",
-                  "Value.$": "$.source_kind"
+                  "Value.$": "$.workerInput.source_kind"
                 },
                 {
                   "Name": "SPUR_INDEX_JOBS_TABLE",
@@ -250,15 +337,15 @@
                 },
                 {
                   "Name": "SPUR_CONTEXT_MAX_SOURCE_BYTES",
-                  "Value.$": "States.Format('{}', $.limits.max_source_bytes)"
+                  "Value.$": "States.Format('{}', $.workerInput.limits.max_source_bytes)"
                 },
                 {
                   "Name": "SPUR_CONTEXT_MAX_BUILD_SECONDS",
-                  "Value.$": "States.Format('{}', $.limits.max_build_seconds)"
+                  "Value.$": "States.Format('{}', $.workerInput.limits.max_build_seconds)"
                 },
                 {
                   "Name": "SPUR_CONTEXT_WORKER_CHECKPOINT_URI",
-                  "Value.$": "States.Format('${worker_checkpoint_uri_template}', $.job_id)"
+                  "Value.$": "States.Format('${worker_checkpoint_uri_template}', $.workerInput.job_id)"
                 }
               ]
             }
