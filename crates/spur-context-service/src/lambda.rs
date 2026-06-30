@@ -147,7 +147,7 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
 
     let authenticated_caller = match request.tool.as_str() {
         "external_index" | "external_index_status" => {
-            Some(match authenticated_caller_id(&event.payload) {
+            Some(match authenticated_caller_id(&event.payload, anonymous_mutations_allowed()) {
                 Ok(caller_id) => caller_id,
                 Err(error) => return auth_error_response(error),
             })
@@ -781,7 +781,31 @@ fn caller_id(request: &ApiGatewayRequest) -> String {
         .to_owned()
 }
 
-fn authenticated_caller_id(request: &ApiGatewayRequest) -> Result<String, McpHandlerError> {
+/// When set truthy, mutating tools (`external_index`/`external_index_status`)
+/// no longer require an authenticated caller and fall back to a shared anonymous
+/// identity. Intended for internal-team / trusted-network deployments where the
+/// HTTP API route is `NONE` (no authorizer injects a caller). Secure-by-default:
+/// off unless explicitly enabled.
+const ALLOW_ANONYMOUS_MUTATIONS_ENV: &str = "SPUR_CONTEXT_ALLOW_ANONYMOUS_MUTATIONS";
+/// Shared caller id used for anonymous mutations. All anonymous callers share
+/// this bucket, so the existing per-caller rate limit / active-job cap still
+/// apply (collectively) rather than being bypassed entirely.
+const ANONYMOUS_CALLER_ID: &str = "anonymous-internal";
+
+fn anonymous_mutations_allowed() -> bool {
+    matches!(
+        env::var(ALLOW_ANONYMOUS_MUTATIONS_ENV)
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
+fn authenticated_caller_id(
+    request: &ApiGatewayRequest,
+    allow_anonymous: bool,
+) -> Result<String, McpHandlerError> {
     request
         .request_context
         .as_ref()
@@ -805,6 +829,7 @@ fn authenticated_caller_id(request: &ApiGatewayRequest) -> Result<String, McpHan
                 })
         })
         .map(str::to_owned)
+        .or_else(|| allow_anonymous.then(|| ANONYMOUS_CALLER_ID.to_owned()))
         .ok_or_else(|| {
             McpHandlerError::InvalidParams(
                 "authenticated caller is required for mutating context-service tools".to_owned(),
@@ -988,7 +1013,7 @@ mod tests {
         }));
 
         assert_eq!(
-            authenticated_caller_id(&request).expect("IAM caller should authenticate"),
+            authenticated_caller_id(&request, false).expect("IAM caller should authenticate"),
             "arn:aws:iam::123456789012:role/context-indexer"
         );
     }
@@ -1001,9 +1026,40 @@ mod tests {
             }
         }));
 
-        let error = authenticated_caller_id(&request).unwrap_err();
+        let error = authenticated_caller_id(&request, false).unwrap_err();
 
         assert!(error.to_string().contains("authenticated caller"));
+    }
+
+    #[test]
+    fn authenticated_caller_id_falls_back_to_anonymous_when_allowed() {
+        // Public (NONE auth) request: no authorizer/identity caller present.
+        let request = request_from_context(json!({
+            "http": {
+                "sourceIp": "203.0.113.24"
+            }
+        }));
+
+        assert_eq!(
+            authenticated_caller_id(&request, true)
+                .expect("anonymous fallback should authenticate when allowed"),
+            ANONYMOUS_CALLER_ID
+        );
+    }
+
+    #[test]
+    fn authenticated_caller_id_prefers_real_caller_over_anonymous_fallback() {
+        // Even with anonymous allowed, a real authenticated caller wins.
+        let request = request_from_context(json!({
+            "identity": {
+                "userArn": "arn:aws:iam::123456789012:user/real"
+            }
+        }));
+
+        assert_eq!(
+            authenticated_caller_id(&request, true).expect("real caller should authenticate"),
+            "arn:aws:iam::123456789012:user/real"
+        );
     }
 
     #[test]
