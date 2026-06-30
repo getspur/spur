@@ -22,6 +22,12 @@ variable "catalog_s3_uri" {
   default     = "s3://spur-context/gold/catalog-snapshot/current.json"
 }
 
+variable "allow_anonymous_mutations" {
+  description = "Allow mutating tools (external_index/external_index_status) without an authenticated caller, falling back to a shared anonymous identity. Intended for internal-team / trusted-network stacks where the API route is public (NONE). Secure-by-default off; the shared anonymous identity still shares the per-caller rate limit / active-job cap."
+  type        = bool
+  default     = false
+}
+
 variable "api_authorization_type" {
   description = "Authorization for the HTTP API $default route. AWS_IAM (SigV4, secure default) or NONE (public, unauthenticated — use only for demo/eval stacks). Valid: NONE, AWS_IAM, JWT, CUSTOM."
   type        = string
