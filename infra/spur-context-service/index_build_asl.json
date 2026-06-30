@@ -42,23 +42,7 @@
           "BackoffRate": 2.0
         }
       ],
-      "Next": "CheckFetchSource"
-    },
-    "CheckFetchSource": {
-      "Type": "Choice",
-      "Choices": [
-        {
-          "Variable": "$.fetchResult.Payload.status",
-          "StringEquals": "failed",
-          "Next": "FetchSourceFailed"
-        }
-      ],
-      "Default": "PrepareFetchedWorkerInput"
-    },
-    "FetchSourceFailed": {
-      "Type": "Fail",
-      "Error": "source_fetch_failed",
-      "Cause": "Source fetcher reported deterministic source fetch failure"
+      "Next": "PrepareFetchedWorkerInput"
     },
     "PrepareFetchedWorkerInput": {
       "Type": "Pass",
