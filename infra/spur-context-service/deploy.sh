@@ -32,7 +32,11 @@ EXT_PLATFORM="linux_arm64"
 # "postgres_scanner" (the bare "postgres" name 404s). `LOAD postgres` resolves
 # the alias to the postgres_scanner file, so bundling postgres_scanner makes the
 # offline `LOAD postgres` succeed.
-EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "sqlite_scanner" "aws" "parquet" "json")
+# `lance` (vector sidecar reader) is bundled so the worker's `LOAD lance` finds
+# it locally; without it, translate falls back to `INSTALL lance`, which the
+# worker cannot download (no egress to extensions.duckdb.org from its VPC) and
+# times out ~60s per sidecar, silently skipping embeddings/section vectors.
+EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "sqlite_scanner" "aws" "parquet" "json" "lance")
 # shellcheck disable=SC2034
 WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"
 
@@ -354,6 +358,7 @@ RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/ducklake.d
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/postgres_scanner.duckdb_extension
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/sqlite_scanner.duckdb_extension
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/aws.duckdb_extension
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/lance.duckdb_extension
 RUN /usr/local/bin/spur --version
 RUN /usr/local/bin/spur-context-worker || true
 CMD ["/usr/local/bin/spur-context-worker"]
@@ -376,6 +381,7 @@ RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/ducklake.d
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/postgres_scanner.duckdb_extension
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/sqlite_scanner.duckdb_extension
 RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/aws.duckdb_extension
+RUN test -f /opt/duckdb/extensions/v${DUCKDB_VERSION}/${EXT_PLATFORM}/lance.duckdb_extension
 RUN /usr/local/bin/spur --version
 RUN /usr/local/bin/spur-context-worker-lambda --smoke
 ENTRYPOINT ["/usr/local/bin/spur-context-worker-lambda"]
