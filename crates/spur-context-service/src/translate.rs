@@ -2097,14 +2097,13 @@ fn load_ducklake_extensions(conn: &Connection, catalog_dsn: &str, data_path: &st
 }
 
 fn load_lance_extension(conn: &Connection) -> Result<()> {
-    match conn.execute_batch("LOAD lance;") {
-        Ok(()) => Ok(()),
-        Err(load_error) => conn
-            .execute_batch("INSTALL lance; LOAD lance;")
-            .with_context(|| {
-                format!("failed to load lance extension: initial LOAD failed: {load_error}")
-            }),
-    }
+    // Load lance via the standard bundled-extension path: sets extension_directory
+    // to the baked-in /opt/duckdb/extensions and autoinstall_known_extensions=false,
+    // then LOADs from disk (same as httpfs/ducklake/etc.). Replaces the old bare
+    // `LOAD lance` + network `INSTALL lance` fallback, which hung on the worker's
+    // egress-less VPC. Local dev (no SPUR_CONTEXT_DUCKDB_EXTENSION_DIR) still
+    // INSTALL+LOADs via the helper's None branch.
+    load_duckdb_extension(conn, "lance", "failed to load lance extension")
 }
 
 fn attach_ducklake(conn: &Connection, catalog_dsn: &str, data_path: &str) -> Result<()> {
