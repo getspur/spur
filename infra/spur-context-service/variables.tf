@@ -182,13 +182,15 @@ variable "allowed_source_domains" {
 # ─── On-Demand Indexing ──────────────────────────────────────────────────────
 
 variable "vpc_id" {
-  description = "VPC ID for the ECS worker tasks (needs S3/RDS/SFN egress)"
+  description = "VPC ID for the ECS worker tasks (needs S3/RDS/SFN egress). Empty (default) discovers the account default VPC via data.aws_vpc.selected."
   type        = string
+  default     = ""
 }
 
 variable "worker_subnets" {
-  description = "Private subnets for Lambda and ECS worker tasks. By default this module creates NAT-free VPC endpoints in these subnets."
+  description = "Private subnets for Lambda and ECS worker tasks. Empty (default) discovers all subnets of the selected VPC. By default this module creates NAT-free VPC endpoints in these subnets."
   type        = list(string)
+  default     = []
 }
 
 variable "worker_route_table_ids" {
@@ -296,7 +298,7 @@ locals {
   # layer one level deep (`.../data/gold/...`) and serving never finds it.
   context_ducklake_data_path      = coalesce(var.context_ducklake_data_path, "s3://${var.bucket_name}/gold/data/")
   worker_checkpoint_uri_template  = "s3://${var.bucket_name}/jobs/{}/checkpoint.json"
-  aurora_subnet_ids               = var.aurora_subnets != null ? var.aurora_subnets : var.worker_subnets
+  aurora_subnet_ids               = var.aurora_subnets != null ? var.aurora_subnets : local.net_subnet_ids
   aurora_catalog_dsn              = "postgres:host=${aws_rds_cluster.catalog.endpoint} port=${aws_rds_cluster.catalog.port} dbname=${var.aurora_database_name} user=${var.aurora_master_username} sslmode=require"
   aurora_master_secret_arn        = aws_rds_cluster.catalog.master_user_secret[0].secret_arn
   aurora_master_password_valuearn = "${local.aurora_master_secret_arn}:password::"

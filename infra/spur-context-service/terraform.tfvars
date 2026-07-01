@@ -17,15 +17,10 @@ context_max_git_bytes                = 2147483648
 context_max_build_seconds            = 1800
 allowed_source_domains               = []
 
-vpc_id = "vpc-xxxxxxxx"
-
-worker_subnets = [
-  "subnet-xxxxxxxx",
-  "subnet-yyyyyyyy",
-]
-worker_route_table_ids = [
-  "rtb-xxxxxxxx",
-]
+# Networking is discovered by default: leaving vpc_id/worker_subnets/
+# worker_route_table_ids unset makes network.tf resolve the account default VPC,
+# its subnets, and its route tables via data sources. staging/prod override
+# these in env/<env>.tfvars to pin a dedicated VPC.
 
 worker_ecr_image    = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker:latest"
 worker_lambda_image = "123456789012.dkr.ecr.ap-southeast-5.amazonaws.com/spur-context-worker-lambda:latest"
