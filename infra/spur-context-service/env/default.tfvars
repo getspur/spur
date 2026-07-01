@@ -21,3 +21,9 @@ api_authorization_type = "NONE"
 # is true; pinning false here keeps a scoped worker-Lambda deploy from silently
 # enabling deletion protection. Flip to true deliberately when desired.
 aurora_deletion_protection = false
+
+# The spur cloud-build VM runs in this same default VPC, so it resolves the
+# private ECR/secrets endpoints via VPC-wide private DNS and must be admitted
+# on the endpoint SG (sg-0e8c8762149e621d8 = spur-builder-ssm). Without this,
+# docker push during deploy times out against api.ecr.ap-southeast-5.
+vpc_endpoint_extra_client_sg_ids = ["sg-0e8c8762149e621d8"]
