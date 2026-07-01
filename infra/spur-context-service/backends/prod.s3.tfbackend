@@ -3,8 +3,14 @@
 # Bootstrap these resources once outside this Terraform module before running
 # `terraform init -backend-config=backends/prod.s3.tfbackend`.
 # The S3 bucket stores state; the DynamoDB table provides state locking.
-bucket         = "replace-me-spur-terraform-state"
+bucket         = "wiilearn-spur-tfstate-apse5"
 key            = "spur-context-service/prod/terraform.tfstate"
 region         = "ap-southeast-5"
-dynamodb_table = "replace-me-spur-terraform-locks"
+dynamodb_table = "wiilearn-spur-tflocks"
 encrypt        = true
+
+# ap-southeast-5 (Malaysia) postdates terraform 1.5.7's embedded S3 backend
+# region list; skip the static validation. Endpoint still resolves normally.
+skip_region_validation      = true
+skip_credentials_validation = true
+skip_metadata_api_check     = true
