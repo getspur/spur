@@ -16,3 +16,8 @@ aws_region = "ap-southeast-5"
 # this to terraform.tfvars — that auto-loads into every env and would silently
 # make staging/prod public too.
 api_authorization_type = "NONE"
+
+# Preserve current reality (live cluster has protection off). The module default
+# is true; pinning false here keeps a scoped worker-Lambda deploy from silently
+# enabling deletion protection. Flip to true deliberately when desired.
+aurora_deletion_protection = false
