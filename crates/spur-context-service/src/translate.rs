@@ -202,21 +202,29 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     log_translate_phase_timing("load_ducklake_extensions+attach_ducklake", phase_started);
 
     let phase_started = Instant::now();
-    acquire_postgres_gold_publish_lock(&conn, &catalog_dsn)?;
-    let mut lock_generation_elapsed = phase_started.elapsed();
-
-    let phase_started = Instant::now();
     ensure_catalog_schema(&conn)?;
     log_translate_phase_timing("ensure_catalog_schema", phase_started);
 
     let phase_started = Instant::now();
-    let generation = next_generation(&conn, &catalog_dsn)?;
-    lock_generation_elapsed += phase_started.elapsed();
+    let prepared_lance = prepare_lance_sidecar_extensions(&conn, opts)?;
+    log_translate_phase_timing("prepare_lance_sidecar_extensions", phase_started);
+
+    let phase_started = Instant::now();
+    let postgres_metadata = attach_postgres_metadata_catalog(&conn, &catalog_dsn)?;
+    log_translate_phase_timing("attach_postgres_metadata_catalog", phase_started);
+
+    let phase_started = Instant::now();
+    acquire_postgres_gold_publish_lock(&conn, postgres_metadata.as_ref())?;
+    let generation = next_generation(&conn, &catalog_dsn, postgres_metadata.as_ref())?;
     emit_translate_phase_timing(
         "acquire_postgres_gold_publish_lock+next_generation",
-        lock_generation_elapsed,
+        phase_started.elapsed(),
     );
 
+    // Keep generation-scoped writes and the metadata publish/checkpoint/export
+    // under the Postgres session advisory lock. Rows are generation-stamped, but
+    // existing tests do not prove concurrent DuckLake metadata writers can
+    // safely publish, checkpoint, and export frozen snapshots in parallel.
     let mut rows_inserted = HashMap::new();
     let phase_started = Instant::now();
     run_transaction(&conn, || {
@@ -231,9 +239,15 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     );
 
     let phase_started = Instant::now();
-    let embeddings_translated =
-        insert_sidecar_tables(&conn, opts, revision, generation, &mut rows_inserted)
-            .context("failed to translate artifact sidecars into DuckLake")?;
+    let embeddings_translated = insert_sidecar_tables(
+        &conn,
+        opts,
+        revision,
+        generation,
+        prepared_lance,
+        &mut rows_inserted,
+    )
+    .context("failed to translate artifact sidecars into DuckLake")?;
     log_translate_phase_timing("insert_sidecar_tables", phase_started);
 
     let snapshot_id = latest_snapshot_id(&conn).context("failed to read DuckLake snapshot id")?;
@@ -845,18 +859,32 @@ fn insert_sidecar_tables(
     opts: &TranslateOptions,
     revision: RevisionParts,
     generation: i64,
+    prepared_lance: PreparedLanceSidecars,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
-    let symbols_translated =
-        insert_symbol_embeddings(conn, opts, revision, generation, rows_inserted).with_context(
-            || {
-                format!(
-                    "failed to translate `{}`",
-                    opts.artifact_dir.join("code_symbols.lance").display()
-                )
-            },
-        )?;
-    insert_section_bodies(conn, opts, revision, generation, rows_inserted).with_context(|| {
+    let symbols_translated = insert_symbol_embeddings(
+        conn,
+        opts,
+        revision,
+        generation,
+        prepared_lance,
+        rows_inserted,
+    )
+    .with_context(|| {
+        format!(
+            "failed to translate `{}`",
+            opts.artifact_dir.join("code_symbols.lance").display()
+        )
+    })?;
+    insert_section_bodies(
+        conn,
+        opts,
+        revision,
+        generation,
+        prepared_lance,
+        rows_inserted,
+    )
+    .with_context(|| {
         format!(
             "failed to translate `{}`",
             opts.artifact_dir.join("sections.lancedb").display()
@@ -870,10 +898,17 @@ fn insert_symbol_embeddings(
     opts: &TranslateOptions,
     revision: RevisionParts,
     generation: i64,
+    prepared_lance: PreparedLanceSidecars,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
     let sidecar_path = opts.artifact_dir.join("code_symbols.lance");
-    let Some(source) = sidecar_source(conn, opts, "code_symbols.lance", SidecarKind::CodeSymbols)?
+    let Some(source) = sidecar_source(
+        conn,
+        opts,
+        "code_symbols.lance",
+        SidecarKind::CodeSymbols,
+        prepared_lance,
+    )?
     else {
         if !opts.allow_missing_embeddings {
             bail!(
@@ -1019,10 +1054,17 @@ fn insert_section_bodies(
     opts: &TranslateOptions,
     revision: RevisionParts,
     generation: i64,
+    prepared_lance: PreparedLanceSidecars,
     rows_inserted: &mut HashMap<String, usize>,
 ) -> Result<bool> {
     let sidecar_path = opts.artifact_dir.join("sections.lancedb");
-    let Some(source) = sidecar_source(conn, opts, "sections.lancedb", SidecarKind::Sections)?
+    let Some(source) = sidecar_source(
+        conn,
+        opts,
+        "sections.lancedb",
+        SidecarKind::Sections,
+        prepared_lance,
+    )?
     else {
         if !opts.allow_missing_embeddings {
             bail!(
@@ -1251,23 +1293,48 @@ fn default_lineage() -> TranslateLineage {
     }
 }
 
-fn next_generation(conn: &Connection, catalog_dsn: &str) -> Result<i64> {
+fn next_generation(
+    conn: &Connection,
+    catalog_dsn: &str,
+    postgres_metadata: Option<&PostgresMetadataCatalog>,
+) -> Result<i64> {
     if is_postgres_catalog(catalog_dsn) {
-        return next_postgres_generation(conn, catalog_dsn);
+        let postgres_metadata = postgres_metadata
+            .context("Postgres metadata catalog must be attached before generation reservation")?;
+        return next_postgres_generation(conn, postgres_metadata);
     }
     reserve_transactional_generation(conn)
 }
 
-fn next_postgres_generation(conn: &Connection, catalog_dsn: &str) -> Result<i64> {
-    let alias = format!("spur_generation_{}", uuid::Uuid::new_v4().simple());
+#[derive(Debug, Clone)]
+struct PostgresMetadataCatalog {
+    alias: String,
+}
+
+fn attach_postgres_metadata_catalog(
+    conn: &Connection,
+    catalog_dsn: &str,
+) -> Result<Option<PostgresMetadataCatalog>> {
+    if !is_postgres_catalog(catalog_dsn) {
+        return Ok(None);
+    }
+
+    let alias = format!("spur_metadata_{}", uuid::Uuid::new_v4().simple());
     let dsn = postgres_metadata_dsn(catalog_dsn_with_env_password(catalog_dsn).as_str());
     conn.execute_batch(&format!(
         "ATTACH '{}' AS {alias} (TYPE postgres);",
         escape_sql_literal(&dsn)
     ))
-    .context("failed to attach Postgres generation allocator")?;
+    .context("failed to attach Postgres metadata catalog")?;
 
-    let sql = postgres_generation_allocator_sql(&alias);
+    Ok(Some(PostgresMetadataCatalog { alias }))
+}
+
+fn next_postgres_generation(
+    conn: &Connection,
+    postgres_metadata: &PostgresMetadataCatalog,
+) -> Result<i64> {
+    let sql = postgres_generation_allocator_sql(&postgres_metadata.alias);
     conn.execute_batch(&sql.create_sequence)
         .context("failed to ensure Postgres gold generation sequence")?;
     conn.query_row(&sql.reserve_generation, [], |row| row.get(0))
@@ -1290,20 +1357,15 @@ fn postgres_generation_allocator_sql(alias: &str) -> PostgresGenerationAllocator
     }
 }
 
-fn acquire_postgres_gold_publish_lock(conn: &Connection, catalog_dsn: &str) -> Result<()> {
-    if !is_postgres_catalog(catalog_dsn) {
+fn acquire_postgres_gold_publish_lock(
+    conn: &Connection,
+    postgres_metadata: Option<&PostgresMetadataCatalog>,
+) -> Result<()> {
+    let Some(postgres_metadata) = postgres_metadata else {
         return Ok(());
-    }
+    };
 
-    let alias = format!("spur_publish_{}", uuid::Uuid::new_v4().simple());
-    let dsn = postgres_metadata_dsn(catalog_dsn_with_env_password(catalog_dsn).as_str());
-    conn.execute_batch(&format!(
-        "ATTACH '{}' AS {alias} (TYPE postgres);",
-        escape_sql_literal(&dsn)
-    ))
-    .context("failed to attach Postgres gold publish lock")?;
-
-    let sql = postgres_gold_publish_lock_sql(&alias);
+    let sql = postgres_gold_publish_lock_sql(&postgres_metadata.alias);
     conn.query_row(&sql.acquire_lock, [], |_| Ok(()))
         .context("failed to acquire Postgres gold publish lock")
 }
@@ -1605,11 +1667,88 @@ impl SidecarKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PreparedLanceSidecars {
+    code_symbols: bool,
+    sections: bool,
+}
+
+impl PreparedLanceSidecars {
+    fn mark_loaded(&mut self, kind: SidecarKind) {
+        match kind {
+            SidecarKind::CodeSymbols => self.code_symbols = true,
+            SidecarKind::Sections => self.sections = true,
+        }
+    }
+
+    fn is_loaded(self, kind: SidecarKind) -> bool {
+        match kind {
+            SidecarKind::CodeSymbols => self.code_symbols,
+            SidecarKind::Sections => self.sections,
+        }
+    }
+}
+
+fn prepare_lance_sidecar_extensions(
+    conn: &Connection,
+    opts: &TranslateOptions,
+) -> Result<PreparedLanceSidecars> {
+    let mut prepared = PreparedLanceSidecars::default();
+    let mut extension_loaded = false;
+
+    for (relative_dir, kind) in [
+        ("code_symbols.lance", SidecarKind::CodeSymbols),
+        ("sections.lancedb", SidecarKind::Sections),
+    ] {
+        let Some(path) = lance_sidecar_path_requiring_extension(opts, relative_dir)? else {
+            continue;
+        };
+
+        if !extension_loaded {
+            if let Err(error) = load_lance_extension(conn) {
+                skip_lance_sidecar_or_fail(
+                    opts,
+                    &path,
+                    error,
+                    kind.expected_sidecar_error_context(),
+                )?;
+                continue;
+            }
+            extension_loaded = true;
+        }
+        prepared.mark_loaded(kind);
+    }
+
+    Ok(prepared)
+}
+
+fn lance_sidecar_path_requiring_extension(
+    opts: &TranslateOptions,
+    relative_dir: &str,
+) -> Result<Option<PathBuf>> {
+    let path = opts.artifact_dir.join(relative_dir);
+    if let Some(manifest) = &opts.artifact_manifest {
+        let files = manifest_files_under(opts, manifest, relative_dir)?;
+        if files.is_empty()
+            || files
+                .iter()
+                .any(|path| path.extension().and_then(|ext| ext.to_str()) == Some("parquet"))
+        {
+            return Ok(None);
+        }
+    } else if parquet_sidecar_glob(&path)?.is_some() {
+        return Ok(None);
+    }
+
+    Ok(path.exists().then_some(path))
+}
+
 fn sidecar_source(
     conn: &Connection,
     opts: &TranslateOptions,
     relative_dir: &str,
     kind: SidecarKind,
+    prepared_lance: PreparedLanceSidecars,
 ) -> Result<Option<SidecarSource>> {
     let path = opts.artifact_dir.join(relative_dir);
     if let Some(manifest) = &opts.artifact_manifest {
@@ -1637,8 +1776,7 @@ fn sidecar_source(
         return Ok(None);
     }
 
-    if let Err(error) = load_lance_extension(conn) {
-        skip_lance_sidecar_or_fail(opts, &path, error, kind.expected_sidecar_error_context())?;
+    if !prepared_lance.is_loaded(kind) {
         return Ok(None);
     }
 
@@ -2194,6 +2332,44 @@ mod tests {
     }
 
     #[test]
+    fn postgres_publish_lock_boundary_excludes_schema_and_lance_prepare() {
+        let body = translate_artifact_to_ducklake_source();
+
+        let attach = body
+            .find("attach_postgres_metadata_catalog(&conn, &catalog_dsn)?")
+            .expect("translate must attach the Postgres metadata catalog once");
+        let ensure_schema = body
+            .find("ensure_catalog_schema(&conn)?")
+            .expect("translate must ensure the catalog schema");
+        let prepare_lance = body
+            .find("prepare_lance_sidecar_extensions(&conn, opts)?")
+            .expect("translate must prepare Lance extensions before publishing");
+        let acquire_lock = body
+            .find("acquire_postgres_gold_publish_lock(&conn, postgres_metadata.as_ref())?")
+            .expect("translate must acquire the Postgres publish lock");
+        let reserve_generation = body
+            .find("next_generation(&conn, &catalog_dsn, postgres_metadata.as_ref())?")
+            .expect("translate must reserve a gold generation");
+
+        assert!(
+            attach < acquire_lock,
+            "Postgres metadata ATTACH must happen before lock acquisition"
+        );
+        assert!(
+            ensure_schema < acquire_lock,
+            "catalog schema DDL must run outside the Postgres publish lock"
+        );
+        assert!(
+            prepare_lance < acquire_lock,
+            "Lance extension INSTALL/LOAD must run outside the Postgres publish lock"
+        );
+        assert!(
+            acquire_lock < reserve_generation,
+            "Postgres generation reservation must remain inside the publish lock"
+        );
+    }
+
+    #[test]
     fn translate_phase_timing_line_uses_translate_prefix_and_elapsed_millis() {
         let line = translate_phase_timing_line(
             "load_ducklake_extensions+attach_ducklake",
@@ -2204,5 +2380,17 @@ mod tests {
             line,
             "[translate] phase load_ducklake_extensions+attach_ducklake elapsed_ms=42"
         );
+    }
+
+    fn translate_artifact_to_ducklake_source() -> &'static str {
+        let source = include_str!("translate.rs");
+        let start = source
+            .find("pub fn translate_artifact_to_ducklake")
+            .expect("translate_artifact_to_ducklake should exist");
+        let rest = &source[start..];
+        let end = rest
+            .find("\npub fn update_refs")
+            .expect("update_refs should follow translate_artifact_to_ducklake");
+        &rest[..end]
     }
 }
