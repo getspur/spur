@@ -22,7 +22,7 @@ resource "aws_sfn_state_machine" "index_build" {
       catalog_dsn                       = local.aurora_catalog_dsn
       context_ducklake_data_path        = local.context_ducklake_data_path
       worker_checkpoint_uri_template    = local.worker_checkpoint_uri_template
-      subnets_json                      = jsonencode(var.worker_subnets)
+      subnets_json                      = jsonencode(local.net_subnet_ids)
       security_groups_json              = jsonencode([aws_security_group.worker.id])
     }
   )
@@ -33,7 +33,7 @@ resource "aws_sfn_state_machine" "index_build" {
 resource "aws_security_group" "worker" {
   name        = "spur-context-worker"
   description = "Egress for indexing worker tasks"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.net_vpc_id
 
   egress {
     from_port   = 0
@@ -54,7 +54,7 @@ resource "aws_security_group" "vpc_endpoints" {
 
   name        = "spur-context-vpc-endpoints"
   description = "Private AWS service endpoints for indexing workers"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.net_vpc_id
 
   ingress {
     description     = "HTTPS from indexing workers"
@@ -73,7 +73,7 @@ resource "aws_security_group" "vpc_endpoints" {
 resource "aws_security_group" "catalog_db" {
   name        = "spur-context-catalog-db"
   description = "Aurora Postgres ingest catalog access"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.net_vpc_id
 
   ingress {
     description     = "Postgres from indexing workers"
