@@ -15,6 +15,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context as _, Result};
 use async_trait::async_trait;
 use aws_sdk_dynamodb::{types::AttributeValue, Client as DynamoDbClient};
+use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -1693,6 +1695,19 @@ impl S3SilverArtifactStore {
     }
 }
 
+fn s3_precondition_failed_status_or_code(status: Option<u16>, code: Option<&str>) -> bool {
+    status == Some(412) || code == Some("PreconditionFailed")
+}
+
+fn is_s3_put_precondition_failed(error: &SdkError<PutObjectError>) -> bool {
+    s3_precondition_failed_status_or_code(
+        error
+            .raw_response()
+            .map(|response| response.status().as_u16()),
+        error.code(),
+    )
+}
+
 #[async_trait]
 impl SilverArtifactStore for S3SilverArtifactStore {
     async fn upload_file(&self, key: &str, path: &Path) -> Result<SilverUploadedFile, WorkerError> {
@@ -1703,7 +1718,8 @@ impl SilverArtifactStore for S3SilverArtifactStore {
             ))
         })?;
         let size_bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
-        let resp = s3_client()
+        let s3_uri = format!("s3://{}/{key}", self.bucket);
+        let resp = match s3_client()
             .put_object()
             .bucket(&self.bucket)
             .key(key)
@@ -1711,13 +1727,46 @@ impl SilverArtifactStore for S3SilverArtifactStore {
             .body(ByteStream::from(data))
             .send()
             .await
-            .map_err(|error| WorkerError::Build(format!("upload silver file `{key}`: {error}")))?;
+        {
+            Ok(resp) => resp,
+            Err(error) if is_s3_put_precondition_failed(&error) => {
+                let head = s3_client()
+                    .head_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|head_error| {
+                        WorkerError::Build(format!(
+                            "head existing silver file `{key}` after precondition failed: {head_error}"
+                        ))
+                    })?;
+                let etag = head
+                    .e_tag()
+                    .ok_or_else(|| {
+                        WorkerError::Build(format!("existing silver file `{key}` returned no ETag"))
+                    })?
+                    .to_owned();
+                let content_length = head.content_length().unwrap_or_default();
+                let size_bytes = u64::try_from(content_length).unwrap_or(u64::MAX);
+                return Ok(SilverUploadedFile {
+                    s3_uri,
+                    etag,
+                    size_bytes,
+                });
+            }
+            Err(error) => {
+                return Err(WorkerError::Build(format!(
+                    "upload silver file `{key}`: {error}"
+                )));
+            }
+        };
         let etag = resp
             .e_tag()
             .ok_or_else(|| WorkerError::Build(format!("silver upload `{key}` returned no ETag")))?
             .to_owned();
         Ok(SilverUploadedFile {
-            s3_uri: format!("s3://{}/{key}", self.bucket),
+            s3_uri,
             etag,
             size_bytes,
         })
@@ -1730,7 +1779,8 @@ impl SilverArtifactStore for S3SilverArtifactStore {
     ) -> Result<String, WorkerError> {
         let data = serde_json::to_vec_pretty(manifest)
             .map_err(|error| WorkerError::Build(format!("encode silver manifest: {error}")))?;
-        s3_client()
+        let s3_uri = format!("s3://{}/{key}", self.bucket);
+        match s3_client()
             .put_object()
             .bucket(&self.bucket)
             .key(key)
@@ -1739,10 +1789,13 @@ impl SilverArtifactStore for S3SilverArtifactStore {
             .body(ByteStream::from(data))
             .send()
             .await
-            .map_err(|error| {
-                WorkerError::Build(format!("upload silver manifest `{key}`: {error}"))
-            })?;
-        Ok(format!("s3://{}/{key}", self.bucket))
+        {
+            Ok(_) => Ok(s3_uri),
+            Err(error) if is_s3_put_precondition_failed(&error) => Ok(s3_uri),
+            Err(error) => Err(WorkerError::Build(format!(
+                "upload silver manifest `{key}`: {error}"
+            ))),
+        }
     }
 
     async fn validate_manifest(
@@ -4061,6 +4114,26 @@ mod tests {
 
     fn lock_env() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().expect("env lock should not be poisoned")
+    }
+
+    #[test]
+    fn s3_precondition_failed_predicate_uses_status_or_error_code() {
+        assert!(s3_precondition_failed_status_or_code(
+            Some(412),
+            Some("PreconditionFailed")
+        ));
+        assert!(s3_precondition_failed_status_or_code(Some(412), None));
+        assert!(s3_precondition_failed_status_or_code(
+            None,
+            Some("PreconditionFailed")
+        ));
+
+        assert!(!s3_precondition_failed_status_or_code(
+            Some(404),
+            Some("NoSuchKey")
+        ));
+        assert!(!s3_precondition_failed_status_or_code(Some(500), None));
+        assert!(!s3_precondition_failed_status_or_code(None, None));
     }
 
     #[test]
