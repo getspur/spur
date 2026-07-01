@@ -19,10 +19,10 @@ locals {
 resource "aws_vpc_endpoint" "gateway" {
   for_each = var.create_vpc_endpoints ? local.gateway_vpc_endpoint_services : {}
 
-  vpc_id            = var.vpc_id
+  vpc_id            = local.net_vpc_id
   service_name      = each.value
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = var.worker_route_table_ids
+  route_table_ids   = local.net_route_table_ids
 
   tags = {
     Name = "spur-context-${each.key}-gateway-endpoint"
@@ -30,8 +30,8 @@ resource "aws_vpc_endpoint" "gateway" {
 
   lifecycle {
     precondition {
-      condition     = length(var.worker_route_table_ids) > 0
-      error_message = "worker_route_table_ids must include the route table IDs associated with worker_subnets when create_vpc_endpoints is true."
+      condition     = length(local.net_route_table_ids) > 0
+      error_message = "No route tables resolved for the selected VPC; set var.worker_route_table_ids when create_vpc_endpoints is true."
     }
   }
 }
@@ -39,10 +39,10 @@ resource "aws_vpc_endpoint" "gateway" {
 resource "aws_vpc_endpoint" "interface" {
   for_each = var.create_vpc_endpoints ? local.interface_vpc_endpoint_services : {}
 
-  vpc_id              = var.vpc_id
+  vpc_id              = local.net_vpc_id
   service_name        = each.value
   vpc_endpoint_type   = "Interface"
-  subnet_ids          = var.worker_subnets
+  subnet_ids          = local.net_subnet_ids
   security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
 
