@@ -64,6 +64,21 @@ resource "aws_security_group" "vpc_endpoints" {
     security_groups = [aws_security_group.worker.id]
   }
 
+  # Additional in-VPC clients that need the private ECR/secrets endpoints.
+  # These endpoints enable VPC-wide private DNS, so anything sharing this VPC
+  # (e.g. the spur cloud-build VM in the default VPC) resolves api.ecr/... to
+  # the endpoint and must be admitted here or its traffic is dropped.
+  dynamic "ingress" {
+    for_each = toset(var.vpc_endpoint_extra_client_sg_ids)
+    content {
+      description     = "HTTPS from spur build VM for private ECR/secrets endpoints"
+      from_port       = 443
+      to_port         = 443
+      protocol        = "tcp"
+      security_groups = [ingress.value]
+    }
+  }
+
   tags = {
     Name = "spur-context-vpc-endpoints"
   }
