@@ -28,7 +28,7 @@ resource "aws_lambda_function" "worker" {
   }
 
   vpc_config {
-    subnet_ids         = var.worker_subnets
+    subnet_ids         = local.net_subnet_ids
     security_group_ids = [aws_security_group.worker.id]
   }
 
