@@ -16,6 +16,14 @@ aws_region = "ap-southeast-5"
 # Must match the catalog's recorded DATA_PATH or attach fails with a mismatch.
 context_ducklake_data_path = "s3://spur-context/data/"
 
+# Serving reads the frozen-snapshot pointer here. The worker derives the pointer
+# location from context_ducklake_data_path: for a bare .../data/ path it lands at
+# .../data/gold/catalog-snapshot/current.json (snapshot_base_uri only strips a
+# /gold/data suffix). The module default (.../gold/catalog-snapshot/...) assumes
+# the /gold/data data path, so serving must be pointed at the /data/-derived key
+# or it 404s and returns empty for every query.
+catalog_s3_uri = "s3://spur-context/data/gold/catalog-snapshot/current.json"
+
 # This stack is intentionally public/unauthenticated (demo/eval). The module
 # default is AWS_IAM (SigV4); staging/prod keep that secure default. Do NOT move
 # this to terraform.tfvars — that auto-loads into every env and would silently
