@@ -204,6 +204,12 @@ variable "worker_route_table_ids" {
   }
 }
 
+variable "vpc_endpoint_extra_client_sg_ids" {
+  description = "Extra security group IDs (beyond the worker SG) allowed inbound 443 on the interface VPC endpoints. Needed for other clients sharing this VPC that rely on the endpoints' VPC-wide private DNS, e.g. the spur cloud-build VM in the default VPC."
+  type        = list(string)
+  default     = []
+}
+
 variable "create_vpc_endpoints" {
   description = "Create NAT-free VPC endpoints for worker access to S3, DynamoDB, Step Functions, Secrets Manager, ECR, CloudWatch Logs, and STS. Disable only when worker_subnets already have equivalent NAT or endpoints."
   type        = bool
