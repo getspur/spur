@@ -297,7 +297,11 @@ package_zip() {
     local zip_path="$1"
     log "packaging Lambda zip..."
     cd "$BUILD_DIR"
-    zip -r "$zip_path" bootstrap .duckdb/ -x "*.gz"
+    # Exclude lance from the SERVING zip: serving reads gold DuckLake tables
+    # (embeddings are native FLOAT[]) and never loads lance, and bundling it
+    # pushes the zip past Lambda's 250 MB unzipped limit. lance stays bundled in
+    # the worker images (copy_worker_extensions) where translate needs it.
+    zip -r "$zip_path" bootstrap .duckdb/ -x "*.gz" -x "*/lance.duckdb_extension"
     log "zip size: $(du -h "$zip_path" | cut -f1)"
 }
 
