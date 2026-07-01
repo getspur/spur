@@ -1,10 +1,13 @@
-# Partial S3 backend config for the staging environment.
+# Partial S3 backend config for the original single-environment deployment.
 #
-# Bootstrap these resources once outside this Terraform module before running
-# `terraform init -backend-config=backends/staging.s3.tfbackend`.
+# This is the de-facto env the live resources (account 065285885105, bucket
+# spur-context) were first deployed under — it predates the staging/prod split,
+# whose committed tfvars are still placeholders. Keep the live state here until
+# a clean staging/prod deploy exists.
+#
 # The S3 bucket stores state; the DynamoDB table provides state locking.
 bucket         = "wiilearn-spur-tfstate-apse5"
-key            = "spur-context-service/staging/terraform.tfstate"
+key            = "spur-context-service/default/terraform.tfstate"
 region         = "ap-southeast-5"
 dynamodb_table = "wiilearn-spur-tflocks"
 encrypt        = true
