@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection};
@@ -172,6 +173,22 @@ impl SidecarSource {
     }
 }
 
+fn translate_phase_timing_line(phase: &str, elapsed: Duration) -> String {
+    format!(
+        "[translate] phase {phase} elapsed_ms={}",
+        elapsed.as_millis()
+    )
+}
+
+fn emit_translate_phase_timing(phase: &str, elapsed: Duration) {
+    let line = translate_phase_timing_line(phase, elapsed);
+    eprintln!("{line}");
+}
+
+fn log_translate_phase_timing(phase: &str, started: Instant) {
+    emit_translate_phase_timing(phase, started.elapsed());
+}
+
 pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<TranslateStats> {
     validate_options(opts)?;
     let revision = revision_parts(&opts.revision, &opts.revision_kind)?;
@@ -179,26 +196,53 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     let data_path = ducklake_data_path(&catalog_dsn)?;
 
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
+    let phase_started = Instant::now();
     load_ducklake_extensions(&conn, &catalog_dsn, &data_path)?;
     attach_ducklake(&conn, &catalog_dsn, &data_path)?;
+    log_translate_phase_timing("load_ducklake_extensions+attach_ducklake", phase_started);
+
+    let phase_started = Instant::now();
     acquire_postgres_gold_publish_lock(&conn, &catalog_dsn)?;
+    let mut lock_generation_elapsed = phase_started.elapsed();
+
+    let phase_started = Instant::now();
     ensure_catalog_schema(&conn)?;
+    log_translate_phase_timing("ensure_catalog_schema", phase_started);
+
+    let phase_started = Instant::now();
     let generation = next_generation(&conn, &catalog_dsn)?;
+    lock_generation_elapsed += phase_started.elapsed();
+    emit_translate_phase_timing(
+        "acquire_postgres_gold_publish_lock+next_generation",
+        lock_generation_elapsed,
+    );
 
     let mut rows_inserted = HashMap::new();
+    let phase_started = Instant::now();
     run_transaction(&conn, || {
         delete_generation_rows(&conn, opts, generation)?;
         insert_structural_tables(&conn, opts, revision, generation, &mut rows_inserted)?;
         insert_git_tables(&conn, opts, revision, generation, &mut rows_inserted)
     })
     .context("failed to translate artifact tables into DuckLake")?;
+    log_translate_phase_timing(
+        "delete_generation_rows+insert_structural_tables+insert_git_tables",
+        phase_started,
+    );
+
+    let phase_started = Instant::now();
     let embeddings_translated =
         insert_sidecar_tables(&conn, opts, revision, generation, &mut rows_inserted)
             .context("failed to translate artifact sidecars into DuckLake")?;
+    log_translate_phase_timing("insert_sidecar_tables", phase_started);
 
     let snapshot_id = latest_snapshot_id(&conn).context("failed to read DuckLake snapshot id")?;
+    let phase_started = Instant::now();
     validate_generation(&conn, opts, generation, &rows_inserted)
         .context("failed to validate translated gold generation")?;
+    log_translate_phase_timing("validate_generation", phase_started);
+
+    let phase_started = Instant::now();
     write_catalog_metadata(
         &conn,
         opts,
@@ -209,6 +253,7 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
         &rows_inserted,
     )
     .context("failed to update package catalog metadata")?;
+    log_translate_phase_timing("write_catalog_metadata", phase_started);
 
     // Force DuckLake to flush all inlined data to parquet files on the data path.
     // DuckLake 1.0 inlines small inserts (<10 rows) into the catalog metadata.
@@ -220,6 +265,7 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     // execute_batch() uses duckdb_query_arrow internally which creates the stream
     // but never drains it — so the writes never happen. We must use prepare().query()
     // and fully drain the result set to force materialization.
+    let phase_started = Instant::now();
     {
         let mut stmt = conn
             .prepare("CALL ducklake_flush_inlined_data('spur_context')")
@@ -234,6 +280,10 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
         .context("failed to force checkpoint DuckLake")?;
     export_frozen_snapshot(&catalog_dsn, &data_path, generation)
         .context("failed to export frozen DuckLake catalog snapshot")?;
+    log_translate_phase_timing(
+        "ducklake_flush_inlined_data+FORCE CHECKPOINT+export_frozen_snapshot",
+        phase_started,
+    );
 
     Ok(TranslateStats {
         rows_inserted,
@@ -2140,6 +2190,19 @@ mod tests {
             sql.acquire_lock.contains("postgres_query('pg_publish'"),
             "lock SQL must run against the attached Postgres metadata catalog: {}",
             sql.acquire_lock
+        );
+    }
+
+    #[test]
+    fn translate_phase_timing_line_uses_translate_prefix_and_elapsed_millis() {
+        let line = translate_phase_timing_line(
+            "load_ducklake_extensions+attach_ducklake",
+            std::time::Duration::from_millis(42),
+        );
+
+        assert_eq!(
+            line,
+            "[translate] phase load_ducklake_extensions+attach_ducklake elapsed_ms=42"
         );
     }
 }
