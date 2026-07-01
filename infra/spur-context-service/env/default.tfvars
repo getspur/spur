@@ -11,11 +11,22 @@
 
 aws_region = "ap-southeast-5"
 
+# The existing DuckLake catalog for this stack stores its data at
+# s3://spur-context/data/ (NOT the module default s3://<bucket>/gold/data/).
+# Must match the catalog's recorded DATA_PATH or attach fails with a mismatch.
+context_ducklake_data_path = "s3://spur-context/data/"
+
 # This stack is intentionally public/unauthenticated (demo/eval). The module
 # default is AWS_IAM (SigV4); staging/prod keep that secure default. Do NOT move
 # this to terraform.tfvars — that auto-loads into every env and would silently
 # make staging/prod public too.
 api_authorization_type = "NONE"
+
+# This stack's API is public (NONE), and index/index_status are meant to be
+# callable without an authenticated caller. Enable the shared anonymous identity
+# for mutating tools (external_index/external_index_status). The anonymous caller
+# still shares the per-caller rate limit / active-job cap.
+allow_anonymous_mutations = true
 
 # Preserve current reality (live cluster has protection off). The module default
 # is true; pinning false here keeps a scoped worker-Lambda deploy from silently
