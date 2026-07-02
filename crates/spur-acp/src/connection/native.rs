@@ -50,18 +50,19 @@ use tokio::sync::{mpsc, oneshot};
 use agent_client_protocol::schema::v1::{
     AgentNotification, AuthenticateRequest, AuthenticateResponse, CancelNotification,
     ClientCapabilities, ClientRequest, ContentBlock, ContentChunk, CreateTerminalRequest,
-    CreateTerminalResponse, ExtRequest, ExtResponse, FileSystemCapabilities, InitializeRequest,
-    InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest,
-    NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId, SessionId, SessionModeId,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, Usage,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    CreateTerminalResponse, DeleteSessionRequest, DeleteSessionResponse, ExtRequest, ExtResponse,
+    FileSystemCapabilities, InitializeRequest, InitializeResponse, KillTerminalRequest,
+    KillTerminalResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse, PermissionOptionId,
+    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId,
+    SessionId, SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, Usage, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
@@ -147,9 +148,17 @@ enum AcpCommand {
             )>,
         >,
     },
+    ResumeSession {
+        request: ResumeSessionRequest,
+        reply: oneshot::Sender<anyhow::Result<ResumeSessionResponse>>,
+    },
     ListSessions {
         request: ListSessionsRequest,
         reply: oneshot::Sender<anyhow::Result<ListSessionsResponse>>,
+    },
+    DeleteSession {
+        request: DeleteSessionRequest,
+        reply: oneshot::Sender<anyhow::Result<DeleteSessionResponse>>,
     },
     SetSessionMode {
         request: SetSessionModeRequest,
@@ -319,7 +328,13 @@ fn reject_busy_command(cmd: AcpCommand, agent_name: &str, in_flight: &str) {
         AcpCommand::LoadSession { reply, .. } => {
             let _ = reply.send(Err(err()));
         }
+        AcpCommand::ResumeSession { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
         AcpCommand::ListSessions { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::DeleteSession { reply, .. } => {
             let _ = reply.send(Err(err()));
         }
         AcpCommand::SetSessionMode { reply, .. } => {
@@ -828,6 +843,37 @@ impl AgentConnection for NativeAcpConnection {
         Ok((response, Box::pin(stream)))
     }
 
+    // ─── resume_session ─────────────────────────────────────────────────
+
+    async fn resume_session(
+        &mut self,
+        request: ResumeSessionRequest,
+    ) -> Result<ResumeSessionResponse, AcpError> {
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx
+            .send(AcpCommand::ResumeSession {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
+
+        reply_rx
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "NativeAcpConnection '{}': ACP thread died during resume_session",
+                    self.agent_name
+                )
+            })?
+            .map_err(AcpError::Transport)
+    }
+
     // ─── list_sessions ───────────────────────────────────────────────────
 
     async fn list_sessions(
@@ -854,6 +900,37 @@ impl AgentConnection for NativeAcpConnection {
                 self.agent_name
             )
         })?
+    }
+
+    // ─── delete_session ─────────────────────────────────────────────────
+
+    async fn delete_session(
+        &mut self,
+        request: DeleteSessionRequest,
+    ) -> Result<DeleteSessionResponse, AcpError> {
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx
+            .send(AcpCommand::DeleteSession {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
+
+        reply_rx
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "NativeAcpConnection '{}': ACP thread died during delete_session",
+                    self.agent_name
+                )
+            })?
+            .map_err(AcpError::Transport)
     }
 
     // ─── set_session_mode ────────────────────────────────────────────────
@@ -1892,11 +1969,38 @@ fn acp_thread_main(
                                     }
                                 }
                             }
+                            AcpCommand::ResumeSession { request, reply } => {
+                                *cwd_loop.lock().unwrap() = request.cwd.clone();
+                                let session_id = request.session_id.clone();
+                                let result = cx.send_request(request).block_task().await;
+                                if let Ok(response) = &result {
+                                    cache_session_modes(
+                                        &advertised_modes,
+                                        &session_id,
+                                        response.modes.as_ref(),
+                                    );
+                                }
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': resume_session failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
                             AcpCommand::ListSessions { request, reply } => {
                                 let result = cx.send_request(request).block_task().await;
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': list_sessions failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
+                            AcpCommand::DeleteSession { request, reply } => {
+                                let result = cx.send_request(request).block_task().await;
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': delete_session failed: {e}",
                                         agent_name_loop
                                     )
                                 }));
@@ -2495,6 +2599,76 @@ mod set_session_model_dispatch_tests {
             Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "set_model"),
             other => panic!("expected CapabilityMissing(\"set_model\"), got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod resume_delete_dispatch_tests {
+    use std::path::PathBuf;
+
+    use super::{AcpCommand, NativeAcpConnection};
+    use crate::connection::AgentConnection;
+    use agent_client_protocol::schema::v1::{
+        DeleteSessionRequest, DeleteSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
+        SessionId,
+    };
+    use tokio::sync::mpsc;
+
+    fn connection_with_command_channel(
+    ) -> (NativeAcpConnection, mpsc::UnboundedReceiver<AcpCommand>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut conn = NativeAcpConnection::new(
+            "test-agent".to_string(),
+            "/bin/false".to_string(),
+            vec![],
+            None,
+        );
+        conn.cmd_tx = Some(tx);
+        (conn, rx)
+    }
+
+    #[tokio::test]
+    async fn resume_session_dispatches_command_and_returns_response() {
+        let (mut conn, mut rx) = connection_with_command_channel();
+        let cwd = PathBuf::from("/tmp/spur-resume");
+        let request = ResumeSessionRequest::new(SessionId::new("sid"), cwd.clone());
+
+        let handle = tokio::spawn(async move { conn.resume_session(request).await });
+
+        match rx.recv().await.expect("resume command must be sent") {
+            AcpCommand::ResumeSession { request, reply } => {
+                assert_eq!(request.session_id, SessionId::new("sid"));
+                assert_eq!(request.cwd, cwd);
+                reply
+                    .send(Ok(ResumeSessionResponse::new()))
+                    .expect("test receiver must still be waiting");
+            }
+            _ => panic!("expected ResumeSession command"),
+        }
+
+        let response = handle.await.expect("resume task must not panic").unwrap();
+        assert_eq!(response, ResumeSessionResponse::new());
+    }
+
+    #[tokio::test]
+    async fn delete_session_dispatches_command_and_returns_response() {
+        let (mut conn, mut rx) = connection_with_command_channel();
+        let request = DeleteSessionRequest::new(SessionId::new("sid"));
+
+        let handle = tokio::spawn(async move { conn.delete_session(request).await });
+
+        match rx.recv().await.expect("delete command must be sent") {
+            AcpCommand::DeleteSession { request, reply } => {
+                assert_eq!(request.session_id, SessionId::new("sid"));
+                reply
+                    .send(Ok(DeleteSessionResponse::new()))
+                    .expect("test receiver must still be waiting");
+            }
+            _ => panic!("expected DeleteSession command"),
+        }
+
+        let response = handle.await.expect("delete task must not panic").unwrap();
+        assert_eq!(response, DeleteSessionResponse::new());
     }
 }
 
