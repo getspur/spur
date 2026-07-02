@@ -9,7 +9,7 @@
 //! cache — the cached title survives the view rebuild because the data
 //! never lived on the view to begin with.
 
-use agent_client_protocol::schema::SessionInfoUpdate;
+use spur_acp::SessionInfoUpdate;
 use spur_acp::{SessionId, SpurConfig, TestStubConnection};
 use spur_core::orchestrator::{BrainSession, Orchestrator};
 use spur_tui::test_support::default_agent_config;

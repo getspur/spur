@@ -31,10 +31,10 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     AuthenticateRequest, AuthenticateResponse, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
-    ModelId, NewSessionResponse, PromptRequest, SessionId, SessionModeId, SessionNotification,
+    NewSessionResponse, PromptRequest, SessionId, SessionModeId, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse,
 };
@@ -198,18 +198,16 @@ pub trait AgentConnection: Send + Sync {
         ))
     }
 
-    /// Issue ACP `session/set_model` (capability-gated, with state-derived
-    /// fallback to `set_session_config_option`). Spec §6.3.
+    /// Issue model selection through ACP `session/set_config_option`.
     ///
-    /// `caps` is read once to choose between the dedicated `set_model`
-    /// method, the `set_config_option` fallback, or `CapabilityMissing`.
-    /// The default implementation returns `CapabilityMissing` — transports
-    /// that talk native ACP (currently `NativeAcpConnection`) override
-    /// this with the real dispatch decision.
+    /// `caps` is read once to choose between the config-option path and
+    /// `CapabilityMissing`. The default implementation returns
+    /// `CapabilityMissing` — transports that talk native ACP (currently
+    /// `NativeAcpConnection`) override this with the real dispatch decision.
     async fn set_session_model(
         &mut self,
         sid: SessionId,
-        model_id: ModelId,
+        model_id: String,
         caps: &SpurAgentCaps,
     ) -> Result<(), AcpError> {
         let _ = (sid, model_id, caps);
@@ -330,7 +328,7 @@ impl AgentConnection for TestStubConnection {
 #[cfg(test)]
 mod agent_connection_defaults {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         AuthMethodId, AuthenticateRequest, SessionId, SetSessionModeRequest,
     };
 

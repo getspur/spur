@@ -125,16 +125,30 @@ pub use types::*;
 // Re-export ACP SDK types for consumer crates (TUI, orchestrator).
 pub use adapter::config_options::{extract_choices, AdvertisedChoice, AdvertisedCommand};
 pub use adapter::{extract_tool_meta, SpurToolMeta};
-pub use agent_client_protocol::schema::{
-    AuthMethodId, AuthenticateRequest, AuthenticateResponse, AvailableCommand,
-    AvailableCommandInput, AvailableCommandsUpdate, ConfigOptionUpdate, ContentBlock, ContentChunk,
-    CurrentModeUpdate, ExtNotification, ExtRequest, ExtResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, PermissionOption, PermissionOptionId,
-    PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    RequestPermissionOutcome, RequestPermissionRequest, ResourceLink, SelectedPermissionOutcome,
-    SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionInfo,
-    SessionInfoUpdate, SessionModeId, SessionNotification, SessionUpdate, SetSessionModeRequest,
-    SetSessionModeResponse, TextContent, ToolCall as AcpToolCall, ToolCallContent, ToolCallId,
-    ToolCallLocation, ToolCallStatus, ToolCallUpdate as AcpToolCallUpdate, ToolKind,
-    UnstructuredCommandInput, UsageUpdate,
+pub use agent_client_protocol::schema::v1::SessionId as AcpSessionId;
+pub use agent_client_protocol::schema::v1::{
+    AgentCapabilities, AuthMethodId, AuthenticateRequest, AuthenticateResponse, AvailableCommand,
+    AvailableCommandInput, AvailableCommandsUpdate, CancelNotification, ClientCapabilities,
+    ConfigOptionUpdate, Content, ContentBlock, ContentChunk, CreateTerminalRequest,
+    CreateTerminalResponse, CurrentModeUpdate, Diff, EmbeddedResource, EmbeddedResourceResource,
+    ExtNotification, ExtRequest, ExtResponse, FileSystemCapabilities, ImageContent,
+    InitializeRequest, InitializeResponse, KillTerminalRequest, KillTerminalResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    McpServerHttp, McpServerStdio, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionId, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    PromptRequest, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
+    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome, SessionConfigGroupId,
+    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelect, SessionConfigSelectGroup, SessionConfigSelectOption,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionInfo, SessionInfoUpdate, SessionMode,
+    SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, Terminal, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, TextContent, TextResourceContents, ToolCall, ToolCall as AcpToolCall,
+    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
+    UsageUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
+pub use agent_client_protocol::schema::ProtocolVersion;
