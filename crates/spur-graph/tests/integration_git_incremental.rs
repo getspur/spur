@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::io::Write as _;
@@ -7,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 mod support;
 
+use spur_graph::mcp::markdown_overlay_base_delta_for_worktree;
 use spur_graph::store::cache::{
     emit_base_seed_stats, load_base_artifact_for_worktree, load_base_seed_for_worktree,
     lookup_canonical, write_with_dedup,
@@ -610,6 +612,52 @@ fn missing_canonical_artifact_returns_none_and_full_rebuild_still_works() {
     assert_eq!(rebuilt.graph_content_hash, main_artifact.graph_content_hash);
 }
 
+#[tokio::test]
+async fn markdown_overlay_base_delta_reports_markdown_changes_relative_to_base() {
+    let repo = GitRepo::new();
+    repo.write("docs/unchanged.md", "# Unchanged\n\nStable body.\n");
+    repo.write("docs/changed.md", "# Changed\n\nOld body.\n");
+    repo.write("docs/deleted.md", "# Deleted\n\nRemoved body.\n");
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.git(&[
+        "add",
+        "docs/unchanged.md",
+        "docs/changed.md",
+        "docs/deleted.md",
+        "src/lib.rs",
+    ]);
+    repo.git(&["commit", "-m", "baseline"]);
+
+    let base_artifact = build_full(repo.path());
+    write_current_only_cache(repo.path(), &base_artifact);
+
+    let clean_delta = markdown_overlay_base_delta_for_worktree(repo.path())
+        .await
+        .expect("base delta");
+    assert_eq!(
+        clean_delta.base_artifact_dir,
+        read_current_pointer(repo.path()).expect("base current pointer")
+    );
+    assert!(clean_delta.changed_markdown_paths.is_empty());
+    assert!(clean_delta.deleted_markdown_paths.is_empty());
+
+    repo.write("docs/changed.md", "# Changed\n\nNew body.\n");
+    repo.write("docs/added.markdown", "# Added\n\nNew markdown file.\n");
+    repo.remove("docs/deleted.md");
+
+    let dirty_delta = markdown_overlay_base_delta_for_worktree(repo.path())
+        .await
+        .expect("dirty base delta");
+    assert_eq!(
+        dirty_delta.changed_markdown_paths,
+        string_set(&["docs/added.markdown", "docs/changed.md"])
+    );
+    assert_eq!(
+        dirty_delta.deleted_markdown_paths,
+        string_set(&["docs/deleted.md"])
+    );
+}
+
 #[test]
 fn crlf_bom_dirty_hash_is_bytewise() {
     let repo = GitRepo::new();
@@ -627,6 +675,10 @@ fn crlf_bom_dirty_hash_is_bytewise() {
             .content_oid,
         git_hash_object(bytes)
     );
+}
+
+fn string_set(paths: &[&str]) -> BTreeSet<String> {
+    paths.iter().map(|path| (*path).to_owned()).collect()
 }
 
 fn build_full(root: &Path) -> GraphIndexArtifact {
