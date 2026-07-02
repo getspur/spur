@@ -1,7 +1,7 @@
 # RCA: SQLite unix-VFS ABBA deadlock wedges parallel beads test targets
 
 **Date:** 2026-07-02
-**Status:** Diagnosed; upstream SQLite bug; mitigations listed
+**Status:** Fixed via vendored SQLite 3.51.2 (see Resolution); upstream bug fixed in SQLite 3.51.2
 **Affected:** any test target (or production process) that opens/closes many
 beads sqlite connections concurrently in one process — observed in
 `spur-core` `plan_ownership` (16 tests wedged simultaneously) and, with the
@@ -51,24 +51,44 @@ compile wall before reaching this contention profile. With those targets
 compiling again, full-suite runs exercise dozens of parallel beads
 open/close cycles for the first time in weeks.
 
-## Mitigations
+## Resolution
 
-1. **Track upstream.** The inversion exists in bundled SQLite 3.51.1
-   (`libsqlite3-sys 0.36.0`); newer `libsqlite3-sys` 0.38.x exists — check
-   its bundled SQLite for a fix before bumping (`rusqlite` comes in via
-   `beads_rust`, so the bump lands there).
-2. **No clean compile-out:** the `#define unixIsSharingShmNode(pFile) (0)`
-   fallback is gated on `SQLITE_WASI || SQLITE_OMIT_WAL` — disabling WAL is
-   not acceptable.
-3. **Reduce trigger surface in beads_rust:** serializing connection *close*
-   across the process (a global mutex around `Connection::drop` /
-   `SqliteStorage` drop) removes one side of the race.
-4. **Operational:** when a workspace test run wedges with this signature
-   (many tests "running over 60 seconds" in one beads-heavy target, ~0%
-   CPU), kill the test process on the builder and rerun; it is not a code
-   regression. Diagnose with:
-   `gdb -p <pid> -batch -ex "thread apply all bt"` and look for
-   `unixIsSharingShmNode` + `unixClose` frames.
+Upstream fixed this in **SQLite 3.51.2** (2026-01-09): *"Fix an obscure
+deadlock in the new broken-posix-lock detection logic"*. The 3.51.2
+`unixIsSharingShmNode` no longer takes the global VFS mutex — it reads
+`pShmNode->nRef` with an atomic load — which removes the inode→global
+acquisition and the ABBA cycle.
+
+Applied here as `[patch.crates-io] libsqlite3-sys = { path =
+"vendor/libsqlite3-sys" }`: the pristine 0.36.0 crate with the bundled
+amalgamation replaced by the official 3.51.2 amalgamation
+(`sqlite3.c` SHA3-256
+`733b3fcc6cccb1e334424b9b91a9d68b618385b76ebfcbb106690bd3a9e61367`,
+matching the sqlite.org changelog). 3.51.2 is a patch release; the crate's
+pregenerated bindings remain valid.
+
+**Exit criteria for the patch:** drop `vendor/libsqlite3-sys` and the
+`[patch.crates-io]` entry once `beads_rust` (and any other rusqlite user in
+the graph) moves to a rusqlite/libsqlite3-sys pairing whose bundled SQLite
+is ≥ 3.51.2 (`libsqlite3-sys` 0.37+ ships post-3.51.2 amalgamations).
+
+## Rejected alternatives
+
+1. **Compile-out:** the `#define unixIsSharingShmNode(pFile) (0)` fallback
+   is gated on `SQLITE_WASI || SQLITE_OMIT_WAL` — disabling WAL is not
+   acceptable.
+2. **System sqlite via `LIBSQLITE3_SYS_USE_PKG_CONFIG`:** Debian 12 on the
+   builder ships SQLite 3.40 — too old, and version skew per machine.
+3. **Serializing connection close in `beads_rust`:** works but papers over
+   the bug and costs a cross-repo change; superseded by the upstream fix.
+
+## Operational note
+
+If a workspace test run ever wedges with this signature again (many tests
+"running over 60 seconds" in one beads-heavy target, ~0% CPU): kill the
+test process on the builder and rerun; diagnose with
+`gdb -p <pid> -batch -ex "thread apply all bt"` and look for
+`unixIsSharingShmNode` + `unixClose` frames.
 
 ## Evidence trail
 
