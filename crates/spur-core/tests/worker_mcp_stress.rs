@@ -33,6 +33,11 @@
 //! contract is already covered by `audit_sentinel_round_trip.rs`, so we do
 //! not re-verify it here via a manual sentinel write.
 
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
