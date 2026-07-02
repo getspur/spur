@@ -2711,6 +2711,7 @@ mod tests {
     #[tokio::test]
     async fn emit_worker_write_audit_inner_logs_warning_on_failure() {
         let warnings = CapturedWarnings::default();
+        let _serialize = crate::tracing_test_lock::guard();
         let _guard = tracing::subscriber::set_default(warnings.clone());
 
         emit_worker_write_audit_inner(Some(&FailingAdvanced), "del-A", "update_issue", "bd-123")
@@ -2731,6 +2732,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn emit_worker_write_audit_inner_times_out_and_warns() {
+        let _serialize = crate::tracing_test_lock::guard();
         let warnings = CapturedWarnings::default();
 
         let handle = tokio::spawn({
