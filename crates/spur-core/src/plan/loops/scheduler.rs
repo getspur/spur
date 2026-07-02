@@ -293,7 +293,7 @@ fn skipped_loop_run(loop_id: &str, generation: u32, outcome: &str, now: i64) -> 
     }
 }
 
-fn trailing_failed_loop_runs(audits: &[AuditSentinelKind], loop_id: &str) -> u32 {
+pub(crate) fn trailing_failed_loop_runs(audits: &[AuditSentinelKind], loop_id: &str) -> u32 {
     let mut count = 0u32;
     for audit in audits.iter().rev() {
         let AuditSentinelKind::LoopRun {
@@ -337,7 +337,7 @@ fn generations_in_last_day(audits: &[AuditSentinelKind], loop_id: &str, now: i64
         .min(u32::MAX as usize) as u32
 }
 
-fn effective_interval_secs(spec: &LoopSpec, consecutive_failures: u32) -> u64 {
+pub(crate) fn effective_interval_secs(spec: &LoopSpec, consecutive_failures: u32) -> u64 {
     let Some(FailureBackoff {
         k,
         factor,
