@@ -93,6 +93,7 @@ async fn derive_beads_version_advances_through_bd334_task_audit_sequence() {
             result_summary: Some("completion 1".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         },
         AuditSentinelKind::ReviewFeedback {
             delegation_id: "del-1".into(),
@@ -110,6 +111,7 @@ async fn derive_beads_version_advances_through_bd334_task_audit_sequence() {
             result_summary: Some("completion 2".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         },
         AuditSentinelKind::Approval {
             delegation_id: "del-1".into(),
@@ -164,6 +166,7 @@ async fn derive_beads_version_does_not_collide_across_plan_restart_same_plan_id(
             result_summary: Some("attempt 1".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -198,6 +201,7 @@ async fn derive_beads_version_does_not_collide_across_plan_restart_same_plan_id(
             result_summary: Some("attempt 2".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }),
     )
     .await

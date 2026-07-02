@@ -1135,6 +1135,7 @@ async fn close_plan_tasks(pm: &spur_pm::PmService, subgraph: &spur_core::EpicSub
                 result_summary: None,
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+                estimated_cost_micros: None,
             }),
         )
         .await
