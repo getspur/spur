@@ -117,7 +117,7 @@ insta = "=1.41.1"
 petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }
 
 # ACP SDK
-agent-client-protocol = { version = "1.0" }
+agent-client-protocol = { version = "1.0", features = ["unstable_end_turn_token_usage"] }
 licenseseat = "=0.5.3"
 
 # Workspace crates
