@@ -563,6 +563,7 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
             result_summary: Some("T1 complete".to_string()),
             artifact_uri: None,
             dispatched_base_oid: Some("t1-dispatched-base".to_string()),
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -739,6 +740,7 @@ async fn persisted_overlay_conflict_emits_plan_task_blocked_on_setup_conflict_co
             result_summary: Some("T1 complete".to_string()),
             artifact_uri: None,
             dispatched_base_oid: Some("t1-dispatched-base".to_string()),
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -1442,6 +1444,7 @@ async fn epic_closes_when_scoped_children_terminal() {
                 result_summary: Some("ready for review".into()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+                estimated_cost_micros: None,
             }),
         )
         .await
@@ -1566,6 +1569,7 @@ async fn all_approved_epic_emits_plan_ready_to_merge() {
                 result_summary: Some("ready for review".into()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+                estimated_cost_micros: None,
             }),
         )
         .await
@@ -2412,6 +2416,7 @@ async fn tick_once_index_hygiene_converges_completion_without_label_write() {
             result_summary: Some("done".to_string()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }),
     )
     .await

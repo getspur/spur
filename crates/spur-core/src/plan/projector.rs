@@ -1677,6 +1677,7 @@ mod tests {
                         result_summary: Some("done".into()),
                         artifact_uri: None,
                         dispatched_base_oid: Some("base-oid".into()),
+                        estimated_cost_micros: None,
                     },
                 ),
                 2,
@@ -1865,6 +1866,7 @@ mod tests {
                         result_summary: Some("ready".into()),
                         artifact_uri: None,
                         dispatched_base_oid: None,
+                        estimated_cost_micros: None,
                     },
                 ),
                 1,
@@ -1891,6 +1893,7 @@ mod tests {
                         result_summary: Some("other".into()),
                         artifact_uri: None,
                         dispatched_base_oid: None,
+                        estimated_cost_micros: None,
                     },
                 ),
                 3,
@@ -2309,6 +2312,7 @@ mod tests {
             result_summary: Some("3 files changed".into()),
             artifact_uri: None,
             dispatched_base_oid: Some("base-oid".into()),
+            estimated_cost_micros: None,
         }];
 
         let facts = super::latest_completion_facts(&audits).expect("completion facts");
@@ -2414,6 +2418,7 @@ mod tests {
             result_summary: Some("looks good".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }];
 
         let status = super::project_status_for_issue(&issue, &audits, true, "closed");
@@ -2487,6 +2492,7 @@ mod tests {
                 result_summary: Some("looks good".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
         ];
 
@@ -2534,6 +2540,7 @@ mod tests {
                 result_summary: Some("looks good".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
         ];
 
@@ -2588,6 +2595,7 @@ mod tests {
                 result_summary: Some("looks good".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
         ];
 
@@ -2619,6 +2627,7 @@ mod tests {
             result_summary: Some("worker failed".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }];
 
         let status = super::project_status_for_issue(&issue, &audits, true, "closed");
@@ -2661,6 +2670,7 @@ mod tests {
             result_summary: Some("worker failed".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }];
 
         let status = super::project_status_for_issue(&issue, &audits, true, "closed");
@@ -2685,6 +2695,7 @@ mod tests {
             result_summary: Some("worker cancelled".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }];
 
         let status = super::project_status_for_issue(&issue, &audits, true, "closed");
@@ -2710,6 +2721,7 @@ mod tests {
                 result_summary: Some("looks good".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::Rejection {
                 delegation_id: "del-A".into(),
@@ -2769,6 +2781,7 @@ mod tests {
             result_summary: Some("worker failed".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }];
 
         let (_, warnings) =
@@ -2805,6 +2818,7 @@ mod tests {
             result_summary: Some("worker cancelled".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }];
 
         let (_, warnings) =
@@ -2961,6 +2975,7 @@ mod tests {
             result_summary: Some("waiting for review".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }];
         let (status, _) =
             capture_warnings(|| super::project_status_for_issue(&issue, &audits, true, "closed"));
@@ -3027,6 +3042,7 @@ mod tests {
             result_summary: Some("cargo test failed".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }];
 
         let status = super::project_closed_status(&issue, &audits);
@@ -3045,6 +3061,7 @@ mod tests {
                 result_summary: Some("worker crashed".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::RetryRequested {
                 delegation_id: "del-A".into(),
@@ -3078,6 +3095,7 @@ mod tests {
                 result_summary: Some("worker crashed again".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
         ];
 
@@ -3312,6 +3330,7 @@ mod tests {
                 result_summary: None,
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-A".into(),
@@ -3331,6 +3350,7 @@ mod tests {
                 result_summary: None,
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::Dispatch {
                 delegation_id: "del-B".into(),
@@ -3345,6 +3365,7 @@ mod tests {
                 result_summary: Some("ready".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
         ];
         assert!(!super::superseded_from_audits(&audits));
@@ -3369,6 +3390,7 @@ mod tests {
                 result_summary: None,
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
         ];
         assert!(!super::escalated_from_audits(&audits));
@@ -3410,6 +3432,7 @@ mod tests {
                 result_summary: Some("ready".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::EscalationRequested {
                 plan_id: "P1".to_string(),
@@ -3554,6 +3577,7 @@ mod tests {
                     result_summary: None,
                     artifact_uri: None,
                     dispatched_base_oid: None,
+                    estimated_cost_micros: None,
                 }
             });
         let approval = arb_delegation_id()
@@ -3633,6 +3657,7 @@ mod tests {
                 result_summary: None,
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
         ];
         assert_eq!(super::current_delegation_from_audits(&audits), None);
@@ -3668,6 +3693,7 @@ mod tests {
                     result_summary: Some("failed".into()),
                     artifact_uri: None,
                     dispatched_base_oid: None,
+                    estimated_cost_micros: None,
                 }),
                 Just(AuditSentinelKind::Completion {
                     delegation_id: "del-a".into(),
@@ -3677,6 +3703,7 @@ mod tests {
                     result_summary: Some("cancelled".into()),
                     artifact_uri: None,
                     dispatched_base_oid: None,
+                    estimated_cost_micros: None,
                 }),
                 Just(AuditSentinelKind::Completion {
                     delegation_id: "del-a".into(),
@@ -3686,6 +3713,7 @@ mod tests {
                     result_summary: None,
                     artifact_uri: None,
                     dispatched_base_oid: None,
+                    estimated_cost_micros: None,
                 }),
             ]
         ) {

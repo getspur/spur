@@ -31,29 +31,38 @@ pub enum EpicCompletionOutcome {
 /// Optional fields propagated from a completed delegation into the beads audit
 /// comment. Bundled to keep completion plumbing signatures manageable and to
 /// localize future field additions to one struct.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CompletionAuditFields {
     /// Worker's git branch name for the delegation. Carried verbatim from
     /// `DelegationResult.worker_branch` (NOT the materializer's clipped copy)
     /// so operators see the original branch in audit comments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_branch: Option<String>,
     /// Human-visible summary line. For non-Superseded paths this is the
     /// materializer's CLIPPED summary (post `clip_with_ellipsis`). For
     /// Superseded — where the materializer is bypassed — it falls back to
     /// the unclipped `DelegationResult.summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_summary: Option<String>,
     /// `Some(_)` when `OutcomeMaterializer::materialize` succeeded, formatted
     /// `spur://outcome/{brain_session}/{delegation}/{attempt}`. Operators
     /// extract this URI and resolve via `fetch_outcome_artifact` to inspect
     /// the full delegation result. `None` for the Superseded path (the
     /// materializer is skipped to avoid emitting stale-attempt artifacts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_uri: Option<String>,
     /// HEAD of the worker worktree immediately after overlay cherry-picks
     /// (post-T9 wiring, dispatch-time). Used for forensics and downstream
     /// range computation. None for legacy or pre-overlay dispatches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatched_base_oid: Option<String>,
+    /// Estimated delegation cost in micro-USD, converted from
+    /// `DelegationResult.estimated_cost_usd` at completion emission time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_micros: Option<u64>,
     /// Repository root used to validate `dispatched_base_oid..worker_branch`.
     /// This is emission-only context and is not serialized into the sentinel.
+    #[serde(default, skip)]
     pub repo_root: Option<std::path::PathBuf>,
 }
 
@@ -137,6 +146,10 @@ pub enum AuditSentinelKind {
         /// pre-overlay dispatches.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dispatched_base_oid: Option<String>,
+        /// Estimated delegation cost in micro-USD. None for legacy completion
+        /// comments and code paths that do not have a delegation result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        estimated_cost_micros: Option<u64>,
     },
     EpicCompletion {
         outcome: EpicCompletionOutcome,
@@ -505,6 +518,7 @@ mod tests {
                 result_summary: None,
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-A".into(),
@@ -731,6 +745,7 @@ mod tests {
                 result_summary: None,
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "x".into(),
@@ -937,6 +952,7 @@ mod tests {
             result_summary: Some("done".into()),
             artifact_uri: Some("spur://outcome/aaa/bbb/1".into()),
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: AuditSentinelKind = serde_json::from_str(&json).unwrap();
@@ -944,6 +960,52 @@ mod tests {
             assert_eq!(artifact_uri.as_deref(), Some("spur://outcome/aaa/bbb/1"));
         } else {
             panic!("variant changed");
+        }
+    }
+
+    #[test]
+    fn completion_sentinel_roundtrips_cost_micros() {
+        let kind = AuditSentinelKind::Completion {
+            delegation_id: "del-A".into(),
+            completion_state: CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: Some("w/b".into()),
+            result_summary: None,
+            artifact_uri: None,
+            dispatched_base_oid: None,
+            estimated_cost_micros: Some(812_000),
+        };
+
+        let body = encode_comment(&kind);
+        let parsed = parse_comment(&body).unwrap().unwrap();
+
+        assert_eq!(parsed, kind);
+    }
+
+    #[test]
+    fn completion_sentinel_without_cost_field_still_parses() {
+        let body = format!(
+            "{SENTINEL_PREFIX}\n{}",
+            serde_json::json!({
+                "kind": "completion",
+                "delegation_id": "del-A",
+                "completion_state": "awaiting_review",
+                "superseded": false,
+                "worker_branch": "w/b",
+                "result_summary": null,
+                "artifact_uri": null,
+                "dispatched_base_oid": null,
+            })
+        );
+
+        let parsed = parse_comment(&body).unwrap().unwrap();
+
+        match parsed {
+            AuditSentinelKind::Completion {
+                estimated_cost_micros,
+                ..
+            } => assert!(estimated_cost_micros.is_none()),
+            _ => panic!("expected Completion"),
         }
     }
 
@@ -957,6 +1019,7 @@ mod tests {
             result_summary: Some("done".into()),
             artifact_uri: None,
             dispatched_base_oid: Some("oid123".into()),
+            estimated_cost_micros: None,
         };
         let body = encode_comment(&kind);
         let parsed = parse_comment(&body).unwrap().unwrap();
@@ -1006,11 +1069,16 @@ mod tests {
             result_summary: None,
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(
             !json.contains("artifact_uri"),
             "skip_serializing_if should omit artifact_uri when None; got: {json}"
+        );
+        assert!(
+            !json.contains("estimated_cost_micros"),
+            "skip_serializing_if should omit estimated_cost_micros when None; got: {json}"
         );
     }
 
@@ -1024,6 +1092,7 @@ mod tests {
             result_summary: Some("late completion ignored".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         };
         let orphan = AuditSentinelKind::DispatchOrphanCleared {
             delegation_id: "del-A".into(),
