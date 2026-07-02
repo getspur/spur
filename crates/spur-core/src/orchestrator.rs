@@ -101,6 +101,7 @@ type BrainRunBootstrap = (
     bool,
     Option<String>,
     SessionId,
+    Option<spur_acp::Usage>,
 );
 type NewBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
@@ -128,6 +129,32 @@ type LoadedBrainSessionBootstrap = (
     SessionId,
     String,
 );
+
+fn prompt_usage_to_token_usage(usage: &spur_acp::Usage) -> spur_cost::pricing::TokenUsage {
+    spur_cost::pricing::TokenUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_creation_input_tokens: usage.cached_write_tokens.unwrap_or(0),
+        cache_read_input_tokens: usage.cached_read_tokens.unwrap_or(0),
+    }
+}
+
+fn estimate_prompt_cost(
+    tier: CostTier,
+    duration: Duration,
+    usage: Option<&spur_acp::Usage>,
+    model: Option<&str>,
+) -> f64 {
+    match usage {
+        Some(usage) => spur_cost::estimator::estimate_cost_from_tokens(
+            tier,
+            duration,
+            prompt_usage_to_token_usage(usage),
+            model,
+        ),
+        None => spur_cost::estimator::estimate_cost(tier, duration),
+    }
+}
 
 const MAX_SESSION_LIST_PAGES: usize = 1000;
 /// Cap session listings at a number appropriate for local CLI agents.
@@ -665,7 +692,7 @@ impl Orchestrator {
         );
 
         let success = true;
-        crate::notification_drain::drive_prompt_notifications(
+        let prompt_outcome = crate::notification_drain::drive_prompt_notifications(
             &mut *connection,
             prompt_request,
             |notification| match &notification.update {
@@ -679,16 +706,33 @@ impl Orchestrator {
             },
         )
         .await?;
+        let prompt_usage = prompt_outcome.usage;
 
         let _ = connection.shutdown().await;
         let duration = start.elapsed();
 
         if let Some(ref ct) = self.cost_tracker {
             let status = if success { "completed" } else { "failed" };
-            let _ = ct.end_session(&session_id, status, duration, agent_config.cost_tier);
+            let result = match prompt_usage.as_ref() {
+                Some(usage) => ct.end_session_with_tokens(
+                    &session_id,
+                    status,
+                    duration,
+                    agent_config.cost_tier,
+                    prompt_usage_to_token_usage(usage),
+                    Some(agent_config.name.as_str()),
+                ),
+                None => ct.end_session(&session_id, status, duration, agent_config.cost_tier),
+            };
+            let _ = result;
         }
 
-        let total_cost = spur_cost::estimator::estimate_cost(agent_config.cost_tier, duration);
+        let total_cost = estimate_prompt_cost(
+            agent_config.cost_tier,
+            duration,
+            prompt_usage.as_ref(),
+            Some(agent_config.name.as_str()),
+        );
         println!();
 
         Ok(RunResult {
@@ -703,3 +747,37 @@ impl Orchestrator {
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support;
+
+#[cfg(test)]
+mod prompt_usage_cost_tests {
+    use std::time::Duration;
+
+    use spur_acp::{CostTier, Usage};
+
+    #[test]
+    fn estimates_prompt_cost_from_usage_tokens_when_available() {
+        let usage = Usage::new(1_800_000, 1_000_000, 500_000)
+            .cached_write_tokens(100_000)
+            .cached_read_tokens(200_000);
+        let duration = Duration::from_secs(60);
+
+        let cost =
+            super::estimate_prompt_cost(CostTier::Medium, duration, Some(&usage), Some("gpt-5"));
+
+        // gpt-5: $1.25/M input + $10/M output + $1.25/M cache write
+        // + $0.125/M cache read.
+        assert!((cost - 6.4).abs() < 0.001, "cost={cost}");
+    }
+
+    #[test]
+    fn estimates_prompt_cost_from_duration_when_usage_missing() {
+        let duration = Duration::from_secs(60);
+
+        let cost = super::estimate_prompt_cost(CostTier::Low, duration, None, Some("gpt-5"));
+
+        assert_eq!(
+            cost,
+            spur_cost::estimator::estimate_cost(CostTier::Low, duration)
+        );
+    }
+}
