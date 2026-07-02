@@ -36,10 +36,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, PermissionOptionId, PromptRequest, ProtocolVersion,
-    SetSessionModeRequest, TextContent,
+use agent_client_protocol::schema::v1::{
+    ContentBlock, InitializeRequest, PermissionOptionId, PromptRequest, SetSessionModeRequest,
+    TextContent,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use spur_acp::connection::{AgentConnection, NativeAcpConnection};
 use spur_acp::types::{PermissionRequest, PermissionResponse};
 use tokio::sync::mpsc;

@@ -40,7 +40,6 @@ spur-pm = { workspace = true }
 spur-worktree = { workspace = true }
 spur-cost = { workspace = true }
 spur-license = { workspace = true }
-agent-client-protocol = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }

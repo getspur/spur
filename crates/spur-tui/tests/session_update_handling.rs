@@ -1,7 +1,7 @@
 //! Confirms unknown SessionUpdate variants don't crash the TUI and that the
 //! three new read-only variants mutate session state as expected.
 
-use agent_client_protocol::schema::SessionId as AcpSessionId;
+use spur_acp::AcpSessionId;
 use spur_acp::{
     domain::events::BrainRetireReason, AvailableCommandsUpdate, CurrentModeUpdate,
     SessionNotification, SessionUpdate, UsageUpdate,
@@ -63,7 +63,7 @@ fn current_mode_update_sets_mode() {
 
 #[test]
 fn available_commands_update_stores_names() {
-    use agent_client_protocol::schema::AvailableCommand;
+    use spur_acp::AvailableCommand;
     let cmds = vec![AvailableCommand::new("compact", "compress context")];
     let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(cmds));
     let notif = SessionNotification::new(nid(), update);

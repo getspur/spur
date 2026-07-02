@@ -30,7 +30,7 @@ use spur_acp::{
 };
 use spur_pm::Issue;
 
-use agent_client_protocol::schema::{
+use spur_acp::{
     ContentBlock, InitializeRequest, McpServer, PromptRequest, ProtocolVersion, SessionUpdate,
     SetSessionModeRequest, TextContent,
 };
@@ -105,15 +105,15 @@ type BrainRunBootstrap = (
 type NewBrainSessionBootstrap = (
     spur_acp::config::AgentConfig,
     Option<tokio::sync::broadcast::Receiver<spur_acp::SessionNotification>>,
-    agent_client_protocol::schema::NewSessionResponse,
+    spur_acp::NewSessionResponse,
     spur_acp::BrainSessionId,
     SessionId,
     String,
 );
 
 enum LoadedSessionWireResponse {
-    New(agent_client_protocol::schema::NewSessionResponse),
-    Loaded(agent_client_protocol::schema::LoadSessionResponse),
+    New(spur_acp::NewSessionResponse),
+    Loaded(spur_acp::LoadSessionResponse),
 }
 
 type LoadedBrainSessionBootstrap = (

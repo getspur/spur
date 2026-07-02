@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::{
+use spur_acp::{
     PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionRequest,
     ToolCallUpdate, ToolCallUpdateFields,
 };

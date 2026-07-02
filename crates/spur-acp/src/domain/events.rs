@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use crate::domain::continuation::{DeferReason, DropReason};
 use crate::domain::delegation::{DelegationId, DelegationStatus};
 use crate::types::{CancelMode, SessionId};
-use agent_client_protocol::schema::{SessionConfigOption, SessionInfo, SessionNotification};
+use agent_client_protocol::schema::v1::{SessionConfigOption, SessionInfo, SessionNotification};
 
 mod option_arc_spur_agent_caps_serde {
     use std::sync::Arc;
@@ -1411,11 +1411,11 @@ mod tests {
 
     #[test]
     fn command_registry_dirty_roundtrips_with_some_caps() {
-        let init = agent_client_protocol::schema::InitializeResponse::new(
+        let init = agent_client_protocol::schema::v1::InitializeResponse::new(
             agent_client_protocol::schema::ProtocolVersion::LATEST,
         );
-        let new = agent_client_protocol::schema::NewSessionResponse::new(
-            agent_client_protocol::schema::SessionId::new("acp-sid"),
+        let new = agent_client_protocol::schema::v1::NewSessionResponse::new(
+            agent_client_protocol::schema::v1::SessionId::new("acp-sid"),
         );
         let body = SpurEventBody::CommandRegistryDirty {
             session: SessionId("sid".to_string()),
