@@ -8,10 +8,11 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     AuthMethodId, AuthenticateRequest, ContentBlock, InitializeRequest, ListSessionsRequest,
-    LoadSessionRequest, PromptRequest, ProtocolVersion, SetSessionModeRequest, TextContent,
+    LoadSessionRequest, PromptRequest, SetSessionModeRequest, TextContent,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use spur_acp::connection::{AgentConnection, NativeAcpConnection};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -179,24 +180,24 @@ async fn main() -> anyhow::Result<()> {
                         };
                         replayed += 1;
                         let name = match &notif.update {
-                            agent_client_protocol::schema::SessionUpdate::UserMessageChunk(_) => {
+                            agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(_) => {
                                 "user_message_chunk"
                             }
-                            agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(_) => {
+                            agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_) => {
                                 "agent_message_chunk"
                             }
-                            agent_client_protocol::schema::SessionUpdate::AgentThoughtChunk(_) => {
+                            agent_client_protocol::schema::v1::SessionUpdate::AgentThoughtChunk(_) => {
                                 "agent_thought_chunk"
                             }
-                            agent_client_protocol::schema::SessionUpdate::ToolCall(_) => "tool_call",
-                            agent_client_protocol::schema::SessionUpdate::ToolCallUpdate(_) => {
+                            agent_client_protocol::schema::v1::SessionUpdate::ToolCall(_) => "tool_call",
+                            agent_client_protocol::schema::v1::SessionUpdate::ToolCallUpdate(_) => {
                                 "tool_call_update"
                             }
-                            agent_client_protocol::schema::SessionUpdate::Plan(_) => "plan",
-                            agent_client_protocol::schema::SessionUpdate::AvailableCommandsUpdate(_) => {
+                            agent_client_protocol::schema::v1::SessionUpdate::Plan(_) => "plan",
+                            agent_client_protocol::schema::v1::SessionUpdate::AvailableCommandsUpdate(_) => {
                                 "available_commands_update"
                             }
-                            agent_client_protocol::schema::SessionUpdate::CurrentModeUpdate(_) => {
+                            agent_client_protocol::schema::v1::SessionUpdate::CurrentModeUpdate(_) => {
                                 "current_mode_update"
                             }
                             _ => "other",

@@ -2,10 +2,10 @@
 //! ReactTrace) surfaces fidelity the old DetailPane::render_stream
 //! path dropped — specifically tool-call lifecycle.
 
-use agent_client_protocol::schema::{
+use spur_acp::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
+use spur_acp::{
     ToolCall as AcpToolCall, ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields,
 };
-use spur_acp::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
 use spur_tui::components::react_trace::{ActStatus, TraceKind};
 use spur_tui::worker_streams::WorkerStreams;
 

@@ -378,9 +378,10 @@ fn encode_image_attachment(att: &ImageAttachment) -> anyhow::Result<ContentBlock
     }
 
     let data = STANDARD.encode(&png_bytes);
-    Ok(ContentBlock::Image(
-        agent_client_protocol::schema::ImageContent::new(data, "image/png"),
-    ))
+    Ok(ContentBlock::Image(spur_acp::ImageContent::new(
+        data,
+        "image/png",
+    )))
 }
 
 /// Flatten blocks into a human-readable string for the local trace echo.
@@ -665,7 +666,7 @@ mod sessions_slash_tests {
             SubmitDecision::Send { blocks, interrupt } => {
                 assert!(!interrupt);
                 assert_eq!(blocks.len(), 1);
-                use agent_client_protocol::schema::ContentBlock;
+                use spur_acp::ContentBlock;
                 let text = match &blocks[0] {
                     ContentBlock::Text(t) => &t.text,
                     other => panic!("expected Text, got {other:?}"),
@@ -708,9 +709,9 @@ mod sessions_slash_tests {
     #[test]
     fn slash_model_with_caps_supporting_set_model_routes_to_set_session_model() {
         use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
-        use agent_client_protocol::schema::{
-            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion, SessionId,
-            SessionModelState,
+        use spur_acp::{
+            InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
+            SessionConfigOption, SessionConfigSelectOption, SessionId,
         };
 
         let mut registry = CommandRegistry::new();
@@ -730,12 +731,15 @@ mod sessions_slash_tests {
             }],
         );
 
-        // Build caps that advertise non-empty available_models — supports_set_model() = true.
+        // Build caps that advertise a non-empty model config option.
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
-            ModelId::new("gpt-5-codex"),
-            vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
-        ));
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        new.config_options = Some(vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "gpt-5-codex",
+            vec![SessionConfigSelectOption::new("gpt-5-codex", "GPT-5 Codex")],
+        )]);
         let caps = spur_acp::SpurAgentCaps::new(&init, &new, spur_acp::AgentKind::CodexAcp);
 
         let decision = route_with_caps(
@@ -757,7 +761,7 @@ mod sessions_slash_tests {
     #[test]
     fn slash_model_with_caps_only_supporting_config_option_routes_to_existing() {
         use crate::commands::entry::{CommandEntry, CommandSource, Dispatch};
-        use agent_client_protocol::schema::{
+        use spur_acp::{
             InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
             SessionConfigKind, SessionConfigOption, SessionConfigSelect,
             SessionConfigSelectOptions, SessionConfigValueId, SessionId,
@@ -781,7 +785,7 @@ mod sessions_slash_tests {
         );
 
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let mut new = NewSessionResponse::new(SessionId::new("sid"));
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
         new.config_options = Some(vec![SessionConfigOption::new(
             SessionConfigId::new("model"),
             "Model",

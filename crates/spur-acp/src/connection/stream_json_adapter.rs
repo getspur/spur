@@ -24,10 +24,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, InitializeRequest, InitializeResponse, McpServer, NewSessionResponse,
-    PromptRequest, ProtocolVersion, SessionId, SessionNotification,
+    PromptRequest, SessionId, SessionNotification,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 
 use crate::connection::AgentConnection;
 use crate::protocol::claude_events::{map_to_notifications, parse_event, ClaudeEvent};

@@ -1,7 +1,7 @@
 //! Synthesizes interactive `AdvertisedCommand` rows from the agent's
 //! `Vec<SessionConfigOption>`. Vendor-neutral by `config_id` allow-list.
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
 };
 
@@ -131,64 +131,21 @@ pub fn synthesize(options: &[SessionConfigOption]) -> Vec<AdvertisedCommand> {
 
 /// Synthesize advertised slash commands from frozen session capabilities.
 ///
-/// Precedence:
-/// 1) Use allow-listed `config_options` exactly like [`synthesize`].
-/// 2) If no `model` command was emitted and `models.available_models` is
-///    non-empty, synthesize a `model` command from `SessionModelState`.
+/// ACP 1.0 expresses model selection through session config options, so this
+/// is now a thin wrapper over [`synthesize`].
 pub fn synthesize_advertised(caps: &SpurAgentCaps) -> Vec<AdvertisedCommand> {
-    let mut out = synthesize(&caps.config_options);
-
-    let has_model_command = out.iter().any(|cmd| cmd.config_id == "model");
-    if has_model_command {
-        return out;
-    }
-
-    let Some(models) = caps
-        .models
-        .as_ref()
-        .filter(|models| !models.available_models.is_empty())
-    else {
-        return out;
-    };
-
-    let current_model_id = models.current_model_id.0.to_string();
-    out.push(AdvertisedCommand {
-        name: "model".to_string(),
-        description: "Switch model for this session".to_string(),
-        hint: Some(
-            caps.current_model_label()
-                .unwrap_or_else(|| current_model_id.clone()),
-        ),
-        config_id: "model".to_string(),
-        current_value: Some(current_model_id),
-        choices: models
-            .available_models
-            .iter()
-            .map(|model| AdvertisedChoice {
-                value: model.model_id.0.to_string(),
-                label: model.name.clone(),
-                description: model.description.clone(),
-            })
-            .collect(),
-        arg_picker_spec: ArgPickerSpec {
-            free_text_hint: String::new(),
-            typed_hint: Some(ArgPickerHint::ConfigOption {
-                config_id: "model".to_string(),
-            }),
-        },
-    });
-
-    out
+    synthesize(&caps.config_options)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::AgentKind;
-    use agent_client_protocol::schema::{
-        InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
-        SessionConfigOption, SessionConfigSelectOption, SessionId, SessionModelState,
+    use agent_client_protocol::schema::v1::{
+        InitializeResponse, NewSessionResponse, SessionConfigOption, SessionConfigSelectOption,
+        SessionId,
     };
+    use agent_client_protocol::schema::ProtocolVersion;
 
     fn make_select(
         config_id: &str,
@@ -209,16 +166,10 @@ mod tests {
         )
     }
 
-    fn make_caps(
-        config_options: Vec<SessionConfigOption>,
-        models: Option<SessionModelState>,
-    ) -> SpurAgentCaps {
+    fn make_caps(config_options: Vec<SessionConfigOption>) -> SpurAgentCaps {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let mut new = NewSessionResponse::new(SessionId::new("test-caps"));
         new.config_options = Some(config_options);
-        if let Some(models) = models {
-            new = new.models(models);
-        }
         SpurAgentCaps::new(&init, &new, AgentKind::Generic)
     }
 
@@ -339,15 +290,12 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_advertised_from_models_only_emits_model_command() {
-        let models = SessionModelState::new(
-            ModelId::new("gpt-5"),
-            vec![
-                ModelInfo::new(ModelId::new("gpt-5"), "GPT-5"),
-                ModelInfo::new(ModelId::new("o4-mini"), "o4-mini"),
-            ],
-        );
-        let caps = make_caps(vec![], Some(models));
+    fn synthesize_advertised_from_model_config_option_emits_model_command() {
+        let caps = make_caps(vec![make_select(
+            "model",
+            "gpt-5",
+            &[("gpt-5", "GPT-5"), ("o4-mini", "o4-mini")],
+        )]);
 
         let out = synthesize_advertised(&caps);
         assert_eq!(out.len(), 1);
@@ -359,25 +307,22 @@ mod tests {
 
     #[test]
     fn synthesize_advertised_from_config_options_only_emits_existing_commands() {
-        let caps = make_caps(
-            vec![
-                make_select(
-                    "model",
-                    "gpt-5",
-                    &[
-                        ("gpt-5", "GPT-5"),
-                        ("gpt-5-codex", "GPT-5 Codex"),
-                        ("o4-mini", "o4-mini"),
-                    ],
-                ),
-                make_select(
-                    "reasoning_effort",
-                    "medium",
-                    &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
-                ),
-            ],
-            None,
-        );
+        let caps = make_caps(vec![
+            make_select(
+                "model",
+                "gpt-5",
+                &[
+                    ("gpt-5", "GPT-5"),
+                    ("gpt-5-codex", "GPT-5 Codex"),
+                    ("o4-mini", "o4-mini"),
+                ],
+            ),
+            make_select(
+                "reasoning_effort",
+                "medium",
+                &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
+            ),
+        ]);
 
         let out = synthesize_advertised(&caps);
         assert_eq!(out.len(), 2);
@@ -388,26 +333,16 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_advertised_from_both_prefers_config_options() {
-        let models = SessionModelState::new(
-            ModelId::new("model-from-model-state"),
-            vec![
-                ModelInfo::new(ModelId::new("model-from-model-state"), "Model State A"),
-                ModelInfo::new(ModelId::new("model-state-b"), "Model State B"),
+    fn synthesize_advertised_emits_single_model_config_option() {
+        let caps = make_caps(vec![make_select(
+            "model",
+            "model-from-config-option",
+            &[
+                ("model-from-config-option", "Config A"),
+                ("config-b", "Config B"),
+                ("config-c", "Config C"),
             ],
-        );
-        let caps = make_caps(
-            vec![make_select(
-                "model",
-                "model-from-config-option",
-                &[
-                    ("model-from-config-option", "Config A"),
-                    ("config-b", "Config B"),
-                    ("config-c", "Config C"),
-                ],
-            )],
-            Some(models),
-        );
+        )]);
 
         let out = synthesize_advertised(&caps);
         let model_entries: Vec<&AdvertisedCommand> =
@@ -422,15 +357,14 @@ mod tests {
 
     #[test]
     fn synthesize_advertised_from_neither_emits_no_model_command() {
-        let caps = make_caps(vec![], None);
+        let caps = make_caps(vec![]);
         let out = synthesize_advertised(&caps);
         assert!(out.is_empty());
     }
 
     #[test]
-    fn synthesize_advertised_with_empty_available_models_falls_through() {
-        let models = SessionModelState::new(ModelId::new("gpt-5"), vec![]);
-        let caps = make_caps(vec![], Some(models));
+    fn synthesize_advertised_with_empty_model_choices_falls_through() {
+        let caps = make_caps(vec![make_select("model", "gpt-5", &[])]);
         let out = synthesize_advertised(&caps);
         assert!(out.is_empty());
     }
