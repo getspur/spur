@@ -11,8 +11,11 @@ use lance_index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery as _, QueryBase as _};
 use serde_json::{json, Value};
 use spur_graph::store::lance_sections::{
-    write_sections_dataset_skipping_embeddings, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
+    write_sections_dataset_skipping_embeddings,
+    write_sections_dataset_skipping_embeddings_with_delta, SidecarDelta, SECTIONS_DATASET_DIR,
+    SECTIONS_TABLE,
 };
+use spur_graph::store::read_artifact_header_parquet;
 use spur_graph::temporal::{resolve_symbol_at_indexed, symbol_history, Resolution, TemporalIndex};
 use spur_graph::{
     load_artifact, resolve_artifact_location, resolve_worktree_root_from, CommitIndexArtifact,
@@ -130,6 +133,49 @@ async fn open_doc_artifact_for_request(
         return Ok(DocArtifactSource::resolved(resolved.path));
     }
 
+    let base_delta = spur_graph::mcp::markdown_overlay_base_delta_for_worktree(worktree).await;
+    if let Some(delta) = &base_delta {
+        if base_sidecar_usable(&delta.base_artifact_dir) {
+            if delta.changed_markdown_paths.is_empty() && delta.deleted_markdown_paths.is_empty() {
+                return Ok(DocArtifactSource::resolved(delta.base_artifact_dir.clone()));
+            }
+
+            if let Ok(artifact) =
+                spur_graph::mcp::overlaid_graph_artifact_from_base_seed_for_worktree(
+                    worktree.to_path_buf(),
+                    spur_graph::mcp::shared_rebuild_coordinator(),
+                )
+                .await
+            {
+                let temp_dir = OverlayDocTempDir::new()?;
+                let artifact_dir = temp_dir.path().join("artifact");
+                let sidecar_delta = SidecarDelta::new(
+                    delta.changed_markdown_paths.clone(),
+                    delta.deleted_markdown_paths.clone(),
+                );
+                match write_sections_dataset_skipping_embeddings_with_delta(
+                    &artifact,
+                    worktree,
+                    &artifact_dir,
+                    &delta.base_artifact_dir,
+                    sidecar_delta,
+                ) {
+                    Ok(()) => {
+                        return Ok(DocArtifactSource::overlay(artifact_dir, artifact, temp_dir));
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            worktree = %worktree.display(),
+                            base_artifact_dir = %delta.base_artifact_dir.display(),
+                            "doc_navigate overlay delta sidecar failed; falling back to full sidecar write"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     let artifact = spur_graph::mcp::overlaid_graph_artifact_from_base_seed_for_worktree(
         worktree.to_path_buf(),
         spur_graph::mcp::shared_rebuild_coordinator(),
@@ -147,6 +193,18 @@ async fn open_doc_artifact_for_request(
         },
     )?;
     Ok(DocArtifactSource::overlay(artifact_dir, artifact, temp_dir))
+}
+
+fn base_sidecar_usable(artifact_dir: &Path) -> bool {
+    let manifest_marks_complete =
+        read_artifact_header_parquet(artifact_dir).is_ok_and(|manifest| manifest.sidecar_complete);
+    if !manifest_marks_complete {
+        tracing::debug!(
+            artifact_dir = %artifact_dir.display(),
+            "base graph manifest does not mark section sidecar complete; checking sidecar directory"
+        );
+    }
+    artifact_dir.join(SECTIONS_DATASET_DIR).is_dir()
 }
 
 struct DocNavigateRequest {
