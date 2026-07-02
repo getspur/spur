@@ -11,7 +11,7 @@ use lance_index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery as _, QueryBase as _};
 use serde_json::{json, Value};
 use spur_graph::store::lance_sections::{
-    write_sections_dataset, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
+    write_sections_dataset_skipping_embeddings, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
 };
 use spur_graph::temporal::{resolve_symbol_at_indexed, symbol_history, Resolution, TemporalIndex};
 use spur_graph::{
@@ -138,12 +138,14 @@ async fn open_doc_artifact_for_request(
     .map_err(McpHandlerError::from)?;
     let temp_dir = OverlayDocTempDir::new()?;
     let artifact_dir = temp_dir.path().join("artifact");
-    write_sections_dataset(&artifact, worktree, &artifact_dir).map_err(|error| {
-        McpHandlerError::Internal(format!(
-            "failed to build doc_navigate overlay sections in {}: {error}",
-            worktree.display()
-        ))
-    })?;
+    write_sections_dataset_skipping_embeddings(&artifact, worktree, &artifact_dir).map_err(
+        |error| {
+            McpHandlerError::Internal(format!(
+                "failed to build doc_navigate overlay sections in {}: {error}",
+                worktree.display()
+            ))
+        },
+    )?;
     Ok(DocArtifactSource::overlay(artifact_dir, artifact, temp_dir))
 }
 
