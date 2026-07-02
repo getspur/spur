@@ -36,7 +36,7 @@ use agent_client_protocol::schema::v1::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
     NewSessionResponse, PromptRequest, SessionId, SessionModeId, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse,
+    SetSessionModeResponse, Usage,
 };
 
 use crate::error::AcpError;
@@ -112,6 +112,12 @@ pub trait AgentConnection: Send + Sync {
         &mut self,
         request: PromptRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>>;
+
+    /// Return and clear the usage reported by the most recently completed
+    /// prompt turn, when the transport exposes `PromptResponse.usage`.
+    fn take_last_prompt_usage(&mut self) -> Option<Usage> {
+        None
+    }
 
     /// Cancel an in-flight prompt for the given session.
     ///

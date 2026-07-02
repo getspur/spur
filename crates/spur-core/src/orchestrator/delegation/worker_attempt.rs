@@ -577,98 +577,107 @@ pub(crate) async fn run_one_worker_attempt(
         },
     )
     .await;
-    if let Err(e) = prompt_result {
-        worker_success = false;
-        output_text = format!("Failed to prompt worker: {e}");
-    } else if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
-        use crate::peer_mailbox::{
-            transition_with_audit, PeerTransitionKind, TransitionAuditOutcome,
-        };
-        use spur_acp::domain::peer_message::LedgerState;
+    let prompt_usage = match prompt_result {
+        Ok(outcome) => Some(outcome.usage),
+        Err(e) => {
+            worker_success = false;
+            output_text = format!("Failed to prompt worker: {e}");
+            None
+        }
+    }
+    .flatten();
 
-        let target_delegation_id =
-            spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
+    if worker_success {
+        if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
+            use crate::peer_mailbox::{
+                transition_with_audit, PeerTransitionKind, TransitionAuditOutcome,
+            };
+            use spur_acp::domain::peer_message::LedgerState;
 
-        for inj in pc.injection_records {
-            match transition_with_audit(
-                bundle.ledger.as_ref(),
-                funnel,
-                ctx.brain_session_id,
-                &target_delegation_id,
-                inj.message_id,
-                LedgerState::DeliveredInflight,
-                PeerTransitionKind::DeliveredInflight,
-            )
-            .await
-            {
-                TransitionAuditOutcome::Changed => {}
-                TransitionAuditOutcome::Unchanged(state) => {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?state,
-                        "peer mailbox: delivered-inflight transition no-op"
-                    );
-                }
-                TransitionAuditOutcome::TerminalSkip(state) => {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?state,
-                        "post-prompt DeliveredInflight transition skipped: message already terminal"
-                    );
-                    continue;
-                }
-                TransitionAuditOutcome::AuditFailed(err) => {
-                    tracing::warn!(
-                        message_id = ?inj.message_id,
-                        %err,
-                        "peer mailbox: delivered-inflight transition failed"
-                    );
-                }
-            }
+            let target_delegation_id =
+                spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
 
-            match transition_with_audit(
-                bundle.ledger.as_ref(),
-                funnel,
-                ctx.brain_session_id,
-                &target_delegation_id,
-                inj.message_id,
-                LedgerState::Delivered,
-                PeerTransitionKind::Delivered,
-            )
-            .await
-            {
-                TransitionAuditOutcome::Changed => {
-                    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDelivered {
-                        brain_session_id: ctx.brain_session_id.to_string(),
-                        message_id: inj.message_id,
-                        target_delegation_id: target_delegation_id.clone(),
-                        target_prompt_id: pc.target_prompt_id.clone(),
-                        injected_chars: inj.injected_bytes,
-                    });
-                    // TODO(peer-mailbox): Task 14 startup reconciliation is
-                    // the durable peer-mailbox audit path.
+            for inj in pc.injection_records {
+                match transition_with_audit(
+                    bundle.ledger.as_ref(),
+                    funnel,
+                    ctx.brain_session_id,
+                    &target_delegation_id,
+                    inj.message_id,
+                    LedgerState::DeliveredInflight,
+                    PeerTransitionKind::DeliveredInflight,
+                )
+                .await
+                {
+                    TransitionAuditOutcome::Changed => {}
+                    TransitionAuditOutcome::Unchanged(state) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            state = ?state,
+                            "peer mailbox: delivered-inflight transition no-op"
+                        );
+                    }
+                    TransitionAuditOutcome::TerminalSkip(state) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            state = ?state,
+                            "post-prompt DeliveredInflight transition skipped: message already terminal"
+                        );
+                        continue;
+                    }
+                    TransitionAuditOutcome::AuditFailed(err) => {
+                        tracing::warn!(
+                            message_id = ?inj.message_id,
+                            %err,
+                            "peer mailbox: delivered-inflight transition failed"
+                        );
+                    }
                 }
-                TransitionAuditOutcome::Unchanged(state) => {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?state,
-                        "peer mailbox: delivered transition no-op"
-                    );
-                }
-                TransitionAuditOutcome::TerminalSkip(state) => {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?state,
-                        "post-prompt Delivered transition skipped: message already terminal"
-                    );
-                    continue;
-                }
-                TransitionAuditOutcome::AuditFailed(err) => {
-                    tracing::warn!(
-                        message_id = ?inj.message_id,
-                        %err,
-                        "peer mailbox: delivered transition failed"
-                    );
+
+                match transition_with_audit(
+                    bundle.ledger.as_ref(),
+                    funnel,
+                    ctx.brain_session_id,
+                    &target_delegation_id,
+                    inj.message_id,
+                    LedgerState::Delivered,
+                    PeerTransitionKind::Delivered,
+                )
+                .await
+                {
+                    TransitionAuditOutcome::Changed => {
+                        funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDelivered {
+                            brain_session_id: ctx.brain_session_id.to_string(),
+                            message_id: inj.message_id,
+                            target_delegation_id: target_delegation_id.clone(),
+                            target_prompt_id: pc.target_prompt_id.clone(),
+                            injected_chars: inj.injected_bytes,
+                        });
+                        // TODO(peer-mailbox): Task 14 startup reconciliation is
+                        // the durable peer-mailbox audit path.
+                    }
+                    TransitionAuditOutcome::Unchanged(state) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            state = ?state,
+                            "peer mailbox: delivered transition no-op"
+                        );
+                    }
+                    TransitionAuditOutcome::TerminalSkip(state) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            state = ?state,
+                            "post-prompt Delivered transition skipped: message already terminal"
+                        );
+                        continue;
+                    }
+                    TransitionAuditOutcome::AuditFailed(err) => {
+                        tracing::warn!(
+                            message_id = ?inj.message_id,
+                            %err,
+                            "peer mailbox: delivered transition failed"
+                        );
+                    }
                 }
             }
         }
@@ -716,7 +725,12 @@ pub(crate) async fn run_one_worker_attempt(
     };
 
     let duration = start.elapsed();
-    let cost = spur_cost::estimator::estimate_cost(ctx.agent_config.cost_tier, duration);
+    let cost = estimate_prompt_cost(
+        ctx.agent_config.cost_tier,
+        duration,
+        prompt_usage.as_ref(),
+        Some(ctx.agent_config.name.as_str()),
+    );
 
     // Attempt side-channel artifact persistence BEFORE building the
     // truncated summary. Only fires when output would otherwise lose
