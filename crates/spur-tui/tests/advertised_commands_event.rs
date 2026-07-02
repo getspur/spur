@@ -24,12 +24,8 @@ fn select_option(config_id: &str, current: &str, choices: &[(&str, &str)]) -> Se
 }
 
 fn caps_with_options(options: Vec<SessionConfigOption>) -> std::sync::Arc<SpurAgentCaps> {
-    let init = agent_client_protocol::schema::InitializeResponse::new(
-        agent_client_protocol::schema::ProtocolVersion::LATEST,
-    );
-    let mut new = agent_client_protocol::schema::NewSessionResponse::new(
-        agent_client_protocol::schema::SessionId::new("acp-session"),
-    );
+    let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
+    let mut new = spur_acp::NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-session"));
     new.config_options = Some(options);
     std::sync::Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp))
 }

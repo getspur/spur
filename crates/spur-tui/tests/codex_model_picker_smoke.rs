@@ -67,20 +67,14 @@ fn test_ctx() -> spur_tui::views::ViewContext<'static> {
     spur_tui::test_support::test_view_ctx(&LINEAGE)
 }
 
-fn gemini_models_only_caps() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
-    let init = agent_client_protocol::schema::InitializeResponse::new(
-        agent_client_protocol::schema::ProtocolVersion::LATEST,
-    );
-    let new = agent_client_protocol::schema::NewSessionResponse::new(
-        agent_client_protocol::schema::SessionId::new("gemini-acp"),
-    )
-    .models(agent_client_protocol::schema::SessionModelState::new(
-        agent_client_protocol::schema::ModelId::new("gemini-3.1-pro-preview"),
-        vec![agent_client_protocol::schema::ModelInfo::new(
-            agent_client_protocol::schema::ModelId::new("gemini-3.1-pro-preview"),
-            "Gemini 3.1 Pro Preview",
-        )],
-    ));
+fn gemini_model_caps() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
+    let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
+    let mut new = spur_acp::NewSessionResponse::new(spur_acp::AcpSessionId::new("gemini-acp"));
+    new.config_options = Some(vec![select(
+        "model",
+        "gemini-3.1-pro-preview",
+        &[("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview")],
+    )]);
     std::sync::Arc::new(spur_acp::SpurAgentCaps::new(
         &init,
         &new,
@@ -200,7 +194,7 @@ fn gemini_model_command_routes_to_set_session_model_from_models_only_caps() {
         Vec::new(),
     );
 
-    let caps = gemini_models_only_caps();
+    let caps = gemini_model_caps();
     view.set_spur_agent_caps(Some(caps.clone()));
     view.handle_spur_event(
         &SpurEvent::now(SpurEventBody::CommandRegistryDirty {

@@ -8,7 +8,7 @@
 //! codex wire shape. If this test passes, the v1 RX-side is provably correct
 //! against today's codex.
 
-use agent_client_protocol::schema::NewSessionResponse;
+use agent_client_protocol::schema::v1::NewSessionResponse;
 use spur_acp::adapter::config_options::synthesize;
 
 const FIXTURE: &str = include_str!("data/codex_acp_0_12_new_session_response.json");
@@ -83,7 +83,7 @@ fn synthesize_produces_model_and_effort_for_codex_0_12() {
 /// versions) start emitting them.
 #[test]
 fn session_info_update_fixture_deserializes_into_sdk_session_update_arm() {
-    use agent_client_protocol::schema::SessionUpdate;
+    use agent_client_protocol::schema::v1::SessionUpdate;
     let parsed: SessionUpdate = serde_json::from_str(SESSION_INFO_UPDATE_FIXTURE).expect(
         "synthetic SessionInfoUpdate fixture must deserialize against SDK 0.11.x SessionUpdate",
     );

@@ -36,7 +36,8 @@
 
 use std::time::Duration;
 
-use agent_client_protocol::schema::{InitializeRequest, ProtocolVersion, SessionUpdate};
+use agent_client_protocol::schema::v1::{InitializeRequest, SessionUpdate};
+use agent_client_protocol::schema::ProtocolVersion;
 use futures::StreamExt;
 use spur_acp::{
     connection::native::NativeAcpConnection, connection::AgentConnection, LoadSessionRequest,

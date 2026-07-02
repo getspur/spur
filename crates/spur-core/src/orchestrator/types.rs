@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::server::McpCallbackServer;
-use agent_client_protocol::schema::{InitializeResponse, ProtocolVersion, SessionConfigOption};
 use spur_acp::connection::AgentConnection;
 use spur_acp::session_lock::SessionAttachGuard;
+use spur_acp::{InitializeResponse, ProtocolVersion, SessionConfigOption};
 use spur_acp::{SessionId, SessionInfoCache, SpurAgentCaps};
 use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
