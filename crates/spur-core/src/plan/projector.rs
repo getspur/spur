@@ -83,7 +83,16 @@ pub fn collect_sorted_audits_for_issue(
 
 /// Sums `estimated_cost_micros` over all Completion audits of a plan's task
 /// issues. Saturating; missing fields count as 0.
-pub async fn plan_spent_micros(pm: &dyn crate::plan::PmLike, plan_id: &str) -> anyhow::Result<u64> {
+pub async fn plan_spent_micros(
+    pm: &dyn crate::plan::PmLike,
+    plan_id: &str,
+    feature_gate: &spur_license::FeatureGate,
+) -> anyhow::Result<u64> {
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
     let Some(advanced) = pm.advanced() else {
         anyhow::bail!("plan spend projection requires beads advanced comments");
     };

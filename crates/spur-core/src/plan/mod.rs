@@ -9,6 +9,7 @@ pub mod audit_sentinel;
 pub mod clobber_detector;
 pub(crate) mod continuation;
 pub mod labels;
+pub mod loops;
 pub mod mutation;
 pub mod mutation_executor;
 pub mod outcomes;
