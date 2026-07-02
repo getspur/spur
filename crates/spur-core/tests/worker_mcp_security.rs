@@ -31,7 +31,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{McpServer, McpServerHttp};
 use reqwest::header::ACCEPT;
 use rmcp::{
     model::CallToolRequestParams, service::ServiceError, transport::StreamableHttpClientTransport,
@@ -42,6 +41,7 @@ use sha2::{Digest, Sha256};
 use spur_acp::config::{AgentConfig, SpurConfig};
 use spur_acp::types::SessionId;
 use spur_acp::BrainSessionId;
+use spur_acp::{McpServer, McpServerHttp};
 use spur_blob_store::OutcomeStore as _;
 use spur_core::plan::audit_sentinel::{self, AuditSentinelKind};
 use spur_core::server::{community_feature_gate, DetachedContinuationCtx};
