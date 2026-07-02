@@ -3996,6 +3996,7 @@ pub fn fastembed_cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lance_index::scalar::FullTextSearchQuery;
     use std::sync::{Arc, Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -4413,6 +4414,41 @@ mod tests {
                     vector,
                 });
             }
+        }
+        rows
+    }
+
+    async fn section_fts_hit_count(dir: &Path, query: &str) -> usize {
+        let db = lancedb::connect(
+            dir.join(SECTIONS_DATASET_DIR)
+                .to_str()
+                .expect("section sidecar dir"),
+        )
+        .execute()
+        .await
+        .expect("connect section sidecar");
+        let table = db
+            .open_table(SECTIONS_TABLE)
+            .execute()
+            .await
+            .expect("open section table");
+        let fts = FullTextSearchQuery::new(query.to_owned())
+            .with_column("body_text".to_owned())
+            .expect("valid FTS query");
+        let mut stream = table
+            .query()
+            .full_text_search(fts)
+            .select(Select::columns(&["stable_symbol_id"]))
+            .execute()
+            .await
+            .expect("query section FTS");
+        let mut rows = 0;
+        while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
+            .await
+            .transpose()
+            .expect("read section FTS batch")
+        {
+            rows += batch.num_rows();
         }
         rows
     }
@@ -6567,6 +6603,162 @@ mod tests {
                 .iter()
                 .any(|row| row.stable_symbol_id == "section:reembed" && !row.has_vector),
             "changed markdown body should not retain a stale previous vector"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_skip_delta_sidecar_carries_vectors_and_refreshes_markdown_fts() {
+        let root = tempfile::tempdir().expect("root");
+        let prev_dir = tempfile::tempdir().expect("prev sidecar");
+        let next_dir = tempfile::tempdir().expect("next sidecar");
+        let unchanged_source = "## Stable Section\n\nstableoverlaytoken unchanged body.\n";
+        let changed_old_source = concat!(
+            "## Keep Section\n\nkeepoverlaytoken unchanged body.\n\n",
+            "## Reembed Section\n\noldoverlaytoken body that should disappear.\n",
+        );
+        let deleted_source = "## Deleted Section\n\ndeletedoverlaytoken body.\n";
+        write_source(root.path(), "docs/unchanged.md", unchanged_source);
+        write_source(root.path(), "docs/changed.md", changed_old_source);
+        write_source(root.path(), "docs/deleted.md", deleted_source);
+
+        let prev_artifact = graph_artifact_for_code_files(
+            "prev-public-delta",
+            vec![
+                (
+                    "docs/unchanged.md",
+                    unchanged_source,
+                    markdown_section_symbols(
+                        "docs/unchanged.md",
+                        unchanged_source,
+                        &[("section:stable", "## Stable Section")],
+                    ),
+                ),
+                (
+                    "docs/changed.md",
+                    changed_old_source,
+                    markdown_section_symbols(
+                        "docs/changed.md",
+                        changed_old_source,
+                        &[
+                            ("section:keep", "## Keep Section"),
+                            ("section:reembed", "## Reembed Section"),
+                        ],
+                    ),
+                ),
+                (
+                    "docs/deleted.md",
+                    deleted_source,
+                    markdown_section_symbols(
+                        "docs/deleted.md",
+                        deleted_source,
+                        &[("section:deleted", "## Deleted Section")],
+                    ),
+                ),
+            ],
+        );
+        let mut prev_rows = section_rows_from_artifact(&prev_artifact, root.path());
+        for (index, row) in prev_rows.iter_mut().enumerate() {
+            row.vector = Some(fake_vector(index as f32));
+        }
+        write_previous_section_sidecar_rows(prev_dir.path(), prev_rows).await;
+        let prev_db = lancedb::connect(
+            prev_dir
+                .path()
+                .join(SECTIONS_DATASET_DIR)
+                .to_str()
+                .expect("previous section sidecar dir"),
+        )
+        .execute()
+        .await
+        .expect("connect previous section sidecar");
+        let prev_table = prev_db
+            .open_table(SECTIONS_TABLE)
+            .execute()
+            .await
+            .expect("open previous section table");
+        ensure_body_text_fts_index(&prev_table)
+            .await
+            .expect("create previous FTS index");
+        assert_eq!(
+            section_fts_hit_count(prev_dir.path(), "oldoverlaytoken").await,
+            1
+        );
+
+        let changed_new_source = concat!(
+            "## Keep Section\n\nkeepoverlaytoken unchanged body.\n\n",
+            "## Reembed Section\n\nnewoverlaytoken body should be searchable.\n",
+        );
+        write_source(root.path(), "docs/changed.md", changed_new_source);
+        fs::remove_file(root.path().join("docs/deleted.md")).expect("remove deleted markdown");
+        let next_artifact = graph_artifact_for_code_files(
+            "next-public-delta",
+            vec![
+                (
+                    "docs/unchanged.md",
+                    unchanged_source,
+                    markdown_section_symbols(
+                        "docs/unchanged.md",
+                        unchanged_source,
+                        &[("section:stable", "## Stable Section")],
+                    ),
+                ),
+                (
+                    "docs/changed.md",
+                    changed_new_source,
+                    markdown_section_symbols(
+                        "docs/changed.md",
+                        changed_new_source,
+                        &[
+                            ("section:keep", "## Keep Section"),
+                            ("section:reembed", "## Reembed Section"),
+                        ],
+                    ),
+                ),
+            ],
+        );
+
+        write_sections_dataset_skipping_embeddings_with_delta(
+            &next_artifact,
+            root.path(),
+            next_dir.path(),
+            prev_dir.path(),
+            sidecar_delta(&["docs/changed.md"], &["docs/deleted.md"]),
+        )
+        .expect("write public delta sidecar");
+
+        let stored_rows = read_stored_section_rows(next_dir.path()).await;
+        assert_eq!(stored_rows.len(), 3);
+        assert!(
+            !stored_rows
+                .iter()
+                .any(|row| row.file_path == "docs/deleted.md"),
+            "deleted markdown rows must not be copied into the delta sidecar"
+        );
+        for stable_symbol_id in ["section:stable", "section:keep"] {
+            assert!(
+                stored_rows
+                    .iter()
+                    .any(|row| row.stable_symbol_id == stable_symbol_id && row.has_vector),
+                "{stable_symbol_id} should retain its carried-forward vector"
+            );
+        }
+        assert!(
+            stored_rows
+                .iter()
+                .any(|row| row.stable_symbol_id == "section:reembed" && !row.has_vector),
+            "changed markdown body must not carry a stale vector"
+        );
+        assert_eq!(
+            section_fts_hit_count(next_dir.path(), "newoverlaytoken").await,
+            1
+        );
+        assert_eq!(
+            section_fts_hit_count(next_dir.path(), "oldoverlaytoken").await,
+            0
+        );
+        assert_eq!(
+            section_fts_hit_count(next_dir.path(), "deletedoverlaytoken").await,
+            0
         );
     }
 
