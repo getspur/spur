@@ -156,6 +156,21 @@ pub enum AuditSentinelKind {
         plan_id: String,
         epic_id: String,
     },
+    LoopRun {
+        loop_id: String,
+        generation: u32,
+        plan_id: String,
+        outcome: String,
+        tasks_discovered: u32,
+        approved: u32,
+        rejected: u32,
+        failed: u32,
+        cancelled: u32,
+        escalations: u32,
+        cost_micros: u64,
+        started_at: i64,
+        ended_at: i64,
+    },
     Approval {
         delegation_id: String,
     },
@@ -345,6 +360,7 @@ impl AuditSentinelKind {
             Self::DispatchOrphanCleared { .. } => "dispatch-orphan-cleared",
             Self::Completion { .. } => "completion",
             Self::EpicCompletion { .. } => "epic-completion",
+            Self::LoopRun { .. } => "loop-run",
             Self::Approval { .. } => "approval",
             Self::Rejection { .. } => "rejection",
             Self::ReviewFeedback { .. } => "review-feedback",
@@ -485,6 +501,29 @@ mod tests {
     }
 
     #[test]
+    fn loop_run_variant_round_trips() {
+        let kind = AuditSentinelKind::LoopRun {
+            loop_id: "loopA".into(),
+            generation: 7,
+            plan_id: "P1".into(),
+            outcome: "partial".into(),
+            tasks_discovered: 3,
+            approved: 2,
+            rejected: 0,
+            failed: 1,
+            cancelled: 0,
+            escalations: 0,
+            cost_micros: 812_000,
+            started_at: 1_782_950_000,
+            ended_at: 1_782_953_600,
+        };
+        let encoded = encode_comment(&kind);
+        let parsed = parse_comment(&encoded).unwrap().unwrap();
+        assert_eq!(parsed, kind);
+        assert_eq!(parsed.kind_str(), "loop-run");
+    }
+
+    #[test]
     fn encode_then_parse_round_trips_all_variants() {
         let cases = vec![
             sample_plan_submit(),
@@ -519,6 +558,21 @@ mod tests {
                 artifact_uri: None,
                 dispatched_base_oid: None,
                 estimated_cost_micros: None,
+            },
+            AuditSentinelKind::LoopRun {
+                loop_id: "loopA".into(),
+                generation: 1,
+                plan_id: "P1".into(),
+                outcome: "approved".into(),
+                tasks_discovered: 1,
+                approved: 1,
+                rejected: 0,
+                failed: 0,
+                cancelled: 0,
+                escalations: 0,
+                cost_micros: 42,
+                started_at: 100,
+                ended_at: 100,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-A".into(),
@@ -746,6 +800,21 @@ mod tests {
                 artifact_uri: None,
                 dispatched_base_oid: None,
                 estimated_cost_micros: None,
+            },
+            AuditSentinelKind::LoopRun {
+                loop_id: "loopA".into(),
+                generation: 1,
+                plan_id: "P1".into(),
+                outcome: "approved".into(),
+                tasks_discovered: 1,
+                approved: 1,
+                rejected: 0,
+                failed: 0,
+                cancelled: 0,
+                escalations: 0,
+                cost_micros: 42,
+                started_at: 100,
+                ended_at: 100,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "x".into(),
