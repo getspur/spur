@@ -116,7 +116,7 @@ fn session_swap_drops_all_pending_continuations() {
 
 #[test]
 fn merged_turn_has_user_block_at_front_and_self_describing_marker() {
-    use agent_client_protocol::schema::{ContentBlock, TextContent};
+    use spur_acp::{ContentBlock, TextContent};
     let user = vec![ContentBlock::Text(TextContent::new("what is the plan?"))];
     let outcome =
         render_merged_turn_with_spill_v2(&user, &[mk_cont("id-1")], MERGE_BUDGET_DEFAULT_BYTES);

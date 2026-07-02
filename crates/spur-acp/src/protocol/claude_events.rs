@@ -4,7 +4,7 @@
 //! `--output-format stream-json`. This module defines the event types,
 //! a parser, and a mapper to ACP `SessionNotification` types.
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent,
     ToolCall as AcpToolCall, ToolCallId, ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields,
 };

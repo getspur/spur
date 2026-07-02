@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use agent_client_protocol::schema::ToolCall;
+use agent_client_protocol::schema::v1::ToolCall;
 use serde_json::Value;
 
 use super::{BadgeColor, ModeBadge, ObservePayload, ToolFamily, ToolInputDisplay};

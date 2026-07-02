@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use crate::server::McpCallbackServer;
 use crate::worker_server::{WorkerMcpDeps, WorkerMcpServer};
-use agent_client_protocol::schema::{McpServer, McpServerHttp};
 use dashmap::DashMap;
 use spur_acp::DelegationDispatchError;
+use spur_acp::{McpServer, McpServerHttp};
 use spur_blob_store::OutcomeStore;
 use spur_pm::PmService;
 
@@ -383,8 +383,8 @@ mod worker_mcp_dispatch_tests {
     //! logic and URL assembly.
 
     use super::build_worker_mcp_servers_with;
-    use agent_client_protocol::schema::McpServer;
     use spur_acp::DelegationDispatchError;
+    use spur_acp::McpServer;
 
     #[tokio::test]
     async fn flag_none_defaults_on_and_runs_fetch() {

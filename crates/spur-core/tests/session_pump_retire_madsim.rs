@@ -8,10 +8,10 @@ extern crate madsim_tokio as tokio;
 
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
+use spur_acp::SpurEventBody;
+use spur_acp::{
     AvailableCommand, AvailableCommandsUpdate, SessionId, SessionNotification, SessionUpdate,
 };
-use spur_acp::SpurEventBody;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -104,7 +104,7 @@ async fn retire_notification_pump_with_grace(h: JoinHandle<()>) {
 
 fn notification(name: &str) -> SessionNotification {
     SessionNotification::new(
-        SessionId::new("madsim-session".to_string()),
+        spur_acp::AcpSessionId::new("madsim-session".to_string()),
         SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
             AvailableCommand::new(name, "test marker"),
         ])),
