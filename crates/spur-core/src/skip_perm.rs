@@ -139,7 +139,8 @@ mod tests {
     use async_trait::async_trait;
     use spur_acp::types::AgentHealth;
     use spur_acp::{
-        InitializeRequest, InitializeResponse, PromptRequest, SessionModeId, SetSessionModeResponse,
+        AcpSessionId, InitializeRequest, InitializeResponse, PromptRequest, SessionModeId,
+        SetSessionModeResponse,
     };
 
     use super::*;
@@ -192,7 +193,10 @@ mod tests {
             AgentHealth::Ready
         }
 
-        fn advertised_session_modes(&self, session_id: &SessionId) -> Option<Vec<SessionModeId>> {
+        fn advertised_session_modes(
+            &self,
+            session_id: &AcpSessionId,
+        ) -> Option<Vec<SessionModeId>> {
             self.calls
                 .lock()
                 .unwrap()
