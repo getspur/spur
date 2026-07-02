@@ -7,11 +7,11 @@
 //! moved this off `SessionDetailView` so the cached title survives the
 //! view's destruction on navigation away from the session detail screen.
 //!
-//! Mirror of `agent_client_protocol::schema::SessionInfoUpdate` flattened
+//! Mirror of `agent_client_protocol::schema::v1::SessionInfoUpdate` flattened
 //! into plain `Option<String>` so consumers do not propagate the SDK's
 //! `MaybeUndefined` distinction.
 
-use agent_client_protocol::schema::SessionInfoUpdate;
+use agent_client_protocol::schema::v1::SessionInfoUpdate;
 
 /// Last-known `SessionInfoUpdate` payload for a session. `None` fields
 /// mean "agent has never emitted this field" (or emitted it as JSON
@@ -45,7 +45,7 @@ impl SessionInfoCache {
 #[cfg(test)]
 mod tests {
     use super::SessionInfoCache;
-    use agent_client_protocol::schema::SessionInfoUpdate;
+    use agent_client_protocol::schema::v1::SessionInfoUpdate;
 
     #[test]
     fn merge_value_sets_field() {

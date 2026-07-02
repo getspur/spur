@@ -106,7 +106,7 @@ impl ContinuationEventSink for crate::event_funnel::FunnelHandle {
 
 // ── Prompt builders ──────────────────────────────────────────────────────────
 
-use agent_client_protocol::schema::{
+use spur_acp::{
     ContentBlock, EmbeddedResource, EmbeddedResourceResource, TextContent, TextResourceContents,
 };
 
@@ -345,7 +345,6 @@ fn block_byte_cost(b: &ContentBlock) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{ContentBlock, TextContent};
     use chrono::{TimeZone, Utc};
     use serde_json::{json, Value};
     use spur_acp::domain::delegation::DelegationStatus;
@@ -354,6 +353,7 @@ mod tests {
         continuation::ArtifactKind, ArtifactRef, ContinuationPayload, ContinuationSource,
         DeferReason, DelegationKey,
     };
+    use spur_acp::{ContentBlock, TextContent};
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc::error::TrySendError;
 

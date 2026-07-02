@@ -52,9 +52,10 @@
 
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, PromptRequest, ProtocolVersion, TextContent,
+use agent_client_protocol::schema::v1::{
+    ContentBlock, InitializeRequest, PromptRequest, TextContent,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use spur_acp::connection::{native::NativeAcpConnection, AgentConnection};
 
 #[tokio::test(flavor = "multi_thread")]

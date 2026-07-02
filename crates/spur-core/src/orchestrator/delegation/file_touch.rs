@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::{SessionNotification, SessionUpdate};
+use spur_acp::{SessionNotification, SessionUpdate};
 
 /// De-dup key for the 200ms file-touch window.
 #[derive(Hash, Eq, PartialEq, Clone)]
