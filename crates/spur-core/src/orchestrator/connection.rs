@@ -4,13 +4,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use tracing::{debug, info, warn};
 
-use agent_client_protocol::schema::{
-    InitializeRequest, ListSessionsRequest, ProtocolVersion, SessionInfo,
-};
 use spur_acp::connection::{
     AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter,
 };
 use spur_acp::types::{AgentHealth, TransportKind};
+use spur_acp::{InitializeRequest, ListSessionsRequest, ProtocolVersion, SessionInfo};
 
 use crate::orchestrator::session_discovery::discovery_for_kind;
 use crate::orchestrator::{Orchestrator, MAX_SESSION_LIST_PAGES, MAX_SESSION_LIST_SESSIONS};
@@ -97,7 +95,7 @@ impl Orchestrator {
     ) -> Result<(
         Box<dyn spur_acp::AgentConnection>,
         String,
-        agent_client_protocol::schema::InitializeResponse,
+        spur_acp::InitializeResponse,
     )> {
         let brain_name = self.selected_brain_name(brain_override);
 

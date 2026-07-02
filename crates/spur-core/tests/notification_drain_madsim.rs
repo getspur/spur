@@ -13,15 +13,15 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
-    AvailableCommand, AvailableCommandsUpdate, ContentBlock, InitializeRequest, InitializeResponse,
-    McpServer, NewSessionResponse, PromptRequest, SessionId, SessionNotification, SessionUpdate,
-    TextContent,
-};
 use async_trait::async_trait;
 use futures::Stream;
 use spur_acp::connection::AgentConnection;
 use spur_acp::types::AgentHealth;
+use spur_acp::{
+    AvailableCommand, AvailableCommandsUpdate, ContentBlock, InitializeRequest, InitializeResponse,
+    McpServer, NewSessionResponse, PromptRequest, SessionId, SessionNotification, SessionUpdate,
+    TextContent,
+};
 use tokio::sync::broadcast;
 
 struct BroadcastPromptConnection {
@@ -113,14 +113,14 @@ fn broadcast_before_grace_deadline_survives_after_deadline_is_dropped() {
 
 fn prompt_request() -> PromptRequest {
     PromptRequest::new(
-        SessionId::new("madsim-session".to_string()),
+        spur_acp::AcpSessionId::new("madsim-session".to_string()),
         vec![ContentBlock::Text(TextContent::new("prompt".to_string()))],
     )
 }
 
 fn notification(name: &str) -> SessionNotification {
     SessionNotification::new(
-        SessionId::new("madsim-session".to_string()),
+        spur_acp::AcpSessionId::new("madsim-session".to_string()),
         SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
             AvailableCommand::new(name, "test marker"),
         ])),

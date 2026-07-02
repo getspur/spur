@@ -10,13 +10,13 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use agent_client_protocol::schema::{
-    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionResponse, SessionId,
-    SessionModeId, SessionNotification, SetSessionModeRequest,
-};
 use futures::Stream;
 use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
+use spur_acp::{
+    AcpSessionId, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionResponse,
+    SessionModeId, SessionNotification, SetSessionModeRequest,
+};
 
 /// Apply `set_session_mode` on `session_id` when the agent's effective
 /// permissions request bypass (`cfg.effective_permissions().skip == true`)
@@ -29,7 +29,7 @@ use spur_acp::connection::AgentConnection;
 async fn apply_bypass_session_mode(
     conn: &mut dyn AgentConnection,
     cfg: &AgentConfig,
-    session_id: SessionId,
+    session_id: AcpSessionId,
     advertised_modes: Option<Vec<SessionModeId>>,
     phase: &'static str,
 ) {
@@ -124,7 +124,7 @@ pub async fn load_session_with_bypass(
     LoadSessionResponse,
     Pin<Box<dyn Stream<Item = SessionNotification> + Send>>,
 )> {
-    let session_id = SessionId::new(acp_session_id);
+    let session_id = AcpSessionId::new(acp_session_id);
     let request = LoadSessionRequest::new(session_id.clone(), cwd).mcp_servers(mcp_servers);
     let (response, stream) = conn.load_session(request).await?;
     let advertised_modes = conn.advertised_session_modes(&session_id);
@@ -136,11 +136,12 @@ pub async fn load_session_with_bypass(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use agent_client_protocol::schema::{
-        InitializeRequest, InitializeResponse, PromptRequest, SessionModeId, SetSessionModeResponse,
-    };
     use async_trait::async_trait;
     use spur_acp::types::AgentHealth;
+    use spur_acp::{
+        AcpSessionId, InitializeRequest, InitializeResponse, PromptRequest, SessionModeId,
+        SetSessionModeResponse,
+    };
 
     use super::*;
 
@@ -168,7 +169,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(("new_session".into(), cwd.display().to_string()));
-            Ok(NewSessionResponse::new(SessionId::new("mock-session")))
+            Ok(NewSessionResponse::new(spur_acp::AcpSessionId::new(
+                "mock-session",
+            )))
         }
 
         async fn prompt(
@@ -190,7 +193,10 @@ mod tests {
             AgentHealth::Ready
         }
 
-        fn advertised_session_modes(&self, session_id: &SessionId) -> Option<Vec<SessionModeId>> {
+        fn advertised_session_modes(
+            &self,
+            session_id: &AcpSessionId,
+        ) -> Option<Vec<SessionModeId>> {
             self.calls
                 .lock()
                 .unwrap()

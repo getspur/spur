@@ -106,7 +106,7 @@ fn codex_review_branch_picker_end_to_end() {
     match route("/review-branch main", &[], &[], &registry, false) {
         SubmitDecision::Send { blocks, interrupt } => {
             assert!(!interrupt);
-            use agent_client_protocol::schema::ContentBlock;
+            use spur_acp::ContentBlock;
             assert_eq!(blocks.len(), 1);
             let text = match &blocks[0] {
                 ContentBlock::Text(t) => &t.text,
@@ -122,7 +122,7 @@ fn codex_review_branch_picker_end_to_end() {
     //    whether to require an arg.
     match route("/review-branch", &[], &[], &registry, false) {
         SubmitDecision::Send { blocks, .. } => {
-            use agent_client_protocol::schema::ContentBlock;
+            use spur_acp::ContentBlock;
             let text = match &blocks[0] {
                 ContentBlock::Text(t) => &t.text,
                 other => panic!("expected Text, got {other:?}"),

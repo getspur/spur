@@ -3,8 +3,8 @@
 // chain exceeds the default trait-solver recursion limit (E0275).
 #![recursion_limit = "256"]
 
-use agent_client_protocol::schema::McpServer;
 use serde_json::json;
+use spur_acp::McpServer;
 use spur_acp::{
     BrainSessionId, Column, DatasourceEntry, DatasourceKind, SessionId, SpurConfig, SpurEventBody,
 };
