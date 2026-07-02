@@ -8,6 +8,11 @@
 //! isolation.  This proves the mechanism works; an Orchestrator-level
 //! integration test can be added later.
 
+// The `Send` proof for spawned server futures traverses the lance_io/moka
+// cache types inside spur-context; the chain exceeds the default trait-solver
+// recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use spur_acp::{
     CancelOutcome, CancellationControl, DelegationResult, DelegationStatus, SpurEventBody,
 };

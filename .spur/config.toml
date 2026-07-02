@@ -116,7 +116,7 @@ name = "claude-code"
 command = "npx"
 args = [
     "--yes",
-    "@agentclientprotocol/claude-agent-acp@0.44.0",
+    "@agentclientprotocol/claude-agent-acp@0.54.1",
 ]
 transport = "acp"
 kind = "claude-code-acp"
@@ -177,8 +177,9 @@ name = "codex"
 command = "npx"
 args = [
     "--yes",
-    "@zed-industries/codex-acp@0.16.0",
+    "@agentclientprotocol/codex-acp@1.0.2",
 ]
+
 transport = "acp"
 kind = "codex-acp"
 role = "both"
