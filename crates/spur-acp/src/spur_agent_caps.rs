@@ -14,7 +14,8 @@
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, InitializeResponse, LoadSessionResponse, NewSessionResponse,
-    SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions, SessionModeState,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionModeState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,20 +85,17 @@ impl SpurAgentCaps {
     /// expresses model choice through `session/set_config_option`.
     #[must_use]
     pub fn supports_set_model(&self) -> bool {
-        self.config_options.iter().any(|option| {
-            option.id.0.as_ref() == "model"
-                && matches!(
-                    &option.kind,
-                    SessionConfigKind::Select(select)
-                        if match &select.options {
-                            SessionConfigSelectOptions::Ungrouped(options) => !options.is_empty(),
-                            SessionConfigSelectOptions::Grouped(groups) => groups
-                                .iter()
-                                .any(|group| !group.options.is_empty()),
-                            _ => false,
-                        }
-                )
-        })
+        self.model_option().is_some_and(has_select_choices)
+    }
+
+    /// The config option that represents model selection, when advertised.
+    ///
+    /// ACP 1.1 adds semantic categories; prefer the first option categorized
+    /// as `Model`, and retain the legacy `id == "model"` fallback only for
+    /// agents that omit `category`.
+    #[must_use]
+    pub fn model_option(&self) -> Option<&SessionConfigOption> {
+        model_option_from(&self.config_options)
     }
 
     /// `session/set_config_option` is usable when the session advertises
@@ -124,9 +122,7 @@ impl SpurAgentCaps {
     /// instead of the frozen caps copy captured at session init.
     #[must_use]
     pub fn model_label_from_config_options(options: &[SessionConfigOption]) -> Option<&str> {
-        let option = options
-            .iter()
-            .find(|option| option.id.0.as_ref() == "model")?;
+        let option = model_option_from(options)?;
 
         let SessionConfigKind::Select(select) = &option.kind else {
             return None;
@@ -153,9 +149,7 @@ impl SpurAgentCaps {
     /// snapshot instead of the frozen caps copy captured at session init.
     #[must_use]
     pub fn effort_label_from(options: &[SessionConfigOption]) -> Option<String> {
-        let option = options
-            .iter()
-            .find(|option| option.id.0.as_ref() == "reasoning_effort")?;
+        let option = thought_level_option_from(options)?;
 
         let SessionConfigKind::Select(select) = &option.kind else {
             return None;
@@ -204,12 +198,75 @@ impl SpurAgentCaps {
     }
 }
 
+fn model_option_from(options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
+    option_by_category_or_absent_id(options, KnownConfigCategory::Model, "model")
+}
+
+fn thought_level_option_from(options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
+    option_by_category_or_absent_id(
+        options,
+        KnownConfigCategory::ThoughtLevel,
+        "reasoning_effort",
+    )
+}
+
+#[derive(Clone, Copy)]
+enum KnownConfigCategory {
+    Model,
+    ThoughtLevel,
+}
+
+fn option_by_category_or_absent_id<'a>(
+    options: &'a [SessionConfigOption],
+    category: KnownConfigCategory,
+    fallback_id: &str,
+) -> Option<&'a SessionConfigOption> {
+    options
+        .iter()
+        .find(|option| category_matches(option.category.as_ref(), category))
+        .or_else(|| {
+            options
+                .iter()
+                .find(|option| option.category.is_none() && option.id.0.as_ref() == fallback_id)
+        })
+}
+
+fn category_matches(
+    category: Option<&SessionConfigOptionCategory>,
+    expected: KnownConfigCategory,
+) -> bool {
+    matches!(
+        (expected, category),
+        (
+            KnownConfigCategory::Model,
+            Some(SessionConfigOptionCategory::Model)
+        ) | (
+            KnownConfigCategory::ThoughtLevel,
+            Some(SessionConfigOptionCategory::ThoughtLevel)
+        )
+    )
+}
+
+fn has_select_choices(option: &SessionConfigOption) -> bool {
+    matches!(
+        &option.kind,
+        SessionConfigKind::Select(select)
+            if match &select.options {
+                SessionConfigSelectOptions::Ungrouped(options) => !options.is_empty(),
+                SessionConfigSelectOptions::Grouped(groups) => groups
+                    .iter()
+                    .any(|group| !group.options.is_empty()),
+                _ => false,
+            }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::schema::v1::{
         AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigId,
-        SessionConfigOption, SessionConfigSelectOption, SessionId, SessionMode, SessionModeId,
-        SessionModeState,
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
+        SessionMode, SessionModeId, SessionModeState,
     };
     use agent_client_protocol::schema::ProtocolVersion;
 
@@ -246,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn current_model_label_resolves_via_available_models() {
+    fn current_model_label_resolves_via_config_option_choices() {
         let init = empty_init_response();
         let mut new = NewSessionResponse::new(SessionId::new("model-label"));
         new.config_options = Some(vec![SessionConfigOption::select(
@@ -258,6 +315,39 @@ mod tests {
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         assert_eq!(caps.current_model_label().as_deref(), Some("GPT-5"));
+    }
+
+    #[test]
+    fn model_option_prefers_model_category_over_model_id_allowlist() {
+        let init = empty_init_response();
+        let mut new = NewSessionResponse::new(SessionId::new("model-category"));
+        new.config_options = Some(vec![
+            SessionConfigOption::select(
+                SessionConfigId::new("model"),
+                "Legacy model",
+                "legacy-model",
+                vec![SessionConfigSelectOption::new(
+                    "legacy-model",
+                    "Legacy Model",
+                )],
+            ),
+            SessionConfigOption::select(
+                SessionConfigId::new("vendor_model"),
+                "Vendor model",
+                "vendor-sonnet",
+                vec![SessionConfigSelectOption::new(
+                    "vendor-sonnet",
+                    "Vendor Sonnet",
+                )],
+            )
+            .category(SessionConfigOptionCategory::Model),
+        ]);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+
+        let option = caps.model_option().expect("model option must resolve");
+        assert_eq!(option.id.0.as_ref(), "vendor_model");
+        assert!(caps.supports_set_model());
+        assert_eq!(caps.current_model_label().as_deref(), Some("Vendor Sonnet"));
     }
 
     #[test]
@@ -276,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn current_model_label_returns_none_when_models_none() {
+    fn current_model_label_returns_none_without_model_option() {
         let init = empty_init_response();
         let new = empty_new_session_response();
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
@@ -297,6 +387,30 @@ mod tests {
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         assert_eq!(caps.current_effort_label().as_deref(), Some("Medium"));
+    }
+
+    #[test]
+    fn current_effort_label_prefers_thought_level_category() {
+        let init = empty_init_response();
+        let mut new = empty_new_session_response();
+        new.config_options = Some(vec![
+            SessionConfigOption::select(
+                SessionConfigId::new("reasoning_effort"),
+                "Reasoning effort",
+                "low",
+                vec![SessionConfigSelectOption::new("low", "Low")],
+            ),
+            SessionConfigOption::select(
+                SessionConfigId::new("thinking_level"),
+                "Thinking level",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ]);
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+
+        assert_eq!(caps.current_effort_label().as_deref(), Some("High"));
     }
 
     #[test]
@@ -357,7 +471,10 @@ mod tests {
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(!caps.supports_set_mode(), "empty modes => no set_mode");
-        assert!(!caps.supports_set_model(), "empty models => no set_model");
+        assert!(
+            !caps.supports_set_model(),
+            "empty config options => no set_model"
+        );
         assert!(
             !caps.supports_set_config_option(),
             "empty config_options => no set_config_option"
@@ -389,7 +506,7 @@ mod tests {
         );
         assert!(
             caps.supports_set_model(),
-            "codex fixture has Some(models) => set_model"
+            "codex fixture has model config option => set_model"
         );
         assert!(
             caps.supports_set_config_option(),
@@ -423,7 +540,7 @@ mod tests {
 
     #[test]
     fn model_config_present_but_empty_yields_false() {
-        let mut new = NewSessionResponse::new(SessionId::new("test-empty-models"));
+        let mut new = NewSessionResponse::new(SessionId::new("test-empty-model-option"));
         new.config_options = Some(vec![SessionConfigOption::select(
             SessionConfigId::new("model"),
             "Model",

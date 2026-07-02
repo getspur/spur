@@ -11,8 +11,8 @@ use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
 use spur_acp::types::{AgentHealth, AgentKind, AgentRole, CostTier, TransportKind};
 use spur_acp::{
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
-    NewSessionResponse, PromptRequest, SessionId, SessionMode, SessionModeId, SessionModeState,
+    AcpSessionId, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    McpServer, NewSessionResponse, PromptRequest, SessionMode, SessionModeId, SessionModeState,
     SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
 };
 use spur_core::skip_perm::{load_session_with_bypass, new_session_with_bypass};
@@ -67,7 +67,7 @@ impl AgentConnection for MockConn {
         AgentHealth::Ready
     }
 
-    fn advertised_session_modes(&self, _session_id: &SessionId) -> Option<Vec<SessionModeId>> {
+    fn advertised_session_modes(&self, _session_id: &AcpSessionId) -> Option<Vec<SessionModeId>> {
         self.advertised_modes.clone()
     }
 
