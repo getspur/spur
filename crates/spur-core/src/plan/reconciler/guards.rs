@@ -131,9 +131,12 @@ impl Reconciler {
                         .filter_map(|label| crate::plan::labels::parse_loop_budget_micros(label))
                         .min()
                     {
-                        let spent_micros =
-                            crate::plan::projector::plan_spent_micros(self.pm.as_ref(), plan_id)
-                                .await?;
+                        let spent_micros = crate::plan::projector::plan_spent_micros(
+                            self.pm.as_ref(),
+                            plan_id,
+                            self.feature_gate.as_ref(),
+                        )
+                        .await?;
                         if spent_micros >= cap_micros {
                             let state = PlanDispatchState::BudgetExhausted {
                                 spent_micros,
