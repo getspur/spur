@@ -511,6 +511,8 @@ fn edge(source: &str, target: Option<&str>, target_label: Option<&str>) -> Graph
         change_kind: None,
         edge_kind: Some(GraphEdgeKind::Calls),
         bind_method: None,
+        receiver_text: None,
+        scope_text: None,
     }
 }
 
