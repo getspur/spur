@@ -131,9 +131,8 @@ fn executor_review_cancelled_round_trips() {
 
 #[test]
 fn worker_notification_roundtrips() {
-    use agent_client_protocol::schema::v1::{
-        ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
-    };
+    use spur_acp::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent};
+
     let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new("thinking...")));
     let notification =
         SessionNotification::new("acp-sess", SessionUpdate::AgentThoughtChunk(chunk));
@@ -150,6 +149,32 @@ fn worker_notification_roundtrips() {
     ));
     assert!(json.contains("WorkerNotification"));
     assert!(json.contains("thinking..."));
+}
+
+#[test]
+fn prompt_response_roundtrips_usage() {
+    use spur_acp::{PromptResponse, StopReason, Usage};
+
+    let response = PromptResponse::new(StopReason::EndTurn).usage(
+        Usage::new(123, 45, 78)
+            .thought_tokens(9)
+            .cached_read_tokens(10)
+            .cached_write_tokens(11),
+    );
+
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"usage\""));
+    assert!(json.contains("\"totalTokens\":123"));
+    assert!(json.contains("\"thoughtTokens\":9"));
+
+    let round: PromptResponse = serde_json::from_str(&json).unwrap();
+    let usage = round.usage.expect("usage should round-trip");
+    assert_eq!(usage.total_tokens, 123);
+    assert_eq!(usage.input_tokens, 45);
+    assert_eq!(usage.output_tokens, 78);
+    assert_eq!(usage.thought_tokens, Some(9));
+    assert_eq!(usage.cached_read_tokens, Some(10));
+    assert_eq!(usage.cached_write_tokens, Some(11));
 }
 
 #[test]
