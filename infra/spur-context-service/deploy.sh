@@ -40,12 +40,27 @@ EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "sqlite_scanner" "aws" "parqu
 # shellcheck disable=SC2034
 WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"
 
+resolve_image_tag() {
+    local git_short_sha
+    if git_short_sha="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"; then
+        local image_tag="$git_short_sha"
+        if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+            image_tag="${image_tag}-dirty-$(date -u +%Y%m%d%H%M%S)"
+        fi
+        echo "$image_tag"
+    else
+        date -u +"nogit-%Y%m%d%H%M%S"
+    fi
+}
+
 # Worker container config.  The image is built on the remote VM (x86_64 for
 # Fargate compatibility) and pushed to ECR.
 WORKER_ECR_REPO="spur-context-worker"
 WORKER_LAMBDA_ECR_REPO="spur-context-worker-lambda"
 SOURCE_FETCHER_LAMBDA_ECR_REPO="spur-context-source-fetcher"
-WORKER_IMAGE_TAG="latest"
+IMAGE_TAG="${SPUR_CONTEXT_SERVICE_IMAGE_TAG:-$(resolve_image_tag)}"
+WORKER_IMAGE_TAG="$IMAGE_TAG"
+LATEST_IMAGE_TAG="latest"
 AWS_REGION_VAL="$(cd "$INFRA_DIR" && terraform output -raw aws_region 2>/dev/null || echo ap-southeast-5)"
 WORKER_IMAGE_URI=""
 WORKER_LAMBDA_IMAGE_URI=""
@@ -66,7 +81,40 @@ aws_account_id() {
 
 ecr_image_tag() {
     local repo="$1"
-    echo "$(aws_account_id).dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${repo}:${WORKER_IMAGE_TAG}"
+    local image_tag="${2:-$IMAGE_TAG}"
+    echo "$(aws_account_id).dkr.ecr.${AWS_REGION_VAL}.amazonaws.com/${repo}:${image_tag}"
+}
+
+ecr_latest_image_tag() {
+    local repo="$1"
+    ecr_image_tag "$repo" "$LATEST_IMAGE_TAG"
+}
+
+tag_ecr_image_as_latest() {
+    local repo="$1"
+    local image_tag="$2"
+    local latest_tag
+    local image_manifest
+
+    latest_tag="$(ecr_latest_image_tag "$repo")"
+    image_manifest="$(aws ecr batch-get-image \
+        --repository-name "$repo" \
+        --image-ids "imageTag=$image_tag" \
+        --region "$AWS_REGION_VAL" \
+        --query 'images[0].imageManifest' \
+        --output text)"
+
+    if [[ -z "$image_manifest" || "$image_manifest" == "None" ]]; then
+        log "failed to resolve ECR image manifest for $repo:$image_tag"
+        exit 1
+    fi
+
+    aws ecr put-image \
+        --repository-name "$repo" \
+        --image-tag "$LATEST_IMAGE_TAG" \
+        --image-manifest "$image_manifest" \
+        --region "$AWS_REGION_VAL" >/dev/null
+    log "latest image pointer updated: $latest_tag"
 }
 
 normalize_push_images() {
@@ -446,12 +494,19 @@ build_local_worker_images() {
         WORKER_IMAGE_URI="$(ecr_image_tag "$WORKER_ECR_REPO")"
         WORKER_LAMBDA_IMAGE_URI="$(ecr_image_tag "$WORKER_LAMBDA_ECR_REPO")"
         SOURCE_FETCHER_LAMBDA_IMAGE_URI="$(ecr_image_tag "$SOURCE_FETCHER_LAMBDA_ECR_REPO")"
+        local worker_latest_image_uri
+        local worker_lambda_latest_image_uri
+        local source_fetcher_latest_image_uri
+        worker_latest_image_uri="$(ecr_latest_image_tag "$WORKER_ECR_REPO")"
+        worker_lambda_latest_image_uri="$(ecr_latest_image_tag "$WORKER_LAMBDA_ECR_REPO")"
+        source_fetcher_latest_image_uri="$(ecr_latest_image_tag "$SOURCE_FETCHER_LAMBDA_ECR_REPO")"
 
         log "building and pushing self-contained worker image: $WORKER_IMAGE_URI"
         docker buildx build \
             --platform linux/arm64 --provenance=false \
             --push \
             --tag "$WORKER_IMAGE_URI" \
+            --tag "$worker_latest_image_uri" \
             "$worker_context"
 
         log "building and pushing self-contained worker Lambda image: $WORKER_LAMBDA_IMAGE_URI"
@@ -459,6 +514,7 @@ build_local_worker_images() {
             --platform linux/arm64 --provenance=false \
             --push \
             --tag "$WORKER_LAMBDA_IMAGE_URI" \
+            --tag "$worker_lambda_latest_image_uri" \
             "$worker_lambda_context"
 
         log "building and pushing self-contained source fetcher Lambda image: $SOURCE_FETCHER_LAMBDA_IMAGE_URI"
@@ -466,16 +522,18 @@ build_local_worker_images() {
             --platform linux/arm64 --provenance=false \
             --push \
             --tag "$SOURCE_FETCHER_LAMBDA_IMAGE_URI" \
+            --tag "$source_fetcher_latest_image_uri" \
             "$source_fetcher_context"
     else
-        WORKER_IMAGE_URI="${WORKER_ECR_REPO}:${WORKER_IMAGE_TAG}"
-        WORKER_LAMBDA_IMAGE_URI="${WORKER_LAMBDA_ECR_REPO}:${WORKER_IMAGE_TAG}"
-        SOURCE_FETCHER_LAMBDA_IMAGE_URI="${SOURCE_FETCHER_LAMBDA_ECR_REPO}:${WORKER_IMAGE_TAG}"
+        WORKER_IMAGE_URI="${WORKER_ECR_REPO}:${IMAGE_TAG}"
+        WORKER_LAMBDA_IMAGE_URI="${WORKER_LAMBDA_ECR_REPO}:${IMAGE_TAG}"
+        SOURCE_FETCHER_LAMBDA_IMAGE_URI="${SOURCE_FETCHER_LAMBDA_ECR_REPO}:${IMAGE_TAG}"
 
         log "building self-contained worker image tar: $output_dir/spur-context-worker-image.tar"
         docker buildx build \
             --platform linux/arm64 --provenance=false \
             --tag "$WORKER_IMAGE_URI" \
+            --tag "${WORKER_ECR_REPO}:${LATEST_IMAGE_TAG}" \
             --output "type=docker,dest=$output_dir/spur-context-worker-image.tar" \
             "$worker_context"
 
@@ -483,6 +541,7 @@ build_local_worker_images() {
         docker buildx build \
             --platform linux/arm64 --provenance=false \
             --tag "$WORKER_LAMBDA_IMAGE_URI" \
+            --tag "${WORKER_LAMBDA_ECR_REPO}:${LATEST_IMAGE_TAG}" \
             --output "type=docker,dest=$output_dir/spur-context-worker-lambda-image.tar" \
             "$worker_lambda_context"
 
@@ -490,6 +549,7 @@ build_local_worker_images() {
         docker buildx build \
             --platform linux/arm64 --provenance=false \
             --tag "$SOURCE_FETCHER_LAMBDA_IMAGE_URI" \
+            --tag "${SOURCE_FETCHER_LAMBDA_ECR_REPO}:${LATEST_IMAGE_TAG}" \
             --output "type=docker,dest=$output_dir/spur-context-source-fetcher-image.tar" \
             "$source_fetcher_context"
     fi
@@ -524,6 +584,7 @@ build_and_push_worker_image() {
         --tag "$full_tag"
 
     smoke_worker_image "$full_tag"
+    tag_ecr_image_as_latest "$WORKER_ECR_REPO" "$IMAGE_TAG"
 
     log "worker image pushed: $full_tag"
     WORKER_IMAGE_URI="$full_tag"
@@ -551,6 +612,8 @@ build_and_push_worker_lambda_image() {
         --dockerfile Dockerfile \
         --tag "$full_tag"
 
+    tag_ecr_image_as_latest "$WORKER_LAMBDA_ECR_REPO" "$IMAGE_TAG"
+
     log "worker Lambda image pushed: $full_tag"
     WORKER_LAMBDA_IMAGE_URI="$full_tag"
 }
@@ -576,6 +639,7 @@ build_and_push_source_fetcher_lambda_image() {
         --tag "$full_tag"
 
     smoke_source_fetcher_image "$full_tag"
+    tag_ecr_image_as_latest "$SOURCE_FETCHER_LAMBDA_ECR_REPO" "$IMAGE_TAG"
 
     log "source fetcher Lambda image pushed: $full_tag"
     SOURCE_FETCHER_LAMBDA_IMAGE_URI="$full_tag"
