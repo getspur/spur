@@ -3180,6 +3180,93 @@ pub(crate) async fn push_plan_completed_continuation(
     .await;
 }
 
+pub(crate) async fn push_loop_due_continuation(
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    brain_session_id: &BrainSessionId,
+    loop_id: &str,
+    goal: &str,
+    generation: u32,
+    template: &serde_json::Value,
+) {
+    let delegation_id = loop_artifact_delegation_id("due", loop_id, generation);
+    let template_json = serde_json::to_string(template).unwrap_or_else(|error| {
+        format!("{{\"error\":\"template serialization failed: {error}\"}}")
+    });
+    let result = DelegationResult {
+        status: DelegationStatus::Success,
+        diff: None,
+        diff_summary: None,
+        summary: Some(format!(
+            "Loop due: loop_id={loop_id}; goal={goal}; generation {generation}; template={template_json}"
+        )),
+        estimated_cost_usd: 0.0,
+        worker_branch: None,
+        artifact: None,
+    };
+    materialize_and_push_detached_continuation(
+        continuation_ctx,
+        materializer,
+        &result,
+        &delegation_id,
+        1,
+        brain_session_id,
+        spur_acp::domain::ContinuationSource::LoopDue,
+    )
+    .await;
+}
+
+pub(crate) async fn push_loop_escalation_continuation(
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    brain_session_id: &BrainSessionId,
+    loop_id: &str,
+    goal: &str,
+    consecutive_failures: u32,
+) {
+    let delegation_id = loop_artifact_delegation_id("escalation", loop_id, consecutive_failures);
+    let result = DelegationResult {
+        status: DelegationStatus::Failed {
+            error: format!("loop auto-paused after {consecutive_failures} consecutive failures"),
+        },
+        diff: None,
+        diff_summary: None,
+        summary: Some(format!(
+            "Loop escalation: loop_id={loop_id}; goal={goal}; consecutive_failures={consecutive_failures}; action=review paused loop and decide whether to resume"
+        )),
+        estimated_cost_usd: 0.0,
+        worker_branch: None,
+        artifact: None,
+    };
+    materialize_and_push_detached_continuation(
+        continuation_ctx,
+        materializer,
+        &result,
+        &delegation_id,
+        1,
+        brain_session_id,
+        spur_acp::domain::ContinuationSource::LoopEscalation,
+    )
+    .await;
+}
+
+fn loop_artifact_delegation_id(kind: &str, loop_id: &str, generation_or_count: u32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"spur.loop-continuation-artifact.v1");
+    hasher.update([0]);
+    hasher.update(kind.as_bytes());
+    hasher.update([0]);
+    hasher.update(loop_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(generation_or_count.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
 fn plan_completed_artifact_delegation_id(plan_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"spur.plan-completed-artifact.v1");
