@@ -116,6 +116,22 @@ def test_self_contained_worker_images_build_locally_without_ecr_mutations_by_def
     assert 'aws ecr describe-repositories --repository-names "$SOURCE_FETCHER_LAMBDA_ECR_REPO"' in script
 
 
+def test_deploy_tags_worker_images_with_immutable_tag_and_latest_pointer():
+    script = DEPLOY_SH.read_text()
+
+    assert 'IMAGE_TAG="${SPUR_CONTEXT_SERVICE_IMAGE_TAG:-$(resolve_image_tag)}"' in script
+    assert 'WORKER_IMAGE_TAG="$IMAGE_TAG"' in script
+    assert 'LATEST_IMAGE_TAG="latest"' in script
+    assert 'git -C "$REPO_ROOT" rev-parse --short HEAD' in script
+    assert 'git -C "$REPO_ROOT" status --porcelain --untracked-files=normal' in script
+    assert 'ecr_latest_image_tag "$WORKER_ECR_REPO"' in script
+    assert 'ecr_latest_image_tag "$WORKER_LAMBDA_ECR_REPO"' in script
+    assert 'ecr_latest_image_tag "$SOURCE_FETCHER_LAMBDA_ECR_REPO"' in script
+    assert 'tag_ecr_image_as_latest "$WORKER_ECR_REPO" "$IMAGE_TAG"' in script
+    assert 'tag_ecr_image_as_latest "$WORKER_LAMBDA_ECR_REPO" "$IMAGE_TAG"' in script
+    assert 'tag_ecr_image_as_latest "$SOURCE_FETCHER_LAMBDA_ECR_REPO" "$IMAGE_TAG"' in script
+
+
 def test_deploy_worker_image_contains_worker_and_spur_binaries():
     deploy_sh = DEPLOY_SH.read_text()
 
