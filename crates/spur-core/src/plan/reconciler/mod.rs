@@ -846,6 +846,7 @@ pub enum PlanDispatchState {
     PlanOwnedByAnotherBrain { epic_id: String, owner: String },
     LoopsPaused { epic_id: String, scope: String },
     ReportOnly { epic_id: String },
+    BudgetExhausted { spent_micros: u64, cap_micros: u64 },
 }
 
 impl PlanDispatchState {
@@ -864,6 +865,13 @@ impl PlanDispatchState {
                 scope: scope.clone(),
             }),
             Self::ReportOnly { .. } => Some(SkipReason::ReportOnly),
+            Self::BudgetExhausted {
+                spent_micros,
+                cap_micros,
+            } => Some(SkipReason::BudgetExhausted {
+                spent_micros: *spent_micros,
+                cap_micros: *cap_micros,
+            }),
         }
     }
 }
