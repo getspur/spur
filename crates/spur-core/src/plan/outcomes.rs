@@ -88,6 +88,10 @@ pub enum SkipReason {
     PlanAllowsDispatchFailed {
         error: String,
     },
+    LoopsPaused {
+        scope: String,
+    },
+    ReportOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -216,6 +220,8 @@ enum SkipReasonKey {
     PersistDispatchIntentFailed,
     HydrationGetIssueFailed,
     PlanAllowsDispatchFailed,
+    LoopsPaused { scope: String },
+    ReportOnly,
 }
 
 impl From<&SkipReason> for SkipReasonKey {
@@ -242,6 +248,10 @@ impl From<&SkipReason> for SkipReasonKey {
             SkipReason::PersistDispatchIntentFailed { .. } => Self::PersistDispatchIntentFailed,
             SkipReason::HydrationGetIssueFailed { .. } => Self::HydrationGetIssueFailed,
             SkipReason::PlanAllowsDispatchFailed { .. } => Self::PlanAllowsDispatchFailed,
+            SkipReason::LoopsPaused { scope } => Self::LoopsPaused {
+                scope: scope.clone(),
+            },
+            SkipReason::ReportOnly => Self::ReportOnly,
         }
     }
 }

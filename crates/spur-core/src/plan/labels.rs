@@ -184,6 +184,10 @@ pub const REVIEW_REJECTED: &str = "spur:review-rejected";
 /// to avoid observing partially-persisted plan graphs as ready work.
 /// If creation fails mid-loop, the epic will NOT carry this label.
 pub const PLAN_COMPLETE: &str = "spur:plan-complete";
+pub const LOOP_PAUSED: &str = "spur:loop-paused";
+pub const PAUSE_ALL_LOOPS: &str = "spur:pause-all-loops";
+pub const LOOP_TRIAGE_TASK: &str = "spur:loop-triage-task";
+pub const AUTONOMY_PREFIX: &str = "spur:autonomy:";
 /// Marker applied to an epic while `build_epic_subgraph` is still creating
 /// children + dependency edges. The reconciler must not dispatch tasks from a
 /// plan while this marker is present.
@@ -217,6 +221,23 @@ pub fn parse_plan_owner_lease_expires_at(label: &str) -> Option<i64> {
         .strip_prefix(PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX)?
         .parse()
         .ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AutonomyLevel {
+    L1,
+    L2,
+    L3,
+}
+
+/// Parses `spur:autonomy:l1|l2|l3`. Unknown suffixes return None.
+pub fn parse_autonomy(label: &str) -> Option<AutonomyLevel> {
+    match label.strip_prefix(AUTONOMY_PREFIX)? {
+        "l1" => Some(AutonomyLevel::L1),
+        "l2" => Some(AutonomyLevel::L2),
+        "l3" => Some(AutonomyLevel::L3),
+        _ => None,
+    }
 }
 
 /// Returns `Some(task_id)` if the given label is a `spur:plan-task-id:<id>` label.
