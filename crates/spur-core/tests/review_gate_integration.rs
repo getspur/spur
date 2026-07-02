@@ -1,3 +1,8 @@
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use spur_acp::ReviewDecision;
 use spur_core::{review_dispatcher_loop, ExecutorId, InteractiveInput, ReviewSink};
 

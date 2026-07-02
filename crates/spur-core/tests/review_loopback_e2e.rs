@@ -14,6 +14,11 @@
 //! Fine-grained gate tests (register/remove invariants, dispatcher routing,
 //! cancellation audit events, etc.) live in `review_gate_integration.rs`.
 
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use spur_acp::{DelegationStatus, ReviewDecision, TimeoutFallback};
 use spur_core::{test_support::run_gate_with_retries, ExecutorId, ReviewSink};
 use std::time::Duration;
