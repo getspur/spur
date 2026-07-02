@@ -597,6 +597,27 @@ where
     Ok(Arc::new(project.await?))
 }
 
+fn report_only_dispatch_state(
+    epic_labels: &[String],
+    task_labels: &[String],
+    epic_id: Option<&str>,
+) -> Option<PlanDispatchState> {
+    let autonomy = epic_labels
+        .iter()
+        .filter_map(|label| crate::plan::labels::parse_autonomy(label))
+        .max();
+    if autonomy == Some(crate::plan::labels::AutonomyLevel::L1)
+        && !task_labels
+            .iter()
+            .any(|label| label == crate::plan::labels::LOOP_TRIAGE_TASK)
+    {
+        return Some(PlanDispatchState::ReportOnly {
+            epic_id: epic_id.unwrap_or_default().to_string(),
+        });
+    }
+    None
+}
+
 pub(crate) async fn prune_projected_terminal_task_outcomes(
     outcomes: &Arc<tokio::sync::Mutex<OutcomeStore>>,
     plan_id: &str,
@@ -781,6 +802,7 @@ pub struct ReconcilerConfig {
     pub label_only_dispatch_grace: Duration,
     pub repo_root: PathBuf,
     pub predispatch_preview: PreviewStrategy,
+    pub pause_all_loops: bool,
 }
 
 impl Default for ReconcilerConfig {
@@ -793,6 +815,7 @@ impl Default for ReconcilerConfig {
             label_only_dispatch_grace: Duration::from_secs(30),
             repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             predispatch_preview: PreviewStrategy::Real,
+            pause_all_loops: false,
         }
     }
 }
@@ -821,6 +844,8 @@ pub enum PlanDispatchState {
     EpicNotOpen { epic_id: String },
     PlanHasPendingEpic { epic_id: String },
     PlanOwnedByAnotherBrain { epic_id: String, owner: String },
+    LoopsPaused { epic_id: String, scope: String },
+    ReportOnly { epic_id: String },
 }
 
 impl PlanDispatchState {
@@ -835,6 +860,10 @@ impl PlanDispatchState {
                     owner: owner.clone(),
                 })
             }
+            Self::LoopsPaused { scope, .. } => Some(SkipReason::LoopsPaused {
+                scope: scope.clone(),
+            }),
+            Self::ReportOnly { .. } => Some(SkipReason::ReportOnly),
         }
     }
 }
@@ -1028,6 +1057,40 @@ impl Reconciler {
         Ok(projected)
     }
 
+    async fn epic_labels_for_plan(
+        &self,
+        plan_id: &str,
+        epic_id: Option<&str>,
+        cache: &mut HashMap<String, Vec<String>>,
+    ) -> anyhow::Result<Vec<String>> {
+        if let Some(labels) = cache.get(plan_id) {
+            return Ok(labels.clone());
+        }
+
+        let labels = if let Some(epic_id) = epic_id {
+            self.pm.get_issue(epic_id).await?.labels
+        } else {
+            self.pm
+                .list_issues(spur_pm::IssueFilter {
+                    labels: vec![
+                        crate::plan::labels::plan_id(plan_id),
+                        crate::plan::labels::PLAN_COMPLETE.to_string(),
+                    ],
+                    issue_type: Some("epic".into()),
+                    limit: Some(1),
+                    ..Default::default()
+                })
+                .await?
+                .into_iter()
+                .next()
+                .map(|summary| summary.labels)
+                .unwrap_or_default()
+        };
+
+        cache.insert(plan_id.to_string(), labels.clone());
+        Ok(labels)
+    }
+
     async fn active_plan_handle(
         &self,
         plan_id: &str,
@@ -1138,6 +1201,7 @@ impl Reconciler {
             .await?;
 
         let ready = self.observe_ready_summaries().await?;
+        let mut epic_labels_cache = HashMap::new();
 
         for hydrated in ready {
             let summary = hydrated.summary;
@@ -1196,6 +1260,44 @@ impl Reconciler {
                     SkipReason::TaskStatusNotReady { blocked_by },
                 )
                 .await;
+                continue;
+            }
+            let epic_labels = match self
+                .epic_labels_for_plan(
+                    plan_id,
+                    projected.epic_id.as_deref(),
+                    &mut epic_labels_cache,
+                )
+                .await
+            {
+                Ok(labels) => labels,
+                Err(error) => {
+                    tracing::warn!(
+                        issue_id = %summary.id,
+                        %plan_id,
+                        task_id = %task.spec.task_id,
+                        "reconciler skipping ready task after epic label hydration failed: {error}"
+                    );
+                    self.record_skipped(
+                        Some(plan_id),
+                        &task.spec.task_id,
+                        SkipReason::HydrationGetIssueFailed {
+                            error: error.to_string(),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            if let Some(state) = report_only_dispatch_state(
+                &epic_labels,
+                &summary.labels,
+                projected.epic_id.as_deref(),
+            ) {
+                if let Some(reason) = state.skip_reason() {
+                    self.record_skipped(Some(plan_id), &task.spec.task_id, reason)
+                        .await;
+                }
                 continue;
             }
 

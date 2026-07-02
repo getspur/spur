@@ -1097,6 +1097,241 @@ async fn seed_mock_ready_tasks_plan(
     issue_ids
 }
 
+async fn add_mock_issue_label(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    issue_id: &str,
+    label: impl Into<String>,
+) {
+    pm.update_issue(
+        issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![label.into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add mock issue label");
+}
+
+async fn add_mock_epic_label(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    label: impl Into<String>,
+) {
+    let epics = pm
+        .list_issues(spur_pm::IssueFilter {
+            labels: vec![crate::plan::labels::plan_id(plan_id)],
+            issue_type: Some("epic".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("list mock epics");
+    let epic_id = epics
+        .first()
+        .unwrap_or_else(|| panic!("expected complete epic for plan {plan_id}"))
+        .id
+        .clone();
+    add_mock_issue_label(pm, &epic_id, label).await;
+}
+
+fn drain_delegation_requests(
+    delegation_rx: &mut tokio::sync::mpsc::Receiver<crate::DelegationRequest>,
+) -> Vec<crate::DelegationRequest> {
+    let mut requests = Vec::new();
+    loop {
+        match delegation_rx.try_recv() {
+            Ok(request) => requests.push(request),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
+    requests
+}
+
+#[tokio::test(start_paused = true)]
+async fn epic_with_loop_paused_label_suppresses_dispatch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-loop-paused".into()));
+    seed_mock_ready_task_plan(&pm, "P-LOOP-PAUSED", "T1", &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-LOOP-PAUSED",
+        crate::plan::labels::LOOP_PAUSED.to_string(),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "loop-paused plan must not dispatch a worker"
+    );
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let recent = outcomes.recent_outcomes("P-LOOP-PAUSED");
+    assert!(
+        recent.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Skipped {
+                task_id,
+                reason: SkipReason::LoopsPaused { scope },
+                ..
+            } if task_id == "T1" && scope == "loop"
+        )),
+        "expected loop-scoped pause skip, got {recent:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn epic_with_pause_all_loops_label_suppresses_dispatch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-pause-all".into()));
+    seed_mock_ready_task_plan(&pm, "P-PAUSE-ALL", "T1", &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-PAUSE-ALL",
+        crate::plan::labels::PAUSE_ALL_LOOPS.to_string(),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "global pause label must not dispatch a worker"
+    );
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let recent = outcomes.recent_outcomes("P-PAUSE-ALL");
+    assert!(
+        recent.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Skipped {
+                task_id,
+                reason: SkipReason::LoopsPaused { scope },
+                ..
+            } if task_id == "T1" && scope == "global"
+        )),
+        "expected global pause skip, got {recent:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn l1_autonomy_suppresses_non_triage_tasks() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-l1-report".into()));
+    let issue_ids =
+        seed_mock_ready_tasks_plan(&pm, "P-L1", &["Triage", "Action"], &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-L1",
+        format!("{}l1", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    add_mock_issue_label(
+        &pm,
+        &issue_ids[0],
+        crate::plan::labels::LOOP_TRIAGE_TASK.to_string(),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(2);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    let requests = drain_delegation_requests(&mut delegation_rx);
+    assert_eq!(requests.len(), 1, "L1 should dispatch only triage");
+    assert_eq!(requests[0].issue_id.as_deref(), Some(issue_ids[0].as_str()));
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let recent = outcomes.recent_outcomes("P-L1");
+    assert!(
+        recent.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Skipped {
+                task_id,
+                reason: SkipReason::ReportOnly,
+                ..
+            } if task_id == "Action"
+        )),
+        "expected report-only skip for non-triage task, got {recent:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn l2_autonomy_dispatches_all_ready_tasks() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-l2-assisted".into()));
+    let issue_ids =
+        seed_mock_ready_tasks_plan(&pm, "P-L2", &["Triage", "Action"], &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-L2",
+        format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    add_mock_issue_label(
+        &pm,
+        &issue_ids[0],
+        crate::plan::labels::LOOP_TRIAGE_TASK.to_string(),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(2);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    let requests = drain_delegation_requests(&mut delegation_rx);
+    let request_issue_ids = requests
+        .iter()
+        .filter_map(|request| request.issue_id.as_deref())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        request_issue_ids,
+        HashSet::from([issue_ids[0].as_str(), issue_ids[1].as_str()])
+    );
+}
+
 #[tokio::test]
 async fn global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_plan() {
     let pm = crate::plan::test_util::MockPm::new().arc();
