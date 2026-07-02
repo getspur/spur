@@ -639,6 +639,15 @@ mod session_attach_guard_transfer_tests {
         )
     }
 
+    fn fixture_select_option_with_category(
+        id: &str,
+        current: &str,
+        choices: &[(&str, &str)],
+        category: spur_acp::SessionConfigOptionCategory,
+    ) -> spur_acp::SessionConfigOption {
+        fixture_select_option(id, current, choices).category(category)
+    }
+
     #[tokio::test]
     async fn spur_agent_caps_getter_returns_cached_arc_or_none() {
         use spur_acp::SpurAgentCaps;
@@ -936,10 +945,11 @@ mod session_attach_guard_transfer_tests {
         // Caps that advertise model switching through the ACP 1.0 config option.
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
         let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-x"));
-        new.config_options = Some(vec![fixture_select_option(
-            "model",
+        new.config_options = Some(vec![fixture_select_option_with_category(
+            "vendor_model",
             "claude-sonnet-4-7",
             &[("claude-sonnet-4-7", "Claude Sonnet 4.7")],
+            spur_acp::SessionConfigOptionCategory::Model,
         )]);
         let caps = std::sync::Arc::new(SpurAgentCaps::new(
             &init,
@@ -1849,7 +1859,7 @@ impl Orchestrator {
         let config_options = session_response.config_options.clone().unwrap_or_default();
         // M8.A: build the frozen-per-session capability cache from both
         // the InitializeResponse (`AgentCapabilities`) and the
-        // NewSessionResponse (modes/models/config_options). Spec §6.1.
+        // NewSessionResponse (modes/config_options). Spec §6.1.
         let spur_agent_caps = Some(Arc::new(spur_acp::SpurAgentCaps::new(
             &init_response,
             &session_response,
@@ -2487,14 +2497,14 @@ impl Orchestrator {
         .await
     }
 
-    /// Dispatch `session/set_model` for `brain` via the trait method on
+    /// Dispatch model selection for `brain` via the trait method on
     /// `AgentConnection`. Reads the cached `SpurAgentCaps` once and lets
-    /// the connection's typed surface decide between `Direct`,
-    /// `FallbackConfigOption`, and `Unsupported` (spec §6.3).
+    /// the connection's typed surface decide between the config-option path
+    /// and `Unsupported` (spec §6.3).
     ///
     /// `value` is the user-supplied model id (e.g. `"claude-sonnet-4-7"`).
     /// `Err(AcpError::CapabilityMissing("set_model"))` when caps absent or
-    /// neither dispatch path is advertised. Defined as an associated
+    /// model switching is not advertised. Defined as an associated
     /// function (no `&self`) so the future stays `Send` when awaited
     /// inside `run_interactive` — `Orchestrator` itself is `!Sync` due
     /// to its embedded rusqlite connection, but no orchestrator state
