@@ -1,6 +1,11 @@
 //! Integration tests for async-continuation scheduling.
 //! These exercise the bridge + orchestrator with a mock brain.
 
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use chrono::Utc;
 use spur_acp::domain::delegation::DelegationStatus;
 use spur_acp::domain::events::SpurEventBody;
