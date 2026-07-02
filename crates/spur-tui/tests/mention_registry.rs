@@ -910,53 +910,52 @@ fn malformed_code_graph_artifact_leaves_existing_sources_available() {
         .any(|hit| matches!(hit.kind, MentionKind::CodeFile | MentionKind::CodeSymbol)));
 }
 
+// Historically this test asserted the LOADER kept the first row when an
+// artifact carried duplicate stable_symbol_ids. Since the JSON read path was
+// removed (078f3c73e), parquet is the only artifact format and its writer
+// rejects duplicate ids outright — the invariant moved to write time, so
+// duplicate-id artifacts are unrepresentable. Assert the write-time guard.
 #[test]
-fn duplicate_symbol_ids_keep_first_row_and_payload() {
+fn duplicate_symbol_ids_are_rejected_at_artifact_write_time() {
     let tmp = tempfile::tempdir().unwrap();
-    let graph_path = write_graph_fixture(
-        tmp.path(),
-        serde_json::json!({
-            "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
-            "files": [],
-            "symbols": [
-                {
-                    "stable_symbol_id": "symbol-dup",
-                    "file_path": "src/first.rs",
-                    "byte_range": [0, 10],
-                    "line_range": [1, 2],
-                    "entity_name": "First",
-                    "symbol_kind": "struct",
-                    "anchor_hash": "1",
-                    "enclosing_scope": "module first"
-                },
-                {
-                    "stable_symbol_id": "symbol-dup",
-                    "file_path": "src/second.rs",
-                    "byte_range": [20, 30],
-                    "line_range": [4, 5],
-                    "entity_name": "Second",
-                    "symbol_kind": "struct",
-                    "anchor_hash": "2",
-                    "enclosing_scope": "module second"
-                }
-            ]
-        }),
-    );
-    let mut reg = MentionRegistry::for_direct_session().with_code_graph(graph_path);
-    let sid = SessionId::new();
-
-    let hits = reg.query(CompletionScope::Session(&sid), tmp.path(), "First", 10);
-    let duplicate_rows: Vec<_> = hits
-        .iter()
-        .filter(|hit| hit.uri == "graph://symbol/symbol-dup")
+    let value = serde_json::json!({
+        "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
+        "files": [],
+        "symbols": [
+            {
+                "stable_symbol_id": "symbol-dup",
+                "file_path": "src/first.rs",
+                "byte_range": [0, 10],
+                "line_range": [1, 2],
+                "entity_name": "First",
+                "symbol_kind": "struct",
+                "anchor_hash": "1",
+                "enclosing_scope": "module first"
+            },
+            {
+                "stable_symbol_id": "symbol-dup",
+                "file_path": "src/second.rs",
+                "byte_range": [20, 30],
+                "line_range": [4, 5],
+                "entity_name": "Second",
+                "symbol_kind": "struct",
+                "anchor_hash": "2",
+                "enclosing_scope": "module second"
+            }
+        ]
+    });
+    let mut artifact: spur_graph::GraphIndexArtifact =
+        serde_json::from_value(value).expect("fixture json shape");
+    artifact.symbol_node_ids = (0..artifact.symbols.len() as u64)
+        .map(spur_graph::NodeId)
         .collect();
 
-    assert_eq!(duplicate_rows.len(), 1, "{:?}", hit_debug(&hits));
-    assert_eq!(duplicate_rows[0].display, "First");
-    let payload = reg
-        .lookup_code_payload("graph://symbol/symbol-dup")
-        .expect("deduplicated payload");
-    assert_eq!(payload.authoritative.file_path, "src/first.rs");
+    let err = write_artifact_parquet(&artifact, tmp.path(), WriteOptions::default(), Vec::new())
+        .expect_err("duplicate stable_symbol_ids must be rejected by the artifact writer");
+    assert!(
+        err.to_string().contains("symbol-dup"),
+        "error should name the duplicated id: {err}"
+    );
 }
 
 #[test]
@@ -993,8 +992,27 @@ fn reversed_byte_range_artifact_disables_code_graph_rows() {
         .any(|hit| matches!(hit.kind, MentionKind::CodeFile | MentionKind::CodeSymbol)));
 }
 
+fn graph_fixture_json() -> serde_json::Value {
+    let raw = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/graph_index/sample.json"),
+    )
+    .expect("read graph fixture json");
+    serde_json::from_str(&raw).expect("parse graph fixture json")
+}
+
+// The legacy JSON artifact read path was removed (078f3c73e); sample.json
+// stays as the human-editable source of truth and is converted to a parquet
+// artifact the loader accepts.
 fn graph_fixture_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph_index/sample.json")
+    static FIXTURE: std::sync::OnceLock<(tempfile::TempDir, std::path::PathBuf)> =
+        std::sync::OnceLock::new();
+    let (_dir, path) = FIXTURE.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("graph fixture tempdir");
+        let path = write_graph_fixture(dir.path(), graph_fixture_json());
+        (dir, path)
+    });
+    path.clone()
 }
 
 fn issue(id: &str, title: &str, assignee: Option<&str>) -> IssueMentionDescriptor {
@@ -1025,18 +1043,22 @@ fn hit_debug(hits: &[spur_tui::mentions::MentionEntry]) -> Vec<(&MentionKind, &s
 }
 
 fn write_graph_fixture(root: &std::path::Path, value: serde_json::Value) -> std::path::PathBuf {
-    let path = root.join("graph.json");
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&value).expect("serialize graph fixture"),
-    )
-    .expect("write graph fixture");
-    path
+    let mut artifact: spur_graph::GraphIndexArtifact =
+        serde_json::from_value(value).expect("graph fixture json must match artifact shape");
+    // Node ids are #[serde(skip)] and the parquet writer requires one per
+    // file/symbol row; synthesize sequential ids like the source.rs tests do.
+    let n_files = artifact.files.len();
+    artifact.file_node_ids = (0..n_files as u64).map(spur_graph::NodeId).collect();
+    artifact.symbol_node_ids = (0..artifact.symbols.len() as u64)
+        .map(|i| spur_graph::NodeId(n_files as u64 + i))
+        .collect();
+    write_artifact_parquet(&artifact, root, WriteOptions::default(), Vec::new())
+        .expect("write parquet graph fixture");
+    root.to_path_buf()
 }
 
 fn valid_config_fixture_copy(root: &std::path::Path) -> std::path::PathBuf {
-    let fixture = std::fs::read_to_string(graph_fixture_path()).expect("read graph fixture");
-    let mut value: serde_json::Value = serde_json::from_str(&fixture).expect("parse graph fixture");
+    let mut value = graph_fixture_json();
     let source = config_fixture_source();
     let slice = &source[10..80];
     let hash = compute_anchor_hash(slice).to_string();
