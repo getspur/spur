@@ -444,6 +444,21 @@ pub fn write_sections_dataset(
     .map(|_| ())
 }
 
+pub fn write_sections_dataset_skipping_embeddings(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+) -> Result<()> {
+    write_sections_dataset_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        SectionSidecarOptions::from_env_with_skip_overrides(true, true),
+        None,
+    )
+    .map(|_| ())
+}
+
 pub fn write_sections_dataset_best_effort_with_options(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
