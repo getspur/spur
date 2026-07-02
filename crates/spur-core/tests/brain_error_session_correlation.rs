@@ -27,6 +27,11 @@
 //! - Current HEAD (pre-fix): FAILS — `session` is a random UUID.
 //! - After Task 2 fix at orchestrator.rs:1358: PASSES.
 
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use std::time::Duration;
 
 use spur_acp::config::SpurConfig;

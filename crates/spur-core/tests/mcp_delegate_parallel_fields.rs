@@ -4,6 +4,11 @@
 //! These tests exercise parse_parallel_tasks by calling it directly and
 //! asserting each DelegationRequest carries the right per-task fields.
 
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use rmcp::{
     model::{CallToolRequestParams, JsonObject},
     serve_server, ServiceExt,

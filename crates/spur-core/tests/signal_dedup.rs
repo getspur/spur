@@ -1,5 +1,10 @@
 //! T-F7: duplicate worker signals with the same `signal_id` are applied once.
 
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
