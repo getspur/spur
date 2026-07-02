@@ -21,9 +21,11 @@ fn count_occurrences(contents: &str, needle: &str) -> usize {
 
 #[test]
 fn brain_session_wire_field_literal_in_mcp_server_is_not_policy_key_renamed() {
+    // Relocated from crates/spur-mcp/src/server/ in 1acc109d0 (S3 plan
+    // engine move).
     let server = [
-        read_workspace_file("crates/spur-mcp/src/server/types.rs"),
-        read_workspace_file("crates/spur-mcp/src/server/handlers/delegation_tests.rs"),
+        read_workspace_file("crates/spur-core/src/server/types.rs"),
+        read_workspace_file("crates/spur-core/src/mcp/delegation_tests.rs"),
     ]
     .join("\n");
 
