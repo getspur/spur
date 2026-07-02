@@ -52,12 +52,9 @@ impl AdvertisedSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
-        InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion, SessionId,
-        SessionModelState,
-    };
     use spur_acp::{
-        AgentKind, SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SpurAgentCaps,
+        AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion, SessionConfigId,
+        SessionConfigOption, SessionConfigSelectOption, SessionId, SpurAgentCaps,
     };
 
     #[test]
@@ -93,13 +90,16 @@ mod tests {
     #[test]
     fn model_caps_yield_model_advertised_entry() {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let new = NewSessionResponse::new(SessionId::new("sid")).models(SessionModelState::new(
-            ModelId::new("gemini-3.1-pro-preview"),
-            vec![ModelInfo::new(
-                ModelId::new("gemini-3.1-pro-preview"),
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("sid"));
+        new.config_options = Some(vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "gemini-3.1-pro-preview",
+            vec![SessionConfigSelectOption::new(
+                "gemini-3.1-pro-preview",
                 "Gemini 3.1 Pro Preview",
             )],
-        ));
+        )]);
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::Gemini);
         let entries = AdvertisedSource::entries_from_caps("gemini", &caps);
         assert_eq!(entries.len(), 1);

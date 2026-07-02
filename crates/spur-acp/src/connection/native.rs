@@ -47,21 +47,21 @@ use futures::stream::unfold;
 use futures::Stream;
 use tokio::sync::{mpsc, oneshot};
 
-use agent_client_protocol::schema::{
-    AuthenticateRequest, AuthenticateResponse, CancelNotification, ClientCapabilities,
-    ContentBlock, ContentChunk, CreateTerminalRequest, CreateTerminalResponse, ExtRequest,
-    ExtResponse, FileSystemCapabilities, InitializeRequest, InitializeResponse,
-    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, McpServer, ModelId, NewSessionRequest,
+use agent_client_protocol::schema::v1::{
+    AgentNotification, AuthenticateRequest, AuthenticateResponse, CancelNotification,
+    ClientCapabilities, ClientRequest, ContentBlock, ContentChunk, CreateTerminalRequest,
+    CreateTerminalResponse, ExtRequest, ExtResponse, FileSystemCapabilities, InitializeRequest,
+    InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest,
     NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
     ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId, SessionId, SessionModeId,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    SetSessionModelRequest, SetSessionModelResponse, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
@@ -154,10 +154,6 @@ enum AcpCommand {
     SetSessionMode {
         request: SetSessionModeRequest,
         reply: oneshot::Sender<anyhow::Result<SetSessionModeResponse>>,
-    },
-    SetSessionModel {
-        request: SetSessionModelRequest,
-        reply: oneshot::Sender<anyhow::Result<SetSessionModelResponse>>,
     },
     SetSessionConfigOption {
         request: SetSessionConfigOptionRequest,
@@ -253,26 +249,18 @@ fn build_acp_log_path(repo_root: &std::path::Path, agent_name: &str) -> std::pat
 
 /// State-gated dispatch decision for `set_session_model`. Spec §6.3.
 ///
-/// The decision is made *once* by reading `SpurAgentCaps` — never by
-/// probing the agent at runtime. Codex (which advertises both `models`
-/// AND a `model` config option) takes the dedicated `Direct` path; an
-/// agent that only advertises config options takes the fallback; an
-/// agent that advertises neither yields `Unsupported`.
+/// ACP 1.0 removed the dedicated `session/set_model` request, so the surviving
+/// dispatch surface is the existing config-option fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetSessionModelDispatch {
-    /// `caps.supports_set_model()` — dispatch `SetSessionModelRequest`.
-    Direct,
-    /// `caps.supports_set_config_option()` only — fall back to
-    /// `set_session_config_option` with `config_id = "model"`.
+    /// Fall back to `set_session_config_option` with `config_id = "model"`.
     FallbackConfigOption,
-    /// Neither capability is advertised → `AcpError::CapabilityMissing`.
+    /// No config-option surface is advertised → `AcpError::CapabilityMissing`.
     Unsupported,
 }
 
 pub(crate) fn decide_set_session_model_dispatch(caps: &SpurAgentCaps) -> SetSessionModelDispatch {
     if caps.supports_set_model() {
-        SetSessionModelDispatch::Direct
-    } else if caps.supports_set_config_option() {
         SetSessionModelDispatch::FallbackConfigOption
     } else {
         SetSessionModelDispatch::Unsupported
@@ -331,9 +319,6 @@ fn reject_busy_command(cmd: AcpCommand, agent_name: &str, in_flight: &str) {
             let _ = reply.send(Err(err()));
         }
         AcpCommand::SetSessionMode { reply, .. } => {
-            let _ = reply.send(Err(err()));
-        }
-        AcpCommand::SetSessionModel { reply, .. } => {
             let _ = reply.send(Err(err()));
         }
         AcpCommand::SetSessionConfigOption { reply, .. } => {
@@ -912,55 +897,23 @@ impl AgentConnection for NativeAcpConnection {
 
     // ─── set_session_model ───────────────────────────────────────────────
 
-    /// Issue ACP `session/set_model` with a state-gated fallback to
-    /// `session/set_config_option`. Spec §6.3.
+    /// Issue ACP model selection through `session/set_config_option`. Spec §6.3.
     ///
-    /// The dispatch decision is read from `caps` once (see
-    /// [`decide_set_session_model_dispatch`]); there is no try-and-see
-    /// runtime probe. Both `Direct` and `FallbackConfigOption` paths
-    /// drop the wire response — the orchestrator refreshes its cached
-    /// `current_model` from the next agent-emitted notification.
+    /// ACP 1.0 removed `session/set_model`; the orchestrator still calls this
+    /// trait method with the user-supplied model id and the native transport
+    /// maps it onto the existing `model` config option.
     async fn set_session_model(
         &mut self,
         sid: SessionId,
-        model_id: ModelId,
+        model_id: String,
         caps: &SpurAgentCaps,
     ) -> Result<(), AcpError> {
         match decide_set_session_model_dispatch(caps) {
-            SetSessionModelDispatch::Direct => {
-                let request = SetSessionModelRequest::new(sid, model_id);
-                let agent_name = self.agent_name.clone();
-                let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
-                    AcpError::Transport(anyhow::anyhow!(
-                        "NativeAcpConnection '{agent_name}': not initialized"
-                    ))
-                })?;
-                let (reply_tx, reply_rx) = oneshot::channel();
-                cmd_tx
-                    .send(AcpCommand::SetSessionModel {
-                        request,
-                        reply: reply_tx,
-                    })
-                    .map_err(|_| {
-                        AcpError::Transport(anyhow::anyhow!(
-                            "NativeAcpConnection '{agent_name}': ACP thread died"
-                        ))
-                    })?;
-                reply_rx
-                    .await
-                    .map_err(|_| {
-                        AcpError::Transport(anyhow::anyhow!(
-                            "NativeAcpConnection '{agent_name}': ACP thread died during set_session_model"
-                        ))
-                    })?
-                    .map_err(AcpError::Transport)?;
-                Ok(())
-            }
             SetSessionModelDispatch::FallbackConfigOption => {
                 let request = SetSessionConfigOptionRequest::new(
                     sid,
                     SessionConfigId::new(Arc::<str>::from("model")),
-                    SessionConfigValueId::new(model_id.0),
+                    SessionConfigValueId::new(model_id),
                 );
                 self.set_session_config_option(request)
                     .await
@@ -1638,9 +1591,9 @@ fn acp_thread_main(
                 )
                 // ── notifications: session/update + extension ────────────
                 .on_receive_notification(
-                    async move |notif: agent_client_protocol::AgentNotification, _cx| {
+                    async move |notif: AgentNotification, _cx| {
                         match notif {
-                            agent_client_protocol::AgentNotification::SessionNotification(args) => {
+                            AgentNotification::SessionNotification(args) => {
                                 let args = session_event_standardizer_h
                                     .lock()
                                     .unwrap()
@@ -1676,7 +1629,7 @@ fn acp_thread_main(
                                     "ACP session_notification (broadcast)"
                                 );
                             }
-                            agent_client_protocol::AgentNotification::ExtNotification(args) => {
+                            AgentNotification::ExtNotification(args) => {
                                 // The SDK already stripped the leading `_` from
                                 // the wire method, so reattach it when reporting
                                 // upward so consumers see the full
@@ -1933,15 +1886,6 @@ fn acp_thread_main(
                                     )
                                 }));
                             }
-                            AcpCommand::SetSessionModel { request, reply } => {
-                                let result = cx.send_request(request).block_task().await;
-                                let _ = reply.send(result.map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "NativeAcpConnection '{}': set_session_model failed: {e}",
-                                        agent_name_loop
-                                    )
-                                }));
-                            }
                             AcpCommand::SetSessionConfigOption { request, reply } => {
                                 let result = cx.send_request(request).block_task().await;
                                 let _ = reply.send(result.map_err(|e| {
@@ -1968,7 +1912,7 @@ fn acp_thread_main(
                                 // `ExtResponse` so the caller-side translation
                                 // in `call_ext` is unchanged.
                                 let client_req =
-                                    agent_client_protocol::ClientRequest::ExtMethodRequest(
+                                    ClientRequest::ExtMethodRequest(
                                         request,
                                     );
                                 let result =
@@ -2164,7 +2108,7 @@ struct TerminalState {
 /// Short static name for each SessionUpdate discriminant.
 /// Used by diagnostic logging only; keep lowercase snake_case.
 fn session_update_variant_name(u: &SessionUpdate) -> &'static str {
-    use agent_client_protocol::schema::SessionUpdate::*;
+    use agent_client_protocol::schema::v1::SessionUpdate::*;
     match u {
         AgentThoughtChunk(_) => "agent_thought_chunk",
         AgentMessageChunk(_) => "agent_message_chunk",
@@ -2382,11 +2326,12 @@ mod set_session_model_dispatch_tests {
     use super::{decide_set_session_model_dispatch, SetSessionModelDispatch};
     use crate::connection::AgentConnection;
     use crate::SpurAgentCaps;
-    use agent_client_protocol::schema::{
-        InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
-        SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigSelect,
-        SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModelState,
+    use agent_client_protocol::schema::v1::{
+        InitializeResponse, NewSessionResponse, SessionConfigId, SessionConfigKind,
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
+        SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
     };
+    use agent_client_protocol::schema::ProtocolVersion;
 
     fn caps_from(modify: impl FnOnce(&mut NewSessionResponse)) -> SpurAgentCaps {
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
@@ -2395,27 +2340,53 @@ mod set_session_model_dispatch_tests {
         SpurAgentCaps::new(&init, &new, crate::AgentKind::CodexAcp)
     }
 
-    fn codex_model_state() -> SessionModelState {
-        SessionModelState::new(
-            ModelId::new("gpt-5-codex"),
-            vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
+    fn model_option(current: &str, choices: &[(&str, &str)]) -> SessionConfigOption {
+        SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            SessionConfigValueId::new(current),
+            choices
+                .iter()
+                .map(|(value, name)| {
+                    SessionConfigSelectOption::new(SessionConfigValueId::new(*value), *name)
+                })
+                .collect::<Vec<_>>(),
         )
     }
 
     #[test]
-    fn caps_with_models_some_routes_direct() {
+    fn caps_with_model_config_option_routes_fallback() {
         let caps = caps_from(|n| {
-            *n = n.clone().models(codex_model_state());
+            n.config_options = Some(vec![model_option(
+                "gpt-5-codex",
+                &[("gpt-5-codex", "GPT-5 Codex")],
+            )]);
         });
         assert!(caps.supports_set_model());
         assert!(matches!(
             decide_set_session_model_dispatch(&caps),
-            SetSessionModelDispatch::Direct
+            SetSessionModelDispatch::FallbackConfigOption
         ));
     }
 
     #[test]
-    fn caps_with_only_config_options_routes_fallback() {
+    fn caps_with_category_model_option_routes_fallback() {
+        let caps = caps_from(|n| {
+            n.config_options = Some(vec![model_option(
+                "gpt-5-codex",
+                &[("gpt-5-codex", "GPT-5 Codex")],
+            )
+            .category(SessionConfigOptionCategory::Model)]);
+        });
+        assert!(caps.supports_set_model());
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::FallbackConfigOption
+        ));
+    }
+
+    #[test]
+    fn caps_with_unusable_model_option_routes_unsupported() {
         let caps = caps_from(|n| {
             n.config_options = Some(vec![SessionConfigOption::new(
                 SessionConfigId::new("model"),
@@ -2430,7 +2401,25 @@ mod set_session_model_dispatch_tests {
         assert!(caps.supports_set_config_option());
         assert!(matches!(
             decide_set_session_model_dispatch(&caps),
-            SetSessionModelDispatch::FallbackConfigOption
+            SetSessionModelDispatch::Unsupported
+        ));
+    }
+
+    #[test]
+    fn caps_with_unrelated_config_options_routes_unsupported() {
+        let caps = caps_from(|n| {
+            n.config_options = Some(vec![SessionConfigOption::select(
+                SessionConfigId::new("reasoning_effort"),
+                "Reasoning effort",
+                SessionConfigValueId::new("medium"),
+                vec![SessionConfigSelectOption::new("medium", "Medium")],
+            )]);
+        });
+        assert!(!caps.supports_set_model());
+        assert!(caps.supports_set_config_option());
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::Unsupported
         ));
     }
 
@@ -2446,22 +2435,23 @@ mod set_session_model_dispatch_tests {
     }
 
     #[test]
-    fn models_takes_precedence_over_config_options() {
-        // Codex case: both populated. Decision must pick Direct, not Fallback.
+    fn model_config_option_routes_fallback_with_additional_options() {
         let caps = caps_from(|n| {
-            *n = n.clone().models(codex_model_state());
-            n.config_options = Some(vec![SessionConfigOption::new(
-                SessionConfigId::new("model"),
-                "Model",
-                SessionConfigKind::Select(SessionConfigSelect::new(
-                    SessionConfigValueId::new("default"),
-                    SessionConfigSelectOptions::Ungrouped(vec![]),
-                )),
-            )]);
+            n.config_options = Some(vec![
+                model_option("gpt-5-codex", &[("gpt-5-codex", "GPT-5 Codex")]),
+                SessionConfigOption::new(
+                    SessionConfigId::new("reasoning_effort"),
+                    "Reasoning effort",
+                    SessionConfigKind::Select(SessionConfigSelect::new(
+                        SessionConfigValueId::new("medium"),
+                        SessionConfigSelectOptions::Ungrouped(vec![]),
+                    )),
+                ),
+            ]);
         });
         assert!(matches!(
             decide_set_session_model_dispatch(&caps),
-            SetSessionModelDispatch::Direct
+            SetSessionModelDispatch::FallbackConfigOption
         ));
     }
 
@@ -2475,7 +2465,7 @@ mod set_session_model_dispatch_tests {
             None,
         );
         let res = conn
-            .set_session_model(SessionId::new("sid"), ModelId::new("m"), &caps)
+            .set_session_model(SessionId::new("sid"), "m".to_string(), &caps)
             .await;
         match res {
             Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "set_model"),

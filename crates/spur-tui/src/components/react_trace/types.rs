@@ -17,7 +17,7 @@ pub struct TraceImage {
 
 /// Terminal/non-terminal state of a tool call.
 ///
-/// Mirrors `agent_client_protocol::ToolCallStatus` but embeds the outcome
+/// Mirrors `spur_acp::ToolCallStatus` but embeds the outcome
 /// payload directly so a single `TraceEntry` represents the full lifecycle
 /// of one tool call. Non-terminal variants keep the spinner animating;
 /// terminal variants render the outcome glyph.

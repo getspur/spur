@@ -601,8 +601,8 @@ impl SessionDetailView {
             }
             None => crate::commands::advertised::AdvertisedSource::entries(&handle, options),
         };
-        // TODO(adapter-models-picker): synthesized /model entries from models-only caps do not
-        // yet provide picker candidates from `SessionModelState.available_models`.
+        // TODO(adapter-models-picker): synthesized /model entries from caps snapshots do not
+        // yet provide picker candidates beyond advertised config options.
         self.command_registry
             .set_advertised_commands(&handle, entries);
         self.session_config_options = options.to_vec();

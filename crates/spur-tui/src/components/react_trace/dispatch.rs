@@ -292,7 +292,7 @@ fn extract_tool_call_text(content: &[spur_acp::ToolCallContent]) -> Option<Strin
     }
 }
 
-fn format_image_content(image: &agent_client_protocol::schema::ImageContent) -> String {
+fn format_image_content(image: &spur_acp::ImageContent) -> String {
     let decoded_len = STANDARD.decode(&image.data).ok().map(|bytes| bytes.len());
     let size = decoded_len
         .map(|len| format!("{len} bytes"))
@@ -339,9 +339,7 @@ fn extract_tool_call_images(content: &[spur_acp::ToolCallContent]) -> Vec<Persis
     out
 }
 
-fn persist_image_content(
-    image: &agent_client_protocol::schema::ImageContent,
-) -> Option<PersistedTraceImage> {
+fn persist_image_content(image: &spur_acp::ImageContent) -> Option<PersistedTraceImage> {
     let bytes = STANDARD.decode(&image.data).ok()?;
     let decoded = image::load_from_memory(&bytes).ok()?;
     let sha256 = sha256_hex(&bytes);
@@ -462,7 +460,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use spur_acp::{
         Content, ImageContent, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use spur_acp::{

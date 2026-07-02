@@ -69,7 +69,7 @@ mod session_attach_guard_transfer_tests {
         async fn initialize(
             &mut self,
             _request: InitializeRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
             panic!("NoopConnection::initialize must not be called")
         }
 
@@ -77,7 +77,7 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
-        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
             panic!("NoopConnection::new_session must not be called")
         }
 
@@ -112,7 +112,7 @@ mod session_attach_guard_transfer_tests {
         async fn initialize(
             &mut self,
             _request: InitializeRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
             panic!("RecordingCancelConnection::initialize must not be called")
         }
 
@@ -120,7 +120,7 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
-        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
             panic!("RecordingCancelConnection::new_session must not be called")
         }
 
@@ -153,7 +153,7 @@ mod session_attach_guard_transfer_tests {
     }
 
     struct NewSessionConnection {
-        response: Option<agent_client_protocol::schema::NewSessionResponse>,
+        response: Option<spur_acp::NewSessionResponse>,
     }
 
     #[async_trait]
@@ -161,7 +161,7 @@ mod session_attach_guard_transfer_tests {
         async fn initialize(
             &mut self,
             _request: InitializeRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
             panic!("NewSessionConnection::initialize must not be called")
         }
 
@@ -169,7 +169,7 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
-        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
             self.response
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("new_session called twice"))
@@ -197,7 +197,7 @@ mod session_attach_guard_transfer_tests {
     }
 
     struct LoadSessionConnection {
-        response: Option<agent_client_protocol::schema::LoadSessionResponse>,
+        response: Option<spur_acp::LoadSessionResponse>,
     }
 
     #[async_trait]
@@ -205,7 +205,7 @@ mod session_attach_guard_transfer_tests {
         async fn initialize(
             &mut self,
             _request: InitializeRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
             panic!("LoadSessionConnection::initialize must not be called")
         }
 
@@ -213,7 +213,7 @@ mod session_attach_guard_transfer_tests {
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
-        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
             panic!("LoadSessionConnection::new_session must not be called")
         }
 
@@ -239,9 +239,9 @@ mod session_attach_guard_transfer_tests {
 
         async fn load_session(
             &mut self,
-            _request: agent_client_protocol::schema::LoadSessionRequest,
+            _request: spur_acp::LoadSessionRequest,
         ) -> anyhow::Result<(
-            agent_client_protocol::schema::LoadSessionResponse,
+            spur_acp::LoadSessionResponse,
             Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>,
         )> {
             let response = self
@@ -313,9 +313,7 @@ mod session_attach_guard_transfer_tests {
             config_options: Vec::new(),
             spur_agent_caps: None,
             session_info: None,
-            init_response: agent_client_protocol::schema::InitializeResponse::new(
-                agent_client_protocol::schema::ProtocolVersion::LATEST,
-            ),
+            init_response: spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST),
         });
         let mut active = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
@@ -369,9 +367,7 @@ mod session_attach_guard_transfer_tests {
             config_options: Vec::new(),
             spur_agent_caps: None,
             session_info: None,
-            init_response: agent_client_protocol::schema::InitializeResponse::new(
-                agent_client_protocol::schema::ProtocolVersion::LATEST,
-            ),
+            init_response: spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST),
         });
         let mut active = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
@@ -431,9 +427,7 @@ mod session_attach_guard_transfer_tests {
             config_options: Vec::new(),
             spur_agent_caps: None,
             session_info: None,
-            init_response: agent_client_protocol::schema::InitializeResponse::new(
-                agent_client_protocol::schema::ProtocolVersion::LATEST,
-            ),
+            init_response: spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST),
         });
         let mut active = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
@@ -494,9 +488,7 @@ mod session_attach_guard_transfer_tests {
             config_options: Vec::new(),
             spur_agent_caps: None,
             session_info: None,
-            init_response: agent_client_protocol::schema::InitializeResponse::new(
-                agent_client_protocol::schema::ProtocolVersion::LATEST,
-            ),
+            init_response: spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST),
         });
         let mut active = None;
         let mut scheduler = crate::scheduler::BrainScheduler::new(
@@ -623,9 +615,7 @@ mod session_attach_guard_transfer_tests {
             config_options: Vec::new(),
             spur_agent_caps: None,
             session_info: None,
-            init_response: agent_client_protocol::schema::InitializeResponse::new(
-                agent_client_protocol::schema::ProtocolVersion::LATEST,
-            ),
+            init_response: spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST),
         }
     }
 
@@ -633,8 +623,8 @@ mod session_attach_guard_transfer_tests {
         id: &str,
         current: &str,
         choices: &[(&str, &str)],
-    ) -> agent_client_protocol::schema::SessionConfigOption {
-        use agent_client_protocol::schema::{
+    ) -> spur_acp::SessionConfigOption {
+        use spur_acp::{
             SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId,
         };
         let opts: Vec<SessionConfigSelectOption> = choices
@@ -649,10 +639,19 @@ mod session_attach_guard_transfer_tests {
         )
     }
 
+    fn fixture_select_option_with_category(
+        id: &str,
+        current: &str,
+        choices: &[(&str, &str)],
+        category: spur_acp::SessionConfigOptionCategory,
+    ) -> spur_acp::SessionConfigOption {
+        fixture_select_option(id, current, choices).category(category)
+    }
+
     #[tokio::test]
     async fn spur_agent_caps_getter_returns_cached_arc_or_none() {
-        use agent_client_protocol::schema::{InitializeResponse, NewSessionResponse};
         use spur_acp::SpurAgentCaps;
+        use spur_acp::{InitializeResponse, NewSessionResponse};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = SpurConfig::default();
@@ -690,11 +689,8 @@ mod session_attach_guard_transfer_tests {
 
     #[tokio::test]
     async fn replace_session_config_options_updates_cache_and_emits_event() {
-        use agent_client_protocol::schema::{
-            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, ProtocolVersion,
-            SessionId as AcpSessionId, SessionModelState,
-        };
         use spur_acp::SpurAgentCaps;
+        use spur_acp::{AcpSessionId, InitializeResponse, NewSessionResponse, ProtocolVersion};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = SpurConfig::default();
@@ -767,21 +763,18 @@ mod session_attach_guard_transfer_tests {
             "expected CommandRegistryDirty event after replace_session_config_options"
         );
 
-        // Models-only caps (e.g. gemini/kimi) still emit an event even when
-        // the concrete config_options snapshot is empty.
+        // Model-capable caps still emit an event even when the concrete
+        // config_options snapshot is empty.
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let models_only = NewSessionResponse::new(AcpSessionId::new("models-only")).models(
-            SessionModelState::new(
-                ModelId::new("gemini-3.1-pro-preview"),
-                vec![ModelInfo::new(
-                    ModelId::new("gemini-3.1-pro-preview"),
-                    "Gemini 3.1 Pro Preview",
-                )],
-            ),
-        );
+        let mut model_caps_response = NewSessionResponse::new(AcpSessionId::new("model-caps"));
+        model_caps_response.config_options = Some(vec![fixture_select_option(
+            "model",
+            "gemini-3.1-pro-preview",
+            &[("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview")],
+        )]);
         let caps = std::sync::Arc::new(SpurAgentCaps::new(
             &init,
-            &models_only,
+            &model_caps_response,
             spur_acp::AgentKind::Gemini,
         ));
         brain.spur_agent_caps = Some(caps.clone());
@@ -810,7 +803,7 @@ mod session_attach_guard_transfer_tests {
         }
         assert!(
             found_models_only,
-            "expected CommandRegistryDirty event for models-only caps"
+            "expected CommandRegistryDirty event for model-capable caps"
         );
 
         // Idempotent abort of the dummy delegation_handle so Drop is clean.
@@ -880,14 +873,14 @@ mod session_attach_guard_transfer_tests {
         async fn initialize(
             &mut self,
             _request: InitializeRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
             panic!("TrackingConnection::initialize must not be called")
         }
         async fn new_session(
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
-        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
             panic!("TrackingConnection::new_session must not be called")
         }
         async fn prompt(
@@ -908,36 +901,34 @@ mod session_attach_guard_transfer_tests {
         }
         async fn set_session_model(
             &mut self,
-            sid: agent_client_protocol::schema::SessionId,
-            model_id: agent_client_protocol::schema::ModelId,
+            sid: spur_acp::AcpSessionId,
+            model_id: String,
             _caps: &spur_acp::SpurAgentCaps,
         ) -> Result<(), spur_acp::AcpError> {
             self.log
                 .lock()
                 .unwrap()
                 .set_session_model
-                .push((sid.0.to_string(), model_id.0.to_string()));
+                .push((sid.0.to_string(), model_id));
             Ok(())
         }
         async fn set_session_config_option(
             &mut self,
-            request: agent_client_protocol::schema::SetSessionConfigOptionRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::SetSessionConfigOptionResponse> {
+            request: spur_acp::SetSessionConfigOptionRequest,
+        ) -> anyhow::Result<spur_acp::SetSessionConfigOptionResponse> {
             self.log.lock().unwrap().set_session_config_option.push((
                 request.session_id.0.to_string(),
                 request.config_id.0.to_string(),
                 request.value.0.to_string(),
             ));
-            Ok(agent_client_protocol::schema::SetSessionConfigOptionResponse::new(vec![]))
+            Ok(spur_acp::SetSessionConfigOptionResponse::new(vec![]))
         }
     }
 
     #[tokio::test]
     async fn dispatch_set_session_model_calls_connection_set_session_model() {
-        use agent_client_protocol::schema::{
-            InitializeResponse, ModelId, ModelInfo, NewSessionResponse, SessionModelState,
-        };
         use spur_acp::SpurAgentCaps;
+        use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = SpurConfig::default();
@@ -951,16 +942,15 @@ mod session_attach_guard_transfer_tests {
             log: std::sync::Arc::clone(&log),
         };
 
-        // Caps that advertise the dedicated set_model trait method.
+        // Caps that advertise model switching through the ACP 1.0 config option.
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
-        let new = NewSessionResponse::new(agent_client_protocol::schema::SessionId::new("acp-x"))
-            .models(SessionModelState::new(
-                ModelId::new("claude-sonnet-4-7"),
-                vec![ModelInfo::new(
-                    ModelId::new("claude-sonnet-4-7"),
-                    "Claude Sonnet 4.7",
-                )],
-            ));
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-x"));
+        new.config_options = Some(vec![fixture_select_option_with_category(
+            "vendor_model",
+            "claude-sonnet-4-7",
+            &[("claude-sonnet-4-7", "Claude Sonnet 4.7")],
+            spur_acp::SessionConfigOptionCategory::Model,
+        )]);
         let caps = std::sync::Arc::new(SpurAgentCaps::new(
             &init,
             &new,
@@ -984,9 +974,7 @@ mod session_attach_guard_transfer_tests {
             config_options: Vec::new(),
             spur_agent_caps: Some(caps),
             session_info: None,
-            init_response: agent_client_protocol::schema::InitializeResponse::new(
-                agent_client_protocol::schema::ProtocolVersion::LATEST,
-            ),
+            init_response: spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST),
         };
 
         Orchestrator::dispatch_set_session_model(&mut brain, "claude-sonnet-4-7".to_string())
@@ -1012,7 +1000,7 @@ mod session_attach_guard_transfer_tests {
 
     #[tokio::test]
     async fn fresh_agent_session_ready_event_carries_caps() {
-        use agent_client_protocol::schema::{ModelId, ModelInfo, NewSessionResponse};
+        use spur_acp::NewSessionResponse;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = SpurConfig::default();
@@ -1021,13 +1009,13 @@ mod session_attach_guard_transfer_tests {
         let mut orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
         let mut event_rx = orchestrator.subscribe();
 
-        let new_session =
-            NewSessionResponse::new(agent_client_protocol::schema::SessionId::new("acp-codex"))
-                .models(agent_client_protocol::schema::SessionModelState::new(
-                    ModelId::new("gpt-5-codex"),
-                    vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
-                ));
-        let init = agent_client_protocol::schema::InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new_session = NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-codex"));
+        new_session.config_options = Some(vec![fixture_select_option(
+            "model",
+            "gpt-5-codex",
+            &[("gpt-5-codex", "GPT-5 Codex")],
+        )]);
+        let init = spur_acp::InitializeResponse::new(ProtocolVersion::LATEST);
 
         let brain = orchestrator
             .create_brain_session(
@@ -1070,10 +1058,7 @@ mod session_attach_guard_transfer_tests {
 
     #[tokio::test]
     async fn loaded_agent_session_emits_command_registry_dirty_with_caps() {
-        use agent_client_protocol::schema::{
-            InitializeResponse, LoadSessionResponse, ModelId, ModelInfo, ProtocolVersion,
-            SessionModelState,
-        };
+        use spur_acp::{InitializeResponse, LoadSessionResponse, ProtocolVersion};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = SpurConfig::default();
@@ -1094,12 +1079,7 @@ mod session_attach_guard_transfer_tests {
                 &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
             ),
         ];
-        let load_response = LoadSessionResponse::new()
-            .models(SessionModelState::new(
-                ModelId::new("gpt-5-codex"),
-                vec![ModelInfo::new(ModelId::new("gpt-5-codex"), "GPT-5 Codex")],
-            ))
-            .config_options(config_options.clone());
+        let load_response = LoadSessionResponse::new().config_options(config_options.clone());
         let init = InitializeResponse::new(ProtocolVersion::LATEST);
 
         let (brain, _history_stream, _outcome) = orchestrator
@@ -1667,7 +1647,7 @@ impl Orchestrator {
         >,
         existing_attach_guard: Option<SessionAttachGuard>,
         existing_fs_unsafe: bool,
-        init_response: agent_client_protocol::schema::InitializeResponse,
+        init_response: spur_acp::InitializeResponse,
     ) -> Result<BrainSession> {
         // Start MCP callback server.
         let sink: Option<std::sync::Arc<dyn spur_mcp::McpEventSink>> =
@@ -1879,7 +1859,7 @@ impl Orchestrator {
         let config_options = session_response.config_options.clone().unwrap_or_default();
         // M8.A: build the frozen-per-session capability cache from both
         // the InitializeResponse (`AgentCapabilities`) and the
-        // NewSessionResponse (modes/models/config_options). Spec §6.1.
+        // NewSessionResponse (modes/config_options). Spec §6.1.
         let spur_agent_caps = Some(Arc::new(spur_acp::SpurAgentCaps::new(
             &init_response,
             &session_response,
@@ -1951,7 +1931,7 @@ impl Orchestrator {
         force_new_session: bool,
         existing_attach_guard: Option<SessionAttachGuard>,
         existing_fs_unsafe: bool,
-        init_response: agent_client_protocol::schema::InitializeResponse,
+        init_response: spur_acp::InitializeResponse,
     ) -> std::result::Result<
         (
             BrainSession,
@@ -2517,14 +2497,14 @@ impl Orchestrator {
         .await
     }
 
-    /// Dispatch `session/set_model` for `brain` via the trait method on
+    /// Dispatch model selection for `brain` via the trait method on
     /// `AgentConnection`. Reads the cached `SpurAgentCaps` once and lets
-    /// the connection's typed surface decide between `Direct`,
-    /// `FallbackConfigOption`, and `Unsupported` (spec §6.3).
+    /// the connection's typed surface decide between the config-option path
+    /// and `Unsupported` (spec §6.3).
     ///
     /// `value` is the user-supplied model id (e.g. `"claude-sonnet-4-7"`).
     /// `Err(AcpError::CapabilityMissing("set_model"))` when caps absent or
-    /// neither dispatch path is advertised. Defined as an associated
+    /// model switching is not advertised. Defined as an associated
     /// function (no `&self`) so the future stays `Send` when awaited
     /// inside `run_interactive` — `Orchestrator` itself is `!Sync` due
     /// to its embedded rusqlite connection, but no orchestrator state
@@ -2538,11 +2518,7 @@ impl Orchestrator {
             .as_ref()
             .cloned()
             .ok_or(spur_acp::AcpError::CapabilityMissing("set_model"))?;
-        let sid = agent_client_protocol::schema::SessionId::new(brain.acp_session_id.clone());
-        let model_id = agent_client_protocol::schema::ModelId::new(value);
-        brain
-            .connection
-            .set_session_model(sid, model_id, &caps)
-            .await
+        let sid = spur_acp::AcpSessionId::new(brain.acp_session_id.clone());
+        brain.connection.set_session_model(sid, value, &caps).await
     }
 }
