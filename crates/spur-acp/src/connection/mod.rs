@@ -32,9 +32,10 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use agent_client_protocol::schema::v1::{
-    AuthenticateRequest, AuthenticateResponse, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
-    NewSessionResponse, PromptRequest, SessionId, SessionModeId, SessionNotification,
+    AuthenticateRequest, AuthenticateResponse, DeleteSessionRequest, DeleteSessionResponse,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionResponse, PromptRequest,
+    ResumeSessionRequest, ResumeSessionResponse, SessionId, SessionModeId, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse, Usage,
 };
@@ -164,6 +165,18 @@ pub trait AgentConnection: Send + Sync {
         ))
     }
 
+    /// Resume an existing session without replaying historical notifications.
+    ///
+    /// The default implementation reports the missing ACP `session/resume`
+    /// capability. Native ACP transports override this with request dispatch.
+    async fn resume_session(
+        &mut self,
+        request: ResumeSessionRequest,
+    ) -> Result<ResumeSessionResponse, AcpError> {
+        let _ = request;
+        Err(AcpError::CapabilityMissing("session/resume"))
+    }
+
     /// List all sessions known to the agent.
     ///
     /// Not all transports support this; the default implementation returns an error.
@@ -175,6 +188,18 @@ pub trait AgentConnection: Send + Sync {
         Err(anyhow::anyhow!(
             "list_sessions not supported by this transport"
         ))
+    }
+
+    /// Delete an existing session known to the agent.
+    ///
+    /// The default implementation reports the missing ACP `session/delete`
+    /// capability. Native ACP transports override this with request dispatch.
+    async fn delete_session(
+        &mut self,
+        request: DeleteSessionRequest,
+    ) -> Result<DeleteSessionResponse, AcpError> {
+        let _ = request;
+        Err(AcpError::CapabilityMissing("session/delete"))
     }
 
     /// Set the current mode of a session (e.g. `"plan"`, `"default"`).
@@ -335,7 +360,8 @@ impl AgentConnection for TestStubConnection {
 mod agent_connection_defaults {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        AuthMethodId, AuthenticateRequest, SessionId, SetSessionModeRequest,
+        AuthMethodId, AuthenticateRequest, DeleteSessionRequest, ResumeSessionRequest, SessionId,
+        SetSessionModeRequest,
     };
 
     struct NullConn;
@@ -387,5 +413,25 @@ mod agent_connection_defaults {
         let req = AuthenticateRequest::new(AuthMethodId::new("x"));
         let err = c.authenticate(req).await.unwrap_err().to_string();
         assert!(err.contains("not supported"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn resume_session_default_returns_capability_missing() {
+        let mut c = NullConn;
+        let req = ResumeSessionRequest::new(SessionId::new("s"), PathBuf::from("/tmp/spur"));
+        match c.resume_session(req).await {
+            Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "session/resume"),
+            other => panic!("expected CapabilityMissing(\"session/resume\"), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_session_default_returns_capability_missing() {
+        let mut c = NullConn;
+        let req = DeleteSessionRequest::new(SessionId::new("s"));
+        match c.delete_session(req).await {
+            Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "session/delete"),
+            other => panic!("expected CapabilityMissing(\"session/delete\"), got {other:?}"),
+        }
     }
 }
