@@ -81,6 +81,55 @@ pub fn collect_sorted_audits_for_issue(
     Ok(audits)
 }
 
+/// Sums `estimated_cost_micros` over all Completion audits of a plan's task
+/// issues. Saturating; missing fields count as 0.
+pub async fn plan_spent_micros(pm: &dyn crate::plan::PmLike, plan_id: &str) -> anyhow::Result<u64> {
+    let Some(advanced) = pm.advanced() else {
+        anyhow::bail!("plan spend projection requires beads advanced comments");
+    };
+
+    const PAGE_SIZE: usize = 100;
+    let mut offset = 0;
+    let mut spent_micros = 0u64;
+
+    loop {
+        let issues = pm
+            .list_issues(spur_pm::IssueFilter {
+                labels: vec![crate::plan::labels::plan_id(plan_id)],
+                issue_type: Some("task".to_string()),
+                include_closed: true,
+                limit: Some(PAGE_SIZE),
+                offset: Some(offset),
+                ..Default::default()
+            })
+            .await?;
+
+        if issues.is_empty() {
+            break;
+        }
+
+        for issue in &issues {
+            let comments = advanced.list_comments(&issue.id).await?;
+            for audit in collect_sorted_audits_for_issue(&issue.id, comments)? {
+                if let AuditSentinelKind::Completion {
+                    estimated_cost_micros: Some(cost_micros),
+                    ..
+                } = audit
+                {
+                    spent_micros = spent_micros.saturating_add(cost_micros);
+                }
+            }
+        }
+
+        if issues.len() < PAGE_SIZE {
+            break;
+        }
+        offset += issues.len();
+    }
+
+    Ok(spent_micros)
+}
+
 fn backfill_legacy_completion_delegation_ids(audits: &mut [AuditSentinelKind]) {
     let mut last_dispatch: Option<String> = None;
     for audit in audits.iter_mut() {
