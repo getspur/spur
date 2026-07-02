@@ -59,7 +59,7 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId, SessionId, SessionModeId,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, Usage,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
@@ -213,6 +213,10 @@ pub struct NativeAcpConnection {
     /// `NewSessionResponse` / `LoadSessionResponse` so policy code can gate
     /// `session/set_mode` without probing unsupported modes.
     advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
+    /// Usage from the most recently completed `session/prompt` response.
+    /// Cleared when a new prompt starts and consumed by the orchestrator after
+    /// `drive_prompt_notifications` observes turn completion.
+    last_prompt_usage: Arc<Mutex<Option<Usage>>>,
     /// Process-group id of the spawned child (equal to its pid because we spawn
     /// with `process_group(0)`). Populated by the ACP thread after spawn, read
     /// by the graceful shutdown path and the `Drop` safety net to kill the
@@ -393,6 +397,7 @@ impl NativeAcpConnection {
             ext_notification_tx: ext_tx,
             session_notif_tx,
             advertised_modes: Arc::new(Mutex::new(HashMap::new())),
+            last_prompt_usage: Arc::new(Mutex::new(None)),
             child_pgid: Arc::new(Mutex::new(None)),
             repo_root: PathBuf::from("."),
             log_config: LogConfig::default(),
@@ -538,6 +543,7 @@ impl AgentConnection for NativeAcpConnection {
         let ext_tx = self.ext_notification_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
         let advertised_modes = self.advertised_modes.clone();
+        let last_prompt_usage = self.last_prompt_usage.clone();
         let child_pgid = self.child_pgid.clone();
         let repo_root = self.repo_root.clone();
         let log_config = self.log_config.clone();
@@ -554,6 +560,7 @@ impl AgentConnection for NativeAcpConnection {
                     ext_tx,
                     session_notif_tx_for_thread,
                     advertised_modes,
+                    last_prompt_usage,
                     child_pgid,
                     repo_root,
                     log_config,
@@ -648,6 +655,9 @@ impl AgentConnection for NativeAcpConnection {
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
             anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
+        if let Ok(mut usage) = self.last_prompt_usage.lock() {
+            *usage = None;
+        }
 
         let session_id = request.session_id.clone();
 
@@ -680,6 +690,13 @@ impl AgentConnection for NativeAcpConnection {
         });
 
         Ok(Box::pin(stream))
+    }
+
+    fn take_last_prompt_usage(&mut self) -> Option<Usage> {
+        self.last_prompt_usage
+            .lock()
+            .ok()
+            .and_then(|mut u| u.take())
     }
 
     // ─── cancel ─────────────────────────────────────────────────────────
@@ -1026,6 +1043,7 @@ fn acp_thread_main(
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
+    last_prompt_usage: Arc<Mutex<Option<Usage>>>,
     child_pgid: Arc<Mutex<Option<i32>>>,
     repo_root: PathBuf,
     log_config: LogConfig,
@@ -1283,6 +1301,7 @@ fn acp_thread_main(
             let agent_name_loop = agent_name.clone();
             let init_reply_slot_loop = init_reply_slot.clone();
             let shutdown_reply_slot_loop = shutdown_reply_slot.clone();
+            let last_prompt_usage_loop = last_prompt_usage.clone();
 
             Client
                 .builder()
@@ -1757,17 +1776,22 @@ fn acp_thread_main(
                                             }
                                         }
                                         prompt_result = &mut prompt_fut => {
-                                            match &prompt_result {
-                                                Ok(_) => tracing::debug!(
-                                                    agent = %agent_name_loop,
-                                                    session = %session_id_for_probe,
-                                                    "NativeAcpConnection: prompt completed"
-                                                ),
+                                            match prompt_result {
+                                                Ok(response) => {
+                                                    if let Ok(mut usage) = last_prompt_usage_loop.lock() {
+                                                        *usage = response.usage;
+                                                    }
+                                                    tracing::debug!(
+                                                        agent = %agent_name_loop,
+                                                        session = %session_id_for_probe,
+                                                        "NativeAcpConnection: prompt completed"
+                                                    );
+                                                }
                                                 Err(e) => tracing::warn!(
-                                                    agent = %agent_name_loop,
-                                                    session = %session_id_for_probe,
-                                                    "NativeAcpConnection: prompt failed: {e}"
-                                                ),
+                                                        agent = %agent_name_loop,
+                                                        session = %session_id_for_probe,
+                                                        "NativeAcpConnection: prompt failed: {e}"
+                                                    ),
                                             }
                                             drop(tx_empty);
                                             break;
