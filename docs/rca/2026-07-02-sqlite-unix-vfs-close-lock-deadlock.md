@@ -1,7 +1,10 @@
 # RCA: SQLite unix-VFS ABBA deadlock wedges parallel beads test targets
 
 **Date:** 2026-07-02
-**Status:** Fixed via vendored SQLite 3.51.2 (see Resolution); upstream bug fixed in SQLite 3.51.2
+**Status:** Fixed upstream — beads_rust hotfix rev `cd65582` bumps rusqlite to
+0.40 (bundled SQLite 3.53.2 ≥ 3.51.2 fix); spur workspace rusqlite bumped in
+lockstep. An interim in-repo vendored 3.51.2 patch was applied and then
+superseded the same day (see Resolution).
 **Affected:** any test target (or production process) that opens/closes many
 beads sqlite connections concurrently in one process — observed in
 `spur-core` `plan_ownership` (16 tests wedged simultaneously) and, with the
@@ -59,18 +62,24 @@ deadlock in the new broken-posix-lock detection logic"*. The 3.51.2
 `pShmNode->nRef` with an atomic load — which removes the inode→global
 acquisition and the ABBA cycle.
 
-Applied here as `[patch.crates-io] libsqlite3-sys = { path =
-"vendor/libsqlite3-sys" }`: the pristine 0.36.0 crate with the bundled
-amalgamation replaced by the official 3.51.2 amalgamation
-(`sqlite3.c` SHA3-256
-`733b3fcc6cccb1e334424b9b91a9d68b618385b76ebfcbb106690bd3a9e61367`,
-matching the sqlite.org changelog). 3.51.2 is a patch release; the crate's
-pregenerated bindings remain valid.
+**Final fix (upstream, same day):** `beads_rust` is getspur-maintained, so
+the rusqlite pin was bumped upstream instead of carrying a local patch:
+branch `hotfix/0.1.15-rusqlite-0.40` (rev `cd65582`, PR
+getspur/beads_rust#1), cut from spur's pinned v0.1.14 rev. rusqlite 0.40 →
+libsqlite3-sys 0.38.1 → bundled SQLite **3.53.2** (contains the 3.51.2
+fix; verified the mutex-free `unixIsSharingShmNode`). Because
+`libsqlite3-sys` is a `links = "sqlite3"` crate (one version per graph),
+the spur workspace `rusqlite` moved 0.38 → 0.40 in the same change.
+`beads_rust` main (0.2.x) has since migrated to fsqlite (pure-Rust SQLite)
+where this bug class does not exist — migration tracked as bd-35m8o.
 
-**Exit criteria for the patch:** drop `vendor/libsqlite3-sys` and the
-`[patch.crates-io]` entry once `beads_rust` (and any other rusqlite user in
-the graph) moves to a rusqlite/libsqlite3-sys pairing whose bundled SQLite
-is ≥ 3.51.2 (`libsqlite3-sys` 0.37+ ships post-3.51.2 amalgamations).
+**Interim fix (superseded):** for a few hours the repo carried
+`[patch.crates-io] libsqlite3-sys = { path = "vendor/libsqlite3-sys" }` —
+the pristine 0.36.0 crate with the amalgamation replaced by official
+3.51.2 (`sqlite3.c` SHA3-256
+`733b3fcc6cccb1e334424b9b91a9d68b618385b76ebfcbb106690bd3a9e61367`,
+matching the sqlite.org changelog). Removed once the upstream hotfix
+landed.
 
 ## Rejected alternatives
 
