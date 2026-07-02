@@ -135,6 +135,7 @@ async fn seed_completion_with_base_oid(pm: &PmService, task_id: &str) {
                 result_summary: Some("ready for review".into()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+                estimated_cost_micros: None,
             }),
         )
         .await

@@ -328,6 +328,7 @@ async fn active_plan_cache_converges_when_reconciler_ticks_race_review_task() {
             result_summary: Some("ready for review".into()),
             artifact_uri: None,
             dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -454,6 +455,7 @@ async fn versioned_cache_stays_stale_when_only_task_audits_advance() {
                 result_summary: Some("ready".into()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+                estimated_cost_micros: None,
             }),
         )
         .await
@@ -792,6 +794,7 @@ async fn t_v0c_6_watcher_uses_projected_plan_state_not_stub_state() {
                 result_summary: None,
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+                estimated_cost_micros: None,
             }),
         )
         .await
