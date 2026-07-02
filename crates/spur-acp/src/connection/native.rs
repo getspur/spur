@@ -260,7 +260,7 @@ pub(crate) enum SetSessionModelDispatch {
 }
 
 pub(crate) fn decide_set_session_model_dispatch(caps: &SpurAgentCaps) -> SetSessionModelDispatch {
-    if caps.supports_set_config_option() {
+    if caps.supports_set_model() {
         SetSessionModelDispatch::FallbackConfigOption
     } else {
         SetSessionModelDispatch::Unsupported
@@ -2328,8 +2328,8 @@ mod set_session_model_dispatch_tests {
     use crate::SpurAgentCaps;
     use agent_client_protocol::schema::v1::{
         InitializeResponse, NewSessionResponse, SessionConfigId, SessionConfigKind,
-        SessionConfigOption, SessionConfigSelect, SessionConfigSelectOption,
-        SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
+        SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
     };
     use agent_client_protocol::schema::ProtocolVersion;
 
@@ -2370,7 +2370,23 @@ mod set_session_model_dispatch_tests {
     }
 
     #[test]
-    fn caps_with_only_config_options_routes_fallback() {
+    fn caps_with_category_model_option_routes_fallback() {
+        let caps = caps_from(|n| {
+            n.config_options = Some(vec![model_option(
+                "gpt-5-codex",
+                &[("gpt-5-codex", "GPT-5 Codex")],
+            )
+            .category(SessionConfigOptionCategory::Model)]);
+        });
+        assert!(caps.supports_set_model());
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::FallbackConfigOption
+        ));
+    }
+
+    #[test]
+    fn caps_with_unusable_model_option_routes_unsupported() {
         let caps = caps_from(|n| {
             n.config_options = Some(vec![SessionConfigOption::new(
                 SessionConfigId::new("model"),
@@ -2385,7 +2401,25 @@ mod set_session_model_dispatch_tests {
         assert!(caps.supports_set_config_option());
         assert!(matches!(
             decide_set_session_model_dispatch(&caps),
-            SetSessionModelDispatch::FallbackConfigOption
+            SetSessionModelDispatch::Unsupported
+        ));
+    }
+
+    #[test]
+    fn caps_with_unrelated_config_options_routes_unsupported() {
+        let caps = caps_from(|n| {
+            n.config_options = Some(vec![SessionConfigOption::select(
+                SessionConfigId::new("reasoning_effort"),
+                "Reasoning effort",
+                SessionConfigValueId::new("medium"),
+                vec![SessionConfigSelectOption::new("medium", "Medium")],
+            )]);
+        });
+        assert!(!caps.supports_set_model());
+        assert!(caps.supports_set_config_option());
+        assert!(matches!(
+            decide_set_session_model_dispatch(&caps),
+            SetSessionModelDispatch::Unsupported
         ));
     }
 
