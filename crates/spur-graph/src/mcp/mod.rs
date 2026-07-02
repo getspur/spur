@@ -520,6 +520,7 @@ const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
 const COLD_OPEN_GRAPH_REBUILD_TIMEOUT: Duration = Duration::from_secs(120);
 const INCREMENTAL_FAILURES_BEFORE_FULL_REBUILD: u32 = 3;
+const MARKDOWN_OVERLAY_EXTENSIONS: &[&str] = &["md", "markdown"];
 
 tokio::task_local! {
     static SCOPED_CODE_GRAPH_WORKTREE_ROOT: PathBuf;
@@ -3345,6 +3346,61 @@ pub async fn overlaid_graph_artifact_from_base_seed_for_worktree(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownOverlayBaseDelta {
+    pub base_artifact_dir: PathBuf,
+    pub changed_markdown_paths: BTreeSet<String>,
+    pub deleted_markdown_paths: BTreeSet<String>,
+}
+
+pub async fn markdown_overlay_base_delta_for_worktree(
+    worktree: &Path,
+) -> Option<MarkdownOverlayBaseDelta> {
+    let seed = load_base_seed_for_worktree(worktree)?;
+    let indexed_commit_oid = seed.indexed_commit_oid.as_deref();
+    let git = worktree_git_metadata_with_extensions(
+        worktree,
+        indexed_commit_oid,
+        MARKDOWN_OVERLAY_EXTENSIONS,
+        true,
+    )
+    .await?;
+    let head_oid = non_empty_string(Some(git.head_oid.clone()))
+        .or_else(|| non_empty_string(seed.indexed_commit_oid.clone()))
+        .unwrap_or_else(|| seed.artifact.graph_content_hash.clone());
+
+    let mut changed_markdown_paths = dirty_indexed_file_oids(worktree, &head_oid, &seed.artifact)
+        .keys()
+        .filter_map(|path| markdown_relative_path(path))
+        .collect::<BTreeSet<_>>();
+    changed_markdown_paths.extend(
+        git.supplemental_changed
+            .into_iter()
+            .filter(|path| is_markdown_path(Path::new(path))),
+    );
+
+    let deleted_markdown_paths = seed
+        .artifact
+        .file_manifests
+        .iter()
+        .filter_map(|entry| {
+            let relative = Path::new(entry.path.as_str());
+            if is_markdown_path(relative) && !worktree.join(relative).is_file() {
+                Some(entry.path.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    changed_markdown_paths.retain(|path| !deleted_markdown_paths.contains(path));
+
+    Some(MarkdownOverlayBaseDelta {
+        base_artifact_dir: seed.artifact_dir,
+        changed_markdown_paths,
+        deleted_markdown_paths,
+    })
+}
+
 async fn base_seed_matches_clean_worktree(
     worktree: &Path,
     seed: &BaseArtifactSeed,
@@ -5041,16 +5097,30 @@ async fn worktree_git_metadata(
     worktree: &Path,
     indexed_head_oid: Option<&str>,
 ) -> Option<WorktreeGitMetadata> {
+    let allowed_extensions = overlay_trigger_extensions();
+    worktree_git_metadata_with_extensions(worktree, indexed_head_oid, &allowed_extensions, false)
+        .await
+}
+
+async fn worktree_git_metadata_with_extensions(
+    worktree: &Path,
+    indexed_head_oid: Option<&str>,
+    allowed_extensions: &[&str],
+    include_tracked_supplemental_paths: bool,
+) -> Option<WorktreeGitMetadata> {
     tokio::time::timeout(GRAPH_GIT_METADATA_TIMEOUT, async {
         let head_oid = run_git_stdout(worktree, &["rev-parse", "HEAD"]).await?;
-        let allowed_extensions = overlay_trigger_extensions();
         let status = run_git_stdout(
             worktree,
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
         )
         .await?;
-        let mut status_report =
-            parse_git_status_for_overlay(worktree, &status, &allowed_extensions);
+        let mut status_report = parse_git_status_for_overlay(
+            worktree,
+            &status,
+            allowed_extensions,
+            include_tracked_supplemental_paths,
+        );
 
         if indexed_head_oid.is_some_and(|indexed| indexed != head_oid) {
             let indexed_head_oid = indexed_head_oid?;
@@ -5061,7 +5131,7 @@ async fn worktree_git_metadata(
                 .extend(supported_git_paths(
                     worktree,
                     diff.split('\0'),
-                    &allowed_extensions,
+                    allowed_extensions,
                 ));
         }
 
@@ -5085,6 +5155,7 @@ fn parse_git_status_for_overlay(
     worktree: &Path,
     status: &str,
     allowed_extensions: &[&str],
+    include_tracked_supplemental_paths: bool,
 ) -> GitStatusOverlayReport {
     let mut has_uncommitted_changes = false;
     let mut supplemental_changed = BTreeSet::new();
@@ -5094,14 +5165,22 @@ fn parse_git_status_for_overlay(
         let Some(status_code) = entry.get(..2) else {
             continue;
         };
-        let path = entry.get(3..).unwrap_or_default();
+        let path = entry.get(2..).unwrap_or_default().trim_start();
+        let supported_path = supported_git_path(worktree, path, allowed_extensions);
         if status_code == "??" {
-            if let Some(path) = supported_git_path(worktree, path, allowed_extensions) {
+            if supported_path.is_some() {
                 has_uncommitted_changes = true;
-                supplemental_changed.insert(path);
             }
         } else {
             has_uncommitted_changes = true;
+        }
+        let include_supplemental = status_code == "??"
+            || (include_tracked_supplemental_paths
+                && status_code_has_supplemental_path(status_code));
+        if include_supplemental {
+            if let Some(path) = supported_path {
+                supplemental_changed.insert(path);
+            }
         }
 
         if status_code.starts_with('R') || status_code.starts_with('C') {
@@ -5113,6 +5192,12 @@ fn parse_git_status_for_overlay(
         has_uncommitted_changes,
         supplemental_changed,
     }
+}
+
+fn status_code_has_supplemental_path(status_code: &str) -> bool {
+    status_code
+        .bytes()
+        .any(|status| matches!(status, b'A' | b'D' | b'R' | b'C'))
 }
 
 fn overlay_trigger_extensions() -> Vec<&'static str> {
@@ -5143,6 +5228,28 @@ fn supported_git_path(worktree: &Path, path: &str, allowed_extensions: &[&str]) 
         return None;
     }
     Some(worktree_relative_slash_path(worktree, &worktree.join(path)))
+}
+
+fn markdown_relative_path(path: &Path) -> Option<String> {
+    is_markdown_path(path).then(|| {
+        path.components()
+            .filter_map(|component| match component {
+                Component::Normal(value) => Some(value.to_string_lossy()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    })
+}
+
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            MARKDOWN_OVERLAY_EXTENSIONS
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
 }
 
 fn supplemental_changed_oids(worktree: &Path, paths: &[String]) -> BTreeMap<PathBuf, [u8; 20]> {

@@ -459,6 +459,25 @@ pub fn write_sections_dataset_skipping_embeddings(
     .map(|_| ())
 }
 
+pub fn write_sections_dataset_skipping_embeddings_with_delta(
+    artifact: &GraphIndexArtifact,
+    worktree_root: &Path,
+    artifact_dir: &Path,
+    previous_artifact_dir: &Path,
+    delta: SidecarDelta,
+) -> Result<()> {
+    write_sections_dataset_with_sidecar_options_and_progress(
+        artifact,
+        worktree_root,
+        artifact_dir,
+        SectionSidecarOptions::from_env_with_skip_overrides(true, true)
+            .with_previous_artifact_dir(Some(previous_artifact_dir.to_path_buf()))
+            .with_delta(Some(delta)),
+        None,
+    )
+    .map(|_| ())
+}
+
 pub fn write_sections_dataset_best_effort_with_options(
     artifact: &GraphIndexArtifact,
     worktree_root: &Path,
