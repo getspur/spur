@@ -12,6 +12,18 @@ fn duckdb_cli_present() -> bool {
         .unwrap_or(false)
 }
 
+/// The CLI path needs the lance extension installed for the *CLI's* duckdb
+/// version (in-process spur-analyst installs it into its own bundled duckdb).
+/// Probe INSTALL+LOAD so the extension self-provisions where the environment
+/// allows, and skip gracefully where it doesn't (e.g. no network).
+fn duckdb_lance_available() -> bool {
+    Command::new("duckdb")
+        .args(["-c", "INSTALL lance; LOAD lance;"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn query_csv(db_path: &Path, lance_dataset_dir: &Path, sql: &str) -> String {
     let lance_dataset_dir = lance_dataset_dir.display().to_string().replace('\'', "''");
     let sql = format!("LOAD lance;\nATTACH '{lance_dataset_dir}' AS lance_ns (TYPE LANCE);\n{sql}");
@@ -33,6 +45,10 @@ fn query_csv(db_path: &Path, lance_dataset_dir: &Path, sql: &str) -> String {
 fn analyst_session_attaches_lance_sections_and_joins_nodes() {
     if !duckdb_cli_present() {
         eprintln!("skipping: duckdb CLI not on PATH");
+        return;
+    }
+    if !duckdb_lance_available() {
+        eprintln!("skipping: duckdb CLI cannot INSTALL/LOAD the lance extension");
         return;
     }
 

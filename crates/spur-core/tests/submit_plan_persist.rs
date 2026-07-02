@@ -5,6 +5,11 @@
 //! pure helper that decides WHAT IssueCreate values the handler would
 //! dispatch given a plan + epic fields.
 
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use spur_core::mcp::tools_list;
 use spur_core::{build_entries_with_task_map, plan_epic_issue_creates};
 // `pub mod plan;` is declared in lib.rs, so spur_core::plan::PlanTask is accessible.

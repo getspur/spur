@@ -86,9 +86,15 @@ fn worker_knowledge_context_enables_spur_analyst_embeddings() {
     let manifest =
         std::fs::read_to_string(&manifest_path).expect("spur-core Cargo.toml must be readable");
 
+    // Since cdfe07ae0 workers build spur-core WITHOUT embeddings
+    // (spur-analyst is default-features = false); the brain binary re-enables
+    // them through spur-core's forwarding `embed` feature (spur-cli enables
+    // it by default). Assert the forwarding link so knowledge_context_pack_2
+    // can create query vectors in embed-enabled builds.
     assert!(
-        manifest.contains(r#"spur-analyst = { workspace = true, features = ["embed"] }"#),
-        "spur-core must enable spur-analyst/embed so knowledge_context_pack_2 can create query vectors"
+        manifest.contains(r#"embed = ["spur-analyst/embed""#),
+        "spur-core must expose an `embed` feature forwarding to spur-analyst/embed \
+         so knowledge_context_pack_2 can create query vectors"
     );
 }
 

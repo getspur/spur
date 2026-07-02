@@ -1,5 +1,9 @@
 #![allow(unexpected_cfgs)]
 #![cfg(madsim)]
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
 
 mod event_funnel {
     use madsim_tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};

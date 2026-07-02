@@ -10,6 +10,11 @@
 //!   - Current main (serial dispatch): tests FAIL
 //!   - After Phase 2 handler rewrite: tests PASS
 
+// The `Send` proof for the spawned server future traverses the lance_io/moka
+// cache types inside spur-context; the chain exceeds the default trait-solver
+// recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
