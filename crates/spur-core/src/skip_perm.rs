@@ -14,8 +14,9 @@ use futures::Stream;
 use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
 use spur_acp::{
-    AcpSessionId, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionResponse,
-    SessionModeId, SessionNotification, SetSessionModeRequest,
+    AcpError, AcpSessionId, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SessionModeId, SessionNotification,
+    SetSessionModeRequest,
 };
 
 /// Apply `set_session_mode` on `session_id` when the agent's effective
@@ -130,6 +131,22 @@ pub async fn load_session_with_bypass(
     let advertised_modes = conn.advertised_session_modes(&session_id);
     apply_bypass_session_mode(conn, cfg, session_id, advertised_modes, "load_session").await;
     Ok((response, stream))
+}
+
+/// Call `conn.resume_session(request)`, then best-effort apply the L1b bypass
+/// mode if this connection already knows the session's advertised modes.
+pub async fn resume_session_with_bypass(
+    conn: &mut dyn AgentConnection,
+    cfg: &AgentConfig,
+    acp_session_id: String,
+    cwd: PathBuf,
+) -> Result<ResumeSessionResponse, AcpError> {
+    let session_id = AcpSessionId::new(acp_session_id);
+    let request = ResumeSessionRequest::new(session_id.clone(), cwd);
+    let response = conn.resume_session(request).await?;
+    let advertised_modes = conn.advertised_session_modes(&session_id);
+    apply_bypass_session_mode(conn, cfg, session_id, advertised_modes, "resume_session").await;
+    Ok(response)
 }
 
 #[cfg(test)]

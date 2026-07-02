@@ -9,6 +9,8 @@
 //! - `handlers`: RMCP Tool router and domain-specific handlers.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -67,6 +69,7 @@ pub use plan_builder::{
 };
 pub(crate) use recovery::{replay_awaiting_review_continuation, AwaitingReviewReplay};
 pub use spur_mcp::git::run_git_capture;
+pub(crate) use sync::resolve_dispatch_orphan_with_resume;
 pub(crate) use sync::*;
 pub use sync::{compensate_mutation_orphans, resolve_dispatch_orphan};
 pub use types::*;
@@ -91,6 +94,69 @@ pub fn require_feature(key: FeatureKey, feature_gate: &FeatureGate) -> Result<()
 
 pub fn feature_error_message(error: McpError) -> String {
     error.message.into_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DispatchOrphanResumeRequest {
+    pub issue_id: String,
+    pub delegation_id: String,
+    pub worker: String,
+    pub worker_branch: String,
+    pub worker_session_id: String,
+    pub dispatched_base_oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DispatchOrphanResumeOutcome {
+    Resumed,
+    Unsupported,
+    Failed(String),
+}
+
+pub(crate) type DispatchOrphanResumeHook = Arc<
+    dyn Fn(
+            DispatchOrphanResumeRequest,
+        ) -> Pin<Box<dyn Future<Output = DispatchOrphanResumeOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+pub(crate) fn dispatch_orphan_resume_request_from_audits(
+    issue_id: &str,
+    delegation_id: &str,
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+) -> Option<DispatchOrphanResumeRequest> {
+    let worker = audits.iter().rev().find_map(|audit| match audit {
+        crate::plan::audit_sentinel::AuditSentinelKind::Dispatch {
+            delegation_id: did,
+            worker,
+            ..
+        } if did == delegation_id => Some(worker.clone()),
+        _ => None,
+    })?;
+    let (worker_branch, worker_session_id, dispatched_base_oid) =
+        audits.iter().rev().find_map(|audit| match audit {
+            crate::plan::audit_sentinel::AuditSentinelKind::WorkerStarted {
+                delegation_id: did,
+                worker_branch,
+                worker_session_id,
+                dispatched_base_oid,
+            } if did == delegation_id => Some((
+                worker_branch.clone(),
+                worker_session_id.clone(),
+                dispatched_base_oid.clone(),
+            )),
+            _ => None,
+        })?;
+
+    Some(DispatchOrphanResumeRequest {
+        issue_id: issue_id.to_string(),
+        delegation_id: delegation_id.to_string(),
+        worker,
+        worker_branch,
+        worker_session_id,
+        dispatched_base_oid,
+    })
 }
 
 /// Build the embedded Community-tier feature gate used by fallback and tests.
@@ -242,6 +308,9 @@ pub struct McpCallbackServer {
     /// Per-server brain tool registry. Core-owned orchestration modules are
     /// composed by the orchestrator at construction time.
     pub(crate) tool_registry: Arc<spur_mcp::registry::ToolRegistry>,
+    /// Optional orchestrator-owned hook for reattaching to a live worker ACP
+    /// session before falling back to durable dispatch-orphan compensation.
+    pub(crate) dispatch_orphan_resume_hook: Option<DispatchOrphanResumeHook>,
 }
 
 impl McpCallbackServer {
@@ -307,6 +376,7 @@ impl McpCallbackServer {
             dispatch_lease_duration: std::time::Duration::from_secs(600),
             graph_mcp_deps: spur_graph::mcp::GraphMcpDeps::default(),
             tool_registry: Arc::new(spur_mcp::registry::ToolRegistry::new()),
+            dispatch_orphan_resume_hook: None,
         };
         let tool_registry = crate::mcp::brain_tool_registry(
             crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
@@ -349,6 +419,10 @@ impl McpCallbackServer {
 
     pub fn set_tool_registry(&mut self, tool_registry: spur_mcp::registry::ToolRegistry) {
         self.tool_registry = Arc::new(tool_registry);
+    }
+
+    pub(crate) fn set_dispatch_orphan_resume_hook(&mut self, hook: DispatchOrphanResumeHook) {
+        self.dispatch_orphan_resume_hook = Some(hook);
     }
 
     /// Returns the brain_session_id. Panics if not yet set - callers from

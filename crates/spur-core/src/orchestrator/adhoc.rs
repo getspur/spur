@@ -96,9 +96,10 @@ impl Orchestrator {
             .await
             .context("Failed to start MCP callback server")?;
 
-        let ((mut connection, delegation_handle, success, pr_url, session_id), mcp_handle): McpGuarded<
-            BrainRunBootstrap,
-        > = cleanup_mcp_on_err(mcp_handle, async {
+        let (
+            (mut connection, delegation_handle, success, pr_url, session_id, prompt_usage),
+            mcp_handle,
+        ): McpGuarded<BrainRunBootstrap> = cleanup_mcp_on_err(mcp_handle, async {
             // 6. Spawn brain agent via AgentConnection.
             let mut connection = self.create_connection(&brain_config, None);
 
@@ -127,8 +128,7 @@ impl Orchestrator {
             .context("Failed to create brain session")?;
 
             let acp_session_id = spur_acp::SessionId(session_response.session_id.to_string());
-            let brain_session_id =
-                crate::plan::labels::derive_brain_session_id(&acp_session_id);
+            let brain_session_id = crate::plan::labels::derive_brain_session_id(&acp_session_id);
             mcp_server
                 .set_brain_session_id(brain_session_id.clone())
                 .expect("set once");
@@ -228,7 +228,7 @@ impl Orchestrator {
             // handles both paths transparently.
             let funnel_for_notif = self.funnel.clone();
             let session_id_for_notif = session_id.clone();
-            crate::notification_drain::drive_prompt_notifications(
+            let prompt_outcome = crate::notification_drain::drive_prompt_notifications(
                 &mut *connection,
                 prompt_request,
                 |notification| {
@@ -253,7 +253,14 @@ impl Orchestrator {
             .await
             .context("Failed to send prompt to brain")?;
 
-            Ok((connection, delegation_handle, success, pr_url, session_id))
+            Ok((
+                connection,
+                delegation_handle,
+                success,
+                pr_url,
+                session_id,
+                prompt_outcome.usage,
+            ))
         })
         .await?;
 
@@ -268,10 +275,26 @@ impl Orchestrator {
         // 10. Log session end.
         if let Some(ref ct) = self.cost_tracker {
             let status = if success { "completed" } else { "failed" };
-            let _ = ct.end_session(&session_id, status, duration, brain_config.cost_tier);
+            let result = match prompt_usage.as_ref() {
+                Some(usage) => ct.end_session_with_tokens(
+                    &session_id,
+                    status,
+                    duration,
+                    brain_config.cost_tier,
+                    prompt_usage_to_token_usage(usage),
+                    Some(brain_config.name.as_str()),
+                ),
+                None => ct.end_session(&session_id, status, duration, brain_config.cost_tier),
+            };
+            let _ = result;
         }
 
-        let total_cost = spur_cost::estimator::estimate_cost(brain_config.cost_tier, duration);
+        let total_cost = estimate_prompt_cost(
+            brain_config.cost_tier,
+            duration,
+            prompt_usage.as_ref(),
+            Some(brain_config.name.as_str()),
+        );
 
         self.emit(SpurEvent::now(SpurEventBody::SessionCompleted {
             session: session_id.clone(),
