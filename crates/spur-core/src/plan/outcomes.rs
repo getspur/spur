@@ -92,6 +92,10 @@ pub enum SkipReason {
         scope: String,
     },
     ReportOnly,
+    BudgetExhausted {
+        spent_micros: u64,
+        cap_micros: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,6 +226,7 @@ enum SkipReasonKey {
     PlanAllowsDispatchFailed,
     LoopsPaused { scope: String },
     ReportOnly,
+    BudgetExhausted { cap_micros: u64 },
 }
 
 impl From<&SkipReason> for SkipReasonKey {
@@ -252,6 +257,9 @@ impl From<&SkipReason> for SkipReasonKey {
                 scope: scope.clone(),
             },
             SkipReason::ReportOnly => Self::ReportOnly,
+            SkipReason::BudgetExhausted { cap_micros, .. } => Self::BudgetExhausted {
+                cap_micros: *cap_micros,
+            },
         }
     }
 }

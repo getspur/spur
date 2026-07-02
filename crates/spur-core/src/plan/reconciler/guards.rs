@@ -125,6 +125,31 @@ impl Reconciler {
                         cache.insert(plan_id.to_string(), state.clone());
                         return Ok(state);
                     }
+                    if let Some(cap_micros) = epic
+                        .labels
+                        .iter()
+                        .filter_map(|label| crate::plan::labels::parse_loop_budget_micros(label))
+                        .min()
+                    {
+                        let spent_micros =
+                            crate::plan::projector::plan_spent_micros(self.pm.as_ref(), plan_id)
+                                .await?;
+                        if spent_micros >= cap_micros {
+                            let state = PlanDispatchState::BudgetExhausted {
+                                spent_micros,
+                                cap_micros,
+                            };
+                            tracing::debug!(
+                                plan_id = %plan_id,
+                                spent_micros,
+                                cap_micros,
+                                ?state,
+                                "reconciler suppressed ready tasks because loop budget is exhausted"
+                            );
+                            cache.insert(plan_id.to_string(), state.clone());
+                            return Ok(state);
+                        }
+                    }
                     open_complete_epic = Some(epic.id.clone());
                 } else if closed_complete_epic.is_none() {
                     closed_complete_epic = Some(epic.id.clone());

@@ -1134,6 +1134,41 @@ async fn add_mock_epic_label(
     add_mock_issue_label(pm, &epic_id, label).await;
 }
 
+async fn close_mock_task_with_completion_cost(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    issue_id: &str,
+    estimated_cost_micros: u64,
+) {
+    let adv =
+        crate::plan::PmLike::advanced(pm.as_ref()).expect("mock pm should expose beads advanced");
+    adv.add_comment(
+        issue_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                delegation_id: "del-budget-spent".to_string(),
+                completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-budget".to_string()),
+                result_summary: None,
+                artifact_uri: None,
+                dispatched_base_oid: None,
+                estimated_cost_micros: Some(estimated_cost_micros),
+            },
+        ),
+    )
+    .await
+    .expect("completion audit");
+    pm.update_issue(
+        issue_id,
+        spur_pm::IssueUpdate {
+            status: Some("closed".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close spent task");
+}
+
 fn drain_delegation_requests(
     delegation_rx: &mut tokio::sync::mpsc::Receiver<crate::DelegationRequest>,
 ) -> Vec<crate::DelegationRequest> {
@@ -1146,6 +1181,56 @@ fn drain_delegation_requests(
         }
     }
     requests
+}
+
+#[tokio::test(start_paused = true)]
+async fn budget_exhausted_plan_suppresses_dispatch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-budget".into()));
+    let issue_ids =
+        seed_mock_ready_tasks_plan(&pm, "P-BUDGET", &["Spent", "Ready"], &brain_session_id).await;
+    close_mock_task_with_completion_cost(&pm, &issue_ids[0], 1_200_000).await;
+    add_mock_epic_label(
+        &pm,
+        "P-BUDGET",
+        format!("{}1000000", crate::plan::labels::LOOP_BUDGET_MICROS_PREFIX),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "over-budget plan must not dispatch a worker"
+    );
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let recent = outcomes.recent_outcomes("P-BUDGET");
+    assert!(
+        recent.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Skipped {
+                task_id,
+                reason: SkipReason::BudgetExhausted {
+                    spent_micros: 1_200_000,
+                    cap_micros: 1_000_000,
+                },
+                ..
+            } if task_id == "Ready"
+        )),
+        "expected budget-exhausted skip, got {recent:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]

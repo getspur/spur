@@ -188,6 +188,7 @@ pub const LOOP_PAUSED: &str = "spur:loop-paused";
 pub const PAUSE_ALL_LOOPS: &str = "spur:pause-all-loops";
 pub const LOOP_TRIAGE_TASK: &str = "spur:loop-triage-task";
 pub const AUTONOMY_PREFIX: &str = "spur:autonomy:";
+pub const LOOP_BUDGET_MICROS_PREFIX: &str = "spur:loop-budget-micros:";
 /// Marker applied to an epic while `build_epic_subgraph` is still creating
 /// children + dependency edges. The reconciler must not dispatch tasks from a
 /// plan while this marker is present.
@@ -206,6 +207,10 @@ pub fn parse_delegation_id(label: &str) -> Option<&str> {
 
 pub fn parse_lease_expires_at(label: &str) -> Option<i64> {
     label.strip_prefix(LEASE_EXPIRES_AT_PREFIX)?.parse().ok()
+}
+
+pub fn parse_loop_budget_micros(label: &str) -> Option<u64> {
+    label.strip_prefix(LOOP_BUDGET_MICROS_PREFIX)?.parse().ok()
 }
 
 pub fn parse_plan_owner(label: &str) -> Option<&str> {
