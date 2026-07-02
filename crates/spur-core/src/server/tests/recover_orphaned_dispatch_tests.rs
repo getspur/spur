@@ -202,6 +202,7 @@ async fn brain_attach_rediscovery_replays_awaiting_review_task_once() {
             result_summary: Some("ready for review".into()),
             artifact_uri: None,
             dispatched_base_oid: Some(base_oid.clone()),
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -457,6 +458,7 @@ async fn recover_orphaned_dispatch_reemits_already_awaiting_review_without_new_a
             result_summary: Some("already ready".into()),
             artifact_uri: None,
             dispatched_base_oid: Some(base_oid.clone()),
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -948,6 +950,7 @@ async fn recover_orphaned_dispatch_reemits_legacy_already_awaiting_review_delega
             result_summary: Some("already done".into()),
             artifact_uri: None,
             dispatched_base_oid: Some(base_oid.clone()),
+            estimated_cost_micros: None,
         }),
     )
     .await

@@ -407,6 +407,7 @@ mod tests {
                 result_summary: Some("worker paused".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             }),
         )
         .await
@@ -544,6 +545,7 @@ mod tests {
                 result_summary: Some("worker paused".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             }),
         )
         .await
