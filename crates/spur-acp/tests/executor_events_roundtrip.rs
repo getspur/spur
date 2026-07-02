@@ -131,7 +131,7 @@ fn executor_review_cancelled_round_trips() {
 
 #[test]
 fn worker_notification_roundtrips() {
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
     };
     let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new("thinking...")));

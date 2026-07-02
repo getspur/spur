@@ -181,15 +181,11 @@ mod worker_stream_routing_tests {
         let mut f = std::fs::File::create(&path).unwrap();
         let ev = wrap_event(SpurEventBody::AgentNotification {
             session: spur_acp::SessionId("test-sess".into()),
-            notification: Box::new(agent_client_protocol::schema::SessionNotification::new(
-                agent_client_protocol::schema::SessionId::new("test-sess"),
-                agent_client_protocol::schema::SessionUpdate::UserMessageChunk(
-                    agent_client_protocol::schema::ContentChunk::new(
-                        agent_client_protocol::schema::ContentBlock::Text(
-                            agent_client_protocol::schema::TextContent::new("hello replay"),
-                        ),
-                    ),
-                ),
+            notification: Box::new(spur_acp::SessionNotification::new(
+                spur_acp::AcpSessionId::new("test-sess"),
+                spur_acp::SessionUpdate::UserMessageChunk(spur_acp::ContentChunk::new(
+                    spur_acp::ContentBlock::Text(spur_acp::TextContent::new("hello replay")),
+                )),
             )),
         });
         writeln!(f, "{}", serde_json::to_string(&ev).unwrap()).unwrap();
@@ -517,12 +513,8 @@ mod brain_retired_tests {
     }
 
     fn caps_without_config_options() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
-        let init = agent_client_protocol::schema::InitializeResponse::new(
-            agent_client_protocol::schema::ProtocolVersion::LATEST,
-        );
-        let new = agent_client_protocol::schema::NewSessionResponse::new(
-            agent_client_protocol::schema::SessionId::new("acp-b1"),
-        );
+        let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
+        let new = spur_acp::NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-b1"));
         std::sync::Arc::new(spur_acp::SpurAgentCaps::new(
             &init,
             &new,
@@ -531,12 +523,8 @@ mod brain_retired_tests {
     }
 
     fn caps_with_effort() -> std::sync::Arc<spur_acp::SpurAgentCaps> {
-        let init = agent_client_protocol::schema::InitializeResponse::new(
-            agent_client_protocol::schema::ProtocolVersion::LATEST,
-        );
-        let mut new = agent_client_protocol::schema::NewSessionResponse::new(
-            agent_client_protocol::schema::SessionId::new("acp-b1"),
-        );
+        let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
+        let mut new = spur_acp::NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-b1"));
         new.config_options = Some(vec![effort_config_option()]);
         std::sync::Arc::new(spur_acp::SpurAgentCaps::new(
             &init,
@@ -1463,11 +1451,9 @@ mod crossterm_stream_tests {
 #[cfg(test)]
 mod synopsis_wire_tests {
     use super::super::super::*;
-    use agent_client_protocol::schema::{
-        ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
-    };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use spur_acp::domain::events::{SpurEvent, SpurEventBody};
+    use spur_acp::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent};
     use spur_acp::{SessionId, SessionInfo};
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
@@ -1480,7 +1466,7 @@ mod synopsis_wire_tests {
         wrap(SpurEventBody::AgentNotification {
             session: SessionId(session.into()),
             notification: Box::new(SessionNotification::new(
-                agent_client_protocol::schema::SessionId::new(session),
+                spur_acp::AcpSessionId::new(session),
                 SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
                     TextContent::new(text),
                 ))),

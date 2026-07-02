@@ -81,11 +81,7 @@ fn commit_rendered_batch(
 }
 
 impl Orchestrator {
-    fn emit_listed_sessions(
-        &mut self,
-        brain_name: &str,
-        sessions: Vec<agent_client_protocol::schema::SessionInfo>,
-    ) {
+    fn emit_listed_sessions(&mut self, brain_name: &str, sessions: Vec<spur_acp::SessionInfo>) {
         let (brain_sessions, worker_sessions) = classify_sessions(sessions, &self.repo_root);
         if !worker_sessions.is_empty() {
             debug!(
@@ -100,10 +96,7 @@ impl Orchestrator {
         self.emit_session_synopsis_seeds(&brain_sessions);
     }
 
-    fn emit_session_synopsis_seeds(
-        &mut self,
-        sessions: &[agent_client_protocol::schema::SessionInfo],
-    ) {
+    fn emit_session_synopsis_seeds(&mut self, sessions: &[spur_acp::SessionInfo]) {
         for session in sessions {
             let spur_session_id = SessionId(session.session_id.0.to_string());
             if !self.seeded_session_ids.insert(spur_session_id.clone()) {
@@ -661,12 +654,10 @@ impl Orchestrator {
                     InteractiveInput::SetSessionMode { mode_id } => {
                         if let Some(b) = brain.as_mut() {
                             let req = SetSessionModeRequest::new(
-                                agent_client_protocol::schema::SessionId::new(
-                                    b.acp_session_id.clone(),
-                                ),
-                                agent_client_protocol::schema::SessionModeId::new(
-                                    std::sync::Arc::<str>::from(mode_id.as_str()),
-                                ),
+                                spur_acp::AcpSessionId::new(b.acp_session_id.clone()),
+                                spur_acp::SessionModeId::new(std::sync::Arc::<str>::from(
+                                    mode_id.as_str(),
+                                )),
                             );
                             if let Err(e) = b.connection.set_session_mode(req).await {
                                 warn!(
@@ -688,18 +679,15 @@ impl Orchestrator {
                     // ── SetSessionConfigOption ───────────────────────────
                     InteractiveInput::SetSessionConfigOption { config_id, value } => {
                         if let Some(b) = brain.as_mut() {
-                            let req =
-                                agent_client_protocol::schema::SetSessionConfigOptionRequest::new(
-                                    agent_client_protocol::schema::SessionId::new(
-                                        b.acp_session_id.clone(),
-                                    ),
-                                    agent_client_protocol::schema::SessionConfigId::new(
-                                        std::sync::Arc::<str>::from(config_id.as_str()),
-                                    ),
-                                    agent_client_protocol::schema::SessionConfigValueId::new(
-                                        std::sync::Arc::<str>::from(value.as_str()),
-                                    ),
-                                );
+                            let req = spur_acp::SetSessionConfigOptionRequest::new(
+                                spur_acp::AcpSessionId::new(b.acp_session_id.clone()),
+                                spur_acp::SessionConfigId::new(std::sync::Arc::<str>::from(
+                                    config_id.as_str(),
+                                )),
+                                spur_acp::SessionConfigValueId::new(std::sync::Arc::<str>::from(
+                                    value.as_str(),
+                                )),
+                            );
                             match b.connection.set_session_config_option(req).await {
                                 Ok(resp) => {
                                     self.replace_session_config_options(b, resp.config_options);
@@ -1615,9 +1603,9 @@ impl Orchestrator {
 #[cfg(test)]
 mod list_sessions_tests {
     use super::*;
-    use agent_client_protocol::schema::{ListSessionsRequest, SessionInfo};
     use async_trait::async_trait;
     use futures::Stream;
+    use spur_acp::{ListSessionsRequest, SessionInfo};
     use std::collections::VecDeque;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -1706,7 +1694,7 @@ mod list_sessions_tests {
         async fn initialize(
             &mut self,
             _request: InitializeRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
             panic!("NonProgressingCursorConnection::initialize must not be called")
         }
 
@@ -1714,7 +1702,7 @@ mod list_sessions_tests {
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
-        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
             panic!("NonProgressingCursorConnection::new_session must not be called")
         }
 
@@ -1741,7 +1729,7 @@ mod list_sessions_tests {
         async fn list_sessions(
             &mut self,
             request: ListSessionsRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::ListSessionsResponse> {
+        ) -> anyhow::Result<spur_acp::ListSessionsResponse> {
             assert!(
                 request.cwd.as_deref() == Some(Path::new("/repo/spur")) || request.cwd.is_none()
             );
@@ -1752,13 +1740,11 @@ mod list_sessions_tests {
             );
             self.calls += 1;
 
-            Ok(
-                agent_client_protocol::schema::ListSessionsResponse::new(vec![SessionInfo::new(
-                    format!("session-{}", self.calls),
-                    "/repo/spur",
-                )])
-                .next_cursor(Some("same".to_string())),
-            )
+            Ok(spur_acp::ListSessionsResponse::new(vec![SessionInfo::new(
+                format!("session-{}", self.calls),
+                "/repo/spur",
+            )])
+            .next_cursor(Some("same".to_string())))
         }
     }
 
@@ -1767,7 +1753,7 @@ mod list_sessions_tests {
         async fn initialize(
             &mut self,
             _request: InitializeRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::InitializeResponse> {
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
             panic!("TwoPhaseConnection::initialize must not be called")
         }
 
@@ -1775,7 +1761,7 @@ mod list_sessions_tests {
             &mut self,
             _cwd: PathBuf,
             _mcp_servers: Vec<McpServer>,
-        ) -> anyhow::Result<agent_client_protocol::schema::NewSessionResponse> {
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
             panic!("TwoPhaseConnection::new_session must not be called")
         }
 
@@ -1802,12 +1788,10 @@ mod list_sessions_tests {
         async fn list_sessions(
             &mut self,
             request: ListSessionsRequest,
-        ) -> anyhow::Result<agent_client_protocol::schema::ListSessionsResponse> {
+        ) -> anyhow::Result<spur_acp::ListSessionsResponse> {
             self.requests.push(request);
             let sessions = self.responses.pop_front().expect("queued response");
-            Ok(agent_client_protocol::schema::ListSessionsResponse::new(
-                sessions,
-            ))
+            Ok(spur_acp::ListSessionsResponse::new(sessions))
         }
     }
 

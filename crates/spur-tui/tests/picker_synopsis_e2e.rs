@@ -1,17 +1,15 @@
 //! End-to-end: synthetic SpurEvents through App -> projection -> picker label.
 
-use agent_client_protocol::schema::{
-    ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
-};
 use spur_acp::domain::events::{HistoryEntry, SpurEvent, SpurEventBody};
 use spur_acp::SessionId;
+use spur_acp::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent};
 use spur_tui::app::App;
 
 fn user_chunk(session: &str, text: &str) -> SpurEvent {
     SpurEvent::now(SpurEventBody::AgentNotification {
         session: SessionId(session.into()),
         notification: Box::new(SessionNotification::new(
-            agent_client_protocol::schema::SessionId::new(session),
+            spur_acp::AcpSessionId::new(session),
             SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
                 TextContent::new(text),
             ))),
@@ -23,7 +21,7 @@ fn agent_chunk(session: &str, text: &str) -> SpurEvent {
     SpurEvent::now(SpurEventBody::AgentNotification {
         session: SessionId(session.into()),
         notification: Box::new(SessionNotification::new(
-            agent_client_protocol::schema::SessionId::new(session),
+            spur_acp::AcpSessionId::new(session),
             SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
                 TextContent::new(text),
             ))),

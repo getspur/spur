@@ -15,11 +15,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
-    AvailableCommand, AvailableCommandsUpdate, SessionNotification, SessionUpdate,
-};
 use spur_acp::domain::events::{SpurEvent, SpurEventBody};
 use spur_acp::types::SessionId;
+use spur_acp::{AvailableCommand, AvailableCommandsUpdate, SessionNotification, SessionUpdate};
 use spur_core::event_funnel::spawn_funnel;
 use spur_core::notification_pump::spawn_session_notification_pump;
 use tokio::sync::broadcast;
@@ -29,10 +27,7 @@ use tokio::sync::broadcast;
 async fn collect_agent_notifications(
     rx: &mut broadcast::Receiver<SpurEvent>,
     timeout: Duration,
-) -> Vec<(
-    SessionId,
-    Box<agent_client_protocol::schema::SessionNotification>,
-)> {
+) -> Vec<(SessionId, Box<spur_acp::SessionNotification>)> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut results = Vec::new();
 
@@ -77,7 +72,7 @@ async fn pump_emits_agent_notification_with_correct_session_id() {
     let sent_update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
         AvailableCommand::new("cmd1", "desc1"),
     ]));
-    let acp_session_id = agent_client_protocol::schema::SessionId::new("acp-sess-1");
+    let acp_session_id = spur_acp::AcpSessionId::new("acp-sess-1");
     notif_tx
         .send(SessionNotification::new(acp_session_id, sent_update))
         .expect("notification broadcast send should succeed");
@@ -136,7 +131,7 @@ async fn pump_abort_stops_emission_for_retired_session() {
         spawn_session_notification_pump(notif_rx_2, SessionId("sess-B".to_string()), funnel);
 
     // ── Exercise: send a notification ────────────────────────────────────────
-    let acp_session_id = agent_client_protocol::schema::SessionId::new("acp-sess-2");
+    let acp_session_id = spur_acp::AcpSessionId::new("acp-sess-2");
     notif_tx
         .send(SessionNotification::new(
             acp_session_id,

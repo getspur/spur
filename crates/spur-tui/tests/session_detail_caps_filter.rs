@@ -9,10 +9,8 @@
 
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
-    InitializeResponse, NewSessionResponse, ProtocolVersion, SessionId,
-};
 use spur_acp::{AgentKind, SpurAgentCaps};
+use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
 use spur_tui::commands::advertised::AdvertisedSource;
 use spur_tui::commands::CommandRegistry;
 use spur_tui::views::session_detail::SessionDetailView;
@@ -22,7 +20,7 @@ const HANDLE: &str = "codex";
 fn gemini_style_caps() -> Arc<SpurAgentCaps> {
     let init = InitializeResponse::new(ProtocolVersion::LATEST);
     // Synthetic gemini-style: neither models nor config_options.
-    let new = NewSessionResponse::new(SessionId::new("gemini-sid"));
+    let new = NewSessionResponse::new(spur_acp::AcpSessionId::new("gemini-sid"));
     Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::Generic))
 }
 
