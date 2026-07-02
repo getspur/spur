@@ -2,6 +2,8 @@ use super::{run_git_capture, DetachedContinuationCtx, McpCallbackServer};
 use crate::plan::audit_sentinel::{AuditSentinelKind, CompletionState};
 use crate::plan::PlanTask;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -50,6 +52,8 @@ impl spur_mcp::events::McpEventSink for RecordingSink {
 type RecordedContinuations =
     Arc<tokio::sync::Mutex<Vec<(spur_acp::domain::BrainContinuation, String)>>>;
 
+type ResumeCalls = Arc<tokio::sync::Mutex<Vec<crate::server::DispatchOrphanResumeRequest>>>;
+
 fn recording_continuation_ctx() -> (DetachedContinuationCtx, RecordedContinuations) {
     let continuations = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let captured = Arc::clone(&continuations);
@@ -70,6 +74,21 @@ fn response_text(response: &super::JsonRpcResponse) -> &str {
     response.result.as_ref().expect("success result")["content"][0]["text"]
         .as_str()
         .expect("text content")
+}
+
+fn recording_resume_hook(
+    calls: ResumeCalls,
+    outcome: crate::server::DispatchOrphanResumeOutcome,
+) -> crate::server::DispatchOrphanResumeHook {
+    Arc::new(move |request| {
+        let calls = Arc::clone(&calls);
+        let outcome = outcome.clone();
+        Box::pin(async move {
+            calls.lock().await.push(request);
+            outcome
+        })
+            as Pin<Box<dyn Future<Output = crate::server::DispatchOrphanResumeOutcome> + Send>>
+    })
 }
 
 struct RecoveryFixture {
@@ -420,6 +439,147 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
             Some(base_oid.as_str())
         ))
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recover_orphaned_dispatch_resumes_worker_session_before_state_compensation() {
+    let _serial = super::beads_sqlite_serial_guard();
+    let dir = init_repo().await;
+    commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+    let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+        .await
+        .expect("base oid");
+
+    let fixture = setup_recovery_task(dir.path(), "recover-orphan-resume", "del-resume").await;
+    super::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        fixture.feature_gate.as_ref(),
+    )
+    .expect("test feature gate should allow beads advanced");
+    let adv = fixture.pm.advanced().expect("advanced beads backend");
+    adv.add_comment(
+        &fixture.task_issue_id,
+        &crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::WorkerStarted {
+            delegation_id: "del-resume".into(),
+            worker_branch: "spur/worker/live".into(),
+            worker_session_id: "worker-session-live".into(),
+            dispatched_base_oid: base_oid.clone(),
+        }),
+    )
+    .await
+    .expect("worker started audit");
+
+    let mut server = recovery_server(
+        dir.path(),
+        Arc::clone(&fixture.pm),
+        Arc::clone(&fixture.feature_gate),
+    );
+    let resume_calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    server.set_dispatch_orphan_resume_hook(recording_resume_hook(
+        Arc::clone(&resume_calls),
+        crate::server::DispatchOrphanResumeOutcome::Resumed,
+    ));
+
+    let msg = server
+        .recover_orphaned_dispatch_with_branch(
+            &fixture.task_issue_id,
+            "spur/worker/live",
+            &base_oid,
+        )
+        .await
+        .expect("live worker session should resume");
+
+    assert!(
+        msg.contains("Worker session resumed"),
+        "unexpected response: {msg}"
+    );
+    let calls = resume_calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].issue_id, fixture.task_issue_id);
+    assert_eq!(calls[0].delegation_id, "del-resume");
+    assert_eq!(calls[0].worker, "codex");
+    assert_eq!(calls[0].worker_session_id, "worker-session-live");
+    drop(calls);
+
+    let issue = fixture
+        .pm
+        .get_issue(&fixture.task_issue_id)
+        .await
+        .expect("load issue");
+    assert!(
+        issue
+            .labels
+            .contains(&crate::plan::labels::delegation_id("del-resume")),
+        "resume must leave dispatch intent intact: {:?}",
+        issue.labels
+    );
+    assert!(
+        !crate::plan::projector::has_ready_for_review_label_compat(&issue.labels),
+        "resume must not promote task to awaiting review"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recover_orphaned_dispatch_ignores_unsupported_resume_and_falls_back() {
+    let _serial = super::beads_sqlite_serial_guard();
+    let dir = init_repo().await;
+    commit_file(dir.path(), "base.txt", "base\n", "seed").await;
+    let base_oid = run_git_capture(dir.path(), None, &["rev-parse", "HEAD"])
+        .await
+        .expect("base oid");
+    let worker_branch = "spur/worker/unsupported-resume";
+    run_git_capture(
+        dir.path(),
+        None,
+        &["checkout", "-q", "-b", worker_branch, &base_oid],
+    )
+    .await
+    .expect("checkout worker branch");
+    commit_file(dir.path(), "worker.txt", "worker\n", "worker change").await;
+    run_git_capture(dir.path(), None, &["checkout", "-q", "main"])
+        .await
+        .expect("checkout main");
+
+    let fixture = setup_recovery_task(
+        dir.path(),
+        "recover-orphan-resume-unsupported",
+        "del-unsupported",
+    )
+    .await;
+    super::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        fixture.feature_gate.as_ref(),
+    )
+    .expect("test feature gate should allow beads advanced");
+    let adv = fixture.pm.advanced().expect("advanced beads backend");
+    adv.add_comment(
+        &fixture.task_issue_id,
+        &crate::plan::audit_sentinel::encode_comment(&AuditSentinelKind::WorkerStarted {
+            delegation_id: "del-unsupported".into(),
+            worker_branch: worker_branch.into(),
+            worker_session_id: "worker-session-unsupported".into(),
+            dispatched_base_oid: base_oid.clone(),
+        }),
+    )
+    .await
+    .expect("worker started audit");
+
+    let mut server = recovery_server(
+        dir.path(),
+        Arc::clone(&fixture.pm),
+        Arc::clone(&fixture.feature_gate),
+    );
+    server.set_dispatch_orphan_resume_hook(recording_resume_hook(
+        Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        crate::server::DispatchOrphanResumeOutcome::Unsupported,
+    ));
+
+    let msg = server
+        .recover_orphaned_dispatch_with_branch(&fixture.task_issue_id, worker_branch, &base_oid)
+        .await
+        .expect("unsupported resume should fall back to branch promotion");
+
+    assert!(msg.contains("Task promoted to AwaitingReview"));
 }
 
 #[tokio::test(flavor = "current_thread")]

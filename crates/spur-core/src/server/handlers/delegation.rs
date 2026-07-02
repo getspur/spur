@@ -250,6 +250,13 @@ impl McpCallbackServer {
             ));
         }
 
+        if let Some(message) = self
+            .try_resume_orphaned_dispatch(issue_id, &delegation_id, &audits)
+            .await
+        {
+            return Ok(message);
+        }
+
         let tip_oid = resolve_worker_branch_tip_oid(repo_root, worker_branch).await?;
         let commit_count = count_commits_between(repo_root, dispatched_base_oid, &tip_oid)
             .await
@@ -319,5 +326,46 @@ impl McpCallbackServer {
         }
 
         Ok("Task promoted to AwaitingReview. Call review_task to approve or reject.".to_string())
+    }
+
+    async fn try_resume_orphaned_dispatch(
+        &self,
+        issue_id: &str,
+        delegation_id: &str,
+        audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+    ) -> Option<String> {
+        let hook = self.dispatch_orphan_resume_hook.as_ref()?.clone();
+        let request = dispatch_orphan_resume_request_from_audits(issue_id, delegation_id, audits)?;
+
+        match hook(request).await {
+            DispatchOrphanResumeOutcome::Resumed => {
+                tracing::info!(
+                    issue_id = %issue_id,
+                    delegation_id = %delegation_id,
+                    "recover_orphaned_dispatch: resumed live worker session"
+                );
+                Some(
+                    "Worker session resumed. Wait for the live worker completion before retrying recovery."
+                        .to_string(),
+                )
+            }
+            DispatchOrphanResumeOutcome::Unsupported => {
+                tracing::debug!(
+                    issue_id = %issue_id,
+                    delegation_id = %delegation_id,
+                    "recover_orphaned_dispatch: session resume unsupported; falling back to state compensation"
+                );
+                None
+            }
+            DispatchOrphanResumeOutcome::Failed(error) => {
+                tracing::warn!(
+                    issue_id = %issue_id,
+                    delegation_id = %delegation_id,
+                    %error,
+                    "recover_orphaned_dispatch: session resume failed; falling back to state compensation"
+                );
+                None
+            }
+        }
     }
 }
