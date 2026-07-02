@@ -261,10 +261,11 @@ impl McpCallbackServer {
                         issue_id,
                     )
                     .await?;
-                    let _ = resolve_dispatch_orphan(
+                    let _ = resolve_dispatch_orphan_with_resume(
                         Arc::clone(&pm),
                         Arc::clone(&self.feature_gate),
                         issue_id,
+                        self.dispatch_orphan_resume_hook.clone(),
                     )
                     .await?;
                 }
