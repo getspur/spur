@@ -3983,31 +3983,14 @@ fn sql_string_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-#[cfg(feature = "embed")]
-fn fastembed_cache_dir() -> Option<PathBuf> {
-    // Check XDG_CACHE_HOME first (Linux/Unix)
-    if let Ok(xdg_cache) = std::env::var("XDG_CACHE_HOME") {
+pub fn fastembed_cache_dir() -> Option<PathBuf> {
+    if let Some(xdg_cache) = std::env::var_os("XDG_CACHE_HOME") {
         return Some(PathBuf::from(xdg_cache).join("spur").join("fastembed"));
     }
 
-    // Fall back to HOME directory
-    if let Ok(home) = std::env::var("HOME") {
-        let home_path = PathBuf::from(home);
-
-        // Use platform-specific cache directories
-        #[cfg(target_os = "macos")]
-        {
-            return Some(home_path.join("Library/Caches/spur/fastembed"));
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            return Some(home_path.join(".cache/spur/fastembed"));
-        }
-    }
-
-    // If we can't determine a cache directory, return None to use fastembed's default
-    None
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".spur").join("cache").join("fastembed"))
 }
 
 #[cfg(test)]
@@ -4801,6 +4784,52 @@ mod tests {
             EMBEDDING_GEMMA_EMBED_TEXT_VERSION,
             "v4-embeddinggemma-300m-titled"
         );
+    }
+
+    #[test]
+    fn fastembed_cache_dir_prefers_xdg_cache_home() {
+        let actual = {
+            let _guard = env_lock();
+            let _xdg = EnvGuard::set("XDG_CACHE_HOME", "/tmp/spur-xdg-cache");
+            let _home = EnvGuard::set("HOME", "/tmp/spur-home");
+            fastembed_cache_dir()
+        };
+
+        assert_eq!(
+            actual,
+            Some(std::path::PathBuf::from(
+                "/tmp/spur-xdg-cache/spur/fastembed"
+            ))
+        );
+    }
+
+    #[test]
+    fn fastembed_cache_dir_falls_back_to_user_spur_cache() {
+        let actual = {
+            let _guard = env_lock();
+            let _xdg = EnvGuard::remove("XDG_CACHE_HOME");
+            let _home = EnvGuard::set("HOME", "/tmp/spur-home");
+            fastembed_cache_dir()
+        };
+
+        assert_eq!(
+            actual,
+            Some(std::path::PathBuf::from(
+                "/tmp/spur-home/.spur/cache/fastembed"
+            ))
+        );
+    }
+
+    #[test]
+    fn fastembed_cache_dir_returns_none_without_cache_or_home() {
+        let actual = {
+            let _guard = env_lock();
+            let _xdg = EnvGuard::remove("XDG_CACHE_HOME");
+            let _home = EnvGuard::remove("HOME");
+            fastembed_cache_dir()
+        };
+
+        assert_eq!(actual, None);
     }
 
     #[test]
