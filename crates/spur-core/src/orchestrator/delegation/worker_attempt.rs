@@ -683,6 +683,7 @@ pub(crate) async fn run_one_worker_attempt(
         }
     }
 
+    delete_worker_session_best_effort(&mut *connection, &worker_session).await;
     let _ = connection.shutdown().await;
 
     // 4. Collect diff. `basis` is either "HEAD" (uncommitted) or
@@ -874,6 +875,32 @@ pub(crate) async fn run_one_worker_attempt(
     })
 }
 
+async fn delete_worker_session_best_effort(
+    connection: &mut dyn AgentConnection,
+    worker_session: &SessionId,
+) {
+    match connection
+        .delete_session(spur_acp::DeleteSessionRequest::new(
+            worker_session.0.clone(),
+        ))
+        .await
+    {
+        Ok(_) => tracing::debug!(
+            session = %worker_session,
+            "deleted worker ACP session during delegation teardown"
+        ),
+        Err(spur_acp::AcpError::CapabilityMissing(_)) => tracing::debug!(
+            session = %worker_session,
+            "worker ACP session delete unsupported during delegation teardown"
+        ),
+        Err(error) => tracing::warn!(
+            session = %worker_session,
+            %error,
+            "worker ACP session delete failed during delegation teardown"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod format_worker_task_tests {
     use super::format_worker_task;
@@ -933,6 +960,112 @@ mod context_files_wiring_tests {
     fn format_worker_task_is_available_in_orchestrator_module() {
         let out = format_worker_task("t", &["x".into()]);
         assert!(out.contains("## Relevant Files"));
+    }
+}
+
+#[cfg(test)]
+mod delete_worker_session_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    struct DeleteRecordingConnection {
+        deleted_sessions: Arc<Mutex<Vec<String>>>,
+        fail_delete: bool,
+    }
+
+    #[async_trait]
+    impl AgentConnection for DeleteRecordingConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            panic!("DeleteRecordingConnection::initialize must not be called")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            panic!("DeleteRecordingConnection::new_session must not be called")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn delete_session(
+            &mut self,
+            request: spur_acp::DeleteSessionRequest,
+        ) -> Result<spur_acp::DeleteSessionResponse, spur_acp::AcpError> {
+            self.deleted_sessions
+                .lock()
+                .expect("delete recorder poisoned")
+                .push(request.session_id.to_string());
+            if self.fail_delete {
+                return Err(spur_acp::AcpError::CapabilityMissing("session/delete"));
+            }
+            Ok(spur_acp::DeleteSessionResponse::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_worker_session_best_effort_calls_connection_delete() {
+        let deleted_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = DeleteRecordingConnection {
+            deleted_sessions: Arc::clone(&deleted_sessions),
+            fail_delete: false,
+        };
+
+        delete_worker_session_best_effort(
+            &mut connection,
+            &SessionId("worker-session".to_string()),
+        )
+        .await;
+
+        assert_eq!(
+            *deleted_sessions.lock().expect("delete recorder poisoned"),
+            vec!["worker-session".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_worker_session_best_effort_swallows_delete_errors() {
+        let deleted_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = DeleteRecordingConnection {
+            deleted_sessions: Arc::clone(&deleted_sessions),
+            fail_delete: true,
+        };
+
+        delete_worker_session_best_effort(
+            &mut connection,
+            &SessionId("worker-session".to_string()),
+        )
+        .await;
+
+        assert_eq!(
+            *deleted_sessions.lock().expect("delete recorder poisoned"),
+            vec!["worker-session".to_string()]
+        );
     }
 }
 

@@ -588,3 +588,106 @@ pub async fn resolve_dispatch_orphan(
     crate::plan::clear_dispatch_intent(pm.as_ref(), task_id, &delegation_id).await?;
     Ok(true)
 }
+
+async fn try_resume_dispatch_orphan(
+    pm: Arc<spur_pm::PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
+    task_id: &str,
+    resume_hook: DispatchOrphanResumeHook,
+) -> anyhow::Result<bool> {
+    let issue = pm.get_issue(task_id).await?;
+    if issue.status != "open" {
+        return Ok(false);
+    }
+    let delegation_label = issue.labels.iter().find_map(|label| {
+        crate::plan::labels::parse_delegation_id(label)
+            .or_else(|| label.strip_prefix("delegation-id:"))
+    });
+    let has_ready_label = crate::plan::projector::has_ready_for_review_label_compat(&issue.labels);
+    if delegation_label.is_none() && !has_ready_label {
+        return Ok(false);
+    }
+
+    require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED, feature_gate.as_ref())
+        .map_err(|error| anyhow::anyhow!(feature_error_message(error)))?;
+    let adv = pm
+        .advanced()
+        .ok_or_else(|| anyhow::anyhow!("dispatch recovery requires beads backend"))?;
+    let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+        task_id,
+        adv.list_comments(task_id).await?,
+    )?;
+    let delegation_id = match (
+        crate::plan::projector::current_delegation_from_audits(&audits),
+        delegation_label,
+    ) {
+        (Some(audit_id), Some(label_id)) if audit_id == label_id => audit_id,
+        (Some(audit_id), Some(_)) | (Some(audit_id), None) => audit_id,
+        (None, Some(_)) | (None, None) => return Ok(false),
+    };
+    if crate::plan::projector::awaiting_review_from_audits(&audits) {
+        return Ok(false);
+    }
+    if audits.iter().any(|audit| matches!(
+        audit,
+        crate::plan::audit_sentinel::AuditSentinelKind::Completion { delegation_id: did, .. } if did == &delegation_id
+    )) {
+        return Ok(false);
+    }
+
+    let Some(request) =
+        dispatch_orphan_resume_request_from_audits(task_id, &delegation_id, &audits)
+    else {
+        return Ok(false);
+    };
+    match resume_hook(request).await {
+        DispatchOrphanResumeOutcome::Resumed => {
+            tracing::info!(
+                task_id = %task_id,
+                delegation_id = %delegation_id,
+                "startup recovery: resumed live worker session for dispatch orphan"
+            );
+            Ok(true)
+        }
+        DispatchOrphanResumeOutcome::Unsupported => {
+            tracing::debug!(
+                task_id = %task_id,
+                delegation_id = %delegation_id,
+                "startup recovery: session resume unsupported; falling back to dispatch orphan compensation"
+            );
+            Ok(false)
+        }
+        DispatchOrphanResumeOutcome::Failed(error) => {
+            tracing::warn!(
+                task_id = %task_id,
+                delegation_id = %delegation_id,
+                %error,
+                "startup recovery: session resume failed; falling back to dispatch orphan compensation"
+            );
+            Ok(false)
+        }
+    }
+}
+
+#[doc(hidden)]
+pub(crate) async fn resolve_dispatch_orphan_with_resume(
+    pm: Arc<spur_pm::PmService>,
+    feature_gate: Arc<spur_license::FeatureGate>,
+    task_id: &str,
+    resume_hook: Option<DispatchOrphanResumeHook>,
+) -> anyhow::Result<bool> {
+    if let Some(resume_hook) = resume_hook {
+        if try_resume_dispatch_orphan(
+            Arc::clone(&pm),
+            Arc::clone(&feature_gate),
+            task_id,
+            resume_hook,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+    }
+
+    resolve_dispatch_orphan(pm, feature_gate, task_id).await
+}
