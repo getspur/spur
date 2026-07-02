@@ -215,6 +215,7 @@ mod plan_truncate_and_restart_tests {
                                 result_summary: summary.clone(),
                                 artifact_uri: None,
                                 dispatched_base_oid: entry.dispatched_base_oid.clone(),
+                                estimated_cost_micros: None,
                             },
                         ),
                     )

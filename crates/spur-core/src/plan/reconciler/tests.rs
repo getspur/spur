@@ -1687,6 +1687,7 @@ async fn seed_ready_overlay_plan(
                 worker_branch: Some(worker_branch.to_string()),
                 result_summary: Some(format!("approved dep {task_id}")),
                 dispatched_base_oid: Some(base_oid.clone()),
+                estimated_cost_micros: None,
                 ..Default::default()
             },
         )
