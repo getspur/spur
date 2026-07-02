@@ -577,103 +577,113 @@ pub(crate) async fn run_one_worker_attempt(
         },
     )
     .await;
-    if let Err(e) = prompt_result {
-        worker_success = false;
-        output_text = format!("Failed to prompt worker: {e}");
-    } else if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
-        use crate::peer_mailbox::{
-            transition_with_audit, PeerTransitionKind, TransitionAuditOutcome,
-        };
-        use spur_acp::domain::peer_message::LedgerState;
+    let prompt_usage = match prompt_result {
+        Ok(outcome) => Some(outcome.usage),
+        Err(e) => {
+            worker_success = false;
+            output_text = format!("Failed to prompt worker: {e}");
+            None
+        }
+    }
+    .flatten();
 
-        let target_delegation_id =
-            spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
+    if worker_success {
+        if let (Some(bundle), Some(pc)) = (ctx.peer_mailbox, peer_context) {
+            use crate::peer_mailbox::{
+                transition_with_audit, PeerTransitionKind, TransitionAuditOutcome,
+            };
+            use spur_acp::domain::peer_message::LedgerState;
 
-        for inj in pc.injection_records {
-            match transition_with_audit(
-                bundle.ledger.as_ref(),
-                funnel,
-                ctx.brain_session_id,
-                &target_delegation_id,
-                inj.message_id,
-                LedgerState::DeliveredInflight,
-                PeerTransitionKind::DeliveredInflight,
-            )
-            .await
-            {
-                TransitionAuditOutcome::Changed => {}
-                TransitionAuditOutcome::Unchanged(state) => {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?state,
-                        "peer mailbox: delivered-inflight transition no-op"
-                    );
-                }
-                TransitionAuditOutcome::TerminalSkip(state) => {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?state,
-                        "post-prompt DeliveredInflight transition skipped: message already terminal"
-                    );
-                    continue;
-                }
-                TransitionAuditOutcome::AuditFailed(err) => {
-                    tracing::warn!(
-                        message_id = ?inj.message_id,
-                        %err,
-                        "peer mailbox: delivered-inflight transition failed"
-                    );
-                }
-            }
+            let target_delegation_id =
+                spur_acp::domain::delegation::DelegationId(ctx.request_id.to_string());
 
-            match transition_with_audit(
-                bundle.ledger.as_ref(),
-                funnel,
-                ctx.brain_session_id,
-                &target_delegation_id,
-                inj.message_id,
-                LedgerState::Delivered,
-                PeerTransitionKind::Delivered,
-            )
-            .await
-            {
-                TransitionAuditOutcome::Changed => {
-                    funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDelivered {
-                        brain_session_id: ctx.brain_session_id.to_string(),
-                        message_id: inj.message_id,
-                        target_delegation_id: target_delegation_id.clone(),
-                        target_prompt_id: pc.target_prompt_id.clone(),
-                        injected_chars: inj.injected_bytes,
-                    });
-                    // TODO(peer-mailbox): Task 14 startup reconciliation is
-                    // the durable peer-mailbox audit path.
+            for inj in pc.injection_records {
+                match transition_with_audit(
+                    bundle.ledger.as_ref(),
+                    funnel,
+                    ctx.brain_session_id,
+                    &target_delegation_id,
+                    inj.message_id,
+                    LedgerState::DeliveredInflight,
+                    PeerTransitionKind::DeliveredInflight,
+                )
+                .await
+                {
+                    TransitionAuditOutcome::Changed => {}
+                    TransitionAuditOutcome::Unchanged(state) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            state = ?state,
+                            "peer mailbox: delivered-inflight transition no-op"
+                        );
+                    }
+                    TransitionAuditOutcome::TerminalSkip(state) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            state = ?state,
+                            "post-prompt DeliveredInflight transition skipped: message already terminal"
+                        );
+                        continue;
+                    }
+                    TransitionAuditOutcome::AuditFailed(err) => {
+                        tracing::warn!(
+                            message_id = ?inj.message_id,
+                            %err,
+                            "peer mailbox: delivered-inflight transition failed"
+                        );
+                    }
                 }
-                TransitionAuditOutcome::Unchanged(state) => {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?state,
-                        "peer mailbox: delivered transition no-op"
-                    );
-                }
-                TransitionAuditOutcome::TerminalSkip(state) => {
-                    tracing::debug!(
-                        message_id = ?inj.message_id,
-                        state = ?state,
-                        "post-prompt Delivered transition skipped: message already terminal"
-                    );
-                    continue;
-                }
-                TransitionAuditOutcome::AuditFailed(err) => {
-                    tracing::warn!(
-                        message_id = ?inj.message_id,
-                        %err,
-                        "peer mailbox: delivered transition failed"
-                    );
+
+                match transition_with_audit(
+                    bundle.ledger.as_ref(),
+                    funnel,
+                    ctx.brain_session_id,
+                    &target_delegation_id,
+                    inj.message_id,
+                    LedgerState::Delivered,
+                    PeerTransitionKind::Delivered,
+                )
+                .await
+                {
+                    TransitionAuditOutcome::Changed => {
+                        funnel.emit(spur_acp::SpurEventBody::WorkerPeerMessageDelivered {
+                            brain_session_id: ctx.brain_session_id.to_string(),
+                            message_id: inj.message_id,
+                            target_delegation_id: target_delegation_id.clone(),
+                            target_prompt_id: pc.target_prompt_id.clone(),
+                            injected_chars: inj.injected_bytes,
+                        });
+                        // TODO(peer-mailbox): Task 14 startup reconciliation is
+                        // the durable peer-mailbox audit path.
+                    }
+                    TransitionAuditOutcome::Unchanged(state) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            state = ?state,
+                            "peer mailbox: delivered transition no-op"
+                        );
+                    }
+                    TransitionAuditOutcome::TerminalSkip(state) => {
+                        tracing::debug!(
+                            message_id = ?inj.message_id,
+                            state = ?state,
+                            "post-prompt Delivered transition skipped: message already terminal"
+                        );
+                        continue;
+                    }
+                    TransitionAuditOutcome::AuditFailed(err) => {
+                        tracing::warn!(
+                            message_id = ?inj.message_id,
+                            %err,
+                            "peer mailbox: delivered transition failed"
+                        );
+                    }
                 }
             }
         }
     }
 
+    delete_worker_session_best_effort(&mut *connection, &worker_session).await;
     let _ = connection.shutdown().await;
 
     // 4. Collect diff. `basis` is either "HEAD" (uncommitted) or
@@ -716,7 +726,12 @@ pub(crate) async fn run_one_worker_attempt(
     };
 
     let duration = start.elapsed();
-    let cost = spur_cost::estimator::estimate_cost(ctx.agent_config.cost_tier, duration);
+    let cost = estimate_prompt_cost(
+        ctx.agent_config.cost_tier,
+        duration,
+        prompt_usage.as_ref(),
+        Some(ctx.agent_config.name.as_str()),
+    );
 
     // Attempt side-channel artifact persistence BEFORE building the
     // truncated summary. Only fires when output would otherwise lose
@@ -860,6 +875,32 @@ pub(crate) async fn run_one_worker_attempt(
     })
 }
 
+async fn delete_worker_session_best_effort(
+    connection: &mut dyn AgentConnection,
+    worker_session: &SessionId,
+) {
+    match connection
+        .delete_session(spur_acp::DeleteSessionRequest::new(
+            worker_session.0.clone(),
+        ))
+        .await
+    {
+        Ok(_) => tracing::debug!(
+            session = %worker_session,
+            "deleted worker ACP session during delegation teardown"
+        ),
+        Err(spur_acp::AcpError::CapabilityMissing(_)) => tracing::debug!(
+            session = %worker_session,
+            "worker ACP session delete unsupported during delegation teardown"
+        ),
+        Err(error) => tracing::warn!(
+            session = %worker_session,
+            %error,
+            "worker ACP session delete failed during delegation teardown"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod format_worker_task_tests {
     use super::format_worker_task;
@@ -919,6 +960,112 @@ mod context_files_wiring_tests {
     fn format_worker_task_is_available_in_orchestrator_module() {
         let out = format_worker_task("t", &["x".into()]);
         assert!(out.contains("## Relevant Files"));
+    }
+}
+
+#[cfg(test)]
+mod delete_worker_session_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    struct DeleteRecordingConnection {
+        deleted_sessions: Arc<Mutex<Vec<String>>>,
+        fail_delete: bool,
+    }
+
+    #[async_trait]
+    impl AgentConnection for DeleteRecordingConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            panic!("DeleteRecordingConnection::initialize must not be called")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            panic!("DeleteRecordingConnection::new_session must not be called")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn delete_session(
+            &mut self,
+            request: spur_acp::DeleteSessionRequest,
+        ) -> Result<spur_acp::DeleteSessionResponse, spur_acp::AcpError> {
+            self.deleted_sessions
+                .lock()
+                .expect("delete recorder poisoned")
+                .push(request.session_id.to_string());
+            if self.fail_delete {
+                return Err(spur_acp::AcpError::CapabilityMissing("session/delete"));
+            }
+            Ok(spur_acp::DeleteSessionResponse::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_worker_session_best_effort_calls_connection_delete() {
+        let deleted_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = DeleteRecordingConnection {
+            deleted_sessions: Arc::clone(&deleted_sessions),
+            fail_delete: false,
+        };
+
+        delete_worker_session_best_effort(
+            &mut connection,
+            &SessionId("worker-session".to_string()),
+        )
+        .await;
+
+        assert_eq!(
+            *deleted_sessions.lock().expect("delete recorder poisoned"),
+            vec!["worker-session".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_worker_session_best_effort_swallows_delete_errors() {
+        let deleted_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = DeleteRecordingConnection {
+            deleted_sessions: Arc::clone(&deleted_sessions),
+            fail_delete: true,
+        };
+
+        delete_worker_session_best_effort(
+            &mut connection,
+            &SessionId("worker-session".to_string()),
+        )
+        .await;
+
+        assert_eq!(
+            *deleted_sessions.lock().expect("delete recorder poisoned"),
+            vec!["worker-session".to_string()]
+        );
     }
 }
 

@@ -252,6 +252,64 @@ mod session_attach_guard_transfer_tests {
         }
     }
 
+    struct RecordingResumeConnection {
+        resumed_sessions: Arc<Mutex<Vec<(String, PathBuf)>>>,
+        supports_resume: bool,
+    }
+
+    #[async_trait]
+    impl AgentConnection for RecordingResumeConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            panic!("RecordingResumeConnection::initialize must not be called")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            panic!("RecordingResumeConnection::new_session must not be called")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn resume_session(
+            &mut self,
+            request: spur_acp::ResumeSessionRequest,
+        ) -> Result<spur_acp::ResumeSessionResponse, spur_acp::AcpError> {
+            self.resumed_sessions
+                .lock()
+                .expect("resume recorder poisoned")
+                .push((request.session_id.to_string(), request.cwd.clone()));
+            if self.supports_resume {
+                Ok(spur_acp::ResumeSessionResponse::new())
+            } else {
+                Err(spur_acp::AcpError::CapabilityMissing("session/resume"))
+            }
+        }
+    }
+
     #[tokio::test]
     async fn retire_session_cost_write_times_out_without_returning_resource() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -516,6 +574,61 @@ mod session_attach_guard_transfer_tests {
 
         let mut active = active.expect("retired brain should still cache active connection");
         active.transport.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_orphaned_dispatch_session_calls_connection_resume() {
+        let resumed_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = RecordingResumeConnection {
+            resumed_sessions: Arc::clone(&resumed_sessions),
+            supports_resume: true,
+        };
+        let cfg = spur_acp::AgentConfig::with_defaults("codex");
+        let cwd = PathBuf::from("/tmp/spur-worker-resume");
+
+        let outcome = resume_orphaned_dispatch_session(
+            &mut connection,
+            &cfg,
+            "worker-acp-session",
+            cwd.clone(),
+        )
+        .await;
+
+        assert_eq!(outcome, crate::server::DispatchOrphanResumeOutcome::Resumed);
+        assert_eq!(
+            *resumed_sessions.lock().expect("resume recorder poisoned"),
+            vec![("worker-acp-session".to_string(), cwd)]
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_orphaned_dispatch_session_treats_capability_missing_as_unsupported() {
+        let resumed_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = RecordingResumeConnection {
+            resumed_sessions: Arc::clone(&resumed_sessions),
+            supports_resume: false,
+        };
+        let cfg = spur_acp::AgentConfig::with_defaults("codex");
+
+        let outcome = resume_orphaned_dispatch_session(
+            &mut connection,
+            &cfg,
+            "worker-acp-session",
+            PathBuf::from("/tmp/spur-worker-resume"),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            crate::server::DispatchOrphanResumeOutcome::Unsupported
+        );
+        assert_eq!(
+            resumed_sessions
+                .lock()
+                .expect("resume recorder poisoned")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1351,7 +1464,82 @@ pub(super) async fn retire_brain_session<S: RetirableMcpServer + ?Sized>(
     scheduler.note_session_swap(new_active, overflow);
 }
 
+pub(super) async fn resume_orphaned_dispatch_session(
+    conn: &mut dyn AgentConnection,
+    cfg: &spur_acp::config::AgentConfig,
+    acp_session_id: &str,
+    cwd: PathBuf,
+) -> crate::server::DispatchOrphanResumeOutcome {
+    match crate::skip_perm::resume_session_with_bypass(conn, cfg, acp_session_id.to_string(), cwd)
+        .await
+    {
+        Ok(_) => crate::server::DispatchOrphanResumeOutcome::Resumed,
+        Err(spur_acp::AcpError::CapabilityMissing(_)) => {
+            crate::server::DispatchOrphanResumeOutcome::Unsupported
+        }
+        Err(error) => crate::server::DispatchOrphanResumeOutcome::Failed(error.to_string()),
+    }
+}
+
+async fn resume_orphaned_dispatch_session_from_configs(
+    agent_configs: Vec<spur_acp::config::AgentConfig>,
+    repo_root: PathBuf,
+    request: crate::server::DispatchOrphanResumeRequest,
+) -> crate::server::DispatchOrphanResumeOutcome {
+    let Some(cfg) = agent_configs
+        .into_iter()
+        .find(|cfg| cfg.name == request.worker)
+    else {
+        return crate::server::DispatchOrphanResumeOutcome::Failed(format!(
+            "worker agent '{}' not found in registry",
+            request.worker
+        ));
+    };
+
+    let spawn_args = cfg.effective_args();
+    let mut connection =
+        super::connection::build_connection_from_transport(&cfg, spawn_args, None, &repo_root);
+
+    let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
+    if let Err(error) = connection.initialize(init_request).await {
+        return crate::server::DispatchOrphanResumeOutcome::Failed(format!(
+            "initialize worker agent '{}': {error:#}",
+            cfg.name
+        ));
+    }
+
+    let outcome = resume_orphaned_dispatch_session(
+        &mut *connection,
+        &cfg,
+        &request.worker_session_id,
+        repo_root,
+    )
+    .await;
+    if let Err(error) = connection.shutdown().await {
+        tracing::debug!(
+            worker = %request.worker,
+            worker_session_id = %request.worker_session_id,
+            %error,
+            "recover_orphaned_dispatch: worker resume connection shutdown failed"
+        );
+    }
+    outcome
+}
+
 impl Orchestrator {
+    fn dispatch_orphan_resume_hook(&self) -> crate::server::DispatchOrphanResumeHook {
+        let agent_configs = self.config.agents.entries.clone();
+        let repo_root = self.repo_root.clone();
+        Arc::new(move |request| {
+            let agent_configs = agent_configs.clone();
+            let repo_root = repo_root.clone();
+            Box::pin(async move {
+                resume_orphaned_dispatch_session_from_configs(agent_configs, repo_root, request)
+                    .await
+            })
+        })
+    }
+
     /// Retire the currently-active brain session's ephemeral state
     /// (delegation handler task, MCP server) while preserving the
     /// initialized ACP connection in `agent_connection` for reuse by the
@@ -1671,6 +1859,7 @@ impl Orchestrator {
             .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
+        mcp_server.set_dispatch_orphan_resume_hook(self.dispatch_orphan_resume_hook());
         // INV-6: wire the cancellation side-channel.
         mcp_server.set_cancellation_control(self.cancellation_control.clone());
         // Phase 1c: async-first dispatch window.
@@ -1977,6 +2166,7 @@ impl Orchestrator {
             .map(build_worker_info)
             .collect();
         mcp_server.set_workers(workers);
+        mcp_server.set_dispatch_orphan_resume_hook(self.dispatch_orphan_resume_hook());
         // INV-6: wire the cancellation side-channel.
         mcp_server.set_cancellation_control(self.cancellation_control.clone());
         // Phase 1c: async-first dispatch window.
