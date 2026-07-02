@@ -4,6 +4,11 @@
 //! `handle_get_plan_status` historically produced — via a mock
 //! `PlanResolver` so the test does not depend on `McpCallbackServer`.
 
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
+
 use std::sync::Arc;
 use std::time::Duration;
 

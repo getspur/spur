@@ -1,4 +1,8 @@
 #![cfg(madsim)]
+// The `Send` proof for spawned server futures traverses deep dependency
+// type chains (lance_io/moka/portable_atomic) inside spur-context; the
+// chain exceeds the default trait-solver recursion limit (E0275).
+#![recursion_limit = "256"]
 
 extern crate madsim_tokio as tokio;
 
