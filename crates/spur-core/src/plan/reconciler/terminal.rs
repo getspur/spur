@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::plan::audit_sentinel::AuditSentinelKind;
 use crate::plan::outcomes::SkipReason;
@@ -15,6 +16,12 @@ fn child_summary_may_have_terminal_projection(
     closed_status: &str,
 ) -> bool {
     child.status == closed_status || matches!(child.status.as_str(), "failed" | "cancelled")
+}
+
+fn system_time_to_unix_seconds(now: SystemTime) -> i64 {
+    now.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +113,118 @@ pub(super) fn build_auto_pr_params(
 }
 
 impl super::Reconciler {
+    async fn maybe_emit_loop_run_record(
+        &self,
+        adv: &dyn spur_pm::BeadsAdvanced,
+        epic: &spur_pm::IssueSummary,
+        plan_id: &str,
+        children: &[spur_pm::IssueSummary],
+        outcome: ProjectedEpicCompletion,
+    ) -> anyhow::Result<bool> {
+        let Some(loop_id) = epic
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_loop_id(label))
+            .map(str::to_string)
+        else {
+            return Ok(false);
+        };
+        let Some(generation) = epic
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_loop_generation(label))
+        else {
+            tracing::warn!(
+                %plan_id,
+                epic_id = %epic.id,
+                %loop_id,
+                "loop-labeled terminal epic is missing loop generation label; skipping loop-run audit"
+            );
+            return Ok(false);
+        };
+
+        let loop_issues = self
+            .pm
+            .list_issues(IssueFilter {
+                labels: vec![crate::plan::labels::loop_id_label(&loop_id)],
+                issue_type: Some("task".into()),
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await?;
+        let Some(loop_issue) = loop_issues.first() else {
+            tracing::warn!(
+                %plan_id,
+                epic_id = %epic.id,
+                %loop_id,
+                generation,
+                "loop-labeled terminal epic has no matching loop issue; skipping loop-run audit"
+            );
+            return Ok(false);
+        };
+        if loop_issues.len() > 1 {
+            tracing::warn!(
+                %plan_id,
+                epic_id = %epic.id,
+                %loop_id,
+                generation,
+                "multiple loop issues carry the same loop id; using first match for loop-run audit"
+            );
+        }
+
+        let loop_audits = crate::plan::projector::collect_sorted_audits_for_issue(
+            &loop_issue.id,
+            adv.list_comments(&loop_issue.id).await?,
+        )?;
+        if loop_audits.iter().any(|audit| {
+            matches!(
+                audit,
+                AuditSentinelKind::LoopRun {
+                    loop_id: audit_loop_id,
+                    generation: audit_generation,
+                    ..
+                } if audit_loop_id == &loop_id && *audit_generation == generation
+            )
+        }) {
+            return Ok(false);
+        }
+
+        let mut child_audits = Vec::new();
+        for child in children {
+            child_audits.extend(crate::plan::projector::collect_sorted_audits_for_issue(
+                &child.id,
+                adv.list_comments(&child.id).await?,
+            )?);
+        }
+
+        let terminal_counts = crate::plan::loops::run_record::LoopRunOutcome {
+            tasks_discovered: outcome
+                .approved_count
+                .saturating_add(outcome.rejected_count)
+                .saturating_add(outcome.failed_count)
+                .saturating_add(outcome.cancelled_count),
+            approved: outcome.approved_count,
+            rejected: outcome.rejected_count,
+            failed: outcome.failed_count,
+            cancelled: outcome.cancelled_count,
+        };
+        let now = system_time_to_unix_seconds(self.now());
+        let run = crate::plan::loops::run_record::build_loop_run(
+            &loop_id,
+            generation,
+            plan_id,
+            terminal_counts,
+            &child_audits,
+            now,
+        );
+        adv.add_comment(
+            &loop_issue.id,
+            &crate::plan::audit_sentinel::encode_comment(&run),
+        )
+        .await?;
+        Ok(true)
+    }
+
     pub(super) async fn reconcile_terminal_epics(&self) -> anyhow::Result<bool> {
         crate::server::require_feature(
             spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
@@ -358,6 +477,12 @@ impl super::Reconciler {
                     }
                     did_work = true;
                 }
+                if self
+                    .maybe_emit_loop_run_record(adv, &epic, plan_id, &children, outcome)
+                    .await?
+                {
+                    did_work = true;
+                }
 
                 // v0e: opt-in auto-merge / auto-PR on durable all-approved state.
                 if self.auto_merge_approved_plans
@@ -502,6 +627,8 @@ impl super::Reconciler {
                     .await;
                 }
             }
+            self.maybe_emit_loop_run_record(adv, &epic, plan_id, &children, outcome)
+                .await?;
             if outcome.add_integration_pending {
                 if let Some(sink) = self
                     .dispatch
