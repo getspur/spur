@@ -2,12 +2,13 @@ use std::fs;
 
 use arrow_array::{Array as _, LargeStringArray, StringArray, UInt32Array};
 use futures::TryStreamExt as _;
+use lance_index::scalar::FullTextSearchQuery;
 use lancedb::index::IndexType;
 use lancedb::query::{ExecutableQuery as _, QueryBase as _, Select};
 use spur_graph::store::lance_sections::{
     write_sections_dataset, write_sections_dataset_best_effort_with_options,
-    SectionEmbeddingOptions, CODE_SYMBOLS_DATASET_DIR, CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR,
-    SECTIONS_TABLE,
+    write_sections_dataset_skipping_embeddings, SectionEmbeddingOptions, CODE_SYMBOLS_DATASET_DIR,
+    CODE_SYMBOLS_TABLE, SECTIONS_DATASET_DIR, SECTIONS_TABLE,
 };
 use spur_graph::{
     artifact_from_facts, build_facts, GraphFileArtifact, GraphFileManifestEntry,
@@ -154,6 +155,65 @@ async fn lance_sections_skip_section_embeddings_writes_null_vectors() {
             .expect("count vector rows"),
         0
     );
+}
+
+#[tokio::test]
+async fn lance_sections_skipping_embeddings_api_writes_null_vectors_and_fts_hits() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("repo");
+    fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+    fs::write(
+        root.join("docs/guide.md"),
+        "# Guide\n\n## Install\n\nInstall body with overlayneedle.\n",
+    )
+    .expect("write guide");
+
+    let facts = build_facts(&root, None).expect("build facts").0;
+    let artifact = artifact_from_facts(&facts, &root).expect("artifact");
+    let out_dir = tempdir.path().join("artifact");
+
+    write_sections_dataset_skipping_embeddings(&artifact, &root, &out_dir)
+        .expect("write sections sidecar");
+
+    let db = lancedb::connect(
+        out_dir
+            .join(SECTIONS_DATASET_DIR)
+            .to_str()
+            .expect("dataset path"),
+    )
+    .execute()
+    .await
+    .expect("connect lancedb");
+    let table = db
+        .open_table(SECTIONS_TABLE)
+        .execute()
+        .await
+        .expect("open table");
+
+    assert_eq!(
+        table
+            .count_rows(Some("vector IS NOT NULL".to_owned()))
+            .await
+            .expect("count vector rows"),
+        0
+    );
+
+    let fts = FullTextSearchQuery::new("overlayneedle".to_owned())
+        .with_column("body_text".to_owned())
+        .expect("valid FTS query");
+    let batches = table
+        .query()
+        .full_text_search(fts)
+        .select(Select::columns(&["qualified_name", "body_text"]))
+        .limit(5)
+        .execute()
+        .await
+        .expect("query body_text FTS")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect FTS rows");
+    let hit_rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+    assert!(hit_rows > 0, "body_text FTS should return at least one hit");
 }
 
 #[tokio::test]
