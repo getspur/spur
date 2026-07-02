@@ -1,20 +1,24 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use crate::plan::labels::AutonomyLevel;
 
 pub const SENTINEL_HEADER: &str = "[[spur-loop v1]]";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LoopSpec {
+    #[serde(default)]
     pub loop_id: String,
     pub goal: String,
     #[serde(default)]
     pub pattern: Option<String>,
     pub cadence_secs: u64,
     #[serde(
+        default = "default_autonomy",
         serialize_with = "serialize_autonomy",
         deserialize_with = "deserialize_autonomy"
     )]
+    #[schemars(with = "String")]
     pub autonomy: AutonomyLevel,
     pub template: serde_json::Value,
     #[serde(default)]
@@ -38,7 +42,7 @@ impl LoopSpec {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LoopGovernors {
     #[serde(default)]
     pub max_cost_micros_per_generation: Option<u64>,
@@ -52,14 +56,14 @@ pub struct LoopGovernors {
     pub consecutive_failure_backoff: Option<FailureBackoff>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FailureBackoff {
     pub k: u32,
     pub factor: u32,
     pub auto_pause_after: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LoopEscalation {
     pub after_unresolved_generations: u32,
 }
@@ -97,6 +101,10 @@ where
             &["l1", "l2", "l3"],
         )),
     }
+}
+
+fn default_autonomy() -> AutonomyLevel {
+    AutonomyLevel::L1
 }
 
 #[cfg(test)]
