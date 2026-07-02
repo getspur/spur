@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spur_acp::DelegationPlan;
 
+use crate::plan::loops::spec::LoopSpec;
 use crate::{BaseSpec, OverlayCommit};
 
 pub fn schema_value<T: JsonSchema>() -> Value {
@@ -162,6 +163,26 @@ pub struct RecoverOrphanedDispatchInput {
     pub worker_branch: String,
     /// Git OID that the dispatch started from.
     pub dispatched_base_oid: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitLoopParams {
+    pub spec: LoopSpec,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoopIdParams {
+    pub loop_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetLoopStatusParams {
+    pub loop_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_runs: Option<u32>,
 }
 
 #[cfg(test)]
