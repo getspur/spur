@@ -60,14 +60,25 @@ fn issue_summary(id: &str, title: &str) -> spur_pm::IssueSummary {
     }
 }
 
+// The legacy JSON artifact read path was removed (078f3c73e); convert the
+// JSON fixture shape into a parquet artifact the loader accepts, synthesizing
+// the #[serde(skip)] node ids the writer requires.
 fn write_graph_fixture(root: &Path, value: serde_json::Value) -> PathBuf {
-    let path = root.join("graph.json");
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&value).expect("serialize graph fixture"),
+    let mut artifact: spur_graph::GraphIndexArtifact =
+        serde_json::from_value(value).expect("graph fixture json must match artifact shape");
+    let n_files = artifact.files.len();
+    artifact.file_node_ids = (0..n_files as u64).map(spur_graph::NodeId).collect();
+    artifact.symbol_node_ids = (0..artifact.symbols.len() as u64)
+        .map(|i| spur_graph::NodeId(n_files as u64 + i))
+        .collect();
+    spur_graph::write_artifact_parquet(
+        &artifact,
+        root,
+        spur_graph::WriteOptions::default(),
+        Vec::new(),
     )
-    .expect("write graph fixture");
-    path
+    .expect("write parquet graph fixture");
+    root.to_path_buf()
 }
 
 fn seed_registry(
@@ -94,8 +105,11 @@ fn empty_at_shows_sectioned_picker() {
         .expect("write file fixture");
     }
 
+    // Keep the parquet artifact out of the workspace root so its shard files
+    // don't appear in the Files section of the picker.
+    let graph_tmp = tempfile::tempdir().expect("graph tempdir");
     let graph_path = write_graph_fixture(
-        tmp.path(),
+        graph_tmp.path(),
         serde_json::json!({
             "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [
@@ -233,8 +247,11 @@ fn typed_query_prefers_files_within_window() {
     std::fs::write(tmp.path().join("needle-notes.md"), "needle notes fixture")
         .expect("write needle file");
 
+    // Keep the parquet artifact out of the workspace root so its shard files
+    // don't appear in the Files section of the picker.
+    let graph_tmp = tempfile::tempdir().expect("graph tempdir");
     let graph_path = write_graph_fixture(
-        tmp.path(),
+        graph_tmp.path(),
         serde_json::json!({
             "header": { "graph_index_version": TEST_GRAPH_INDEX_VERSION },
             "files": [],
