@@ -1503,6 +1503,9 @@ mod tests {
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let subscriber = WarningCapture(Arc::clone(&warnings));
 
+        // Hold the crate-wide lock: a concurrent subscriber install/drop
+        // rebuilds tracing's global callsite cache and can swallow warn!s.
+        let _serialize = crate::tracing_test_lock::guard();
         let result = tracing::subscriber::with_default(subscriber, f);
         let captured = warnings.lock().unwrap().clone();
         (result, captured)

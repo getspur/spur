@@ -210,6 +210,8 @@ pub mod skip_perm;
 pub mod spur_ext_interp;
 mod submit_plan_dedup;
 pub mod tool_schemas;
+#[cfg(test)]
+pub(crate) mod tracing_test_lock;
 pub mod upgrade;
 pub mod worker_server;
 pub mod worktree_authority;
