@@ -802,6 +802,7 @@ pub struct ReconcilerConfig {
     pub label_only_dispatch_grace: Duration,
     pub repo_root: PathBuf,
     pub predispatch_preview: PreviewStrategy,
+    pub loops_enabled: bool,
     pub pause_all_loops: bool,
 }
 
@@ -815,6 +816,7 @@ impl Default for ReconcilerConfig {
             label_only_dispatch_grace: Duration::from_secs(30),
             repo_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             predispatch_preview: PreviewStrategy::Real,
+            loops_enabled: true,
             pause_all_loops: false,
         }
     }
@@ -1207,6 +1209,7 @@ impl Reconciler {
         did_work |= self
             .sweep_expired_dispatch_leases(dispatch.as_ref())
             .await?;
+        did_work |= self.run_loop_scheduler_sweep().await?;
 
         let ready = self.observe_ready_summaries().await?;
         let mut epic_labels_cache = HashMap::new();
