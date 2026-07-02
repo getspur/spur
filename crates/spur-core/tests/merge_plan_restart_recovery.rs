@@ -170,6 +170,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
             result_summary: Some("worker branch ready".into()),
             artifact_uri: None,
             dispatched_base_oid: Some(base_snapshot_oid.clone()),
+            estimated_cost_micros: None,
         }),
     )
     .await
