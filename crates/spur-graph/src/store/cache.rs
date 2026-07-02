@@ -57,6 +57,7 @@ struct BaseArtifactCache {
 #[derive(Debug, Clone)]
 pub struct BaseArtifactSeed {
     pub base: &'static str,
+    pub artifact_dir: PathBuf,
     pub artifact: Arc<GraphIndexArtifact>,
     pub indexed_commit_oid: Option<String>,
 }
@@ -307,6 +308,7 @@ fn load_pointer_artifact(
         .and_then(|pointer| pointer.indexed_commit_oid);
     Some(BaseArtifactSeed {
         base: source,
+        artifact_dir: resolved.path,
         artifact,
         indexed_commit_oid,
     })
