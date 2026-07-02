@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::ContentBlock;
+use spur_acp::ContentBlock;
 use spur_acp::SessionId;
 
 /// A user input message from the TUI.

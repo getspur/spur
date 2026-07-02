@@ -215,7 +215,7 @@ impl Orchestrator {
     /// Classify an error as an auth-required failure.
     ///
     /// The ACP spec reserves error code `-32000` with `authRequired`-shaped
-    /// data payloads for this, but in practice the agent_client_protocol
+    /// data payloads for this, but in practice the ACP SDK
     /// crate surfaces it as a stringly-typed error. Claude Code's wrapper
     /// also prints human-readable prompts. Match on substrings.
     pub(in crate::orchestrator) fn is_auth_required_error(e: &anyhow::Error) -> bool {
@@ -275,7 +275,7 @@ impl Orchestrator {
     pub fn session_config_options(
         &self,
         brain: &BrainSession,
-    ) -> Vec<agent_client_protocol::schema::SessionConfigOption> {
+    ) -> Vec<spur_acp::SessionConfigOption> {
         brain.config_options.clone()
     }
 
@@ -309,7 +309,7 @@ impl Orchestrator {
     pub fn apply_session_info_update(
         &self,
         brain: &mut BrainSession,
-        info: &agent_client_protocol::schema::SessionInfoUpdate,
+        info: &spur_acp::SessionInfoUpdate,
     ) {
         let cache = brain
             .session_info
@@ -334,7 +334,7 @@ impl Orchestrator {
     pub fn replace_session_config_options(
         &self,
         brain: &mut BrainSession,
-        opts: Vec<agent_client_protocol::schema::SessionConfigOption>,
+        opts: Vec<spur_acp::SessionConfigOption>,
     ) {
         brain.config_options = opts.clone();
         self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {

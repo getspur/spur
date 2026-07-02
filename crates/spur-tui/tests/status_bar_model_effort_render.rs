@@ -1,9 +1,7 @@
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
-    InitializeResponse, NewSessionResponse, ProtocolVersion, SessionId as AcpSessionId,
-};
+use spur_acp::{AcpSessionId, InitializeResponse, NewSessionResponse, ProtocolVersion};
 use spur_acp::{
     AgentKind, SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId,
     SpurAgentCaps, SpurEvent, SpurEventBody,

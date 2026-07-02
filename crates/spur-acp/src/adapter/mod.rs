@@ -9,7 +9,7 @@ pub mod kiro;
 pub mod mcp;
 
 use crate::types::AgentKind;
-use agent_client_protocol::schema::{SessionNotification, ToolCall, ToolKind};
+use agent_client_protocol::schema::v1::{SessionNotification, ToolCall, ToolKind};
 use serde_json::Value;
 
 /// Mirrors ACP `ToolKind` 1:1 with TUI-specific refinements.

@@ -4,7 +4,7 @@
 //!
 //! Wraps two wire facts: the agent's `AgentCapabilities` (from
 //! `InitializeResponse`) and the per-session response payload's
-//! `modes` / `models` / `config_options`. Spur derives `set_*` support
+//! `modes` / `config_options`. Spur derives `set_*` support
 //! from session state because ACP 0.12 does not gate these
 //! protocol-stable methods on `AgentCapabilities` flags.
 //!
@@ -12,10 +12,9 @@
 //! with the SDK's `SessionCapabilities` struct that lives on
 //! `AgentCapabilities`.
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     AgentCapabilities, InitializeResponse, LoadSessionResponse, NewSessionResponse,
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions, SessionModeState,
-    SessionModelState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -33,8 +32,6 @@ pub struct SpurAgentCaps {
     /// `NewSessionResponse.modes` (or `LoadSessionResponse.modes`). Some
     /// state with non-empty `available_modes` ⇒ `session/set_mode` is usable.
     pub modes: Option<SessionModeState>,
-    /// `NewSessionResponse.models`. Some(_) ⇒ `session/set_model` is usable.
-    pub models: Option<SessionModelState>,
     /// `NewSessionResponse.config_options`. Non-empty ⇒
     /// `session/set_config_option` is usable.
     pub config_options: Vec<SessionConfigOption>,
@@ -53,7 +50,6 @@ impl SpurAgentCaps {
         Self {
             agent: initialize.agent_capabilities.clone(),
             modes: new_session.modes.clone(),
-            models: new_session.models.clone(),
             config_options: new_session.config_options.clone().unwrap_or_default(),
             agent_kind,
         }
@@ -70,7 +66,6 @@ impl SpurAgentCaps {
         Self {
             agent: initialize.agent_capabilities.clone(),
             modes: load_session.modes.clone(),
-            models: load_session.models.clone(),
             config_options: load_session.config_options.clone().unwrap_or_default(),
             agent_kind,
         }
@@ -85,14 +80,24 @@ impl SpurAgentCaps {
     }
 
     /// `session/set_model` is usable when the session advertises a non-empty
-    /// `available_models` list. Mirrors `supports_set_mode`'s `has_choices()`
-    /// semantic — `Some(state)` with zero available models is not a usable
-    /// model-switch surface, so the picker is hidden.
+    /// `model` config option. ACP 1.0 removed the dedicated model state and
+    /// expresses model choice through `session/set_config_option`.
     #[must_use]
     pub fn supports_set_model(&self) -> bool {
-        self.models
-            .as_ref()
-            .is_some_and(|m| !m.available_models.is_empty())
+        self.config_options.iter().any(|option| {
+            option.id.0.as_ref() == "model"
+                && matches!(
+                    &option.kind,
+                    SessionConfigKind::Select(select)
+                        if match &select.options {
+                            SessionConfigSelectOptions::Ungrouped(options) => !options.is_empty(),
+                            SessionConfigSelectOptions::Grouped(groups) => groups
+                                .iter()
+                                .any(|group| !group.options.is_empty()),
+                            _ => false,
+                        }
+                )
+        })
     }
 
     /// `session/set_config_option` is usable when the session advertises
@@ -111,15 +116,7 @@ impl SpurAgentCaps {
     /// Display label for the active model.
     #[must_use]
     pub fn current_model_label(&self) -> Option<String> {
-        let models = self.models.as_ref()?;
-        Some(
-            models
-                .available_models
-                .iter()
-                .find(|info| info.model_id.0.as_ref() == models.current_model_id.0.as_ref())
-                .map(|info| info.name.clone())
-                .unwrap_or_else(|| models.current_model_id.0.to_string()),
-        )
+        Self::model_label_from_config_options(&self.config_options).map(str::to_owned)
     }
 
     /// Display label for the active model from a config-options snapshot.
@@ -209,11 +206,12 @@ impl SpurAgentCaps {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::{
-        AgentCapabilities, InitializeResponse, ModelId, NewSessionResponse, ProtocolVersion,
-        SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId, SessionMode,
-        SessionModeId, SessionModeState, SessionModelState,
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigId,
+        SessionConfigOption, SessionConfigSelectOption, SessionId, SessionMode, SessionModeId,
+        SessionModeState,
     };
+    use agent_client_protocol::schema::ProtocolVersion;
 
     use crate::spur_agent_caps::SpurAgentCaps;
     use crate::types::AgentKind;
@@ -249,14 +247,14 @@ mod tests {
 
     #[test]
     fn current_model_label_resolves_via_available_models() {
-        use agent_client_protocol::schema::ModelInfo;
-
         let init = empty_init_response();
-        let new =
-            NewSessionResponse::new(SessionId::new("model-label")).models(SessionModelState::new(
-                ModelId::new("gpt-5"),
-                vec![ModelInfo::new(ModelId::new("gpt-5"), "GPT-5")],
-            ));
+        let mut new = NewSessionResponse::new(SessionId::new("model-label"));
+        new.config_options = Some(vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "gpt-5",
+            vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
+        )]);
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         assert_eq!(caps.current_model_label().as_deref(), Some("GPT-5"));
@@ -265,8 +263,13 @@ mod tests {
     #[test]
     fn current_model_label_falls_back_to_raw_id() {
         let init = empty_init_response();
-        let new = NewSessionResponse::new(SessionId::new("model-label"))
-            .models(SessionModelState::new(ModelId::new("gpt-5"), vec![]));
+        let mut new = NewSessionResponse::new(SessionId::new("model-label"));
+        new.config_options = Some(vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "gpt-5",
+            vec![SessionConfigSelectOption::new("other", "Other")],
+        )]);
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
 
         assert_eq!(caps.current_model_label().as_deref(), Some("gpt-5"));
@@ -396,53 +399,55 @@ mod tests {
     }
 
     #[test]
-    fn gemini_style_models_some_config_options_none() {
-        use agent_client_protocol::schema::ModelInfo;
-        // Synthetic gemini-style: models populated, config_options None/absent.
-        let new =
-            NewSessionResponse::new(SessionId::new("test-gemini")).models(SessionModelState::new(
-                ModelId::new("gemini-1.5-pro"),
-                vec![ModelInfo::new(
-                    ModelId::new("gemini-1.5-pro"),
-                    "Gemini 1.5 Pro",
-                )],
-            ));
+    fn model_config_option_sets_model_support() {
+        let mut new = NewSessionResponse::new(SessionId::new("test-model-config"));
+        new.config_options = Some(vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "gemini-1.5-pro",
+            vec![SessionConfigSelectOption::new(
+                "gemini-1.5-pro",
+                "Gemini 1.5 Pro",
+            )],
+        )]);
         let init = empty_init_response();
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
-        assert!(caps.supports_set_model(), "gemini-style has models");
+        assert!(caps.supports_set_model(), "model config option has choices");
         assert!(
-            !caps.supports_set_config_option(),
-            "gemini-style has no config_options"
+            caps.supports_set_config_option(),
+            "model config option is advertised"
         );
-        assert!(!caps.supports_set_mode(), "gemini-style has no modes");
+        assert!(!caps.supports_set_mode(), "model config has no modes");
     }
 
     #[test]
-    fn models_present_but_empty_yields_false() {
-        // Mirrors `supports_set_mode`'s `has_choices()` semantic: a
-        // `Some(state)` with zero available models is not a usable
-        // model-switch surface. The agent advertised the field but
-        // exposed no choices, so `/model` should be hidden / disabled.
-        let new = NewSessionResponse::new(SessionId::new("test-empty-models"))
-            .models(SessionModelState::new(ModelId::new("only-current"), vec![]));
+    fn model_config_present_but_empty_yields_false() {
+        let mut new = NewSessionResponse::new(SessionId::new("test-empty-models"));
+        new.config_options = Some(vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "only-current",
+            Vec::<SessionConfigSelectOption>::new(),
+        )]);
         let init = empty_init_response();
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(
             !caps.supports_set_model(),
-            "Some(models) with empty available_models => not usable"
+            "model config option with empty choices => not usable"
         );
     }
 
     #[test]
-    fn models_with_available_yield_true() {
-        use agent_client_protocol::schema::ModelInfo;
-        let modes_state = SessionModelState::new(
-            ModelId::new("default"),
-            vec![ModelInfo::new(ModelId::new("default"), "Default")],
-        );
-        let new = NewSessionResponse::new(SessionId::new("test-models")).models(modes_state);
+    fn model_config_with_available_yields_true() {
+        let mut new = NewSessionResponse::new(SessionId::new("test-models"));
+        new.config_options = Some(vec![SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            "default",
+            vec![SessionConfigSelectOption::new("default", "Default")],
+        )]);
         let init = empty_init_response();
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 

@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::{ToolCall, ToolKind};
+use agent_client_protocol::schema::v1::{ToolCall, ToolKind};
 use serde_json::json;
 use spur_acp::{
     adapter::{self, mcp::unwrap_envelope, ObservePayload, ToolFamily},
