@@ -106,7 +106,8 @@ async fn stream_json_dies_on_drop() {
 /// inside the ACP thread, so a short timeout is enough to have a live
 /// child + an on-disk record by the time we return.
 async fn make_test_native_connection(repo_root: &Path) -> spur_acp::NativeAcpConnection {
-    use agent_client_protocol::schema::{InitializeRequest, ProtocolVersion};
+    use agent_client_protocol::schema::v1::InitializeRequest;
+    use agent_client_protocol::schema::ProtocolVersion;
     use spur_acp::connection::AgentConnection;
     use spur_acp::NativeAcpConnection;
 

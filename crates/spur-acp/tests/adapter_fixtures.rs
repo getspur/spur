@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::{SessionNotification, SessionUpdate};
+use agent_client_protocol::schema::v1::{SessionNotification, SessionUpdate};
 use spur_acp::{
     adapter::{self, ObservePayload, ToolFamily},
     AgentKind,

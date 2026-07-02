@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::{ContentBlock, TextContent};
 use chrono::Utc;
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
@@ -12,6 +11,7 @@ use spur_acp::domain::{
     BrainContinuation, ContinuationPayload, ContinuationSource, DelegationKey, DropReason,
 };
 use spur_acp::types::SessionId;
+use spur_acp::{ContentBlock, TextContent};
 use spur_core::continuation_bridge::{
     render_autonomous_turn_with_spill_v2, render_merged_turn_with_spill_v2, ContinuationEventSink,
 };

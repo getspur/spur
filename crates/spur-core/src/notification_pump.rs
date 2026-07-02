@@ -14,9 +14,9 @@
 use tokio::sync::broadcast::{error::RecvError, Receiver};
 use tokio::task::JoinHandle;
 
-use agent_client_protocol::schema::SessionNotification;
 use spur_acp::domain::events::SpurEventBody;
 use spur_acp::types::SessionId;
+use spur_acp::SessionNotification;
 
 use crate::event_funnel::FunnelHandle;
 

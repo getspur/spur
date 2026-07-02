@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use agent_client_protocol::schema::{McpServer, McpServerHttp, McpServerStdio};
+use spur_acp::{McpServer, McpServerHttp, McpServerStdio};
 
 const SPUR_NOTEBOOK_BIN_ENV: &str = "SPUR_NOTEBOOK_BIN";
 const SPUR_NOTEBOOK_CHANNEL_ENV: &str = "SPUR_NOTEBOOK_CHANNEL";

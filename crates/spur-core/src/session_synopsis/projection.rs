@@ -115,8 +115,8 @@ impl SessionSynopsisProjection {
     /// `crates/spur-core/src/event_replay.rs` is structurally guarded against
     /// double-apply via PID-filtered file selection.
     pub fn apply(&mut self, event: &spur_acp::SpurEvent) {
-        use agent_client_protocol::schema::SessionUpdate;
         use spur_acp::domain::events::SpurEventBody;
+        use spur_acp::SessionUpdate;
 
         match &event.body {
             SpurEventBody::AgentNotification {
@@ -336,8 +336,8 @@ fn is_slash_command_like(text: &str) -> bool {
     t.starts_with('/') || t.starts_with("<command-name>")
 }
 
-fn content_block_text(content: &agent_client_protocol::schema::ContentBlock) -> &str {
-    use agent_client_protocol::schema::ContentBlock;
+fn content_block_text(content: &spur_acp::ContentBlock) -> &str {
+    use spur_acp::ContentBlock;
     match content {
         ContentBlock::Text(t) => &t.text,
         _ => "",
@@ -347,16 +347,14 @@ fn content_block_text(content: &agent_client_protocol::schema::ContentBlock) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
-        ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent,
-    };
     use spur_acp::domain::events::{HistoryEntry, SpurEvent, SpurEventBody};
+    use spur_acp::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent};
 
     fn user_chunk_event(session: &str, text: &str) -> SpurEvent {
         SpurEvent::now(SpurEventBody::AgentNotification {
             session: SessionId(session.into()),
             notification: Box::new(SessionNotification::new(
-                agent_client_protocol::schema::SessionId::new(session),
+                spur_acp::AcpSessionId::new(session),
                 SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
                     TextContent::new(text),
                 ))),
@@ -368,7 +366,7 @@ mod tests {
         SpurEvent::now(SpurEventBody::AgentNotification {
             session: SessionId(session.into()),
             notification: Box::new(SessionNotification::new(
-                agent_client_protocol::schema::SessionId::new(session),
+                spur_acp::AcpSessionId::new(session),
                 SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
                     TextContent::new(text),
                 ))),
@@ -793,7 +791,7 @@ mod tests {
 
     #[test]
     fn agent_thought_or_tool_call_does_not_split_agent_reply() {
-        use agent_client_protocol::schema::{ContentChunk, TextContent};
+        use spur_acp::{ContentChunk, TextContent};
         let mut proj = SessionSynopsisProjection::new();
         proj.apply(&user_chunk_event("S1", "do thing"));
         proj.apply(&agent_chunk_event("S1", "step 1 "));
@@ -801,7 +799,7 @@ mod tests {
         proj.apply(&SpurEvent::now(SpurEventBody::AgentNotification {
             session: SessionId("S1".into()),
             notification: Box::new(SessionNotification::new(
-                agent_client_protocol::schema::SessionId::new("S1"),
+                spur_acp::AcpSessionId::new("S1"),
                 SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
                     TextContent::new("thinking..."),
                 ))),

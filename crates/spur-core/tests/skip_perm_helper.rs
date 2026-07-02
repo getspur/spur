@@ -5,16 +5,16 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::{
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
-    NewSessionResponse, PromptRequest, SessionId, SessionMode, SessionModeId, SessionModeState,
-    SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
-};
 use async_trait::async_trait;
 use futures::Stream;
 use spur_acp::config::AgentConfig;
 use spur_acp::connection::AgentConnection;
 use spur_acp::types::{AgentHealth, AgentKind, AgentRole, CostTier, TransportKind};
+use spur_acp::{
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    NewSessionResponse, PromptRequest, SessionId, SessionMode, SessionModeId, SessionModeState,
+    SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
+};
 use spur_core::skip_perm::{load_session_with_bypass, new_session_with_bypass};
 
 #[derive(Default)]
@@ -42,7 +42,8 @@ impl AgentConnection for MockConn {
             .lock()
             .unwrap()
             .push(("new_session".into(), cwd.display().to_string()));
-        let mut response = NewSessionResponse::new(SessionId::new("mock-session".to_string()));
+        let mut response =
+            NewSessionResponse::new(spur_acp::AcpSessionId::new("mock-session".to_string()));
         if let Some(modes) = self.advertised_modes.clone() {
             response = response.modes(mode_state(modes));
         }

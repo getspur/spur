@@ -3,7 +3,7 @@
 //! for v2 advertised commands). Consumed by spur-tui without ACP-schema
 //! imports — spur-tui sees only the types defined here.
 
-use agent_client_protocol::schema::{AvailableCommand, AvailableCommandInput};
+use agent_client_protocol::schema::v1::{AvailableCommand, AvailableCommandInput};
 
 /// Parse an `AvailableCommand` into an `ArgPickerSpec`.
 ///
@@ -48,7 +48,7 @@ pub enum ArgPickerHint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         AvailableCommand, AvailableCommandInput, UnstructuredCommandInput,
     };
 

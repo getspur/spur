@@ -9,7 +9,7 @@
 //! `app::apply_session_update` swallows the notification, leaving loaded
 //! sessions with `config_options: Vec::new()` and any picker empty.
 
-use agent_client_protocol::schema::SessionId as AcpSessionId;
+use spur_acp::AcpSessionId;
 use spur_acp::{
     ConfigOptionUpdate, SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId,
     SessionNotification, SessionUpdate,

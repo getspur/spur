@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol::schema::SessionInfo;
 use anyhow::Result;
 use spur_acp::AgentKind;
+use spur_acp::SessionInfo;
 
 // ── Public API ──────────────────────────────────────────────────────────
 
