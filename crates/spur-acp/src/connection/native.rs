@@ -315,7 +315,7 @@ fn session_capability_advertised(
     let Ok(guard) = session_capabilities.lock() else {
         return true;
     };
-    guard.as_ref().map_or(true, supports)
+    guard.as_ref().is_none_or(supports)
 }
 
 fn busy_in_flight_error(agent_name: &str, in_flight: &str) -> anyhow::Error {
