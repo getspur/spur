@@ -270,9 +270,9 @@ impl App {
                     params,
                 })
             }
-            SubmitDecision::SetSessionConfigOption { config_id, value } => {
-                Some(Action::SetSessionConfigOption { config_id, value })
-            }
+            SubmitDecision::SetSessionConfigOption {
+                config_id, value, ..
+            } => Some(Action::SetSessionConfigOption { config_id, value }),
             SubmitDecision::SetSessionModel { value } => {
                 let session_id = self.current_acp_session_id()?;
                 Some(Action::SetSessionModel { session_id, value })

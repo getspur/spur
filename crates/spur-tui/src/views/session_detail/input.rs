@@ -309,10 +309,17 @@ impl SessionDetailView {
                                         })
                                     }
                                 }
-                                SubmitDecision::SetSessionConfigOption { config_id, value } => {
+                                SubmitDecision::SetSessionConfigOption {
+                                    command_name,
+                                    config_id,
+                                    value,
+                                } => {
                                     if self.is_cleared() {
                                         None
                                     } else {
+                                        if command_name == "effort" {
+                                            self.pending_effort_override = Some(value.clone());
+                                        }
                                         Some(Action::SetSessionConfigOption { config_id, value })
                                     }
                                 }

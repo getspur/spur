@@ -371,7 +371,7 @@ impl SessionDetailView {
         let spur_agent_caps = self.spur_agent_caps_cloned();
         let caps = spur_agent_caps.as_deref();
         let model_label = self.resolved_model_label();
-        let effort_label = spur_acp::SpurAgentCaps::effort_label_from(&self.session_config_options);
+        let effort_label = self.resolved_effort_label();
         let usage_supported = caps
             .map(spur_acp::SpurAgentCaps::usage_supported)
             .unwrap_or(true);
