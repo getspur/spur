@@ -65,6 +65,7 @@ impl SessionDetailView {
             react_trace: brain_chat_trace(agent_kind),
             input_bar: InputBar::new(),
             cost: 0.0,
+            agent_reported_cost: None,
             started_at: Instant::now(),
             current_mode: None,
             command_registry,
@@ -106,6 +107,7 @@ impl SessionDetailView {
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
             pending_model_override: None,
+            pending_effort_override: None,
             spur_agent_caps: None,
         }
     }
@@ -150,6 +152,7 @@ impl SessionDetailView {
             react_trace: brain_chat_trace(spur_acp::AgentKind::Generic),
             input_bar: crate::components::input_bar::InputBar::new(),
             cost: 0.0,
+            agent_reported_cost: None,
             started_at: std::time::Instant::now(),
             current_mode: None,
             command_registry,
@@ -191,6 +194,7 @@ impl SessionDetailView {
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
             pending_model_override: None,
+            pending_effort_override: None,
             spur_agent_caps: None,
         }
     }
@@ -250,6 +254,7 @@ impl SessionDetailView {
             react_trace: brain_chat_trace(spur_acp::AgentKind::Generic),
             input_bar: InputBar::new(),
             cost: 0.0,
+            agent_reported_cost: None,
             started_at: std::time::Instant::now(),
             current_mode: None,
             command_registry,
@@ -291,6 +296,7 @@ impl SessionDetailView {
             load_state: LoadState::Retiring,
             session_config_options: Vec::new(),
             pending_model_override: None,
+            pending_effort_override: None,
             spur_agent_caps: None,
         }
     }
@@ -326,9 +332,9 @@ impl SessionDetailView {
     /// - Conversation: `react_trace` (content wiped; keeps its `AgentKind`
     ///   and `mermaid_enabled` config), `tool_depth`, `mermaid_registry`,
     ///   `pending_fence_actions`.
-    /// - Header/status (Task 3): `cost`, `started_at`, `current_mode`
-    ///   (plus `react_trace.set_mode(None)` — see §3.3 of spec), `context_used`,
-    ///   `context_size`, `auth_error`.
+    /// - Header/status (Task 3): `cost`, `agent_reported_cost`, `started_at`,
+    ///   `current_mode` (plus `react_trace.set_mode(None)` — see §3.3 of spec),
+    ///   `context_used`, `context_size`, `auth_error`.
     /// - Stream flags (Task 3): `stream_in_flight`, `cancelling_in_flight`.
     /// - UI transient: `resume_banner`, `completion`, `cancel_hint_until`.
     /// - Draft debounce locals (Task 4): `last_persisted_draft`,
@@ -359,6 +365,7 @@ impl SessionDetailView {
 
         // Header / status.
         self.cost = 0.0;
+        self.agent_reported_cost = None;
         self.started_at = std::time::Instant::now();
         self.current_mode = None;
         self.react_trace.set_mode(None); // mirror for pane-title badge (set_current_mode pattern)
@@ -609,6 +616,9 @@ impl SessionDetailView {
         if options.iter().any(|option| option.id.0.as_ref() == "model") {
             self.pending_model_override = None;
         }
+        if spur_acp::SpurAgentCaps::effort_label_from(options).is_some() {
+            self.pending_effort_override = None;
+        }
     }
 
     pub(super) fn resolved_model_label(&self) -> Option<String> {
@@ -617,6 +627,13 @@ impl SessionDetailView {
             .map(str::to_owned)
             .or_else(|| self.pending_model_override.clone())
             .or_else(|| caps.and_then(spur_acp::SpurAgentCaps::current_model_label))
+    }
+
+    pub(super) fn resolved_effort_label(&self) -> Option<String> {
+        let caps = self.spur_agent_caps.as_deref();
+        spur_acp::SpurAgentCaps::effort_label_from(&self.session_config_options)
+            .or_else(|| self.pending_effort_override.clone())
+            .or_else(|| caps.and_then(spur_acp::SpurAgentCaps::current_effort_label))
     }
 
     /// Cache the agent capabilities for this session. Captured by the
