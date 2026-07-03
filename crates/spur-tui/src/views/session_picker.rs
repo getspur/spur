@@ -723,13 +723,11 @@ impl SessionPickerView {
             .unwrap_or_else(|| cwd.to_str().unwrap_or(""))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_loading(
         &self,
         frame: &mut Frame,
         area: Rect,
         theme: &Theme,
-        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
         tombstone: Option<&Tombstone>,
         view_hint_override: Option<HintOverride<'_>>,
@@ -779,10 +777,8 @@ impl SessionPickerView {
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
                 notebook_ready: false,
-                session_lifecycle_caps: None,
                 issue_count: 0,
                 alert_summary: None,
-                license_badge,
                 flag_summary,
                 view_hint_override: view_hint_override.or(Some(HintOverride {
                     full: footer_hint(&self.state, false, false),
@@ -884,7 +880,6 @@ impl SessionPickerView {
         frame: &mut Frame,
         area: Rect,
         ctx: &super::ViewContext,
-        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
         agent: &str,
         sessions: &[SessionInfo],
@@ -1405,10 +1400,8 @@ impl SessionPickerView {
                     stream_in_flight: false,
                     esc_consumed_by_composer: false,
                     notebook_ready: ctx.notebook_ready,
-                    session_lifecycle_caps: None,
                     issue_count: 0,
                     alert_summary: None,
-                    license_badge,
                     flag_summary,
                     view_hint_override: ctx.transient_hint_override.or(Some(HintOverride {
                         full: if self.help_visible {
@@ -1453,7 +1446,6 @@ impl SessionPickerView {
     }
 
     fn render_error(&self, frame: &mut Frame, area: Rect, message: &str, ctx: &super::ViewContext) {
-        let license_badge = ctx.license_badge;
         let flag_summary = ctx.flag_summary;
         let tombstone = ctx.tombstone;
         let view_hint_override = ctx.transient_hint_override;
@@ -1503,10 +1495,8 @@ impl SessionPickerView {
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
                 notebook_ready: ctx.notebook_ready,
-                session_lifecycle_caps: None,
                 issue_count: 0,
                 alert_summary: None,
-                license_badge,
                 flag_summary,
                 view_hint_override: view_hint_override.or(Some(HintOverride {
                     full: footer_hint(&self.state, false, false),
@@ -2261,7 +2251,6 @@ impl View for SessionPickerView {
                 frame,
                 content_area,
                 ctx.theme,
-                ctx.license_badge,
                 ctx.flag_summary,
                 ctx.tombstone,
                 ctx.transient_hint_override,
@@ -2276,7 +2265,6 @@ impl View for SessionPickerView {
                 frame,
                 content_area,
                 ctx,
-                ctx.license_badge,
                 ctx.flag_summary,
                 agent,
                 sessions,
@@ -2312,7 +2300,6 @@ mod current_session_shortcut_tests {
             plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &crate::app::BrainStatus::Idle,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
@@ -2731,7 +2718,6 @@ mod preview_render_tests {
             plan_projection: &plan_projection,
             synopsis: &synopsis,
             brain_status: &brain_status,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
@@ -2800,7 +2786,6 @@ mod preview_render_tests {
             plan_projection: &plan_projection,
             synopsis: &synopsis,
             brain_status: &brain_status,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
@@ -2868,7 +2853,6 @@ mod preview_render_tests {
             plan_projection: &plan_projection,
             synopsis: &synopsis,
             brain_status: &brain_status,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
@@ -2964,7 +2948,6 @@ mod preview_render_tests {
             plan_projection: &plan_projection,
             synopsis: &synopsis,
             brain_status: &brain_status,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
@@ -3046,7 +3029,6 @@ mod preview_render_tests {
             plan_projection: &plan_projection,
             synopsis: &synopsis,
             brain_status: &brain_status,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
@@ -3138,7 +3120,6 @@ mod preview_render_tests {
             plan_projection: &plan_projection,
             synopsis: &synopsis,
             brain_status: &brain_status,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
