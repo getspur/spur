@@ -2920,6 +2920,7 @@ fn edge_kind_to_str(edge_kind: GraphEdgeKind) -> &'static str {
         GraphEdgeKind::CallsDyn => "calls_dyn",
         GraphEdgeKind::ReferencesHof => "references_hof",
         GraphEdgeKind::ReferencesOther => "references_other",
+        GraphEdgeKind::ReferencesAddress => "references_address",
     }
 }
 
@@ -2929,6 +2930,7 @@ pub(crate) fn edge_kind_from_str(value: &str) -> anyhow::Result<GraphEdgeKind> {
         "calls_dyn" => Ok(GraphEdgeKind::CallsDyn),
         "references_hof" => Ok(GraphEdgeKind::ReferencesHof),
         "references_other" => Ok(GraphEdgeKind::ReferencesOther),
+        "references_address" => Ok(GraphEdgeKind::ReferencesAddress),
         _ => bail!("unknown edge kind `{value}`"),
     }
 }
@@ -3308,6 +3310,12 @@ mod helpers_test {
         let decoded = git_path_from_b64(&encoded).expect("decode git path");
 
         assert_eq!(decoded, path);
+    }
+
+    #[test]
+    fn edge_kind_codec_round_trips_references_address() {
+        let kind = edge_kind_from_str("references_address").expect("decode references_address");
+        assert_eq!(edge_kind_to_str(kind), "references_address");
     }
 
     #[test]

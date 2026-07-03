@@ -196,7 +196,8 @@ pub struct GraphEdgeArtifact {
     /// Current resolver stamps include `fqn`, `scope_match`, `singleton`,
     /// `bare_qualified_singleton`, `macro_body_singleton`, `relational`,
     /// `constructs_type_singleton`, `method_crate_singleton`, `import_path`,
-    /// `import_licensed`, and `external`.
+    /// `import_licensed`, `external`, `address_module_scope`, and
+    /// `address_singleton`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_method: Option<String>,
 }
@@ -278,6 +279,7 @@ pub enum NodeKind {
     McpTool,
     Cell,
     Port,
+    Resource,
 }
 
 impl NodeKind {
@@ -304,6 +306,7 @@ impl NodeKind {
             Self::McpTool => "mcp_tool",
             Self::Cell => "cell",
             Self::Port => "port",
+            Self::Resource => "resource",
         }
     }
 }
@@ -431,6 +434,7 @@ pub enum GraphEdgeKind {
     CallsDyn,
     ReferencesHof,
     ReferencesOther,
+    ReferencesAddress,
 }
 
 pub fn graph_edge_kind_or_default(
@@ -1069,6 +1073,25 @@ mod change_kind_tests {
         let r = RelationKind::Touches;
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(s, "\"touches\"");
+    }
+
+    #[test]
+    fn node_kind_resource_round_trips() {
+        let kind: NodeKind = serde_json::from_str("\"resource\"").expect("resource node kind");
+        assert_eq!(kind, NodeKind::Resource);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"resource\"");
+        assert_eq!(kind.discriminator(), "resource");
+    }
+
+    #[test]
+    fn graph_edge_kind_references_address_round_trips() {
+        let kind: GraphEdgeKind =
+            serde_json::from_str("\"references_address\"").expect("references_address edge kind");
+        assert_eq!(kind, GraphEdgeKind::ReferencesAddress);
+        assert_eq!(
+            serde_json::to_string(&kind).unwrap(),
+            "\"references_address\""
+        );
     }
 
     #[test]
