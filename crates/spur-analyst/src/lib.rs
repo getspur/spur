@@ -2,7 +2,7 @@
 
 pub mod mcp;
 
-use std::path::Path;
+use std::{env, path::Path};
 
 use anyhow::{anyhow, Context as _, Result};
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
@@ -18,6 +18,112 @@ const MAX_GRAPH_CANDIDATES: usize = 30;
 pub const MAX_SYMBOL_RISK_COMMUNITY_IDS: usize = 40;
 pub const MAX_CONTEXT_PATH_HOPS: usize = 6;
 pub const MAX_CONTEXT_PATHS: usize = 12;
+const DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT: &str = "512MB";
+const DEFAULT_ANALYST_DUCKDB_THREADS: usize = 4;
+const ANALYST_DUCKDB_MEMORY_LIMIT_ENV: &str = "SPUR_ANALYST_DUCKDB_MEMORY_LIMIT";
+const ANALYST_DUCKDB_THREADS_ENV: &str = "SPUR_ANALYST_DUCKDB_THREADS";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnalystDuckDbResourceCaps {
+    memory_limit: String,
+    threads: usize,
+}
+
+impl Default for AnalystDuckDbResourceCaps {
+    fn default() -> Self {
+        Self {
+            memory_limit: DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT.to_owned(),
+            threads: DEFAULT_ANALYST_DUCKDB_THREADS,
+        }
+    }
+}
+
+impl AnalystDuckDbResourceCaps {
+    fn from_env() -> Self {
+        let mut caps = Self::default();
+        match env::var(ANALYST_DUCKDB_MEMORY_LIMIT_ENV) {
+            Ok(value) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    tracing::warn!(
+                        env_var = ANALYST_DUCKDB_MEMORY_LIMIT_ENV,
+                        default = DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT,
+                        "invalid empty analyst DuckDB memory limit override; using default"
+                    );
+                } else {
+                    caps.memory_limit = value.to_owned();
+                }
+            }
+            Err(env::VarError::NotPresent) => {}
+            Err(error) => tracing::warn!(
+                env_var = ANALYST_DUCKDB_MEMORY_LIMIT_ENV,
+                error = %error,
+                default = DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT,
+                "invalid analyst DuckDB memory limit override; using default"
+            ),
+        }
+
+        match env::var(ANALYST_DUCKDB_THREADS_ENV) {
+            Ok(value) => match value.trim().parse::<usize>() {
+                Ok(threads) if threads > 0 => caps.threads = threads,
+                _ => tracing::warn!(
+                    env_var = ANALYST_DUCKDB_THREADS_ENV,
+                    value = %value,
+                    default = DEFAULT_ANALYST_DUCKDB_THREADS,
+                    "invalid analyst DuckDB threads override; using default"
+                ),
+            },
+            Err(env::VarError::NotPresent) => {}
+            Err(error) => tracing::warn!(
+                env_var = ANALYST_DUCKDB_THREADS_ENV,
+                error = %error,
+                default = DEFAULT_ANALYST_DUCKDB_THREADS,
+                "invalid analyst DuckDB threads override; using default"
+            ),
+        }
+
+        caps
+    }
+}
+
+pub(crate) fn open_analyst_connection_read_only(db_path: &Path) -> Result<duckdb::Connection> {
+    open_analyst_connection_read_only_with_caps(db_path, AnalystDuckDbResourceCaps::from_env())
+}
+
+fn open_analyst_connection_read_only_with_caps(
+    db_path: &Path,
+    caps: AnalystDuckDbResourceCaps,
+) -> Result<duckdb::Connection> {
+    let config = duckdb::Config::default()
+        .access_mode(duckdb::AccessMode::ReadOnly)
+        .context("failed to configure read-only duckdb")?;
+    let conn = duckdb::Connection::open_with_flags(db_path, config).with_context(|| {
+        format!(
+            "failed to open analyst DuckDB read-only at {}",
+            db_path.display()
+        )
+    })?;
+    apply_analyst_duckdb_resource_caps(&conn, &caps)?;
+    Ok(conn)
+}
+
+fn apply_analyst_duckdb_resource_caps(
+    conn: &duckdb::Connection,
+    caps: &AnalystDuckDbResourceCaps,
+) -> Result<()> {
+    let memory_limit = caps.memory_limit.replace('\'', "''");
+    conn.execute_batch(&format!(
+        "SET memory_limit = '{memory_limit}';\nSET threads = {};",
+        caps.threads
+    ))
+    .with_context(|| {
+        format!(
+            "failed to apply analyst DuckDB resource caps (memory_limit={:?}, threads={})",
+            caps.memory_limit, caps.threads
+        )
+    })?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeSearchScope {
@@ -249,15 +355,7 @@ pub fn query_symbol_risk_community<S: AsRef<str>>(
     db_path: &Path,
     stable_symbol_ids: &[S],
 ) -> Result<SymbolRiskCommunityResult> {
-    let config = duckdb::Config::default()
-        .access_mode(duckdb::AccessMode::ReadOnly)
-        .context("failed to configure read-only duckdb")?;
-    let conn = duckdb::Connection::open_with_flags(db_path, config).with_context(|| {
-        format!(
-            "failed to open analyst DuckDB read-only at {}",
-            db_path.display()
-        )
-    })?;
+    let conn = open_analyst_connection_read_only(db_path)?;
 
     // The risk scorecard view (via v_symbol_churn_90d) does TIMESTAMPTZ arithmetic
     // (`now() - INTERVAL '90 day'`) whose `-` overload lives in DuckDB's ICU
@@ -337,15 +435,7 @@ pub fn query_context_candidates(
     }
     let limit = options.limit.clamp(1, MAX_CONTEXT_CANDIDATES);
 
-    let config = duckdb::Config::default()
-        .access_mode(duckdb::AccessMode::ReadOnly)
-        .context("failed to configure read-only duckdb")?;
-    let conn = duckdb::Connection::open_with_flags(db_path, config).with_context(|| {
-        format!(
-            "failed to open analyst DuckDB read-only at {}",
-            db_path.display()
-        )
-    })?;
+    let conn = open_analyst_connection_read_only(db_path)?;
 
     // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
     // live in DuckDB's ICU extension. Docs-only queries can still work without it,
@@ -435,15 +525,7 @@ pub fn query_context_paths(
 
     let max_hops = options.max_hops.clamp(1, MAX_CONTEXT_PATH_HOPS);
     let max_paths = options.max_paths.clamp(1, MAX_CONTEXT_PATHS);
-    let config = duckdb::Config::default()
-        .access_mode(duckdb::AccessMode::ReadOnly)
-        .context("failed to configure read-only duckdb")?;
-    let conn = duckdb::Connection::open_with_flags(db_path, config).with_context(|| {
-        format!(
-            "failed to open analyst DuckDB read-only at {}",
-            db_path.display()
-        )
-    })?;
+    let conn = open_analyst_connection_read_only(db_path)?;
 
     let result_context = KnowledgePathResultContext {
         db_path,
@@ -1277,15 +1359,7 @@ pub fn query_graph_candidates(
     }
     let limit = options.limit.clamp(1, MAX_GRAPH_CANDIDATES);
 
-    let config = duckdb::Config::default()
-        .access_mode(duckdb::AccessMode::ReadOnly)
-        .context("failed to configure read-only duckdb")?;
-    let conn = duckdb::Connection::open_with_flags(db_path, config).with_context(|| {
-        format!(
-            "failed to open analyst DuckDB read-only at {}",
-            db_path.display()
-        )
-    })?;
+    let conn = open_analyst_connection_read_only(db_path)?;
 
     // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
     // live in DuckDB's ICU extension. Docs-only queries can still work without it,
@@ -1348,6 +1422,39 @@ mod tests {
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS - 1])).is_none());
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS + 1])).is_none());
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS])).is_some());
+    }
+
+    #[test]
+    fn read_only_connection_helper_applies_resource_caps() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("analyst.duckdb");
+        drop(Connection::open(&db_path).expect("create fixture db"));
+
+        let conn: Connection = open_analyst_connection_read_only_with_caps(
+            &db_path,
+            AnalystDuckDbResourceCaps {
+                memory_limit: "64MiB".to_owned(),
+                threads: 2,
+            },
+        )
+        .expect("open read-only connection with caps");
+        let memory_limit: String = conn
+            .query_row(
+                "SELECT current_setting('memory_limit')::VARCHAR",
+                [],
+                |row: &duckdb::Row<'_>| row.get::<_, String>(0),
+            )
+            .expect("read memory_limit setting");
+        let threads: i64 = conn
+            .query_row(
+                "SELECT current_setting('threads')::INTEGER",
+                [],
+                |row: &duckdb::Row<'_>| row.get::<_, i64>(0),
+            )
+            .expect("read threads setting");
+
+        assert_eq!(memory_limit, "64.0 MiB");
+        assert_eq!(threads, 2);
     }
 
     fn context_path_fixture(edges_sql: &str) -> (tempfile::TempDir, PathBuf) {
