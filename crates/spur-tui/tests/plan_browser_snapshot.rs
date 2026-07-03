@@ -102,6 +102,7 @@ fn summary(
         }),
         updated_at: None,
         created_at: None,
+        loop_origin: None,
     }
 }
 
