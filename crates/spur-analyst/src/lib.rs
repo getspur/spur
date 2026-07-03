@@ -1,5 +1,6 @@
 //! Shared Rust query layer over `.spur/analyst.duckdb`.
 
+pub mod embed_service;
 pub mod mcp;
 
 use std::{env, path::Path};
