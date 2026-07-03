@@ -25,7 +25,7 @@ fn community_quota_defaults() {
 }
 
 #[test]
-fn community_compat_grants_pm_beads_advanced() {
+fn community_policy_grants_pm_beads_advanced() {
     let policy = PolicyResolver::embedded();
     let gate = FeatureGate::new(policy);
     assert!(gate.has(FeatureKey::PM_PRO_BEADS_ADVANCED));
