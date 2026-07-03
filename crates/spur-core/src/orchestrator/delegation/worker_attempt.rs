@@ -683,6 +683,7 @@ pub(crate) async fn run_one_worker_attempt(
         }
     }
 
+    close_worker_session_best_effort(&mut *connection, &worker_session).await;
     delete_worker_session_best_effort(&mut *connection, &worker_session).await;
     let _ = connection.shutdown().await;
 
@@ -875,6 +876,30 @@ pub(crate) async fn run_one_worker_attempt(
     })
 }
 
+async fn close_worker_session_best_effort(
+    connection: &mut dyn AgentConnection,
+    worker_session: &SessionId,
+) {
+    match connection
+        .close_session(spur_acp::CloseSessionRequest::new(worker_session.0.clone()))
+        .await
+    {
+        Ok(_) => tracing::debug!(
+            session = %worker_session,
+            "closed worker ACP session during delegation teardown"
+        ),
+        Err(spur_acp::AcpError::CapabilityMissing(_)) => tracing::debug!(
+            session = %worker_session,
+            "worker ACP session close unsupported during delegation teardown"
+        ),
+        Err(error) => tracing::warn!(
+            session = %worker_session,
+            %error,
+            "worker ACP session close failed during delegation teardown"
+        ),
+    }
+}
+
 async fn delete_worker_session_best_effort(
     connection: &mut dyn AgentConnection,
     worker_session: &SessionId,
@@ -1064,6 +1089,106 @@ mod delete_worker_session_tests {
 
         assert_eq!(
             *deleted_sessions.lock().expect("delete recorder poisoned"),
+            vec!["worker-session".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod close_worker_session_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    struct CloseRecordingConnection {
+        closed_sessions: Arc<Mutex<Vec<String>>>,
+        fail_close: bool,
+    }
+
+    #[async_trait]
+    impl AgentConnection for CloseRecordingConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            panic!("CloseRecordingConnection::initialize must not be called")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            panic!("CloseRecordingConnection::new_session must not be called")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn close_session(
+            &mut self,
+            request: spur_acp::CloseSessionRequest,
+        ) -> Result<spur_acp::CloseSessionResponse, spur_acp::AcpError> {
+            self.closed_sessions
+                .lock()
+                .expect("close recorder poisoned")
+                .push(request.session_id.to_string());
+            if self.fail_close {
+                return Err(spur_acp::AcpError::CapabilityMissing("session/close"));
+            }
+            Ok(spur_acp::CloseSessionResponse::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn close_worker_session_best_effort_calls_connection_close() {
+        let closed_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = CloseRecordingConnection {
+            closed_sessions: Arc::clone(&closed_sessions),
+            fail_close: false,
+        };
+
+        close_worker_session_best_effort(&mut connection, &SessionId("worker-session".to_string()))
+            .await;
+
+        assert_eq!(
+            *closed_sessions.lock().expect("close recorder poisoned"),
+            vec!["worker-session".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn close_worker_session_best_effort_swallows_close_errors() {
+        let closed_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = CloseRecordingConnection {
+            closed_sessions: Arc::clone(&closed_sessions),
+            fail_close: true,
+        };
+
+        close_worker_session_best_effort(&mut connection, &SessionId("worker-session".to_string()))
+            .await;
+
+        assert_eq!(
+            *closed_sessions.lock().expect("close recorder poisoned"),
             vec!["worker-session".to_string()]
         );
     }
