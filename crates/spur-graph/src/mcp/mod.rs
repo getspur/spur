@@ -1700,26 +1700,45 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
         McpHandlerError::Internal("failed to resolve current worktree root".into())
     })?;
     let file_oid = manifest.content_oid.clone();
-    let indexed_bytes = read_indexed_file_bytes(&worktree, &symbol.file_path, &file_oid)?;
-    let indexed_source = String::from_utf8(indexed_bytes).map_err(|error| {
-        McpHandlerError::Internal(format!(
-            "indexed blob `{}` for `{}` is not UTF-8: {error}",
-            file_oid, symbol.file_path
-        ))
-    })?;
-    let source_range = source_range_with_context(&indexed_source, &symbol, context_lines.value);
-    let source = source_for_line_range(&indexed_source, source_range);
     let current_oid = current_file_oid(&worktree, &symbol.file_path)?;
     let stale = current_oid.as_deref() != Some(file_oid.as_str());
+
+    // On a stale file, prefer the current worktree source via a single-file
+    // overlay; fall back to the indexed blob when the symbol no longer
+    // exists in the edited file (or the overlay cannot be built).
+    let current_snapshot = if stale {
+        stale_read_current_snapshot(client, &worktree, &symbol)
+    } else {
+        None
+    };
+    let source_origin = current_snapshot.as_ref().map(|_| "worktree");
+    let (symbol, source_text, served_oid) = match current_snapshot {
+        Some((fresh_symbol, current_text, current_oid)) => {
+            (fresh_symbol, current_text, current_oid)
+        }
+        None => {
+            let indexed_bytes = read_indexed_file_bytes(&worktree, &symbol.file_path, &file_oid)?;
+            let indexed_source = String::from_utf8(indexed_bytes).map_err(|error| {
+                McpHandlerError::Internal(format!(
+                    "indexed blob `{}` for `{}` is not UTF-8: {error}",
+                    file_oid, symbol.file_path
+                ))
+            })?;
+            (symbol, indexed_source, file_oid)
+        }
+    };
+    let source_range = source_range_with_context(&source_text, &symbol, context_lines.value);
+    let source = source_for_line_range(&source_text, source_range);
 
     if response_format == ResponseFormat::Source {
         return Ok(source_symbol_response(
             &symbol,
             source,
             source_range,
-            file_oid,
+            served_oid,
             &context_lines,
             stale,
+            source_origin,
         ));
     }
 
@@ -1730,7 +1749,7 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
             "start": source_range[0],
             "end": source_range[1],
         },
-        "file_oid": file_oid,
+        "file_oid": served_oid,
         "context_lines": context_lines.value,
     });
     if let Some(requested_context_lines) = context_lines.requested_value {
@@ -1739,7 +1758,42 @@ fn code_read_symbol_with_client(args: &Value, client: &dyn GraphQueryClient) -> 
     if stale {
         body["stale"] = Value::Bool(true);
     }
+    if let Some(origin) = source_origin {
+        body["source_origin"] = Value::String(origin.to_owned());
+    }
     Ok(body)
+}
+
+/// Best-effort current view of a stale symbol: parse just the symbol's file
+/// into a single-file overlay over `client` and return the surviving symbol
+/// with the current file text and blob oid. `None` falls back to the indexed
+/// source.
+fn stale_read_current_snapshot(
+    client: &dyn GraphQueryClient,
+    worktree: &Path,
+    symbol: &GraphSymbolArtifact,
+) -> Option<(GraphSymbolArtifact, String, String)> {
+    let changed = [PathBuf::from(&symbol.file_path)];
+    let overlay = match OverlayClient::new(client, worktree, &changed) {
+        Ok(overlay) => overlay,
+        Err(error) => {
+            tracing::debug!(
+                target: "spur_graph::mcp",
+                error = %error,
+                file = %symbol.file_path,
+                "single-file overlay for stale read failed; serving indexed source"
+            );
+            return None;
+        }
+    };
+    let fresh_symbol = overlay
+        .current_symbol_for(&symbol.stable_symbol_id)
+        .ok()
+        .flatten()?;
+    let bytes = read_current_file_bytes(worktree, &fresh_symbol.file_path).ok()?;
+    let current_oid = git_blob_oid(&bytes);
+    let current_text = String::from_utf8(bytes).ok()?;
+    Some((fresh_symbol, current_text, current_oid))
 }
 
 pub async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
@@ -5339,6 +5393,7 @@ fn source_symbol_response(
     file_oid: String,
     context_lines: &ClampedUsizeArg,
     stale: bool,
+    source_origin: Option<&str>,
 ) -> Value {
     let mut body = json!({
         "id": symbol.stable_symbol_id,
@@ -5359,6 +5414,9 @@ fn source_symbol_response(
     }
     if stale {
         body["stale"] = Value::Bool(true);
+    }
+    if let Some(origin) = source_origin {
+        body["source_origin"] = Value::String(origin.to_owned());
     }
     body
 }

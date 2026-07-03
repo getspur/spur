@@ -336,6 +336,25 @@ impl<B: GraphQueryClient> OverlayClient<B> {
         self.remap.get(old_id).map(String::as_str)
     }
 
+    /// Resolve the current (delta) version of a base symbol after an edit to
+    /// its file: the same id when re-extraction kept it stable, or the
+    /// remapped successor when the id changed. `None` means the symbol no
+    /// longer exists in the changed file.
+    pub fn current_symbol_for(
+        &self,
+        base_symbol_id: &str,
+    ) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        if let Some(symbol) = self.delta.symbol_by_id(base_symbol_id)? {
+            if self.is_shadowed_path(&symbol.file_path) {
+                return Ok(Some(symbol));
+            }
+        }
+        if let Some(new_id) = self.remapped_id_for(base_symbol_id) {
+            return self.delta.symbol_by_id(new_id);
+        }
+        Ok(None)
+    }
+
     fn old_ids_for_new<'a>(&'a self, new_id: &'a str) -> impl Iterator<Item = &'a str> + 'a {
         self.remap
             .iter()
