@@ -930,6 +930,7 @@ impl McpCallbackServer {
                 parent_epic_id: input.parent_epic_id,
                 epic_title: input.epic_title,
                 epic_body: input.epic_body,
+                epic_labels: Vec::new(),
                 brain_session_id: input.brain_session_id,
                 execution_mode: input.execution_mode.to_string(),
                 precomputed_auto_serialized: input.precomputed_auto_serialized,
