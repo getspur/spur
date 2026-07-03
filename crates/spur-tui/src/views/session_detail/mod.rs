@@ -203,6 +203,9 @@ pub struct SessionDetailView {
     /// `session_config_options` never reflects the new value.
     /// Always loses to a live `session_config_options[id="model"]` entry.
     pending_model_override: Option<String>,
+    /// Optimistic effort override set when the user dispatches `/effort`.
+    /// Always loses to a live effort config option once one resolves.
+    pending_effort_override: Option<String>,
 
     /// Wave B/C (M8): cached `SpurAgentCaps` for this session. Populated by
     /// the upstream wiring once `Orchestrator::spur_agent_caps()` returns
