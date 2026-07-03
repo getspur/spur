@@ -63,6 +63,7 @@ Legend:
 | JavaScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
 | C | - | Y | - | - | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
 | Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
+| Go | Y | Y | Y | - | Y | Y | - | - | - | Y | - | Y | - | Y | - |
 | Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - |
 | Shell | - | Y | - | - | - | - | - | - | - | - | - | - | - | - | - |
 | Sql | Y | Y | - | - | - | Y | Y | - | - | Y | - | Y | - | - | - |
@@ -95,6 +96,18 @@ Notes:
 - `python/symbols.scm` used to duplicate `python/tags.scm`. Snapshot extraction
   now reuses Python `tags.scm`, matching Rust/TypeScript/C++ and avoiding a
   stale duplicate symbol policy.
+- Go methods are grammatical (`method_declaration` for receiver methods and
+  `method_elem` for interface methods), so no `is_method` heuristic is used.
+  `type_spec` bodies dispatch to `struct`/`interface`, with every other
+  `type_spec` shape and `type_alias` folded into `type_alias`. Multi-name
+  `const_spec` and struct `field_declaration` specs capture each identifier as
+  its own definition node so `const A, B = 1, 2` fans out into one constant
+  per name. Only top-level `const` declarations are captured (function-local
+  `const` is skipped); Go `var` declarations are intentionally out of scope
+  for this phase (no clean NodeKind) and may be revisited later. The Go
+  `package_clause` spans only the clause itself, so top-level symbols are not
+  nested under the module node and keep bare-name FQNs, matching the
+  shell/sql convention.
 
 ## Relation Coverage Matrix
 
@@ -103,21 +116,21 @@ This table is the relation-level analogue of the Definition Coverage Matrix and 
 seed of the Tier-0 ontology realization contract
 (`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
 
-| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Lua | Shell | Sql | Markdown | JupyterNotebook |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | Y(links) | — |
-| calls | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| constructs | Y | Y | Y | Y | Y | Y | Y | — | — | Y | — | — |
-| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
-| produces | — | — | — | — | — | — | — | — | — | — | — | Y |
-| consumes | — | — | — | — | — | — | — | — | — | — | — | Y |
-| binds | — | — | — | — | — | — | — | — | — | — | — | Y |
-| emits | — | — | — | — | — | — | — | — | — | — | — | Y |
-| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| references (HOF/notebook facts) | Y | Y | Y | Y | Y | — | Y | — | — | Y | — | Y |
-| links | — | — | — | — | — | — | — | — | — | — | Y | — |
-| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — |
-| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — |
+| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Go | Lua | Shell | Sql | Markdown | JupyterNotebook |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | Y(links) | — |
+| calls | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| constructs | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | — | — |
+| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| produces | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| consumes | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| binds | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| emits | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| references (HOF/notebook facts) | Y | Y | Y | Y | Y | — | Y | — | — | — | Y | — | Y |
+| links | — | — | — | — | — | — | — | — | — | — | — | Y | — |
+| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — | — |
+| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — | — |
 
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
@@ -126,6 +139,16 @@ reclassified to `implements`.
 TypeScript/Tsx/JavaScript `imports` includes both direct import declarations
 and re-export statements (`export { ... } from "..."`, `export * from "..."`),
 both mapped to `RelationKind::Imports` through the same resolver path.
+
+Go `imports` edges are emitted per `import_spec`. The quote-free path content
+(`interpreted_string_literal_content` / `raw_string_literal_content`) is
+captured as `@import.path` and doubles as `@import.name` for plain, dot, and
+blank imports; aliased imports use the alias `package_identifier` as the edge
+name instead. Bare single-segment paths such as `fmt` are kept via
+`preserve_bare_import_path`. Go `constructs` is realized after resolution:
+composite literals of named types (`type_identifier`, `qualified_type`,
+`generic_type`) emit Calls edges that reclassify to Constructs when the target
+resolves to a struct; slice, array, and map literal shapes emit nothing.
 
 HOF references are realized in Rust, Python, C++, and TypeScript/Tsx/JavaScript
 via closed HOF-method allowlists in the respective `spur-edges.scm` files.

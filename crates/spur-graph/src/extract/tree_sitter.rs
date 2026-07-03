@@ -109,6 +109,7 @@ fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
         | Language::Javascript
         | Language::C
         | Language::Cpp
+        | Language::Go
         | Language::Lua
         | Language::Shell
         | Language::Sql
@@ -3416,11 +3417,14 @@ pub(crate) fn run_query<'tree>(
         let current_match_index = match_index;
         match_index += 1;
         for capture in query_match.captures {
-            if is_string_literal_context(capture.node) {
+            let name = capture_names[capture.index as usize];
+            if is_string_literal_context(capture.node)
+                && !is_string_content_import_capture(name, capture.node)
+            {
                 continue;
             }
             hits.push(CaptureHit {
-                name: capture_names[capture.index as usize].to_owned(),
+                name: name.to_owned(),
                 node: capture.node,
                 pattern_index: query_match.pattern_index,
                 match_index: current_match_index,
@@ -3428,6 +3432,18 @@ pub(crate) fn run_query<'tree>(
         }
     }
     hits
+}
+
+/// Go import paths grammatically live inside string literals, so their
+/// quote-free content captures must survive the string-context suppression.
+/// Scoped to Go's content node kinds so C/C++ `#include "..."` string_literal
+/// captures keep their historical suppression.
+fn is_string_content_import_capture(name: &str, node: Node<'_>) -> bool {
+    matches!(name, "import.name" | "import.path")
+        && matches!(
+            node.kind(),
+            "interpreted_string_literal_content" | "raw_string_literal_content"
+        )
 }
 
 fn is_string_literal_context(node: Node<'_>) -> bool {
