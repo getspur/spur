@@ -1,10 +1,11 @@
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 use std::sync::Arc;
 
-use spur_acp::{AcpSessionId, InitializeResponse, NewSessionResponse, ProtocolVersion};
 use spur_acp::{
-    AgentKind, SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId,
-    SpurAgentCaps, SpurEvent, SpurEventBody,
+    AcpSessionId, AgentCapabilities, AgentKind, InitializeResponse, NewSessionResponse,
+    ProtocolVersion, SessionCapabilities, SessionCloseCapabilities, SessionConfigId,
+    SessionConfigOption, SessionConfigSelectOption, SessionDeleteCapabilities, SessionId,
+    SessionListCapabilities, SessionResumeCapabilities, SpurAgentCaps, SpurEvent, SpurEventBody,
 };
 use spur_tui::action::ViewId;
 use spur_tui::components::status_bar::{StatusBar, StatusBarProps};
@@ -44,6 +45,7 @@ fn render_status(
                     stream_in_flight: false,
                     esc_consumed_by_composer: false,
                     notebook_ready: false,
+                    session_lifecycle_caps: None,
                     issue_count: 0,
                     alert_summary: None,
                     license_badge: None,
@@ -79,6 +81,27 @@ fn caps_with_effort(current: &str) -> Arc<SpurAgentCaps> {
     Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp))
 }
 
+fn caps_with_lifecycle(resume: bool, delete: bool, list: bool, close: bool) -> Arc<SpurAgentCaps> {
+    let mut session_caps = SessionCapabilities::new();
+    if resume {
+        session_caps = session_caps.resume(SessionResumeCapabilities::new());
+    }
+    if delete {
+        session_caps = session_caps.delete(SessionDeleteCapabilities::new());
+    }
+    if list {
+        session_caps = session_caps.list(SessionListCapabilities::new());
+    }
+    if close {
+        session_caps = session_caps.close(SessionCloseCapabilities::new());
+    }
+
+    let mut init = InitializeResponse::new(ProtocolVersion::LATEST);
+    init.agent_capabilities = AgentCapabilities::new().session_capabilities(session_caps);
+    let new = NewSessionResponse::new(AcpSessionId::new("caps-session"));
+    Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp))
+}
+
 fn render_session_detail(view: &mut SessionDetailView) -> String {
     static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
         std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
@@ -100,6 +123,61 @@ fn render_session_detail(view: &mut SessionDetailView) -> String {
         output.push('\n');
     }
     output
+}
+
+fn new_session_detail_view() -> (tempfile::TempDir, SessionDetailView) {
+    let tmp = tempfile::tempdir().unwrap();
+    let view = SessionDetailView::new(
+        SessionId::new(),
+        "codex".into(),
+        "brain".into(),
+        tmp.path().to_path_buf(),
+        spur_tui::test_support::default_agent_config("codex"),
+        Vec::new(),
+    );
+    (tmp, view)
+}
+
+fn rendered_status_bar_line(output: &str) -> &str {
+    output.lines().last().unwrap_or_default()
+}
+
+#[test]
+fn session_detail_lifecycle_indicator_absent_without_advertised_caps() {
+    let (_tmp, mut view) = new_session_detail_view();
+
+    let without_caps = render_session_detail(&mut view);
+    let without_caps_status = rendered_status_bar_line(&without_caps);
+    assert!(
+        !without_caps_status.contains("session:"),
+        "session lifecycle indicator must be hidden when caps are absent: {without_caps_status}"
+    );
+
+    view.set_spur_agent_caps(Some(caps_with_lifecycle(false, false, false, false)));
+    let without_lifecycle = render_session_detail(&mut view);
+    let without_lifecycle_status = rendered_status_bar_line(&without_lifecycle);
+    assert!(
+        !without_lifecycle_status.contains("session:"),
+        "session lifecycle indicator must be hidden when no lifecycle caps are advertised: {without_lifecycle_status}"
+    );
+}
+
+#[test]
+fn session_detail_lifecycle_indicator_lists_advertised_caps_only() {
+    let (_tmp, mut view) = new_session_detail_view();
+    view.set_spur_agent_caps(Some(caps_with_lifecycle(true, false, false, true)));
+
+    let rendered = render_session_detail(&mut view);
+    let status = rendered_status_bar_line(&rendered);
+
+    assert!(
+        status.contains("session: resume close"),
+        "status bar should list advertised session lifecycle caps: {status}"
+    );
+    assert!(
+        !status.contains("delete") && !status.contains("list"),
+        "status bar should not list unadvertised lifecycle caps: {status}"
+    );
 }
 
 #[test]
