@@ -340,7 +340,7 @@ impl PlanMcpDeps {
         let advanced = pm
             .advanced()
             .ok_or_else(|| "test version churn requires beads advanced backend".to_string())?;
-        eprintln!("[dbg-hang] churn: add_comment begin");
+        tracing::trace!(%epic_id, "dbg-hang: churn add_comment begin");
         advanced
             .add_comment(
                 epic_id,
@@ -354,7 +354,7 @@ impl PlanMcpDeps {
                 ),
             )
             .await
-            .map(|_| eprintln!("[dbg-hang] churn: add_comment done"))
+            .map(|_| tracing::trace!(%epic_id, "dbg-hang: churn add_comment done"))
             .map_err(|error| format!("test version churn failed: {error}"))
     }
 
@@ -493,9 +493,9 @@ impl PlanMcpDeps {
         .await?;
 
         for (attempt, backoff) in VERSIONED_PLAN_CACHE_BACKOFFS.iter().enumerate() {
-            eprintln!("[dbg-hang] retry attempt={attempt} pre-before-version");
+            tracing::trace!(%plan_id, epic_id = %epic.id, attempt, "dbg-hang: retry pre-before-version");
             let before_version = self.beads_version_for_epic(&epic.id).await?;
-            eprintln!("[dbg-hang] attempt={attempt} got before_version, projecting");
+            tracing::trace!(%plan_id, epic_id = %epic.id, attempt, "dbg-hang: got before_version, projecting");
             let projected = crate::plan::projector::project_plan_from_beads(
                 pm,
                 plan_id,
@@ -503,9 +503,9 @@ impl PlanMcpDeps {
             )
             .await
             .map_err(|error| format!("unknown plan '{plan_id}': {error}"))?;
-            eprintln!("[dbg-hang] attempt={attempt} projected, pre-after-version");
+            tracing::trace!(%plan_id, epic_id = %epic.id, attempt, "dbg-hang: projected, pre-after-version");
             let after_version = self.beads_version_for_epic(&epic.id).await?;
-            eprintln!("[dbg-hang] attempt={attempt} got after_version");
+            tracing::trace!(%plan_id, epic_id = %epic.id, attempt, "dbg-hang: got after_version");
             if before_version == after_version {
                 return Ok((projected, after_version));
             }
@@ -543,9 +543,9 @@ impl PlanMcpDeps {
         &self,
         plan_id: &str,
     ) -> Result<crate::handlers::ResolvedPlanState, String> {
-        eprintln!("[dbg-hang] freshness: enter plan_id={plan_id}");
+        tracing::trace!(%plan_id, "dbg-hang: freshness enter");
         let cached = self.active_plans.lock().await.get(plan_id).cloned();
-        eprintln!("[dbg-hang] freshness: cache hit={}", cached.is_some());
+        tracing::trace!(%plan_id, cache_hit = cached.is_some(), "dbg-hang: freshness cache lookup done");
         if let Some(existing) = cached.clone() {
             let (epic_id, has_nonterminal_tasks) = {
                 let state = existing.state.lock().await;
@@ -556,9 +556,9 @@ impl PlanMcpDeps {
             };
             if self.versioned_cache_serve {
                 if let Some(epic_id) = epic_id {
-                    eprintln!("[dbg-hang] freshness: versioned revalidate begin");
+                    tracing::trace!(%plan_id, %epic_id, "dbg-hang: freshness versioned revalidate begin");
                     let current_version = self.beads_version_for_epic(&epic_id).await?;
-                    eprintln!("[dbg-hang] freshness: revalidate got version");
+                    tracing::trace!(%plan_id, %epic_id, "dbg-hang: freshness revalidate got version");
                     if current_version == existing.beads_version {
                         return Ok(crate::handlers::ResolvedPlanState {
                             state: existing.state,

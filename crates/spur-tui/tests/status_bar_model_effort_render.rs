@@ -3,10 +3,9 @@ use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 use std::sync::Arc;
 
 use spur_acp::{
-    AcpSessionId, AgentCapabilities, AgentKind, InitializeResponse, NewSessionResponse,
-    ProtocolVersion, SessionCapabilities, SessionCloseCapabilities, SessionConfigId,
-    SessionConfigOption, SessionConfigSelectOption, SessionDeleteCapabilities, SessionId,
-    SessionListCapabilities, SessionResumeCapabilities, SpurAgentCaps, SpurEvent, SpurEventBody,
+    AcpSessionId, AgentKind, InitializeResponse, NewSessionResponse, ProtocolVersion,
+    SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionId, SpurAgentCaps,
+    SpurEvent, SpurEventBody,
 };
 use spur_tui::action::{Action, ViewId};
 use spur_tui::components::status_bar::{StatusBar, StatusBarProps};
@@ -46,10 +45,8 @@ fn render_status(
                     stream_in_flight: false,
                     esc_consumed_by_composer: false,
                     notebook_ready: false,
-                    session_lifecycle_caps: None,
                     issue_count: 0,
                     alert_summary: None,
-                    license_badge: None,
                     flag_summary: None,
                     view_hint_override: None,
                 },
@@ -82,32 +79,14 @@ fn caps_with_effort(current: &str) -> Arc<SpurAgentCaps> {
     Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp))
 }
 
-fn caps_with_lifecycle(resume: bool, delete: bool, list: bool, close: bool) -> Arc<SpurAgentCaps> {
-    let mut session_caps = SessionCapabilities::new();
-    if resume {
-        session_caps = session_caps.resume(SessionResumeCapabilities::new());
-    }
-    if delete {
-        session_caps = session_caps.delete(SessionDeleteCapabilities::new());
-    }
-    if list {
-        session_caps = session_caps.list(SessionListCapabilities::new());
-    }
-    if close {
-        session_caps = session_caps.close(SessionCloseCapabilities::new());
-    }
-
-    let mut init = InitializeResponse::new(ProtocolVersion::LATEST);
-    init.agent_capabilities = AgentCapabilities::new().session_capabilities(session_caps);
-    let new = NewSessionResponse::new(AcpSessionId::new("caps-session"));
-    Arc::new(SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp))
-}
-
 fn render_session_detail(view: &mut SessionDetailView) -> String {
     static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
         std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
 
-    let backend = TestBackend::new(160, 20);
+    // Wide enough that the full metrics group (~100 cols) and the SessionDetail
+    // hint text (~100 cols) both fit without the status bar falling back to
+    // compact mode (see StatusBar::render's per-view hint reserve).
+    let backend = TestBackend::new(220, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
 
@@ -156,44 +135,6 @@ fn submit_text(view: &mut SessionDetailView, text: &str) -> Option<Action> {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &test_ctx(),
     )
-}
-
-#[test]
-fn session_detail_lifecycle_indicator_absent_without_advertised_caps() {
-    let (_tmp, mut view) = new_session_detail_view();
-
-    let without_caps = render_session_detail(&mut view);
-    let without_caps_status = rendered_status_bar_line(&without_caps);
-    assert!(
-        !without_caps_status.contains("session:"),
-        "session lifecycle indicator must be hidden when caps are absent: {without_caps_status}"
-    );
-
-    view.set_spur_agent_caps(Some(caps_with_lifecycle(false, false, false, false)));
-    let without_lifecycle = render_session_detail(&mut view);
-    let without_lifecycle_status = rendered_status_bar_line(&without_lifecycle);
-    assert!(
-        !without_lifecycle_status.contains("session:"),
-        "session lifecycle indicator must be hidden when no lifecycle caps are advertised: {without_lifecycle_status}"
-    );
-}
-
-#[test]
-fn session_detail_lifecycle_indicator_lists_advertised_caps_only() {
-    let (_tmp, mut view) = new_session_detail_view();
-    view.set_spur_agent_caps(Some(caps_with_lifecycle(true, false, false, true)));
-
-    let rendered = render_session_detail(&mut view);
-    let status = rendered_status_bar_line(&rendered);
-
-    assert!(
-        status.contains("session: resume close"),
-        "status bar should list advertised session lifecycle caps: {status}"
-    );
-    assert!(
-        !status.contains("delete") && !status.contains("list"),
-        "status bar should not list unadvertised lifecycle caps: {status}"
-    );
 }
 
 #[test]
@@ -316,8 +257,10 @@ fn session_detail_status_bar_uses_live_effort_after_config_refresh() {
 
 #[test]
 fn codex_status_bar_renders_model_effort_and_usage() {
+    // Wide enough for full metrics (~100 cols) plus the SessionDetail hint
+    // text (~100 cols) to both fit without falling back to compact mode.
     let line = render_status(
-        160,
+        220,
         Some("GPT-5 Codex"),
         Some("Medium"),
         true,
@@ -346,6 +289,22 @@ fn claude_code_status_bar_hides_effort_and_unsupported_usage() {
 }
 
 #[test]
+fn unsupported_usage_flag_does_not_hide_real_live_usage_data() {
+    // `usage_supported` is a frozen per-agent-kind prediction captured at
+    // session start (see spur-acp's `agent_quirks::usage_emit_default`), not
+    // a live protocol capability — ACP has no capability flag for
+    // `UsageUpdate` emission. When the live agent sends real usage data
+    // despite that prediction saying "unsupported", the gauge must still
+    // render it: arrived data is strictly better evidence than a guess.
+    let line = render_status(160, Some("Sonnet 4.5"), None, false, Some(47), Some(100));
+
+    assert!(
+        line.contains("ctx 47%"),
+        "real live usage data must render even when usage_supported predicted false: {line}"
+    );
+}
+
+#[test]
 fn supported_usage_without_update_renders_placeholder() {
     let line = render_status(160, Some("GPT-5 Codex"), Some("Medium"), true, None, None);
 
@@ -356,9 +315,12 @@ fn supported_usage_without_update_renders_placeholder() {
 }
 
 #[test]
-fn sixty_columns_use_compact_model_effort_usage_form() {
+fn one_hundred_seventy_columns_use_compact_model_effort_usage_form() {
+    // Narrow enough that full metrics (~103 cols) + hint (~98 cols) don't fit,
+    // but wide enough that compact metrics (~50 cols) + hint do — the band
+    // where compacting the metrics actually buys back the hint's space.
     let line = render_status(
-        60,
+        170,
         Some("gpt-5-super-long-model-name"),
         Some("Medium"),
         true,
@@ -394,9 +356,11 @@ fn one_hundred_columns_keep_full_model_effort_usage_form() {
 }
 
 #[test]
-fn one_hundred_sixty_columns_keep_full_model_effort_usage_form() {
+fn two_hundred_twenty_columns_keep_full_model_effort_usage_form() {
+    // Wide enough for full metrics (~100 cols) plus the SessionDetail hint
+    // text (~100 cols) to both fit without falling back to compact mode.
     let line = render_status(
-        160,
+        220,
         Some("GPT-5 Codex"),
         Some("Medium"),
         true,
@@ -406,6 +370,6 @@ fn one_hundred_sixty_columns_keep_full_model_effort_usage_form() {
 
     assert!(
         line.contains("[default] GPT-5 Codex · Medium · ctx 47%"),
-        "160-column status bar should keep the full model/effort/usage group: {line}"
+        "220-column status bar should keep the full model/effort/usage group: {line}"
     );
 }

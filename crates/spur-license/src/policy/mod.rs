@@ -423,7 +423,10 @@ mod tests {
         assert!(community.contains("core_core_brain_session"));
         assert!(community.contains("core_core_parallel_workers"));
         assert!(community.contains("mcp_core_server_dispatch"));
-        assert!(!community.contains("pm_pro_beads_advanced"));
+        // Local beads-backed planning is part of the Community
+        // daily-driver workflow — granted by the signed policy itself,
+        // not by a runtime compatibility shim.
+        assert!(community.contains("pm_pro_beads_advanced"));
     }
 
     #[test]
