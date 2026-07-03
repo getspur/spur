@@ -80,6 +80,68 @@ fn commit_rendered_batch(
     );
 }
 
+fn prompt_cost_model_hint(brain: &BrainSession) -> &str {
+    current_model_config_value(&brain.config_options).unwrap_or(&brain.brain_name)
+}
+
+fn current_model_config_value(options: &[spur_acp::SessionConfigOption]) -> Option<&str> {
+    let option = options
+        .iter()
+        .find(|option| {
+            matches!(
+                option.category.as_ref(),
+                Some(spur_acp::SessionConfigOptionCategory::Model)
+            )
+        })
+        .or_else(|| {
+            options
+                .iter()
+                .find(|option| option.category.is_none() && option.id.0.as_ref() == "model")
+        })?;
+
+    let spur_acp::SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let current = select.current_value.0.as_ref();
+    if current.is_empty() {
+        None
+    } else {
+        Some(current)
+    }
+}
+
+fn emit_prompt_usage_cost_update(
+    funnel: &crate::event_funnel::FunnelHandle,
+    registry: &AgentRegistry,
+    brain: &mut BrainSession,
+    duration: Duration,
+) {
+    let Some(usage) = brain.connection.take_last_prompt_usage() else {
+        return;
+    };
+    let Some(agent_config) = registry.get(&brain.brain_name) else {
+        warn!(
+            session = %brain.spur_session_id,
+            brain = %brain.brain_name,
+            "skipping prompt usage cost update because brain config is no longer registered"
+        );
+        return;
+    };
+
+    let estimated_cost_usd = estimate_prompt_cost(
+        agent_config.cost_tier,
+        duration,
+        Some(&usage),
+        Some(prompt_cost_model_hint(brain)),
+    );
+
+    funnel.emit(SpurEventBody::CostUpdate {
+        session: brain.spur_session_id.clone(),
+        agent: brain.brain_name.clone(),
+        estimated_cost_usd,
+    });
+}
+
 impl Orchestrator {
     fn emit_listed_sessions(&mut self, brain_name: &str, sessions: Vec<spur_acp::SessionInfo>) {
         let (brain_sessions, worker_sessions) = classify_sessions(sessions, &self.repo_root);
@@ -1573,7 +1635,9 @@ impl Orchestrator {
             }
 
             // Emit turn complete
+            let prompt_duration = prompt_started_at.elapsed();
             let b = brain.as_mut().unwrap();
+            emit_prompt_usage_cost_update(&self.funnel, &self.registry, b, prompt_duration);
             self.emit(SpurEvent::now(SpurEventBody::TurnComplete {
                 session: b.spur_session_id.clone(),
             }));
@@ -1921,6 +1985,114 @@ mod list_sessions_tests {
         assert_eq!(
             seeds.get("seed-b"),
             Some(&(Some("hello b".to_string()), Some("last b".to_string())))
+        );
+    }
+}
+
+#[cfg(test)]
+mod prompt_usage_cost_update_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use spur_acp::connection::AgentConnection;
+    use spur_acp::types::AgentHealth;
+    use spur_acp::{
+        CostTier, InitializeRequest, InitializeResponse, McpServer, NewSessionResponse,
+        PromptRequest, SessionNotification, Usage,
+    };
+    use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::time::Duration;
+
+    struct UsageConnection {
+        usage: Option<Usage>,
+    }
+
+    #[async_trait]
+    impl AgentConnection for UsageConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<InitializeResponse> {
+            unimplemented!("not needed for cost update test")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<NewSessionResponse> {
+            unimplemented!("not needed for cost update test")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        fn take_last_prompt_usage(&mut self) -> Option<Usage> {
+            self.usage.take()
+        }
+    }
+
+    #[tokio::test]
+    async fn emits_cost_update_from_completed_prompt_usage() {
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+        let mut registry = AgentRegistry::new();
+        let mut agent_config = spur_acp::config::AgentConfig::with_defaults("gpt-5");
+        agent_config.cost_tier = CostTier::Medium;
+        registry.register(agent_config);
+
+        let usage = Usage::new(1_800_000, 1_000_000, 500_000)
+            .cached_write_tokens(100_000)
+            .cached_read_tokens(200_000);
+        let mut brain = BrainSession::for_test(
+            Box::new(UsageConnection { usage: Some(usage) }),
+            "acp-session",
+            SessionId("spur-session".to_string()),
+            "gpt-5",
+        );
+
+        emit_prompt_usage_cost_update(&funnel, &registry, &mut brain, Duration::from_secs(60));
+
+        let body = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("cost update should be emitted")
+            .expect("event channel should stay open");
+
+        match body {
+            SpurEventBody::CostUpdate {
+                session,
+                agent,
+                estimated_cost_usd,
+            } => {
+                assert_eq!(session.0, "spur-session");
+                assert_eq!(agent, "gpt-5");
+                assert!(
+                    (estimated_cost_usd - 6.4).abs() < 0.001,
+                    "cost={estimated_cost_usd}"
+                );
+            }
+            other => panic!("expected CostUpdate, got {other:?}"),
+        }
+
+        assert!(
+            brain.connection.take_last_prompt_usage().is_none(),
+            "usage must be consumed exactly once"
         );
     }
 }
