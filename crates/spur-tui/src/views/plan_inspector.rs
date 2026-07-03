@@ -42,6 +42,7 @@ pub struct PlanInspectorView {
     task_detail_scroll: usize,
     mode: PlanInspectorMode,
     confirm: Option<PlanInspectorConfirm>,
+    loop_event_status: Option<String>,
 }
 
 #[derive(Debug)]
@@ -90,6 +91,7 @@ impl PlanInspectorView {
             task_detail_scroll: 0,
             mode: PlanInspectorMode::Browse,
             confirm: None,
+            loop_event_status: None,
         }
     }
 
@@ -105,6 +107,7 @@ impl PlanInspectorView {
             task_detail_scroll: 0,
             mode: PlanInspectorMode::Browse,
             confirm: None,
+            loop_event_status: None,
         }
     }
 
@@ -952,6 +955,36 @@ impl View for PlanInspectorView {
                     }
                 }
             }
+            spur_acp::SpurEventBody::LoopArmed {
+                loop_id,
+                generation,
+                next_run,
+            } => {
+                self.loop_event_status = Some(format!(
+                    "loop {loop_id} gen {generation}: armed next {next_run}"
+                ));
+            }
+            spur_acp::SpurEventBody::LoopGenerationStarted {
+                loop_id,
+                generation,
+                plan_id,
+            } => {
+                self.loop_event_status =
+                    Some(format!("loop {loop_id} gen {generation}: plan {plan_id}"));
+            }
+            spur_acp::SpurEventBody::LoopRunRecorded {
+                loop_id,
+                generation,
+                outcome,
+                cost_micros,
+            } => {
+                self.loop_event_status = Some(format!(
+                    "loop {loop_id} gen {generation}: [{outcome}] {cost_micros} micros"
+                ));
+            }
+            spur_acp::SpurEventBody::LoopPaused { loop_id, by } => {
+                self.loop_event_status = Some(format!("loop {loop_id}: {by}"));
+            }
             _ => {}
         }
     }
@@ -1212,17 +1245,23 @@ impl View for PlanInspectorView {
         } else {
             ""
         };
+        let footer = footer_hint(
+            area.width,
+            enter_hint,
+            peek_hint,
+            retry_hint,
+            review_hint,
+            scroll_hint,
+            self.open_issue_id.is_none() && self.active_plan(ctx).is_some(),
+        );
+        let footer = if let Some(status) = self.loop_event_status.as_ref() {
+            truncate_display(&format!("{status}  {footer}"), area.width as usize)
+        } else {
+            footer
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                footer_hint(
-                    area.width,
-                    enter_hint,
-                    peek_hint,
-                    retry_hint,
-                    review_hint,
-                    scroll_hint,
-                    self.open_issue_id.is_none() && self.active_plan(ctx).is_some(),
-                ),
+                footer,
                 Style::default().fg(token(ctx.theme, "plan_inspector.footer_hint.fg")),
             )])),
             chunks[2],
