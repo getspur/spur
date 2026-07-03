@@ -151,6 +151,24 @@ pub enum UserInput {
     RefreshIssues,
     /// Request the orchestrator to refresh persisted plan summaries.
     RefreshPlans,
+    /// Request the orchestrator to refresh persisted loop summaries.
+    RefreshLoops,
+    /// Request a read-only persisted loop detail snapshot.
+    InspectLoop {
+        loop_id: String,
+    },
+    /// Request the orchestrator to pause a governed loop.
+    PauseLoop {
+        loop_id: String,
+    },
+    /// Request the orchestrator to resume a governed loop.
+    ResumeLoop {
+        loop_id: String,
+    },
+    /// Request the orchestrator to retire a governed loop.
+    KillLoop {
+        loop_id: String,
+    },
     /// Request the orchestrator to claim a persisted plan without starting execution.
     ClaimPlan {
         plan_id: String,
