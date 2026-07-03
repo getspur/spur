@@ -490,9 +490,9 @@ async fn recover_orphaned_dispatch_resumes_worker_session_before_state_compensat
         .await
         .expect("live worker session should resume");
 
-    assert!(
-        msg.contains("Worker session resumed"),
-        "unexpected response: {msg}"
+    assert_eq!(
+        msg,
+        "Worker ACP session was verified resumable via a probe connection; no live worker is currently executing because resume re-drive is not implemented yet. Dispatch intent and labels were preserved, so state compensation was skipped. Once the worker branch is final, re-run recover_orphaned_dispatch to fall back to state compensation, or review the branch directly."
     );
     let calls = resume_calls.lock().await;
     assert_eq!(calls.len(), 1);
