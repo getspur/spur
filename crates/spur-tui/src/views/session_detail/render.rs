@@ -368,7 +368,8 @@ impl SessionDetailView {
                 (r, p)
             })
             .unwrap_or((0, 0));
-        let caps = self.spur_agent_caps.as_deref();
+        let spur_agent_caps = self.spur_agent_caps_cloned();
+        let caps = spur_agent_caps.as_deref();
         let model_label = self.resolved_model_label();
         let effort_label = spur_acp::SpurAgentCaps::effort_label_from(&self.session_config_options);
         let usage_supported = caps
@@ -395,6 +396,7 @@ impl SessionDetailView {
                 stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
                 esc_consumed_by_composer: self.input_bar.wants_esc(),
                 notebook_ready: ctx.notebook_ready,
+                session_lifecycle_caps: caps,
                 issue_count: 0,
                 alert_summary: None,
                 license_badge,
