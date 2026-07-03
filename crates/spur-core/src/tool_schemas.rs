@@ -179,6 +179,14 @@ pub struct LoopIdParams {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct SetLoopAutonomyParams {
+    pub loop_id: String,
+    /// Must be one of `l1`, `l2`, or `l3`.
+    pub level: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetLoopStatusParams {
     pub loop_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

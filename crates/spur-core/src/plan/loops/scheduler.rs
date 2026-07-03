@@ -92,6 +92,7 @@ impl Reconciler {
                         &encode_comment(&skipped_loop_run(
                             &spec.loop_id,
                             next_generation,
+                            Some(spec.autonomy.as_str().to_string()),
                             "budget_exhausted",
                             now,
                         )),
@@ -110,6 +111,7 @@ impl Reconciler {
                         &encode_comment(&skipped_loop_run(
                             &spec.loop_id,
                             next_generation,
+                            Some(spec.autonomy.as_str().to_string()),
                             "skipped_overlap",
                             now,
                         )),
@@ -275,11 +277,18 @@ fn next_run_after_now(labels: &[String], now: i64) -> bool {
         .is_some_and(|next_run| next_run > now)
 }
 
-fn skipped_loop_run(loop_id: &str, generation: u32, outcome: &str, now: i64) -> AuditSentinelKind {
+fn skipped_loop_run(
+    loop_id: &str,
+    generation: u32,
+    autonomy: Option<String>,
+    outcome: &str,
+    now: i64,
+) -> AuditSentinelKind {
     AuditSentinelKind::LoopRun {
         loop_id: loop_id.to_string(),
         generation,
         plan_id: String::new(),
+        autonomy,
         outcome: outcome.to_string(),
         tasks_discovered: 0,
         approved: 0,
