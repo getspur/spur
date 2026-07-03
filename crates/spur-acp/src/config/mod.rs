@@ -315,6 +315,12 @@ pub struct SpurRuntimeConfig {
     /// When true, automatically merge approved plans and create PRs.
     /// Default: false (opt-in).
     pub auto_merge_approved_plans: bool,
+    /// When false, disables loop scheduler sweeps at startup.
+    /// Default: true.
+    pub loops_enabled: bool,
+    /// When true, starts the loop scheduler in globally paused mode.
+    /// Default: false.
+    pub pause_all_loops: bool,
     /// Grace period before startup quarantines stale `spur:plan-pending`
     /// persisted plan epics. Default: 1 hour.
     pub plan_pending_grace_secs: u64,
@@ -337,10 +343,16 @@ fn default_dispatch_lease_heartbeat_secs() -> u64 {
     default_dispatch_lease_secs() / 3
 }
 
+fn default_loops_enabled() -> bool {
+    true
+}
+
 impl Default for SpurRuntimeConfig {
     fn default() -> Self {
         Self {
             auto_merge_approved_plans: false,
+            loops_enabled: default_loops_enabled(),
+            pause_all_loops: false,
             plan_pending_grace_secs: default_plan_pending_grace_secs(),
             dispatch_lease_secs: default_dispatch_lease_secs(),
             dispatch_lease_heartbeat_secs: default_dispatch_lease_heartbeat_secs(),
@@ -1261,6 +1273,8 @@ mod tests {
     fn spur_runtime_defaults_auto_merge_to_false() {
         let cfg: SpurConfig = toml::from_str("").unwrap();
         assert!(!cfg.spur.auto_merge_approved_plans);
+        assert!(cfg.spur.loops_enabled);
+        assert!(!cfg.spur.pause_all_loops);
         assert_eq!(cfg.spur.plan_pending_grace_secs, 60 * 60);
         assert_eq!(cfg.spur.dispatch_lease_secs, 600);
         assert_eq!(cfg.spur.dispatch_lease_heartbeat_secs, 200);
@@ -1319,6 +1333,8 @@ mod tests {
             r#"
             [spur]
             auto_merge_approved_plans = true
+            loops_enabled = false
+            pause_all_loops = true
             plan_pending_grace_secs = 10
             dispatch_lease_secs = 30
             dispatch_lease_heartbeat_secs = 10
@@ -1326,6 +1342,8 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.spur.auto_merge_approved_plans);
+        assert!(!cfg.spur.loops_enabled);
+        assert!(cfg.spur.pause_all_loops);
         assert_eq!(cfg.spur.plan_pending_grace_secs, 10);
         assert_eq!(cfg.spur.dispatch_lease_secs, 30);
         assert_eq!(cfg.spur.dispatch_lease_heartbeat_secs, 10);
