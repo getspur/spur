@@ -57,12 +57,12 @@ use agent_client_protocol::schema::v1::{
     PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigValueId,
-    SessionId, SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse, TerminalExitStatus, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, Usage, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse,
+    ResumeSessionResponse, SelectedPermissionOutcome, SessionCapabilities, SessionConfigId,
+    SessionConfigValueId, SessionId, SessionModeId, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModeResponse, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, Usage, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
@@ -222,6 +222,11 @@ pub struct NativeAcpConnection {
     /// `NewSessionResponse` / `LoadSessionResponse` so policy code can gate
     /// `session/set_mode` without probing unsupported modes.
     advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
+    /// Session lifecycle capabilities from this connection's
+    /// `InitializeResponse`. `None` means initialize has not completed yet;
+    /// `Some(default)` means the agent initialized but did not advertise
+    /// optional lifecycle methods.
+    session_capabilities: Arc<Mutex<Option<SessionCapabilities>>>,
     /// Usage from the most recently completed `session/prompt` response.
     /// Cleared when a new prompt starts and consumed by the orchestrator after
     /// `drive_prompt_notifications` observes turn completion.
@@ -296,6 +301,16 @@ fn cache_session_modes(
     if let Ok(mut guard) = advertised_modes.lock() {
         guard.insert(session_id.0.to_string(), ids);
     }
+}
+
+fn session_capability_advertised(
+    session_capabilities: &Arc<Mutex<Option<SessionCapabilities>>>,
+    supports: impl FnOnce(&SessionCapabilities) -> bool,
+) -> bool {
+    let Ok(guard) = session_capabilities.lock() else {
+        return true;
+    };
+    guard.as_ref().map_or(true, supports)
 }
 
 fn busy_in_flight_error(agent_name: &str, in_flight: &str) -> anyhow::Error {
@@ -412,6 +427,7 @@ impl NativeAcpConnection {
             ext_notification_tx: ext_tx,
             session_notif_tx,
             advertised_modes: Arc::new(Mutex::new(HashMap::new())),
+            session_capabilities: Arc::new(Mutex::new(None)),
             last_prompt_usage: Arc::new(Mutex::new(None)),
             child_pgid: Arc::new(Mutex::new(None)),
             repo_root: PathBuf::from("."),
@@ -611,6 +627,10 @@ impl AgentConnection for NativeAcpConnection {
                 self.agent_name
             )
         })??;
+
+        if let Ok(mut guard) = self.session_capabilities.lock() {
+            *guard = Some(result.agent_capabilities.session_capabilities.clone());
+        }
 
         self.health_status = AgentHealth::Ready;
         tracing::info!(
@@ -849,6 +869,11 @@ impl AgentConnection for NativeAcpConnection {
         &mut self,
         request: ResumeSessionRequest,
     ) -> Result<ResumeSessionResponse, AcpError> {
+        if !session_capability_advertised(&self.session_capabilities, |caps| caps.resume.is_some())
+        {
+            return Err(AcpError::CapabilityMissing("session/resume"));
+        }
+
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
             anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
@@ -880,6 +905,10 @@ impl AgentConnection for NativeAcpConnection {
         &mut self,
         request: ListSessionsRequest,
     ) -> anyhow::Result<ListSessionsResponse> {
+        if !session_capability_advertised(&self.session_capabilities, |caps| caps.list.is_some()) {
+            return Err(AcpError::CapabilityMissing("session/list").into());
+        }
+
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
             anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
@@ -908,6 +937,11 @@ impl AgentConnection for NativeAcpConnection {
         &mut self,
         request: DeleteSessionRequest,
     ) -> Result<DeleteSessionResponse, AcpError> {
+        if !session_capability_advertised(&self.session_capabilities, |caps| caps.delete.is_some())
+        {
+            return Err(AcpError::CapabilityMissing("session/delete"));
+        }
+
         let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
             anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
         })?;
@@ -2608,11 +2642,13 @@ mod resume_delete_dispatch_tests {
 
     use super::{AcpCommand, NativeAcpConnection};
     use crate::connection::AgentConnection;
+    use crate::AcpError;
     use agent_client_protocol::schema::v1::{
-        DeleteSessionRequest, DeleteSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
-        SessionId,
+        DeleteSessionRequest, DeleteSessionResponse, ListSessionsRequest, ListSessionsResponse,
+        ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+        SessionDeleteCapabilities, SessionId, SessionListCapabilities, SessionResumeCapabilities,
     };
-    use tokio::sync::mpsc;
+    use tokio::sync::mpsc::{self, error::TryRecvError};
 
     fn connection_with_command_channel(
     ) -> (NativeAcpConnection, mpsc::UnboundedReceiver<AcpCommand>) {
@@ -2627,9 +2663,22 @@ mod resume_delete_dispatch_tests {
         (conn, rx)
     }
 
+    fn connection_with_session_capabilities(
+        capabilities: SessionCapabilities,
+    ) -> (NativeAcpConnection, mpsc::UnboundedReceiver<AcpCommand>) {
+        let (conn, rx) = connection_with_command_channel();
+        conn.session_capabilities
+            .lock()
+            .expect("test mutex must not be poisoned")
+            .replace(capabilities);
+        (conn, rx)
+    }
+
     #[tokio::test]
     async fn resume_session_dispatches_command_and_returns_response() {
-        let (mut conn, mut rx) = connection_with_command_channel();
+        let (mut conn, mut rx) = connection_with_session_capabilities(
+            SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
+        );
         let cwd = PathBuf::from("/tmp/spur-resume");
         let request = ResumeSessionRequest::new(SessionId::new("sid"), cwd.clone());
 
@@ -2651,8 +2700,64 @@ mod resume_delete_dispatch_tests {
     }
 
     #[tokio::test]
+    async fn resume_session_without_capability_returns_missing_without_dispatch() {
+        let (mut conn, mut rx) = connection_with_session_capabilities(SessionCapabilities::new());
+        let request =
+            ResumeSessionRequest::new(SessionId::new("sid"), PathBuf::from("/tmp/spur-resume"));
+
+        let result = conn.resume_session(request).await;
+
+        match result {
+            Err(AcpError::CapabilityMissing(name)) => assert_eq!(name, "session/resume"),
+            other => panic!("expected CapabilityMissing(\"session/resume\"), got {other:?}"),
+        }
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_dispatches_command_and_returns_response() {
+        let (mut conn, mut rx) = connection_with_session_capabilities(
+            SessionCapabilities::new().list(SessionListCapabilities::new()),
+        );
+        let request = ListSessionsRequest::new().cursor("next-page".to_string());
+
+        let handle = tokio::spawn(async move { conn.list_sessions(request).await });
+
+        match rx.recv().await.expect("list command must be sent") {
+            AcpCommand::ListSessions { request, reply } => {
+                assert_eq!(request.cursor.as_deref(), Some("next-page"));
+                reply
+                    .send(Ok(ListSessionsResponse::new(vec![])))
+                    .expect("test receiver must still be waiting");
+            }
+            _ => panic!("expected ListSessions command"),
+        }
+
+        let response = handle.await.expect("list task must not panic").unwrap();
+        assert_eq!(response, ListSessionsResponse::new(vec![]));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_without_capability_returns_missing_without_dispatch() {
+        let (mut conn, mut rx) = connection_with_session_capabilities(SessionCapabilities::new());
+
+        let err = conn
+            .list_sessions(ListSessionsRequest::new())
+            .await
+            .expect_err("missing session/list capability must fail");
+
+        match err.downcast_ref::<AcpError>() {
+            Some(AcpError::CapabilityMissing(name)) => assert_eq!(*name, "session/list"),
+            other => panic!("expected CapabilityMissing(\"session/list\"), got {other:?}"),
+        }
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
     async fn delete_session_dispatches_command_and_returns_response() {
-        let (mut conn, mut rx) = connection_with_command_channel();
+        let (mut conn, mut rx) = connection_with_session_capabilities(
+            SessionCapabilities::new().delete(SessionDeleteCapabilities::new()),
+        );
         let request = DeleteSessionRequest::new(SessionId::new("sid"));
 
         let handle = tokio::spawn(async move { conn.delete_session(request).await });
@@ -2669,6 +2774,20 @@ mod resume_delete_dispatch_tests {
 
         let response = handle.await.expect("delete task must not panic").unwrap();
         assert_eq!(response, DeleteSessionResponse::new());
+    }
+
+    #[tokio::test]
+    async fn delete_session_without_capability_returns_missing_without_dispatch() {
+        let (mut conn, mut rx) = connection_with_session_capabilities(SessionCapabilities::new());
+        let request = DeleteSessionRequest::new(SessionId::new("sid"));
+
+        let result = conn.delete_session(request).await;
+
+        match result {
+            Err(AcpError::CapabilityMissing(name)) => assert_eq!(name, "session/delete"),
+            other => panic!("expected CapabilityMissing(\"session/delete\"), got {other:?}"),
+        }
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }
 

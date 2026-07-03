@@ -111,6 +111,30 @@ impl SpurAgentCaps {
         self.agent.load_session
     }
 
+    /// `session/resume` is announced by `AgentCapabilities.session_capabilities.resume`.
+    #[must_use]
+    pub fn supports_resume_session(&self) -> bool {
+        self.agent.session_capabilities.resume.is_some()
+    }
+
+    /// `session/delete` is announced by `AgentCapabilities.session_capabilities.delete`.
+    #[must_use]
+    pub fn supports_delete_session(&self) -> bool {
+        self.agent.session_capabilities.delete.is_some()
+    }
+
+    /// `session/list` is announced by `AgentCapabilities.session_capabilities.list`.
+    #[must_use]
+    pub fn supports_list_sessions(&self) -> bool {
+        self.agent.session_capabilities.list.is_some()
+    }
+
+    /// `session/close` is announced by `AgentCapabilities.session_capabilities.close`.
+    #[must_use]
+    pub fn supports_close_session(&self) -> bool {
+        self.agent.session_capabilities.close.is_some()
+    }
+
     /// Display label for the active model.
     #[must_use]
     pub fn current_model_label(&self) -> Option<String> {
@@ -264,9 +288,11 @@ fn has_select_choices(option: &SessionConfigOption) -> bool {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::schema::v1::{
-        AgentCapabilities, InitializeResponse, NewSessionResponse, SessionConfigId,
-        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
-        SessionMode, SessionModeId, SessionModeState,
+        AgentCapabilities, InitializeResponse, NewSessionResponse, SessionCapabilities,
+        SessionCloseCapabilities, SessionConfigId, SessionConfigOption,
+        SessionConfigOptionCategory, SessionConfigSelectOption, SessionDeleteCapabilities,
+        SessionId, SessionListCapabilities, SessionMode, SessionModeId, SessionModeState,
+        SessionResumeCapabilities,
     };
     use agent_client_protocol::schema::ProtocolVersion;
 
@@ -484,6 +510,22 @@ mod tests {
             "default agent_capabilities => no load_session"
         );
         assert!(
+            !caps.supports_resume_session(),
+            "default session_capabilities => no session/resume"
+        );
+        assert!(
+            !caps.supports_delete_session(),
+            "default session_capabilities => no session/delete"
+        );
+        assert!(
+            !caps.supports_list_sessions(),
+            "default session_capabilities => no session/list"
+        );
+        assert!(
+            !caps.supports_close_session(),
+            "default session_capabilities => no session/close"
+        );
+        assert!(
             !caps.meta_capability("terminal_output"),
             "absent meta => terminal_output false"
         );
@@ -605,6 +647,25 @@ mod tests {
         let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
 
         assert!(caps.supports_load_session());
+    }
+
+    #[test]
+    fn session_lifecycle_capabilities_propagate_from_agent_capabilities() {
+        let mut init = empty_init_response();
+        init.agent_capabilities = AgentCapabilities::new().session_capabilities(
+            SessionCapabilities::new()
+                .resume(SessionResumeCapabilities::new())
+                .delete(SessionDeleteCapabilities::new())
+                .list(SessionListCapabilities::new())
+                .close(SessionCloseCapabilities::new()),
+        );
+        let new = empty_new_session_response();
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::Generic);
+
+        assert!(caps.supports_resume_session());
+        assert!(caps.supports_delete_session());
+        assert!(caps.supports_list_sessions());
+        assert!(caps.supports_close_session());
     }
 
     #[test]
