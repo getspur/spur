@@ -2,7 +2,7 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 use spur_tui::action::ViewId;
-use spur_tui::components::status_bar::{LicenseBadge, LicenseBadgeTone, StatusBar, StatusBarProps};
+use spur_tui::components::status_bar::{StatusBar, StatusBarProps};
 
 #[test]
 fn status_bar_renders_flag_summary() {
@@ -32,10 +32,8 @@ fn status_bar_renders_flag_summary() {
                     stream_in_flight: false,
                     esc_consumed_by_composer: false,
                     notebook_ready: false,
-                    session_lifecycle_caps: None,
                     issue_count: 0,
                     alert_summary: None,
-                    license_badge: Some(&LicenseBadge::new("community", LicenseBadgeTone::Neutral)),
                     flag_summary: Some((3, 4)),
                     view_hint_override: None,
                 },
@@ -84,10 +82,8 @@ fn status_bar_omits_flag_summary_when_none() {
                     stream_in_flight: false,
                     esc_consumed_by_composer: false,
                     notebook_ready: false,
-                    session_lifecycle_caps: None,
                     issue_count: 0,
                     alert_summary: None,
-                    license_badge: None,
                     flag_summary: None,
                     view_hint_override: None,
                 },
@@ -137,10 +133,8 @@ fn status_bar_shows_back_when_streaming_but_composer_owns_esc() {
                     stream_in_flight: true,
                     esc_consumed_by_composer: true,
                     notebook_ready: false,
-                    session_lifecycle_caps: None,
                     issue_count: 0,
                     alert_summary: None,
-                    license_badge: None,
                     flag_summary: None,
                     view_hint_override: None,
                 },
