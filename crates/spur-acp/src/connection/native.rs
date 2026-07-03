@@ -58,8 +58,8 @@ use agent_client_protocol::schema::v1::{
     ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, ResumeSessionResponse, SelectedPermissionOutcome, SessionCapabilities,
-    SessionConfigId, SessionConfigValueId, SessionId, SessionModeId, SessionModeState,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SessionConfigId, SessionConfigOption, SessionConfigValueId, SessionId, SessionModeId,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
     TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, Usage,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
@@ -1078,7 +1078,7 @@ impl AgentConnection for NativeAcpConnection {
         sid: SessionId,
         model_id: String,
         caps: &SpurAgentCaps,
-    ) -> Result<(), AcpError> {
+    ) -> Result<Vec<SessionConfigOption>, AcpError> {
         match decide_set_session_model_dispatch(caps) {
             SetSessionModelDispatch::FallbackConfigOption => {
                 let request = SetSessionConfigOptionRequest::new(
@@ -1088,7 +1088,7 @@ impl AgentConnection for NativeAcpConnection {
                 );
                 self.set_session_config_option(request)
                     .await
-                    .map(|_| ())
+                    .map(|resp| resp.config_options)
                     .map_err(AcpError::Transport)
             }
             SetSessionModelDispatch::Unsupported => Err(AcpError::CapabilityMissing("set_model")),

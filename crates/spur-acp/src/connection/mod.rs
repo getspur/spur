@@ -35,9 +35,10 @@ use agent_client_protocol::schema::v1::{
     AuthenticateRequest, AuthenticateResponse, CloseSessionRequest, CloseSessionResponse,
     DeleteSessionRequest, DeleteSessionResponse, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
-    NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse, SessionId,
-    SessionModeId, SessionNotification, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, Usage,
+    NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse,
+    SessionConfigOption, SessionId, SessionModeId, SessionNotification,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, Usage,
 };
 
 use crate::error::AcpError;
@@ -243,6 +244,11 @@ pub trait AgentConnection: Send + Sync {
 
     /// Issue model selection through ACP `session/set_config_option`.
     ///
+    /// Returns the agent's updated `Vec<SessionConfigOption>` so callers can
+    /// refresh their cache — the response carries the newly-selected model's
+    /// current value, which is how the TUI status bar learns the switch
+    /// actually took effect.
+    ///
     /// `caps` is read once to choose between the config-option path and
     /// `CapabilityMissing`. The default implementation returns
     /// `CapabilityMissing` — transports that talk native ACP (currently
@@ -252,7 +258,7 @@ pub trait AgentConnection: Send + Sync {
         sid: SessionId,
         model_id: String,
         caps: &SpurAgentCaps,
-    ) -> Result<(), AcpError> {
+    ) -> Result<Vec<SessionConfigOption>, AcpError> {
         let _ = (sid, model_id, caps);
         Err(AcpError::CapabilityMissing("set_model"))
     }
