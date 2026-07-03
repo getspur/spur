@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use spur_acp::{PlanSnapshot, SessionId, SpurEvent, SpurEventBody};
+use spur_acp::{PlanLoopOriginEvent, PlanSnapshot, SessionId, SpurEvent, SpurEventBody};
 
 use super::types::{TrackedPlan, TrackedTask};
 
@@ -8,6 +8,7 @@ use super::types::{TrackedPlan, TrackedTask};
 pub struct PlanProjectionStore {
     by_plan: HashMap<String, TrackedPlan>,
     current_by_session: HashMap<SessionId, String>,
+    loop_origins: HashMap<String, PlanLoopOriginEvent>,
 }
 
 impl PlanProjectionStore {
@@ -16,28 +17,39 @@ impl PlanProjectionStore {
     }
 
     pub fn apply(&mut self, event: &SpurEvent) {
-        let SpurEventBody::PlanSnapshotUpdated {
-            session_id,
-            snapshot,
-        } = &event.body
-        else {
-            return;
-        };
+        match &event.body {
+            SpurEventBody::PlanSnapshotUpdated {
+                session_id,
+                snapshot,
+            } => {
+                let tracked =
+                    tracked_plan_from_snapshot(session_id.clone(), snapshot, event.occurred_at);
+                let replace_current = self
+                    .current_by_session
+                    .get(session_id)
+                    .and_then(|plan_id| self.by_plan.get(plan_id))
+                    .map(|current| should_promote_current(current, &tracked))
+                    .unwrap_or(true);
 
-        let tracked = tracked_plan_from_snapshot(session_id.clone(), snapshot, event.occurred_at);
-        let replace_current = self
-            .current_by_session
-            .get(session_id)
-            .and_then(|plan_id| self.by_plan.get(plan_id))
-            .map(|current| should_promote_current(current, &tracked))
-            .unwrap_or(true);
+                if replace_current {
+                    self.current_by_session
+                        .insert(session_id.clone(), tracked.plan_id.clone());
+                }
 
-        if replace_current {
-            self.current_by_session
-                .insert(session_id.clone(), tracked.plan_id.clone());
+                self.by_plan.insert(tracked.plan_id.clone(), tracked);
+            }
+            SpurEventBody::PlansLoaded { plans, .. } => {
+                self.loop_origins = plans
+                    .iter()
+                    .filter_map(|plan| {
+                        plan.loop_origin
+                            .clone()
+                            .map(|origin| (plan.plan_id.clone(), origin))
+                    })
+                    .collect();
+            }
+            _ => {}
         }
-
-        self.by_plan.insert(tracked.plan_id.clone(), tracked);
     }
 
     pub fn plan(&self, plan_id: &str) -> Option<&TrackedPlan> {
@@ -58,6 +70,10 @@ impl PlanProjectionStore {
 
     pub fn plans(&self) -> impl Iterator<Item = &TrackedPlan> {
         self.by_plan.values()
+    }
+
+    pub fn loop_origin(&self, plan_id: &str) -> Option<&PlanLoopOriginEvent> {
+        self.loop_origins.get(plan_id)
     }
 }
 

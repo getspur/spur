@@ -2,8 +2,9 @@
 
 use chrono::{TimeZone, Utc};
 use spur_acp::{
-    Column, DatasourceEntry, DatasourceKind, IssueSummaryEvent, PlanLifecycleEvent,
-    PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
+    Column, DatasourceEntry, DatasourceKind, IssueSummaryEvent, LoopDetailEvent,
+    LoopRunRecordEvent, LoopSummaryEvent, PlanLifecycleEvent, PlanLoadWarningEvent,
+    PlanLoopOriginEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent, PlanSummaryEvent,
     ReviewDecision, ReviewKind, ReviewPayload, Role, SessionId, SpurEvent, SpurEventBody,
 };
 
@@ -486,6 +487,10 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                 source_body_preview: Some("Move auth persistence behind the new adapter.".into()),
                 owner_state: PlanOwnerStateEvent::Mine,
                 lifecycle: PlanLifecycleEvent::Running,
+                loop_origin: Some(PlanLoopOriginEvent {
+                    loop_id: "loop-daily-triage".into(),
+                    generation: 4,
+                }),
                 counts: Some(PlanSummaryCountsEvent {
                     total: 7,
                     pending: 1,
@@ -509,6 +514,7 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                     owner: "other-brain".into(),
                 },
                 lifecycle: PlanLifecycleEvent::AwaitingReview,
+                loop_origin: None,
                 counts: None,
                 updated_at: None,
                 created_at: None,
@@ -522,6 +528,7 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                     owners: vec!["brain-a".into(), "brain-b".into()],
                 },
                 lifecycle: PlanLifecycleEvent::Unknown,
+                loop_origin: None,
                 counts: None,
                 updated_at: None,
                 created_at: None,
@@ -561,6 +568,45 @@ fn plans_loaded_roundtrips_plan_summary_contract() {
                 PlanOwnerStateEvent::Ambiguous { .. }
             ));
             assert_eq!(plans[0].counts.as_ref().unwrap().total, 7);
+            assert_eq!(
+                plans[0]
+                    .loop_origin
+                    .as_ref()
+                    .map(|origin| { (origin.loop_id.as_str(), origin.generation) }),
+                Some(("loop-daily-triage", 4))
+            );
+            assert!(plans[1].loop_origin.is_none());
+            assert!(plans[2].loop_origin.is_none());
+        }
+        other => panic!("expected PlansLoaded, got {other:?}"),
+    }
+}
+
+#[test]
+fn plans_loaded_deserializes_without_loop_origin_for_backward_compat() {
+    let json = serde_json::json!({
+        "occurred_at": {"secs_since_epoch": 1000, "nanos_since_epoch": 0},
+        "body": {
+            "PlansLoaded": {
+                "plans": [{
+                    "plan_id": "plan-legacy",
+                    "epic_id": "bd-legacy",
+                    "title": "Legacy plan summary",
+                    "owner_state": "Mine",
+                    "lifecycle": "Running"
+                }],
+                "warnings": []
+            }
+        }
+    });
+
+    let round: SpurEvent = serde_json::from_value(json).unwrap();
+
+    match round.body {
+        SpurEventBody::PlansLoaded { plans, warnings } => {
+            assert_eq!(plans.len(), 1);
+            assert!(warnings.is_empty());
+            assert!(plans[0].loop_origin.is_none());
         }
         other => panic!("expected PlansLoaded, got {other:?}"),
     }
@@ -589,6 +635,101 @@ fn plan_command_error_roundtrips() {
         }
         other => panic!("expected PlanCommandError, got {other:?}"),
     }
+}
+
+#[test]
+fn loop_observability_events_roundtrip_with_bounded_payloads() {
+    let loops_loaded = SpurEvent::now(SpurEventBody::LoopsLoaded {
+        loops: vec![LoopSummaryEvent {
+            loop_id: "loop-daily-triage".into(),
+            issue_id: "bd-loop".into(),
+            title: "Daily triage loop".into(),
+            autonomy: Some("l2".into()),
+            paused: false,
+            retired: false,
+            backoff_active: true,
+            cadence_secs: 3600,
+            effective_interval_secs: 7200,
+            next_run: Some(1_783_036_800),
+            last_generation: Some(7),
+            last_outcome: Some("partial".into()),
+            last_cost_micros: Some(42_000),
+            consecutive_failures: 2,
+            goal_preview: Some("Keep the issue queue under control.".into()),
+            updated_at: Some(Utc.with_ymd_and_hms(2026, 5, 3, 10, 15, 0).unwrap()),
+        }],
+        warnings: vec!["Loop list truncated at 200 rows.".into()],
+    });
+
+    let encoded = serde_json::to_value(&loops_loaded).unwrap();
+    assert_eq!(
+        encoded["body"]["LoopsLoaded"]["loops"][0]["effective_interval_secs"],
+        serde_json::json!(7200)
+    );
+    assert_eq!(
+        encoded["body"]["LoopsLoaded"]["loops"][0]["goal_preview"],
+        serde_json::json!("Keep the issue queue under control.")
+    );
+    let round: SpurEvent = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round.body, loops_loaded.body);
+
+    let detail_loaded = SpurEvent::now(SpurEventBody::LoopDetailLoaded {
+        detail: LoopDetailEvent {
+            loop_id: "loop-daily-triage".into(),
+            issue_id: "bd-loop".into(),
+            title: "Daily triage loop".into(),
+            goal_preview: Some("Keep the issue queue under control.".into()),
+            cadence_secs: 3600,
+            effective_interval_secs: 7200,
+            backoff_active: true,
+            paused: false,
+            next_run: Some(1_783_036_800),
+            consecutive_failures: 2,
+            budget_micros_per_generation: Some(100_000),
+            max_generations_per_day: Some(8),
+            max_tasks: Some(12),
+            recent_runs: vec![LoopRunRecordEvent {
+                generation: 7,
+                outcome: "partial".into(),
+                cost_micros: 42_000,
+                autonomy: Some("l2".into()),
+            }],
+        },
+    });
+
+    let encoded = serde_json::to_value(&detail_loaded).unwrap();
+    assert_eq!(
+        encoded["body"]["LoopDetailLoaded"]["detail"]["recent_runs"][0]["generation"],
+        serde_json::json!(7)
+    );
+    let round: SpurEvent = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round.body, detail_loaded.body);
+
+    let command_error_with_loop = SpurEvent::now(SpurEventBody::LoopCommandError {
+        operation: "PauseLoop".into(),
+        loop_id: Some("loop-daily-triage".into()),
+        error: "loop issue not found".into(),
+    });
+    let encoded = serde_json::to_value(&command_error_with_loop).unwrap();
+    assert_eq!(
+        encoded["body"]["LoopCommandError"]["loop_id"],
+        serde_json::json!("loop-daily-triage")
+    );
+    let round: SpurEvent = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round.body, command_error_with_loop.body);
+
+    let command_error_without_loop = SpurEvent::now(SpurEventBody::LoopCommandError {
+        operation: "RefreshLoops".into(),
+        loop_id: None,
+        error: "backend unavailable".into(),
+    });
+    let encoded = serde_json::to_value(&command_error_without_loop).unwrap();
+    let payload = encoded["body"]["LoopCommandError"]
+        .as_object()
+        .expect("loop command error payload");
+    assert!(!payload.contains_key("loop_id"));
+    let round: SpurEvent = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round.body, command_error_without_loop.body);
 }
 
 #[test]
