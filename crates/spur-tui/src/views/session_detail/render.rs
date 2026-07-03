@@ -225,6 +225,10 @@ impl SessionDetailView {
         // ── Header: breadcrumb + elapsed + cost ─────────────────────────
         let [header_left, header_right] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(48)]).areas(chunks[0]);
+        let agent_reported_cost = self
+            .agent_reported_cost
+            .as_ref()
+            .map(|(amount, currency)| format_agent_reported_cost(*amount, currency));
         let header = Line::from(vec![
             Span::styled(
                 " Dashboard > ",
@@ -249,6 +253,12 @@ impl SessionDetailView {
             Span::styled(
                 format!("${:.2}", self.cost),
                 Style::default().fg(token(ctx.theme, "session_detail.cost.fg")),
+            ),
+            Span::styled(
+                agent_reported_cost.unwrap_or_default(),
+                Style::default()
+                    .fg(token(ctx.theme, "session_detail.cost.fg"))
+                    .add_modifier(Modifier::DIM),
             ),
             if self.fs_unsafe {
                 Span::styled(
@@ -425,6 +435,14 @@ impl SessionDetailView {
         if self.cancel_confirm_open {
             render_cancel_confirm_modal(frame, area, ctx.theme);
         }
+    }
+}
+
+fn format_agent_reported_cost(amount: f64, currency: &str) -> String {
+    if currency.eq_ignore_ascii_case("USD") {
+        format!(" (agent: ${amount:.2})")
+    } else {
+        format!(" (agent: {amount:.2} {currency})")
     }
 }
 
