@@ -2,6 +2,7 @@ pub mod dashboard;
 #[cfg(feature = "analytics")]
 pub mod insights;
 pub mod issue_browser;
+pub mod loop_browser;
 #[cfg(feature = "markdown")]
 pub mod mermaid_viewer;
 pub mod plan_browser;

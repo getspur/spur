@@ -131,6 +131,11 @@ impl App {
 
             action @ (Action::RefreshIssues
             | Action::RefreshPlans
+            | Action::RefreshLoops
+            | Action::InspectLoop { .. }
+            | Action::PauseLoop { .. }
+            | Action::ResumeLoop { .. }
+            | Action::KillLoop { .. }
             | Action::ClaimPlan { .. }
             | Action::ForceReclaimPlan { .. }
             | Action::ResumePlan { .. }
