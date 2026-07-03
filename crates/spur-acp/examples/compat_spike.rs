@@ -154,13 +154,27 @@ fn format_session_config_report(
     let options = session.config_options.as_deref().unwrap_or_default();
     let ids = options
         .iter()
-        .map(|option| option.id.0.as_ref())
+        .map(|option| {
+            format!(
+                "{}(category={})",
+                option.id.0.as_ref(),
+                option
+                    .category
+                    .as_ref()
+                    .map(|c| format!("{c:?}"))
+                    .unwrap_or_else(|| "none".to_string())
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let ids = if ids.is_empty() {
         "none".to_string()
     } else {
         ids
+    };
+    let effort = match spur_acp::SpurAgentCaps::effort_label_from(options) {
+        Some(label) => format!("effort option: yes resolved_label={label:?}"),
+        None => "effort option: NOT RESOLVED (no ThoughtLevel category and no bare id==\"reasoning_effort\")".to_string(),
     };
     let model = match caps.model_option() {
         Some(option) => {
@@ -192,10 +206,12 @@ fn format_session_config_report(
         "\
 === new_session config report ===
 config_options: {} [{}]
+{}
 {}",
         options.len(),
         ids,
-        model
+        model,
+        effort
     )
 }
 
