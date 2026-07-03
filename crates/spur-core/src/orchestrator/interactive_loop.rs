@@ -715,16 +715,19 @@ impl Orchestrator {
                     // ── SetSessionModel (M9 F-C) ──────────────────────────
                     InteractiveInput::SetSessionModel { value } => {
                         if let Some(b) = brain.as_mut() {
-                            if let Err(e) =
-                                Orchestrator::dispatch_set_session_model(b, value.clone()).await
-                            {
-                                warn!(
-                                    brain = %b.brain_name,
-                                    session_id = %b.spur_session_id,
-                                    value = %value,
-                                    error = %e,
-                                    "set_session_model failed"
-                                );
+                            match Orchestrator::dispatch_set_session_model(b, value.clone()).await {
+                                Ok(config_options) => {
+                                    self.replace_session_config_options(b, config_options);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        brain = %b.brain_name,
+                                        session_id = %b.spur_session_id,
+                                        value = %value,
+                                        error = %e,
+                                        "set_session_model failed"
+                                    );
+                                }
                             }
                         } else {
                             warn!(
