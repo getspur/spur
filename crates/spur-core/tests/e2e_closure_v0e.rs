@@ -152,6 +152,7 @@ async fn seed_all_approved_epic(
                 result_summary: Some("approved fixture completion".to_string()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".to_string()),
+                estimated_cost_micros: None,
             }),
         )
         .await

@@ -148,6 +148,7 @@ async fn setup_persisted_merge_ready_plan(
             result_summary: Some("worker branch ready".into()),
             artifact_uri: None,
             dispatched_base_oid: Some(base_snapshot_oid.clone()),
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -355,6 +356,7 @@ async fn setup_persisted_retried_plan(plan_id: &str, clear_cache: bool) -> Persi
             result_summary: Some("attempt 1 summary".into()),
             artifact_uri: None,
             dispatched_base_oid: Some(base_snapshot_oid.clone()),
+            estimated_cost_micros: None,
         },
         AuditSentinelKind::Rejection {
             delegation_id: "del-1".into(),
@@ -373,6 +375,7 @@ async fn setup_persisted_retried_plan(plan_id: &str, clear_cache: bool) -> Persi
             result_summary: Some("attempt 2 summary".into()),
             artifact_uri: None,
             dispatched_base_oid: Some(base_snapshot_oid.clone()),
+            estimated_cost_micros: None,
         },
         AuditSentinelKind::Approval {
             delegation_id: "del-2".into(),
@@ -466,6 +469,7 @@ async fn reconstruct_historical_attempts_classifies_retry_requested_as_worker_fa
             result_summary: Some("worker crashed".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         },
         AuditSentinelKind::RetryRequested {
             delegation_id: "del-1".into(),
@@ -659,6 +663,7 @@ async fn setup_cached_overlay_diff_plan(
                 result_summary: Some("foo ready".into()),
                 artifact_uri: None,
                 dispatched_base_oid: Some(base_snapshot_oid.clone()),
+                estimated_cost_micros: None,
             },
         ),
         (
@@ -671,6 +676,7 @@ async fn setup_cached_overlay_diff_plan(
                 result_summary: Some("bar ready".into()),
                 artifact_uri: None,
                 dispatched_base_oid: Some(t2_dispatched_base_oid),
+                estimated_cost_micros: None,
             },
         ),
     ] {
