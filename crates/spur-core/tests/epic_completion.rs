@@ -339,6 +339,7 @@ async fn seed_epic_fixture(
                 result_summary: Some("fixture completion".to_string()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".to_string()),
+                estimated_cost_micros: None,
             }),
         )
         .await
@@ -455,6 +456,7 @@ async fn mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready
             result_summary: Some("A ready".into()),
             artifact_uri: None,
             dispatched_base_oid: Some("0000000000000000000000000000000000000001".into()),
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -497,6 +499,7 @@ async fn mock_pm_reconciler_plan_completed_counts_cancelled_and_suppresses_ready
             result_summary: Some("B cancelled".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }),
     )
     .await
@@ -673,6 +676,7 @@ async fn mock_pm_reconciler_terminal_failure_fires_escalated_task_continuation()
                 result_summary: Some("previous failure".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             }),
         )
         .await
@@ -812,6 +816,7 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
             result_summary: Some("first attempt failed".into()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         },
         AuditSentinelKind::RetryRequested {
             delegation_id: "del-prev".into(),

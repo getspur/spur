@@ -9,6 +9,7 @@ pub mod audit_sentinel;
 pub mod clobber_detector;
 pub(crate) mod continuation;
 pub mod labels;
+pub mod loops;
 pub mod mutation;
 pub mod mutation_executor;
 pub mod outcomes;
@@ -1712,6 +1713,7 @@ pub async fn emit_completion_audit(
         result_summary: fields.result_summary,
         artifact_uri: fields.artifact_uri,
         dispatched_base_oid: fields.dispatched_base_oid,
+        estimated_cost_micros: fields.estimated_cost_micros,
     };
     let body = crate::plan::audit_sentinel::encode_comment(&kind);
     adv.add_comment(issue_id, &body).await?;
@@ -2776,6 +2778,10 @@ async fn persist_completion_inner(
 ) -> anyhow::Result<Option<DeferredCompletionPush>> {
     use crate::plan::audit_sentinel::CompletionState;
 
+    let estimated_cost_micros = Some(crate::outcome_materializer::usd_to_micros_saturating(
+        result.estimated_cost_usd,
+    ));
+
     if matches!(completion_state, CompletionState::Superseded) {
         persist_completion_result_after_worker_output_invariant(
             pm,
@@ -2789,6 +2795,7 @@ async fn persist_completion_inner(
                 result_summary: result.summary.clone(),
                 artifact_uri: None,
                 dispatched_base_oid,
+                estimated_cost_micros,
                 repo_root,
             },
             already_emitted,
@@ -2841,6 +2848,7 @@ async fn persist_completion_inner(
                 .or_else(|| failure_reason_from_status(&result.status)),
             artifact_uri,
             dispatched_base_oid,
+            estimated_cost_micros,
             repo_root,
         },
         already_emitted,
@@ -3170,6 +3178,93 @@ pub(crate) async fn push_plan_completed_continuation(
         spur_acp::domain::ContinuationSource::PlanCompleted,
     )
     .await;
+}
+
+pub(crate) async fn push_loop_due_continuation(
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    brain_session_id: &BrainSessionId,
+    loop_id: &str,
+    goal: &str,
+    generation: u32,
+    template: &serde_json::Value,
+) {
+    let delegation_id = loop_artifact_delegation_id("due", loop_id, generation);
+    let template_json = serde_json::to_string(template).unwrap_or_else(|error| {
+        format!("{{\"error\":\"template serialization failed: {error}\"}}")
+    });
+    let result = DelegationResult {
+        status: DelegationStatus::Success,
+        diff: None,
+        diff_summary: None,
+        summary: Some(format!(
+            "Loop due: loop_id={loop_id}; goal={goal}; generation {generation}; template={template_json}"
+        )),
+        estimated_cost_usd: 0.0,
+        worker_branch: None,
+        artifact: None,
+    };
+    materialize_and_push_detached_continuation(
+        continuation_ctx,
+        materializer,
+        &result,
+        &delegation_id,
+        1,
+        brain_session_id,
+        spur_acp::domain::ContinuationSource::LoopDue,
+    )
+    .await;
+}
+
+pub(crate) async fn push_loop_escalation_continuation(
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    brain_session_id: &BrainSessionId,
+    loop_id: &str,
+    goal: &str,
+    consecutive_failures: u32,
+) {
+    let delegation_id = loop_artifact_delegation_id("escalation", loop_id, consecutive_failures);
+    let result = DelegationResult {
+        status: DelegationStatus::Failed {
+            error: format!("loop auto-paused after {consecutive_failures} consecutive failures"),
+        },
+        diff: None,
+        diff_summary: None,
+        summary: Some(format!(
+            "Loop escalation: loop_id={loop_id}; goal={goal}; consecutive_failures={consecutive_failures}; action=review paused loop and decide whether to resume"
+        )),
+        estimated_cost_usd: 0.0,
+        worker_branch: None,
+        artifact: None,
+    };
+    materialize_and_push_detached_continuation(
+        continuation_ctx,
+        materializer,
+        &result,
+        &delegation_id,
+        1,
+        brain_session_id,
+        spur_acp::domain::ContinuationSource::LoopEscalation,
+    )
+    .await;
+}
+
+fn loop_artifact_delegation_id(kind: &str, loop_id: &str, generation_or_count: u32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"spur.loop-continuation-artifact.v1");
+    hasher.update([0]);
+    hasher.update(kind.as_bytes());
+    hasher.update([0]);
+    hasher.update(loop_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(generation_or_count.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 fn plan_completed_artifact_delegation_id(plan_id: &str) -> String {
@@ -7693,6 +7788,7 @@ mod tests {
             result_summary: Some("worker done".to_string()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
             repo_root: None,
         }
     }
@@ -7776,6 +7872,7 @@ mod tests {
                     result_summary: Some("already completed".into()),
                     artifact_uri: None,
                     dispatched_base_oid: None,
+                    estimated_cost_micros: None,
                 },
             ),
         );
@@ -7900,6 +7997,7 @@ mod tests {
             crate::plan::audit_sentinel::CompletionAuditFields {
                 worker_branch: entry.worker_branch.clone(),
                 dispatched_base_oid: entry.dispatched_base_oid.clone(),
+                estimated_cost_micros: None,
                 repo_root: Some(repo.path().to_path_buf()),
                 ..completion_audit_fields()
             },
@@ -7931,6 +8029,7 @@ mod tests {
             crate::plan::audit_sentinel::CompletionAuditFields {
                 worker_branch: Some("worker".to_string()),
                 dispatched_base_oid: Some(base),
+                estimated_cost_micros: None,
                 repo_root: Some(repo.path().to_path_buf()),
                 ..completion_audit_fields()
             },
@@ -7962,6 +8061,7 @@ mod tests {
             crate::plan::audit_sentinel::CompletionAuditFields {
                 worker_branch: Some("worker".to_string()),
                 dispatched_base_oid: Some(base.clone()),
+                estimated_cost_micros: None,
                 repo_root: Some(repo.path().to_path_buf()),
                 ..completion_audit_fields()
             },
@@ -8026,6 +8126,7 @@ mod tests {
             crate::plan::audit_sentinel::CompletionAuditFields {
                 worker_branch: Some("worker".to_string()),
                 dispatched_base_oid: Some(base),
+                estimated_cost_micros: None,
                 repo_root: Some(repo.path().to_path_buf()),
                 ..completion_audit_fields()
             },
@@ -8087,7 +8188,7 @@ mod tests {
             diff: None,
             diff_summary: None,
             summary: None,
-            estimated_cost_usd: 0.0,
+            estimated_cost_usd: 0.812,
             worker_branch: Some("spur/worker-failed".to_string()),
             artifact: None,
         };
@@ -8109,6 +8210,16 @@ mod tests {
         .await
         .expect("auto-retry completion should persist")
         .expect("auto-retry completion should defer an event");
+
+        match single_completion_comment(&pm) {
+            crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                estimated_cost_micros,
+                ..
+            } => {
+                assert_eq!(estimated_cost_micros, Some(812_000));
+            }
+            other => panic!("expected completion audit, got {other:?}"),
+        }
 
         let continuation_count = Arc::new(AtomicUsize::new(0));
         let continuation_count_for_ctx = Arc::clone(&continuation_count);
@@ -8168,6 +8279,7 @@ mod tests {
                 worker_branch: Some("worker".to_string()),
                 result_summary: Some("worker failed before first commit".to_string()),
                 dispatched_base_oid: Some(base),
+                estimated_cost_micros: None,
                 repo_root: Some(repo.path().to_path_buf()),
                 ..completion_audit_fields()
             },
@@ -8223,6 +8335,7 @@ mod tests {
             crate::plan::audit_sentinel::CompletionAuditFields {
                 worker_branch: Some("worker".to_string()),
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
                 repo_root: Some(repo.path().to_path_buf()),
                 ..completion_audit_fields()
             },
@@ -8399,6 +8512,7 @@ mod tests {
                 result_summary: Some("worker crashed".into()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
                 repo_root: None,
             },
             false,

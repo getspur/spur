@@ -200,6 +200,7 @@ async fn persist_plan(pm: &MockPm, mut state: PlanState) {
                     result_summary: None,
                     artifact_uri: None,
                     dispatched_base_oid: entry.dispatched_base_oid.clone(),
+                    estimated_cost_micros: None,
                 }),
             )
             .await
