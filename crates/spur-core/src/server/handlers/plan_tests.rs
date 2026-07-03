@@ -315,6 +315,170 @@ mod plan_truncate_and_restart_tests {
         serde_json::from_str(text).expect("response text is JSON")
     }
 
+    fn parse_audit_comments(
+        comments: Vec<spur_pm::Comment>,
+    ) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
+        comments
+            .into_iter()
+            .filter_map(|comment| {
+                crate::plan::audit_sentinel::parse_comment(&comment.body)
+                    .map(|parsed| parsed.expect("audit comment parses"))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn submit_plan_persist_characterizes_epic_labels_audits_and_cache() {
+        let dir = init_repo().await;
+        let main_oid = run_git(dir.path(), &["rev-parse", "--verify", "main"]).await;
+        let (server, _channel, mock_pm) = new_server_with_mock_pm(dir.path()).await;
+
+        let response = server
+            .__test_call_submit_plan(json!({
+                "epic_title": "Persist Characterization",
+                "epic_body": "persisted plan body",
+                "base": { "kind": "branch", "name": "main" },
+                "tasks": [
+                    {
+                        "task_id": "A",
+                        "agent": "codex",
+                        "task": "Implement A",
+                        "context_files": ["a.rs"]
+                    },
+                    {
+                        "task_id": "B",
+                        "agent": "codex",
+                        "task": "Implement B",
+                        "depends_on": ["A"],
+                        "issue_id": "bd-source",
+                        "context_files": ["b.rs"]
+                    }
+                ]
+            }))
+            .await;
+        assert!(
+            response.get("error").is_none(),
+            "submit_plan should succeed: {response}"
+        );
+
+        let cached_plan = {
+            let active = server.active_plans.lock().await;
+            assert_eq!(active.len(), 1, "submit_plan should cache one plan");
+            active.values().next().cloned().expect("cached plan")
+        };
+        let cached = cached_plan.state.lock().await;
+        let plan_id = cached.plan_id.clone();
+        let epic_id = cached.epic_id.clone().expect("persisted epic id");
+        assert_eq!(cached.brain_session_id.to_string(), "brain");
+        assert_eq!(cached.base_snapshot_oid.as_deref(), Some(main_oid.as_str()));
+        assert!(
+            cached
+                .base_snapshot_branch
+                .as_deref()
+                .is_some_and(|branch| branch.starts_with("spur/brain-snapshot-")),
+            "submit_plan should cache a resolved snapshot branch: {:?}",
+            cached.base_snapshot_branch
+        );
+        assert_eq!(cached.tasks.len(), 2);
+        assert_eq!(cached.tasks[0].spec.issue_id.as_deref(), Some("bd-mock-2"));
+        assert_eq!(cached.tasks[1].spec.issue_id.as_deref(), Some("bd-source"));
+        drop(cached);
+
+        let epic = mock_pm.issue(&epic_id).await;
+        assert_eq!(epic.title, "Persist Characterization");
+        assert_eq!(epic.body, "persisted plan body");
+        assert_eq!(epic.issue_type.as_deref(), Some("epic"));
+        assert!(epic.labels.contains(&crate::plan::labels::plan_id(&plan_id)));
+        assert!(epic
+            .labels
+            .contains(&crate::plan::labels::plan_owner("brain")));
+        assert!(epic
+            .labels
+            .contains(&crate::plan::labels::PLAN_COMPLETE.to_string()));
+        assert!(!epic
+            .labels
+            .contains(&crate::plan::labels::PLAN_PENDING.to_string()));
+
+        let issues = mock_pm.issues().await;
+        let child_a = issues
+            .iter()
+            .find(|issue| {
+                issue
+                    .labels
+                    .contains(&crate::plan::labels::plan_task_id("A"))
+            })
+            .expect("task A issue");
+        let child_b = issues
+            .iter()
+            .find(|issue| {
+                issue
+                    .labels
+                    .contains(&crate::plan::labels::plan_task_id("B"))
+            })
+            .expect("task B issue");
+        assert!(child_a.blocked_by.contains(&epic_id));
+        assert!(child_b.blocked_by.contains(&epic_id));
+        assert!(child_b.blocked_by.contains(&child_a.id));
+        assert!(child_b
+            .labels
+            .contains(&crate::plan::labels::source_issue("bd-source")));
+
+        let child_a_audits = parse_audit_comments(mock_pm.comments(&child_a.id).await);
+        assert!(child_a_audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
+                task_id,
+                context_files,
+                agent: Some(agent),
+                ..
+            } if task_id == "A" && agent == "codex" && context_files == &vec!["a.rs".to_string()]
+        )));
+        let child_b_audits = parse_audit_comments(mock_pm.comments(&child_b.id).await);
+        assert!(child_b_audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
+                task_id,
+                context_files,
+                agent: Some(agent),
+                ..
+            } if task_id == "B" && agent == "codex" && context_files == &vec!["b.rs".to_string()]
+        )));
+
+        let epic_audits = parse_audit_comments(mock_pm.comments(&epic_id).await);
+        assert!(epic_audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
+                plan_id: audit_plan_id,
+                owner,
+                reason,
+                ..
+            } if audit_plan_id == &plan_id && owner == "brain" && reason == "submit_plan"
+        )));
+        assert!(epic_audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                plan_id: audit_plan_id,
+                epic_issue_id,
+                task_ids,
+                base_snapshot_branch,
+                base_snapshot_oid,
+                execution_mode: Some(execution_mode),
+                brain_session_id: Some(brain_session_id),
+                explicit_base: Some(crate::BaseTarget::Branch { name }),
+            } if audit_plan_id == &plan_id
+                && epic_issue_id == &epic_id
+                && task_ids.contains(&child_a.id)
+                && task_ids.contains(&child_b.id)
+                && base_snapshot_branch
+                    .as_deref()
+                    .is_some_and(|branch| branch.starts_with("spur/brain-snapshot-"))
+                && base_snapshot_oid.as_deref() == Some(main_oid.as_str())
+                && execution_mode == "submit_plan"
+                && brain_session_id == "brain"
+                && name == "main"
+        )));
+    }
+
     #[tokio::test]
     pub(crate) async fn handle_plan_truncate_and_restart_happy_path() {
         let dir = init_repo().await;
