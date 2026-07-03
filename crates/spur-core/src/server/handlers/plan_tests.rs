@@ -1596,6 +1596,15 @@ mod loop_lifecycle_mcp_tests {
         Arc<McpCallbackServer>,
         Arc<crate::plan::test_util::MockPm>,
     ) {
+        new_server_with_mock_pm_and_gate(super::pro_feature_gate()).await
+    }
+
+    async fn new_server_with_mock_pm_and_gate(
+        feature_gate: Arc<spur_license::FeatureGate>,
+    ) -> (
+        Arc<McpCallbackServer>,
+        Arc<crate::plan::test_util::MockPm>,
+    ) {
         let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
         let mock_pm = crate::plan::test_util::MockPm::new().arc();
         let (mut server, _channel) = McpCallbackServer::new(
@@ -1604,10 +1613,51 @@ mod loop_lifecycle_mcp_tests {
             None,
             no_op_ctx(),
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
-            super::pro_feature_gate(),
+            feature_gate,
         );
         server.__test_set_pm_like(mock_pm.clone() as Arc<dyn crate::plan::PmLike>);
         (Arc::new(server), mock_pm)
+    }
+
+    struct ListIssuesFailPm;
+
+    #[async_trait::async_trait]
+    impl PmLike for ListIssuesFailPm {
+        async fn list_issues(
+            &self,
+            _filter: spur_pm::IssueFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            anyhow::bail!("beads list exploded")
+        }
+
+        async fn update_issue(
+            &self,
+            _id: &str,
+            _update: spur_pm::IssueUpdate,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn closed_status(&self) -> &str {
+            "closed"
+        }
+    }
+
+    async fn new_server_with_pm_like(
+        pm: Arc<dyn crate::plan::PmLike>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+    ) -> Arc<McpCallbackServer> {
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            feature_gate,
+        );
+        server.__test_set_pm_like(pm);
+        Arc::new(server)
     }
 
     fn valid_loop_spec() -> serde_json::Value {
@@ -1996,6 +2046,53 @@ mod loop_lifecycle_mcp_tests {
         assert_eq!(status["consecutive_failures"], 2);
         assert_eq!(status["effective_interval_secs"], 120);
         assert_eq!(status["paused"], false);
+    }
+
+    #[tokio::test]
+    async fn get_loop_status_requires_advanced_feature_before_loading_status() {
+        let (server, _mock_pm) =
+            new_server_with_mock_pm_and_gate(super::unlicensed_feature_gate()).await;
+
+        let response = server
+            .__test_call_tool(
+                "get_loop_status",
+                json!({ "loop_id": "loop-without-license" }),
+            )
+            .await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected gated error response, got {response}"));
+        assert!(
+            message.contains(spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED.as_str()),
+            "expected missing advanced feature error before status lookup, got {response}"
+        );
+        assert!(
+            !message.contains("unknown loop_id"),
+            "license gate must run before loop lookup, got {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_loop_status_error_preserves_loop_issue_load_cause() {
+        let server =
+            new_server_with_pm_like(Arc::new(ListIssuesFailPm), super::pro_feature_gate()).await;
+
+        let response = server
+            .__test_call_tool("get_loop_status", json!({ "loop_id": "cause-loop" }))
+            .await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected load error response, got {response}"));
+        assert!(
+            message.contains("failed to load loop issue"),
+            "expected context in get_loop_status error, got {response}"
+        );
+        assert!(
+            message.contains("beads list exploded"),
+            "expected underlying cause in get_loop_status error, got {response}"
+        );
     }
 
     #[tokio::test]
