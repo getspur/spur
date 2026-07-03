@@ -70,6 +70,7 @@ pub mod types;
 mod util;
 mod worker_mcp;
 
+use crate::plan::loops::status::{build_loop_status, load_loop_summaries};
 pub use delegation::cleanup::{should_commit_worker_diff, should_preserve_worktree};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use delegation::execute::{render_retry_context, RetryAttempt};

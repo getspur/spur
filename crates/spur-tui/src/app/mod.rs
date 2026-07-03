@@ -59,6 +59,7 @@ use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
 use crate::views::dashboard::{DashboardMode, DashboardView};
 use crate::views::issue_browser::IssueBrowserView;
+use crate::views::loop_browser::LoopBrowserView;
 use crate::views::plan_browser::PlanBrowserView;
 use crate::views::plan_inspector::PlanInspectorView;
 use crate::views::session_detail::SessionDetailView;
@@ -151,6 +152,24 @@ pub enum UserInput {
     RefreshIssues,
     /// Request the orchestrator to refresh persisted plan summaries.
     RefreshPlans,
+    /// Request the orchestrator to refresh persisted loop summaries.
+    RefreshLoops,
+    /// Request a read-only persisted loop detail snapshot.
+    InspectLoop {
+        loop_id: String,
+    },
+    /// Request the orchestrator to pause a governed loop.
+    PauseLoop {
+        loop_id: String,
+    },
+    /// Request the orchestrator to resume a governed loop.
+    ResumeLoop {
+        loop_id: String,
+    },
+    /// Request the orchestrator to retire a governed loop.
+    KillLoop {
+        loop_id: String,
+    },
     /// Request the orchestrator to claim a persisted plan without starting execution.
     ClaimPlan {
         plan_id: String,
@@ -301,6 +320,7 @@ pub struct App {
     pub(super) dashboard: DashboardView,
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
+    loop_browser: Option<LoopBrowserView>,
     plan_browser: Option<PlanBrowserView>,
     plan_inspector: Option<PlanInspectorView>,
     issue_browser: Option<IssueBrowserView>,
@@ -530,6 +550,11 @@ impl App {
                     view.tick();
                 }
             }
+            ViewId::LoopBrowser => {
+                if let Some(view) = self.loop_browser.as_mut() {
+                    view.tick();
+                }
+            }
             ViewId::IssueBrowser => {
                 let pending = if let Some(view) = self.issue_browser.as_mut() {
                     view.tick();
@@ -628,6 +653,11 @@ impl App {
             }
             ViewId::PlanBrowser => {
                 if let Some(ref mut view) = self.plan_browser {
+                    view.render(frame, view_area, &ctx);
+                }
+            }
+            ViewId::LoopBrowser => {
+                if let Some(ref mut view) = self.loop_browser {
                     view.render(frame, view_area, &ctx);
                 }
             }

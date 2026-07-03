@@ -143,6 +143,92 @@ fn emit_prompt_usage_cost_update(
 }
 
 impl Orchestrator {
+    fn emit_loop_command_error(
+        funnel: &crate::event_funnel::FunnelHandle,
+        operation: &'static str,
+        loop_id: Option<String>,
+        error: impl Into<String>,
+    ) {
+        funnel.emit(SpurEventBody::LoopCommandError {
+            operation: operation.into(),
+            loop_id,
+            error: error.into(),
+        });
+    }
+
+    async fn emit_loop_summaries(
+        pm_service: Option<Arc<PmService>>,
+        funnel: crate::event_funnel::FunnelHandle,
+    ) {
+        if let Some(pm) = pm_service {
+            match load_loop_summaries(pm.as_ref()).await {
+                Ok(load) => {
+                    funnel.emit(SpurEventBody::LoopsLoaded {
+                        loops: load.loops,
+                        warnings: load.warnings,
+                    });
+                }
+                Err(error) => {
+                    Self::emit_loop_command_error(&funnel, "RefreshLoops", None, error.to_string());
+                }
+            }
+        } else {
+            Self::emit_loop_command_error(
+                &funnel,
+                "RefreshLoops",
+                None,
+                "No issue tracker configured",
+            );
+        }
+    }
+
+    async fn emit_loop_detail(
+        pm_service: Option<Arc<PmService>>,
+        funnel: crate::event_funnel::FunnelHandle,
+        loop_id: String,
+    ) {
+        if let Some(pm) = pm_service {
+            match build_loop_status(pm.as_ref(), &loop_id, 20).await {
+                Ok(Some(status)) => {
+                    funnel.emit(SpurEventBody::LoopDetailLoaded {
+                        detail: status.to_detail_event(),
+                    });
+                }
+                Ok(None) => {
+                    Self::emit_loop_command_error(
+                        &funnel,
+                        "InspectLoop",
+                        Some(loop_id.clone()),
+                        format!("unknown loop_id '{loop_id}'"),
+                    );
+                }
+                Err(error) => {
+                    Self::emit_loop_command_error(
+                        &funnel,
+                        "InspectLoop",
+                        Some(loop_id),
+                        error.to_string(),
+                    );
+                }
+            }
+        } else {
+            Self::emit_loop_command_error(
+                &funnel,
+                "InspectLoop",
+                Some(loop_id),
+                "No issue tracker configured",
+            );
+        }
+    }
+
+    fn missing_loop_mcp_server_error(brain: &Option<BrainSession>) -> String {
+        if brain.is_some() {
+            "Brain session initializing - try again in a moment".into()
+        } else {
+            "No active brain session - start one to claim plans".into()
+        }
+    }
+
     fn emit_listed_sessions(&mut self, brain_name: &str, sessions: Vec<spur_acp::SessionInfo>) {
         let (brain_sessions, worker_sessions) = classify_sessions(sessions, &self.repo_root);
         if !worker_sessions.is_empty() {
@@ -824,7 +910,7 @@ impl Orchestrator {
                     InteractiveInput::RefreshPlans => {
                         if let Some(pm) = &self.pm_service {
                             let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                            match load_plan_summaries(pm, current_session).await {
+                            match load_plan_summaries(pm.as_ref(), current_session).await {
                                 Ok(load) => {
                                     self.funnel.emit(SpurEventBody::PlansLoaded {
                                         plans: load.plans,
@@ -848,6 +934,124 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── RefreshLoops ──────────────────────────────────────
+                    InteractiveInput::RefreshLoops => {
+                        Self::emit_loop_summaries(self.pm_service.clone(), self.funnel.clone())
+                            .await;
+                    }
+
+                    // ── InspectLoop ───────────────────────────────────────
+                    InteractiveInput::InspectLoop { loop_id } => {
+                        Self::emit_loop_detail(
+                            self.pm_service.clone(),
+                            self.funnel.clone(),
+                            loop_id,
+                        )
+                        .await;
+                    }
+
+                    // ── PauseLoop ─────────────────────────────────────────
+                    InteractiveInput::PauseLoop { loop_id } => {
+                        let server = brain
+                            .as_ref()
+                            .and_then(|b| b.mcp_server.as_ref())
+                            .map(Arc::clone);
+                        if let Some(server) = server {
+                            match server.call_pause_loop(&loop_id).await {
+                                Ok(()) => {
+                                    Self::emit_loop_summaries(
+                                        self.pm_service.clone(),
+                                        self.funnel.clone(),
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    Self::emit_loop_command_error(
+                                        &self.funnel,
+                                        "PauseLoop",
+                                        Some(loop_id),
+                                        error,
+                                    );
+                                }
+                            }
+                        } else {
+                            Self::emit_loop_command_error(
+                                &self.funnel,
+                                "PauseLoop",
+                                Some(loop_id),
+                                Self::missing_loop_mcp_server_error(&brain),
+                            );
+                        }
+                    }
+
+                    // ── ResumeLoop ────────────────────────────────────────
+                    InteractiveInput::ResumeLoop { loop_id } => {
+                        let server = brain
+                            .as_ref()
+                            .and_then(|b| b.mcp_server.as_ref())
+                            .map(Arc::clone);
+                        if let Some(server) = server {
+                            match server.call_resume_loop(&loop_id).await {
+                                Ok(()) => {
+                                    Self::emit_loop_summaries(
+                                        self.pm_service.clone(),
+                                        self.funnel.clone(),
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    Self::emit_loop_command_error(
+                                        &self.funnel,
+                                        "ResumeLoop",
+                                        Some(loop_id),
+                                        error,
+                                    );
+                                }
+                            }
+                        } else {
+                            Self::emit_loop_command_error(
+                                &self.funnel,
+                                "ResumeLoop",
+                                Some(loop_id),
+                                Self::missing_loop_mcp_server_error(&brain),
+                            );
+                        }
+                    }
+
+                    // ── KillLoop ──────────────────────────────────────────
+                    InteractiveInput::KillLoop { loop_id } => {
+                        let server = brain
+                            .as_ref()
+                            .and_then(|b| b.mcp_server.as_ref())
+                            .map(Arc::clone);
+                        if let Some(server) = server {
+                            match server.call_kill_loop(&loop_id).await {
+                                Ok(()) => {
+                                    Self::emit_loop_summaries(
+                                        self.pm_service.clone(),
+                                        self.funnel.clone(),
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    Self::emit_loop_command_error(
+                                        &self.funnel,
+                                        "KillLoop",
+                                        Some(loop_id),
+                                        error,
+                                    );
+                                }
+                            }
+                        } else {
+                            Self::emit_loop_command_error(
+                                &self.funnel,
+                                "KillLoop",
+                                Some(loop_id),
+                                Self::missing_loop_mcp_server_error(&brain),
+                            );
+                        }
+                    }
+
                     // ── ClaimPlan ─────────────────────────────────────────
                     InteractiveInput::ClaimPlan { plan_id } => {
                         let server = brain
@@ -863,7 +1067,7 @@ impl Orchestrator {
                                 });
                             } else if let Some(pm) = &self.pm_service {
                                 let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                                match load_plan_summaries(pm, current_session).await {
+                                match load_plan_summaries(pm.as_ref(), current_session).await {
                                     Ok(load) => {
                                         self.funnel.emit(SpurEventBody::PlansLoaded {
                                             plans: load.plans,
@@ -908,7 +1112,7 @@ impl Orchestrator {
                                 });
                             } else if let Some(pm) = &self.pm_service {
                                 let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                                match load_plan_summaries(pm, current_session).await {
+                                match load_plan_summaries(pm.as_ref(), current_session).await {
                                     Ok(load) => {
                                         self.funnel.emit(SpurEventBody::PlansLoaded {
                                             plans: load.plans,
