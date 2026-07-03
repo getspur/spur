@@ -81,7 +81,7 @@ Non-trivial work should flow from spec to plan to implementation. Before executi
 
 SPUR uses sentinel conventions embedded in beads comment bodies to propagate structured metadata between brain, workers, and the reconciler. Workers and the MCP server emit these signals; the brain consumes them.
 
-> **Agent guidance:** The bundled `spur-way` skill establishes beads as the sole source of truth and mandates the `INTENT → ACTION → RECORD` primitive for every transaction. The `worker-signals`, `brain-review-gate`, `beads-lifecycle`, and `plan-task-discipline` skills provide detailed enforcement guidance for these conventions. See `crates/spur-core/src/skills/` for the authoritative skill bodies.
+> **Agent guidance:** The bundled `spur-way` skill establishes beads as the sole source of truth and mandates the `INTENT → ACTION → RECORD` primitive for every transaction. The `worker-signals`, `brain-review-gate`, `beads-lifecycle`, `plan-task-discipline`, and `loop-generation-authoring` skills provide detailed enforcement guidance for these conventions and loop continuations. See `crates/spur-core/src/skills/` for the authoritative skill bodies.
 
 ### `[[spur-signal v1]]` — Worker-to-Brain Signals
 
