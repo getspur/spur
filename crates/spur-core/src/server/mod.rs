@@ -288,6 +288,10 @@ pub struct McpCallbackServer {
     pub(crate) repo_root: Option<std::path::PathBuf>,
     /// v0e: opt-in auto-merge/PR on durable epic completion.
     pub(crate) auto_merge_approved_plans: bool,
+    /// Runtime loop scheduler switch. Defaults on to preserve existing behavior.
+    pub(crate) loops_enabled: bool,
+    /// Runtime startup default for the global loop pause guard.
+    pub(crate) pause_all_loops: bool,
     /// Grace period before startup quarantines stale `spur:plan-pending`
     /// persisted-plan epics.
     pub(crate) plan_pending_grace: std::time::Duration,
@@ -370,6 +374,8 @@ impl McpCallbackServer {
             reconciler_fast_forward: None,
             repo_root: None,
             auto_merge_approved_plans: false,
+            loops_enabled: true,
+            pause_all_loops: false,
             plan_pending_grace: DEFAULT_PLAN_PENDING_GRACE,
             versioned_cache_serve: false,
             nonadvisory_review_writes: false,
@@ -724,6 +730,16 @@ impl McpCallbackServer {
         self.auto_merge_approved_plans
     }
 
+    /// Whether loop scheduler sweeps are enabled at startup.
+    pub fn loops_enabled(&self) -> bool {
+        self.loops_enabled
+    }
+
+    /// Whether loop scheduler sweeps start globally paused.
+    pub fn pause_all_loops(&self) -> bool {
+        self.pause_all_loops
+    }
+
     /// Startup quarantine grace for stale `spur:plan-pending` epics.
     pub fn plan_pending_grace(&self) -> std::time::Duration {
         self.plan_pending_grace
@@ -737,6 +753,12 @@ impl McpCallbackServer {
     /// v0e: opt-in auto-merge/PR on durable epic completion.
     pub fn set_auto_merge_approved_plans(&mut self, enabled: bool) {
         self.auto_merge_approved_plans = enabled;
+    }
+
+    /// Configure startup loop scheduler behavior.
+    pub fn set_loop_runtime(&mut self, loops_enabled: bool, pause_all_loops: bool) {
+        self.loops_enabled = loops_enabled;
+        self.pause_all_loops = pause_all_loops;
     }
 
     /// Configure startup quarantine grace for stale `spur:plan-pending` epics.
@@ -841,6 +863,8 @@ impl McpCallbackServer {
         let reconciler_config = ReconcilerConfig {
             dispatch_lease_duration: self.dispatch_lease_duration,
             repo_root: repo_root.clone(),
+            loops_enabled: self.loops_enabled,
+            pause_all_loops: self.pause_all_loops,
             ..Default::default()
         };
         let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
