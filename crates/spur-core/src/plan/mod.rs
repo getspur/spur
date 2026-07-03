@@ -244,6 +244,185 @@ pub struct PlanState {
     pub epic_id: Option<String>,
 }
 
+pub type PlanId = String;
+
+pub struct PersistPlanAsEpicInput {
+    pub tasks: Vec<PlanTask>,
+    pub base: Option<crate::BaseTarget>,
+    pub parent_epic_id: Option<String>,
+    pub epic_title: Option<String>,
+    pub epic_body: Option<String>,
+    pub epic_labels: Vec<String>,
+    pub brain_session_id: BrainSessionId,
+    pub execution_mode: String,
+    pub precomputed_auto_serialized: Option<Vec<SiblingOverlap>>,
+    pub repo_root: Option<std::path::PathBuf>,
+    pub active_plans: Arc<tokio::sync::Mutex<HashMap<PlanId, crate::server::CachedPlan>>>,
+    pub event_sink: Option<Arc<dyn spur_mcp::events::McpEventSink>>,
+    pub reconciler_fast_forward: Option<Arc<tokio::sync::Notify>>,
+}
+
+pub async fn persist_plan_as_epic(
+    pm: &dyn PmLike,
+    feature_gate: &spur_license::FeatureGate,
+    mut input: PersistPlanAsEpicInput,
+) -> anyhow::Result<PlanId> {
+    crate::server::require_feature(
+        spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+        feature_gate,
+    )
+    .map_err(|error| anyhow::anyhow!(crate::server::feature_error_message(error)))?;
+
+    if input.precomputed_auto_serialized.take().is_none() {
+        submit_plan_normalize_tasks(&mut input.tasks).map_err(anyhow::Error::msg)?;
+    }
+
+    let plan_id = uuid::Uuid::new_v4().to_string();
+    let owner_label = labels::plan_owner(&input.brain_session_id.as_session_id().0);
+    let epic_title = match input
+        .epic_title
+        .take()
+        .map(|title| title.trim().to_string())
+    {
+        Some(title) if !title.is_empty() => title,
+        _ => {
+            let parent_epic_id = input.parent_epic_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("submit_plan: epic_title is required when persist_as_epic is true")
+            })?;
+            let parent = pm.get_issue(parent_epic_id).await.map_err(|error| {
+                anyhow::anyhow!("submit_plan: failed to load parent epic {parent_epic_id}: {error}")
+            })?;
+            let branch = match input.base.as_ref() {
+                Some(crate::BaseTarget::Branch { name }) => name.as_str(),
+                _ => "unspecified base",
+            };
+            format!("{} ({branch})", parent.title)
+        }
+    };
+
+    let mut activation_labels = vec![owner_label];
+    activation_labels.extend(input.epic_labels);
+
+    let epic_subgraph = crate::server::plan_builder::build_epic_subgraph_with_activation_labels(
+        pm,
+        feature_gate,
+        &plan_id,
+        &epic_title,
+        input.epic_body.as_deref(),
+        &input.tasks,
+        input.parent_epic_id.as_deref(),
+        activation_labels,
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+
+    if let Some(sink) = input.event_sink.as_deref() {
+        match pm.get_issue(&epic_subgraph.epic_id).await {
+            Ok(epic) => {
+                let loop_id = epic
+                    .labels
+                    .iter()
+                    .find_map(|label| labels::parse_loop_id(label))
+                    .map(str::to_string);
+                let generation = epic
+                    .labels
+                    .iter()
+                    .find_map(|label| labels::parse_loop_generation(label));
+                if let (Some(loop_id), Some(generation)) = (loop_id, generation) {
+                    sink.emit(spur_acp::SpurEventBody::LoopGenerationStarted {
+                        loop_id,
+                        generation,
+                        plan_id: plan_id.clone(),
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    plan_id = %plan_id,
+                    epic_id = %epic_subgraph.epic_id,
+                    "failed to load persisted epic labels for loop generation event: {error}"
+                );
+            }
+        }
+    }
+
+    if let Some(adv) = pm.advanced() {
+        let audit = audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
+            plan_id: plan_id.clone(),
+            owner: input.brain_session_id.to_string(),
+            token: uuid::Uuid::new_v4().to_string(),
+            reason: input.execution_mode.clone(),
+        };
+        let body = audit_sentinel::encode_comment(&audit);
+        if let Err(e) = adv.add_comment(&epic_subgraph.epic_id, &body).await {
+            tracing::warn!(
+                target: "spur.audit.emit_failure",
+                kind = "plan_ownership_acquired",
+                epic_id = %epic_subgraph.epic_id,
+                plan_id = %plan_id,
+                "PlanOwnershipAcquired audit comment emission failed (owner label is persisted; audit missing): {e}"
+            );
+        }
+    }
+
+    let entries = crate::server::plan_builder::build_entries_with_task_map(
+        input.tasks,
+        Some(&epic_subgraph.task_map),
+    );
+    let base_snapshot = crate::server::plan_builder::resolve_plan_base(
+        input.repo_root.as_ref(),
+        input.base.as_ref(),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+    let state = PlanState {
+        plan_id: plan_id.clone(),
+        tasks: entries,
+        brain_session_id: input.brain_session_id.clone(),
+        base_snapshot_branch: base_snapshot.branch,
+        base_snapshot_oid: base_snapshot.oid,
+        merge_state: PlanMergeState::NotStarted,
+        epic_id: Some(epic_subgraph.epic_id.clone()),
+    };
+    let state = Arc::new(tokio::sync::Mutex::new(state));
+
+    if let Some(adv) = pm.advanced() {
+        let (base_snapshot_branch, base_snapshot_oid) = {
+            let state = state.lock().await;
+            (
+                state.base_snapshot_branch.clone(),
+                state.base_snapshot_oid.clone(),
+            )
+        };
+        crate::server::plan_builder::emit_plan_submit_audit(
+            adv,
+            &plan_id,
+            &epic_subgraph,
+            crate::server::PlanSubmitAuditContext {
+                base_snapshot_branch: base_snapshot_branch.as_deref(),
+                base_snapshot_oid: base_snapshot_oid.as_deref(),
+                execution_mode: Some(input.execution_mode.as_str()),
+                brain_session_id: Some(input.brain_session_id.as_session_id()),
+                explicit_base: input.base.as_ref(),
+            },
+        )
+        .await;
+    }
+
+    input.active_plans.lock().await.insert(
+        plan_id.clone(),
+        crate::server::CachedPlan::new(Arc::clone(&state), crate::server::unknown_beads_version()),
+    );
+
+    {
+        let state = state.lock().await;
+        snapshot::emit_plan_snapshot(input.event_sink.as_deref(), &state);
+    }
+    continuation::notify_fast_forward(&input.reconciler_fast_forward);
+
+    Ok(plan_id)
+}
+
 impl PlanState {
     /// Returns plan tasks in topological dependency order. Equal-rank tasks are
     /// ordered by task_id for deterministic staging and dispatch previews.
@@ -3233,6 +3412,41 @@ pub(crate) async fn push_loop_escalation_continuation(
         diff_summary: None,
         summary: Some(format!(
             "Loop escalation: loop_id={loop_id}; goal={goal}; consecutive_failures={consecutive_failures}; action=review paused loop and decide whether to resume"
+        )),
+        estimated_cost_usd: 0.0,
+        worker_branch: None,
+        artifact: None,
+    };
+    materialize_and_push_detached_continuation(
+        continuation_ctx,
+        materializer,
+        &result,
+        &delegation_id,
+        1,
+        brain_session_id,
+        spur_acp::domain::ContinuationSource::LoopEscalation,
+    )
+    .await;
+}
+
+pub(crate) async fn push_loop_template_validation_escalation_continuation(
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    brain_session_id: &BrainSessionId,
+    loop_id: &str,
+    goal: &str,
+    generation: u32,
+    validation_error: &str,
+) {
+    let delegation_id = loop_artifact_delegation_id("template-validation", loop_id, generation);
+    let result = DelegationResult {
+        status: DelegationStatus::Failed {
+            error: format!("loop auto-paused after template validation failed: {validation_error}"),
+        },
+        diff: None,
+        diff_summary: None,
+        summary: Some(format!(
+            "Loop escalation: loop_id={loop_id}; goal={goal}; generation={generation}; validation_error={validation_error}; action=review paused loop template before resuming"
         )),
         estimated_cost_usd: 0.0,
         worker_branch: None,

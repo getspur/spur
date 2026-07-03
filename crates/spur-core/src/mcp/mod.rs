@@ -28,6 +28,8 @@ const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
     "get_loop_status",
     "pause_loop",
     "resume_loop",
+    "kill_loop",
+    "set_loop_autonomy",
     "preview_task_base",
     "plan_truncate_and_restart",
     "recover_orphaned_dispatch",

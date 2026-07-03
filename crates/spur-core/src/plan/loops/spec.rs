@@ -80,11 +80,7 @@ fn serialize_autonomy<S>(level: &AutonomyLevel, serializer: S) -> Result<S::Ok, 
 where
     S: Serializer,
 {
-    serializer.serialize_str(match level {
-        AutonomyLevel::L1 => "l1",
-        AutonomyLevel::L2 => "l2",
-        AutonomyLevel::L3 => "l3",
-    })
+    serializer.serialize_str(level.as_str())
 }
 
 fn deserialize_autonomy<'de, D>(deserializer: D) -> Result<AutonomyLevel, D::Error>
@@ -92,11 +88,9 @@ where
     D: Deserializer<'de>,
 {
     let value = String::deserialize(deserializer)?;
-    match value.as_str() {
-        "l1" => Ok(AutonomyLevel::L1),
-        "l2" => Ok(AutonomyLevel::L2),
-        "l3" => Ok(AutonomyLevel::L3),
-        _ => Err(serde::de::Error::unknown_variant(
+    match AutonomyLevel::parse(value.as_str()) {
+        Some(level) => Ok(level),
+        None => Err(serde::de::Error::unknown_variant(
             &value,
             &["l1", "l2", "l3"],
         )),

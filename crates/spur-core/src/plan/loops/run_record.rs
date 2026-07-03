@@ -35,6 +35,7 @@ pub fn build_loop_run(
     loop_id: &str,
     generation: u32,
     plan_id: &str,
+    autonomy: Option<String>,
     outcome: LoopRunOutcome,
     audits: &[AuditSentinelKind],
     clock_now: i64,
@@ -49,6 +50,7 @@ pub fn build_loop_run(
         loop_id: loop_id.to_string(),
         generation,
         plan_id: plan_id.to_string(),
+        autonomy,
         outcome: outcome.outcome_str().to_string(),
         tasks_discovered: outcome.tasks_discovered,
         approved: outcome.approved,
@@ -57,6 +59,25 @@ pub fn build_loop_run(
         cancelled: outcome.cancelled,
         escalations,
         cost_micros: sum_completion_cost_micros(audits),
+        started_at: clock_now,
+        ended_at: clock_now,
+    }
+}
+
+pub fn retired_loop_run(loop_id: &str, generation: u32, clock_now: i64) -> AuditSentinelKind {
+    AuditSentinelKind::LoopRun {
+        loop_id: loop_id.to_string(),
+        generation,
+        plan_id: String::new(),
+        autonomy: None,
+        outcome: "retired".to_string(),
+        tasks_discovered: 0,
+        approved: 0,
+        rejected: 0,
+        failed: 0,
+        cancelled: 0,
+        escalations: 0,
+        cost_micros: 0,
         started_at: clock_now,
         ended_at: clock_now,
     }
