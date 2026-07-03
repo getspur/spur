@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 use std::sync::Arc;
 
@@ -7,7 +8,7 @@ use spur_acp::{
     SessionConfigOption, SessionConfigSelectOption, SessionDeleteCapabilities, SessionId,
     SessionListCapabilities, SessionResumeCapabilities, SpurAgentCaps, SpurEvent, SpurEventBody,
 };
-use spur_tui::action::ViewId;
+use spur_tui::action::{Action, ViewId};
 use spur_tui::components::status_bar::{StatusBar, StatusBarProps};
 use spur_tui::views::{session_detail::SessionDetailView, View};
 
@@ -142,6 +143,21 @@ fn rendered_status_bar_line(output: &str) -> &str {
     output.lines().last().unwrap_or_default()
 }
 
+fn test_ctx() -> spur_tui::views::ViewContext<'static> {
+    static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+        std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+    spur_tui::test_support::test_view_ctx(&LINEAGE)
+}
+
+fn submit_text(view: &mut SessionDetailView, text: &str) -> Option<Action> {
+    view.input_bar_mut_for_test()
+        .set_text(text.to_string(), text.len());
+    view.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &test_ctx(),
+    )
+}
+
 #[test]
 fn session_detail_lifecycle_indicator_absent_without_advertised_caps() {
     let (_tmp, mut view) = new_session_detail_view();
@@ -177,6 +193,83 @@ fn session_detail_lifecycle_indicator_lists_advertised_caps_only() {
     assert!(
         !status.contains("delete") && !status.contains("list"),
         "status bar should not list unadvertised lifecycle caps: {status}"
+    );
+}
+
+#[test]
+fn session_detail_status_bar_uses_frozen_caps_effort_before_live_options() {
+    let (_tmp, mut view) = new_session_detail_view();
+    view.set_spur_agent_caps(Some(caps_with_effort("medium")));
+
+    let rendered = render_session_detail(&mut view);
+    let status = rendered_status_bar_line(&rendered);
+
+    assert!(
+        status.contains("Medium"),
+        "fresh sessions should render effort from frozen caps before live config options arrive: {status}"
+    );
+}
+
+#[test]
+fn session_detail_effort_submit_updates_status_before_live_confirmation() {
+    let (_tmp, mut view) = new_session_detail_view();
+    let caps = caps_with_effort("medium");
+    view.set_spur_agent_caps(Some(caps.clone()));
+    view.apply_advertised_commands(Some(caps.as_ref()), &[]);
+
+    let action = submit_text(&mut view, "/effort high").expect("effort submit action");
+    match action {
+        Action::SetSessionConfigOption { config_id, value } => {
+            assert_eq!(config_id, "reasoning_effort");
+            assert_eq!(value, "high");
+        }
+        other => panic!("expected SetSessionConfigOption, got {other:?}"),
+    }
+
+    let rendered = render_session_detail(&mut view);
+    let status = rendered_status_bar_line(&rendered);
+
+    assert!(
+        status.contains("high"),
+        "status bar should reflect the optimistic /effort value before live confirmation: {status}"
+    );
+    assert!(
+        !status.contains("Medium"),
+        "optimistic /effort value should replace the frozen caps label before confirmation: {status}"
+    );
+}
+
+#[test]
+fn session_detail_live_effort_refresh_clears_pending_override() {
+    let (_tmp, mut view) = new_session_detail_view();
+    let caps = caps_with_effort("medium");
+    view.set_spur_agent_caps(Some(caps.clone()));
+    view.apply_advertised_commands(Some(caps.as_ref()), &[]);
+
+    let action = submit_text(&mut view, "/effort high").expect("effort submit action");
+    assert!(
+        matches!(action, Action::SetSessionConfigOption { .. }),
+        "expected effort submit to dispatch set_config_option, got {action:?}"
+    );
+
+    view.apply_advertised_commands(Some(caps.as_ref()), &[effort_option("medium")]);
+    let refreshed = render_session_detail(&mut view);
+    let refreshed_status = rendered_status_bar_line(&refreshed);
+    assert!(
+        refreshed_status.contains("Medium"),
+        "live effort config option should take precedence over pending override: {refreshed_status}"
+    );
+
+    view.apply_advertised_commands(Some(caps.as_ref()), &[]);
+    let after_empty_refresh = render_session_detail(&mut view);
+    let after_empty_status = rendered_status_bar_line(&after_empty_refresh);
+    assert!(
+        after_empty_status.contains("Medium"),
+        "pending effort override should stay cleared after a resolvable live refresh: {after_empty_status}"
+    );
+    assert!(
+        !after_empty_status.contains("high"),
+        "cleared pending effort override must not return after options disappear: {after_empty_status}"
     );
 }
 

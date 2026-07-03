@@ -49,6 +49,7 @@ pub enum SubmitDecision {
     /// to ACP `session/set_config_option`. The consumer (app.rs → orchestrator)
     /// maps this to `InteractiveInput::SetSessionConfigOption`.
     SetSessionConfigOption {
+        command_name: String,
         config_id: String,
         value: String,
     },
@@ -144,6 +145,7 @@ pub fn route_with_caps(
 
     if text.starts_with('/') {
         if let Some(entry) = registry.resolve(text) {
+            let command_name = entry.name;
             return match entry.dispatch {
                 Dispatch::SpurLocal(action) => SubmitDecision::Local { action },
                 Dispatch::PromptText { normalized } => {
@@ -175,7 +177,11 @@ pub fn route_with_caps(
                         // calls that flow through it directly.
                         SubmitDecision::SetSessionModel { value }
                     } else {
-                        SubmitDecision::SetSessionConfigOption { config_id, value }
+                        SubmitDecision::SetSessionConfigOption {
+                            command_name,
+                            config_id,
+                            value,
+                        }
                     }
                 }
                 Dispatch::VendorExec {
@@ -630,7 +636,9 @@ mod sessions_slash_tests {
 
         let decision = route("/model gpt-5-codex", &[], &[], &registry, false);
         match decision {
-            SubmitDecision::SetSessionConfigOption { config_id, value } => {
+            SubmitDecision::SetSessionConfigOption {
+                config_id, value, ..
+            } => {
                 assert_eq!(config_id, "model");
                 assert_eq!(value, "gpt-5-codex");
             }
@@ -800,7 +808,9 @@ mod sessions_slash_tests {
 
         let decision = route_with_caps("/model gpt-4o", &[], &[], &registry, false, Some(&caps));
         match decision {
-            SubmitDecision::SetSessionConfigOption { config_id, value } => {
+            SubmitDecision::SetSessionConfigOption {
+                config_id, value, ..
+            } => {
                 assert_eq!(config_id, "model");
                 assert_eq!(value, "gpt-4o");
             }
@@ -934,7 +944,9 @@ mod sessions_slash_tests {
 
         let decision = route_with_caps("/model gpt-4o", &[], &[], &registry, false, None);
         match decision {
-            SubmitDecision::SetSessionConfigOption { config_id, value } => {
+            SubmitDecision::SetSessionConfigOption {
+                config_id, value, ..
+            } => {
                 assert_eq!(config_id, "model");
                 assert_eq!(value, "gpt-4o");
             }
