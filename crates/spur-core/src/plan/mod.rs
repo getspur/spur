@@ -312,6 +312,36 @@ pub async fn persist_plan_as_epic(
     .await
     .map_err(anyhow::Error::msg)?;
 
+    if let Some(sink) = input.event_sink.as_deref() {
+        match pm.get_issue(&epic_subgraph.epic_id).await {
+            Ok(epic) => {
+                let loop_id = epic
+                    .labels
+                    .iter()
+                    .find_map(|label| labels::parse_loop_id(label))
+                    .map(str::to_string);
+                let generation = epic
+                    .labels
+                    .iter()
+                    .find_map(|label| labels::parse_loop_generation(label));
+                if let (Some(loop_id), Some(generation)) = (loop_id, generation) {
+                    sink.emit(spur_acp::SpurEventBody::LoopGenerationStarted {
+                        loop_id,
+                        generation,
+                        plan_id: plan_id.clone(),
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    plan_id = %plan_id,
+                    epic_id = %epic_subgraph.epic_id,
+                    "failed to load persisted epic labels for loop generation event: {error}"
+                );
+            }
+        }
+    }
+
     if let Some(adv) = pm.advanced() {
         let audit = audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
             plan_id: plan_id.clone(),

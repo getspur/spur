@@ -1368,6 +1368,12 @@ impl McpCallbackServer {
                 ),
             );
         }
+        if let Some(sink) = self.event_sink.as_deref() {
+            sink.emit(spur_acp::SpurEventBody::LoopPaused {
+                loop_id: input.loop_id.clone(),
+                by: "paused".to_string(),
+            });
+        }
         let output = json!({
             "loop_id": input.loop_id,
             "issue_id": issue.id,
@@ -1452,6 +1458,12 @@ impl McpCallbackServer {
             );
         }
         self.fast_forward_reconciler();
+        if let Some(sink) = self.event_sink.as_deref() {
+            sink.emit(spur_acp::SpurEventBody::LoopPaused {
+                loop_id: input.loop_id.clone(),
+                by: "resumed".to_string(),
+            });
+        }
         let output = json!({
             "loop_id": input.loop_id,
             "issue_id": issue.id,
@@ -1565,6 +1577,12 @@ impl McpCallbackServer {
                     input.loop_id
                 ),
             );
+        }
+        if let Some(sink) = self.event_sink.as_deref() {
+            sink.emit(spur_acp::SpurEventBody::LoopPaused {
+                loop_id: input.loop_id.clone(),
+                by: "retired".to_string(),
+            });
         }
         let output = json!({
             "loop_id": input.loop_id,
