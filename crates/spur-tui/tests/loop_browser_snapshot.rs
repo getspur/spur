@@ -18,7 +18,6 @@ fn view_ctx<'a>(lineage: &'a ExecutorLineage, plans: &'a PlanProjectionStore) ->
         plan_projection: plans,
         synopsis: &SYNOPSIS,
         brain_status: &BRAIN_STATUS,
-        license_badge: None,
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
