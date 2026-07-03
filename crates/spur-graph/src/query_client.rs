@@ -55,6 +55,16 @@ pub trait GraphQueryClient {
     fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution>;
     fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>>;
     fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>>;
+    /// Batched form of [`symbols_by_file`](Self::symbols_by_file): one call
+    /// covers every path, so backends with per-query scan cost (parquet) can
+    /// answer with a single pass instead of one scan per path.
+    fn symbols_by_files(&self, paths: &[String]) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        let mut symbols = Vec::new();
+        for path in paths {
+            symbols.extend(self.symbols_by_file(path)?);
+        }
+        Ok(symbols)
+    }
     fn symbols_by_path_name(
         &self,
         path: &str,
@@ -103,6 +113,10 @@ impl<T: GraphQueryClient + ?Sized> GraphQueryClient for &T {
 
     fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
         (**self).symbols_by_file(path)
+    }
+
+    fn symbols_by_files(&self, paths: &[String]) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        (**self).symbols_by_files(paths)
     }
 
     fn symbols_by_path_name(
@@ -637,17 +651,52 @@ fn build_overlay_remap<B: GraphQueryClient>(
     delta_artifact: &GraphIndexArtifact,
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut remap = HashMap::new();
+    if delta_artifact.symbols.is_empty() {
+        return Ok(remap);
+    }
+
+    // One batched base fetch for the changed paths; per-delta-symbol base
+    // queries are full scans on the parquet backend and dominate overlay
+    // construction cost.
+    let mut changed_paths = delta_artifact
+        .symbols
+        .iter()
+        .map(|symbol| symbol.file_path.clone())
+        .collect::<Vec<_>>();
+    changed_paths.sort();
+    changed_paths.dedup();
+    let base_symbols = base.symbols_by_files(&changed_paths)?;
+    let mut base_by_path: HashMap<&str, Vec<&GraphSymbolArtifact>> = HashMap::new();
+    for base_symbol in &base_symbols {
+        base_by_path
+            .entry(base_symbol.file_path.as_str())
+            .or_default()
+            .push(base_symbol);
+    }
+
     for delta_symbol in &delta_artifact.symbols {
-        let mut candidates =
-            base.symbols_by_path_name(&delta_symbol.file_path, &delta_symbol.qualified_name)?;
+        let file_symbols = base_by_path
+            .get(delta_symbol.file_path.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let matching_name = |name: &str| {
+            file_symbols
+                .iter()
+                .copied()
+                .filter(|base_symbol| {
+                    base_symbol.entity_name == name || base_symbol.qualified_name == name
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut candidates = matching_name(&delta_symbol.qualified_name);
         if candidates.is_empty() && delta_symbol.qualified_name != delta_symbol.entity_name {
-            candidates =
-                base.symbols_by_path_name(&delta_symbol.file_path, &delta_symbol.entity_name)?;
+            candidates = matching_name(&delta_symbol.entity_name);
         }
         if candidates.is_empty() {
-            candidates = base
-                .symbols_by_file(&delta_symbol.file_path)?
-                .into_iter()
+            candidates = file_symbols
+                .iter()
+                .copied()
                 .filter(|base_symbol| base_symbol.symbol_kind == delta_symbol.symbol_kind)
                 .filter(|base_symbol| {
                     ranges_overlap(base_symbol.line_range, delta_symbol.line_range)
@@ -663,7 +712,7 @@ fn build_overlay_remap<B: GraphQueryClient>(
         for base_symbol in candidates {
             if base_symbol.stable_symbol_id != delta_symbol.stable_symbol_id {
                 remap.insert(
-                    base_symbol.stable_symbol_id,
+                    base_symbol.stable_symbol_id.clone(),
                     delta_symbol.stable_symbol_id.clone(),
                 );
             }
