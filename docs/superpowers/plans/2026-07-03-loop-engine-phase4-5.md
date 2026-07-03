@@ -17,6 +17,19 @@
 Non-gaps confirmed: L1 `ReportOnly` enforcement, budget gate, backoff/auto-pause, run
 records, pause/resume, overlap skip — all live and tested on main.
 
+**Adversarially grounded 2026-07-03** (independent codex review, delegation
+`d2305c8a`). Corrections folded into the tasks below; the review also added G7–G8:
+
+| # | Gap | Evidence anchor | Size |
+|---|---|---|---|
+| G7 | Loop runtime config surface: `ReconcilerConfig.loops_enabled` defaults `true` and `pause_all_loops` `false` (`reconciler/mod.rs:797-823`) but `[spur]` runtime config exposes neither (`spur-acp/src/config/mod.rs:311-326`) — loops are always-on with no user-facing switch or docs | config plumbing + docs | S |
+| G8 | `ContinuationSource::LoopDue` carries no structured payload — loop id/generation/template are embedded in free-form summary text (`plan/mod.rs:3183-3215`) | v1 decision: document the text contract + require `get_loop_status` (see T6); structured payload deferred to phase 6 | — |
+
+Review-refuted claims (do NOT re-add): `session_synopsis/projection.rs` and
+`event_replay.rs` use catch-alls, so new event variants are NOT compile blockers
+there; a per-loop auto-merge "allowlist config" does not exist — the actual mechanism
+is `auto_merge_approved_plans` + `spur:integration-pending`.
+
 ## Task DAG
 
 ```
@@ -24,7 +37,8 @@ T1 persist extraction ──► T5 L3 engine-arming
 T3 set_loop_autonomy  ──► T5
 T2 kill_loop          (independent)
 T4 loop events        (independent)
-T6 authoring skill    (independent, docs)
+T6 authoring skill    (independent, docs+tests)
+T7 config + operability (independent, small)
 ```
 
 ### Task T1: extract `persist_plan_as_epic` (spec §3.4)
@@ -34,7 +48,13 @@ T6 authoring skill    (independent, docs)
   missing coverage for labels/audit emission before moving code.
 - Move the epic+tasks+labels+`PlanSubmit`-audit persistence from
   `submit_plan_as_epic_internal` into
-  `crate::plan::persist_plan_as_epic(pm: &dyn PmLike, feature_gate: &FeatureGate, spec: &DelegationPlan, provenance: PlanProvenance) -> anyhow::Result<PlanId>`.
+  `crate::plan::persist_plan_as_epic(pm: &dyn PmLike, feature_gate: &FeatureGate, input: PersistPlanAsEpicInput) -> anyhow::Result<PlanId>`.
+  Grounding correction: the internal fn is NOT a thin persist — `PersistPlanAsEpicInput`
+  must capture everything the handler currently threads through: base/snapshot spec,
+  brain session/ownership labels, plan-cache interaction, and the reconciler
+  fast-forward. Enumerate these from `submit_plan_as_epic_internal` (owner label flows
+  into subgraph creation at `plan.rs:823-832`) during the characterization step and
+  make each an explicit input field rather than a hidden server dependency.
 - Handler stays: validation + dedup + response shaping. Zero behavior change.
 - Gate: `require_feature(PM_PRO_BEADS_ADVANCED)` inside the moved fn (static guard
   scans `.advanced()` call sites — same trap T3-phase1 hit).
@@ -43,7 +63,10 @@ T6 authoring skill    (independent, docs)
 ### Task T2: `kill_loop` MCP tool (spec §3.5)
 
 - `LoopIdParams` reused. Handler `handle_kill_loop`:
-  load loop issue by `spur:loop-id:*` (reuse `load_loop_issue`), append terminal
+  load loop issue by `spur:loop-id:*` — grounding correction: `load_loop_issue` as
+  written only finds OPEN issues, which breaks kill idempotency (second kill of a
+  closed loop would report "unknown loop_id"); add a closed-aware variant
+  (`include_closed: true` in the `IssueFilter`) and use it here — then append terminal
   `LoopRun` record with `outcome: "retired"` (reuse `skipped_loop_run` shape via a
   `retired_loop_run` helper in `plan/loops/run_record.rs`), remove all
   `spur:loop-next-run:*` labels, close the issue.
@@ -65,10 +88,16 @@ T6 authoring skill    (independent, docs)
 - Semantics:
   - **Demotion always allowed** (any level → lower level).
   - **Promotion ratcheted**: require ≥ `RATCHET_MIN_STABLE_GENERATIONS` (const, 3)
-    consecutive `LoopRun` records with `outcome == "approved"` at the *current* level
-    (scan audits via `collect_sorted_audits_for_issue`, newest-first, stop at first
-    non-real-generation outcome — reuse the "real generation" predicate from the T6
-    phase-1 fix: `approved|partial|failed` only; skips don't count for or against).
+    consecutive `LoopRun` records with `outcome == "approved"` at the *current* level.
+    Grounding correction: `LoopRun` does NOT store the autonomy level a generation ran
+    at, so "at the current level" is inexpressible today. Fix first: add
+    `#[serde(default)] autonomy: Option<String>` to `AuditSentinelKind::LoopRun`
+    (backward-compatible — old records deserialize as `None`), stamp it in
+    `build_loop_run`/`skipped_loop_run` from the generation epic's autonomy label,
+    and extend the round-trip tests. Ratchet scan: newest-first via
+    `collect_sorted_audits_for_issue`; count only real-generation outcomes
+    (`approved|partial|failed` — skips don't count for or against); a record with
+    `autonomy: None` (legacy) or a different level RESETS the streak (does not count).
   - One level per call (L1→L3 direct is rejected).
 - Effect: rewrite `LoopSpec.autonomy` in the sentinel body AND swap the
   `spur:autonomy:*` label on the loop issue in one `update_issue`. Both must stay
@@ -91,14 +120,16 @@ T6 authoring skill    (independent, docs)
     `maybe_emit_loop_run_record` (`plan/reconciler/terminal.rs`).
   - `LoopPaused { loop_id, by: paused|auto_paused|resumed|retired }` — emit in
     `handle_pause_loop`/`handle_resume_loop`/`auto_pause_failed_loop`/`kill_loop`.
-- Emission surface: investigate how `Reconciler` reaches the event sink — anchor
-  `event_sink.rs::enforce_event_cap` and the `SpurEvent.seq` allocator; if the
-  reconciler has no sink handle today, thread the existing one (do NOT invent a new
-  channel).
+- Emission surface (grounded): reconciler paths emit via `dispatch.event_sink()` —
+  the trait already exposes it at `reconciler/mod.rs:728-733` and terminal emission
+  uses it at `terminal.rs:452-463`; MCP handler paths use the server `event_sink`
+  (`server/mod.rs:224-225`). If `persist_plan_as_epic` (T1) emits
+  `LoopGenerationStarted`, plumb the sink into it explicitly as an input.
 - Round-trip serialization tests modeled on
   `crates/spur-acp/tests/executor_events_roundtrip.rs` (mandatory per repo rules).
-- Consumers (from the analyst blast-radius query): update exhaustive matches in
-  `session_synopsis/projection.rs` and `event_replay.rs`; add minimal display arms in
+- Consumers (grounding correction): `session_synopsis/projection.rs` and
+  `event_replay.rs` use catch-alls — new variants compile without arms; add arms only
+  where the projection should surface loop state. Add minimal display arms in
   `spur-tui` `plan_inspector.rs`/`plan_browser.rs` (loop rows: id, generation,
   outcome badge) — TUI behavior change, screenshot in PR.
 - **Run the `spur-invariants-reviewer` agent on this diff before commit** (touches
@@ -109,11 +140,17 @@ T6 authoring skill    (independent, docs)
 
 - In `run_loop_scheduler_sweep`, where the loop-due continuation is pushed: if
   `spec.autonomy == AutonomyLevel::L3`, instead call
-  `crate::plan::persist_plan_as_epic` with the stored template verbatim, labeling the
+  `crate::plan::persist_plan_as_epic` with the stored template, labeling the
   epic `spur:loop-id:<id>` + `spur:loop-generation:<n>` + `spur:autonomy:l3` (+
   `spur:loop-budget-micros` mapped from `governors.max_cost_micros_per_generation`).
-- Auto-merge stays within the existing v0e allowlist mechanism
-  (`auto_merge_approved_plans` + allowlist config); no new merge path.
+  Grounding correction: extraction alone is not sufficient — add a tested conversion
+  `loop_template_to_persist_input(template: &serde_json::Value, spec: &LoopSpec, generation: u32) -> Result<PersistPlanAsEpicInput>`
+  (`LoopSpec.template` at `loops/spec.rs:23` is free-form JSON; validation errors must
+  auto-pause the loop with an escalation record, never panic the sweep).
+- Auto-merge (grounding correction — no per-loop allowlist config exists): stays
+  within the existing `auto_merge_approved_plans` + `spur:integration-pending`
+  mechanism; if the spec's "allowlist" ambition is wanted, add it as an explicit new
+  governor field in a later phase — out of scope here.
 - L1/L2 keep the continuation path unchanged.
 - Tests: L3 loop arms a generation with zero brain involvement (mock PM: epic exists
   with correct labels after one tick); L1/L2 still push continuations; template
@@ -133,9 +170,31 @@ T6 authoring skill    (independent, docs)
     output; close out and let the terminal hook write the run record.
   - Escalation: on `ContinuationSource::LoopEscalation`, summarize run-record history
     and surface to the user; never self-promote autonomy.
-- Wire into the brain injection set alongside `brain-delegation` (same mechanism).
+  - Contract note (G8): the `LoopDue` continuation payload is free-form summary text —
+    loop id/generation/template are embedded as text (`plan/mod.rs:3183-3215`). The
+    skill MUST instruct the brain to call `get_loop_status` for authoritative state
+    and never parse structured fields out of the continuation text.
+- Wire into the brain prompt injection in `orchestrator/prompt.rs` (the exact place
+  `brain-delegation` is injected) — this is a code change, not just an asset drop.
+- Tests (grounding correction — not docs-only): mirror the existing skill tests that
+  load `brain-delegation`: prove the new skill is bundled (`all_bundled_raw` contains
+  it) and injected into brain sessions.
 - Update `CLAUDE.md`/`AGENTS` skill tables mentioning the new skill.
-- Commit: `docs(spur-core): loop generation authoring skill`
+- Commits: `test(spur-core): loop authoring skill is bundled and injected` →
+  `feat(spur-core): loop generation authoring skill`
+
+### Task T7: loop runtime config + operability (G7)
+
+- Decide and implement the user-facing switch: expose `loops_enabled` (and optionally
+  `pause_all_loops` as a startup default) in `[spur]` runtime config
+  (`spur-acp/src/config/mod.rs:311-326` idiom), threading into `ReconcilerConfig`
+  (`reconciler/mod.rs:797-823`). Config-validation change → run
+  `scripts/spur-cargo test -p spur-acp` per repo rules.
+- Docs: a short `docs/loops.md` operator guide — submit/pause/resume/kill/status,
+  autonomy ladder + ratchet, governor semantics, the L1 pilot recipe.
+- TUI actions for `kill_loop`/`set_loop_autonomy` are explicitly deferred (MCP-only
+  control surface for phases 4–5); noted here so the omission is a decision, not an
+  oversight.
 
 ## Verification (whole plan)
 
