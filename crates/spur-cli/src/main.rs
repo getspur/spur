@@ -1996,6 +1996,19 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
         }
         spur_tui::UserInput::RefreshIssues => spur_core::InteractiveInput::RefreshIssues,
         spur_tui::UserInput::RefreshPlans => spur_core::InteractiveInput::RefreshPlans,
+        spur_tui::UserInput::RefreshLoops => spur_core::InteractiveInput::RefreshLoops,
+        spur_tui::UserInput::InspectLoop { loop_id } => {
+            spur_core::InteractiveInput::InspectLoop { loop_id }
+        }
+        spur_tui::UserInput::PauseLoop { loop_id } => {
+            spur_core::InteractiveInput::PauseLoop { loop_id }
+        }
+        spur_tui::UserInput::ResumeLoop { loop_id } => {
+            spur_core::InteractiveInput::ResumeLoop { loop_id }
+        }
+        spur_tui::UserInput::KillLoop { loop_id } => {
+            spur_core::InteractiveInput::KillLoop { loop_id }
+        }
         spur_tui::UserInput::ClaimPlan { plan_id } => {
             spur_core::InteractiveInput::ClaimPlan { plan_id }
         }
