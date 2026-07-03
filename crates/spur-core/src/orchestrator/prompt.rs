@@ -75,6 +75,11 @@ impl Orchestrator {
         if let Some(framework) = crate::skills::load_skill("brain-delegation", &self.repo_root) {
             prompt.push_str(&framework);
         }
+        if let Some(loop_authoring) =
+            crate::skills::load_skill("loop-generation-authoring", &self.repo_root)
+        {
+            prompt.push_str(&loop_authoring);
+        }
         let agent_skill = format!("brain-delegation-{}", brain_name);
         if let Some(guidance) = crate::skills::load_skill(&agent_skill, &self.repo_root) {
             prompt.push_str(&guidance);
@@ -207,5 +212,24 @@ mod tests {
         assert!(header.contains("## WORKING SURFACE"));
         assert!(header.contains("markdown cells = reasoning artifacts"));
         assert!(header.contains("code cells = computation"));
+    }
+
+    #[tokio::test]
+    async fn brain_prompt_v1_injects_loop_generation_authoring_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = spur_acp::config::SpurConfig::default();
+        config.brain.delegation.framework = "v1".to_string();
+        let orchestrator = Orchestrator::new(tmp.path().to_path_buf(), config, None).unwrap();
+
+        let prompt = orchestrator.build_brain_prompt(
+            "continue loop",
+            None,
+            &spur_acp::types::SessionId::new(),
+            "codex",
+        );
+
+        assert!(prompt.contains("# Loop Generation Authoring"));
+        assert!(prompt.contains("ContinuationSource::LoopDue"));
+        assert!(prompt.contains("get_loop_status"));
     }
 }
