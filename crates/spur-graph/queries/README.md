@@ -42,7 +42,8 @@ The shared capture vocabulary is:
 
 `@definition.constant` is captured for Rust, Python, TypeScript/TSX/JavaScript
 top-level non-function `const` bindings, C file-scope `const` variables, and
-C++ namespace/file-scope `const` and `constexpr` variables.
+C++ namespace/file-scope `const` and `constexpr` variables, and Go
+package-level `const` and `var` bindings.
 `@definition.enum_variant` is captured for Rust, TypeScript/TSX/JavaScript, C,
 and C++ enum members.
 `@definition.resource` is captured for Hcl/Terraform `resource` blocks; the
@@ -107,11 +108,11 @@ Notes:
   `method_elem` for interface methods), so no `is_method` heuristic is used.
   `type_spec` bodies dispatch to `struct`/`interface`, with every other
   `type_spec` shape and `type_alias` folded into `type_alias`. Multi-name
-  `const_spec` and struct `field_declaration` specs capture each identifier as
-  its own definition node so `const A, B = 1, 2` fans out into one constant
-  per name. Only top-level `const` declarations are captured (function-local
-  `const` is skipped); Go `var` declarations are intentionally out of scope
-  for this phase (no clean NodeKind) and may be revisited later. The Go
+  `const_spec`, `var_spec`, and struct `field_declaration` specs capture each
+  identifier as its own definition node so `const A, B = 1, 2` and
+  `var A, B = 1, 2` fan out into one constant per name. Only top-level `const`
+  and `var` declarations are captured (function-local declarations are
+  skipped). The Go
   `package_clause` spans only the clause itself, so top-level symbols are not
   nested under the module node and keep bare-name FQNs, matching the
   shell/sql convention.
@@ -172,6 +173,11 @@ HOF references are realized in Rust, Python, C++, and TypeScript/Tsx/JavaScript
 via closed HOF-method allowlists in the respective `spur-edges.scm` files.
 TypeScript/Tsx/JavaScript currently capture bare identifier callbacks passed as
 the first argument to recognized array/iterable and Promise-style methods.
+
+Markdown `links` covers inline links plus full, collapsed, and shortcut
+reference-style links. Reference definitions map labels to normalized
+destinations; missing labels remain unresolved link edges labeled by the
+normalized reference label.
 
 Hcl/Terraform `references` are address references
 (`GraphEdgeKind::ReferencesAddress`): each `variable_expr` + `get_attr` chain

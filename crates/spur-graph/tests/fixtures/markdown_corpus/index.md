@@ -4,6 +4,7 @@ See the [Guide](guide.md) for setup.
 Reference-style full link to [Guide label][guide-ref].
 Collapsed reference [guide-ref][].
 Shortcut reference [guide-ref].
+Missing reference [no-such-label].
 
 ## Details
 
