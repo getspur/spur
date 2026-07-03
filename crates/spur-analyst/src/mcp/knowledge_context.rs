@@ -32,6 +32,7 @@ const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
 const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 0.80;
 const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
+const ANALYST_EMBED_MODE_ENV: &str = "SPUR_ANALYST_EMBED_MODE";
 
 #[cfg(feature = "embed")]
 const EMBED_INFERENCE_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -41,6 +42,105 @@ static EMBEDDING_GEMMA_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> =
 #[cfg(all(test, feature = "embed"))]
 static DISABLE_EMBED_QUERY_FOR_TESTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnalystEmbedMode {
+    Auto,
+    InProcess,
+    Sidecar,
+    Off,
+}
+
+impl AnalystEmbedMode {
+    fn current() -> Self {
+        #[cfg(test)]
+        if let Some(mode) =
+            ANALYST_EMBED_MODE_OVERRIDE_FOR_TESTS.with(|override_mode| override_mode.get())
+        {
+            return mode;
+        }
+
+        Self::from_env()
+    }
+
+    fn from_env() -> Self {
+        match std::env::var(ANALYST_EMBED_MODE_ENV) {
+            Ok(value) => Self::parse_env_value(&value),
+            Err(std::env::VarError::NotPresent) => Self::Auto,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    env = ANALYST_EMBED_MODE_ENV,
+                    "failed to read analyst embed mode; falling back to auto"
+                );
+                Self::Auto
+            }
+        }
+    }
+
+    fn parse_env_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Self::Auto,
+            "inprocess" => Self::InProcess,
+            "sidecar" => Self::Sidecar,
+            "off" => Self::Off,
+            _ => {
+                tracing::warn!(
+                    value,
+                    env = ANALYST_EMBED_MODE_ENV,
+                    "unknown analyst embed mode; falling back to auto"
+                );
+                Self::Auto
+            }
+        }
+    }
+
+    #[cfg(feature = "embed")]
+    fn allows_in_process(self, entrypoint: &'static str) -> bool {
+        match self {
+            Self::Auto | Self::InProcess => true,
+            Self::Off => false,
+            Self::Sidecar => {
+                tracing::debug!(
+                    mode = "sidecar",
+                    entrypoint,
+                    "analyst embed sidecar mode is not yet wired; degrading to BM25-only search"
+                );
+                false
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static ANALYST_EMBED_MODE_OVERRIDE_FOR_TESTS: std::cell::Cell<Option<AnalystEmbedMode>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct AnalystEmbedModeOverrideGuard {
+    previous: Option<AnalystEmbedMode>,
+}
+
+#[cfg(test)]
+impl Drop for AnalystEmbedModeOverrideGuard {
+    fn drop(&mut self) {
+        ANALYST_EMBED_MODE_OVERRIDE_FOR_TESTS.with(|override_mode| {
+            override_mode.set(self.previous);
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_analyst_embed_mode_for_test(mode: AnalystEmbedMode) -> AnalystEmbedModeOverrideGuard {
+    let previous = ANALYST_EMBED_MODE_OVERRIDE_FOR_TESTS.with(|override_mode| {
+        let previous = override_mode.get();
+        override_mode.set(Some(mode));
+        previous
+    });
+    AnalystEmbedModeOverrideGuard { previous }
+}
 
 pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
@@ -435,6 +535,14 @@ impl<M> EmbedModelCell<M> {
     }
 
     #[cfg(test)]
+    fn is_loading_for_test(&self) -> bool {
+        *self
+            .loading
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(test)]
     fn load_if_idle(&self, load: impl FnOnce() -> Option<M>) -> Option<Arc<Mutex<M>>> {
         if let Some(model) = self.ready() {
             return Some(model);
@@ -500,6 +608,10 @@ fn load_embed_model(
 
 #[cfg(feature = "embed")]
 fn start_embed_model_load_if_needed(embedding_model: EmbeddingModelSelection) -> bool {
+    if !AnalystEmbedMode::current().allows_in_process("start_embed_model_load_if_needed") {
+        return false;
+    }
+
     let Some(permit) = embed_model_cell(embedding_model).begin_load() else {
         return false;
     };
@@ -546,6 +658,10 @@ fn start_embed_model_load_if_needed(embedding_model: EmbeddingModelSelection) ->
 
 #[cfg(feature = "embed")]
 pub fn warm_embed_model() {
+    if !AnalystEmbedMode::current().allows_in_process("warm_embed_model") {
+        return;
+    }
+
     let embedding_model = EmbeddingModelSelection::from_env();
     if !start_embed_model_load_if_needed(embedding_model) {
         tracing::debug!(
@@ -560,6 +676,10 @@ pub fn warm_embed_model() {}
 
 #[cfg(feature = "embed")]
 async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
+    if !AnalystEmbedMode::current().allows_in_process("embed_query") {
+        return None;
+    }
+
     #[cfg(test)]
     if DISABLE_EMBED_QUERY_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
         return None;
@@ -2008,13 +2128,12 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     #[cfg(feature = "embed")]
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     #[cfg(feature = "embed")]
     use std::time::Duration;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
 
     use super::*;
     use crate::query_context_candidates;
@@ -2069,6 +2188,80 @@ mod tests {
         embedding
     }
 
+    #[derive(Clone, Default)]
+    struct TraceCapture {
+        events: Arc<Mutex<Vec<CapturedTraceEvent>>>,
+    }
+
+    impl TraceCapture {
+        fn subscriber(&self) -> CaptureSubscriber {
+            CaptureSubscriber {
+                events: Arc::clone(&self.events),
+            }
+        }
+
+        fn contains_warning(&self, needle: &str) -> bool {
+            self.events
+                .lock()
+                .expect("trace events lock")
+                .iter()
+                .any(|event| event.level == "WARN" && event.fields.contains(needle))
+        }
+    }
+
+    struct CapturedTraceEvent {
+        level: &'static str,
+        fields: String,
+    }
+
+    struct CaptureSubscriber {
+        events: Arc<Mutex<Vec<CapturedTraceEvent>>>,
+    }
+
+    impl Subscriber for CaptureSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = TraceFieldVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("trace events lock")
+                .push(CapturedTraceEvent {
+                    level: event.metadata().level().as_str(),
+                    fields: visitor.fields,
+                });
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[derive(Default)]
+    struct TraceFieldVisitor {
+        fields: String,
+    }
+
+    impl tracing::field::Visit for TraceFieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if !self.fields.is_empty() {
+                self.fields.push(' ');
+            }
+            self.fields.push_str(&format!("{}={value:?}", field.name()));
+        }
+    }
+
     #[cfg(feature = "embed")]
     #[test]
     fn embed_model_cell_selection_uses_single_gemma_cell() {
@@ -2076,6 +2269,57 @@ mod tests {
             embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M),
             &EMBEDDING_GEMMA_EMBED_MODEL
         ));
+    }
+
+    #[cfg(feature = "embed")]
+    #[tokio::test]
+    async fn off_embed_mode_never_starts_in_process_model_load() {
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Off);
+        let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+
+        assert!(!model_cell.is_ready(), "test assumes model has not loaded");
+        assert!(
+            !model_cell.is_loading_for_test(),
+            "test assumes no previous load is running"
+        );
+
+        warm_embed_model();
+
+        assert!(
+            !model_cell.is_ready(),
+            "off mode must not warm the in-process model"
+        );
+        assert!(
+            !model_cell.is_loading_for_test(),
+            "off mode must not mark the model cell as loading"
+        );
+
+        assert!(embed_query("ranking beacon").await.is_none());
+        assert!(
+            !model_cell.is_ready(),
+            "off mode query must not load the in-process model"
+        );
+        assert!(
+            !model_cell.is_loading_for_test(),
+            "off mode query must not start a background load"
+        );
+    }
+
+    #[test]
+    fn unknown_embed_mode_falls_back_to_auto_and_warns() {
+        let captured = TraceCapture::default();
+
+        let mode = tracing::subscriber::with_default(captured.subscriber(), || {
+            AnalystEmbedMode::parse_env_value("mystery-mode")
+        });
+
+        assert_eq!(mode, AnalystEmbedMode::Auto);
+        assert!(
+            captured.contains_warning("unknown analyst embed mode")
+                && captured.contains_warning("mystery-mode")
+                && captured.contains_warning("SPUR_ANALYST_EMBED_MODE"),
+            "unknown mode should emit a warning with the bad value and env var"
+        );
     }
 
     #[cfg(feature = "embed")]
