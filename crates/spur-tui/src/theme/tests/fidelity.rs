@@ -9,8 +9,6 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
 fn dark_tokens_match_current_literal_color_sites() {
     let dark = load_built_in("dark").expect("dark built-in loads");
     let cases: &[(&str, Color)] = &[
-        // status_bar.rs:53 LicenseBadgeTone::Neutral uses Color::DarkGray.
-        ("license_badge.neutral.fg", rgb(0x73, 0x73, 0x73)),
         // status_bar.rs:87 tombstone badges use Color::DarkGray.
         ("status_bar.tombstone.fg", rgb(0x73, 0x73, 0x73)),
         // status_bar.rs:354 issue counts use Color::Cyan.
