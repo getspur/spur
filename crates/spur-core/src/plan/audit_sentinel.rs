@@ -160,6 +160,8 @@ pub enum AuditSentinelKind {
         loop_id: String,
         generation: u32,
         plan_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        autonomy: Option<String>,
         outcome: String,
         tasks_discovered: u32,
         approved: u32,
@@ -506,6 +508,7 @@ mod tests {
             loop_id: "loopA".into(),
             generation: 7,
             plan_id: "P1".into(),
+            autonomy: Some("l2".into()),
             outcome: "partial".into(),
             tasks_discovered: 3,
             approved: 2,
@@ -518,9 +521,38 @@ mod tests {
             ended_at: 1_782_953_600,
         };
         let encoded = encode_comment(&kind);
+        assert!(
+            encoded.contains("\"autonomy\":\"l2\""),
+            "LoopRun comments must stamp the generation autonomy level: {encoded}"
+        );
         let parsed = parse_comment(&encoded).unwrap().unwrap();
         assert_eq!(parsed, kind);
         assert_eq!(parsed.kind_str(), "loop-run");
+    }
+
+    #[test]
+    fn legacy_loop_run_without_autonomy_deserializes() {
+        let legacy_json = r#"{
+            "kind":"loop-run",
+            "loop_id":"loopA",
+            "generation":7,
+            "plan_id":"P1",
+            "outcome":"approved",
+            "tasks_discovered":1,
+            "approved":1,
+            "rejected":0,
+            "failed":0,
+            "cancelled":0,
+            "escalations":0,
+            "cost_micros":42,
+            "started_at":100,
+            "ended_at":100
+        }"#;
+        let parsed: AuditSentinelKind = serde_json::from_str(legacy_json).expect("parse legacy");
+        assert!(matches!(
+            parsed,
+            AuditSentinelKind::LoopRun { autonomy: None, .. }
+        ));
     }
 
     #[test]
@@ -563,6 +595,7 @@ mod tests {
                 loop_id: "loopA".into(),
                 generation: 1,
                 plan_id: "P1".into(),
+                autonomy: Some("l1".into()),
                 outcome: "approved".into(),
                 tasks_discovered: 1,
                 approved: 1,
@@ -805,6 +838,7 @@ mod tests {
                 loop_id: "loopA".into(),
                 generation: 1,
                 plan_id: "P1".into(),
+                autonomy: Some("l1".into()),
                 outcome: "approved".into(),
                 tasks_discovered: 1,
                 approved: 1,

@@ -592,6 +592,7 @@ mod tests {
             "brain-delegation-kiro",
             "brain-delegation-codex",
             "brain-delegation-gemini",
+            "loop-generation-authoring",
             "test-driven-development",
             "systematic-debugging",
             "verification-before-completion",
