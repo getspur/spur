@@ -204,6 +204,7 @@ async fn seed_loop_run(
                 loop_id: loop_id.to_string(),
                 generation,
                 plan_id: format!("plan-{generation}"),
+                autonomy: Some("l1".to_string()),
                 outcome: outcome.to_string(),
                 tasks_discovered: 1,
                 approved: u32::from(outcome == "approved"),

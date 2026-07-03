@@ -262,14 +262,28 @@ pub enum AutonomyLevel {
     L3,
 }
 
+impl AutonomyLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutonomyLevel::L1 => "l1",
+            AutonomyLevel::L2 => "l2",
+            AutonomyLevel::L3 => "l3",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "l1" => Some(AutonomyLevel::L1),
+            "l2" => Some(AutonomyLevel::L2),
+            "l3" => Some(AutonomyLevel::L3),
+            _ => None,
+        }
+    }
+}
+
 /// Parses `spur:autonomy:l1|l2|l3`. Unknown suffixes return None.
 pub fn parse_autonomy(label: &str) -> Option<AutonomyLevel> {
-    match label.strip_prefix(AUTONOMY_PREFIX)? {
-        "l1" => Some(AutonomyLevel::L1),
-        "l2" => Some(AutonomyLevel::L2),
-        "l3" => Some(AutonomyLevel::L3),
-        _ => None,
-    }
+    AutonomyLevel::parse(label.strip_prefix(AUTONOMY_PREFIX)?)
 }
 
 /// Returns `Some(task_id)` if the given label is a `spur:plan-task-id:<id>` label.
