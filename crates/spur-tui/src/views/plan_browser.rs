@@ -937,10 +937,8 @@ impl PlanBrowserView {
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
                 notebook_ready: false,
-                session_lifecycle_caps: None,
                 issue_count: self.plans.len(),
                 alert_summary: None,
-                license_badge: None,
                 flag_summary: None,
                 view_hint_override: Some(HintOverride {
                     full: STATUS_HINT,
@@ -1377,7 +1375,6 @@ mod tests {
             plan_projection: projection,
             synopsis,
             brain_status: &BrainStatus::Idle,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,

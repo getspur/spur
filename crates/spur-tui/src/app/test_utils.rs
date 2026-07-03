@@ -41,12 +41,6 @@ impl App {
         &self.license_state
     }
 
-    /// Test-only accessor: borrow the current licensing badge projection.
-    #[doc(hidden)]
-    pub fn license_badge_for_test(&self) -> Option<&LicenseBadge> {
-        self.license_badge.as_ref()
-    }
-
     pub(crate) fn feature_enabled_for_test(&self, key: spur_license::FeatureKey) -> bool {
         spur_license::require_feature(&self.feature_gate, key).is_ok()
     }

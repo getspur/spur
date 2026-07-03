@@ -95,7 +95,6 @@ tokens:
   tool.family.task: accent
   tool.family.mcp: fg_subtle
   tool.family.unknown: warning
-  license_badge.neutral.fg: fg_subtle
   diff.add.fg: diff_add
   diff.del.fg: diff_del
   diff.context.fg: fg_muted
@@ -111,9 +110,6 @@ tokens:
   status_bar.usage.fg: info
   status_bar.analytics.fg: info
   status_bar.effort.fg: accent_alt
-  license_badge.success.text_fg: success
-  license_badge.warning.text_fg: warning
-  license_badge.danger.text_fg: danger
   react_trace.timestamp.fg: fg_subtle
   react_trace.think.fg: fg_subtle
   react_trace.message.title.fg: accent
