@@ -7,6 +7,7 @@ pub mod loop_browser;
 pub mod mermaid_viewer;
 pub mod plan_browser;
 pub mod plan_inspector;
+mod plan_provenance;
 pub mod session_detail;
 pub mod session_picker;
 
