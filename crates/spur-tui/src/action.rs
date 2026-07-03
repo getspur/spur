@@ -192,6 +192,24 @@ pub enum Action {
     RefreshIssues,
     /// Refresh persisted plan summaries from the PM backend.
     RefreshPlans,
+    /// Refresh persisted loop summaries from the PM backend.
+    RefreshLoops,
+    /// Inspect a persisted loop detail snapshot.
+    InspectLoop {
+        loop_id: String,
+    },
+    /// Pause a governed loop.
+    PauseLoop {
+        loop_id: String,
+    },
+    /// Resume a governed loop.
+    ResumeLoop {
+        loop_id: String,
+    },
+    /// Retire a governed loop.
+    KillLoop {
+        loop_id: String,
+    },
     /// Claim a persisted plan for the current brain session without starting execution.
     ClaimPlan {
         plan_id: String,
@@ -289,6 +307,7 @@ pub enum ViewId {
     Dashboard,
     IssueBrowser,
     PlanBrowser,
+    LoopBrowser,
     SessionDetail(SessionId),
     SessionPicker,
     PlanInspector(SessionId),
