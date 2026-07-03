@@ -55,6 +55,7 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "recover_orphaned_dispatch",
     "pause_loop",
     "resume_loop",
+    "kill_loop",
     "review_task",
     "submit_plan_mutation",
     "report_signal",
@@ -134,6 +135,7 @@ fn plan_module_advertises_exact_plan_review_reconciler_tools() {
         "recover_orphaned_dispatch",
         "pause_loop",
         "resume_loop",
+        "kill_loop",
         "review_task",
         "submit_plan_mutation",
     ]
