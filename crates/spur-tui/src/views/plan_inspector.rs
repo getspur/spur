@@ -1677,7 +1677,6 @@ mod tests {
             plan_projection: projection,
             synopsis,
             brain_status: &BrainStatus::Idle,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,

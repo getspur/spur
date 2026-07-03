@@ -30,10 +30,8 @@ fn render_status_for(view: &ViewId, width: u16) -> String {
             stream_in_flight: false,
             esc_consumed_by_composer: false,
             notebook_ready: false,
-            session_lifecycle_caps: None,
             issue_count: 0,
             alert_summary: None,
-            license_badge: None,
             flag_summary: None,
             view_hint_override: None,
         };
