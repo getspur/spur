@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SPUR Loop Browser — interactive UI/UX mockup</title>
+</head>
+<body style="background:#07090c;margin:0;padding:24px;">
+<!-- Mockup for docs/superpowers/plans/2026-07-03-loop-observability-tui.md.
+     Self-contained: no external assets, no framework. The #spur-loopb block
+     below is what the notebook cell displays. -->
+<div id="spur-loopb" tabindex="0">
+  <div class="lb-focus-chip" id="lb-chip">click here, then use the keyboard: j/k Enter p x S f r</div>
+  <div class="lb-frame">
+    <div class="lb-header">
+      <span class="lb-title"> SPUR ▸ Loops </span>
+      <span class="lb-mode">sort:<b id="lb-sort">next-run</b>  filter:<b id="lb-filter">all</b></span>
+      <span class="lb-brain" id="lb-brain">brain: connected</span>
+    </div>
+    <div class="lb-panel lb-list" data-title=" Loops ">
+      <table class="lb-table">
+        <thead><tr>
+          <th>LOOP</th><th>TITLE</th><th>AUT</th><th>STATE</th>
+          <th>CAD→EFF</th><th>NEXT RUN</th><th>LAST RUN</th><th>FAILS</th>
+        </tr></thead>
+        <tbody id="lb-rows"></tbody>
+      </table>
+    </div>
+    <div class="lb-panel lb-detail" data-title=" Detail " id="lb-detail"></div>
+    <div class="lb-status" id="lb-status"> [j/k]nav [Enter]inspect [o]issue [p]pause/resume [x]kill [S]sort [f]filter [r]refresh [Esc]back</div>
+  </div>
+  <div class="lb-modal-backdrop" id="lb-modal" style="display:none">
+    <div class="lb-modal">
+      <div class="lb-modal-title" id="lb-modal-title"></div>
+      <div class="lb-modal-body" id="lb-modal-body"></div>
+      <div class="lb-modal-keys"><span class="lb-key">Enter</span> confirm<span class="lb-gap"></span><span class="lb-key">Esc</span> cancel</div>
+    </div>
+  </div>
+  <div class="lb-toast" id="lb-toast" style="display:none"></div>
+</div>
+
+<style>
+#spur-loopb{font-family:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;font-size:13px;
+  background:#0d1117;color:#c9d1d9;max-width:980px;margin:0 auto;position:relative;
+  border-radius:6px;padding:10px;outline:none;line-height:1.45}
+#spur-loopb:focus{box-shadow:0 0 0 2px #56d4dd55}
+#spur-loopb .lb-focus-chip{font-size:11px;color:#8b949e;text-align:center;margin-bottom:6px}
+#spur-loopb.lb-focused .lb-focus-chip{color:#56d4dd}
+#spur-loopb .lb-frame{display:flex;flex-direction:column;gap:6px}
+#spur-loopb .lb-header{display:flex;justify-content:space-between;padding:2px 6px;color:#56d4dd}
+#spur-loopb .lb-header .lb-title{font-weight:700}
+#spur-loopb .lb-header .lb-mode{color:#8b949e}
+#spur-loopb .lb-header .lb-mode b{color:#d2a8ff;font-weight:600}
+#spur-loopb .lb-header .lb-brain{color:#3fb950}
+#spur-loopb .lb-panel{border:1px solid #30363d;border-radius:4px;position:relative;padding:8px}
+#spur-loopb .lb-panel::before{content:attr(data-title);position:absolute;top:-9px;left:10px;
+  background:#0d1117;color:#8b949e;padding:0 4px;font-size:11px}
+#spur-loopb .lb-table{width:100%;border-collapse:collapse}
+#spur-loopb .lb-table th{color:#56d4dd;text-align:left;font-weight:600;padding:1px 8px;font-size:12px}
+#spur-loopb .lb-table td{padding:1px 8px;white-space:nowrap;cursor:pointer}
+#spur-loopb tr.lb-sel td{background:#1f2937}
+#spur-loopb tr.lb-sel td:first-child{box-shadow:inset 2px 0 0 #56d4dd}
+#spur-loopb .lb-id{color:#d2a8ff}
+#spur-loopb .lb-aut{color:#e3b341}
+#spur-loopb .st-active{color:#3fb950}
+#spur-loopb .st-backoff{color:#e3b341}
+#spur-loopb .st-paused,#spur-loopb .st-auto-paused{color:#d29922}
+#spur-loopb .st-retired{color:#8b949e}
+#spur-loopb .oc-approved{color:#3fb950}
+#spur-loopb .oc-partial{color:#e3b341}
+#spur-loopb .oc-failed{color:#f85149}
+#spur-loopb .oc-budget_exhausted,#spur-loopb .oc-skipped_overlap{color:#8b949e}
+#spur-loopb .lb-dim{color:#8b949e}
+#spur-loopb .lb-due{color:#f85149;font-weight:700}
+#spur-loopb .lb-detail{min-height:150px;font-size:12.5px}
+#spur-loopb .lb-detail h4{margin:0 0 4px;color:#56d4dd;font-size:12.5px;font-weight:600}
+#spur-loopb .lb-detail .lb-cols{display:flex;gap:24px;flex-wrap:wrap}
+#spur-loopb .lb-detail .lb-col{min-width:260px;flex:1}
+#spur-loopb .lb-runrow{display:flex;gap:10px}
+#spur-loopb .lb-ratchet{color:#d2a8ff}
+#spur-loopb .lb-status{color:#8b949e;padding:0 6px;font-size:12px}
+#spur-loopb .lb-hint{color:#e3b341}
+#spur-loopb .lb-modal-backdrop{position:absolute;inset:0;background:#0008;display:flex;
+  align-items:center;justify-content:center;border-radius:6px;z-index:5}
+#spur-loopb .lb-modal{background:#161b22;border:1px solid #56d4dd;border-radius:4px;
+  min-width:380px;padding:12px 14px}
+#spur-loopb .lb-modal-title{color:#56d4dd;font-weight:700;margin-bottom:6px}
+#spur-loopb .lb-modal-body{margin-bottom:10px}
+#spur-loopb .lb-modal-keys{color:#8b949e;font-size:12px}
+#spur-loopb .lb-key{color:#e3b341;font-weight:700}
+#spur-loopb .lb-gap{display:inline-block;width:18px}
+#spur-loopb .lb-toast{position:absolute;top:14px;right:16px;background:#161b22;
+  border:1px solid #3fb950;color:#c9d1d9;border-radius:4px;padding:6px 10px;font-size:12px;z-index:6}
+</style>
+
+<script>
+(function () {
+  var root = document.getElementById("spur-loopb");
+  if (!root || root.dataset.lbInit) return;
+  root.dataset.lbInit = "1";
+
+  // ── sample data (first row mirrors the real ci-sweeper pilot loop) ──
+  var loops = [
+    { id: "e86b57b0", title: "ci-sweeper — full-suite triage", aut: "L1", state: "active",
+      cad: "1h", eff: "1h", next: 2520, gen: 1, outcome: "approved", cost: "$0.78", fails: 0,
+      streak: 1, today: "1/24",
+      goal: "Keep the workspace suite green: run spur-acp + spur-core + spur-tui, triage failures, file follow-ups.",
+      gov: "budget $2.00/gen · 24 gen/day · ≤3 tasks · backoff k=2 ×2 pause@4",
+      runs: [[1, "approved", "$0.78", "l1"]] },
+    { id: "9f21ac44", title: "docs-drift sentinel", aut: "L2", state: "active", backoff: true,
+      cad: "6h", eff: "12h", next: 10800, gen: 12, outcome: "failed", cost: "$1.20", fails: 2,
+      streak: 0, today: "2/8",
+      goal: "Detect drift between docs/superpowers plans and code anchors; propose doc fixes.",
+      gov: "budget $3.00/gen · 8 gen/day · ≤2 tasks · backoff k=2 ×2 pause@4",
+      runs: [[12, "failed", "$1.20", "l2"], [11, "failed", "$0.95", "l2"], [10, "approved", "$1.02", "l2"]] },
+    { id: "5c77d1e2", title: "nightly clippy sweep", aut: "L3", state: "auto-paused",
+      cad: "24h", eff: "24h", next: null, gen: 7, outcome: "budget_exhausted", cost: "—", fails: 4,
+      streak: 0, today: "0/2",
+      goal: "clippy --workspace -D warnings nightly; open fix plans for regressions.",
+      gov: "budget $5.00/gen · 2 gen/day · ≤4 tasks · backoff k=2 ×2 pause@4",
+      runs: [[7, "budget_exhausted", "—", "l3"], [6, "failed", "$1.80", "l3"], [5, "failed", "$1.75", "l3"]] },
+    { id: "07b3aa90", title: "flaky-hunter", aut: "L1", state: "retired",
+      cad: "12h", eff: "12h", next: null, gen: 21, outcome: "approved", cost: "$0.44", fails: 0,
+      streak: 3, today: "—",
+      goal: "Re-run suites with shuffled seeds to catch flaky tests; retired after zero flakes for 2 weeks.",
+      gov: "budget $1.00/gen · 4 gen/day · ≤1 task · backoff k=2 ×2 pause@4",
+      runs: [[21, "approved", "$0.44", "l1"], [20, "approved", "$0.41", "l1"], [19, "approved", "$0.47", "l1"]] }
+  ];
+
+  var FILTERS = ["all", "active", "paused", "retired"];
+  var SORTS = ["next-run", "title", "state", "last-outcome"];
+  var sel = 0, filterIdx = 0, sortIdx = 0, hint = null, modal = null, inspecting = false;
+
+  function fmtNext(l) {
+    if (l.state === "retired") return "—";
+    if (l.state.indexOf("paused") >= 0) return "paused";
+    if (l.next === null) return "—";
+    if (l.next <= 0) return "due";
+    var m = Math.floor(l.next / 60);
+    return m >= 60 ? "in " + Math.floor(m / 60) + "h" + (m % 60 ? (m % 60) + "m" : "") : "in " + m + "m";
+  }
+  function visible() {
+    var f = FILTERS[filterIdx];
+    var v = loops.filter(function (l) {
+      if (f === "all") return true;
+      if (f === "active") return l.state === "active";
+      if (f === "paused") return l.state.indexOf("paused") >= 0;
+      return l.state === "retired";
+    });
+    var s = SORTS[sortIdx];
+    v.sort(function (a, b) {
+      if (s === "title") return a.title < b.title ? -1 : 1;
+      if (s === "state") return a.state < b.state ? -1 : 1;
+      if (s === "last-outcome") return a.outcome < b.outcome ? -1 : 1;
+      var an = a.next === null ? 1e12 : a.next, bn = b.next === null ? 1e12 : b.next;
+      return an - bn;
+    });
+    return v;
+  }
+  function stateSpan(l) {
+    var cls = "st-" + l.state.replace(" ", "-");
+    var txt = l.state + (l.backoff ? " ⏳×2" : "");
+    return '<span class="' + cls + '">' + txt + "</span>";
+  }
+  function render() {
+    var v = visible();
+    if (sel >= v.length) sel = Math.max(0, v.length - 1);
+    var rows = v.map(function (l, i) {
+      var next = fmtNext(l);
+      return '<tr class="' + (i === sel ? "lb-sel" : "") + '" data-i="' + i + '">' +
+        '<td class="lb-id">' + l.id + "</td><td>" + l.title + "</td>" +
+        '<td class="lb-aut">' + l.aut + "</td><td>" + stateSpan(l) + "</td>" +
+        "<td>" + l.cad + "→" + l.eff + "</td>" +
+        '<td class="' + (next === "due" ? "lb-due" : "") + '">' + next + "</td>" +
+        '<td>gen ' + l.gen + ' <span class="oc-' + l.outcome + '">' + l.outcome + "</span> " +
+        '<span class="lb-dim">' + l.cost + "</span></td>" +
+        "<td>" + (l.fails ? '<span class="oc-failed">' + l.fails + "</span>" : "0") + "</td></tr>";
+    }).join("");
+    document.getElementById("lb-rows").innerHTML =
+      rows || '<tr><td colspan="8" class="lb-dim">no loops match filter</td></tr>';
+    document.getElementById("lb-sort").textContent = SORTS[sortIdx];
+    document.getElementById("lb-filter").textContent = FILTERS[filterIdx];
+
+    var d = document.getElementById("lb-detail"), l = v[sel];
+    if (!l) { d.innerHTML = '<span class="lb-dim">nothing selected</span>'; }
+    else if (!inspecting) {
+      d.innerHTML = "<h4>" + l.id + " · " + l.title + "</h4>" +
+        '<div class="lb-dim">' + l.goal + "</div>" +
+        "<div>governors: " + l.gov + "</div>" +
+        '<div>ratchet: <span class="lb-ratchet">' + l.streak + "/3 approved @ " + l.aut +
+        "</span> · today " + l.today + ' · <span class="lb-dim">Enter for run history</span></div>';
+    } else {
+      var runs = l.runs.map(function (r) {
+        return '<div class="lb-runrow"><span>gen ' + r[0] + '</span><span class="oc-' + r[1] + '">' +
+          r[1] + '</span><span class="lb-dim">' + r[2] + '</span><span class="lb-aut">' + r[3] + "</span></div>";
+      }).join("");
+      d.innerHTML = "<h4>" + l.id + " — recent runs (LoopRun audit records)</h4>" + runs +
+        '<div class="lb-dim">Esc to close · in the real view this arrives via LoopDetailLoaded</div>';
+    }
+    var st = document.getElementById("lb-status");
+    st.innerHTML = hint
+      ? ' <span class="lb-hint">' + hint + "</span>"
+      : " [j/k]nav [Enter]inspect [o]issue [p]pause/resume [x]kill [S]sort [f]filter [r]refresh [Esc]back";
+  }
+  function toast(msg, ms) {
+    var t = document.getElementById("lb-toast");
+    t.textContent = msg; t.style.display = "block";
+    setTimeout(function () { t.style.display = "none"; }, ms || 2600);
+  }
+  function openModal(kind) {
+    var l = visible()[sel]; if (!l) return;
+    if (l.state === "retired") { hint = "Cannot " + kind + ": loop " + l.id + " is retired"; render(); return; }
+    modal = { kind: kind, id: l.id };
+    document.getElementById("lb-modal-title").textContent =
+      kind === "kill" ? "Kill loop " + l.id + "?" :
+      (l.state.indexOf("paused") >= 0 ? "Resume loop " + l.id + "?" : "Pause loop " + l.id + "?");
+    document.getElementById("lb-modal-body").textContent =
+      kind === "kill"
+        ? "Retires the loop: closes the loop issue and writes a terminal LoopRun record. Cannot be re-armed."
+        : (l.state.indexOf("paused") >= 0
+          ? "Removes spur:loop-paused; the scheduler re-arms on the next reconciler tick."
+          : "Adds spur:loop-paused; the scheduler skips this loop until resumed.");
+    document.getElementById("lb-modal").style.display = "flex";
+  }
+  function confirmModal() {
+    var l = loops.filter(function (x) { return x.id === modal.id; })[0];
+    if (modal.kind === "kill") {
+      l.state = "retired"; l.next = null;
+      toast("LoopPaused { loop_id: " + l.id + ", by: retired }");
+    } else if (l.state.indexOf("paused") >= 0) {
+      l.state = "active"; l.next = l.cad === "1h" ? 3600 : 21600;
+      toast("LoopPaused { loop_id: " + l.id + ", by: resumed }");
+    } else {
+      l.state = "paused"; l.next = null;
+      toast("LoopPaused { loop_id: " + l.id + ", by: paused }");
+    }
+    closeModal(); render();
+  }
+  function closeModal() { modal = null; document.getElementById("lb-modal").style.display = "none"; }
+  function simulateRefresh() {
+    var ci = loops[0];
+    if (ci.state === "active") {
+      ci.gen += 1; ci.outcome = "approved"; ci.cost = "$0.81"; ci.next = 3600;
+      ci.streak = Math.min(3, ci.streak + 1); ci.runs.unshift([ci.gen, "approved", "$0.81", "l1"]);
+      hint = "Loop " + ci.id + " gen " + ci.gen + ": [approved] 810000 micros";
+      toast("LoopRunRecorded { loop_id: " + ci.id + ", generation: " + ci.gen + ", outcome: approved }");
+    } else { hint = "LoopsLoaded: " + loops.length + " loops, 0 warnings"; }
+    render();
+  }
+
+  root.addEventListener("focus", function () { root.classList.add("lb-focused"); });
+  root.addEventListener("blur", function () { root.classList.remove("lb-focused"); });
+  root.addEventListener("click", function (e) {
+    root.focus();
+    var tr = e.target.closest ? e.target.closest("tr[data-i]") : null;
+    if (tr) { sel = +tr.dataset.i; inspecting = false; hint = null; render(); }
+  });
+  root.addEventListener("keydown", function (e) {
+    var k = e.key;
+    if (["ArrowDown", "ArrowUp", " ", "Enter", "Escape"].indexOf(k) >= 0) e.preventDefault();
+    if (modal) {
+      if (k === "Enter") confirmModal();
+      if (k === "Escape" || k === "q") closeModal();
+      render(); return;
+    }
+    if (k === "j" || k === "ArrowDown") { sel = Math.min(visible().length - 1, sel + 1); inspecting = false; hint = null; }
+    else if (k === "k" || k === "ArrowUp") { sel = Math.max(0, sel - 1); inspecting = false; hint = null; }
+    else if (k === "g") { sel = 0; } else if (k === "G") { sel = visible().length - 1; }
+    else if (k === "Enter") { inspecting = !inspecting; }
+    else if (k === "S") { sortIdx = (sortIdx + 1) % SORTS.length; }
+    else if (k === "f") { filterIdx = (filterIdx + 1) % FILTERS.length; sel = 0; }
+    else if (k === "r") { simulateRefresh(); return; }
+    else if (k === "p") { openModal("pause"); }
+    else if (k === "x") { openModal("kill"); }
+    else if (k === "o") { hint = "OpenIssueInBacklog { id: bd-36gx5 } — loop state lives on the beads issue"; }
+    else if (k === "Escape") { if (inspecting) inspecting = false; else hint = "NavigateBack (would return to previous view)"; }
+    render();
+  });
+
+  setInterval(function () {
+    var changed = false;
+    loops.forEach(function (l) { if (l.next !== null && l.next > 0 && l.state === "active") { l.next -= 30; changed = true; } });
+    if (changed && !modal) render();
+  }, 30000);
+
+  render();
+})();
+</script>
+</body>
+</html>
