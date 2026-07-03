@@ -86,6 +86,14 @@ impl App {
                 self.navigate_to(ViewId::PlanBrowser);
                 (just_created || session_changed).then_some(Action::RefreshPlans)
             }
+            Action::NavigateTo(ViewId::LoopBrowser) => {
+                let just_created = self.loop_browser.is_none();
+                if just_created {
+                    self.loop_browser = Some(LoopBrowserView::new());
+                }
+                self.navigate_to(ViewId::LoopBrowser);
+                just_created.then_some(Action::RefreshLoops)
+            }
             Action::NavigateTo(ViewId::IssueBrowser) => {
                 let just_created = self.issue_browser.is_none();
                 if just_created {
