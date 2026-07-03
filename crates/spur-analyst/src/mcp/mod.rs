@@ -11,6 +11,8 @@ use thiserror::Error;
 use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 
 pub use doc_navigate::doc_navigate;
+#[cfg(feature = "embed")]
+pub(crate) use knowledge_context::{embed_model_cell, load_embed_model};
 pub use knowledge_context::{knowledge_context_pack, knowledge_context_pack_2, warm_embed_model};
 pub use query::query;
 
