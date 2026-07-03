@@ -1991,6 +1991,44 @@ mod loop_lifecycle_mcp_tests {
     }
 
     #[tokio::test]
+    async fn call_loop_wrappers_delegate_to_governed_handlers() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+
+        server
+            .call_pause_loop(&loop_id)
+            .await
+            .expect("call_pause_loop succeeds");
+        let issue = mock_pm.issue(&issue_id).await;
+        assert!(issue
+            .labels
+            .contains(&crate::plan::labels::LOOP_PAUSED.to_string()));
+
+        server
+            .call_resume_loop(&loop_id)
+            .await
+            .expect("call_resume_loop succeeds");
+        let issue = mock_pm.issue(&issue_id).await;
+        assert!(!issue
+            .labels
+            .contains(&crate::plan::labels::LOOP_PAUSED.to_string()));
+
+        server
+            .call_kill_loop(&loop_id)
+            .await
+            .expect("call_kill_loop succeeds");
+        let issue = mock_pm.issue(&issue_id).await;
+        assert_eq!(issue.status, crate::plan::PmLike::closed_status(mock_pm.as_ref()));
+        let runs = loop_run_audits(mock_pm.as_ref(), &issue_id).await;
+        assert_eq!(
+            runs.len(),
+            1,
+            "call_kill_loop must use the governed kill handler"
+        );
+    }
+
+    #[tokio::test]
     async fn get_loop_status_returns_spec_and_recent_runs() {
         let (server, mock_pm) = new_server_with_mock_pm().await;
         let (loop_id, _) = submit_valid_loop(&server).await;

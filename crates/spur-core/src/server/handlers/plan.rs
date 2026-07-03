@@ -294,6 +294,33 @@ impl McpCallbackServer {
         }
     }
 
+    pub async fn call_pause_loop(&self, loop_id: &str) -> Result<(), String> {
+        let args = serde_json::json!({ "loop_id": loop_id });
+        let resp = self.handle_pause_loop(serde_json::Value::Null, args).await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn call_resume_loop(&self, loop_id: &str) -> Result<(), String> {
+        let args = serde_json::json!({ "loop_id": loop_id });
+        let resp = self.handle_resume_loop(serde_json::Value::Null, args).await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn call_kill_loop(&self, loop_id: &str) -> Result<(), String> {
+        let args = serde_json::json!({ "loop_id": loop_id });
+        let resp = self.handle_kill_loop(serde_json::Value::Null, args).await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
     /// Public bridge for orchestrator/TUI: retry one persisted plan task via
     /// the same `submit_plan_mutation` path exposed to brain tools.
     pub async fn call_retry_plan_task(
