@@ -67,6 +67,8 @@ fn c_tags_query_captures_core_symbol_surface() {
 #define LIMIT 8
 
 const int VERSION = 1;
+int counter = 0;
+volatile int tick = 0;
 
 typedef unsigned long SpurId;
 
@@ -115,6 +117,16 @@ int run(struct Entry *entry) {
             "definition.enum_variant"
         ),
         ["ModeRead", "ModeWrite"]
+    );
+    assert_eq!(
+        definition_names(
+            &language,
+            &tree,
+            source,
+            C_TAGS_QUERY,
+            "definition.constant"
+        ),
+        ["VERSION"]
     );
     assert_eq!(
         definition_names(&language, &tree, source, C_TAGS_QUERY, "definition.field"),
