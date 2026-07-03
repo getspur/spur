@@ -315,6 +315,170 @@ mod plan_truncate_and_restart_tests {
         serde_json::from_str(text).expect("response text is JSON")
     }
 
+    fn parse_audit_comments(
+        comments: Vec<spur_pm::Comment>,
+    ) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
+        comments
+            .into_iter()
+            .filter_map(|comment| {
+                crate::plan::audit_sentinel::parse_comment(&comment.body)
+                    .map(|parsed| parsed.expect("audit comment parses"))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn submit_plan_persist_characterizes_epic_labels_audits_and_cache() {
+        let dir = init_repo().await;
+        let main_oid = run_git(dir.path(), &["rev-parse", "--verify", "main"]).await;
+        let (server, _channel, mock_pm) = new_server_with_mock_pm(dir.path()).await;
+
+        let response = server
+            .__test_call_submit_plan(json!({
+                "epic_title": "Persist Characterization",
+                "epic_body": "persisted plan body",
+                "base": { "kind": "branch", "name": "main" },
+                "tasks": [
+                    {
+                        "task_id": "A",
+                        "agent": "codex",
+                        "task": "Implement A",
+                        "context_files": ["a.rs"]
+                    },
+                    {
+                        "task_id": "B",
+                        "agent": "codex",
+                        "task": "Implement B",
+                        "depends_on": ["A"],
+                        "issue_id": "bd-source",
+                        "context_files": ["b.rs"]
+                    }
+                ]
+            }))
+            .await;
+        assert!(
+            response.get("error").is_none(),
+            "submit_plan should succeed: {response}"
+        );
+
+        let cached_plan = {
+            let active = server.active_plans.lock().await;
+            assert_eq!(active.len(), 1, "submit_plan should cache one plan");
+            active.values().next().cloned().expect("cached plan")
+        };
+        let cached = cached_plan.state.lock().await;
+        let plan_id = cached.plan_id.clone();
+        let epic_id = cached.epic_id.clone().expect("persisted epic id");
+        assert_eq!(cached.brain_session_id.to_string(), "brain");
+        assert_eq!(cached.base_snapshot_oid.as_deref(), Some(main_oid.as_str()));
+        assert!(
+            cached
+                .base_snapshot_branch
+                .as_deref()
+                .is_some_and(|branch| branch.starts_with("spur/brain-snapshot-")),
+            "submit_plan should cache a resolved snapshot branch: {:?}",
+            cached.base_snapshot_branch
+        );
+        assert_eq!(cached.tasks.len(), 2);
+        assert_eq!(cached.tasks[0].spec.issue_id.as_deref(), Some("bd-mock-2"));
+        assert_eq!(cached.tasks[1].spec.issue_id.as_deref(), Some("bd-source"));
+        drop(cached);
+
+        let epic = mock_pm.issue(&epic_id).await;
+        assert_eq!(epic.title, "Persist Characterization");
+        assert_eq!(epic.body, "persisted plan body");
+        assert_eq!(epic.issue_type.as_deref(), Some("epic"));
+        assert!(epic.labels.contains(&crate::plan::labels::plan_id(&plan_id)));
+        assert!(epic
+            .labels
+            .contains(&crate::plan::labels::plan_owner("brain")));
+        assert!(epic
+            .labels
+            .contains(&crate::plan::labels::PLAN_COMPLETE.to_string()));
+        assert!(!epic
+            .labels
+            .contains(&crate::plan::labels::PLAN_PENDING.to_string()));
+
+        let issues = mock_pm.issues().await;
+        let child_a = issues
+            .iter()
+            .find(|issue| {
+                issue
+                    .labels
+                    .contains(&crate::plan::labels::plan_task_id("A"))
+            })
+            .expect("task A issue");
+        let child_b = issues
+            .iter()
+            .find(|issue| {
+                issue
+                    .labels
+                    .contains(&crate::plan::labels::plan_task_id("B"))
+            })
+            .expect("task B issue");
+        assert!(child_a.blocked_by.contains(&epic_id));
+        assert!(child_b.blocked_by.contains(&epic_id));
+        assert!(child_b.blocked_by.contains(&child_a.id));
+        assert!(child_b
+            .labels
+            .contains(&crate::plan::labels::source_issue("bd-source")));
+
+        let child_a_audits = parse_audit_comments(mock_pm.comments(&child_a.id).await);
+        assert!(child_a_audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
+                task_id,
+                context_files,
+                agent: Some(agent),
+                ..
+            } if task_id == "A" && agent == "codex" && context_files == &vec!["a.rs".to_string()]
+        )));
+        let child_b_audits = parse_audit_comments(mock_pm.comments(&child_b.id).await);
+        assert!(child_b_audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
+                task_id,
+                context_files,
+                agent: Some(agent),
+                ..
+            } if task_id == "B" && agent == "codex" && context_files == &vec!["b.rs".to_string()]
+        )));
+
+        let epic_audits = parse_audit_comments(mock_pm.comments(&epic_id).await);
+        assert!(epic_audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
+                plan_id: audit_plan_id,
+                owner,
+                reason,
+                ..
+            } if audit_plan_id == &plan_id && owner == "brain" && reason == "submit_plan"
+        )));
+        assert!(epic_audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanSubmit {
+                plan_id: audit_plan_id,
+                epic_issue_id,
+                task_ids,
+                base_snapshot_branch,
+                base_snapshot_oid,
+                execution_mode: Some(execution_mode),
+                brain_session_id: Some(brain_session_id),
+                explicit_base: Some(crate::BaseTarget::Branch { name }),
+            } if audit_plan_id == &plan_id
+                && epic_issue_id == &epic_id
+                && task_ids.contains(&child_a.id)
+                && task_ids.contains(&child_b.id)
+                && base_snapshot_branch
+                    .as_deref()
+                    .is_some_and(|branch| branch.starts_with("spur/brain-snapshot-"))
+                && base_snapshot_oid.as_deref() == Some(main_oid.as_str())
+                && execution_mode == "submit_plan"
+                && brain_session_id == "brain"
+                && name == "main"
+        )));
+    }
+
     #[tokio::test]
     pub(crate) async fn handle_plan_truncate_and_restart_happy_path() {
         let dir = init_repo().await;
@@ -1472,6 +1636,12 @@ mod loop_lifecycle_mcp_tests {
         })
     }
 
+    fn valid_loop_spec_with_autonomy(level: &str) -> serde_json::Value {
+        let mut spec = valid_loop_spec();
+        spec["autonomy"] = json!(level);
+        spec
+    }
+
     fn response_text_json(response: &serde_json::Value) -> serde_json::Value {
         let text = response["result"]["content"][0]["text"]
             .as_str()
@@ -1497,6 +1667,65 @@ mod loop_lifecycle_mcp_tests {
             .unwrap_or_else(|| panic!("missing loop issue for {loop_id}; issues={issues:?}"))
     }
 
+    async fn loop_run_audits(
+        mock_pm: &crate::plan::test_util::MockPm,
+        issue_id: &str,
+    ) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
+        mock_pm
+            .comments(issue_id)
+            .await
+            .into_iter()
+            .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(&comment.body))
+            .filter_map(Result::ok)
+            .filter(|audit| matches!(audit, crate::plan::audit_sentinel::AuditSentinelKind::LoopRun { .. }))
+            .collect()
+    }
+
+    async fn seed_loop_run(
+        mock_pm: &crate::plan::test_util::MockPm,
+        issue_id: &str,
+        loop_id: &str,
+        generation: u32,
+        outcome: &str,
+        autonomy: Option<&str>,
+    ) {
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            super::pro_feature_gate().as_ref(),
+        )
+        .expect("pro gate");
+        let mut record = json!({
+            "kind": "loop-run",
+            "loop_id": loop_id,
+            "generation": generation,
+            "plan_id": format!("plan-{generation}"),
+            "outcome": outcome,
+            "tasks_discovered": 1,
+            "approved": u32::from(outcome == "approved"),
+            "rejected": 0,
+            "failed": u32::from(outcome == "failed"),
+            "cancelled": 0,
+            "escalations": 0,
+            "cost_micros": 100,
+            "started_at": i64::from(generation),
+            "ended_at": i64::from(generation),
+        });
+        if let Some(level) = autonomy {
+            record["autonomy"] = json!(level);
+        }
+        let comment = format!(
+            "{}\n{}",
+            crate::plan::audit_sentinel::SENTINEL_PREFIX,
+            serde_json::to_string(&record).expect("loop-run JSON serializes")
+        );
+        mock_pm
+            .advanced()
+            .expect("mock PM supports comments")
+            .add_comment(issue_id, &comment)
+            .await
+            .expect("seed loop-run");
+    }
+
     async fn submit_valid_loop(
         server: &McpCallbackServer,
     ) -> (String, serde_json::Value) {
@@ -1508,6 +1737,33 @@ mod loop_lifecycle_mcp_tests {
             "submit_loop should succeed: {response}"
         );
         (response_loop_id(&response), response)
+    }
+
+    async fn submit_valid_loop_with_spec(
+        server: &McpCallbackServer,
+        spec: serde_json::Value,
+    ) -> (String, serde_json::Value) {
+        let response = server
+            .__test_call_tool("submit_loop", json!({ "spec": spec }))
+            .await;
+        assert!(
+            response.get("error").is_none(),
+            "submit_loop should succeed: {response}"
+        );
+        (response_loop_id(&response), response)
+    }
+
+    async fn call_set_loop_autonomy(
+        server: &McpCallbackServer,
+        loop_id: &str,
+        level: &str,
+    ) -> serde_json::Value {
+        server
+            .__test_call_tool(
+                "set_loop_autonomy",
+                json!({ "loop_id": loop_id, "level": level }),
+            )
+            .await
     }
 
     #[tokio::test]
@@ -1538,6 +1794,85 @@ mod loop_lifecycle_mcp_tests {
                 .expect("loop sentinel parses")
                 .loop_id,
             loop_id
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_loop_closes_issue_and_writes_retired_record() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+
+        let response = server
+            .__test_call_tool("kill_loop", json!({ "loop_id": loop_id }))
+            .await;
+
+        assert!(response.get("error").is_none(), "kill_loop failed: {response}");
+        let output = response_text_json(&response);
+        assert_eq!(output["loop_id"], loop_id);
+        assert_eq!(output["issue_id"], issue_id);
+        assert_eq!(output["retired"], true);
+        let issue = mock_pm.issue(&issue_id).await;
+        assert_eq!(issue.status, crate::plan::PmLike::closed_status(mock_pm.as_ref()));
+        assert!(
+            issue.labels
+                .iter()
+                .all(|label| crate::plan::labels::parse_loop_next_run(label).is_none()),
+            "kill_loop must remove next-run labels: {:?}",
+            issue.labels
+        );
+        let runs = loop_run_audits(mock_pm.as_ref(), &issue_id).await;
+        assert_eq!(runs.len(), 1, "kill_loop must write exactly one run record");
+        assert!(matches!(
+            &runs[0],
+            crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+                loop_id: record_loop_id,
+                outcome,
+                tasks_discovered: 0,
+                approved: 0,
+                rejected: 0,
+                failed: 0,
+                cancelled: 0,
+                cost_micros: 0,
+                ..
+            } if record_loop_id == &loop_id && outcome == "retired"
+        ));
+    }
+
+    #[tokio::test]
+    async fn kill_loop_is_idempotent_on_closed_loop() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+
+        let first = server
+            .__test_call_tool("kill_loop", json!({ "loop_id": loop_id }))
+            .await;
+        assert!(first.get("error").is_none(), "first kill_loop failed: {first}");
+        let first_runs = loop_run_audits(mock_pm.as_ref(), &issue_id).await;
+        assert_eq!(first_runs.len(), 1);
+
+        let second = server
+            .__test_call_tool("kill_loop", json!({ "loop_id": loop_id }))
+            .await;
+
+        assert!(
+            second.get("error").is_none(),
+            "second kill_loop should be idempotent: {second}"
+        );
+        let output = response_text_json(&second);
+        assert_eq!(output["loop_id"], loop_id);
+        assert_eq!(output["issue_id"], issue_id);
+        assert_eq!(output["retired"], true);
+        assert_eq!(
+            mock_pm.issue(&issue_id).await.status,
+            crate::plan::PmLike::closed_status(mock_pm.as_ref())
+        );
+        let second_runs = loop_run_audits(mock_pm.as_ref(), &issue_id).await;
+        assert_eq!(
+            second_runs.len(),
+            1,
+            "second kill_loop must not duplicate retired run records"
         );
     }
 
@@ -1624,6 +1959,7 @@ mod loop_lifecycle_mcp_tests {
                         loop_id: loop_id.clone(),
                         generation,
                         plan_id: format!("plan-{generation}"),
+                        autonomy: Some("l1".to_string()),
                         outcome: outcome.to_string(),
                         tasks_discovered: generation,
                         approved: u32::from(outcome == "approved"),
@@ -1660,5 +1996,160 @@ mod loop_lifecycle_mcp_tests {
         assert_eq!(status["consecutive_failures"], 2);
         assert_eq!(status["effective_interval_secs"], 120);
         assert_eq!(status["paused"], false);
+    }
+
+    #[tokio::test]
+    async fn set_loop_autonomy_blocks_promotion_below_threshold_and_names_shortfall() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+        seed_loop_run(mock_pm.as_ref(), &issue_id, &loop_id, 1, "approved", Some("l1")).await;
+        seed_loop_run(mock_pm.as_ref(), &issue_id, &loop_id, 2, "approved", Some("l1")).await;
+
+        let response = call_set_loop_autonomy(&server, &loop_id, "l2").await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected ratchet error response, got {response}"));
+        assert!(
+            message.contains("requires 3") && message.contains("short by 1"),
+            "promotion error must name threshold and shortfall, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_loop_autonomy_allows_promotion_at_exact_threshold() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+        for generation in 1..=3 {
+            seed_loop_run(
+                mock_pm.as_ref(),
+                &issue_id,
+                &loop_id,
+                generation,
+                "approved",
+                Some("l1"),
+            )
+            .await;
+        }
+
+        let response = call_set_loop_autonomy(&server, &loop_id, "l2").await;
+
+        assert!(
+            response.get("error").is_none(),
+            "promotion at threshold should succeed: {response}"
+        );
+        let output = response_text_json(&response);
+        assert_eq!(output["loop_id"], loop_id);
+        assert_eq!(output["previous_level"], "l1");
+        assert_eq!(output["level"], "l2");
+        assert_eq!(output["stable_generations"], 3);
+    }
+
+    #[tokio::test]
+    async fn set_loop_autonomy_allows_demotion_without_ratchet() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) =
+            submit_valid_loop_with_spec(&server, valid_loop_spec_with_autonomy("l2")).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+
+        let response = call_set_loop_autonomy(&server, &loop_id, "l1").await;
+
+        assert!(
+            response.get("error").is_none(),
+            "demotion should not require stable generations: {response}"
+        );
+        let issue = mock_pm.issue(&issue_id).await;
+        assert_eq!(
+            crate::plan::loops::spec::LoopSpec::parse(&issue.body)
+                .expect("loop spec parses")
+                .autonomy,
+            crate::plan::labels::AutonomyLevel::L1
+        );
+    }
+
+    #[tokio::test]
+    async fn set_loop_autonomy_rejects_direct_l1_to_l3_promotion() {
+        let (server, _mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+
+        let response = call_set_loop_autonomy(&server, &loop_id, "l3").await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected direct-promotion error response, got {response}"));
+        assert!(
+            message.contains("one level"),
+            "direct promotion error must explain one-level ratchet, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_loop_autonomy_updates_body_and_swaps_label_together() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+        for generation in 1..=3 {
+            seed_loop_run(
+                mock_pm.as_ref(),
+                &issue_id,
+                &loop_id,
+                generation,
+                "approved",
+                Some("l1"),
+            )
+            .await;
+        }
+
+        let response = call_set_loop_autonomy(&server, &loop_id, "l2").await;
+
+        assert!(
+            response.get("error").is_none(),
+            "set_loop_autonomy should succeed: {response}"
+        );
+        let issue = mock_pm.issue(&issue_id).await;
+        assert_eq!(
+            crate::plan::loops::spec::LoopSpec::parse(&issue.body)
+                .expect("loop spec parses")
+                .autonomy,
+            crate::plan::labels::AutonomyLevel::L2
+        );
+        assert!(
+            issue
+                .labels
+                .contains(&format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX)),
+            "updated issue must carry l2 label: {:?}",
+            issue.labels
+        );
+        assert!(
+            !issue
+                .labels
+                .contains(&format!("{}l1", crate::plan::labels::AUTONOMY_PREFIX)),
+            "updated issue must remove old l1 label: {:?}",
+            issue.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn set_loop_autonomy_legacy_unstamped_records_reset_streak() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+        seed_loop_run(mock_pm.as_ref(), &issue_id, &loop_id, 1, "approved", Some("l1")).await;
+        seed_loop_run(mock_pm.as_ref(), &issue_id, &loop_id, 2, "approved", Some("l1")).await;
+        seed_loop_run(mock_pm.as_ref(), &issue_id, &loop_id, 3, "approved", None).await;
+        seed_loop_run(mock_pm.as_ref(), &issue_id, &loop_id, 4, "approved", Some("l1")).await;
+        seed_loop_run(mock_pm.as_ref(), &issue_id, &loop_id, 5, "approved", Some("l1")).await;
+
+        let response = call_set_loop_autonomy(&server, &loop_id, "l2").await;
+
+        let message = response["error"]["message"].as_str().unwrap_or_else(|| {
+            panic!("legacy unstamped run should reset streak; got {response}")
+        });
+        assert!(
+            message.contains("short by 1"),
+            "legacy unstamped run must reset the promotion streak, got {message:?}"
+        );
     }
 }

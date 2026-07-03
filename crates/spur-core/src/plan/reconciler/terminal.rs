@@ -209,10 +209,17 @@ impl super::Reconciler {
             cancelled: outcome.cancelled_count,
         };
         let now = system_time_to_unix_seconds(self.now());
+        let autonomy = epic
+            .labels
+            .iter()
+            .filter_map(|label| crate::plan::labels::parse_autonomy(label))
+            .max()
+            .map(|level| level.as_str().to_string());
         let run = crate::plan::loops::run_record::build_loop_run(
             &loop_id,
             generation,
             plan_id,
+            autonomy,
             terminal_counts,
             &child_audits,
             now,
@@ -222,6 +229,25 @@ impl super::Reconciler {
             &crate::plan::audit_sentinel::encode_comment(&run),
         )
         .await?;
+        if let Some(sink) = self
+            .dispatch
+            .as_ref()
+            .and_then(|dispatch| dispatch.event_sink())
+        {
+            if let AuditSentinelKind::LoopRun {
+                outcome,
+                cost_micros,
+                ..
+            } = &run
+            {
+                sink.emit(spur_acp::SpurEventBody::LoopRunRecorded {
+                    loop_id,
+                    generation,
+                    outcome: outcome.clone(),
+                    cost_micros: *cost_micros,
+                });
+            }
+        }
         Ok(true)
     }
 

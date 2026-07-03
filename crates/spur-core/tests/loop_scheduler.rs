@@ -204,6 +204,7 @@ async fn seed_loop_run(
                 loop_id: loop_id.to_string(),
                 generation,
                 plan_id: format!("plan-{generation}"),
+                autonomy: Some("l1".to_string()),
                 outcome: outcome.to_string(),
                 tasks_discovered: 1,
                 approved: u32::from(outcome == "approved"),
@@ -283,6 +284,50 @@ async fn undue_loop_is_untouched() {
         Some(now + 30)
     );
     assert!(loop_runs(pm.as_ref(), &loop_issue_id).await.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn killed_loop_is_never_rearmed_by_sweep() {
+    let pm = MockPm::new().arc();
+    let now = 1_782_950_000;
+    let spec = loop_spec("retiredloop001", 60);
+    let loop_issue_id = create_loop_issue(pm.as_ref(), &spec, Some(now - 1), Vec::new()).await;
+    pm.update_issue(
+        &loop_issue_id,
+        spur_pm::IssueUpdate {
+            status: Some(pm.closed_status().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close killed loop issue");
+    let (continuation_ctx, mut continuation_rx) = capture_continuations();
+    let reconciler = reconciler(
+        Arc::clone(&pm),
+        ReconcilerConfig::default(),
+        now as u64,
+        continuation_ctx,
+    );
+
+    let did_work = reconciler.tick_once().await.expect("tick_once");
+
+    assert!(
+        !did_work,
+        "closed loop issue must be outside the scheduler's open-issue sweep"
+    );
+    assert!(
+        continuation_rx.try_recv().is_err(),
+        "closed loop issue must not push a loop-due continuation"
+    );
+    assert_eq!(
+        loop_next_run(pm.as_ref(), &loop_issue_id).await,
+        Some(now - 1),
+        "stale next-run label on a closed loop must not be replaced"
+    );
+    assert!(
+        loop_runs(pm.as_ref(), &loop_issue_id).await.is_empty(),
+        "closed loop issue must not receive scheduler run records"
+    );
 }
 
 #[tokio::test(start_paused = true)]

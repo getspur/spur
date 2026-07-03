@@ -54,6 +54,8 @@ const EXPECTED: &[&str] = &[
     "recover_orphaned_dispatch",
     "pause_loop",
     "resume_loop",
+    "kill_loop",
+    "set_loop_autonomy",
     "review_task",
     "submit_plan_mutation",
     "report_signal",
@@ -139,6 +141,8 @@ fn plan_tools_are_owned_by_core_catalog() {
         "recover_orphaned_dispatch",
         "pause_loop",
         "resume_loop",
+        "kill_loop",
+        "set_loop_autonomy",
         "review_task",
         "submit_plan_mutation",
     ] {
@@ -169,6 +173,14 @@ fn loop_tools_advertise_stable_user_facing_descriptions() {
     assert_eq!(
         find("resume_loop").description,
         "Resume a paused loop by removing spur:loop-paused and replacing any spur:loop-next-run:* label with spur:loop-next-run:<now>, clearing failure backoff so the scheduler may run it immediately."
+    );
+    assert_eq!(
+        find("kill_loop").description,
+        "Retire a loop by appending a terminal LoopRun audit record with outcome retired, removing all spur:loop-next-run:* labels, and closing the loop issue identified by loop_id. Repeated calls on an already-closed loop return current state without writing another record."
+    );
+    assert_eq!(
+        find("set_loop_autonomy").description,
+        "Set a loop's autonomy to l1, l2, or l3. Demotions are immediate; promotions advance one level at a time and require three consecutive approved real generations at the current level. Updates the [[spur-loop v1]] spec body and spur:autonomy:* label together."
     );
     assert_eq!(
         find("get_loop_status").description,
