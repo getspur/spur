@@ -344,6 +344,49 @@ fn parquet_client_search_symbols_matches_in_memory_client() {
 }
 
 #[test]
+fn parquet_client_symbols_by_files_matches_in_memory_client() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact();
+    let parquet_dir = write_artifact_parquet(
+        &artifact,
+        tempdir.path(),
+        WriteOptions::default(),
+        Vec::new(),
+    )
+    .expect("write parquet artifact");
+    let in_memory = InMemoryClient::new(Arc::new(artifact));
+    let parquet = ParquetClient::open(&parquet_dir).expect("open parquet client");
+
+    let paths = [
+        "src/lib.rs".to_owned(),
+        "src/a.rs".to_owned(),
+        "src/missing.rs".to_owned(),
+    ];
+    let normalize = |mut symbols: Vec<GraphSymbolArtifact>| {
+        symbols.sort_by(|left, right| left.stable_symbol_id.cmp(&right.stable_symbol_id));
+        symbols
+    };
+
+    let expected = normalize(
+        in_memory
+            .symbols_by_files(&paths)
+            .expect("in-memory symbols by files"),
+    );
+    let actual = normalize(
+        parquet
+            .symbols_by_files(&paths)
+            .expect("parquet symbols by files"),
+    );
+
+    assert!(!expected.is_empty(), "fixture should cover queried paths");
+    assert_eq!(actual, expected);
+    assert!(parquet
+        .symbols_by_files(&[])
+        .expect("empty path set")
+        .is_empty());
+}
+
+#[test]
 fn parquet_client_find_caller_edges_matches_in_memory_client() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact();
