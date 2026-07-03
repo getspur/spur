@@ -406,7 +406,6 @@ fn plan_inspector_header_renders_loop_origin_badge() {
         plan_projection: &plans,
         synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
-        license_badge: None,
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,
