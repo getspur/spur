@@ -3,7 +3,7 @@
     "graph_index_version": "4"
   },
   "manifest_version": "<normalized>",
-  "graph_content_hash": "92dd7c1626c7d4ab263a6b8fbfb0764722e05a952491d9dc78fcd48b10cd7218",
+  "graph_content_hash": "a722096886ea6967f936b8afdd5a8619a30e7f48db521a555820b4ab8cbab8ba",
   "file_manifests": [
     {
       "stable_file_id": "a759aff8ae5419e0",
@@ -29,7 +29,7 @@
     {
       "stable_file_id": "57b2b40fcba2e8ed",
       "path": "index.md",
-      "content_oid": "fed171d712be56404f261a5a2016432f22d640f9",
+      "content_oid": "7fe044bb613f2638f359ca8d800daa11c20df886",
       "node_ids": [
         8,
         9,
@@ -143,11 +143,11 @@
       "file_path": "index.md",
       "byte_range": [
         0,
-        303
+        338
       ],
       "line_range": [
         1,
-        17
+        18
       ],
       "entity_name": "Overview",
       "qualified_name": "Overview",
@@ -156,15 +156,15 @@
       "enclosing_scope": null
     },
     {
-      "stable_symbol_id": "30cc2b6854ab6306",
+      "stable_symbol_id": "bc939756d87af019",
       "file_path": "index.md",
       "byte_range": [
-        172,
-        303
+        207,
+        338
       ],
       "line_range": [
-        8,
-        17
+        9,
+        18
       ],
       "entity_name": "Details",
       "qualified_name": "Overview::Details",
@@ -173,15 +173,15 @@
       "enclosing_scope": "Overview"
     },
     {
-      "stable_symbol_id": "20bb6eac9c665eaa",
+      "stable_symbol_id": "ff55fff08ad65e77",
       "file_path": "index.md",
       "byte_range": [
-        218,
-        303
+        253,
+        338
       ],
       "line_range": [
-        12,
-        17
+        13,
+        18
       ],
       "entity_name": "Deep Dive",
       "qualified_name": "Overview::Details::Deep Dive",
@@ -228,57 +228,12 @@
       "edge_kind": "references_other"
     },
     {
-      "source_stable_symbol_id": "20bb6eac9c665eaa",
-      "target_stable_symbol_id": "91079949255a448a",
-      "target_label": "guide.md",
-      "relation": "links",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "30cc2b6854ab6306",
-      "target_stable_symbol_id": "20bb6eac9c665eaa",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "30cc2b6854ab6306",
-      "target_stable_symbol_id": "a759aff8ae5419e0",
-      "target_label": "api.md",
-      "relation": "links",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
       "source_stable_symbol_id": "324648dd1b8e00d2",
       "target_stable_symbol_id": null,
-      "target_label": "[guide-ref]",
+      "target_label": "no-such-label",
       "relation": "links",
       "confidence": "heuristic",
       "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "324648dd1b8e00d2",
-      "target_stable_symbol_id": null,
-      "target_label": "guide-ref",
-      "relation": "links",
-      "confidence": "heuristic",
-      "confidence_score": 0.8,
-      "edge_kind": "references_other"
-    },
-    {
-      "source_stable_symbol_id": "324648dd1b8e00d2",
-      "target_stable_symbol_id": "30cc2b6854ab6306",
-      "target_label": null,
-      "relation": "contains",
-      "confidence": "syntax_exact",
-      "confidence_score": 1.0,
       "edge_kind": "references_other"
     },
     {
@@ -288,6 +243,15 @@
       "relation": "links",
       "confidence": "heuristic",
       "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "324648dd1b8e00d2",
+      "target_stable_symbol_id": "bc939756d87af019",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
       "edge_kind": "references_other"
     },
     {
@@ -336,12 +300,39 @@
       "edge_kind": "references_other"
     },
     {
+      "source_stable_symbol_id": "bc939756d87af019",
+      "target_stable_symbol_id": "a759aff8ae5419e0",
+      "target_label": "api.md",
+      "relation": "links",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "bc939756d87af019",
+      "target_stable_symbol_id": "ff55fff08ad65e77",
+      "target_label": null,
+      "relation": "contains",
+      "confidence": "syntax_exact",
+      "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
       "source_stable_symbol_id": "e35b915f52f45e83",
       "target_stable_symbol_id": "804fa19ecdd05a81",
       "target_label": null,
       "relation": "contains",
       "confidence": "syntax_exact",
       "confidence_score": 1.0,
+      "edge_kind": "references_other"
+    },
+    {
+      "source_stable_symbol_id": "ff55fff08ad65e77",
+      "target_stable_symbol_id": "91079949255a448a",
+      "target_label": "guide.md",
+      "relation": "links",
+      "confidence": "heuristic",
+      "confidence_score": 0.8,
       "edge_kind": "references_other"
     }
   ],
