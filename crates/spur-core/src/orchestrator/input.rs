@@ -83,6 +83,24 @@ pub enum InteractiveInput {
     RefreshIssues,
     /// Refresh persisted plan summaries and emit PlansLoaded.
     RefreshPlans,
+    /// Refresh persisted loop summaries and emit LoopsLoaded.
+    RefreshLoops,
+    /// Load one persisted loop detail snapshot.
+    InspectLoop {
+        loop_id: String,
+    },
+    /// Pause a governed loop via the brain MCP server.
+    PauseLoop {
+        loop_id: String,
+    },
+    /// Resume a governed loop via the brain MCP server.
+    ResumeLoop {
+        loop_id: String,
+    },
+    /// Retire a governed loop via the brain MCP server.
+    KillLoop {
+        loop_id: String,
+    },
     /// Claim a persisted plan for this brain without starting execution.
     ClaimPlan {
         plan_id: String,

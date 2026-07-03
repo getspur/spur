@@ -15,6 +15,7 @@ use spur_core::{ExecutorId, ExecutorNode, LifecycleState, TrackedPlan};
 use crate::action::{Action, IssueAction};
 use crate::theme::{resolve_token, ColorDepth, Theme};
 
+use super::plan_provenance::loop_origin_badge;
 use super::View;
 
 #[derive(Debug)]
@@ -1031,24 +1032,30 @@ impl View for PlanInspectorView {
                     .split(header_rows[0]);
 
             let status_color = plan_status_color(ctx.theme, &plan.status);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(
-                        format!(" Plan: {} ", plan.plan_id),
-                        Style::default()
-                            .fg(token(ctx.theme, "plan_inspector.title.fg"))
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(" {} ", plan.status.to_uppercase()),
-                        Style::default()
-                            .fg(status_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!("  {} ", plan.progress)),
-                ])),
-                header_cols[0],
-            );
+            let mut header_spans = vec![
+                Span::styled(
+                    format!(" Plan: {} ", plan.plan_id),
+                    Style::default()
+                        .fg(token(ctx.theme, "plan_inspector.title.fg"))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {} ", plan.status.to_uppercase()),
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if let Some(origin) = ctx.plan_projection.loop_origin(&plan.plan_id) {
+                header_spans.push(Span::styled(
+                    format!(" {} ", loop_origin_badge(origin)),
+                    Style::default()
+                        .fg(token(ctx.theme, "plan_inspector.title.fg"))
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            header_spans.push(Span::raw(format!("  {} ", plan.progress)));
+            frame.render_widget(Paragraph::new(Line::from(header_spans)), header_cols[0]);
 
             let total_tasks = plan.counts.pending
                 + plan.counts.ready

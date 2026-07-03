@@ -294,6 +294,33 @@ impl McpCallbackServer {
         }
     }
 
+    pub async fn call_pause_loop(&self, loop_id: &str) -> Result<(), String> {
+        let args = serde_json::json!({ "loop_id": loop_id });
+        let resp = self.handle_pause_loop(serde_json::Value::Null, args).await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn call_resume_loop(&self, loop_id: &str) -> Result<(), String> {
+        let args = serde_json::json!({ "loop_id": loop_id });
+        let resp = self.handle_resume_loop(serde_json::Value::Null, args).await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn call_kill_loop(&self, loop_id: &str) -> Result<(), String> {
+        let args = serde_json::json!({ "loop_id": loop_id });
+        let resp = self.handle_kill_loop(serde_json::Value::Null, args).await;
+        match resp.error {
+            Some(e) => Err(e.message),
+            None => Ok(()),
+        }
+    }
+
     /// Public bridge for orchestrator/TUI: retry one persisted plan task via
     /// the same `submit_plan_mutation` path exposed to brain tools.
     pub async fn call_retry_plan_task(
@@ -1779,10 +1806,8 @@ impl McpCallbackServer {
                 )
             }
         };
-        if let Some(response) =
-            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
-        {
-            return response;
+        if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+            return JsonRpcResponse::mcp_error(id, error);
         }
         if let Err(message) = validate_loop_id_param(&input.loop_id) {
             return JsonRpcResponse::invalid_params(id, format!("get_loop_status: {message}"));
@@ -1794,104 +1819,28 @@ impl McpCallbackServer {
                 "get_loop_status: requires a beads PM backend (configured backend: none)",
             );
         };
-        let issue = match load_loop_issue(pm, &input.loop_id).await {
-            Ok(Some(issue)) => issue,
-            Ok(None) => {
-                return JsonRpcResponse::error(
-                    id,
-                    -32004,
-                    format!("get_loop_status: unknown loop_id '{}'", input.loop_id),
-                )
-            }
-            Err(error) => {
-                return JsonRpcResponse::error(
-                    id,
-                    -32000,
-                    format!("get_loop_status: failed to load loop issue: {error}"),
-                )
-            }
-        };
-        let spec = match crate::plan::loops::spec::LoopSpec::parse(&issue.body) {
-            Ok(spec) => spec,
-            Err(error) => {
-                return JsonRpcResponse::error(
-                    id,
-                    -32000,
-                    format!("get_loop_status: failed to parse loop spec: {error}"),
-                )
-            }
-        };
-        if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
-            return JsonRpcResponse::mcp_error(id, error);
-        }
-        let Some(advanced) = pm.advanced() else {
-            return JsonRpcResponse::error(
-                id,
-                -32000,
-                "get_loop_status: beads advanced comments API is unavailable",
-            );
-        };
-        let audits = match crate::plan::projector::collect_sorted_audits_for_issue(
-            &issue.id,
-            match advanced.list_comments(&issue.id).await {
-                Ok(comments) => comments,
+        let recent_limit = input.recent_runs.unwrap_or(10).min(100) as usize;
+        let status =
+            match crate::plan::loops::status::build_loop_status(pm, &input.loop_id, recent_limit)
+                .await
+            {
+                Ok(Some(status)) => status,
+                Ok(None) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32004,
+                        format!("get_loop_status: unknown loop_id '{}'", input.loop_id),
+                    )
+                }
                 Err(error) => {
                     return JsonRpcResponse::error(
                         id,
                         -32000,
-                        format!("get_loop_status: failed to list loop comments: {error}"),
+                        format!("get_loop_status: {error:#}"),
                     )
                 }
-            },
-        ) {
-            Ok(audits) => audits,
-            Err(error) => {
-                return JsonRpcResponse::error(
-                    id,
-                    -32000,
-                    format!("get_loop_status: failed to parse loop audits: {error}"),
-                )
-            }
-        };
-        let recent_limit = input.recent_runs.unwrap_or(10).min(100) as usize;
-        let mut recent_runs: Vec<Value> = audits
-            .iter()
-            .rev()
-            .filter_map(|audit| match audit {
-                crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
-                    loop_id: record_loop_id,
-                    ..
-                } if record_loop_id == &input.loop_id => serde_json::to_value(audit).ok(),
-                _ => None,
-            })
-            .take(recent_limit)
-            .collect();
-        recent_runs.reverse();
-        let consecutive_failures =
-            crate::plan::loops::scheduler::trailing_failed_loop_runs(&audits, &input.loop_id);
-        let effective_interval_secs =
-            crate::plan::loops::scheduler::effective_interval_secs(&spec, consecutive_failures);
-        let cadence_secs = spec.cadence_secs;
-        let next_run = issue
-            .labels
-            .iter()
-            .filter_map(|label| crate::plan::labels::parse_loop_next_run(label))
-            .max();
-        let paused = issue
-            .labels
-            .iter()
-            .any(|label| label == crate::plan::labels::LOOP_PAUSED);
-        let output = json!({
-            "loop_id": input.loop_id,
-            "issue_id": issue.id,
-            "spec": spec,
-            "recent_runs": recent_runs,
-            "consecutive_failures": consecutive_failures,
-            "effective_interval_secs": effective_interval_secs,
-            "backoff_active": effective_interval_secs > cadence_secs,
-            "paused": paused,
-            "next_run": next_run,
-        });
+            };
+        let output = status.to_mcp_json();
         let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
         JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
     }

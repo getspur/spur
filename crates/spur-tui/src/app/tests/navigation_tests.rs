@@ -56,7 +56,7 @@ mod issue_browser_navigation_tests {
 mod plan_browser_navigation_tests {
     use super::super::super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use spur_acp::{PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryEvent};
+    use spur_acp::{LoopSummaryEvent, PlanLifecycleEvent, PlanOwnerStateEvent, PlanSummaryEvent};
 
     fn plan_summary(plan_id: &str, owner_state: PlanOwnerStateEvent) -> PlanSummaryEvent {
         PlanSummaryEvent {
@@ -69,6 +69,28 @@ mod plan_browser_navigation_tests {
             counts: None,
             updated_at: None,
             created_at: None,
+            loop_origin: None,
+        }
+    }
+
+    fn loop_summary(loop_id: &str) -> LoopSummaryEvent {
+        LoopSummaryEvent {
+            loop_id: loop_id.into(),
+            issue_id: format!("bd-{loop_id}"),
+            title: format!("Loop {loop_id}"),
+            autonomy: Some("l2".into()),
+            paused: false,
+            retired: false,
+            backoff_active: false,
+            cadence_secs: 900,
+            effective_interval_secs: 900,
+            next_run: None,
+            last_generation: None,
+            last_outcome: None,
+            last_cost_micros: None,
+            consecutive_failures: 0,
+            goal_preview: None,
+            updated_at: None,
         }
     }
 
@@ -130,6 +152,97 @@ mod plan_browser_navigation_tests {
             app.plan_browser.is_none(),
             "PlanBrowser must not be created when navigation is refused"
         );
+    }
+
+    #[test]
+    fn navigate_to_loop_browser_lazily_creates_without_session_and_refreshes_once() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::NavigateTo(ViewId::LoopBrowser));
+
+        assert_eq!(app.current_view(), &ViewId::LoopBrowser);
+        assert!(
+            app.loop_browser.is_some(),
+            "navigation should lazily create LoopBrowser"
+        );
+        match rx.try_recv() {
+            Ok(UserInput::RefreshLoops) => {}
+            Ok(_) => panic!("expected RefreshLoops, got different user input"),
+            Err(err) => panic!("expected RefreshLoops after first navigation, got {err}"),
+        }
+
+        app.process_action(Action::NavigateTo(ViewId::Dashboard));
+        app.process_action(Action::NavigateTo(ViewId::LoopBrowser));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "existing LoopBrowser should not request another refresh on navigation"
+        );
+    }
+
+    #[test]
+    fn loop_browser_spur_events_route_to_view() {
+        let mut app = App::new_for_tests();
+        app.process_action(Action::NavigateTo(ViewId::LoopBrowser));
+
+        app.handle_spur_event(SpurEvent::now(SpurEventBody::LoopsLoaded {
+            loops: vec![loop_summary("loop-1")],
+            warnings: Vec::new(),
+        }));
+
+        let ids = app
+            .loop_browser
+            .as_ref()
+            .expect("LoopBrowser should exist")
+            .loop_ids_for_test();
+        assert_eq!(ids, vec!["loop-1"]);
+    }
+
+    #[test]
+    fn loop_actions_send_user_input() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
+
+        app.process_action(Action::RefreshLoops);
+        app.process_action(Action::InspectLoop {
+            loop_id: "loop-1".into(),
+        });
+        app.process_action(Action::PauseLoop {
+            loop_id: "loop-1".into(),
+        });
+        app.process_action(Action::ResumeLoop {
+            loop_id: "loop-1".into(),
+        });
+        app.process_action(Action::KillLoop {
+            loop_id: "loop-1".into(),
+        });
+
+        match rx.try_recv() {
+            Ok(UserInput::RefreshLoops) => {}
+            Ok(_) => panic!("expected RefreshLoops, got different user input"),
+            Err(err) => panic!("expected RefreshLoops user input, got {err}"),
+        }
+        match rx.try_recv() {
+            Ok(UserInput::InspectLoop { loop_id }) => assert_eq!(loop_id, "loop-1"),
+            Ok(_) => panic!("expected InspectLoop, got different user input"),
+            Err(err) => panic!("expected InspectLoop user input, got {err}"),
+        }
+        match rx.try_recv() {
+            Ok(UserInput::PauseLoop { loop_id }) => assert_eq!(loop_id, "loop-1"),
+            Ok(_) => panic!("expected PauseLoop, got different user input"),
+            Err(err) => panic!("expected PauseLoop user input, got {err}"),
+        }
+        match rx.try_recv() {
+            Ok(UserInput::ResumeLoop { loop_id }) => assert_eq!(loop_id, "loop-1"),
+            Ok(_) => panic!("expected ResumeLoop, got different user input"),
+            Err(err) => panic!("expected ResumeLoop user input, got {err}"),
+        }
+        match rx.try_recv() {
+            Ok(UserInput::KillLoop { loop_id }) => assert_eq!(loop_id, "loop-1"),
+            Ok(_) => panic!("expected KillLoop, got different user input"),
+            Err(err) => panic!("expected KillLoop user input, got {err}"),
+        }
     }
 
     #[test]

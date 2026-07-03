@@ -594,6 +594,9 @@ impl App {
         if let Some(ref mut inspector) = self.plan_inspector {
             inspector.handle_spur_event(&event, &ctx);
         }
+        if let Some(ref mut browser) = self.loop_browser {
+            browser.handle_spur_event(&event, &ctx);
+        }
         if let Some(ref mut browser) = self.plan_browser {
             browser.handle_spur_event(&event, &ctx);
         }
