@@ -52,6 +52,8 @@ tree-sitter-bash = "0.25.1"
 tree-sitter-c = "0.24.2"
 tree-sitter-cpp = "0.23"
 tree-sitter-go = "0.25"
+# One grammar covers both .tf and .hcl (shared-variant precedent: Javascript/Tsx on LANGUAGE_TSX).
+tree-sitter-hcl = "1.1.0"
 tree-sitter-lua = "0.5.0"
 tree-sitter-md = "0.5.3"
 tree-sitter-python = "0.25"

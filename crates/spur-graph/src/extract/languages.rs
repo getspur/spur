@@ -29,6 +29,8 @@ pub enum Language {
     C,
     Cpp,
     Go,
+    Hcl,
+    Terraform,
     Lua,
     Shell,
     Sql,
@@ -330,6 +332,8 @@ impl Language {
             Self::C => tree_sitter_c::LANGUAGE.into(),
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::Hcl => tree_sitter_hcl::LANGUAGE.into(),
+            Self::Terraform => tree_sitter_hcl::LANGUAGE.into(),
             Self::Lua => tree_sitter_lua::LANGUAGE.into(),
             Self::Shell => tree_sitter_bash::LANGUAGE.into(),
             Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
@@ -348,6 +352,8 @@ impl Language {
             Self::C => c_config(),
             Self::Cpp => cpp_config(),
             Self::Go => go_config(),
+            Self::Hcl => hcl_config(),
+            Self::Terraform => terraform_config(),
             Self::Lua => lua_config(),
             Self::Shell => shell_config(),
             Self::Sql => sql_config(),
@@ -365,7 +371,7 @@ impl Language {
             Self::Go => GO_BUILTIN_METHODS,
             Self::Lua => LUA_BUILTIN_METHODS,
             Self::Shell => SHELL_BUILTIN_METHODS,
-            Self::Markdown | Self::JupyterNotebook | Self::Sql => &[],
+            Self::Markdown | Self::JupyterNotebook | Self::Sql | Self::Hcl | Self::Terraform => &[],
         }
     }
 
@@ -381,6 +387,8 @@ impl Language {
             Self::C => "c",
             Self::Cpp => "cpp",
             Self::Go => "go",
+            Self::Hcl => "hcl",
+            Self::Terraform => "terraform",
             Self::Lua => "lua",
             Self::Shell => "shell",
             Self::Sql => "sql",
@@ -617,6 +625,43 @@ pub(crate) fn go_config() -> LanguageConfig {
     }
 }
 
+const HCL_QUERIES: &[(&str, &str)] = &[
+    ("tags", include_str!("../../queries/hcl/tags.scm")),
+    (
+        "spur-edges",
+        include_str!("../../queries/hcl/spur-edges.scm"),
+    ),
+];
+
+const HCL_DEFINITION_KIND_MAP: &[(&str, NodeKind)] = &[
+    ("definition.resource", NodeKind::Resource),
+    ("definition.data", NodeKind::Resource),
+    ("definition.module", NodeKind::Resource),
+    ("definition.variable", NodeKind::Constant),
+    ("definition.output", NodeKind::Constant),
+    ("definition.local", NodeKind::Constant),
+];
+
+fn hcl_config_for() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_hcl::LANGUAGE.into(),
+        inline_language: None,
+        queries: HCL_QUERIES,
+        definition_kind_map: HCL_DEFINITION_KIND_MAP,
+        relation_kind_map: None,
+        preserve_bare_import_path: false,
+        is_method: None,
+    }
+}
+
+pub(crate) fn hcl_config() -> LanguageConfig {
+    hcl_config_for()
+}
+
+pub(crate) fn terraform_config() -> LanguageConfig {
+    hcl_config_for()
+}
+
 pub(crate) fn lua_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_lua::LANGUAGE.into(),
@@ -789,6 +834,18 @@ fn go_matcher(path: &std::path::Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("go"))
 }
 
+fn hcl_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("hcl"))
+}
+
+fn terraform_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tf"))
+}
+
 fn lua_matcher(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -876,6 +933,20 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::Go,
             label: "go",
             extensions: &["go"],
+        },
+        LanguageDescriptor {
+            matcher: hcl_matcher,
+            factory: hcl_config,
+            language: Language::Hcl,
+            label: "hcl",
+            extensions: &["hcl"],
+        },
+        LanguageDescriptor {
+            matcher: terraform_matcher,
+            factory: terraform_config,
+            language: Language::Terraform,
+            label: "terraform",
+            extensions: &["tf"],
         },
         LanguageDescriptor {
             matcher: lua_matcher,
@@ -1175,6 +1246,22 @@ pub(crate) fn emit_edges(
                     import_path: None,
                     relation: RelationKind::References,
                     edge_kind: Some(GraphEdgeKind::ReferencesHof),
+                    origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                    receiver_text: None,
+                    scope_text: None,
+                });
+            }
+            "hcl_ref" => {
+                let Some(target_name) = hcl_reference_address(capture.node, source) else {
+                    continue;
+                };
+                let source_id = nearest_parent(file_node_id, definitions, capture.node).node_id;
+                builder.pending_edges.push(PendingEdge {
+                    source: source_id,
+                    target_name,
+                    import_path: None,
+                    relation: RelationKind::References,
+                    edge_kind: Some(GraphEdgeKind::ReferencesAddress),
                     origin: crate::extract::tree_sitter::CallOrigin::Expression,
                     receiver_text: None,
                     scope_text: None,
@@ -1543,9 +1630,117 @@ fn definition_name(
         });
     }
 
-    contained_capture_text(definition, source, captures, "name")
-        .into_iter()
-        .next()
+    match definition.name.as_str() {
+        "definition.resource" if is_hcl_block(definition) => {
+            hcl_block_address(definition, source, captures, None)
+        }
+        "definition.data" if is_hcl_block(definition) => {
+            hcl_block_address(definition, source, captures, Some("data"))
+        }
+        "definition.module" if is_hcl_block(definition) => {
+            hcl_label_address(definition, source, captures, "module")
+        }
+        "definition.variable" if is_hcl_block(definition) => {
+            hcl_label_address(definition, source, captures, "var")
+        }
+        "definition.output" if is_hcl_block(definition) => {
+            hcl_label_address(definition, source, captures, "output")
+        }
+        "definition.local" if definition.node.kind() == "attribute" => {
+            contained_capture_text(definition, source, captures, "name")
+                .into_iter()
+                .next()
+                .map(|name| format!("local.{name}"))
+        }
+        _ => contained_capture_text(definition, source, captures, "name")
+            .into_iter()
+            .next(),
+    }
+}
+
+fn is_hcl_block(definition: &CaptureHit<'_>) -> bool {
+    definition.node.kind() == "block"
+}
+
+fn hcl_block_address(
+    definition: &CaptureHit<'_>,
+    source: &str,
+    captures: &[CaptureHit<'_>],
+    prefix: Option<&str>,
+) -> Option<String> {
+    let block_type = hcl_label_text(definition, source, captures, "resource.type")?;
+    let block_name = hcl_label_text(definition, source, captures, "resource.name")?;
+    Some(match prefix {
+        Some(prefix) => format!("{prefix}.{block_type}.{block_name}"),
+        None => format!("{block_type}.{block_name}"),
+    })
+}
+
+fn hcl_label_address(
+    definition: &CaptureHit<'_>,
+    source: &str,
+    captures: &[CaptureHit<'_>],
+    prefix: &str,
+) -> Option<String> {
+    let block_name = hcl_label_text(definition, source, captures, "resource.name")?;
+    Some(format!("{prefix}.{block_name}"))
+}
+
+const HCL_RESERVED_REFERENCE_ROOTS: &[&str] =
+    &["count", "each", "path", "provider", "self", "terraform"];
+
+fn hcl_reference_address(node: Node<'_>, source: &str) -> Option<String> {
+    let segments = hcl_reference_segments(node, source);
+    let (first, rest) = segments.split_first()?;
+    if rest.is_empty() || HCL_RESERVED_REFERENCE_ROOTS.contains(&first.as_str()) {
+        return None;
+    }
+    let keep = match first.as_str() {
+        "data" => 3,
+        _ => 2,
+    };
+    if segments.len() < keep {
+        return None;
+    }
+    Some(segments[..keep].join("."))
+}
+
+fn hcl_reference_segments(node: Node<'_>, source: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let Some(identifier) = direct_named_child_by_kind(node, "identifier") else {
+        return segments;
+    };
+    segments.push(child_text(identifier, source).trim().to_owned());
+    let mut current = node.next_named_sibling();
+    while let Some(sibling) = current {
+        match sibling.kind() {
+            "get_attr" => {
+                if let Some(identifier) = direct_named_child_by_kind(sibling, "identifier") {
+                    segments.push(child_text(identifier, source).trim().to_owned());
+                }
+            }
+            "index" => {}
+            _ => break,
+        }
+        current = sibling.next_named_sibling();
+    }
+    segments
+}
+
+fn hcl_label_text(
+    parent: &CaptureHit<'_>,
+    source: &str,
+    captures: &[CaptureHit<'_>],
+    capture_name: &str,
+) -> Option<String> {
+    captures
+        .iter()
+        .find(|capture| {
+            capture.name == capture_name
+                && capture.pattern_index == parent.pattern_index
+                && capture.match_index == parent.match_index
+        })
+        .and_then(|capture| string_lit_text(capture.node, source))
 }
 
 fn nearest_parent<'a>(
@@ -1690,6 +1885,7 @@ fn symbol_kind(kind: NodeKind) -> &'static str {
         NodeKind::TypeAlias => "type_alias",
         NodeKind::Macro => "macro",
         NodeKind::Section => "section",
+        NodeKind::Resource => "resource",
         _ => "symbol",
     }
 }
@@ -2108,6 +2304,7 @@ mod gate_contract {
             "implements" => Some(RelationKind::Implements),
             "extends" => Some(RelationKind::Extends),
             "reference.name" => Some(RelationKind::References),
+            "hcl_ref" => Some(RelationKind::References),
             _ => None,
         }
     }
@@ -2228,6 +2425,14 @@ mod gate_contract {
                 relation_set(&["imports", "calls", "constructs", "contains", "defines"]),
             ),
             (
+                Language::Hcl.label(),
+                relation_set(&["contains", "defines", "references"]),
+            ),
+            (
+                Language::Terraform.label(),
+                relation_set(&["contains", "defines", "references"]),
+            ),
+            (
                 Language::Lua.label(),
                 relation_set(&["imports", "calls", "contains", "defines"]),
             ),
@@ -2346,6 +2551,14 @@ mod gate_contract {
                 "definition.constant",
                 "definition.field",
             ],
+            Language::Hcl | Language::Terraform => &[
+                "definition.resource",
+                "definition.data",
+                "definition.module",
+                "definition.variable",
+                "definition.output",
+                "definition.local",
+            ],
             Language::Lua => &["definition.function", "definition.method"],
             Language::Shell => &["definition.function"],
             Language::Sql => &[
@@ -2410,6 +2623,22 @@ fn is_bare_single_segment_import(path: &str) -> bool {
 
 fn child_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
     &source[node.start_byte()..node.end_byte()]
+}
+
+fn string_lit_text(node: Node<'_>, source: &str) -> Option<String> {
+    if node.kind() != "string_lit" {
+        return None;
+    }
+    let mut literal = None;
+    for index in 0..node.named_child_count() {
+        let child = node.named_child(index)?;
+        match child.kind() {
+            "template_literal" if literal.is_none() => literal = Some(child),
+            "quoted_template_start" | "quoted_template_end" => {}
+            _ => return None,
+        }
+    }
+    literal.map(|literal| child_text(literal, source).to_owned())
 }
 
 fn scoped_name(prefix: &str, name: &str) -> String {

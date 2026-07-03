@@ -5822,6 +5822,7 @@ fn traversal_summary<'a>(
     let mut calls_dyn = 0usize;
     let mut references_hof = 0usize;
     let mut references_other = 0usize;
+    let mut references_address = 0usize;
     let mut unresolved = 0usize;
 
     for edge in edges {
@@ -5830,6 +5831,7 @@ fn traversal_summary<'a>(
             GraphEdgeKind::CallsDyn => calls_dyn += 1,
             GraphEdgeKind::ReferencesHof => references_hof += 1,
             GraphEdgeKind::ReferencesOther => references_other += 1,
+            GraphEdgeKind::ReferencesAddress => references_address += 1,
         }
         if edge.target_stable_symbol_id.is_none() {
             unresolved += 1;
@@ -5842,6 +5844,7 @@ fn traversal_summary<'a>(
             "calls_dyn": calls_dyn,
             "references_hof": references_hof,
             "references_other": references_other,
+            "references_address": references_address,
             "unresolved": unresolved,
         }),
         counts_by_context: json!({}),
@@ -5957,6 +5960,7 @@ fn edge_kind_str(edge_kind: GraphEdgeKind) -> &'static str {
         GraphEdgeKind::CallsDyn => "calls_dyn",
         GraphEdgeKind::ReferencesHof => "references_hof",
         GraphEdgeKind::ReferencesOther => "references_other",
+        GraphEdgeKind::ReferencesAddress => "references_address",
     }
 }
 
