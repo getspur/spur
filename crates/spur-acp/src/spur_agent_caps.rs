@@ -206,19 +206,25 @@ impl SpurAgentCaps {
     /// Whether this agent is expected to emit usage updates.
     #[must_use]
     pub fn usage_supported(&self) -> bool {
-        crate::agent_quirks::usage_emit_default(self.agent_kind)
+        self.meta_capability_opt("usage_updates")
+            .unwrap_or_else(|| crate::agent_quirks::usage_emit_default(self.agent_kind))
+    }
+
+    /// Probe a vendor `_meta` extension key and preserve absent/non-bool state.
+    #[must_use]
+    pub fn meta_capability_opt(&self, key: &str) -> Option<bool> {
+        self.agent
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(key))
+            .and_then(serde_json::Value::as_bool)
     }
 
     /// Probe a vendor `_meta` extension key (e.g. `"terminal_output"`).
     /// Returns false for missing keys, non-bool values, or absent meta.
     #[must_use]
     pub fn meta_capability(&self, key: &str) -> bool {
-        self.agent
-            .meta
-            .as_ref()
-            .and_then(|m| m.get(key))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
+        self.meta_capability_opt(key).unwrap_or(false)
     }
 }
 
@@ -481,6 +487,46 @@ mod tests {
     #[test]
     fn usage_supported_delegates_to_quirks() {
         let init = empty_init_response();
+        let new = empty_new_session_response();
+
+        let claude = SpurAgentCaps::new(&init, &new, AgentKind::ClaudeCodeAcp);
+        let codex = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+
+        assert!(!claude.usage_supported());
+        assert!(codex.usage_supported());
+    }
+
+    #[test]
+    fn usage_supported_honors_meta_true_for_claude_code() {
+        let mut init = empty_init_response();
+        init.agent_capabilities =
+            agent_caps_with_meta("usage_updates", serde_json::Value::Bool(true));
+        let new = empty_new_session_response();
+
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::ClaudeCodeAcp);
+
+        assert!(caps.usage_supported());
+    }
+
+    #[test]
+    fn usage_supported_honors_meta_false_for_codex() {
+        let mut init = empty_init_response();
+        init.agent_capabilities =
+            agent_caps_with_meta("usage_updates", serde_json::Value::Bool(false));
+        let new = empty_new_session_response();
+
+        let caps = SpurAgentCaps::new(&init, &new, AgentKind::CodexAcp);
+
+        assert!(!caps.usage_supported());
+    }
+
+    #[test]
+    fn usage_supported_ignores_non_bool_meta_and_falls_back_to_quirks() {
+        let mut init = empty_init_response();
+        init.agent_capabilities = agent_caps_with_meta(
+            "usage_updates",
+            serde_json::Value::String("false".to_string()),
+        );
         let new = empty_new_session_response();
 
         let claude = SpurAgentCaps::new(&init, &new, AgentKind::ClaudeCodeAcp);
