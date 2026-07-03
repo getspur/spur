@@ -213,7 +213,6 @@ impl App {
                     plan_projection: &self.plan_projection,
                     synopsis: &self.synopsis,
                     brain_status: &self.brain_status,
-                    license_badge: self.license_badge.as_ref(),
                     flag_summary: self.flag_summary,
                     tombstone: None,
                     transient_hint_override: None,
