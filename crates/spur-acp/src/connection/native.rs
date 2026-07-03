@@ -49,20 +49,21 @@ use tokio::sync::{mpsc, oneshot};
 
 use agent_client_protocol::schema::v1::{
     AgentNotification, AuthenticateRequest, AuthenticateResponse, CancelNotification,
-    ClientCapabilities, ClientRequest, ContentBlock, ContentChunk, CreateTerminalRequest,
-    CreateTerminalResponse, DeleteSessionRequest, DeleteSessionResponse, ExtRequest, ExtResponse,
-    FileSystemCapabilities, InitializeRequest, InitializeResponse, KillTerminalRequest,
-    KillTerminalResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse, PermissionOptionId,
-    PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SelectedPermissionOutcome, SessionCapabilities, SessionConfigId,
-    SessionConfigValueId, SessionId, SessionModeId, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    SetSessionModeRequest, SetSessionModeResponse, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, Usage, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    ClientCapabilities, ClientRequest, CloseSessionRequest, CloseSessionResponse, ContentBlock,
+    ContentChunk, CreateTerminalRequest, CreateTerminalResponse, DeleteSessionRequest,
+    DeleteSessionResponse, ExtRequest, ExtResponse, FileSystemCapabilities, InitializeRequest,
+    InitializeResponse, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest,
+    NewSessionResponse, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SelectedPermissionOutcome, SessionCapabilities,
+    SessionConfigId, SessionConfigValueId, SessionId, SessionModeId, SessionModeState,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
+    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, Usage,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
@@ -159,6 +160,10 @@ enum AcpCommand {
     DeleteSession {
         request: DeleteSessionRequest,
         reply: oneshot::Sender<anyhow::Result<DeleteSessionResponse>>,
+    },
+    CloseSession {
+        request: CloseSessionRequest,
+        reply: oneshot::Sender<anyhow::Result<CloseSessionResponse>>,
     },
     SetSessionMode {
         request: SetSessionModeRequest,
@@ -350,6 +355,9 @@ fn reject_busy_command(cmd: AcpCommand, agent_name: &str, in_flight: &str) {
             let _ = reply.send(Err(err()));
         }
         AcpCommand::DeleteSession { reply, .. } => {
+            let _ = reply.send(Err(err()));
+        }
+        AcpCommand::CloseSession { reply, .. } => {
             let _ = reply.send(Err(err()));
         }
         AcpCommand::SetSessionMode { reply, .. } => {
@@ -961,6 +969,41 @@ impl AgentConnection for NativeAcpConnection {
             .map_err(|_| {
                 anyhow::anyhow!(
                     "NativeAcpConnection '{}': ACP thread died during delete_session",
+                    self.agent_name
+                )
+            })?
+            .map_err(AcpError::Transport)
+    }
+
+    // ─── close_session ──────────────────────────────────────────────────
+
+    async fn close_session(
+        &mut self,
+        request: CloseSessionRequest,
+    ) -> Result<CloseSessionResponse, AcpError> {
+        if !session_capability_advertised(&self.session_capabilities, |caps| caps.close.is_some()) {
+            return Err(AcpError::CapabilityMissing("session/close"));
+        }
+
+        let cmd_tx = self.cmd_tx.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("NativeAcpConnection '{}': not initialized", self.agent_name)
+        })?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx
+            .send(AcpCommand::CloseSession {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("NativeAcpConnection '{}': ACP thread died", self.agent_name)
+            })?;
+
+        reply_rx
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "NativeAcpConnection '{}': ACP thread died during close_session",
                     self.agent_name
                 )
             })?
@@ -2039,6 +2082,15 @@ fn acp_thread_main(
                                     )
                                 }));
                             }
+                            AcpCommand::CloseSession { request, reply } => {
+                                let result = cx.send_request(request).block_task().await;
+                                let _ = reply.send(result.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "NativeAcpConnection '{}': close_session failed: {e}",
+                                        agent_name_loop
+                                    )
+                                }));
+                            }
                             AcpCommand::SetSessionMode { request, reply } => {
                                 let result = cx.send_request(request).block_task().await;
                                 let _ = reply.send(result.map_err(|e| {
@@ -2644,9 +2696,10 @@ mod resume_delete_dispatch_tests {
     use crate::connection::AgentConnection;
     use crate::AcpError;
     use agent_client_protocol::schema::v1::{
-        DeleteSessionRequest, DeleteSessionResponse, ListSessionsRequest, ListSessionsResponse,
-        ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-        SessionDeleteCapabilities, SessionId, SessionListCapabilities, SessionResumeCapabilities,
+        CloseSessionRequest, CloseSessionResponse, DeleteSessionRequest, DeleteSessionResponse,
+        ListSessionsRequest, ListSessionsResponse, ResumeSessionRequest, ResumeSessionResponse,
+        SessionCapabilities, SessionCloseCapabilities, SessionDeleteCapabilities, SessionId,
+        SessionListCapabilities, SessionResumeCapabilities,
     };
     use tokio::sync::mpsc::{self, error::TryRecvError};
 
@@ -2786,6 +2839,43 @@ mod resume_delete_dispatch_tests {
         match result {
             Err(AcpError::CapabilityMissing(name)) => assert_eq!(name, "session/delete"),
             other => panic!("expected CapabilityMissing(\"session/delete\"), got {other:?}"),
+        }
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn close_session_dispatches_command_and_returns_response() {
+        let (mut conn, mut rx) = connection_with_session_capabilities(
+            SessionCapabilities::new().close(SessionCloseCapabilities::new()),
+        );
+        let request = CloseSessionRequest::new(SessionId::new("sid"));
+
+        let handle = tokio::spawn(async move { conn.close_session(request).await });
+
+        match rx.recv().await.expect("close command must be sent") {
+            AcpCommand::CloseSession { request, reply } => {
+                assert_eq!(request.session_id, SessionId::new("sid"));
+                reply
+                    .send(Ok(CloseSessionResponse::new()))
+                    .expect("test receiver must still be waiting");
+            }
+            _ => panic!("expected CloseSession command"),
+        }
+
+        let response = handle.await.expect("close task must not panic").unwrap();
+        assert_eq!(response, CloseSessionResponse::new());
+    }
+
+    #[tokio::test]
+    async fn close_session_without_capability_returns_missing_without_dispatch() {
+        let (mut conn, mut rx) = connection_with_session_capabilities(SessionCapabilities::new());
+        let request = CloseSessionRequest::new(SessionId::new("sid"));
+
+        let result = conn.close_session(request).await;
+
+        match result {
+            Err(AcpError::CapabilityMissing(name)) => assert_eq!(name, "session/close"),
+            other => panic!("expected CapabilityMissing(\"session/close\"), got {other:?}"),
         }
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
