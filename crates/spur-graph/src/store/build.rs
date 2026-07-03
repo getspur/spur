@@ -15,8 +15,8 @@ use crate::extract::{
     build_facts_for_paths,
     languages::all_supported_extensions,
     tree_sitter::{
-        classify_import_origin, function_singleton_safe, ImportOriginClassification,
-        ImportWorkspaceIndex,
+        classify_import_origin, function_singleton_safe, language_family,
+        ImportOriginClassification, ImportWorkspaceIndex,
     },
 };
 use crate::identity::{stable_symbol_id_for_external_path, EXTERNAL_FILE_PATH};
@@ -28,7 +28,7 @@ use crate::{
     GraphSymbolArtifact, GraphTombstoneEntry, NodeId, NodeKind, RelationKind, SourceSpan,
 };
 
-pub const SCHEMA_VERSION: &str = "spur-graph-schema-v9";
+pub const SCHEMA_VERSION: &str = "spur-graph-schema-v10";
 pub const EXTRACTOR_VERSION: &str = "2026-06-05-import-path-capture-v1";
 /// Bump when resolver semantics change without query, extractor, or schema changes.
 pub const RESOLVER_VERSION: &str = "2026-06-06-import-licensed-xcrate-supply-v18";
@@ -70,6 +70,16 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         language: "go",
         query: "spur-edges",
         bytes: include_bytes!("../../queries/go/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
+        language: "hcl",
+        query: "tags",
+        bytes: include_bytes!("../../queries/hcl/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "hcl",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/hcl/spur-edges.scm"),
     },
     ManifestQueryBytes {
         language: "markdown",
@@ -653,7 +663,8 @@ fn buckets_from_facts(
             | NodeKind::Section
             | NodeKind::McpTool
             | NodeKind::Cell
-            | NodeKind::Port => {
+            | NodeKind::Port
+            | NodeKind::Resource => {
                 let file_path = file_path_for_span(facts, span).unwrap_or_default();
                 if !current_entries.contains_key(&file_path) {
                     continue;
@@ -1443,6 +1454,15 @@ fn rebind_remaining_edges(
             if edge.relation == RelationKind::Links {
                 continue;
             }
+            if edge.edge_kind == Some(GraphEdgeKind::ReferencesAddress) {
+                ambiguous_unresolved += rebind_address_reference_edge(
+                    edge,
+                    source_file_path,
+                    &target_label,
+                    symbols_by_entity_name,
+                );
+                continue;
+            }
             let Some(matches) = symbols_by_entity_name.get(target_label.as_str()) else {
                 edge.target_stable_symbol_id = None;
                 continue;
@@ -1513,6 +1533,69 @@ fn rebind_remaining_edges(
         }
     }
     ambiguous_unresolved
+}
+
+fn rebind_address_reference_edge(
+    edge: &mut GraphEdgeArtifact,
+    source_file_path: &str,
+    target_label: &str,
+    symbols_by_entity_name: &BTreeMap<String, Vec<RebindTarget>>,
+) -> usize {
+    let candidates: Vec<&RebindTarget> = if language_family(source_file_path) == Some("hcl") {
+        symbols_by_entity_name
+            .get(target_label)
+            .into_iter()
+            .flatten()
+            .filter(|target| matches!(target.symbol_kind.as_str(), "resource" | "constant"))
+            .filter(|target| language_family(&target.file_path) == Some("hcl"))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let module_scoped: Vec<&RebindTarget> = candidates
+        .iter()
+        .copied()
+        .filter(|target| same_directory_path(&target.file_path, source_file_path))
+        .collect();
+    match module_scoped.as_slice() {
+        [target] => {
+            edge.target_stable_symbol_id = Some(target.stable_symbol_id.clone());
+            edge.bind_method = Some("address_module_scope".to_owned());
+            0
+        }
+        [] => match candidates.as_slice() {
+            [target] => {
+                edge.target_stable_symbol_id = Some(target.stable_symbol_id.clone());
+                edge.bind_method = Some("address_singleton".to_owned());
+                0
+            }
+            [] => {
+                edge.target_stable_symbol_id = None;
+                edge.bind_method = None;
+                0
+            }
+            candidates => {
+                tracing::debug!(
+                    target_label,
+                    candidates = candidates.len(),
+                    "spur-graph: ambiguous address reference target; leaving unresolved"
+                );
+                edge.target_stable_symbol_id = None;
+                edge.bind_method = None;
+                1
+            }
+        },
+        duplicates => {
+            tracing::debug!(
+                target_label,
+                candidates = duplicates.len(),
+                "spur-graph: duplicate address within one module directory; leaving unresolved"
+            );
+            edge.target_stable_symbol_id = None;
+            edge.bind_method = None;
+            1
+        }
+    }
 }
 
 fn drop_dangling_stamped_target(
@@ -2449,19 +2532,25 @@ mod tests {
         import_workspace_index_from_buckets, manifest_version_from_query_bytes,
         rebind_cross_file_edges, rebind_import_edges, rebind_remaining_edges,
         symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry, ExternalImportRegistry,
-        FileImportIndex, ManifestQueryBytes, RebindTarget, GRAPH_INDEX_VERSION_TEMPORAL,
+        FileBucket, FileImportIndex, ManifestQueryBytes, RebindTarget,
+        GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
     use crate::extract::{build_facts, build_facts_for_paths, GraphFacts};
     use crate::identity::{stable_symbol_id_for_external_path, EXTERNAL_FILE_PATH};
     use crate::{
-        graph_edge_kind_or_default, Confidence, FileId, GraphEdgeArtifact, GraphFileArtifact,
-        GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
+        graph_edge_kind_or_default, Confidence, FileId, GraphEdgeArtifact, GraphEdgeKind,
+        GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
         GraphSymbolArtifact, NodeId, NodeKind, RelationKind, RunId, SourceSpan, SpanId,
     };
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
     use tracing::{Event, Id, Metadata, Subscriber};
+
+    #[test]
+    fn schema_version_carries_phase_1b_vocabulary() {
+        assert_eq!(super::SCHEMA_VERSION, "spur-graph-schema-v10");
+    }
 
     #[test]
     fn manifest_version_changes_when_spur_edges_query_bytes_change() {
@@ -3105,6 +3194,176 @@ mod tests {
             Some("sym:crate-b-foo")
         );
         assert_eq!(edges[1].bind_method.as_deref(), Some("import_licensed"));
+    }
+
+    fn hcl_symbol(
+        stable_symbol_id: &str,
+        path: &str,
+        entity_name: &str,
+        symbol_kind: &str,
+    ) -> GraphSymbolArtifact {
+        let mut hcl_symbol = symbol(stable_symbol_id, path);
+        hcl_symbol.entity_name = entity_name.to_owned();
+        hcl_symbol.qualified_name = entity_name.to_owned();
+        hcl_symbol.symbol_kind = symbol_kind.to_owned();
+        hcl_symbol
+    }
+
+    fn address_edge(source_stable_symbol_id: &str, target_label: &str) -> GraphEdgeArtifact {
+        let mut address_edge = edge(source_stable_symbol_id, None, RelationKind::References);
+        address_edge.target_label = Some(target_label.to_owned());
+        address_edge.edge_kind = Some(GraphEdgeKind::ReferencesAddress);
+        address_edge
+    }
+
+    fn run_rebind_remaining(buckets: &mut BTreeMap<String, FileBucket>) -> usize {
+        let workspace_index = import_workspace_index_from_buckets(buckets);
+        let symbols_by_entity_name = symbols_by_entity_name_from_buckets(buckets);
+        let mut external_imports = ExternalImportRegistry::from_buckets(buckets);
+        let mut current_symbol_ids = current_symbol_ids_from_buckets(buckets);
+        rebind_remaining_edges(
+            buckets,
+            &workspace_index,
+            &symbols_by_entity_name,
+            &FileImportIndex::new(),
+            &mut external_imports,
+            &mut current_symbol_ids,
+        )
+    }
+
+    #[test]
+    fn rebind_prefers_the_module_directory_for_address_references() {
+        let mut module_a = empty_bucket("modules/a/main.tf", "oid-a");
+        module_a.symbols.push(hcl_symbol(
+            "sym:a-web",
+            "modules/a/main.tf",
+            "aws_instance.web",
+            "resource",
+        ));
+        module_a.symbols.push(hcl_symbol(
+            "sym:a-eip",
+            "modules/a/main.tf",
+            "aws_eip.ip",
+            "resource",
+        ));
+        module_a
+            .edges
+            .push(address_edge("sym:a-eip", "aws_instance.web"));
+
+        let mut module_b = empty_bucket("modules/b/main.tf", "oid-b");
+        module_b.symbols.push(hcl_symbol(
+            "sym:b-web",
+            "modules/b/main.tf",
+            "aws_instance.web",
+            "resource",
+        ));
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("modules/a/main.tf".to_owned(), module_a);
+        buckets.insert("modules/b/main.tf".to_owned(), module_b);
+
+        let ambiguous_unresolved = run_rebind_remaining(&mut buckets);
+
+        assert_eq!(ambiguous_unresolved, 0);
+        let rebound = &buckets["modules/a/main.tf"].edges[0];
+        assert_eq!(
+            rebound.target_stable_symbol_id.as_deref(),
+            Some("sym:a-web")
+        );
+        assert_eq!(rebound.bind_method.as_deref(), Some("address_module_scope"));
+    }
+
+    #[test]
+    fn rebind_falls_back_to_workspace_singleton_and_keeps_ambiguity_unresolved() {
+        let mut root = empty_bucket("main.tf", "oid-root");
+        root.symbols.push(hcl_symbol(
+            "sym:trail",
+            "main.tf",
+            "aws_cloudtrail.t",
+            "resource",
+        ));
+        root.edges
+            .push(address_edge("sym:trail", "aws_s3_bucket.logs"));
+        root.edges
+            .push(address_edge("sym:trail", "aws_instance.web"));
+
+        let mut storage = empty_bucket("modules/storage/main.tf", "oid-storage");
+        storage.symbols.push(hcl_symbol(
+            "sym:logs",
+            "modules/storage/main.tf",
+            "aws_s3_bucket.logs",
+            "resource",
+        ));
+
+        let mut module_a = empty_bucket("modules/a/main.tf", "oid-a");
+        module_a.symbols.push(hcl_symbol(
+            "sym:a-web",
+            "modules/a/main.tf",
+            "aws_instance.web",
+            "resource",
+        ));
+        let mut module_b = empty_bucket("modules/b/main.tf", "oid-b");
+        module_b.symbols.push(hcl_symbol(
+            "sym:b-web",
+            "modules/b/main.tf",
+            "aws_instance.web",
+            "resource",
+        ));
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("main.tf".to_owned(), root);
+        buckets.insert("modules/storage/main.tf".to_owned(), storage);
+        buckets.insert("modules/a/main.tf".to_owned(), module_a);
+        buckets.insert("modules/b/main.tf".to_owned(), module_b);
+
+        let ambiguous_unresolved = run_rebind_remaining(&mut buckets);
+
+        assert_eq!(ambiguous_unresolved, 1);
+        let edges = &buckets["main.tf"].edges;
+        let singleton = edges
+            .iter()
+            .find(|edge| edge.target_label.as_deref() == Some("aws_s3_bucket.logs"))
+            .expect("singleton address edge");
+        assert_eq!(
+            singleton.target_stable_symbol_id.as_deref(),
+            Some("sym:logs")
+        );
+        assert_eq!(singleton.bind_method.as_deref(), Some("address_singleton"));
+
+        let ambiguous = edges
+            .iter()
+            .find(|edge| edge.target_label.as_deref() == Some("aws_instance.web"))
+            .expect("ambiguous address edge");
+        assert_eq!(ambiguous.target_stable_symbol_id, None);
+    }
+
+    #[test]
+    fn rebind_never_binds_addresses_to_foreign_kinds_or_families() {
+        let mut root = empty_bucket("main.tf", "oid-root");
+        root.symbols
+            .push(hcl_symbol("sym:eip", "main.tf", "aws_eip.ip", "resource"));
+        root.edges
+            .push(address_edge("sym:eip", "aws_instance.ghost"));
+
+        let mut docs = empty_bucket("docs/notes.md", "oid-docs");
+        docs.symbols.push(hcl_symbol(
+            "sym:md-section",
+            "docs/notes.md",
+            "aws_instance.ghost",
+            "section",
+        ));
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert("main.tf".to_owned(), root);
+        buckets.insert("docs/notes.md".to_owned(), docs);
+
+        run_rebind_remaining(&mut buckets);
+
+        let rebound = &buckets["main.tf"].edges[0];
+        assert_eq!(
+            rebound.target_stable_symbol_id, None,
+            "a markdown section sharing the address text must never satisfy the rebind"
+        );
     }
 
     #[test]
