@@ -1068,6 +1068,23 @@ impl ParquetClient {
         symbols_from_batches(batches)
     }
 
+    fn symbols_where_string_in(
+        &self,
+        column: &str,
+        values: &[String],
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        let expected = values.iter().cloned().collect::<HashSet<_>>();
+        let batches = filtered_projected_batches(
+            &self.dir.join("nodes.parquet"),
+            SYMBOL_COLUMNS,
+            |schema| string_in_row_filter(schema, column, expected),
+        )?;
+        symbols_from_batches(batches)
+    }
+
     fn symbols_where_all_string_eq(
         &self,
         expected: Vec<(&str, String)>,
@@ -1366,6 +1383,12 @@ impl GraphQueryClient for ParquetClient {
 
     fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
         self.symbols_by_file_path(path)
+    }
+
+    fn symbols_by_files(&self, paths: &[String]) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        // Single set-membership scan of nodes.parquet; the default per-path
+        // loop would pay one full filtered scan per path.
+        self.symbols_where_string_in("file_path", paths)
     }
 
     fn symbols_by_path_name(
