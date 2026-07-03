@@ -2,8 +2,9 @@ use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use spur_acp::{
-    IssueDetailEvent, LifecycleState, PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, Role,
-    SessionId, SpurEvent, SpurEventBody,
+    IssueDetailEvent, LifecycleState, PlanLifecycleEvent, PlanLoopOriginEvent, PlanOwnerStateEvent,
+    PlanSnapshot, PlanSnapshotCounts, PlanSnapshotTask, PlanSummaryEvent, Role, SessionId,
+    SpurEvent, SpurEventBody,
 };
 use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
 use spur_tui::action::{Action, IssueAction};
@@ -373,6 +374,52 @@ fn plan_inspector_renders_wide_lane_board() {
     assert!(buffer_contains(&buffer, "Stage 1"));
     assert!(buffer_contains(&buffer, "Task detail"));
     assert!(buffer_contains(&buffer, "codex:run"));
+}
+
+#[test]
+fn plan_inspector_header_renders_loop_origin_badge() {
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut view = PlanInspectorView::new(SessionId("brain-1".into()));
+    let mut plans = sample_plan_store();
+    plans.apply(&SpurEvent::now(SpurEventBody::PlansLoaded {
+        plans: vec![PlanSummaryEvent {
+            plan_id: "plan-1".into(),
+            epic_id: "bd-plan-1".into(),
+            title: "Loop-authored plan".into(),
+            source_body_preview: None,
+            owner_state: PlanOwnerStateEvent::Mine,
+            lifecycle: PlanLifecycleEvent::Running,
+            loop_origin: Some(PlanLoopOriginEvent {
+                loop_id: "loopabc".into(),
+                generation: 7,
+            }),
+            counts: None,
+            updated_at: None,
+            created_at: None,
+        }],
+        warnings: Vec::new(),
+    }));
+    let lineage = sample_lineage();
+    let synopsis = SessionSynopsisProjection::new();
+    let ctx = ViewContext {
+        lineage: &lineage,
+        plan_projection: &plans,
+        synopsis: &synopsis,
+        brain_status: &BrainStatus::Idle,
+        license_badge: None,
+        flag_summary: None,
+        tombstone: None,
+        transient_hint_override: None,
+        notebook_ready: false,
+        theme: spur_tui::theme::fallback_theme(),
+    };
+
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    assert!(buffer_contains(&buffer, "⟳ gen 7"));
 }
 
 #[test]

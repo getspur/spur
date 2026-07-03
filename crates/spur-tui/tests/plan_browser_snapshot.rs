@@ -3,9 +3,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use spur_acp::{
-    PlanLifecycleEvent, PlanLoadWarningEvent, PlanOwnerStateEvent, PlanSnapshot,
-    PlanSnapshotCounts, PlanSummaryCountsEvent, PlanSummaryEvent, SessionId, SpurEvent,
-    SpurEventBody,
+    PlanLifecycleEvent, PlanLoadWarningEvent, PlanLoopOriginEvent, PlanOwnerStateEvent,
+    PlanSnapshot, PlanSnapshotCounts, PlanSummaryCountsEvent, PlanSummaryEvent, SessionId,
+    SpurEvent, SpurEventBody,
 };
 use spur_core::{ExecutorLineage, PlanProjectionStore, SessionSynopsisProjection};
 use spur_tui::action::Action;
@@ -146,6 +146,18 @@ fn loaded_event() -> SpurEvent {
     })
 }
 
+fn with_loop_origin(
+    mut plan: PlanSummaryEvent,
+    loop_id: &str,
+    generation: u32,
+) -> PlanSummaryEvent {
+    plan.loop_origin = Some(PlanLoopOriginEvent {
+        loop_id: loop_id.into(),
+        generation,
+    });
+    plan
+}
+
 #[test]
 fn renders_all_owner_state_rows_with_lifecycle_and_progress() {
     let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
@@ -183,6 +195,44 @@ fn renders_all_owner_state_rows_with_lifecycle_and_progress() {
             "expected {expected:?} in rendered output:\n{rendered}"
         );
     }
+}
+
+#[test]
+fn renders_loop_origin_badge_in_row_and_detail_panel() {
+    let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
+    let lineage = ExecutorLineage::new();
+    let plans = plan_store_with_current("plan-a1");
+    let ctx = view_ctx(&lineage, &plans);
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::PlansLoaded {
+            plans: vec![with_loop_origin(
+                summary(
+                    "plan-loop",
+                    PlanOwnerStateEvent::Mine,
+                    PlanLifecycleEvent::Running,
+                    1,
+                    2,
+                ),
+                "loopabc",
+                7,
+            )],
+            warnings: Vec::new(),
+        }),
+        &ctx,
+    );
+
+    let backend = TestBackend::new(140, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let rendered = rendered_text(&terminal);
+    let badge_count = rendered.matches("⟳ gen 7").count();
+
+    assert!(
+        badge_count >= 2,
+        "expected badge in row and detail panel, got {badge_count} occurrences:\n{rendered}"
+    );
 }
 
 #[test]
@@ -320,6 +370,61 @@ fn enter_on_persisted_mine_without_projection_inspects_plan() {
             }) if id == "brain-1" && plan_id == "plan-a1"
         ),
         "expected read-only InspectPlan from persisted Mine row, got {action:?}"
+    );
+}
+
+#[test]
+fn loop_generation_started_focuses_new_plan_after_next_refresh() {
+    let mut view = PlanBrowserView::new(SessionId("brain-1".into()));
+    let lineage = ExecutorLineage::new();
+    let plans = PlanProjectionStore::default();
+    let ctx = view_ctx(&lineage, &plans);
+    view.handle_spur_event(&loaded_event(), &ctx);
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::LoopGenerationStarted {
+            loop_id: "loopabc".into(),
+            generation: 7,
+            plan_id: "plan-loop".into(),
+        }),
+        &ctx,
+    );
+    view.handle_spur_event(
+        &SpurEvent::now(SpurEventBody::PlansLoaded {
+            plans: vec![
+                summary(
+                    "plan-a1",
+                    PlanOwnerStateEvent::Mine,
+                    PlanLifecycleEvent::Running,
+                    2,
+                    7,
+                ),
+                with_loop_origin(
+                    summary(
+                        "plan-loop",
+                        PlanOwnerStateEvent::Mine,
+                        PlanLifecycleEvent::Running,
+                        0,
+                        1,
+                    ),
+                    "loopabc",
+                    7,
+                ),
+            ],
+            warnings: Vec::new(),
+        }),
+        &ctx,
+    );
+
+    let backend = TestBackend::new(120, 22);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &ctx))
+        .unwrap();
+    let rendered = rendered_text(&terminal);
+
+    assert!(
+        rendered.contains("> plan-loop"),
+        "expected refreshed loop plan to be selected:\n{rendered}"
     );
 }
 
