@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use spur_acp::{
-    AcpSessionId as SessionId, DeleteSessionRequest, DeleteSessionResponse, ResumeSessionRequest,
-    ResumeSessionResponse,
+    AcpSessionId as SessionId, CloseSessionRequest, CloseSessionResponse, DeleteSessionRequest,
+    DeleteSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
 };
 
 #[test]
@@ -66,4 +66,28 @@ fn delete_session_response_roundtrips_empty_payload() {
     let roundtrip: DeleteSessionResponse =
         serde_json::from_value(value).expect("delete response must deserialize");
     assert_eq!(roundtrip, DeleteSessionResponse::new());
+}
+
+#[test]
+fn close_session_request_roundtrips_with_session_id() {
+    let request = CloseSessionRequest::new(SessionId::new("sess_123"));
+
+    let value = serde_json::to_value(&request).expect("close request must serialize");
+    assert_eq!(value, json!({ "sessionId": "sess_123" }));
+
+    let roundtrip: CloseSessionRequest =
+        serde_json::from_value(value).expect("close request must deserialize");
+    assert_eq!(roundtrip.session_id, SessionId::new("sess_123"));
+    assert!(roundtrip.meta.is_none());
+}
+
+#[test]
+fn close_session_response_roundtrips_empty_payload() {
+    let response = CloseSessionResponse::new();
+    let value = serde_json::to_value(&response).expect("close response must serialize");
+    assert_eq!(value, json!({}));
+
+    let roundtrip: CloseSessionResponse =
+        serde_json::from_value(value).expect("close response must deserialize");
+    assert_eq!(roundtrip, CloseSessionResponse::new());
 }
