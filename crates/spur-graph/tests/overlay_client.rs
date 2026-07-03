@@ -1,12 +1,15 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use spur_graph::{
     CodeSelectorResolution, Confidence, GraphEdgeArtifact, GraphEdgeKind, GraphFileArtifact,
-    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient as _,
+    GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphQueryClient,
     GraphSymbolArtifact, InMemoryClient, NodeId, OverlayClient, OwnedCalleeRecord,
-    OwnedCallerRecord, RelationKind, SearchFilters, SearchMode, SearchOptions,
+    OwnedCallerRecord, RelationKind, SearchFilters, SearchMode, SearchOptions, SearchResult,
 };
+
+use spur_graph::temporal::TemporalIndex;
 
 #[test]
 fn empty_delta_matches_base_across_query_surface() {
@@ -437,6 +440,151 @@ fn assert_clients_match(
         caller_records(expected.find_caller_edges(focus_id)),
         "find_caller_edges({focus_id})"
     );
+}
+
+#[test]
+fn overlay_remap_queries_base_per_changed_file_not_per_symbol() {
+    let base = CountingClient::new(InMemoryClient::new(Arc::new(base_artifact())));
+    let delta = artifact(
+        "delta-many-symbols",
+        vec![
+            file("src/changed.rs"),
+            file("src/unchanged.rs"),
+            file("src/deleted.rs"),
+        ],
+        vec![
+            symbol("changed-a", "src/changed.rs", [1, 2], "target", "target"),
+            symbol(
+                "changed-b",
+                "src/changed.rs",
+                [4, 6],
+                "helper_b",
+                "helper_b",
+            ),
+            symbol(
+                "changed-c",
+                "src/changed.rs",
+                [8, 9],
+                "helper_c",
+                "helper_c",
+            ),
+            symbol("deleted-a", "src/deleted.rs", [30, 31], "gone", "gone"),
+            symbol("deleted-b", "src/deleted.rs", [33, 35], "gone_b", "gone_b"),
+            symbol("deleted-c", "src/deleted.rs", [37, 39], "gone_c", "gone_c"),
+        ],
+        vec![],
+    );
+
+    let overlay = OverlayClient::from_artifacts(
+        base.clone(),
+        Arc::new(delta),
+        HashSet::from(["src/changed.rs".to_owned(), "src/deleted.rs".to_owned()]),
+    )
+    .expect("overlay");
+
+    assert_eq!(
+        base.symbols_by_path_name_calls(),
+        0,
+        "overlay construction must not query the base once per delta symbol"
+    );
+    assert!(
+        base.symbols_by_file_calls() <= 2,
+        "overlay construction should fetch base symbols at most once per changed file, got {}",
+        base.symbols_by_file_calls()
+    );
+
+    // The remap must still repoint stale base ids to their delta successors.
+    let repointed = overlay
+        .find_caller_edges("changed-a")
+        .into_iter()
+        .filter_map(|record| match record {
+            OwnedCallerRecord::Resolved { caller, .. } => Some(caller.stable_symbol_id),
+            OwnedCallerRecord::Unresolved { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(repointed, vec!["unchanged-caller-id".to_owned()]);
+}
+
+#[derive(Clone)]
+struct CountingClient {
+    inner: InMemoryClient,
+    symbols_by_file_calls: Arc<AtomicUsize>,
+    symbols_by_path_name_calls: Arc<AtomicUsize>,
+}
+
+impl CountingClient {
+    fn new(inner: InMemoryClient) -> Self {
+        Self {
+            inner,
+            symbols_by_file_calls: Arc::new(AtomicUsize::new(0)),
+            symbols_by_path_name_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn symbols_by_file_calls(&self) -> usize {
+        self.symbols_by_file_calls.load(Ordering::SeqCst)
+    }
+
+    fn symbols_by_path_name_calls(&self) -> usize {
+        self.symbols_by_path_name_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl GraphQueryClient for CountingClient {
+    fn search_symbols(&self, opts: &SearchOptions) -> anyhow::Result<SearchResult> {
+        self.inner.search_symbols(opts)
+    }
+
+    fn find_caller_edges(&self, sid: &str) -> Vec<OwnedCallerRecord> {
+        self.inner.find_caller_edges(sid)
+    }
+
+    fn find_unresolved_caller_edges_by_labels(
+        &self,
+        target_labels: &HashSet<String>,
+    ) -> Vec<OwnedCallerRecord> {
+        self.inner
+            .find_unresolved_caller_edges_by_labels(target_labels)
+    }
+
+    fn find_callee_edges(&self, sid: &str) -> Vec<OwnedCalleeRecord> {
+        self.inner.find_callee_edges(sid)
+    }
+
+    fn resolve_selector(&self, selector: &str) -> anyhow::Result<CodeSelectorResolution> {
+        self.inner.resolve_selector(selector)
+    }
+
+    fn symbol_by_id(&self, sid: &str) -> anyhow::Result<Option<GraphSymbolArtifact>> {
+        self.inner.symbol_by_id(sid)
+    }
+
+    fn symbols_by_file(&self, path: &str) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.symbols_by_file_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.symbols_by_file(path)
+    }
+
+    fn symbols_by_path_name(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<GraphSymbolArtifact>> {
+        self.symbols_by_path_name_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.inner.symbols_by_path_name(path, name)
+    }
+
+    fn file_manifest_by_path(&self, path: &str) -> anyhow::Result<Option<GraphFileManifestEntry>> {
+        self.inner.file_manifest_by_path(path)
+    }
+
+    fn file_exists(&self, path: &str) -> anyhow::Result<bool> {
+        self.inner.file_exists(path)
+    }
+
+    fn temporal_index(&self) -> Arc<TemporalIndex> {
+        self.inner.temporal_index()
+    }
 }
 
 fn normalize_resolution(resolution: CodeSelectorResolution) -> CodeSelectorResolution {
