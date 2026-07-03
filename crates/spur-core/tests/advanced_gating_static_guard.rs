@@ -9,6 +9,18 @@ const REQUIRED_FUNCTION: &str = "require_feature(";
 const REQUIRED_KEY: &str = "PM_PRO_BEADS_ADVANCED";
 const LOOKBACK_LINES: usize = 10;
 const MIN_GATED_CALLSITES: usize = 29;
+const ALLOWED_UNGATED_CALLSITES: &[AllowedUngatedCallsite] = &[
+    AllowedUngatedCallsite {
+        path_suffix: "src/plan/loops/status.rs",
+        function_name: "build_loop_status",
+        reason: "license gate enforced at the MCP handler boundary (handle_get_loop_status); interactive TUI inspect path intentionally ungated - browse-only surfaces degrade rather than gate",
+    },
+    AllowedUngatedCallsite {
+        path_suffix: "src/plan/loops/status.rs",
+        function_name: "load_loop_summaries",
+        reason: "loop browser degrades when advanced comments are unavailable",
+    },
+];
 const MOVED_SOURCE_PATHS: &[&str] = &[
     "src/handlers.rs",
     "src/outcome_materializer.rs",
@@ -42,6 +54,9 @@ fn every_advanced_callsite_is_pm_pro_gated() {
             }
             checked += 1;
             if has_nearby_gate(&lines, idx) || containing_function_has_gate(&lines, idx) {
+                continue;
+            }
+            if is_allowed_ungated_callsite(&file, &lines, idx) {
                 continue;
             }
             failures.push(format!("{}:{}", file.display(), idx + 1));
@@ -86,4 +101,29 @@ fn containing_function_has_gate(lines: &[&str], idx: usize) -> bool {
     };
     let body_to_call = lines[fn_start..=idx].join("\n");
     body_to_call.contains(REQUIRED_FUNCTION) && body_to_call.contains(REQUIRED_KEY)
+}
+
+struct AllowedUngatedCallsite {
+    path_suffix: &'static str,
+    function_name: &'static str,
+    reason: &'static str,
+}
+
+fn is_allowed_ungated_callsite(file: &Path, lines: &[&str], idx: usize) -> bool {
+    ALLOWED_UNGATED_CALLSITES.iter().any(|allowed| {
+        let _reason = allowed.reason;
+        file.ends_with(allowed.path_suffix)
+            && containing_function_name(lines, idx).as_deref() == Some(allowed.function_name)
+    })
+}
+
+fn containing_function_name(lines: &[&str], idx: usize) -> Option<String> {
+    let fn_line = (0..=idx)
+        .rev()
+        .find(|line_idx| lines[*line_idx].contains("fn "))?;
+    let after_fn = lines[fn_line].split_once("fn ")?.1;
+    let name = after_fn
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .next()?;
+    Some(name.to_string())
 }
