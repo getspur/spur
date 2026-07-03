@@ -61,3 +61,21 @@ pub fn build_loop_run(
         ended_at: clock_now,
     }
 }
+
+pub fn retired_loop_run(loop_id: &str, generation: u32, clock_now: i64) -> AuditSentinelKind {
+    AuditSentinelKind::LoopRun {
+        loop_id: loop_id.to_string(),
+        generation,
+        plan_id: String::new(),
+        outcome: "retired".to_string(),
+        tasks_discovered: 0,
+        approved: 0,
+        rejected: 0,
+        failed: 0,
+        cancelled: 0,
+        escalations: 0,
+        cost_micros: 0,
+        started_at: clock_now,
+        ended_at: clock_now,
+    }
+}

@@ -1661,6 +1661,20 @@ mod loop_lifecycle_mcp_tests {
             .unwrap_or_else(|| panic!("missing loop issue for {loop_id}; issues={issues:?}"))
     }
 
+    async fn loop_run_audits(
+        mock_pm: &crate::plan::test_util::MockPm,
+        issue_id: &str,
+    ) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
+        mock_pm
+            .comments(issue_id)
+            .await
+            .into_iter()
+            .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(&comment.body))
+            .filter_map(Result::ok)
+            .filter(|audit| matches!(audit, crate::plan::audit_sentinel::AuditSentinelKind::LoopRun { .. }))
+            .collect()
+    }
+
     async fn submit_valid_loop(
         server: &McpCallbackServer,
     ) -> (String, serde_json::Value) {
@@ -1702,6 +1716,85 @@ mod loop_lifecycle_mcp_tests {
                 .expect("loop sentinel parses")
                 .loop_id,
             loop_id
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_loop_closes_issue_and_writes_retired_record() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+
+        let response = server
+            .__test_call_tool("kill_loop", json!({ "loop_id": loop_id }))
+            .await;
+
+        assert!(response.get("error").is_none(), "kill_loop failed: {response}");
+        let output = response_text_json(&response);
+        assert_eq!(output["loop_id"], loop_id);
+        assert_eq!(output["issue_id"], issue_id);
+        assert_eq!(output["retired"], true);
+        let issue = mock_pm.issue(&issue_id).await;
+        assert_eq!(issue.status, crate::plan::PmLike::closed_status(mock_pm.as_ref()));
+        assert!(
+            issue.labels
+                .iter()
+                .all(|label| crate::plan::labels::parse_loop_next_run(label).is_none()),
+            "kill_loop must remove next-run labels: {:?}",
+            issue.labels
+        );
+        let runs = loop_run_audits(mock_pm.as_ref(), &issue_id).await;
+        assert_eq!(runs.len(), 1, "kill_loop must write exactly one run record");
+        assert!(matches!(
+            &runs[0],
+            crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+                loop_id: record_loop_id,
+                outcome,
+                tasks_discovered: 0,
+                approved: 0,
+                rejected: 0,
+                failed: 0,
+                cancelled: 0,
+                cost_micros: 0,
+                ..
+            } if record_loop_id == &loop_id && outcome == "retired"
+        ));
+    }
+
+    #[tokio::test]
+    async fn kill_loop_is_idempotent_on_closed_loop() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+
+        let first = server
+            .__test_call_tool("kill_loop", json!({ "loop_id": loop_id }))
+            .await;
+        assert!(first.get("error").is_none(), "first kill_loop failed: {first}");
+        let first_runs = loop_run_audits(mock_pm.as_ref(), &issue_id).await;
+        assert_eq!(first_runs.len(), 1);
+
+        let second = server
+            .__test_call_tool("kill_loop", json!({ "loop_id": loop_id }))
+            .await;
+
+        assert!(
+            second.get("error").is_none(),
+            "second kill_loop should be idempotent: {second}"
+        );
+        let output = response_text_json(&second);
+        assert_eq!(output["loop_id"], loop_id);
+        assert_eq!(output["issue_id"], issue_id);
+        assert_eq!(output["retired"], true);
+        assert_eq!(
+            mock_pm.issue(&issue_id).await.status,
+            crate::plan::PmLike::closed_status(mock_pm.as_ref())
+        );
+        let second_runs = loop_run_audits(mock_pm.as_ref(), &issue_id).await;
+        assert_eq!(
+            second_runs.len(),
+            1,
+            "second kill_loop must not duplicate retired run records"
         );
     }
 
