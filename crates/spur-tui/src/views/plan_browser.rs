@@ -24,9 +24,9 @@ fn token(theme: &Theme, name: &str) -> Color {
 }
 
 const STATUS_HINT: &str =
-    " [j/k]navigate [p]plan peek/open [o]work item peek/open [c]claim [s]start/resume [S]sort [f]filter [r]refresh [Esc]summary/back";
+    " [j/k]navigate [p]plan peek/open [o]work item peek/open [c]claim [s]start/resume [L]loops [S]sort [f]filter [r]refresh [Esc]summary/back";
 const STATUS_HINT_COMPACT: &str =
-    " [j/k]nav [p]plan [o]item [c]claim [s]start [S]sort [f]filter [Esc]back";
+    " [j/k]nav [p]plan [o]item [c]claim [s]start [L]loops [S]sort [f]filter [Esc]back";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortMode {
@@ -128,6 +128,34 @@ pub fn format_relative_time(ts: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
     let years = days / 365;
     format!("{years}y ago")
+}
+
+pub fn format_until(ts: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (ts - now).num_seconds();
+    if secs <= 0 {
+        return "due".into();
+    }
+    if secs < 60 {
+        return "in <1m".into();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("in {mins}m");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("in {hours}h");
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return format!("in {days}d");
+    }
+    if days < 365 {
+        let months = days / 30;
+        return format!("in {months}mo");
+    }
+    let years = days / 365;
+    format!("in {years}y")
 }
 
 fn format_relative_opt(ts: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
@@ -1025,6 +1053,12 @@ impl View for PlanBrowserView {
             KeyCode::Char('b') if key.modifiers.is_empty() => {
                 Some(Action::NavigateTo(ViewId::IssueBrowser))
             }
+            KeyCode::Char('L')
+                if key.modifiers.is_empty()
+                    || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+            {
+                Some(Action::NavigateTo(ViewId::LoopBrowser))
+            }
             KeyCode::Esc if key.modifiers.is_empty() && self.detail_peek != DetailPeek::Summary => {
                 self.detail_peek = DetailPeek::Summary;
                 self.hint = None;
@@ -1255,6 +1289,7 @@ mod tests {
             }),
             updated_at: None,
             created_at: None,
+            loop_origin: None,
         }
     }
 
@@ -1602,6 +1637,20 @@ mod tests {
         ];
         for (ts, expected) in cases {
             assert_eq!(format_relative_time(ts, now), expected, "ts={ts}");
+        }
+
+        let until_cases = [
+            (now - chrono::Duration::seconds(1), "due"),
+            (now, "due"),
+            (now + chrono::Duration::seconds(59), "in <1m"),
+            (now + chrono::Duration::minutes(42), "in 42m"),
+            (now + chrono::Duration::hours(3), "in 3h"),
+            (now + chrono::Duration::days(8), "in 8d"),
+            (now + chrono::Duration::days(60), "in 2mo"),
+            (now + chrono::Duration::days(800), "in 2y"),
+        ];
+        for (ts, expected) in until_cases {
+            assert_eq!(format_until(ts, now), expected, "ts={ts}");
         }
     }
 
