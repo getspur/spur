@@ -65,6 +65,7 @@ impl SessionDetailView {
             react_trace: brain_chat_trace(agent_kind),
             input_bar: InputBar::new(),
             cost: 0.0,
+            agent_reported_cost: None,
             started_at: Instant::now(),
             current_mode: None,
             command_registry,
@@ -151,6 +152,7 @@ impl SessionDetailView {
             react_trace: brain_chat_trace(spur_acp::AgentKind::Generic),
             input_bar: crate::components::input_bar::InputBar::new(),
             cost: 0.0,
+            agent_reported_cost: None,
             started_at: std::time::Instant::now(),
             current_mode: None,
             command_registry,
@@ -252,6 +254,7 @@ impl SessionDetailView {
             react_trace: brain_chat_trace(spur_acp::AgentKind::Generic),
             input_bar: InputBar::new(),
             cost: 0.0,
+            agent_reported_cost: None,
             started_at: std::time::Instant::now(),
             current_mode: None,
             command_registry,
@@ -329,9 +332,9 @@ impl SessionDetailView {
     /// - Conversation: `react_trace` (content wiped; keeps its `AgentKind`
     ///   and `mermaid_enabled` config), `tool_depth`, `mermaid_registry`,
     ///   `pending_fence_actions`.
-    /// - Header/status (Task 3): `cost`, `started_at`, `current_mode`
-    ///   (plus `react_trace.set_mode(None)` — see §3.3 of spec), `context_used`,
-    ///   `context_size`, `auth_error`.
+    /// - Header/status (Task 3): `cost`, `agent_reported_cost`, `started_at`,
+    ///   `current_mode` (plus `react_trace.set_mode(None)` — see §3.3 of spec),
+    ///   `context_used`, `context_size`, `auth_error`.
     /// - Stream flags (Task 3): `stream_in_flight`, `cancelling_in_flight`.
     /// - UI transient: `resume_banner`, `completion`, `cancel_hint_until`.
     /// - Draft debounce locals (Task 4): `last_persisted_draft`,
@@ -362,6 +365,7 @@ impl SessionDetailView {
 
         // Header / status.
         self.cost = 0.0;
+        self.agent_reported_cost = None;
         self.started_at = std::time::Instant::now();
         self.current_mode = None;
         self.react_trace.set_mode(None); // mirror for pane-title badge (set_current_mode pattern)
