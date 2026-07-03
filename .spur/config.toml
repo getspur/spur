@@ -185,7 +185,7 @@ kind = "codex-acp"
 role = "both"
 capabilities = []
 cost_tier = "low"
-skip_permissions = false
+skip_permissions = true
 skip_permissions_args = []
 
 [agents.entries.review]
