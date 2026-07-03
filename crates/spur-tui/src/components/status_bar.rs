@@ -167,6 +167,8 @@ pub struct StatusBarProps<'a> {
     pub esc_consumed_by_composer: bool,
     /// True when the notebook socket has advertised readiness.
     pub notebook_ready: bool,
+    /// Cached agent caps for SessionDetail lifecycle affordance discovery.
+    pub session_lifecycle_caps: Option<&'a spur_acp::SpurAgentCaps>,
     /// Number of tracked issues (from IssuesLoaded); 0 means not shown.
     pub issue_count: usize,
     /// Graph alert summary from bv: (total, critical, warning). None if bv unavailable.
@@ -416,6 +418,18 @@ impl StatusBar {
             ));
             spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
         }
+        if matches!(props.view, ViewId::SessionDetail(_)) {
+            if let Some(label) = props
+                .session_lifecycle_caps
+                .and_then(session_lifecycle_caps_label)
+            {
+                spans.push(Span::styled(
+                    label,
+                    Style::default().fg(token(theme, "status_bar.fg")),
+                ));
+                spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
+            }
+        }
         #[cfg(feature = "analytics")]
         if via_analytics_visible() {
             spans.push(Span::styled(
@@ -529,6 +543,28 @@ impl StatusBar {
     }
 }
 
+fn session_lifecycle_caps_label(caps: &spur_acp::SpurAgentCaps) -> Option<String> {
+    let mut advertised = Vec::new();
+    if caps.supports_resume_session() {
+        advertised.push("resume");
+    }
+    if caps.supports_delete_session() {
+        advertised.push("delete");
+    }
+    if caps.supports_list_sessions() {
+        advertised.push("list");
+    }
+    if caps.supports_close_session() {
+        advertised.push("close");
+    }
+
+    if advertised.is_empty() {
+        None
+    } else {
+        Some(format!("session: {}", advertised.join(" ")))
+    }
+}
+
 #[cfg(test)]
 mod status_bar_hint_tests {
     use super::{hint_for_session_detail, StatusBar, StatusBarProps};
@@ -558,6 +594,7 @@ mod status_bar_hint_tests {
             stream_in_flight: false,
             esc_consumed_by_composer: false,
             notebook_ready,
+            session_lifecycle_caps: None,
             issue_count: 0,
             alert_summary: None,
             license_badge: None,
