@@ -212,6 +212,7 @@ async fn review_task_emits_refreshed_plan_snapshot() {
                 result_summary: Some("ready".to_string()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("0000000000000000000000000000000000000001".to_string()),
+                estimated_cost_micros: None,
             }),
         )
         .await

@@ -61,6 +61,7 @@ async fn emit_completion_failed(adv: &dyn spur_pm::BeadsAdvanced, id: &str) {
         result_summary: Some("worker crashed".into()),
         artifact_uri: None,
         dispatched_base_oid: None,
+        estimated_cost_micros: None,
     });
     adv.add_comment(id, &comment).await.expect("seed audit");
 }
