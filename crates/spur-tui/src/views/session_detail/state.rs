@@ -106,6 +106,7 @@ impl SessionDetailView {
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
             pending_model_override: None,
+            pending_effort_override: None,
             spur_agent_caps: None,
         }
     }
@@ -191,6 +192,7 @@ impl SessionDetailView {
             load_state: LoadState::Ready,
             session_config_options: Vec::new(),
             pending_model_override: None,
+            pending_effort_override: None,
             spur_agent_caps: None,
         }
     }
@@ -291,6 +293,7 @@ impl SessionDetailView {
             load_state: LoadState::Retiring,
             session_config_options: Vec::new(),
             pending_model_override: None,
+            pending_effort_override: None,
             spur_agent_caps: None,
         }
     }
@@ -609,6 +612,9 @@ impl SessionDetailView {
         if options.iter().any(|option| option.id.0.as_ref() == "model") {
             self.pending_model_override = None;
         }
+        if spur_acp::SpurAgentCaps::effort_label_from(options).is_some() {
+            self.pending_effort_override = None;
+        }
     }
 
     pub(super) fn resolved_model_label(&self) -> Option<String> {
@@ -617,6 +623,13 @@ impl SessionDetailView {
             .map(str::to_owned)
             .or_else(|| self.pending_model_override.clone())
             .or_else(|| caps.and_then(spur_acp::SpurAgentCaps::current_model_label))
+    }
+
+    pub(super) fn resolved_effort_label(&self) -> Option<String> {
+        let caps = self.spur_agent_caps.as_deref();
+        spur_acp::SpurAgentCaps::effort_label_from(&self.session_config_options)
+            .or_else(|| self.pending_effort_override.clone())
+            .or_else(|| caps.and_then(spur_acp::SpurAgentCaps::current_effort_label))
     }
 
     /// Cache the agent capabilities for this session. Captured by the
