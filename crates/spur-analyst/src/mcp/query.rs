@@ -14,6 +14,8 @@ use duckdb::arrow::datatypes::DataType;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::open_analyst_connection_read_only;
+
 use super::knowledge_context::analyst_db_path;
 use super::McpHandlerError;
 
@@ -107,17 +109,8 @@ fn first_token(query: &str) -> &str {
 }
 
 fn query_read_only(db_path: &Path, sql: &str, allow_stale: bool) -> Result<Value, McpHandlerError> {
-    let config = duckdb::Config::default()
-        .access_mode(duckdb::AccessMode::ReadOnly)
-        .map_err(|error| {
-            McpHandlerError::Internal(format!("failed to configure read-only duckdb: {error}"))
-        })?;
-    let conn = duckdb::Connection::open_with_flags(db_path, config).map_err(|error| {
-        McpHandlerError::Internal(format!(
-            "failed to open analyst DuckDB read-only at {}: {error}",
-            db_path.display()
-        ))
-    })?;
+    let conn = open_analyst_connection_read_only(db_path)
+        .map_err(|error| McpHandlerError::Internal(format!("{error:#}")))?;
 
     let staleness_warning = match freshness_gate(&conn, db_path, allow_stale)? {
         FreshnessGate::Proceed { warning } => warning,
