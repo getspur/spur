@@ -339,13 +339,14 @@ impl McpCallbackServer {
 
         match hook(request).await {
             DispatchOrphanResumeOutcome::Resumed => {
+                // TODO(resume-redrive): Re-prompt the verified ACP session after probe resume.
                 tracing::info!(
                     issue_id = %issue_id,
                     delegation_id = %delegation_id,
-                    "recover_orphaned_dispatch: resumed live worker session"
+                    "recover_orphaned_dispatch: worker ACP session verified resumable via probe connection; no live worker is executing because resume re-drive is not implemented"
                 );
                 Some(
-                    "Worker session resumed. Wait for the live worker completion before retrying recovery."
+                    "Worker ACP session was verified resumable via a probe connection; no live worker is currently executing because resume re-drive is not implemented yet. Dispatch intent and labels were preserved, so state compensation was skipped. Once the worker branch is final, re-run recover_orphaned_dispatch to fall back to state compensation, or review the branch directly."
                         .to_string(),
                 )
             }

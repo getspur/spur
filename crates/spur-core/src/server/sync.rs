@@ -645,7 +645,7 @@ async fn try_resume_dispatch_orphan(
             tracing::info!(
                 task_id = %task_id,
                 delegation_id = %delegation_id,
-                "startup recovery: resumed live worker session for dispatch orphan"
+                "startup recovery: worker ACP session verified resumable via probe connection for dispatch orphan; no live worker is executing because resume re-drive is not implemented"
             );
             Ok(true)
         }
