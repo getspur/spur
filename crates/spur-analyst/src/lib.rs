@@ -29,7 +29,10 @@ const MAX_GRAPH_CANDIDATES: usize = 30;
 pub const MAX_SYMBOL_RISK_COMMUNITY_IDS: usize = 40;
 pub const MAX_CONTEXT_PATH_HOPS: usize = 6;
 pub const MAX_CONTEXT_PATHS: usize = 12;
-const DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT: &str = "512MB";
+// Keep this at 2GB or above: 512MB starved real-index hybrid
+// context-candidate queries into DuckDB OOM, whose abort path can
+// double-free aggregate state and SIGABRT the process (duckdb#19391).
+const DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT: &str = "4GB";
 const DEFAULT_ANALYST_DUCKDB_THREADS: usize = 4;
 const ANALYST_DUCKDB_MEMORY_LIMIT_ENV: &str = "SPUR_ANALYST_DUCKDB_MEMORY_LIMIT";
 const ANALYST_DUCKDB_THREADS_ENV: &str = "SPUR_ANALYST_DUCKDB_THREADS";
@@ -170,8 +173,11 @@ fn apply_analyst_duckdb_resource_caps(
     caps: &AnalystDuckDbResourceCaps,
 ) -> Result<()> {
     let memory_limit = caps.memory_limit.replace('\'', "''");
+    // preserve_insertion_order=false shrinks the working set of large
+    // aggregations; analyst queries that care about order use explicit
+    // ORDER BY clauses.
     conn.execute_batch(&format!(
-        "SET memory_limit = '{memory_limit}';\nSET threads = {};",
+        "SET memory_limit = '{memory_limit}';\nSET threads = {};\nSET preserve_insertion_order = false;",
         caps.threads
     ))
     .with_context(|| {
