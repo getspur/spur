@@ -4,6 +4,13 @@ pub mod mcp;
 
 use std::{env, path::Path};
 
+#[cfg(test)]
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
+
 use anyhow::{anyhow, Context as _, Result};
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 
@@ -12,6 +19,8 @@ static LANCE_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 // only published for DuckDB <= 1.4.4. Install it once per process; the LOAD is
 // best-effort and the caller falls back to recursive SQL on failure.
 static DUCKPGQ_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+#[cfg(test)]
+static ANALYST_CONNECTION_OPEN_COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
 
 const MAX_CONTEXT_CANDIDATES: usize = 40;
 const MAX_GRAPH_CANDIDATES: usize = 30;
@@ -90,6 +99,51 @@ pub(crate) fn open_analyst_connection_read_only(db_path: &Path) -> Result<duckdb
     open_analyst_connection_read_only_with_caps(db_path, AnalystDuckDbResourceCaps::from_env())
 }
 
+pub(crate) fn load_analyst_icu_extension(conn: &duckdb::Connection) {
+    // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
+    // live in DuckDB's ICU extension. Keep this best-effort and let query
+    // preparation surface genuine failures in the existing per-stage shape.
+    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
+}
+
+pub(crate) fn load_analyst_lance_extension(conn: &duckdb::Connection) {
+    // Hybrid retrieval uses DuckDB's Lance extension when available. Keep this
+    // best-effort so missing extension binaries degrade to BM25-only search.
+    LANCE_INSTALLED.get_or_init(|| {
+        let _ = conn.execute_batch("INSTALL lance;");
+    });
+    let _ = conn.execute_batch("LOAD lance;");
+}
+
+#[cfg(test)]
+pub(crate) fn reset_analyst_connection_open_count_for_test(db_path: &Path) {
+    let counts = ANALYST_CONNECTION_OPEN_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut counts = counts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.remove(db_path);
+}
+
+#[cfg(test)]
+pub(crate) fn analyst_connection_open_count_for_test(db_path: &Path) -> usize {
+    let Some(counts) = ANALYST_CONNECTION_OPEN_COUNTS.get() else {
+        return 0;
+    };
+    let counts = counts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.get(db_path).copied().unwrap_or(0)
+}
+
+#[cfg(test)]
+fn record_analyst_connection_open_for_test(db_path: &Path) {
+    let counts = ANALYST_CONNECTION_OPEN_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut counts = counts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counts.entry(db_path.to_path_buf()).or_insert(0) += 1;
+}
+
 fn open_analyst_connection_read_only_with_caps(
     db_path: &Path,
     caps: AnalystDuckDbResourceCaps,
@@ -104,6 +158,8 @@ fn open_analyst_connection_read_only_with_caps(
         )
     })?;
     apply_analyst_duckdb_resource_caps(&conn, &caps)?;
+    #[cfg(test)]
+    record_analyst_connection_open_for_test(db_path);
     Ok(conn)
 }
 
@@ -356,18 +412,19 @@ pub fn query_symbol_risk_community<S: AsRef<str>>(
     stable_symbol_ids: &[S],
 ) -> Result<SymbolRiskCommunityResult> {
     let conn = open_analyst_connection_read_only(db_path)?;
+    load_analyst_icu_extension(&conn);
+    query_symbol_risk_community_with_conn(&conn, db_path, stable_symbol_ids)
+}
 
-    // The risk scorecard view (via v_symbol_churn_90d) does TIMESTAMPTZ arithmetic
-    // (`now() - INTERVAL '90 day'`) whose `-` overload lives in DuckDB's ICU
-    // extension. Without it, scorecard enrichment fails to bind. Keep it
-    // best-effort (mirrors query_context_candidates) and let preparation surface
-    // any genuine failure as a caveat.
-    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
-
+pub fn query_symbol_risk_community_with_conn<S: AsRef<str>>(
+    conn: &duckdb::Connection,
+    db_path: &Path,
+    stable_symbol_ids: &[S],
+) -> Result<SymbolRiskCommunityResult> {
     let (inputs, mut caveats, truncated) = bounded_symbol_inputs(stable_symbol_ids);
     let mut result = SymbolRiskCommunityResult {
         db_path: db_path.display().to_string(),
-        graph_content_hash: graph_content_hash(&conn),
+        graph_content_hash: graph_content_hash(conn),
         max_symbols: MAX_SYMBOL_RISK_COMMUNITY_IDS,
         truncated,
         risk_scorecard: Vec::new(),
@@ -381,7 +438,7 @@ pub fn query_symbol_risk_community<S: AsRef<str>>(
         return Ok(result);
     }
 
-    match query_symbol_risk_scorecard_rows(&conn, &inputs) {
+    match query_symbol_risk_scorecard_rows(conn, &inputs) {
         Ok(rows) => result.risk_scorecard = rows,
         Err(error) => {
             let caveat = SymbolEvidenceCaveat {
@@ -396,7 +453,7 @@ pub fn query_symbol_risk_community<S: AsRef<str>>(
         }
     }
 
-    match query_symbol_community_context_rows(&conn, &inputs) {
+    match query_symbol_community_context_rows(conn, &inputs) {
         Ok(rows) => result.community_context = rows,
         Err(error) => {
             let caveat = SymbolEvidenceCaveat {
@@ -411,7 +468,7 @@ pub fn query_symbol_risk_community<S: AsRef<str>>(
         }
     }
 
-    match query_symbol_graph_metrics(&conn) {
+    match query_symbol_graph_metrics(conn) {
         Ok(metrics) => result.graph_metrics = metrics,
         Err(error) => result.caveats.push(SymbolEvidenceCaveat {
             stable_symbol_id: None,
@@ -429,24 +486,24 @@ pub fn query_context_candidates(
     scope: KnowledgeSearchScope,
     options: KnowledgeQueryOptions,
 ) -> Result<KnowledgeQueryResult> {
+    let conn = open_analyst_connection_read_only(db_path)?;
+    load_analyst_icu_extension(&conn);
+    load_analyst_lance_extension(&conn);
+    query_context_candidates_with_conn(&conn, db_path, query, scope, options)
+}
+
+pub fn query_context_candidates_with_conn(
+    conn: &duckdb::Connection,
+    db_path: &Path,
+    query: &str,
+    scope: KnowledgeSearchScope,
+    options: KnowledgeQueryOptions,
+) -> Result<KnowledgeQueryResult> {
     let query = query.trim();
     if query.is_empty() {
         return Err(anyhow!("knowledge context query must be non-empty"));
     }
     let limit = options.limit.clamp(1, MAX_CONTEXT_CANDIDATES);
-
-    let conn = open_analyst_connection_read_only(db_path)?;
-
-    // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
-    // live in DuckDB's ICU extension. Docs-only queries can still work without it,
-    // so keep this best-effort and let query preparation surface real failures.
-    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
-    // Hybrid retrieval uses DuckDB's Lance extension when available. Keep this
-    // best-effort so missing extension binaries degrade to the BM25 macro below.
-    LANCE_INSTALLED.get_or_init(|| {
-        let _ = conn.execute_batch("INSTALL lance;");
-    });
-    let _ = conn.execute_batch("LOAD lance;");
 
     let graph_content_hash = conn
         .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
@@ -458,7 +515,7 @@ pub fn query_context_candidates(
     let query_vec_sql = format_query_vec_sql(options.query_vec.as_deref());
     let mut hybrid_failed = false;
     let candidates = match query_context_candidates_inner(
-        &conn,
+        conn,
         &escaped_query,
         sql_scope,
         sql_intent,
@@ -476,8 +533,9 @@ pub fn query_context_candidates(
                 limit,
                 "hybrid search failed; degrading to BM25-only context candidate search"
             );
+            let _ = conn.execute_batch("ROLLBACK;");
             query_context_candidates_inner(
-                &conn,
+                conn,
                 &escaped_query,
                 sql_scope,
                 sql_intent,
@@ -515,6 +573,17 @@ pub fn query_context_paths(
     target_stable_id: &str,
     options: KnowledgePathOptions,
 ) -> Result<KnowledgePathResult> {
+    let conn = open_analyst_connection_read_only(db_path)?;
+    query_context_paths_with_conn(&conn, db_path, source_stable_id, target_stable_id, options)
+}
+
+pub fn query_context_paths_with_conn(
+    conn: &duckdb::Connection,
+    db_path: &Path,
+    source_stable_id: &str,
+    target_stable_id: &str,
+    options: KnowledgePathOptions,
+) -> Result<KnowledgePathResult> {
     let source_stable_id = source_stable_id.trim();
     let target_stable_id = target_stable_id.trim();
     if source_stable_id.is_empty() || target_stable_id.is_empty() {
@@ -525,11 +594,10 @@ pub fn query_context_paths(
 
     let max_hops = options.max_hops.clamp(1, MAX_CONTEXT_PATH_HOPS);
     let max_paths = options.max_paths.clamp(1, MAX_CONTEXT_PATHS);
-    let conn = open_analyst_connection_read_only(db_path)?;
 
     let result_context = KnowledgePathResultContext {
         db_path,
-        graph_content_hash: graph_content_hash(&conn),
+        graph_content_hash: graph_content_hash(conn),
         max_hops,
         max_paths,
     };
@@ -547,7 +615,7 @@ pub fn query_context_paths(
 
     if options.undirected {
         match query_recursive_undirected_context_path_rows(
-            &conn,
+            conn,
             source_stable_id,
             target_stable_id,
             max_hops,
@@ -586,7 +654,7 @@ pub fn query_context_paths(
     }
 
     if let Ok(rows) =
-        query_duckpgq_direct_paths(&conn, source_stable_id, target_stable_id, max_paths)
+        query_duckpgq_direct_paths(conn, source_stable_id, target_stable_id, max_paths)
     {
         if !rows.is_empty() {
             return Ok(path_result(
@@ -599,10 +667,10 @@ pub fn query_context_paths(
         }
     }
 
-    match query_duckpgq_shortest_hops(&conn, source_stable_id, target_stable_id, max_hops) {
+    match query_duckpgq_shortest_hops(conn, source_stable_id, target_stable_id, max_hops) {
         Ok(Some(shortest_hops)) => {
             match query_recursive_context_path_rows(
-                &conn,
+                conn,
                 source_stable_id,
                 target_stable_id,
                 shortest_hops,
@@ -642,7 +710,7 @@ pub fn query_context_paths(
     }
 
     match query_recursive_context_path_rows(
-        &conn,
+        conn,
         source_stable_id,
         target_stable_id,
         max_hops,
@@ -1353,18 +1421,22 @@ pub fn query_graph_candidates(
     query: &str,
     options: KnowledgeQueryOptions,
 ) -> Result<KnowledgeQueryResult> {
+    let conn = open_analyst_connection_read_only(db_path)?;
+    load_analyst_icu_extension(&conn);
+    query_graph_candidates_with_conn(&conn, db_path, query, options)
+}
+
+pub fn query_graph_candidates_with_conn(
+    conn: &duckdb::Connection,
+    db_path: &Path,
+    query: &str,
+    options: KnowledgeQueryOptions,
+) -> Result<KnowledgeQueryResult> {
     let query = query.trim();
     if query.is_empty() {
         return Err(anyhow!("knowledge graph query must be non-empty"));
     }
     let limit = options.limit.clamp(1, MAX_GRAPH_CANDIDATES);
-
-    let conn = open_analyst_connection_read_only(db_path)?;
-
-    // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
-    // live in DuckDB's ICU extension. Docs-only queries can still work without it,
-    // so keep this best-effort and let query preparation surface real failures.
-    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
 
     let graph_content_hash = conn
         .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
