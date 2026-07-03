@@ -238,6 +238,7 @@ impl AuditStep {
                     result_summary: result_summary.clone(),
                     artifact_uri: None,
                     dispatched_base_oid: None,
+                    estimated_cost_micros: None,
                 }
             }
             Self::Approval { delegation_id } => AuditSentinelKind::Approval {

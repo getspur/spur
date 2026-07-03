@@ -43,13 +43,17 @@ const EXPECTED: &[&str] = &[
     "knowledge_context_pack_2",
     "query",
     "submit_plan",
+    "submit_loop",
     "execute_epic",
     "get_plan_status",
+    "get_loop_status",
     "get_reconciler_status",
     "get_task_diff",
     "preview_task_base",
     "plan_truncate_and_restart",
     "recover_orphaned_dispatch",
+    "pause_loop",
+    "resume_loop",
     "review_task",
     "submit_plan_mutation",
     "report_signal",
@@ -124,13 +128,17 @@ fn plan_tools_are_owned_by_core_catalog() {
         "resume_plan",
         "force_reclaim_plan",
         "submit_plan",
+        "submit_loop",
         "execute_epic",
         "get_plan_status",
+        "get_loop_status",
         "get_reconciler_status",
         "get_task_diff",
         "preview_task_base",
         "plan_truncate_and_restart",
         "recover_orphaned_dispatch",
+        "pause_loop",
+        "resume_loop",
         "review_task",
         "submit_plan_mutation",
     ] {
@@ -139,6 +147,33 @@ fn plan_tools_are_owned_by_core_catalog() {
             "{tool} must be owned by spur_core::mcp::plan"
         );
     }
+}
+
+#[test]
+fn loop_tools_advertise_stable_user_facing_descriptions() {
+    let defs = tools_list();
+    let find = |name: &str| -> &ToolDefinition {
+        defs.iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing loop tool {name}"))
+    };
+
+    assert_eq!(
+        find("submit_loop").description,
+        "Create a durable loop issue with a [[spur-loop v1]] spec sentinel. Validates cadence_secs >= 60, defaults omitted autonomy to l1, requires at least one template task marked spur:loop-triage-task, rejects non-positive governor caps, mints a compact loop_id, and labels the loop spur:loop-id:<id>, spur:autonomy:<level>, and spur:loop-next-run:<now> so it fires immediately."
+    );
+    assert_eq!(
+        find("pause_loop").description,
+        "Pause a loop by adding spur:loop-paused to the loop issue identified by loop_id. Existing in-flight generations are not cancelled."
+    );
+    assert_eq!(
+        find("resume_loop").description,
+        "Resume a paused loop by removing spur:loop-paused and replacing any spur:loop-next-run:* label with spur:loop-next-run:<now>, clearing failure backoff so the scheduler may run it immediately."
+    );
+    assert_eq!(
+        find("get_loop_status").description,
+        "Return loop status as JSON for a loop_id: parsed LoopSpec, last recent_runs LoopRun audit records, effective backoff interval, consecutive failure count, paused flag, and next_run timestamp."
+    );
 }
 
 #[test]

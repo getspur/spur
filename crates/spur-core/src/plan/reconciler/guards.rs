@@ -90,6 +90,69 @@ impl Reconciler {
                             }
                         }
                     }
+                    if self.config.pause_all_loops
+                        || epic
+                            .labels
+                            .iter()
+                            .any(|label| label == crate::plan::labels::PAUSE_ALL_LOOPS)
+                    {
+                        let state = PlanDispatchState::LoopsPaused {
+                            epic_id: epic.id.clone(),
+                            scope: "global".to_string(),
+                        };
+                        tracing::debug!(
+                            plan_id = %plan_id,
+                            ?state,
+                            "reconciler suppressed ready tasks because all loops are paused"
+                        );
+                        cache.insert(plan_id.to_string(), state.clone());
+                        return Ok(state);
+                    }
+                    if epic
+                        .labels
+                        .iter()
+                        .any(|label| label == crate::plan::labels::LOOP_PAUSED)
+                    {
+                        let state = PlanDispatchState::LoopsPaused {
+                            epic_id: epic.id.clone(),
+                            scope: "loop".to_string(),
+                        };
+                        tracing::debug!(
+                            plan_id = %plan_id,
+                            ?state,
+                            "reconciler suppressed ready tasks because loop is paused"
+                        );
+                        cache.insert(plan_id.to_string(), state.clone());
+                        return Ok(state);
+                    }
+                    if let Some(cap_micros) = epic
+                        .labels
+                        .iter()
+                        .filter_map(|label| crate::plan::labels::parse_loop_budget_micros(label))
+                        .min()
+                    {
+                        let spent_micros = crate::plan::projector::plan_spent_micros(
+                            self.pm.as_ref(),
+                            plan_id,
+                            self.feature_gate.as_ref(),
+                        )
+                        .await?;
+                        if spent_micros >= cap_micros {
+                            let state = PlanDispatchState::BudgetExhausted {
+                                spent_micros,
+                                cap_micros,
+                            };
+                            tracing::debug!(
+                                plan_id = %plan_id,
+                                spent_micros,
+                                cap_micros,
+                                ?state,
+                                "reconciler suppressed ready tasks because loop budget is exhausted"
+                            );
+                            cache.insert(plan_id.to_string(), state.clone());
+                            return Ok(state);
+                        }
+                    }
                     open_complete_epic = Some(epic.id.clone());
                 } else if closed_complete_epic.is_none() {
                     closed_complete_epic = Some(epic.id.clone());

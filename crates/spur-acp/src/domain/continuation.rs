@@ -42,6 +42,12 @@ pub enum ContinuationSource {
     /// The brain receives compiled git topology and resolves via
     /// `plan_truncate_and_restart` or `submit_plan_mutation`.
     PlanTaskBlockedOnSetupConflict,
+    /// A standing loop reached its durable next-run trigger. The brain reviews
+    /// loop state and submits the next generation plan.
+    LoopDue,
+    /// A standing loop auto-paused after repeated failed generations and needs
+    /// brain intervention.
+    LoopEscalation,
 }
 
 /// Kind of side-channel continuation artifact the brain can fetch on demand.
@@ -381,6 +387,23 @@ mod tests {
 
         let back: ContinuationSource = serde_json::from_value(json).unwrap();
         assert!(matches!(back, ContinuationSource::AsyncRequested));
+    }
+
+    #[test]
+    fn loop_continuation_sources_round_trip_as_tagged_snake_case() {
+        let due = serde_json::to_value(ContinuationSource::LoopDue).unwrap();
+        assert_eq!(due, json!({ "kind": "loop_due" }));
+        assert!(matches!(
+            serde_json::from_value::<ContinuationSource>(due).unwrap(),
+            ContinuationSource::LoopDue
+        ));
+
+        let escalation = serde_json::to_value(ContinuationSource::LoopEscalation).unwrap();
+        assert_eq!(escalation, json!({ "kind": "loop_escalation" }));
+        assert!(matches!(
+            serde_json::from_value::<ContinuationSource>(escalation).unwrap(),
+            ContinuationSource::LoopEscalation
+        ));
     }
 
     #[test]
