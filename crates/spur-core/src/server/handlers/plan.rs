@@ -1,6 +1,8 @@
 use super::McpCallbackServer;
 use super::*;
 
+const RATCHET_MIN_STABLE_GENERATIONS: u32 = 3;
+
 fn unix_now_secs() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -16,12 +18,45 @@ fn loop_issue_title(goal: &str) -> String {
 }
 
 fn autonomy_label(level: crate::plan::labels::AutonomyLevel) -> String {
-    let suffix = match level {
-        crate::plan::labels::AutonomyLevel::L1 => "l1",
-        crate::plan::labels::AutonomyLevel::L2 => "l2",
-        crate::plan::labels::AutonomyLevel::L3 => "l3",
-    };
-    format!("{}{suffix}", crate::plan::labels::AUTONOMY_PREFIX)
+    format!("{}{}", crate::plan::labels::AUTONOMY_PREFIX, level.as_str())
+}
+
+fn parse_autonomy_level_param(level: &str) -> Result<crate::plan::labels::AutonomyLevel, String> {
+    crate::plan::labels::AutonomyLevel::parse(level)
+        .ok_or_else(|| "level must be one of l1, l2, or l3".to_string())
+}
+
+fn is_real_generation_outcome(outcome: &str) -> bool {
+    matches!(outcome, "approved" | "partial" | "failed")
+}
+
+fn stable_approved_generations_at_level(
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+    loop_id: &str,
+    current_level: crate::plan::labels::AutonomyLevel,
+) -> u32 {
+    let current_level = current_level.as_str();
+    let mut stable = 0u32;
+    for audit in audits.iter().rev() {
+        let crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+            loop_id: record_loop_id,
+            autonomy,
+            outcome,
+            ..
+        } = audit
+        else {
+            continue;
+        };
+        if record_loop_id != loop_id || !is_real_generation_outcome(outcome) {
+            continue;
+        }
+        if outcome == "approved" && autonomy.as_deref() == Some(current_level) {
+            stable = stable.saturating_add(1);
+            continue;
+        }
+        break;
+    }
+    stable
 }
 
 async fn load_persisted_plan_task_map(
@@ -1537,6 +1572,179 @@ impl McpCallbackServer {
             "retired": true,
             "status": pm.closed_status(),
             "next_run": Value::Null,
+        });
+        let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+    }
+
+    pub(crate) async fn handle_set_loop_autonomy(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let input: crate::tool_schemas::SetLoopAutonomyParams = match serde_json::from_value(args) {
+            Ok(input) => input,
+            Err(error) => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("set_loop_autonomy: invalid parameters: {error}"),
+                )
+            }
+        };
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+        if let Err(message) = validate_loop_id_param(&input.loop_id) {
+            return JsonRpcResponse::invalid_params(id, format!("set_loop_autonomy: {message}"));
+        }
+        let target_level = match parse_autonomy_level_param(&input.level) {
+            Ok(level) => level,
+            Err(message) => {
+                return JsonRpcResponse::invalid_params(id, format!("set_loop_autonomy: {message}"))
+            }
+        };
+        let Some(pm) = self.submit_plan_substrate_pm() else {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                "set_loop_autonomy: requires a beads PM backend (configured backend: none)",
+            );
+        };
+        let issue = match load_loop_issue(pm, &input.loop_id).await {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32004,
+                    format!("set_loop_autonomy: unknown loop_id '{}'", input.loop_id),
+                )
+            }
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("set_loop_autonomy: failed to load loop issue: {error}"),
+                )
+            }
+        };
+        let mut spec = match crate::plan::loops::spec::LoopSpec::parse(&issue.body) {
+            Ok(spec) => spec,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("set_loop_autonomy: failed to parse loop spec: {error}"),
+                )
+            }
+        };
+        let current_level = spec.autonomy;
+        if target_level > current_level {
+            let direct_steps = target_level as u8 - current_level as u8;
+            if direct_steps != 1 {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!(
+                        "set_loop_autonomy: promotions may advance one level per call (current {}, requested {})",
+                        current_level.as_str(),
+                        target_level.as_str()
+                    ),
+                );
+            }
+        }
+
+        let mut stable_generations = 0;
+        if target_level > current_level {
+            if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+                return JsonRpcResponse::mcp_error(id, error);
+            }
+            let Some(advanced) = pm.advanced() else {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    "set_loop_autonomy: beads advanced comments API is unavailable",
+                );
+            };
+            let audits = match crate::plan::projector::collect_sorted_audits_for_issue(
+                &issue.id,
+                match advanced.list_comments(&issue.id).await {
+                    Ok(comments) => comments,
+                    Err(error) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32000,
+                            format!("set_loop_autonomy: failed to list loop comments: {error}"),
+                        )
+                    }
+                },
+            ) {
+                Ok(audits) => audits,
+                Err(error) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!("set_loop_autonomy: failed to parse loop audits: {error}"),
+                    )
+                }
+            };
+            stable_generations =
+                stable_approved_generations_at_level(&audits, &input.loop_id, current_level);
+            if stable_generations < RATCHET_MIN_STABLE_GENERATIONS {
+                let shortfall = RATCHET_MIN_STABLE_GENERATIONS - stable_generations;
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!(
+                        "set_loop_autonomy: promotion from {} to {} requires {} consecutive approved real generations at current level {}; observed {}, short by {}",
+                        current_level.as_str(),
+                        target_level.as_str(),
+                        RATCHET_MIN_STABLE_GENERATIONS,
+                        current_level.as_str(),
+                        stable_generations,
+                        shortfall
+                    ),
+                );
+            }
+        }
+
+        spec.autonomy = target_level;
+        let target_label = autonomy_label(target_level);
+        let mut remove_labels: Vec<String> = issue
+            .labels
+            .iter()
+            .filter(|label| {
+                crate::plan::labels::parse_autonomy(label).is_some()
+                    && label.as_str() != target_label.as_str()
+            })
+            .cloned()
+            .collect();
+        remove_labels.sort();
+        remove_labels.dedup();
+        if let Err(error) = pm
+            .update_issue(
+                &issue.id,
+                spur_pm::IssueUpdate {
+                    body: Some(spec.to_sentinel_body()),
+                    add_labels: vec![target_label],
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                format!(
+                    "set_loop_autonomy: failed to update loop '{}': {error}",
+                    input.loop_id
+                ),
+            );
+        }
+
+        let output = json!({
+            "loop_id": input.loop_id,
+            "issue_id": issue.id,
+            "previous_level": current_level.as_str(),
+            "level": target_level.as_str(),
+            "stable_generations": stable_generations,
         });
         let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
         JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))

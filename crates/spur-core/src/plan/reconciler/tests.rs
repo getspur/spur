@@ -731,6 +731,7 @@ fn build_loop_run_sums_costs_and_derives_partial_outcome() {
         "loopA",
         7,
         "P1",
+        Some("l2".into()),
         LoopRunOutcome {
             tasks_discovered: 3,
             approved: 2,
@@ -748,6 +749,7 @@ fn build_loop_run_sums_costs_and_derives_partial_outcome() {
             loop_id: "loopA".into(),
             generation: 7,
             plan_id: "P1".into(),
+            autonomy: Some("l2".into()),
             outcome: "partial".into(),
             tasks_discovered: 3,
             approved: 2,
@@ -1293,6 +1295,12 @@ async fn terminal_loop_epic_appends_one_loop_run_to_loop_issue() {
         crate::plan::labels::loop_generation_label(1),
     )
     .await;
+    add_mock_epic_label(
+        &pm,
+        "P-LOOP-RUN",
+        format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
     close_mock_task_with_completion_cost(&pm, &task_issue_ids[0], 300).await;
     close_mock_task_with_completion_cost(&pm, &task_issue_ids[1], 500).await;
 
@@ -1336,6 +1344,7 @@ async fn terminal_loop_epic_appends_one_loop_run_to_loop_issue() {
             loop_id: loop_id.into(),
             generation: 1,
             plan_id: "P-LOOP-RUN".into(),
+            autonomy: Some("l2".into()),
             outcome: "approved".into(),
             tasks_discovered: 2,
             approved: 2,

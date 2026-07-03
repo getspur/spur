@@ -56,6 +56,7 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "pause_loop",
     "resume_loop",
     "kill_loop",
+    "set_loop_autonomy",
     "review_task",
     "submit_plan_mutation",
     "report_signal",
@@ -136,6 +137,7 @@ fn plan_module_advertises_exact_plan_review_reconciler_tools() {
         "pause_loop",
         "resume_loop",
         "kill_loop",
+        "set_loop_autonomy",
         "review_task",
         "submit_plan_mutation",
     ]
