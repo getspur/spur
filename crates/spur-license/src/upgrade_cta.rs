@@ -174,14 +174,25 @@ mod tests {
 
     #[test]
     fn required_tier_for_pro_only_key_returns_pro() {
-        // `pm_pro_beads_advanced` is in the Pro feature set but NOT
-        // in the community feature set per the embedded policy
+        // `core_pro_review_auto_approve` is in the Pro feature set but
+        // NOT in the community feature set per the embedded policy
         // (verified against `resources/default_policy.json`). Pro
         // walks before Team / Enterprise so the lowest-granting
         // tier is Pro.
         assert_eq!(
-            required_tier_for(FeatureKey::PM_PRO_BEADS_ADVANCED),
+            required_tier_for(FeatureKey::CORE_PRO_REVIEW_AUTO_APPROVE),
             Some(Plan::Pro),
+        );
+    }
+
+    #[test]
+    fn required_tier_for_pm_beads_advanced_returns_community() {
+        // Local beads-backed planning is a Community entitlement in the
+        // signed policy. The TUI upgrade modal must never render
+        // "Required tier: Pro" for it.
+        assert_eq!(
+            required_tier_for(FeatureKey::PM_PRO_BEADS_ADVANCED),
+            Some(Plan::Community),
         );
     }
 
