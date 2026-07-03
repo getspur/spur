@@ -960,6 +960,9 @@ pub(crate) fn apply_session_update(
         UsageUpdate(u) => {
             state.context_used = Some(u.used);
             state.context_size = Some(u.size);
+            if let Some(cost) = u.cost.as_ref() {
+                state.agent_reported_cost = Some((cost.amount, cost.currency.clone()));
+            }
         }
         SessionInfoUpdate(_) => {
             // M9 hoist: the cached title / updated_at moved to
