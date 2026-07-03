@@ -6,11 +6,15 @@ use std::{
 };
 
 use crate::{
-    query_context_candidates, query_context_paths, query_graph_candidates,
-    query_symbol_risk_community, KnowledgeCandidate, KnowledgePathOptions, KnowledgeQueryIntent,
-    KnowledgeQueryOptions, KnowledgeQueryResult, KnowledgeSearchScope, SymbolEvidenceCaveat,
-    SymbolEvidenceStatus, SymbolRiskScorecardRow, MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
+    load_analyst_icu_extension, load_analyst_lance_extension, open_analyst_connection_read_only,
+    query_context_candidates_with_conn, query_context_paths_with_conn,
+    query_graph_candidates_with_conn, query_symbol_risk_community_with_conn, KnowledgeCandidate,
+    KnowledgePathOptions, KnowledgePathResult, KnowledgeQueryIntent, KnowledgeQueryOptions,
+    KnowledgeQueryResult, KnowledgeSearchScope, SymbolEvidenceCaveat, SymbolEvidenceStatus,
+    SymbolRiskScorecardRow, MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
 };
+#[cfg(test)]
+use crate::{query_context_paths, query_symbol_risk_community};
 use futures::future::join_all;
 use serde_json::{json, Value};
 #[cfg(feature = "embed")]
@@ -34,6 +38,9 @@ const EMBED_INFERENCE_TIMEOUT: Duration = Duration::from_millis(1500);
 #[cfg(feature = "embed")]
 static EMBEDDING_GEMMA_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> =
     EmbedModelCell::new();
+#[cfg(all(test, feature = "embed"))]
+static DISABLE_EMBED_QUERY_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
@@ -42,8 +49,17 @@ pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerErr
         return Ok(unavailable_pack(&request, &db_path));
     }
 
-    let query_result =
-        query_candidates_for_request(&request, &db_path, "knowledge_context_pack").await?;
+    let query_vec = embed_query(&request.query).await.map(Vec::from);
+    let query_result = {
+        let conn = open_pack_connection(&db_path, "knowledge_context_pack")?;
+        query_candidates_for_request_with_conn(
+            &request,
+            &db_path,
+            &conn,
+            "knowledge_context_pack",
+            query_vec,
+        )?
+    };
 
     let exact_context = exact_graph_context_for_result(&request, &query_result).await;
     Ok(pack_query_result_with_exact_context(&request, query_result, exact_context).await)
@@ -56,24 +72,59 @@ pub async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerE
         return Ok(unavailable_pack_v2(&request, &db_path));
     }
 
-    let query_result =
-        query_candidates_for_request(&request.base, &db_path, "knowledge_context_pack_2").await?;
+    let query_vec = embed_query(&request.base.query).await.map(Vec::from);
+    let conn = open_pack_connection(&db_path, "knowledge_context_pack_2")?;
+    let query_result = query_candidates_for_request_with_conn(
+        &request.base,
+        &db_path,
+        &conn,
+        "knowledge_context_pack_2",
+        query_vec,
+    )?;
 
     let exact_context = exact_graph_context_for_result(&request.base, &query_result).await;
-    Ok(
-        pack_query_result_v2_with_graph_reasoning(&request, query_result, exact_context, &db_path)
-            .await,
+    let graph_sections = graph_reasoning_sections_for_pack_with_conn(
+        &request,
+        &query_result,
+        &exact_context,
+        &db_path,
+        &conn,
+    );
+    drop(conn);
+    Ok(pack_query_result_v2_with_graph_sections(
+        &request,
+        query_result,
+        exact_context,
+        graph_sections,
     )
+    .await)
 }
 
-async fn query_candidates_for_request(
-    request: &KnowledgeContextPackRequest,
+fn open_pack_connection(
     db_path: &Path,
     tool_name: &str,
+) -> Result<duckdb::Connection, McpHandlerError> {
+    let conn = open_analyst_connection_read_only(db_path).map_err(|error| {
+        McpHandlerError::Internal(format!(
+            "{tool_name} failed to query analyst DB at {}: {error}",
+            db_path.display()
+        ))
+    })?;
+    load_analyst_icu_extension(&conn);
+    load_analyst_lance_extension(&conn);
+    Ok(conn)
+}
+
+fn query_candidates_for_request_with_conn(
+    request: &KnowledgeContextPackRequest,
+    db_path: &Path,
+    conn: &duckdb::Connection,
+    tool_name: &str,
+    query_vec: Option<Vec<f32>>,
 ) -> Result<KnowledgeQueryResult, McpHandlerError> {
-    let query_vec = embed_query(&request.query).await.map(Vec::from);
     let analyst_intent = request.intent.as_analyst_intent();
-    let mut query_result = query_context_candidates(
+    let mut query_result = query_context_candidates_with_conn(
+        conn,
         db_path,
         &request.query,
         request.scope.as_analyst_scope(),
@@ -91,7 +142,8 @@ async fn query_candidates_for_request(
     })?;
 
     if request.should_query_graph_candidates() {
-        match query_graph_candidates(
+        match query_graph_candidates_with_conn(
+            conn,
             db_path,
             &request.query,
             KnowledgeQueryOptions {
@@ -508,6 +560,11 @@ pub fn warm_embed_model() {}
 
 #[cfg(feature = "embed")]
 async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
+    #[cfg(test)]
+    if DISABLE_EMBED_QUERY_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+
     let embedding_model = EmbeddingModelSelection::from_env();
     let model_cell = embed_model_cell(embedding_model);
     if !model_cell.is_ready() {
@@ -1079,21 +1136,57 @@ async fn pack_query_result_with_exact_context(
     pack
 }
 
+#[cfg(test)]
 async fn pack_query_result_v2_with_graph_reasoning(
     request: &KnowledgeContextPackV2Request,
     result: KnowledgeQueryResult,
     exact_context: ExactGraphContext,
     db_path: &Path,
 ) -> Value {
-    let graph_sections = match analyst_matches_exact_graph(&result, &exact_context) {
-        Some(false) if request.graph_reasoning.any_enabled() => {
-            stale_graph_reasoning_sections(&result, &exact_context)
-        }
-        _ => graph_reasoning_sections(request, &result, db_path),
-    };
+    let graph_sections =
+        graph_reasoning_sections_for_pack(request, &result, &exact_context, db_path);
+    pack_query_result_v2_with_graph_sections(request, result, exact_context, graph_sections).await
+}
+
+async fn pack_query_result_v2_with_graph_sections(
+    request: &KnowledgeContextPackV2Request,
+    result: KnowledgeQueryResult,
+    exact_context: ExactGraphContext,
+    graph_sections: GraphReasoningSections,
+) -> Value {
     let mut pack = pack_query_result_with_exact_context(&request.base, result, exact_context).await;
     insert_v2_sections(&mut pack, graph_sections);
     pack
+}
+
+#[cfg(test)]
+fn graph_reasoning_sections_for_pack(
+    request: &KnowledgeContextPackV2Request,
+    result: &KnowledgeQueryResult,
+    exact_context: &ExactGraphContext,
+    db_path: &Path,
+) -> GraphReasoningSections {
+    match analyst_matches_exact_graph(result, exact_context) {
+        Some(false) if request.graph_reasoning.any_enabled() => {
+            stale_graph_reasoning_sections(result, exact_context)
+        }
+        _ => graph_reasoning_sections(request, result, db_path),
+    }
+}
+
+fn graph_reasoning_sections_for_pack_with_conn(
+    request: &KnowledgeContextPackV2Request,
+    result: &KnowledgeQueryResult,
+    exact_context: &ExactGraphContext,
+    db_path: &Path,
+    conn: &duckdb::Connection,
+) -> GraphReasoningSections {
+    match analyst_matches_exact_graph(result, exact_context) {
+        Some(false) if request.graph_reasoning.any_enabled() => {
+            stale_graph_reasoning_sections(result, exact_context)
+        }
+        _ => graph_reasoning_sections_with_conn(request, result, db_path, conn),
+    }
 }
 
 fn unavailable_pack_v2(request: &KnowledgeContextPackV2Request, db_path: &Path) -> Value {
@@ -1166,6 +1259,7 @@ impl GraphReasoningOptions {
     }
 }
 
+#[cfg(test)]
 fn graph_reasoning_sections(
     request: &KnowledgeContextPackV2Request,
     result: &KnowledgeQueryResult,
@@ -1196,40 +1290,7 @@ fn graph_reasoning_sections(
     if wants_symbol_enrichment {
         match query_symbol_risk_community(db_path, &code_symbol_ids) {
             Ok(result) => {
-                let risk_rows = result.risk_scorecard;
-                let community_rows = result.community_context;
-                if request.graph_reasoning.risk {
-                    sections.temporal_context = temporal_context_from_risk_rows(&risk_rows);
-                    sections.risk_scorecard = risk_rows
-                        .iter()
-                        .filter_map(to_json_value)
-                        .collect::<Vec<_>>();
-                } else {
-                    sections.temporal_context = Vec::new();
-                }
-                if wants_communities {
-                    sections.community_context = community_rows
-                        .iter()
-                        .filter_map(to_json_value)
-                        .collect::<Vec<_>>();
-                }
-                sections
-                    .caveats
-                    .extend(result.caveats.iter().map(symbol_caveat_value));
-                sections.caveats.extend(risk_rows.iter().flat_map(|row| {
-                    row.caveats
-                        .iter()
-                        .map(symbol_caveat_value)
-                        .collect::<Vec<_>>()
-                }));
-                sections
-                    .caveats
-                    .extend(community_rows.iter().flat_map(|row| {
-                        row.caveats
-                            .iter()
-                            .map(symbol_caveat_value)
-                            .collect::<Vec<_>>()
-                    }));
+                apply_symbol_enrichment_result(request, wants_communities, &mut sections, result);
             }
             Err(error) => sections.caveats.push(caveat_value(
                 "symbol_enrichment_unavailable",
@@ -1240,6 +1301,102 @@ fn graph_reasoning_sections(
     }
 
     sections
+}
+
+fn graph_reasoning_sections_with_conn(
+    request: &KnowledgeContextPackV2Request,
+    result: &KnowledgeQueryResult,
+    db_path: &Path,
+    conn: &duckdb::Connection,
+) -> GraphReasoningSections {
+    let code_symbol_ids = graph_reasoning_code_symbol_ids(&result.candidates, &request.base);
+    let mut sections = GraphReasoningSections::default();
+    let wants_communities = request
+        .graph_reasoning
+        .should_query_communities(code_symbol_ids.len());
+    let wants_symbol_enrichment = request.graph_reasoning.risk || wants_communities;
+
+    if code_symbol_ids.is_empty() {
+        if request.graph_reasoning.paths || wants_symbol_enrichment {
+            sections.caveats.push(caveat_value(
+                "graph_reasoning_no_code_candidates",
+                "graph reasoning sections require grounded code candidates",
+                None,
+            ));
+        }
+        return sections;
+    }
+
+    if request.graph_reasoning.paths {
+        collect_graph_paths_with_conn(conn, db_path, request, &code_symbol_ids, &mut sections);
+    }
+
+    if wants_symbol_enrichment {
+        let symbol_enrichment_error =
+            match query_symbol_risk_community_with_conn(conn, db_path, &code_symbol_ids) {
+                Ok(result) => {
+                    apply_symbol_enrichment_result(
+                        request,
+                        wants_communities,
+                        &mut sections,
+                        result,
+                    );
+                    None
+                }
+                Err(error) => Some(error),
+            };
+        if let Some(error) = symbol_enrichment_error {
+            sections.caveats.push(caveat_value(
+                "symbol_enrichment_unavailable",
+                format!("symbol graph enrichment unavailable: {error:#}"),
+                None,
+            ));
+        }
+    }
+
+    sections
+}
+
+fn apply_symbol_enrichment_result(
+    request: &KnowledgeContextPackV2Request,
+    wants_communities: bool,
+    sections: &mut GraphReasoningSections,
+    result: crate::SymbolRiskCommunityResult,
+) {
+    let risk_rows = result.risk_scorecard;
+    let community_rows = result.community_context;
+    if request.graph_reasoning.risk {
+        sections.temporal_context = temporal_context_from_risk_rows(&risk_rows);
+        sections.risk_scorecard = risk_rows
+            .iter()
+            .filter_map(to_json_value)
+            .collect::<Vec<_>>();
+    } else {
+        sections.temporal_context = Vec::new();
+    }
+    if wants_communities {
+        sections.community_context = community_rows
+            .iter()
+            .filter_map(to_json_value)
+            .collect::<Vec<_>>();
+    }
+    sections
+        .caveats
+        .extend(result.caveats.iter().map(symbol_caveat_value));
+    sections.caveats.extend(risk_rows.iter().flat_map(|row| {
+        row.caveats
+            .iter()
+            .map(symbol_caveat_value)
+            .collect::<Vec<_>>()
+    }));
+    sections
+        .caveats
+        .extend(community_rows.iter().flat_map(|row| {
+            row.caveats
+                .iter()
+                .map(symbol_caveat_value)
+                .collect::<Vec<_>>()
+        }));
 }
 
 fn graph_reasoning_code_symbol_ids(
@@ -1268,12 +1425,46 @@ fn graph_reasoning_code_symbol_ids(
     ids
 }
 
+#[cfg(test)]
 fn collect_graph_paths(
     db_path: &Path,
     request: &KnowledgeContextPackV2Request,
     code_symbol_ids: &[String],
     sections: &mut GraphReasoningSections,
 ) {
+    collect_graph_paths_with_query(
+        request,
+        code_symbol_ids,
+        sections,
+        |source, target, options| query_context_paths(db_path, source, target, options),
+    );
+}
+
+fn collect_graph_paths_with_conn(
+    conn: &duckdb::Connection,
+    db_path: &Path,
+    request: &KnowledgeContextPackV2Request,
+    code_symbol_ids: &[String],
+    sections: &mut GraphReasoningSections,
+) {
+    collect_graph_paths_with_query(
+        request,
+        code_symbol_ids,
+        sections,
+        |source, target, options| {
+            query_context_paths_with_conn(conn, db_path, source, target, options)
+        },
+    );
+}
+
+fn collect_graph_paths_with_query<F>(
+    request: &KnowledgeContextPackV2Request,
+    code_symbol_ids: &[String],
+    sections: &mut GraphReasoningSections,
+    mut query_paths: F,
+) where
+    F: FnMut(&str, &str, KnowledgePathOptions) -> anyhow::Result<KnowledgePathResult>,
+{
     let Some(source) = code_symbol_ids.first() else {
         return;
     };
@@ -1296,8 +1487,7 @@ fn collect_graph_paths(
 
     let budget = path_budget_plan(targets.len(), request.graph_reasoning.max_paths);
     for target in targets.into_iter().take(budget.target_cap) {
-        match query_context_paths(
-            db_path,
+        match query_paths(
             source,
             &target,
             KnowledgePathOptions {
@@ -1822,11 +2012,12 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     #[cfg(feature = "embed")]
     use std::time::Duration;
 
     use super::*;
+    use crate::query_context_candidates;
     use duckdb::Connection;
 
     use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
@@ -1837,6 +2028,7 @@ mod tests {
 
     const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ASYNC_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
     struct HybridConfidenceFixture {
         _temp_dir: tempfile::TempDir,
@@ -1854,6 +2046,7 @@ mod tests {
 
     #[tokio::test]
     async fn analyst_db_path_falls_back_to_parent_repo_db_for_spur_worker_worktree() {
+        let _lock = async_env_lock().await;
         let repo_dir = tempfile::tempdir().expect("repo tempdir");
         let repo_spur = repo_dir.path().join(".spur");
         let worker_dir = repo_spur.join("worktrees").join("worker-1");
@@ -2379,6 +2572,35 @@ mod tests {
         ENV_LOCK.lock().expect("env lock")
     }
 
+    async fn async_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        ASYNC_ENV_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
+    #[cfg(feature = "embed")]
+    struct EmbedQueryDisableGuard {
+        previous: bool,
+    }
+
+    #[cfg(feature = "embed")]
+    impl Drop for EmbedQueryDisableGuard {
+        fn drop(&mut self) {
+            DISABLE_EMBED_QUERY_FOR_TESTS.store(self.previous, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(feature = "embed")]
+    fn disable_embed_query_for_test() -> EmbedQueryDisableGuard {
+        let previous =
+            DISABLE_EMBED_QUERY_FOR_TESTS.swap(true, std::sync::atomic::Ordering::SeqCst);
+        EmbedQueryDisableGuard { previous }
+    }
+
+    #[cfg(not(feature = "embed"))]
+    fn disable_embed_query_for_test() {}
+
     fn parse_vector_json_to_f32(raw: &str) -> Vec<f32> {
         serde_json::from_str::<Vec<f64>>(raw)
             .unwrap_or_default()
@@ -2606,6 +2828,7 @@ pub fn lexical_signal_anchor() {
 
     #[tokio::test]
     async fn knowledge_context_pack_missing_analyst_db_returns_structured_unavailable() {
+        let _lock = async_env_lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join(".spur")).expect("create .spur");
@@ -2858,6 +3081,69 @@ pub fn lexical_signal_anchor() {
     }
 
     #[tokio::test]
+    async fn knowledge_context_pack_uses_single_connection_for_candidate_queries() {
+        let _lock = async_env_lock().await;
+        let _embed_guard = disable_embed_query_for_test();
+        let (_temp_dir, repo) = kcp2_fixture_repo(true);
+        let db_path = repo.join(".spur").join("analyst.duckdb");
+        crate::reset_analyst_connection_open_count_for_test(&db_path);
+
+        let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
+            knowledge_context_pack(&json!({
+                "query": "dispatch approval evidence",
+                "intent": "change",
+                "scope": "all",
+                "limit": 5
+            }))
+            .await
+        })
+        .await
+        .expect("v1 fixture response");
+
+        assert!(pack.get("error").is_none(), "{pack:#}");
+        assert_eq!(
+            crate::analyst_connection_open_count_for_test(&db_path),
+            1,
+            "v1 candidate and graph retrieval should share one analyst connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_uses_single_connection_for_pack_request() {
+        let _lock = async_env_lock().await;
+        let _embed_guard = disable_embed_query_for_test();
+        let (_temp_dir, repo) = kcp2_fixture_repo(true);
+        let db_path = repo.join(".spur").join("analyst.duckdb");
+        crate::reset_analyst_connection_open_count_for_test(&db_path);
+
+        let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
+            knowledge_context_pack_2(&json!({
+                "query": "dispatch approval evidence",
+                "intent": "review",
+                "scope": "all",
+                "limit": 5,
+                "graph_reasoning": {
+                    "paths": true,
+                    "communities": true,
+                    "risk": true,
+                    "max_path_hops": 2,
+                    "max_paths": 1
+                }
+            }))
+            .await
+        })
+        .await
+        .expect("kcp2 fixture response");
+
+        assert!(pack.get("error").is_none(), "{pack:#}");
+        assert_eq!(
+            crate::analyst_connection_open_count_for_test(&db_path),
+            1,
+            "v2 candidates, paths, and symbol enrichment should share one analyst connection"
+        );
+    }
+
+    #[tokio::test]
     async fn knowledge_context_pack_2_preserves_v1_fields_and_adds_empty_v2_sections_when_disabled()
     {
         let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
@@ -3075,6 +3361,7 @@ pub fn lexical_signal_anchor() {
 
     #[tokio::test]
     async fn knowledge_context_pack_2_staleness_uses_rebuilt_graph_hash() {
+        let _lock = async_env_lock().await;
         let worktree = tempfile::tempdir().expect("worktree tempdir");
         write_minimal_graph_fixture(
             worktree.path(),
@@ -3195,6 +3482,8 @@ pub fn lexical_signal_anchor() {
 
     #[tokio::test]
     async fn knowledge_context_pack_2_reads_fixture_db_end_to_end() {
+        let _lock = async_env_lock().await;
+        let _embed_guard = disable_embed_query_for_test();
         let (_temp_dir, repo) = kcp2_fixture_repo(true);
 
         let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
@@ -3266,6 +3555,8 @@ pub fn lexical_signal_anchor() {
 
     #[tokio::test]
     async fn knowledge_context_pack_2_missing_graph_views_keeps_candidates_and_returns_caveats() {
+        let _lock = async_env_lock().await;
+        let _embed_guard = disable_embed_query_for_test();
         let (_temp_dir, repo) = kcp2_fixture_repo(false);
 
         let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
