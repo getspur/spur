@@ -31,6 +31,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::json;
 use spur_acp::config::SpurConfig;
 use spur_acp::domain::events::{SpurEvent, SpurEventBody};
 use spur_acp::types::SessionId;
@@ -95,6 +96,96 @@ fn attach_beads_workspace(repo: &Path, w: &TestBeadsWorkspace) {
     let beads_dir = repo.join(".beads");
     std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
     w.copy_db_to(&beads_dir);
+}
+
+fn init_git_repo(repo: &Path) {
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "test@spur"]);
+    git(&["config", "user.name", "spur-test"]);
+    std::fs::write(repo.join("README.md"), "test\n").expect("write README");
+    git(&["add", "README.md"]);
+    git(&["commit", "-q", "-m", "seed"]);
+}
+
+async fn seed_loop_issue(pm: &spur_pm::PmService, loop_id: &str) -> String {
+    let body = format!(
+        "{}\n{}",
+        spur_core::plan::loops::spec::SENTINEL_HEADER,
+        json!({
+            "loop_id": loop_id,
+            "goal": "Keep CI green",
+            "pattern": "ci-sweeper",
+            "cadence_secs": 60,
+            "template": {
+                "tasks": [{
+                    "task_id": "triage",
+                    "agent": "codex",
+                    "task": "Triage CI",
+                    "labels": [spur_core::plan::labels::LOOP_TRIAGE_TASK]
+                }]
+            }
+        })
+    );
+
+    pm.create_issue(spur_pm::IssueCreate {
+        title: "Loop: Keep CI green".to_string(),
+        description: Some(body),
+        issue_type: Some("task".to_string()),
+        labels: vec![spur_core::plan::labels::loop_id_label(loop_id)],
+        ..Default::default()
+    })
+    .await
+    .expect("create loop issue")
+}
+
+async fn build_orchestrator_with_loop(
+    loop_id: &str,
+) -> (
+    mpsc::Sender<InteractiveInput>,
+    tokio::sync::broadcast::Receiver<SpurEvent>,
+) {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo_root = tmp.path().to_path_buf();
+    init_git_repo(&repo_root);
+
+    let beads = TestBeadsWorkspace::init();
+    attach_beads_workspace(&repo_root, &beads);
+
+    let pm = Arc::new(
+        spur_pm::PmService::try_new(None, true, false, &repo_root, None)
+            .await
+            .expect("PmService::try_new")
+            .expect("expected Some(PmService)"),
+    );
+    seed_loop_issue(&pm, loop_id).await;
+
+    let orch = Orchestrator::new(repo_root, SpurConfig::default(), None)
+        .expect("Orchestrator::new")
+        .with_pm_service(Arc::clone(&pm));
+    let events_rx = orch.event_tx.subscribe();
+    let (input_tx, input_rx) = mpsc::channel::<InteractiveInput>(16);
+    let overflow = new_overflow_buf();
+
+    tokio::spawn(async move {
+        let _ = orch.run_interactive(input_rx, None, None, overflow).await;
+        drop(tmp);
+    });
+
+    (input_tx, events_rx)
 }
 
 /// When `ResumePlan` is sent without any active brain session, the orchestrator
@@ -189,6 +280,81 @@ async fn retry_plan_task_no_brain_session_emits_plan_command_error() {
         1,
         "expected exactly one PlanCommandError(RetryPlanTask / 'No active brain session…') \
          but found {}. All events: {:#?}",
+        matching.len(),
+        events.iter().map(|e| &e.body).collect::<Vec<_>>(),
+    );
+}
+
+#[tokio::test]
+async fn refresh_loops_emits_loops_loaded_without_brain_session() {
+    let loop_id = "looprefreshnobrain";
+    let (input_tx, mut events_rx) = build_orchestrator_with_loop(loop_id).await;
+
+    tokio::task::yield_now().await;
+
+    input_tx
+        .send(InteractiveInput::RefreshLoops)
+        .await
+        .expect("send RefreshLoops");
+
+    let events = drain_events(&mut events_rx, 64, Duration::from_secs(3)).await;
+    let loaded = events.iter().find_map(|ev| match &ev.body {
+        SpurEventBody::LoopsLoaded { loops, warnings } => Some((loops, warnings)),
+        _ => None,
+    });
+
+    let (loops, _warnings) = loaded.unwrap_or_else(|| {
+        panic!(
+            "expected LoopsLoaded after RefreshLoops. All events: {:#?}",
+            events.iter().map(|e| &e.body).collect::<Vec<_>>()
+        )
+    });
+
+    assert!(
+        loops
+            .iter()
+            .any(|loop_summary| loop_summary.loop_id == loop_id
+                && loop_summary.title == "Loop: Keep CI green"),
+        "expected seeded loop in LoopsLoaded, got {loops:#?}"
+    );
+}
+
+#[tokio::test]
+async fn pause_loop_no_brain_session_emits_loop_command_error() {
+    let loop_id = "looppausenobrain";
+    let (input_tx, mut events_rx) = build_orchestrator();
+
+    tokio::task::yield_now().await;
+
+    input_tx
+        .send(InteractiveInput::PauseLoop {
+            loop_id: loop_id.to_string(),
+        })
+        .await
+        .expect("send PauseLoop");
+
+    let events = drain_events(&mut events_rx, 32, Duration::from_secs(3)).await;
+    let matching: Vec<_> = events
+        .iter()
+        .filter(|ev| {
+            matches!(
+                &ev.body,
+                SpurEventBody::LoopCommandError {
+                    operation,
+                    loop_id: Some(event_loop_id),
+                    error,
+                }
+                if operation == "PauseLoop"
+                    && event_loop_id == loop_id
+                    && error == "No active brain session - start one to claim plans"
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one LoopCommandError(PauseLoop / no brain) but found {}. All events: {:#?}",
         matching.len(),
         events.iter().map(|e| &e.body).collect::<Vec<_>>(),
     );
