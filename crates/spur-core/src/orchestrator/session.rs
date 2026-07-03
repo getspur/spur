@@ -979,6 +979,7 @@ mod session_attach_guard_transfer_tests {
 
     struct TrackingConnection {
         log: std::sync::Arc<std::sync::Mutex<DispatchLog>>,
+        model_response: Vec<spur_acp::SessionConfigOption>,
     }
 
     #[async_trait]
@@ -1017,13 +1018,13 @@ mod session_attach_guard_transfer_tests {
             sid: spur_acp::AcpSessionId,
             model_id: String,
             _caps: &spur_acp::SpurAgentCaps,
-        ) -> Result<(), spur_acp::AcpError> {
+        ) -> Result<Vec<spur_acp::SessionConfigOption>, spur_acp::AcpError> {
             self.log
                 .lock()
                 .unwrap()
                 .set_session_model
                 .push((sid.0.to_string(), model_id));
-            Ok(())
+            Ok(self.model_response.clone())
         }
         async fn set_session_config_option(
             &mut self,
@@ -1053,6 +1054,7 @@ mod session_attach_guard_transfer_tests {
         let log = std::sync::Arc::new(std::sync::Mutex::new(DispatchLog::default()));
         let conn = TrackingConnection {
             log: std::sync::Arc::clone(&log),
+            model_response: Vec::new(),
         };
 
         // Caps that advertise model switching through the ACP 1.0 config option.
@@ -1107,6 +1109,83 @@ mod session_attach_guard_transfer_tests {
         );
         assert_eq!(log.set_session_model[0].0, "acp-x");
         assert_eq!(log.set_session_model[0].1, "claude-sonnet-4-7");
+
+        brain.delegation_handle.abort();
+    }
+
+    /// Regression test for the status-bar-stuck-on-old-model bug: the model
+    /// switch previously discarded the connection's response, so the caller
+    /// had nothing to feed `replace_session_config_options` with and the
+    /// cached snapshot (and therefore `resolved_model_label`) never learned
+    /// about the new current model. `dispatch_set_session_model` must
+    /// surface the agent's post-switch `config_options` instead of `()`.
+    #[tokio::test]
+    async fn dispatch_set_session_model_returns_updated_config_options() {
+        use spur_acp::SpurAgentCaps;
+        use spur_acp::{InitializeResponse, NewSessionResponse, ProtocolVersion};
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(DispatchLog::default()));
+        let updated_options = vec![fixture_select_option_with_category(
+            "vendor_model",
+            "claude-sonnet-5",
+            &[
+                ("claude-fable-5", "Fable 5"),
+                ("claude-sonnet-5", "Sonnet 5"),
+            ],
+            spur_acp::SessionConfigOptionCategory::Model,
+        )];
+        let conn = TrackingConnection {
+            log: std::sync::Arc::clone(&log),
+            model_response: updated_options.clone(),
+        };
+
+        let init = InitializeResponse::new(ProtocolVersion::LATEST);
+        let mut new = NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-x"));
+        new.config_options = Some(vec![fixture_select_option_with_category(
+            "vendor_model",
+            "claude-fable-5",
+            &[
+                ("claude-fable-5", "Fable 5"),
+                ("claude-sonnet-5", "Sonnet 5"),
+            ],
+            spur_acp::SessionConfigOptionCategory::Model,
+        )]);
+        let caps = std::sync::Arc::new(SpurAgentCaps::new(
+            &init,
+            &new,
+            spur_acp::AgentKind::CodexAcp,
+        ));
+
+        let mut brain = BrainSession {
+            connection: Box::new(conn),
+            acp_session_id: "acp-x".to_string(),
+            spur_session_id: SessionId("spur-x".to_string()),
+            notebook_socket_nonce: "test-nonce".to_string(),
+            brain_name: "test-brain".to_string(),
+            delegation_handle: tokio::spawn(async {}),
+            mcp_server: None,
+            mcp_guard: None,
+            notification_pump_handle: None,
+            attach_guard: None,
+            fs_unsafe: false,
+            started_at: std::time::Instant::now(),
+            config_options: Vec::new(),
+            spur_agent_caps: Some(caps),
+            session_info: None,
+            init_response: spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST),
+        };
+
+        let returned =
+            Orchestrator::dispatch_set_session_model(&mut brain, "claude-sonnet-5".to_string())
+                .await
+                .expect("dispatch must succeed when caps support set_model");
+
+        assert_eq!(
+            returned, updated_options,
+            "dispatch_set_session_model must surface the connection's updated \
+             config_options so the caller can refresh session_config_options \
+             instead of discarding them"
+        );
 
         brain.delegation_handle.abort();
     }
@@ -2693,6 +2772,10 @@ impl Orchestrator {
     /// and `Unsupported` (spec §6.3).
     ///
     /// `value` is the user-supplied model id (e.g. `"claude-sonnet-4-7"`).
+    /// Returns the agent's updated `Vec<SessionConfigOption>` on success so
+    /// the caller can refresh the cached snapshot via
+    /// `replace_session_config_options` — mirroring the `SetSessionConfigOption`
+    /// path, this is how the TUI status bar learns the switch took effect.
     /// `Err(AcpError::CapabilityMissing("set_model"))` when caps absent or
     /// model switching is not advertised. Defined as an associated
     /// function (no `&self`) so the future stays `Send` when awaited
@@ -2702,7 +2785,7 @@ impl Orchestrator {
     pub async fn dispatch_set_session_model(
         brain: &mut BrainSession,
         value: String,
-    ) -> Result<(), spur_acp::AcpError> {
+    ) -> Result<Vec<spur_acp::SessionConfigOption>, spur_acp::AcpError> {
         let caps = brain
             .spur_agent_caps
             .as_ref()
