@@ -28,6 +28,11 @@
     (const_spec
       (identifier) @name @definition.constant)))
 
+(source_file
+  (var_declaration
+    (var_spec
+      (identifier) @name @definition.constant)))
+
 (field_declaration
   (field_identifier) @name @definition.field)
 
