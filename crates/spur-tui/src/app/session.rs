@@ -182,7 +182,6 @@ impl App {
             #[cfg(feature = "markdown")]
             mermaid_viewer: None,
             license_state,
-            license_badge: None,
             flag_summary: None,
             feature_gate: spur_license::FeatureGate::new(
                 spur_license::policy::PolicyResolver::embedded(),
@@ -238,7 +237,6 @@ impl App {
             app.spawn_live_cost_refresh();
         }
 
-        app.license_badge = license_badge_from_state(&app.license_state);
         app.flag_summary = compute_flag_summary();
 
         // Validate every agent entry. Fatal errors abort the agent (but we don't

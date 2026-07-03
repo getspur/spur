@@ -651,7 +651,6 @@ impl DashboardView {
         ctx: &super::ViewContext,
     ) {
         let lineage = ctx.lineage;
-        let license_badge = ctx.license_badge;
         let flag_summary = ctx.flag_summary;
         let tombstone = ctx.tombstone;
         let view_hint_override = ctx.transient_hint_override;
@@ -677,7 +676,6 @@ impl DashboardView {
                     frame,
                     area,
                     ctx.theme,
-                    license_badge,
                     flag_summary,
                     tombstone,
                     view_hint_override,
@@ -785,10 +783,8 @@ impl DashboardView {
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
                 notebook_ready: ctx.notebook_ready,
-                session_lifecycle_caps: None,
                 issue_count: self.tracked_issues.len(),
                 alert_summary: self.alert_summary,
-                license_badge,
                 flag_summary,
                 view_hint_override,
             },
@@ -802,7 +798,6 @@ impl DashboardView {
         lineage: &ExecutorLineage,
         ctx: &super::ViewContext,
     ) {
-        let license_badge = ctx.license_badge;
         let flag_summary = ctx.flag_summary;
         let tombstone = ctx.tombstone;
         let view_hint_override = ctx.transient_hint_override;
@@ -901,23 +896,19 @@ impl DashboardView {
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
                 notebook_ready: ctx.notebook_ready,
-                session_lifecycle_caps: None,
                 issue_count: self.tracked_issues.len(),
                 alert_summary: self.alert_summary,
-                license_badge,
                 flag_summary,
                 view_hint_override,
             },
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_setup_nudge(
         &mut self,
         frame: &mut Frame,
         area: Rect,
         theme: &Theme,
-        license_badge: Option<&crate::components::status_bar::LicenseBadge>,
         flag_summary: Option<(usize, usize)>,
         tombstone: Option<&Tombstone>,
         view_hint_override: Option<HintOverride<'_>>,
@@ -1054,10 +1045,8 @@ impl DashboardView {
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
                 notebook_ready: false,
-                session_lifecycle_caps: None,
                 issue_count: self.tracked_issues.len(),
                 alert_summary: self.alert_summary,
-                license_badge,
                 flag_summary,
                 view_hint_override,
             },
