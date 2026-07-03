@@ -74,6 +74,9 @@ pub struct SessionDetailView {
     react_trace: ReactTrace,
     input_bar: InputBar,
     cost: f64,
+    /// Agent-reported cumulative session cost from `UsageUpdate::cost`.
+    /// Kept separate from SPUR's own token-based estimate in `cost`.
+    pub agent_reported_cost: Option<(f64, String)>,
     started_at: Instant,
     /// Current session mode id (e.g. "plan", "default"). Populated from
     /// `SessionUpdate::CurrentModeUpdate`.
@@ -1836,6 +1839,34 @@ mod tests {
         }
     }
 
+    fn render_view_text(view: &mut SessionDetailView, width: u16, height: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let ctx = test_ctx();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                <SessionDetailView as crate::views::View>::render(view, f, f.area(), &ctx);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .map(|c| c.symbol().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn prompt_dispatched_event(
         session: &spur_acp::SessionId,
         turn_kind: &str,
@@ -1951,6 +1982,7 @@ mod tests {
         // Seed via existing public APIs.
         view.set_current_mode(Some("plan".into()));
         view.cost = 1.23;
+        view.agent_reported_cost = Some((1.35, "USD".to_string()));
         view.context_used = Some(1234);
         view.context_size = Some(200_000);
         view.auth_error = Some("auth failed".into());
@@ -1960,6 +1992,7 @@ mod tests {
         view.reset_for_clear();
 
         assert_eq!(view.cost, 0.0);
+        assert_eq!(view.agent_reported_cost, None);
         assert_eq!(view.current_mode, None);
         assert_eq!(view.context_used, None);
         assert_eq!(view.context_size, None);
@@ -1968,6 +2001,38 @@ mod tests {
         assert!(!view.cancelling_in_flight);
         // react_trace's mode mirror must also reset.
         assert_eq!(view.react_trace.current_mode(), None);
+    }
+
+    #[test]
+    fn header_renders_agent_reported_cost_when_present() {
+        let mut view = make_view();
+        view.cost = 1.20;
+        view.agent_reported_cost = Some((1.35, "USD".to_string()));
+
+        let rendered = render_view_text(&mut view, 120, 24);
+
+        assert!(
+            rendered.contains("$1.20 (agent: $1.35)"),
+            "agent-reported cost must be labeled beside SPUR estimate. Rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn header_omits_agent_reported_cost_when_absent() {
+        let mut view = make_view();
+        view.cost = 1.20;
+        view.agent_reported_cost = None;
+
+        let rendered = render_view_text(&mut view, 120, 24);
+
+        assert!(
+            rendered.contains("$1.20"),
+            "SPUR estimate should still render. Rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("agent:"),
+            "agent cost label must not render without an agent-reported cost. Rendered:\n{rendered}"
+        );
     }
 
     #[test]
