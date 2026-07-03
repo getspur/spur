@@ -1,5 +1,7 @@
 //! Shared Rust query layer over `.spur/analyst.duckdb`.
 
+pub(crate) mod embed_client;
+pub mod embed_service;
 pub mod mcp;
 
 use std::{env, path::Path};
@@ -27,7 +29,10 @@ const MAX_GRAPH_CANDIDATES: usize = 30;
 pub const MAX_SYMBOL_RISK_COMMUNITY_IDS: usize = 40;
 pub const MAX_CONTEXT_PATH_HOPS: usize = 6;
 pub const MAX_CONTEXT_PATHS: usize = 12;
-const DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT: &str = "512MB";
+// Keep this at 2GB or above: 512MB starved real-index hybrid
+// context-candidate queries into DuckDB OOM, whose abort path can
+// double-free aggregate state and SIGABRT the process (duckdb#19391).
+const DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT: &str = "4GB";
 const DEFAULT_ANALYST_DUCKDB_THREADS: usize = 4;
 const ANALYST_DUCKDB_MEMORY_LIMIT_ENV: &str = "SPUR_ANALYST_DUCKDB_MEMORY_LIMIT";
 const ANALYST_DUCKDB_THREADS_ENV: &str = "SPUR_ANALYST_DUCKDB_THREADS";
@@ -168,8 +173,11 @@ fn apply_analyst_duckdb_resource_caps(
     caps: &AnalystDuckDbResourceCaps,
 ) -> Result<()> {
     let memory_limit = caps.memory_limit.replace('\'', "''");
+    // preserve_insertion_order=false shrinks the working set of large
+    // aggregations; analyst queries that care about order use explicit
+    // ORDER BY clauses.
     conn.execute_batch(&format!(
-        "SET memory_limit = '{memory_limit}';\nSET threads = {};",
+        "SET memory_limit = '{memory_limit}';\nSET threads = {};\nSET preserve_insertion_order = false;",
         caps.threads
     ))
     .with_context(|| {
@@ -1527,6 +1535,77 @@ mod tests {
 
         assert_eq!(memory_limit, "64.0 MiB");
         assert_eq!(threads, 2);
+    }
+
+    fn humanized_memory_setting_bytes(setting: &str) -> f64 {
+        let mut parts = setting.split_whitespace();
+        let value: f64 = parts
+            .next()
+            .expect("memory setting value")
+            .parse()
+            .expect("numeric memory setting value");
+        let multiplier: f64 = match parts.next().expect("memory setting unit") {
+            "KiB" => 1024.0,
+            "MiB" => 1024.0 * 1024.0,
+            "GiB" => 1024.0 * 1024.0 * 1024.0,
+            "TiB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+            other => panic!("unexpected memory setting unit: {other}"),
+        };
+        value * multiplier
+    }
+
+    fn open_connection_with_default_caps() -> (tempfile::TempDir, Connection) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("analyst.duckdb");
+        drop(Connection::open(&db_path).expect("create fixture db"));
+
+        let conn = open_analyst_connection_read_only_with_caps(
+            &db_path,
+            AnalystDuckDbResourceCaps::default(),
+        )
+        .expect("open read-only connection with default caps");
+        (temp_dir, conn)
+    }
+
+    #[test]
+    fn default_memory_limit_supports_hybrid_search_workloads() {
+        // The old 512MB default starved real-index hybrid context-candidate
+        // queries into DuckDB OOM, whose abort path can double-free aggregate
+        // state and SIGABRT the whole process (duckdb/duckdb#19391). Keep the
+        // default cap at or above 2GB, the verified floor for those queries.
+        let (_temp_dir, conn) = open_connection_with_default_caps();
+        let memory_limit: String = conn
+            .query_row(
+                "SELECT current_setting('memory_limit')::VARCHAR",
+                [],
+                |row: &duckdb::Row<'_>| row.get::<_, String>(0),
+            )
+            .expect("read memory_limit setting");
+
+        assert!(
+            humanized_memory_setting_bytes(&memory_limit) >= 2_000_000_000.0,
+            "default analyst memory limit {memory_limit} is below the 2GB floor"
+        );
+    }
+
+    #[test]
+    fn resource_caps_disable_insertion_order_preservation() {
+        // Insertion-order preservation inflates the working set of large
+        // aggregations; every analyst query that cares about order has an
+        // explicit ORDER BY, so trade it away for OOM headroom.
+        let (_temp_dir, conn) = open_connection_with_default_caps();
+        let preserve_insertion_order: bool = conn
+            .query_row(
+                "SELECT current_setting('preserve_insertion_order')::BOOLEAN",
+                [],
+                |row: &duckdb::Row<'_>| row.get::<_, bool>(0),
+            )
+            .expect("read preserve_insertion_order setting");
+
+        assert!(
+            !preserve_insertion_order,
+            "analyst connections must disable insertion-order preservation"
+        );
     }
 
     fn context_path_fixture(edges_sql: &str) -> (tempfile::TempDir, PathBuf) {

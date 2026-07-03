@@ -31,46 +31,6 @@ fn via_analytics_visible() -> bool {
     VIA_ANALYTICS_VISIBLE.load(Ordering::Relaxed)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LicenseBadge {
-    pub label: String,
-    pub tone: LicenseBadgeTone,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LicenseBadgeTone {
-    Neutral,
-    Success,
-    Warning,
-    Danger,
-}
-
-impl LicenseBadge {
-    pub fn new(label: impl Into<String>, tone: LicenseBadgeTone) -> Self {
-        Self {
-            label: label.into(),
-            tone,
-        }
-    }
-
-    fn style(&self, theme: &Theme) -> Style {
-        match self.tone {
-            LicenseBadgeTone::Neutral => {
-                Style::default().fg(token(theme, "license_badge.neutral.fg"))
-            }
-            LicenseBadgeTone::Success => Style::default()
-                .fg(token(theme, "license_badge.success.text_fg"))
-                .add_modifier(Modifier::BOLD),
-            LicenseBadgeTone::Warning => Style::default()
-                .fg(token(theme, "license_badge.warning.text_fg"))
-                .add_modifier(Modifier::BOLD),
-            LicenseBadgeTone::Danger => Style::default()
-                .fg(token(theme, "license_badge.danger.text_fg"))
-                .add_modifier(Modifier::BOLD),
-        }
-    }
-}
-
 pub fn render_tombstone_badge(
     slot: Option<&Tombstone>,
     now: std::time::Instant,
@@ -167,14 +127,10 @@ pub struct StatusBarProps<'a> {
     pub esc_consumed_by_composer: bool,
     /// True when the notebook socket has advertised readiness.
     pub notebook_ready: bool,
-    /// Cached agent caps for SessionDetail lifecycle affordance discovery.
-    pub session_lifecycle_caps: Option<&'a spur_acp::SpurAgentCaps>,
     /// Number of tracked issues (from IssuesLoaded); 0 means not shown.
     pub issue_count: usize,
     /// Graph alert summary from bv: (total, critical, warning). None if bv unavailable.
     pub alert_summary: Option<(usize, usize, usize)>,
-    /// Compact license snapshot rendered as a pill, if licensing is active.
-    pub license_badge: Option<&'a LicenseBadge>,
     /// Compact flag snapshot: (active_count, total_count). None if unavailable.
     pub flag_summary: Option<(usize, usize)>,
     /// When `Some`, overrides the hardcoded per-view hint string.
@@ -237,17 +193,19 @@ impl StatusBar {
             .map(|m| format!(" [{m}]"))
             .unwrap_or_default();
 
-        let usage_text = match (
-            props.usage_supported,
-            props.context_used,
-            props.context_size,
-        ) {
-            (false, _, _) => None,
-            (true, Some(used), Some(size)) if size > 0 => {
+        // `usage_supported` is a frozen per-agent-kind prediction captured at
+        // session start (ACP has no capability flag for `UsageUpdate`
+        // emission, so it's a guess). Arrived data is strictly better
+        // evidence than that guess, so real `context_used`/`context_size`
+        // always render; the flag only governs the "nothing arrived yet"
+        // placeholder.
+        let usage_text = match (props.context_used, props.context_size) {
+            (Some(used), Some(size)) if size > 0 => {
                 let pct = (used as f64 / size as f64) * 100.0;
                 Some(format!("ctx {:.0}%", pct))
             }
-            (true, _, _) => Some("ctx --%".to_string()),
+            _ if props.usage_supported => Some("ctx --%".to_string()),
+            _ => None,
         };
 
         // Build the review span: warning+bold when reviews are pending, muted otherwise.
@@ -276,11 +234,16 @@ impl StatusBar {
         let compact_line = Line::from(compact_spans);
         let compact_width = compact_line.width() as u16;
 
-        // SessionDetail has a dedicated hint area allocated separately below, so the
-        // 45-col reserve doesn't apply — fit metrics fully unless they exceed area.
-        // Other views render hints inline, so reserve space to keep them readable.
+        // SessionDetail's hint text is longer and state-dependent (unlike the other
+        // views' short fixed hints), so reserve exactly its rendered width instead of
+        // the other views' flat 45-col guess. Without this, metrics could claim the
+        // whole line and clip the hint text mid-word with no fallback.
         let use_compact = if matches!(props.view, ViewId::SessionDetail(_)) {
-            full_width > area.width
+            let hint_text = props.view_hint_override.map(|o| o.full).unwrap_or_else(|| {
+                hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
+            });
+            let hints_reserve = Span::raw(hint_text).width() as u16;
+            full_width + hints_reserve > area.width && compact_width + hints_reserve <= area.width
         } else {
             let hints_reserve = 45u16;
             full_width + hints_reserve > area.width && compact_width + hints_reserve <= area.width
@@ -399,15 +362,6 @@ impl StatusBar {
                 spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
             }
         }
-        if let Some(badge) = props.license_badge {
-            spans.push(Span::styled(
-                format!("{} ", badge.label),
-                badge.style(theme),
-            ));
-            if !compact {
-                spans.push(Span::styled("· ", Style::default().fg(sep_fg)));
-            }
-        }
         let tombstone_badge =
             render_tombstone_badge(props.tombstone, std::time::Instant::now(), theme);
         if !tombstone_badge.spans.is_empty() {
@@ -420,18 +374,6 @@ impl StatusBar {
                 Style::default().fg(token(theme, "status_bar.notebook.fg")),
             ));
             spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
-        }
-        if matches!(props.view, ViewId::SessionDetail(_)) {
-            if let Some(label) = props
-                .session_lifecycle_caps
-                .and_then(session_lifecycle_caps_label)
-            {
-                spans.push(Span::styled(
-                    label,
-                    Style::default().fg(token(theme, "status_bar.fg")),
-                ));
-                spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
-            }
         }
         #[cfg(feature = "analytics")]
         if via_analytics_visible() {
@@ -546,28 +488,6 @@ impl StatusBar {
     }
 }
 
-fn session_lifecycle_caps_label(caps: &spur_acp::SpurAgentCaps) -> Option<String> {
-    let mut advertised = Vec::new();
-    if caps.supports_resume_session() {
-        advertised.push("resume");
-    }
-    if caps.supports_delete_session() {
-        advertised.push("delete");
-    }
-    if caps.supports_list_sessions() {
-        advertised.push("list");
-    }
-    if caps.supports_close_session() {
-        advertised.push("close");
-    }
-
-    if advertised.is_empty() {
-        None
-    } else {
-        Some(format!("session: {}", advertised.join(" ")))
-    }
-}
-
 #[cfg(test)]
 mod status_bar_hint_tests {
     use super::{hint_for_session_detail, StatusBar, StatusBarProps};
@@ -597,10 +517,8 @@ mod status_bar_hint_tests {
             stream_in_flight: false,
             esc_consumed_by_composer: false,
             notebook_ready,
-            session_lifecycle_caps: None,
             issue_count: 0,
             alert_summary: None,
-            license_badge: None,
             flag_summary: None,
             view_hint_override: None,
         };
