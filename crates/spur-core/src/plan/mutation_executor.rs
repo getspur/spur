@@ -1499,6 +1499,7 @@ async fn apply_abandon_task(
                 result_summary: Some(reason.to_string()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             }),
         )
         .await
@@ -1701,6 +1702,7 @@ async fn apply_cancel_task(
             result_summary: Some(reason.to_string()),
             artifact_uri: None,
             dispatched_base_oid: None,
+            estimated_cost_micros: None,
         }),
     )
     .await

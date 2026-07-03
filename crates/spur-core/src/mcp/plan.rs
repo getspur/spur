@@ -33,13 +33,17 @@ const PLAN_MANAGEMENT_TOOL_NAMES: &[&str] = &["merge_plan", "resume_plan", "forc
 
 const PLAN_REMAINDER_TOOL_NAMES: &[&str] = &[
     "submit_plan",
+    "submit_loop",
     "execute_epic",
     "get_plan_status",
+    "get_loop_status",
     "get_reconciler_status",
     "get_task_diff",
     "preview_task_base",
     "plan_truncate_and_restart",
     "recover_orphaned_dispatch",
+    "pause_loop",
+    "resume_loop",
     "review_task",
     "submit_plan_mutation",
 ];
@@ -49,13 +53,17 @@ const PLAN_TOOL_NAMES: &[&str] = &[
     "resume_plan",
     "force_reclaim_plan",
     "submit_plan",
+    "submit_loop",
     "execute_epic",
     "get_plan_status",
+    "get_loop_status",
     "get_reconciler_status",
     "get_task_diff",
     "preview_task_base",
     "plan_truncate_and_restart",
     "recover_orphaned_dispatch",
+    "pause_loop",
+    "resume_loop",
     "review_task",
     "submit_plan_mutation",
 ];
@@ -114,8 +122,10 @@ impl PlanMcpModule {
             "resume_plan" => server.handle_resume_plan(id, arguments).await,
             "force_reclaim_plan" => server.handle_force_reclaim_plan(id, arguments).await,
             "submit_plan" => server.handle_submit_plan(id, arguments).await,
+            "submit_loop" => server.handle_submit_loop(id, arguments).await,
             "execute_epic" => server.handle_execute_epic(id, arguments).await,
             "get_plan_status" => server.handle_get_plan_status(id, arguments).await,
+            "get_loop_status" => server.handle_get_loop_status(id, arguments).await,
             "get_reconciler_status" => server.handle_get_reconciler_status(id).await,
             "get_task_diff" => server.handle_get_task_diff(id, arguments).await,
             "preview_task_base" => server.handle_preview_task_base(id, arguments).await,
@@ -125,6 +135,8 @@ impl PlanMcpModule {
             "recover_orphaned_dispatch" => {
                 server.handle_recover_orphaned_dispatch(id, arguments).await
             }
+            "pause_loop" => server.handle_pause_loop(id, arguments).await,
+            "resume_loop" => server.handle_resume_loop(id, arguments).await,
             "review_task" => {
                 if let Some(plan_id) = arguments.get("plan_id").and_then(|v| v.as_str()) {
                     if let Err((code, message)) =
@@ -205,13 +217,17 @@ fn plan_tool_definition(name: &str) -> ToolDefinition {
         "resume_plan" => resume_plan_def(),
         "force_reclaim_plan" => force_reclaim_plan_def(),
         "submit_plan" => submit_plan_def(),
+        "submit_loop" => submit_loop_def(),
         "execute_epic" => execute_epic_def(),
         "get_plan_status" => get_plan_status_def(),
+        "get_loop_status" => get_loop_status_def(),
         "get_reconciler_status" => get_reconciler_status_def(),
         "get_task_diff" => get_task_diff_def(),
         "preview_task_base" => preview_task_base_def(),
         "plan_truncate_and_restart" => plan_truncate_and_restart_def(),
         "recover_orphaned_dispatch" => recover_orphaned_dispatch_def(),
+        "pause_loop" => pause_loop_def(),
+        "resume_loop" => resume_loop_def(),
         "review_task" => review_task_def(),
         "submit_plan_mutation" => submit_plan_mutation_def(),
         other => panic!("unknown plan MCP tool definition: {other}"),
@@ -474,6 +490,14 @@ fn submit_plan_def() -> ToolDefinition {
     }
 }
 
+fn submit_loop_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "submit_loop".into(),
+        description: "Create a durable loop issue with a [[spur-loop v1]] spec sentinel. Validates cadence_secs >= 60, defaults omitted autonomy to l1, requires at least one template task marked spur:loop-triage-task, rejects non-positive governor caps, mints a compact loop_id, and labels the loop spur:loop-id:<id>, spur:autonomy:<level>, and spur:loop-next-run:<now> so it fires immediately.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::SubmitLoopParams>(),
+    }
+}
+
 fn get_plan_status_def() -> ToolDefinition {
     ToolDefinition {
         name: "get_plan_status".into(),
@@ -488,6 +512,14 @@ fn get_plan_status_def() -> ToolDefinition {
             },
             "required": ["plan_id"]
         }),
+    }
+}
+
+fn get_loop_status_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_loop_status".into(),
+        description: "Return loop status as JSON for a loop_id: parsed LoopSpec, last recent_runs LoopRun audit records, effective backoff interval, consecutive failure count, paused flag, and next_run timestamp.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::GetLoopStatusParams>(),
     }
 }
 
@@ -547,6 +579,22 @@ fn recover_orphaned_dispatch_def() -> ToolDefinition {
         name: "recover_orphaned_dispatch".into(),
         description: "Brain-side recovery tool. Promote a stuck Dispatched beads task to AwaitingReview when the worker branch and dispatch base OID are known. Validates the task is still dispatched, the worker branch exists, and the branch contains exactly one commit over the dispatched base.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::RecoverOrphanedDispatchInput>(),
+    }
+}
+
+fn pause_loop_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "pause_loop".into(),
+        description: "Pause a loop by adding spur:loop-paused to the loop issue identified by loop_id. Existing in-flight generations are not cancelled.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::LoopIdParams>(),
+    }
+}
+
+fn resume_loop_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "resume_loop".into(),
+        description: "Resume a paused loop by removing spur:loop-paused and replacing any spur:loop-next-run:* label with spur:loop-next-run:<now>, clearing failure backoff so the scheduler may run it immediately.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::LoopIdParams>(),
     }
 }
 

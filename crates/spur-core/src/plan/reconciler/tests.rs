@@ -44,6 +44,16 @@ fn test_completion_dispatch(
     }
 }
 
+struct FixedClock {
+    now: SystemTime,
+}
+
+impl Clock for FixedClock {
+    fn now(&self) -> SystemTime {
+        self.now
+    }
+}
+
 fn projected_test_state(plan_id: &str) -> crate::plan::PlanState {
     crate::plan::PlanState {
         plan_id: plan_id.to_string(),
@@ -668,6 +678,90 @@ fn classify_epic_completion_reports_terminal_failures() {
     assert!(!outcome.add_integration_pending);
 }
 
+#[test]
+fn build_loop_run_sums_costs_and_derives_partial_outcome() {
+    use crate::plan::loops::run_record::{
+        build_loop_run, sum_completion_cost_micros, LoopRunOutcome,
+    };
+
+    let audits = vec![
+        crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+            delegation_id: "del-a".into(),
+            completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: None,
+            result_summary: None,
+            artifact_uri: None,
+            dispatched_base_oid: None,
+            estimated_cost_micros: Some(300),
+        },
+        crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+            delegation_id: "del-b".into(),
+            completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: None,
+            result_summary: None,
+            artifact_uri: None,
+            dispatched_base_oid: None,
+            estimated_cost_micros: Some(500),
+        },
+        crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+            delegation_id: "del-legacy".into(),
+            completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+            superseded: false,
+            worker_branch: None,
+            result_summary: None,
+            artifact_uri: None,
+            dispatched_base_oid: None,
+            estimated_cost_micros: None,
+        },
+        crate::plan::audit_sentinel::AuditSentinelKind::EscalationRequested {
+            plan_id: "P1".into(),
+            task_id: "T3".into(),
+            attempt: 2,
+            last_error: "needs brain".into(),
+            worker_branch: None,
+            delegation_id: Some("del-c".into()),
+        },
+    ];
+
+    assert_eq!(sum_completion_cost_micros(&audits), 800);
+
+    let run = build_loop_run(
+        "loopA",
+        7,
+        "P1",
+        LoopRunOutcome {
+            tasks_discovered: 3,
+            approved: 2,
+            rejected: 0,
+            failed: 1,
+            cancelled: 0,
+        },
+        &audits,
+        1_782_953_600,
+    );
+
+    assert_eq!(
+        run,
+        crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+            loop_id: "loopA".into(),
+            generation: 7,
+            plan_id: "P1".into(),
+            outcome: "partial".into(),
+            tasks_discovered: 3,
+            approved: 2,
+            rejected: 0,
+            failed: 1,
+            cancelled: 0,
+            escalations: 1,
+            cost_micros: 800,
+            started_at: 1_782_953_600,
+            ended_at: 1_782_953_600,
+        }
+    );
+}
+
 /// D1 fix coverage: verify that the biased select! pattern used inside
 /// `Reconciler::run` to race `tick_once` against `cancel` actually
 /// preempts an in-flight future when cancel fires. Uses a pending future
@@ -1097,6 +1191,413 @@ async fn seed_mock_ready_tasks_plan(
     issue_ids
 }
 
+async fn add_mock_issue_label(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    issue_id: &str,
+    label: impl Into<String>,
+) {
+    pm.update_issue(
+        issue_id,
+        spur_pm::IssueUpdate {
+            add_labels: vec![label.into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("add mock issue label");
+}
+
+async fn add_mock_epic_label(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    plan_id: &str,
+    label: impl Into<String>,
+) {
+    let epics = pm
+        .list_issues(spur_pm::IssueFilter {
+            labels: vec![crate::plan::labels::plan_id(plan_id)],
+            issue_type: Some("epic".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("list mock epics");
+    let epic_id = epics
+        .first()
+        .unwrap_or_else(|| panic!("expected complete epic for plan {plan_id}"))
+        .id
+        .clone();
+    add_mock_issue_label(pm, &epic_id, label).await;
+}
+
+async fn close_mock_task_with_completion_cost(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    issue_id: &str,
+    estimated_cost_micros: u64,
+) {
+    let adv =
+        crate::plan::PmLike::advanced(pm.as_ref()).expect("mock pm should expose beads advanced");
+    adv.add_comment(
+        issue_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                delegation_id: "del-budget-spent".to_string(),
+                completion_state: crate::plan::audit_sentinel::CompletionState::AwaitingReview,
+                superseded: false,
+                worker_branch: Some("spur/worker-budget".to_string()),
+                result_summary: None,
+                artifact_uri: None,
+                dispatched_base_oid: None,
+                estimated_cost_micros: Some(estimated_cost_micros),
+            },
+        ),
+    )
+    .await
+    .expect("completion audit");
+    pm.update_issue(
+        issue_id,
+        spur_pm::IssueUpdate {
+            status: Some("closed".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("close spent task");
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_loop_epic_appends_one_loop_run_to_loop_issue() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-loop-run".into()));
+    let loop_id = "loopA";
+    let loop_issue_id = pm
+        .create_issue(spur_pm::IssueCreate {
+            title: "Loop controller".into(),
+            description: Some("loop issue".into()),
+            issue_type: Some("task".into()),
+            labels: vec![crate::plan::labels::loop_id_label(loop_id)],
+            ..Default::default()
+        })
+        .await
+        .expect("create loop issue");
+    let task_issue_ids =
+        seed_mock_ready_tasks_plan(&pm, "P-LOOP-RUN", &["T1", "T2"], &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-LOOP-RUN",
+        crate::plan::labels::loop_id_label(loop_id),
+    )
+    .await;
+    add_mock_epic_label(
+        &pm,
+        "P-LOOP-RUN",
+        crate::plan::labels::loop_generation_label(1),
+    )
+    .await;
+    close_mock_task_with_completion_cost(&pm, &task_issue_ids[0], 300).await;
+    close_mock_task_with_completion_cost(&pm, &task_issue_ids[1], 500).await;
+
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let mut reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+    reconciler.set_clock(Arc::new(FixedClock {
+        now: SystemTime::UNIX_EPOCH + Duration::from_secs(12_345),
+    }));
+
+    reconciler.tick_once().await.expect("first tick");
+    reconciler.tick_once().await.expect("second tick");
+
+    let loop_comments = pm.comments(&loop_issue_id).await;
+    let loop_runs = loop_comments
+        .iter()
+        .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(&comment.body))
+        .filter_map(Result::ok)
+        .filter(|audit| {
+            matches!(
+                audit,
+                crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+                    loop_id: found_loop_id,
+                    generation: 1,
+                    ..
+                } if found_loop_id == loop_id
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(loop_runs.len(), 1, "LoopRun must be idempotent");
+    assert_eq!(
+        loop_runs[0],
+        crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+            loop_id: loop_id.into(),
+            generation: 1,
+            plan_id: "P-LOOP-RUN".into(),
+            outcome: "approved".into(),
+            tasks_discovered: 2,
+            approved: 2,
+            rejected: 0,
+            failed: 0,
+            cancelled: 0,
+            escalations: 0,
+            cost_micros: 800,
+            started_at: 12_345,
+            ended_at: 12_345,
+        }
+    );
+}
+
+fn drain_delegation_requests(
+    delegation_rx: &mut tokio::sync::mpsc::Receiver<crate::DelegationRequest>,
+) -> Vec<crate::DelegationRequest> {
+    let mut requests = Vec::new();
+    loop {
+        match delegation_rx.try_recv() {
+            Ok(request) => requests.push(request),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
+    requests
+}
+
+#[tokio::test(start_paused = true)]
+async fn budget_exhausted_plan_suppresses_dispatch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-budget".into()));
+    let issue_ids =
+        seed_mock_ready_tasks_plan(&pm, "P-BUDGET", &["Spent", "Ready"], &brain_session_id).await;
+    close_mock_task_with_completion_cost(&pm, &issue_ids[0], 1_200_000).await;
+    add_mock_epic_label(
+        &pm,
+        "P-BUDGET",
+        format!("{}1000000", crate::plan::labels::LOOP_BUDGET_MICROS_PREFIX),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "over-budget plan must not dispatch a worker"
+    );
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let recent = outcomes.recent_outcomes("P-BUDGET");
+    assert!(
+        recent.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Skipped {
+                task_id,
+                reason: SkipReason::BudgetExhausted {
+                    spent_micros: 1_200_000,
+                    cap_micros: 1_000_000,
+                },
+                ..
+            } if task_id == "Ready"
+        )),
+        "expected budget-exhausted skip, got {recent:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn epic_with_loop_paused_label_suppresses_dispatch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-loop-paused".into()));
+    seed_mock_ready_task_plan(&pm, "P-LOOP-PAUSED", "T1", &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-LOOP-PAUSED",
+        crate::plan::labels::LOOP_PAUSED.to_string(),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "loop-paused plan must not dispatch a worker"
+    );
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let recent = outcomes.recent_outcomes("P-LOOP-PAUSED");
+    assert!(
+        recent.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Skipped {
+                task_id,
+                reason: SkipReason::LoopsPaused { scope },
+                ..
+            } if task_id == "T1" && scope == "loop"
+        )),
+        "expected loop-scoped pause skip, got {recent:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn epic_with_pause_all_loops_label_suppresses_dispatch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-pause-all".into()));
+    seed_mock_ready_task_plan(&pm, "P-PAUSE-ALL", "T1", &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-PAUSE-ALL",
+        crate::plan::labels::PAUSE_ALL_LOOPS.to_string(),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    assert!(
+        delegation_rx.try_recv().is_err(),
+        "global pause label must not dispatch a worker"
+    );
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let recent = outcomes.recent_outcomes("P-PAUSE-ALL");
+    assert!(
+        recent.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Skipped {
+                task_id,
+                reason: SkipReason::LoopsPaused { scope },
+                ..
+            } if task_id == "T1" && scope == "global"
+        )),
+        "expected global pause skip, got {recent:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn l1_autonomy_suppresses_non_triage_tasks() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-l1-report".into()));
+    let issue_ids =
+        seed_mock_ready_tasks_plan(&pm, "P-L1", &["Triage", "Action"], &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-L1",
+        format!("{}l1", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    add_mock_issue_label(
+        &pm,
+        &issue_ids[0],
+        crate::plan::labels::LOOP_TRIAGE_TASK.to_string(),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(2);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    let requests = drain_delegation_requests(&mut delegation_rx);
+    assert_eq!(requests.len(), 1, "L1 should dispatch only triage");
+    assert_eq!(requests[0].issue_id.as_deref(), Some(issue_ids[0].as_str()));
+    let outcomes_store = reconciler.outcomes();
+    let outcomes = outcomes_store.lock().await;
+    let recent = outcomes.recent_outcomes("P-L1");
+    assert!(
+        recent.iter().any(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Skipped {
+                task_id,
+                reason: SkipReason::ReportOnly,
+                ..
+            } if task_id == "Action"
+        )),
+        "expected report-only skip for non-triage task, got {recent:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn l2_autonomy_dispatches_all_ready_tasks() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-l2-assisted".into()));
+    let issue_ids =
+        seed_mock_ready_tasks_plan(&pm, "P-L2", &["Triage", "Action"], &brain_session_id).await;
+    add_mock_epic_label(
+        &pm,
+        "P-L2",
+        format!("{}l2", crate::plan::labels::AUTONOMY_PREFIX),
+    )
+    .await;
+    add_mock_issue_label(
+        &pm,
+        &issue_ids[0],
+        crate::plan::labels::LOOP_TRIAGE_TASK.to_string(),
+    )
+    .await;
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(2);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    let requests = drain_delegation_requests(&mut delegation_rx);
+    let request_issue_ids = requests
+        .iter()
+        .filter_map(|request| request.issue_id.as_deref())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        request_issue_ids,
+        HashSet::from([issue_ids[0].as_str(), issue_ids[1].as_str()])
+    );
+}
+
 #[tokio::test]
 async fn global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_plan() {
     let pm = crate::plan::test_util::MockPm::new().arc();
@@ -1452,6 +1953,7 @@ async fn seed_ready_overlay_plan(
                 worker_branch: Some(worker_branch.to_string()),
                 result_summary: Some(format!("approved dep {task_id}")),
                 dispatched_base_oid: Some(base_oid.clone()),
+                estimated_cost_micros: None,
                 ..Default::default()
             },
         )

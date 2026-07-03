@@ -857,6 +857,7 @@ impl SimState {
                 result_summary: Some("approved setup".to_string()),
                 artifact_uri: None,
                 dispatched_base_oid: Some(hex_oid(task_id)),
+                estimated_cost_micros: None,
             },
         );
         self.add_audit(&issue_id, AuditSentinelKind::Approval { delegation_id });
