@@ -252,6 +252,7 @@ pub struct PersistPlanAsEpicInput {
     pub parent_epic_id: Option<String>,
     pub epic_title: Option<String>,
     pub epic_body: Option<String>,
+    pub epic_labels: Vec<String>,
     pub brain_session_id: BrainSessionId,
     pub execution_mode: String,
     pub precomputed_auto_serialized: Option<Vec<SiblingOverlap>>,
@@ -299,6 +300,9 @@ pub async fn persist_plan_as_epic(
         }
     };
 
+    let mut activation_labels = vec![owner_label];
+    activation_labels.extend(input.epic_labels);
+
     let epic_subgraph = crate::server::plan_builder::build_epic_subgraph_with_activation_labels(
         pm,
         feature_gate,
@@ -307,7 +311,7 @@ pub async fn persist_plan_as_epic(
         input.epic_body.as_deref(),
         &input.tasks,
         input.parent_epic_id.as_deref(),
-        vec![owner_label],
+        activation_labels,
     )
     .await
     .map_err(anyhow::Error::msg)?;
@@ -3408,6 +3412,41 @@ pub(crate) async fn push_loop_escalation_continuation(
         diff_summary: None,
         summary: Some(format!(
             "Loop escalation: loop_id={loop_id}; goal={goal}; consecutive_failures={consecutive_failures}; action=review paused loop and decide whether to resume"
+        )),
+        estimated_cost_usd: 0.0,
+        worker_branch: None,
+        artifact: None,
+    };
+    materialize_and_push_detached_continuation(
+        continuation_ctx,
+        materializer,
+        &result,
+        &delegation_id,
+        1,
+        brain_session_id,
+        spur_acp::domain::ContinuationSource::LoopEscalation,
+    )
+    .await;
+}
+
+pub(crate) async fn push_loop_template_validation_escalation_continuation(
+    continuation_ctx: &crate::plan::continuation::DetachedContinuationCtx,
+    materializer: &crate::outcome_materializer::OutcomeMaterializer,
+    brain_session_id: &BrainSessionId,
+    loop_id: &str,
+    goal: &str,
+    generation: u32,
+    validation_error: &str,
+) {
+    let delegation_id = loop_artifact_delegation_id("template-validation", loop_id, generation);
+    let result = DelegationResult {
+        status: DelegationStatus::Failed {
+            error: format!("loop auto-paused after template validation failed: {validation_error}"),
+        },
+        diff: None,
+        diff_summary: None,
+        summary: Some(format!(
+            "Loop escalation: loop_id={loop_id}; goal={goal}; generation={generation}; validation_error={validation_error}; action=review paused loop template before resuming"
         )),
         estimated_cost_usd: 0.0,
         worker_branch: None,

@@ -1017,6 +1017,41 @@ fn test_dispatch_ctx(
     }
 }
 
+fn test_dispatch_ctx_with_recording(
+    delegation_tx: tokio::sync::mpsc::Sender<crate::DelegationRequest>,
+    brain_session_id: spur_acp::BrainSessionId,
+    event_sink: Option<Arc<dyn spur_mcp::events::McpEventSink>>,
+) -> (
+    ReconcilerDispatchCtx,
+    Arc<std::sync::Mutex<Vec<spur_acp::domain::BrainContinuation>>>,
+) {
+    let continuations = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&continuations);
+    (
+        ReconcilerDispatchCtx {
+            delegation_tx,
+            task_tracker: tokio_util::task::TaskTracker::new(),
+            brain_session_id,
+            event_sink,
+            materializer: Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
+                Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            )),
+            continuation_ctx: Arc::new(crate::plan::continuation::DetachedContinuationCtx {
+                on_complete: Arc::new(move |continuation, _worker_session| {
+                    let captured = Arc::clone(&captured);
+                    Box::pin(async move {
+                        captured
+                            .lock()
+                            .expect("continuations lock")
+                            .push(continuation);
+                    })
+                }),
+            }),
+        },
+        continuations,
+    )
+}
+
 struct ScriptedReadyPm {
     inner: Arc<crate::plan::test_util::MockPm>,
     empty_plan_ids: HashSet<String>,
@@ -1265,6 +1300,44 @@ async fn close_mock_task_with_completion_cost(
     .expect("close spent task");
 }
 
+async fn create_mock_loop_issue(
+    pm: &Arc<crate::plan::test_util::MockPm>,
+    loop_id: &str,
+    autonomy: crate::plan::loops::spec::AutonomyLevel,
+    template: serde_json::Value,
+    max_cost_micros_per_generation: Option<u64>,
+) -> String {
+    let spec = crate::plan::loops::spec::LoopSpec {
+        loop_id: loop_id.to_string(),
+        goal: format!("Goal for {loop_id}"),
+        pattern: None,
+        cadence_secs: 60,
+        autonomy,
+        template,
+        governors: crate::plan::loops::spec::LoopGovernors {
+            max_cost_micros_per_generation,
+            ..Default::default()
+        },
+        escalation: None,
+    };
+    pm.create_issue(spur_pm::IssueCreate {
+        title: format!("Loop {loop_id}"),
+        description: Some(spec.to_sentinel_body()),
+        issue_type: Some("task".into()),
+        labels: vec![
+            crate::plan::labels::loop_id_label(loop_id),
+            format!(
+                "{}{}",
+                crate::plan::labels::AUTONOMY_PREFIX,
+                autonomy.as_str()
+            ),
+        ],
+        ..Default::default()
+    })
+    .await
+    .expect("create loop issue")
+}
+
 #[tokio::test(start_paused = true)]
 async fn terminal_loop_epic_appends_one_loop_run_to_loop_issue() {
     let pm = crate::plan::test_util::MockPm::new().arc();
@@ -1356,6 +1429,279 @@ async fn terminal_loop_epic_appends_one_loop_run_to_loop_issue() {
             started_at: 12_345,
             ended_at: 12_345,
         }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn l3_loop_arms_generation_without_brain() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let loop_id = "loopl3arm";
+    let triage_body = "Triage the stored template\nkeep this body byte-exact";
+    let action_body = "Apply the approved action\nsecond line stays byte-exact";
+    let template = serde_json::json!({
+        "epic_title": "Stored L3 generation",
+        "epic_body": "Generated from stored loop template",
+        "tasks": [
+            {
+                "task_id": "Triage",
+                "agent": "codex",
+                "task": triage_body,
+                "context_files": ["docs/loop.md"]
+            },
+            {
+                "task_id": "Action",
+                "agent": "codex",
+                "task": action_body,
+                "depends_on": ["Triage"]
+            }
+        ]
+    });
+    create_mock_loop_issue(
+        &pm,
+        loop_id,
+        crate::plan::loops::spec::AutonomyLevel::L3,
+        template,
+        Some(123_456),
+    )
+    .await;
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-l3-arm".into()));
+    let event_sink = Arc::new(RecordingEventSink::default());
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel::<crate::DelegationRequest>(4);
+    let (dispatch, continuations) =
+        test_dispatch_ctx_with_recording(delegation_tx, brain_session_id, Some(event_sink.clone()));
+    let mut reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(dispatch.into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+    reconciler.set_clock(Arc::new(FixedClock {
+        now: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+    }));
+
+    reconciler.tick_once().await.expect("tick once");
+
+    assert!(
+        continuations.lock().expect("continuations lock").is_empty(),
+        "L3 should persist directly without a LoopDue continuation"
+    );
+    let issues = pm.issues().await;
+    let generation_epics = issues
+        .iter()
+        .filter(|issue| {
+            issue.issue_type.as_deref() == Some("epic")
+                && issue
+                    .labels
+                    .iter()
+                    .any(|label| label == &crate::plan::labels::loop_id_label(loop_id))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(generation_epics.len(), 1, "expected one L3 generation epic");
+    let epic = generation_epics[0];
+    for expected in [
+        crate::plan::labels::loop_id_label(loop_id),
+        crate::plan::labels::loop_generation_label(1),
+        format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX),
+        format!("{}123456", crate::plan::labels::LOOP_BUDGET_MICROS_PREFIX),
+    ] {
+        assert!(
+            epic.labels.contains(&expected),
+            "generation epic labels missing {expected}: {:?}",
+            epic.labels
+        );
+    }
+
+    let child_bodies = issues
+        .iter()
+        .filter(|issue| {
+            issue.issue_type.as_deref() == Some("task")
+                && issue.blocked_by.iter().any(|blocker| blocker == &epic.id)
+        })
+        .filter_map(|issue| {
+            let task_id = issue
+                .labels
+                .iter()
+                .find_map(|label| crate::plan::labels::parse_plan_task_id(label))?;
+            Some((task_id, issue.body.clone()))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        child_bodies
+            .get("Triage")
+            .expect("triage task body")
+            .as_bytes(),
+        triage_body.as_bytes()
+    );
+    assert_eq!(
+        child_bodies
+            .get("Action")
+            .expect("action task body")
+            .as_bytes(),
+        action_body.as_bytes()
+    );
+    let events = event_sink.events.lock().expect("events lock");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            spur_acp::SpurEventBody::LoopGenerationStarted {
+                loop_id: found_loop_id,
+                generation: 1,
+                ..
+            } if found_loop_id == loop_id
+        )),
+        "expected LoopGenerationStarted event, got {events:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn l1_and_l2_still_push_continuations() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let template = serde_json::json!({
+        "tasks": [
+            {
+                "task_id": "Triage",
+                "agent": "codex",
+                "task": "Brain should author this generation"
+            }
+        ]
+    });
+    create_mock_loop_issue(
+        &pm,
+        "loop-l1",
+        crate::plan::loops::spec::AutonomyLevel::L1,
+        template.clone(),
+        None,
+    )
+    .await;
+    create_mock_loop_issue(
+        &pm,
+        "loop-l2",
+        crate::plan::loops::spec::AutonomyLevel::L2,
+        template,
+        None,
+    )
+    .await;
+    let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-l1-l2".into()));
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let (dispatch, continuations) =
+        test_dispatch_ctx_with_recording(delegation_tx, brain_session_id, None);
+    let mut reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(dispatch.into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+    reconciler.set_clock(Arc::new(FixedClock {
+        now: SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+    }));
+
+    reconciler.tick_once().await.expect("tick once");
+
+    let continuations = continuations.lock().expect("continuations lock");
+    assert_eq!(continuations.len(), 2);
+    assert!(continuations.iter().all(|continuation| {
+        continuation.source == spur_acp::domain::ContinuationSource::LoopDue
+    }));
+    let loop_generation_epics = pm
+        .issues()
+        .await
+        .into_iter()
+        .filter(|issue| {
+            issue.issue_type.as_deref() == Some("epic")
+                && issue
+                    .labels
+                    .iter()
+                    .any(|label| crate::plan::labels::parse_loop_generation(label).is_some())
+        })
+        .count();
+    assert_eq!(loop_generation_epics, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn invalid_template_auto_pauses_loop_with_escalation_record() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let loop_id = "loop-invalid-template";
+    let loop_issue_id = create_mock_loop_issue(
+        &pm,
+        loop_id,
+        crate::plan::loops::spec::AutonomyLevel::L3,
+        serde_json::json!({ "tasks": "not an array" }),
+        None,
+    )
+    .await;
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-invalid-template".into()));
+    let event_sink = Arc::new(RecordingEventSink::default());
+    let (delegation_tx, _delegation_rx) = tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let (dispatch, continuations) =
+        test_dispatch_ctx_with_recording(delegation_tx, brain_session_id, Some(event_sink.clone()));
+    let mut reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(dispatch.into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+    reconciler.set_clock(Arc::new(FixedClock {
+        now: SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+    }));
+
+    let did_work = reconciler.tick_once().await.expect("tick once");
+
+    assert!(did_work, "invalid template pause is durable scheduler work");
+    let loop_issue = pm.issue(&loop_issue_id).await;
+    assert!(loop_issue
+        .labels
+        .contains(&crate::plan::labels::LOOP_PAUSED.to_string()));
+    assert!(
+        !loop_issue
+            .labels
+            .iter()
+            .any(|label| crate::plan::labels::parse_loop_next_run(label).is_some()),
+        "paused invalid template loop should not be rearmed: {:?}",
+        loop_issue.labels
+    );
+    let continuations = continuations.lock().expect("continuations lock");
+    assert_eq!(continuations.len(), 1);
+    assert_eq!(
+        continuations[0].source,
+        spur_acp::domain::ContinuationSource::LoopEscalation
+    );
+    let comments = pm.comments(&loop_issue_id).await;
+    let audits = comments
+        .iter()
+        .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(&comment.body))
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    assert!(
+        audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+                loop_id: found_loop_id,
+                generation: 1,
+                outcome,
+                escalations: 1,
+                ..
+            } if found_loop_id == loop_id && outcome == "invalid_template"
+        )),
+        "expected invalid-template LoopRun escalation record, got {audits:?}"
+    );
+    let events = event_sink.events.lock().expect("events lock");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            spur_acp::SpurEventBody::LoopPaused {
+                loop_id: found_loop_id,
+                by,
+            } if found_loop_id == loop_id && by == "auto_paused"
+        )),
+        "expected LoopPaused auto_paused event, got {events:?}"
     );
 }
 
