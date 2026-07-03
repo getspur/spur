@@ -47,14 +47,16 @@
 
 (translation_unit
   (declaration
-    (type_qualifier)
+    (type_qualifier) @constant.qualifier
     declarator: (init_declarator
-      declarator: (identifier) @name)) @definition.constant)
+      declarator: (identifier) @name)) @definition.constant
+  (#eq? @constant.qualifier "const"))
 
 (translation_unit
   (declaration
-    (type_qualifier)
-    declarator: (identifier) @name) @definition.constant)
+    (type_qualifier) @constant.qualifier
+    declarator: (identifier) @name) @definition.constant
+  (#eq? @constant.qualifier "const"))
 
 ; -------- fields --------
 

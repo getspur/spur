@@ -184,39 +184,31 @@
 
 (translation_unit
   (declaration
-    [
-      (type_qualifier)
-      "constexpr"
-    ]
+    (type_qualifier) @constant.qualifier
     declarator: (init_declarator
-      declarator: (identifier) @name)) @definition.constant)
+      declarator: (identifier) @name)) @definition.constant
+  (#match? @constant.qualifier "^(const|constexpr)$"))
 
 (translation_unit
   (declaration
-    [
-      (type_qualifier)
-      "constexpr"
-    ]
-    declarator: (identifier) @name) @definition.constant)
+    (type_qualifier) @constant.qualifier
+    declarator: (identifier) @name) @definition.constant
+  (#match? @constant.qualifier "^(const|constexpr)$"))
 
 (namespace_definition
   body: (declaration_list
     (declaration
-      [
-        (type_qualifier)
-        "constexpr"
-      ]
+      (type_qualifier) @constant.qualifier
       declarator: (init_declarator
-        declarator: (identifier) @name)) @definition.constant))
+        declarator: (identifier) @name)) @definition.constant)
+  (#match? @constant.qualifier "^(const|constexpr)$"))
 
 (namespace_definition
   body: (declaration_list
     (declaration
-      [
-        (type_qualifier)
-        "constexpr"
-      ]
-      declarator: (identifier) @name) @definition.constant))
+      (type_qualifier) @constant.qualifier
+      declarator: (identifier) @name) @definition.constant)
+  (#match? @constant.qualifier "^(const|constexpr)$"))
 
 ; -------- fields (class data members) --------
 ;

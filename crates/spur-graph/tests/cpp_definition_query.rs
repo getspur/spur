@@ -76,10 +76,14 @@ enum class Color {
 fn cpp_tags_query_captures_namespace_scope_constants_only() {
     let source = r#"
 const int FILE_LIMIT = 5;
+int counter = 0;
+volatile int tick = 0;
 
 namespace demo {
 constexpr double PI = 3.14;
 static constexpr int BUFFER_SIZE = 10;
+int namespaced_counter = 0;
+volatile int namespaced_tick = 0;
 const int answer();
 
 int scale(const int factor) {

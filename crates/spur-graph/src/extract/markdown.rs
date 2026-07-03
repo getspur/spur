@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tree_sitter::{Node, Parser, Point, Range};
 
 use crate::extract::languages::LanguageConfig;
@@ -174,6 +176,9 @@ fn emit_markdown_links(
     inline_parser: Option<&mut Parser>,
     relative_path: &str,
 ) -> anyhow::Result<()> {
+    let reference_definitions =
+        markdown_reference_definitions(source, root_node, queries, relative_path);
+
     emit_markdown_block_links(
         builder,
         config,
@@ -216,6 +221,30 @@ fn emit_markdown_links(
         {
             for target in contained_capture_text(capture, text, &inline_captures, "import.name") {
                 if let Some(target_name) = normalize_link_target(&target, relative_path) {
+                    builder.pending_edges.push(PendingEdge {
+                        source: source_id,
+                        target_name,
+                        import_path: None,
+                        relation,
+                        edge_kind: None,
+                        origin: crate::extract::tree_sitter::CallOrigin::Expression,
+                        receiver_text: None,
+                        scope_text: None,
+                    });
+                }
+            }
+            for reference in
+                contained_capture_text(capture, text, &inline_captures, "import.reference")
+            {
+                let label = normalize_reference_label(&reference);
+                if label.is_empty() {
+                    continue;
+                }
+                let target = reference_definitions
+                    .get(&label)
+                    .map(String::as_str)
+                    .unwrap_or(label.as_str());
+                if let Some(target_name) = normalize_link_target(target, relative_path) {
                     builder.pending_edges.push(PendingEdge {
                         source: source_id,
                         target_name,
@@ -276,6 +305,45 @@ fn emit_markdown_block_links(
     }
 }
 
+fn markdown_reference_definitions(
+    source: &str,
+    root_node: Node<'_>,
+    queries: &CompiledQueries,
+    relative_path: &str,
+) -> HashMap<String, String> {
+    let Some(block_query) = queries.spur_edges.as_ref() else {
+        return HashMap::new();
+    };
+    let captures = run_query(block_query, root_node, source);
+    let mut definitions = HashMap::new();
+    for capture in captures
+        .iter()
+        .filter(|capture| capture.name == "reference.definition")
+    {
+        let Some(label) = contained_capture_text(capture, source, &captures, "reference.label")
+            .into_iter()
+            .next()
+        else {
+            continue;
+        };
+        let Some(destination) =
+            contained_capture_text(capture, source, &captures, "reference.destination")
+                .into_iter()
+                .next()
+        else {
+            continue;
+        };
+        let label = normalize_reference_label(&label);
+        if label.is_empty() {
+            continue;
+        }
+        if let Some(target) = normalize_link_target(&destination, relative_path) {
+            definitions.entry(label).or_insert(target);
+        }
+    }
+    definitions
+}
+
 fn inline_nodes(root: Node<'_>) -> Vec<Node<'_>> {
     let mut out = Vec::new();
     let mut stack = vec![root];
@@ -304,6 +372,19 @@ fn source_section_for_inline(
         .find(|section| section.node.start_byte() <= pos)
         .map(|section| section.node_id)
         .unwrap_or(file_node_id)
+}
+
+fn normalize_reference_label(label: &str) -> String {
+    let trimmed = label.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    inner
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn normalize_link_target(target: &str, relative_path: &str) -> Option<String> {
