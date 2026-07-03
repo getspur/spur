@@ -38,12 +38,17 @@ The shared capture vocabulary is:
 | `@definition.constant` | `NodeKind::Constant` |
 | `@definition.section` | `NodeKind::Section` |
 | `@definition.enum_variant` | `NodeKind::EnumVariant` |
+| `@definition.resource` | `NodeKind::Resource` |
 
 `@definition.constant` is captured for Rust, Python, TypeScript/TSX/JavaScript
 top-level non-function `const` bindings, C file-scope `const` variables, and
 C++ namespace/file-scope `const` and `constexpr` variables.
 `@definition.enum_variant` is captured for Rust, TypeScript/TSX/JavaScript, C,
 and C++ enum members.
+`@definition.resource` is captured for Hcl/Terraform `resource` blocks; the
+family's `@definition.data` and `@definition.module` captures fold into the
+same `NodeKind::Resource` column, and `@definition.variable` /
+`@definition.output` / `@definition.local` fold into `constant`.
 
 ## Coverage Matrix
 
@@ -54,21 +59,23 @@ Legend:
   model it for that family
 - `TODO`: known coverage gap; do not add a new language with an unreviewed gap
 
-| Language | module | function | method | class | interface | struct | enum | impl | trait | type_alias | macro | field | section | constant | enum_variant |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Rust | Y | Y | Y | - | - | Y | Y | Y | Y | Y | Y | Y | - | Y | Y |
-| Python | - | Y | - | Y | - | - | - | - | - | - | - | - | - | Y | - |
-| TypeScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
-| Tsx | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
-| JavaScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y |
-| C | - | Y | - | - | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
-| Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | Y | Y |
-| Go | Y | Y | Y | - | Y | Y | - | - | - | Y | - | Y | - | Y | - |
-| Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - |
-| Shell | - | Y | - | - | - | - | - | - | - | - | - | - | - | - | - |
-| Sql | Y | Y | - | - | - | Y | Y | - | - | Y | - | Y | - | - | - |
-| Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - |
-| JupyterNotebook | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Language | module | function | method | class | interface | struct | enum | impl | trait | type_alias | macro | field | section | constant | enum_variant | resource |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Rust | Y | Y | Y | - | - | Y | Y | Y | Y | Y | Y | Y | - | Y | Y | - |
+| Python | - | Y | - | Y | - | - | - | - | - | - | - | - | - | Y | - | - |
+| TypeScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y | - |
+| Tsx | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y | - |
+| JavaScript | Y | Y | Y | Y | Y | - | Y | - | - | Y | - | Y | - | Y | Y | - |
+| C | - | Y | - | - | - | Y | Y | - | - | Y | Y | Y | - | Y | Y | - |
+| Cpp | Y | Y | Y | Y | - | Y | Y | - | - | Y | Y | Y | - | Y | Y | - |
+| Go | Y | Y | Y | - | Y | Y | - | - | - | Y | - | Y | - | Y | - | - |
+| Hcl | - | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | Y |
+| Terraform | - | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | Y |
+| Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Shell | - | Y | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Sql | Y | Y | - | - | - | Y | Y | - | - | Y | - | Y | - | - | - | - |
+| Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - | - |
+| JupyterNotebook | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 
 Notes:
 
@@ -108,6 +115,17 @@ Notes:
   `package_clause` spans only the clause itself, so top-level symbols are not
   nested under the module node and keep bare-name FQNs, matching the
   shell/sql convention.
+- Hcl (.hcl) and Terraform (.tf) share the tree-sitter-hcl grammar and the
+  same query set. Symbols carry canonical Terraform address labels:
+  `resource`/`data`/`module` blocks become `NodeKind::Resource` nodes labeled
+  `<type>.<name>` / `data.<type>.<name>` / `module.<name>`, and
+  `variable`/`output` blocks plus each `locals` attribute become
+  `NodeKind::Constant` nodes labeled `var.<name>` / `output.<name>` /
+  `local.<name>`. Provider blocks are deliberately unmodeled in v1, so
+  provider alias references (`aws.west`) remain unresolved evidence.
+  `.tf.json` files are JSON syntax and are out of scope (the extension
+  matcher sees `json`); Terragrunt-flavored `.hcl` parses as generic HCL with
+  no dedicated `dependency`/`include` modeling.
 
 ## Relation Coverage Matrix
 
@@ -116,21 +134,21 @@ This table is the relation-level analogue of the Definition Coverage Matrix and 
 seed of the Tier-0 ontology realization contract
 (`docs/superpowers/specs/2026-06-04-code-graph-ontology-tier0-design.ipynb`).
 
-| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Go | Lua | Shell | Sql | Markdown | JupyterNotebook |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| imports | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | Y(links) | — |
-| calls | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| constructs | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | — | — |
-| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
-| produces | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| consumes | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| binds | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| emits | — | — | — | — | — | — | — | — | — | — | — | — | Y |
-| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
-| references (HOF/notebook facts) | Y | Y | Y | Y | Y | — | Y | — | — | — | Y | — | Y |
-| links | — | — | — | — | — | — | — | — | — | — | — | Y | — |
-| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — | — |
-| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — | — |
+| Predicate | Rust | Python | TypeScript | Tsx | JavaScript | C | Cpp | Go | Hcl | Terraform | Lua | Shell | Sql | Markdown | JupyterNotebook |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| imports | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | — | Y(links) | — |
+| calls | Y | Y | Y | Y | Y | Y | Y | Y | — | — | Y | Y | Y | — | — |
+| constructs | Y | Y | Y | Y | Y | Y | Y | Y | — | — | — | — | Y | — | — |
+| contains | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| produces | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| consumes | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| binds | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| emits | — | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| defines | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | — | — |
+| references (HOF/notebook/address) | Y | Y | Y | Y | Y | — | Y | — | Y | Y | — | — | Y | — | Y |
+| links | — | — | — | — | — | — | — | — | — | — | — | — | — | Y | — |
+| implements | Y | Y | Y | Y | Y | — | — | — | — | — | — | — | — | — | — |
+| extends | Y | Y | Y | Y | Y | — | Y | — | — | — | — | — | — | — | — |
 
 Python `implements` is realized after resolution: `@extends` captures targeting
 local classes declared with `Protocol`, `ABC`, or `abc.ABC` bases are
@@ -154,6 +172,24 @@ HOF references are realized in Rust, Python, C++, and TypeScript/Tsx/JavaScript
 via closed HOF-method allowlists in the respective `spur-edges.scm` files.
 TypeScript/Tsx/JavaScript currently capture bare identifier callbacks passed as
 the first argument to recognized array/iterable and Promise-style methods.
+
+Hcl/Terraform `references` are address references
+(`GraphEdgeKind::ReferencesAddress`): each `variable_expr` + `get_attr` chain
+(bare or inside `${...}` template interpolation, with `index` nodes skipped)
+is truncated to its canonical Terraform address — `var.<name>`,
+`local.<name>`, `module.<name>` (output tails trimmed), `data.<type>.<name>`,
+or `<type>.<name>`. The reserved builtin roots `count`, `each`, `self`,
+`path`, `terraform`, and `provider` and single bare identifiers emit no
+edges. Resolution is module-directory-first (`address_module_scope`), then
+workspace-singleton (`address_singleton`), restricted to `Resource`/
+`Constant` targets in the hcl language family; anything else stays
+unresolved evidence. No call channel exists — all Terraform functions are
+builtins. Recall ceiling: address references resolve iff the target address
+is defined in the same module directory (or is a workspace singleton), which
+Terraform semantics make a tight bound; the expected residue on idiomatic
+multi-module repos (~5–15%) is provider alias refs, for-expression loop-var
+attribute access, and exotic splats — all left unresolved, never wrongly
+bound.
 
 ### Notebook Semantic Facts
 
