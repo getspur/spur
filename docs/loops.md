@@ -101,6 +101,75 @@ include loop id, generation, and template JSON, but it is not a structured API.
 backoff, and next run. Treat the continuation as a wake-up notice and call
 `get_loop_status` before authoring or skipping a generation.
 
+## Observing Loops in the TUI
+
+Open the loop browser with `L` from the plan browser. The loop browser itself is
+global: browsing and refresh use the issue tracker projection and do not require an
+active brain session. The first open loads loops automatically; press `r` to refresh
+after that.
+
+The loop browser is an operator view, not a plan filter. Generation plans still appear
+in the plan browser and inspector, where loop-created plans carry an `⟳ gen N` badge.
+The badge means "this plan came from loop generation `N`"; the loop id is retained in
+the plan event data even though the compact badge only prints the generation.
+
+Loop rows use these columns:
+
+| Column | Meaning |
+|---|---|
+| `Loop` | Compact loop id. |
+| `Title` | Source loop issue title. |
+| `Aut` | Autonomy label, rendered as `L1`, `L2`, or `L3` when present. |
+| `State` | `active`, `paused`, `auto-paused`, or `retired`. |
+| `Cad→Eff` | Configured cadence and current effective interval. A trailing `*` marks active failure backoff. |
+| `Next run` | Countdown such as `due`, `in <1m`, `in 42m`, `in 3h`, or `—`; paused rows show `paused`. |
+| `Last run` | Last generation, outcome, and cost when run history is available, for example `g4 approved $0.37`. |
+| `Fails` | Consecutive failure count derived from recent loop run audits. |
+
+Keys in the loop browser:
+
+| Key | Action |
+|---|---|
+| `j` / `k`, arrows | Move selection. |
+| `g` / `G` | Jump to first or last visible row. |
+| `Enter` | Inspect the selected loop; pressing `Enter` again on the loaded detail returns to summary. |
+| `o` | Open the source loop issue in the backlog view. |
+| `p` | Open a pause or resume confirmation modal for the selected loop. |
+| `x` | Open the retire confirmation modal. This calls the loop kill action after confirmation. |
+| `Enter` in a modal | Confirm pause, resume, or retire. |
+| `Esc` / `q` in a modal | Cancel the modal. |
+| `S` | Cycle sort order: next run, title, state, last outcome. |
+| `f` | Cycle filter: all, active, paused, retired. |
+| `Esc` | Close detail first, then navigate back. |
+| `q` | Navigate back. |
+| `r` | Reload loop summaries. |
+
+Pause, resume, and retire require the active brain session's MCP server because the
+TUI routes them through the same governed loop tools as the brain. With no active
+brain session, browsing still works, but mutations flash a command error instead of
+changing labels. Retired rows cannot be paused or resumed from the browser.
+
+When the beads advanced comments API is unavailable, loop discovery still renders from
+labels and the `[[spur-loop v1]]` spec. Run-derived fields degrade: last run is `--`,
+failure count starts at `0`, and detail/recent run history is unavailable until the
+advanced comments API is available.
+
+Live loop events update rows in place. `LoopArmed` refreshes the generation, next-run
+timestamp, and active state. `LoopRunRecorded` refreshes last run, cost, and the
+failure streak, and prepends the run to any open detail payload. `LoopPaused` maps
+`paused`, `auto_paused`, `resumed`, and `retired` into the row state. If an event
+arrives for an unknown loop id, the browser keeps the current list and hints to press
+`r`.
+
+Payloads are intentionally bounded. A summary load emits at most 200 loops, with a
+warning when truncated. Detail loads request at most 20 recent runs; the detail panel
+renders the newest visible rows from that bounded payload.
+
+For implementation background, see
+[`docs/superpowers/plans/2026-07-03-loop-observability-tui.md`](superpowers/plans/2026-07-03-loop-observability-tui.md)
+and the static mockup at
+[`docs/superpowers/design/2026-07-03-loop-browser-mockup.html`](superpowers/design/2026-07-03-loop-browser-mockup.html).
+
 ## L1 CI Sweeper Pilot
 
 Use this as the first production-style pilot:
