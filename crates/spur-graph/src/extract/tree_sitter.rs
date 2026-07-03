@@ -110,6 +110,8 @@ fn symbol_query_policy(language: Language) -> SymbolQueryPolicy {
         | Language::C
         | Language::Cpp
         | Language::Go
+        | Language::Hcl
+        | Language::Terraform
         | Language::Lua
         | Language::Shell
         | Language::Sql
@@ -689,6 +691,8 @@ impl<'a> FactBuilder<'a> {
                         self.add_pending_edge(&edge, None);
                     }
                 }
+            } else if edge.edge_kind == Some(GraphEdgeKind::ReferencesAddress) {
+                resolve_address_reference_edge(self, &edge, &indexes, &mut ambiguous_unresolved);
             } else if edge.relation == RelationKind::References {
                 let allow_reference_fallbacks = reference_fallbacks_allowed(&edge, &file_by_id);
                 if let Some(target) = singleton_symbols_by_label.get(&edge.target_name).copied() {
@@ -806,6 +810,106 @@ impl<'a> FactBuilder<'a> {
             );
         }
     }
+}
+
+fn resolve_address_reference_edge(
+    builder: &mut FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+    ambiguous_unresolved: &mut usize,
+) {
+    let candidates = address_reference_candidates(builder, edge, indexes);
+    let source_directory = file_path_for_node(builder, edge.source, indexes)
+        .map(|path| parent_directory(&path).to_owned());
+    let module_scoped = candidates
+        .iter()
+        .copied()
+        .filter(|target| {
+            source_directory.as_deref().is_some_and(|source_directory| {
+                file_path_for_node(builder, *target, indexes)
+                    .is_some_and(|path| parent_directory(&path) == source_directory)
+            })
+        })
+        .collect::<Vec<_>>();
+    match module_scoped.as_slice() {
+        [target] => {
+            builder.add_pending_edge_with_bind_method(
+                edge,
+                Some(*target),
+                Some("address_module_scope"),
+            );
+        }
+        [] => match candidates.as_slice() {
+            [target] => {
+                builder.add_pending_edge_with_bind_method(
+                    edge,
+                    Some(*target),
+                    Some("address_singleton"),
+                );
+            }
+            [] => {
+                builder.add_pending_edge(edge, None);
+            }
+            candidates => {
+                *ambiguous_unresolved += 1;
+                tracing::debug!(
+                    target_label = %edge.target_name,
+                    candidates = candidates.len(),
+                    "spur-graph: ambiguous address reference target; leaving unresolved"
+                );
+                builder.add_pending_edge(edge, None);
+            }
+        },
+        duplicates => {
+            *ambiguous_unresolved += 1;
+            tracing::debug!(
+                target_label = %edge.target_name,
+                candidates = duplicates.len(),
+                "spur-graph: duplicate address within one module directory; leaving unresolved"
+            );
+            builder.add_pending_edge(edge, None);
+        }
+    }
+}
+
+fn address_reference_candidates(
+    builder: &FactBuilder<'_>,
+    edge: &PendingEdge,
+    indexes: &PendingResolutionIndexes<'_>,
+) -> Vec<NodeId> {
+    let Some(source_family) =
+        file_path_for_node(builder, edge.source, indexes).and_then(|path| language_family(&path))
+    else {
+        return Vec::new();
+    };
+    let mut candidates = builder
+        .symbol_index
+        .get(&edge.target_name)
+        .into_iter()
+        .flat_map(|ids| ids.iter().copied())
+        .filter(|target| *target != edge.source)
+        .filter(|target| {
+            matches!(
+                indexes.node_kind_by_id.get(target).copied(),
+                Some(NodeKind::Resource | NodeKind::Constant)
+            )
+        })
+        .filter(|target| {
+            file_path_for_node(builder, *target, indexes)
+                .as_deref()
+                .and_then(language_family)
+                == Some(source_family)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|id| id.get());
+    candidates.dedup();
+    candidates
+}
+
+fn parent_directory(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
 }
 
 fn reference_fallbacks_allowed(edge: &PendingEdge, file_by_id: &HashMap<NodeId, &str>) -> bool {
@@ -2797,7 +2901,7 @@ pub(crate) fn function_singleton_safe(src_file: &str, tgt_file: &str) -> bool {
     )
 }
 
-fn language_family(path: &str) -> Option<&'static str> {
+pub(crate) fn language_family(path: &str) -> Option<&'static str> {
     let ext = path.rsplit('.').next()?;
     if ext == path {
         return None;
@@ -2808,6 +2912,7 @@ fn language_family(path: &str) -> Option<&'static str> {
         "py" | "pyi" => "python",
         "cpp" | "cc" | "cxx" | "c" | "h" | "hpp" | "hxx" => "cpp",
         "md" | "markdown" => "markdown",
+        "tf" | "hcl" => "hcl",
         _ => return None,
     })
 }
@@ -3033,6 +3138,13 @@ fn metadata_for_pending_edge(
         if target.is_some() && matches!(bind_method, Some("singleton")) {
             bind_method = Some("bare_qualified_singleton");
         }
+    }
+    if edge.edge_kind == Some(GraphEdgeKind::ReferencesAddress)
+        && target.is_some()
+        && matches!(bind_method, Some("address_module_scope"))
+    {
+        confidence = Confidence::Heuristic;
+        confidence_score = 0.8;
     }
 
     EdgeMetadata {
