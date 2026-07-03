@@ -32,12 +32,12 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use agent_client_protocol::schema::v1::{
-    AuthenticateRequest, AuthenticateResponse, DeleteSessionRequest, DeleteSessionResponse,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionResponse, PromptRequest,
-    ResumeSessionRequest, ResumeSessionResponse, SessionId, SessionModeId, SessionNotification,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse, Usage,
+    AuthenticateRequest, AuthenticateResponse, CloseSessionRequest, CloseSessionResponse,
+    DeleteSessionRequest, DeleteSessionResponse, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse, SessionId,
+    SessionModeId, SessionNotification, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, Usage,
 };
 
 use crate::error::AcpError;
@@ -202,6 +202,18 @@ pub trait AgentConnection: Send + Sync {
         Err(AcpError::CapabilityMissing("session/delete"))
     }
 
+    /// Close an existing session known to the agent.
+    ///
+    /// The default implementation reports the missing ACP `session/close`
+    /// capability. Native ACP transports override this with request dispatch.
+    async fn close_session(
+        &mut self,
+        request: CloseSessionRequest,
+    ) -> Result<CloseSessionResponse, AcpError> {
+        let _ = request;
+        Err(AcpError::CapabilityMissing("session/close"))
+    }
+
     /// Set the current mode of a session (e.g. `"plan"`, `"default"`).
     ///
     /// Not all transports support this; the default implementation returns an error.
@@ -360,8 +372,8 @@ impl AgentConnection for TestStubConnection {
 mod agent_connection_defaults {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        AuthMethodId, AuthenticateRequest, DeleteSessionRequest, ResumeSessionRequest, SessionId,
-        SetSessionModeRequest,
+        AuthMethodId, AuthenticateRequest, CloseSessionRequest, DeleteSessionRequest,
+        ResumeSessionRequest, SessionId, SetSessionModeRequest,
     };
 
     struct NullConn;
@@ -432,6 +444,16 @@ mod agent_connection_defaults {
         match c.delete_session(req).await {
             Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "session/delete"),
             other => panic!("expected CapabilityMissing(\"session/delete\"), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn close_session_default_returns_capability_missing() {
+        let mut c = NullConn;
+        let req = CloseSessionRequest::new(SessionId::new("s"));
+        match c.close_session(req).await {
+            Err(crate::AcpError::CapabilityMissing(name)) => assert_eq!(name, "session/close"),
+            other => panic!("expected CapabilityMissing(\"session/close\"), got {other:?}"),
         }
     }
 }
