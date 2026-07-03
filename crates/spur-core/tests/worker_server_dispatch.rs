@@ -459,6 +459,7 @@ async fn tools_list_advertises_response_format_for_worker_code_graph_tools() {
         .expect("tools array present");
 
     for tool_name in [
+        "code_symbol_search",
         "code_file_symbols",
         "code_callers",
         "code_callees",
