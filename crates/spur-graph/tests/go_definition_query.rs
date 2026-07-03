@@ -21,6 +21,7 @@ const Origin, Unit = 0, 1
 const MaxPoints = 128
 
 var Scratch = 0
+var Cache, Pool = 1, 2
 
 type Point struct {
 	X, Y int
@@ -125,7 +126,7 @@ fn go_tags_query_captures_functions_and_methods() {
 fn go_tags_query_fans_out_multi_name_const_spec() {
     assert_eq!(
         definition_names(GO_FIXTURE, "definition.constant"),
-        ["Origin", "Unit", "MaxPoints"]
+        ["Origin", "Unit", "MaxPoints", "Scratch", "Cache", "Pool"]
     );
 }
 
@@ -147,8 +148,11 @@ fn go_tags_query_captures_types_and_fields() {
 }
 
 #[test]
-fn go_tags_query_skips_locals_and_var_specs() {
+fn go_tags_query_captures_package_vars_and_skips_locals() {
     let names = definition_names(GO_FIXTURE, "definition.constant");
+    assert!(names.contains(&"Scratch".to_owned()));
+    assert!(names.contains(&"Cache".to_owned()));
+    assert!(names.contains(&"Pool".to_owned()));
     assert!(
         !names.contains(&"local".to_owned()),
         "function-local const must not be captured: {names:?}"
@@ -183,14 +187,13 @@ fn go_extractor_builds_symbols_with_expected_kinds() {
     assert!(has_node(NodeKind::Constant, "Origin"));
     assert!(has_node(NodeKind::Constant, "Unit"));
     assert!(has_node(NodeKind::Constant, "MaxPoints"));
+    assert!(has_node(NodeKind::Constant, "Scratch"));
+    assert!(has_node(NodeKind::Constant, "Cache"));
+    assert!(has_node(NodeKind::Constant, "Pool"));
 
     assert!(
         !facts.nodes.iter().any(|node| node.label == "local"),
         "function-local const must not become a symbol"
-    );
-    assert!(
-        !facts.nodes.iter().any(|node| node.label == "Scratch"),
-        "top-level var is out of scope for this phase"
     );
     assert!(
         !facts
