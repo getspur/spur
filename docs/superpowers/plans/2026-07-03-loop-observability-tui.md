@@ -139,10 +139,35 @@ New chain:
 |----|-------|---------|
 | T1 | spur-acp | `LoopSummaryEvent`/`LoopDetailEvent` types; `LoopsLoaded`/`LoopDetailLoaded`/`LoopCommandError` variants; `loop_origin` on `PlanSummaryEvent`; round-trip serialization tests |
 | T2 | spur-core | Extract `build_loop_status` into `plan/loops/status.rs` (refactor `handle_get_loop_status` to reuse, behavior-preserving); add `load_loop_summaries`; unit tests over label/spec assembly incl. missing-advanced degradation |
-| T3 | spur-core | `InteractiveInput::{RefreshLoops,InspectLoop,PauseLoop,ResumeLoop,KillLoop}` + `UserInput` passthrough; `call_pause_loop`/`call_resume_loop`/`call_kill_loop` wrappers; interactive-loop wiring emitting the new events; tests |
-| T4 | spur-tui | `LoopBrowserView` (table, sort/filter, detail peek, confirm modals, live event application); `ViewId::LoopBrowser`; nav/dispatch/keybinding wiring; view tests mirroring `plan_browser.rs:1341+` |
-| T5 | spur-tui | Plan-side provenance: `⟳ gen N` badge in plan browser rows + plan inspector header; upgraded loop hints (deep-link `LoopGenerationStarted` → `focus_plan_id`, `plan_browser.rs:235`) |
+| T3 | spur-core + spur-tui + spur-cli | `InteractiveInput::{RefreshLoops,InspectLoop,PauseLoop,ResumeLoop,KillLoop}` + matching `UserInput` variants (`spur-tui/src/app/mod.rs:89`) + the `UserInput → InteractiveInput` mapping in `spur-cli/src/main.rs:~1998`; `call_pause_loop`/`call_resume_loop`/`call_kill_loop` wrappers; interactive-loop wiring emitting the new events; tests |
+| T4 | spur-tui | `LoopBrowserView` (table, sort/filter, detail peek, confirm modals, live event application); `ViewId::LoopBrowser`; nav/dispatch/keybinding wiring incl. `components/status_bar.rs` hints; in-file view tests mirroring `plan_browser.rs:1341+` **plus** an integration snapshot suite `crates/spur-tui/tests/loop_browser_snapshot.rs` modeled on `plan_browser_snapshot.rs` |
+| T5 | spur-tui | Plan-side provenance: `⟳ gen N` badge in plan browser rows + plan inspector header; upgraded loop hints (deep-link `LoopGenerationStarted` → `focus_plan_id`, `plan_browser.rs:235`); update `plan_inspector_snapshot.rs` / `plan_browser_snapshot.rs` expectations for the badge |
 | T6 | docs | `docs/loops.md` "Observing loops in the TUI" section; keybinding/help updates; run `spur-invariants-reviewer` over the event-plumbing diff |
+
+## Grounding review (2026-07-03, graph + analyst pass)
+
+Verified with `code_*` graph tools and spur-analyst SQL (analyst DB stale vs live
+pointer — doc-only commits since build; loop symbols present with matching line
+anchors, so aggregates trusted with `allow_stale`):
+
+- **`handle_get_loop_status` has exactly one caller** — the tool dispatch
+  `PlanMcpModule::call_with_server` (`crates/spur-core/src/mcp/plan.rs`). The T2
+  extraction refactor is graph-verified low-risk.
+- **`load_plan_summaries` has one calling symbol** (`Orchestrator::run_interactive`,
+  three call sites within it) — the T5 `loop_origin` extension ripples nowhere else.
+- **Co-change ring for `plan_browser.rs`** (top partners, all-history):
+  `plan_inspector.rs` ×11, `tests/plan_browser_snapshot.rs` ×10, `issue_browser.rs`
+  ×10, `spur-acp/src/domain/events.rs` ×9, `tests/executor_events_roundtrip.rs` ×9,
+  `plan_inspector_snapshot.rs` ×8, `action.rs` ×7, `components/status_bar.rs` ×7.
+  This drove the T4/T5 additions: snapshot test suites and status-bar surface are
+  empirically part of every view change; the events.rs + roundtrip pairing
+  confirms T1's test requirement.
+- **Discovery hardening**: rows whose issue body fails `LoopSpec::parse` must be
+  skipped with a warning (defends against any future task issue that carries a
+  `spur:loop-id:*` label without being a loop root — e.g. mislabeled triage tasks).
+  `load_loop_issue_with_closed` (`plan.rs:191`) takes `.first()` of `limit: 2`, so
+  the engine already assumes label uniqueness; the browser must not.
+- `PlanSummaryEvent` is declared at `events.rs:243` (doc comment at 241).
 
 ## Invariant callouts
 
