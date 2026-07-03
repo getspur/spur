@@ -1,7 +1,8 @@
-use std::path::{Path, PathBuf};
 #[cfg(feature = "embed")]
+use std::sync::Arc;
 use std::{
-    sync::{Arc, Mutex, OnceLock},
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -34,8 +35,10 @@ const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 0.80;
 const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
 const ANALYST_EMBED_MODE_ENV: &str = "SPUR_ANALYST_EMBED_MODE";
 
-#[cfg(feature = "embed")]
 const EMBED_INFERENCE_TIMEOUT: Duration = Duration::from_millis(1500);
+const AUTO_SIDECAR_PING_TIMEOUT: Duration = Duration::from_millis(100);
+const AUTO_SIDECAR_UNAVAILABLE_TTL: Duration = Duration::from_secs(3);
+static AUTO_SIDECAR_PROBE_CACHE: OnceLock<Mutex<Option<AutoSidecarProbeCache>>> = OnceLock::new();
 #[cfg(feature = "embed")]
 static EMBEDDING_GEMMA_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> =
     EmbedModelCell::new();
@@ -49,6 +52,12 @@ enum AnalystEmbedMode {
     InProcess,
     Sidecar,
     Off,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AutoSidecarProbeCache {
+    reachable: bool,
+    checked_at: Instant,
 }
 
 impl AnalystEmbedMode {
@@ -104,7 +113,7 @@ impl AnalystEmbedMode {
                 tracing::debug!(
                     mode = "sidecar",
                     entrypoint,
-                    "analyst embed sidecar mode is not yet wired; degrading to BM25-only search"
+                    "analyst embed sidecar mode does not allow in-process model loading"
                 );
                 false
             }
@@ -140,6 +149,57 @@ fn set_analyst_embed_mode_for_test(mode: AnalystEmbedMode) -> AnalystEmbedModeOv
         previous
     });
     AnalystEmbedModeOverrideGuard { previous }
+}
+
+fn auto_sidecar_probe_cache() -> &'static Mutex<Option<AutoSidecarProbeCache>> {
+    AUTO_SIDECAR_PROBE_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn cached_auto_sidecar_reachable(now: Instant) -> Option<bool> {
+    let cache = auto_sidecar_probe_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cached = (*cache)?;
+    if cached.reachable {
+        return Some(true);
+    }
+
+    let age = now
+        .checked_duration_since(cached.checked_at)
+        .unwrap_or(Duration::ZERO);
+    (age < AUTO_SIDECAR_UNAVAILABLE_TTL).then_some(false)
+}
+
+fn record_auto_sidecar_probe(reachable: bool) {
+    let mut cache = auto_sidecar_probe_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cache = Some(AutoSidecarProbeCache {
+        reachable,
+        checked_at: Instant::now(),
+    });
+}
+
+#[cfg(test)]
+fn reset_auto_sidecar_probe_for_test() {
+    let mut cache = auto_sidecar_probe_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cache = None;
+}
+
+async fn auto_sidecar_reachable() -> bool {
+    // Cache policy: a reachable sidecar is sticky for the process so serving
+    // processes keep sharing it and never fall back to loading their own model.
+    // Misses are cached briefly to avoid adding a socket probe to every BM25
+    // fallback query while still letting a newly started sidecar be discovered.
+    if let Some(reachable) = cached_auto_sidecar_reachable(Instant::now()) {
+        return reachable;
+    }
+
+    let reachable = crate::embed_client::ping(AUTO_SIDECAR_PING_TIMEOUT).await;
+    record_auto_sidecar_probe(reachable);
+    reachable
 }
 
 pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
@@ -658,11 +718,29 @@ fn start_embed_model_load_if_needed(embedding_model: EmbeddingModelSelection) ->
 
 #[cfg(feature = "embed")]
 pub fn warm_embed_model() {
-    if !AnalystEmbedMode::current().allows_in_process("warm_embed_model") {
-        return;
+    match AnalystEmbedMode::current() {
+        AnalystEmbedMode::Off => {}
+        AnalystEmbedMode::Sidecar => {
+            tracing::debug!(
+                mode = "sidecar",
+                "embedding model warm-up skipped; sidecar mode never loads in-process"
+            );
+        }
+        AnalystEmbedMode::InProcess => warm_embed_model_in_process(),
+        AnalystEmbedMode::Auto => warm_embed_model_auto(),
     }
+}
 
-    let embedding_model = EmbeddingModelSelection::from_env();
+#[cfg(not(feature = "embed"))]
+pub fn warm_embed_model() {}
+
+#[cfg(feature = "embed")]
+fn warm_embed_model_in_process() {
+    warm_embed_model_in_process_for_model(EmbeddingModelSelection::from_env());
+}
+
+#[cfg(feature = "embed")]
+fn warm_embed_model_in_process_for_model(embedding_model: EmbeddingModelSelection) {
     if !start_embed_model_load_if_needed(embedding_model) {
         tracing::debug!(
             model = embedding_model.model_name(),
@@ -671,11 +749,79 @@ pub fn warm_embed_model() {
     }
 }
 
-#[cfg(not(feature = "embed"))]
-pub fn warm_embed_model() {}
+#[cfg(feature = "embed")]
+fn warm_embed_model_auto() {
+    match cached_auto_sidecar_reachable(Instant::now()) {
+        Some(true) => {
+            tracing::debug!("embedding model warm-up skipped; cached sidecar probe is reachable");
+        }
+        Some(false) => warm_embed_model_in_process(),
+        None => {
+            let embedding_model = EmbeddingModelSelection::from_env();
+            let spawn_result = std::thread::Builder::new()
+                .name("spur-mcp-embed-sidecar-probe".into())
+                .spawn(move || {
+                    let reachable = ping_sidecar_blocking(AUTO_SIDECAR_PING_TIMEOUT);
+                    record_auto_sidecar_probe(reachable);
+                    if reachable {
+                        tracing::debug!(
+                            "embedding model warm-up skipped; sidecar probe is reachable"
+                        );
+                    } else {
+                        warm_embed_model_in_process_for_model(embedding_model);
+                    }
+                });
+
+            if let Err(error) = spawn_result {
+                tracing::warn!(
+                    %error,
+                    "failed to spawn embedding sidecar probe thread; falling back to in-process warm-up"
+                );
+                warm_embed_model_in_process_for_model(embedding_model);
+            }
+        }
+    }
+}
 
 #[cfg(feature = "embed")]
+fn ping_sidecar_blocking(timeout_duration: Duration) -> bool {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "failed to create runtime for embedding sidecar ping"
+            );
+            return false;
+        }
+    };
+    runtime.block_on(crate::embed_client::ping(timeout_duration))
+}
+
 async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
+    match AnalystEmbedMode::current() {
+        AnalystEmbedMode::Off => None,
+        AnalystEmbedMode::Sidecar => embed_query_with_sidecar(query).await,
+        AnalystEmbedMode::Auto => {
+            if auto_sidecar_reachable().await {
+                return embed_query_with_sidecar(query).await;
+            }
+            embed_query_in_process(query).await
+        }
+        AnalystEmbedMode::InProcess => embed_query_in_process(query).await,
+    }
+}
+
+async fn embed_query_with_sidecar(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
+    crate::embed_client::embed_query(query, EMBED_INFERENCE_TIMEOUT).await
+}
+
+#[cfg(feature = "embed")]
+async fn embed_query_in_process(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
     if !AnalystEmbedMode::current().allows_in_process("embed_query") {
         return None;
     }
@@ -702,6 +848,18 @@ async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> 
     }
 
     embed_query_with_ready_model(query, embedding_model).await
+}
+
+#[cfg(not(feature = "embed"))]
+#[expect(
+    clippy::unused_async,
+    reason = "the disabled stub matches the embed-enabled async signature"
+)]
+async fn embed_query_in_process(_query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
+    tracing::debug!(
+        "in-process embedding model unavailable in builds without the `embed` feature; degrading to BM25-only search"
+    );
+    None
 }
 
 #[cfg(feature = "embed")]
@@ -797,15 +955,6 @@ where
 #[cfg(feature = "embed")]
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-#[cfg(not(feature = "embed"))]
-#[expect(
-    clippy::unused_async,
-    reason = "the disabled stub matches the embed-enabled async signature"
-)]
-async fn embed_query(_query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    None
 }
 
 #[derive(Clone, Copy)]
@@ -2124,25 +2273,30 @@ fn is_test_file(file_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
+    use std::io;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    #[cfg(feature = "embed")]
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-    #[cfg(feature = "embed")]
     use std::time::Duration;
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata, Subscriber};
 
     use super::*;
+    use crate::embed_service::{EmbedService, SPUR_EMBED_SOCKET_ENV};
     use crate::query_context_candidates;
     use duckdb::Connection;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio::task::JoinHandle;
 
     use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
     use spur_graph::{
-        artifact_from_facts, build_facts, write_artifact_parquet, write_current_pointer,
-        EMBEDDING_VECTOR_DIMENSIONS,
+        artifact_from_facts, build_facts, embedding_query_text_for_model, write_artifact_parquet,
+        write_current_pointer, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
     };
 
     const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
@@ -2181,11 +2335,132 @@ mod tests {
         assert_eq!(selected, repo_spur.join("analyst.duckdb"));
     }
 
-    #[cfg(feature = "embed")]
     fn test_embedding(first_value: f32) -> [f32; EMBEDDING_VECTOR_DIMENSIONS] {
         let mut embedding = [0.0; EMBEDDING_VECTOR_DIMENSIONS];
         embedding[0] = first_value;
         embedding
+    }
+
+    fn test_embedding_vec(first_value: f32) -> Vec<f32> {
+        test_embedding(first_value).to_vec()
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn set_env_var_for_test(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> EnvVarGuard {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        EnvVarGuard { key, previous }
+    }
+
+    struct StubSidecar {
+        _temp_dir: tempfile::TempDir,
+        socket_path: PathBuf,
+        task: JoinHandle<()>,
+    }
+
+    impl Drop for StubSidecar {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn wait_for_socket(socket_path: &Path) {
+        for _ in 0..100 {
+            match UnixStream::connect(socket_path).await {
+                Ok(_) => return,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!(
+                    "unexpected error while waiting for socket {}: {error}",
+                    socket_path.display()
+                ),
+            }
+        }
+
+        panic!("timed out waiting for socket {}", socket_path.display());
+    }
+
+    async fn start_stub_embed_sidecar<E>(
+        ready: impl Fn() -> bool + Send + Sync + 'static,
+        embedder: E,
+    ) -> StubSidecar
+    where
+        E: Fn(Vec<String>) -> Result<Vec<Vec<f32>>, String> + Send + Sync + 'static,
+    {
+        let temp_dir = tempfile::tempdir().expect("sidecar tempdir");
+        let socket_path = temp_dir.path().join("embed.sock");
+        let service = EmbedService::new("stub-model", ready, embedder);
+        let serve_path = socket_path.clone();
+        let task = tokio::spawn(async move {
+            let _ = service.serve_socket(serve_path).await;
+        });
+        wait_for_socket(&socket_path).await;
+
+        StubSidecar {
+            _temp_dir: temp_dir,
+            socket_path,
+            task,
+        }
+    }
+
+    async fn start_raw_embed_sidecar(
+        response_line: Option<String>,
+        response_delay: Duration,
+        request_count: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> StubSidecar {
+        let temp_dir = tempfile::tempdir().expect("sidecar tempdir");
+        let socket_path = temp_dir.path().join("embed.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind raw sidecar");
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+            .expect("set raw sidecar socket permissions");
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let response_line = response_line.clone();
+                let request_count = Arc::clone(&request_count);
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut lines = BufReader::new(reader).lines();
+                    if lines.next_line().await.ok().flatten().is_none() {
+                        return;
+                    }
+                    request_count.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(response_delay).await;
+                    if let Some(line) = response_line {
+                        let _ = writer.write_all(line.as_bytes()).await;
+                        let _ = writer.write_all(b"\n").await;
+                    }
+                });
+            }
+        });
+        wait_for_socket(&socket_path).await;
+
+        StubSidecar {
+            _temp_dir: temp_dir,
+            socket_path,
+            task,
+        }
     }
 
     #[derive(Clone, Default)]
@@ -2274,6 +2549,7 @@ mod tests {
     #[cfg(feature = "embed")]
     #[tokio::test]
     async fn off_embed_mode_never_starts_in_process_model_load() {
+        let _lock = async_env_lock().await;
         let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Off);
         let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
 
@@ -2302,6 +2578,209 @@ mod tests {
         assert!(
             !model_cell.is_loading_for_test(),
             "off mode query must not start a background load"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_embed_mode_returns_query_vector_without_double_transforming_text() {
+        let _lock = async_env_lock().await;
+        let captured_texts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&captured_texts);
+        let sidecar = start_stub_embed_sidecar(
+            || true,
+            move |texts| {
+                *captured.lock().expect("captured sidecar texts") = texts;
+                Ok(vec![test_embedding_vec(0.25)])
+            },
+        )
+        .await;
+        let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &sidecar.socket_path);
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Sidecar);
+
+        let embedding = embed_query("ranking beacon")
+            .await
+            .expect("sidecar mode should return the sidecar vector");
+
+        assert_eq!(embedding[0], 0.25);
+        let texts = captured_texts.lock().expect("captured sidecar texts");
+        assert_eq!(
+            texts.as_slice(),
+            [embedding_query_text_for_model(
+                "ranking beacon",
+                EmbeddingModelSelection::EmbeddingGemma300M
+            )
+            .into_owned()],
+            "the client must send the raw query and let the sidecar apply the model transform once"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_embed_mode_absent_socket_falls_back_quickly() {
+        let _lock = async_env_lock().await;
+        let temp_dir = tempfile::tempdir().expect("socket tempdir");
+        let missing_socket = temp_dir.path().join("missing.sock");
+        let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &missing_socket);
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Sidecar);
+
+        let started = std::time::Instant::now();
+        let embedding = embed_query("ranking beacon").await;
+        let elapsed = started.elapsed();
+
+        assert!(embedding.is_none());
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "absent sidecar socket should not wait for the full inference budget, elapsed={elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_embed_mode_times_out_the_whole_round_trip() {
+        let _lock = async_env_lock().await;
+        let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sidecar = start_raw_embed_sidecar(
+            None,
+            Duration::from_millis(5_000),
+            Arc::clone(&request_count),
+        )
+        .await;
+        let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &sidecar.socket_path);
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Sidecar);
+
+        let started = std::time::Instant::now();
+        let embedding = embed_query("ranking beacon").await;
+        let elapsed = started.elapsed();
+
+        assert!(embedding.is_none());
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "sidecar client should connect and send one request before timing out"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(1_000) && elapsed < Duration::from_millis(2_500),
+            "sidecar timeout should budget the connect+write+read round trip, elapsed={elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_embed_mode_dimension_mismatch_falls_back_to_bm25() {
+        let _lock = async_env_lock().await;
+        let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let response = serde_json::json!({
+            "v": 1,
+            "id": "query",
+            "vectors": [[0.0, 1.0, 2.0]]
+        })
+        .to_string();
+        let sidecar =
+            start_raw_embed_sidecar(Some(response), Duration::ZERO, Arc::clone(&request_count))
+                .await;
+        let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &sidecar.socket_path);
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Sidecar);
+
+        let embedding = embed_query("ranking beacon").await;
+
+        assert!(embedding.is_none());
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "dimension mismatch should be detected from the sidecar response"
+        );
+    }
+
+    #[cfg(feature = "embed")]
+    #[tokio::test]
+    async fn auto_embed_mode_uses_reachable_sidecar_without_in_process_load() {
+        let _lock = async_env_lock().await;
+        reset_auto_sidecar_probe_for_test();
+        let sidecar =
+            start_stub_embed_sidecar(|| true, |_| Ok(vec![test_embedding_vec(0.5)])).await;
+        let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &sidecar.socket_path);
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Auto);
+        let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+        let _permit = model_cell
+            .begin_load()
+            .expect("test should hold the in-process load gate");
+
+        let embedding = embed_query("ranking beacon")
+            .await
+            .expect("auto mode should use the reachable sidecar");
+
+        assert_eq!(embedding[0], 0.5);
+        assert!(
+            !model_cell.is_ready(),
+            "auto sidecar query must not initialize the in-process model"
+        );
+        assert!(
+            model_cell.is_loading_for_test(),
+            "the only in-process load state should be the permit held by this test"
+        );
+    }
+
+    #[cfg(feature = "embed")]
+    #[tokio::test]
+    async fn auto_warm_embed_model_pings_reachable_sidecar_without_starting_in_process_load() {
+        let _lock = async_env_lock().await;
+        reset_auto_sidecar_probe_for_test();
+        let pinged = Arc::new(AtomicBool::new(false));
+        let pinged_by_ready = Arc::clone(&pinged);
+        let sidecar = start_stub_embed_sidecar(
+            move || {
+                pinged_by_ready.store(true, Ordering::SeqCst);
+                true
+            },
+            |_| Ok(vec![test_embedding_vec(0.5)]),
+        )
+        .await;
+        let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &sidecar.socket_path);
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Auto);
+        let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+        let _permit = model_cell
+            .begin_load()
+            .expect("test should hold the in-process load gate");
+
+        warm_embed_model();
+        for _ in 0..20 {
+            if pinged.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            pinged.load(Ordering::SeqCst),
+            "auto warm should probe the sidecar before considering in-process warm-up"
+        );
+        assert!(
+            !model_cell.is_ready(),
+            "auto warm with a reachable sidecar must not initialize the in-process model"
+        );
+        assert!(
+            model_cell.is_loading_for_test(),
+            "the only in-process load state should be the permit held by this test"
+        );
+    }
+
+    #[cfg(feature = "embed")]
+    #[tokio::test]
+    async fn auto_embed_mode_without_sidecar_falls_back_to_in_process_gate() {
+        let _lock = async_env_lock().await;
+        reset_auto_sidecar_probe_for_test();
+        let temp_dir = tempfile::tempdir().expect("socket tempdir");
+        let missing_socket = temp_dir.path().join("missing.sock");
+        let _socket_guard = set_env_var_for_test(SPUR_EMBED_SOCKET_ENV, &missing_socket);
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Auto);
+        let model_cell = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+        let _permit = model_cell
+            .begin_load()
+            .expect("test should hold the in-process load gate");
+
+        let embedding = embed_query("ranking beacon").await;
+
+        assert!(embedding.is_none());
+        assert!(
+            model_cell.is_loading_for_test(),
+            "auto mode without sidecar should reach the in-process load gate"
         );
     }
 

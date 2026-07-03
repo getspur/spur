@@ -1,5 +1,6 @@
 //! Shared Rust query layer over `.spur/analyst.duckdb`.
 
+pub(crate) mod embed_client;
 pub mod embed_service;
 pub mod mcp;
 
