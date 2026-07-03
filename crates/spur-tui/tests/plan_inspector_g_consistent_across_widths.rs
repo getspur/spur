@@ -109,7 +109,6 @@ fn assert_g_and_shift_g_are_lane_local_at_width(width: u16) {
         plan_projection: &plans,
         synopsis: &synopsis,
         brain_status: &BrainStatus::Idle,
-        license_badge: None,
         flag_summary: None,
         tombstone: None,
         transient_hint_override: None,

@@ -23,7 +23,6 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("tool.family.task", "accent"),
     ("tool.family.mcp", "fg_subtle"),
     ("tool.family.unknown", "warning"),
-    ("license_badge.neutral.fg", "fg_subtle"),
     ("diff.add.fg", "diff_add"),
     ("diff.del.fg", "diff_del"),
     ("diff.context.fg", "fg_muted"),
@@ -41,9 +40,6 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("status_bar.usage.fg", "info"),
     ("status_bar.analytics.fg", "info"),
     ("status_bar.effort.fg", "accent_alt"),
-    ("license_badge.success.text_fg", "success"),
-    ("license_badge.warning.text_fg", "warning"),
-    ("license_badge.danger.text_fg", "danger"),
     // ReAct trace tokens (PR3 wave-1 migration).
     ("react_trace.timestamp.fg", "fg_subtle"),
     ("react_trace.think.fg", "fg_subtle"),
@@ -241,7 +237,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 163);
+        assert_eq!(TokenMap::dark_default().0.len(), 159);
     }
 
     #[test]

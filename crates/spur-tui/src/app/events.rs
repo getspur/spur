@@ -49,7 +49,6 @@ impl App {
     fn update_license_state(&mut self, license_state: LicenseStateEvent) {
         let resolved = license_state_event_to_state(&license_state);
         self.feature_gate.update_state(&resolved);
-        self.license_badge = license_badge_from_state(&license_state);
         self.license_state = license_state;
         self.dirty = true;
     }
@@ -568,7 +567,6 @@ impl App {
             plan_projection: &self.plan_projection,
             synopsis: &self.synopsis,
             brain_status: &self.brain_status,
-            license_badge: self.license_badge.as_ref(),
             flag_summary: self.flag_summary,
             tombstone: None,
             transient_hint_override: None,

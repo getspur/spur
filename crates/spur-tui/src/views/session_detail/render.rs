@@ -113,7 +113,6 @@ impl SessionDetailView {
     ) {
         let lineage = Some(ctx.lineage);
         let tracked_plan = ctx.plan_projection.current_for_session(self.session_id());
-        let license_badge = ctx.license_badge;
         let flag_summary = ctx.flag_summary;
         let view_hint_override = if self
             .cancel_hint_until
@@ -406,10 +405,8 @@ impl SessionDetailView {
                 stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
                 esc_consumed_by_composer: self.input_bar.wants_esc(),
                 notebook_ready: ctx.notebook_ready,
-                session_lifecycle_caps: caps,
                 issue_count: 0,
                 alert_summary: None,
-                license_badge,
                 flag_summary,
                 view_hint_override,
             },
