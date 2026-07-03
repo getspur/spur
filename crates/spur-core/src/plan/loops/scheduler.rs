@@ -10,6 +10,26 @@ use crate::plan::loops::spec::{AutonomyLevel, FailureBackoff, LoopSpec};
 use crate::plan::projector::collect_sorted_audits_for_issue;
 use crate::plan::reconciler::Reconciler;
 
+struct InvalidTemplatePause<'a> {
+    summary: &'a IssueSummary,
+    spec: &'a LoopSpec,
+    generation: u32,
+    now: i64,
+    validation_error: String,
+    advanced: &'a dyn spur_pm::BeadsAdvanced,
+    dispatch: &'a dyn crate::plan::reconciler::ReconcilerDispatch,
+}
+
+struct RearmLoop<'a> {
+    summary: &'a IssueSummary,
+    loop_id: &'a str,
+    generation: u32,
+    now: i64,
+    interval_secs: u64,
+    add_labels: Vec<String>,
+    event_sink: Option<&'a Arc<dyn spur_mcp::events::McpEventSink>>,
+}
+
 impl Reconciler {
     /// One pass over open loop issues. Returns true if any loop was armed or a
     /// durable loop record/control update was written.
@@ -100,15 +120,15 @@ impl Reconciler {
                         )),
                     )
                     .await?;
-                self.rearm_loop(
-                    &summary,
-                    &spec.loop_id,
-                    next_generation,
+                self.rearm_loop(RearmLoop {
+                    summary: &summary,
+                    loop_id: &spec.loop_id,
+                    generation: next_generation,
                     now,
                     interval_secs,
-                    Vec::new(),
-                    dispatch.event_sink(),
-                )
+                    add_labels: Vec::new(),
+                    event_sink: dispatch.event_sink(),
+                })
                 .await?;
                 did_work = true;
                 continue;
@@ -127,15 +147,15 @@ impl Reconciler {
                         )),
                     )
                     .await?;
-                self.rearm_loop(
-                    &summary,
-                    &spec.loop_id,
-                    next_generation,
+                self.rearm_loop(RearmLoop {
+                    summary: &summary,
+                    loop_id: &spec.loop_id,
+                    generation: next_generation,
                     now,
                     interval_secs,
-                    Vec::new(),
-                    dispatch.event_sink(),
-                )
+                    add_labels: Vec::new(),
+                    event_sink: dispatch.event_sink(),
+                })
                 .await?;
                 did_work = true;
                 continue;
@@ -152,15 +172,15 @@ impl Reconciler {
                                 generation = next_generation,
                                 "loop scheduler auto-pausing invalid L3 template: {error}"
                             );
-                            self.auto_pause_invalid_template_loop(
-                                &summary,
-                                &spec,
-                                next_generation,
+                            self.auto_pause_invalid_template_loop(InvalidTemplatePause {
+                                summary: &summary,
+                                spec: &spec,
+                                generation: next_generation,
                                 now,
-                                error.to_string(),
+                                validation_error: error.to_string(),
                                 advanced,
-                                dispatch.as_ref(),
-                            )
+                                dispatch: dispatch.as_ref(),
+                            })
                             .await?;
                             did_work = true;
                             continue;
@@ -190,15 +210,15 @@ impl Reconciler {
                 )
                 .await;
             }
-            self.rearm_loop(
-                &summary,
-                &spec.loop_id,
-                next_generation,
+            self.rearm_loop(RearmLoop {
+                summary: &summary,
+                loop_id: &spec.loop_id,
+                generation: next_generation,
                 now,
                 interval_secs,
-                Vec::new(),
-                dispatch.event_sink(),
-            )
+                add_labels: Vec::new(),
+                event_sink: dispatch.event_sink(),
+            })
             .await?;
             did_work = true;
         }
@@ -307,20 +327,15 @@ impl Reconciler {
 
     async fn auto_pause_invalid_template_loop(
         &self,
-        summary: &IssueSummary,
-        spec: &LoopSpec,
-        generation: u32,
-        now: i64,
-        validation_error: String,
-        advanced: &dyn spur_pm::BeadsAdvanced,
-        dispatch: &dyn crate::plan::reconciler::ReconcilerDispatch,
+        pause: InvalidTemplatePause<'_>,
     ) -> anyhow::Result<()> {
         self.pm
             .update_issue(
-                &summary.id,
+                &pause.summary.id,
                 IssueUpdate {
                     add_labels: vec![labels::LOOP_PAUSED.to_string()],
-                    remove_labels: summary
+                    remove_labels: pause
+                        .summary
                         .labels
                         .iter()
                         .filter(|label| labels::parse_loop_next_run(label).is_some())
@@ -330,56 +345,49 @@ impl Reconciler {
                 },
             )
             .await?;
-        if let Some(sink) = dispatch.event_sink() {
+        if let Some(sink) = pause.dispatch.event_sink() {
             sink.emit(spur_acp::SpurEventBody::LoopPaused {
-                loop_id: spec.loop_id.clone(),
+                loop_id: pause.spec.loop_id.clone(),
                 by: "auto_paused".to_string(),
             });
         }
-        advanced
+        pause
+            .advanced
             .add_comment(
-                &summary.id,
+                &pause.summary.id,
                 &encode_comment(&invalid_template_loop_run(
-                    &spec.loop_id,
-                    generation,
-                    Some(spec.autonomy.as_str().to_string()),
-                    now,
+                    &pause.spec.loop_id,
+                    pause.generation,
+                    Some(pause.spec.autonomy.as_str().to_string()),
+                    pause.now,
                 )),
             )
             .await?;
         crate::plan::push_loop_template_validation_escalation_continuation(
-            dispatch.continuation_ctx().as_ref(),
-            dispatch.materializer().as_ref(),
-            dispatch.brain_session_id(),
-            &spec.loop_id,
-            &spec.goal,
-            generation,
-            &validation_error,
+            pause.dispatch.continuation_ctx().as_ref(),
+            pause.dispatch.materializer().as_ref(),
+            pause.dispatch.brain_session_id(),
+            &pause.spec.loop_id,
+            &pause.spec.goal,
+            pause.generation,
+            &pause.validation_error,
         )
         .await;
         Ok(())
     }
 
-    async fn rearm_loop(
-        &self,
-        summary: &IssueSummary,
-        loop_id: &str,
-        generation: u32,
-        now: i64,
-        interval_secs: u64,
-        add_labels: Vec<String>,
-        event_sink: Option<&std::sync::Arc<dyn spur_mcp::events::McpEventSink>>,
-    ) -> anyhow::Result<()> {
-        let interval = i64::try_from(interval_secs).unwrap_or(i64::MAX);
-        let next_run = now.saturating_add(interval);
+    async fn rearm_loop(&self, rearm: RearmLoop<'_>) -> anyhow::Result<()> {
+        let interval = i64::try_from(rearm.interval_secs).unwrap_or(i64::MAX);
+        let next_run = rearm.now.saturating_add(interval);
         let mut add = vec![labels::loop_next_run_label(next_run)];
-        add.extend(add_labels);
+        add.extend(rearm.add_labels);
         self.pm
             .update_issue(
-                &summary.id,
+                &rearm.summary.id,
                 IssueUpdate {
                     add_labels: add,
-                    remove_labels: summary
+                    remove_labels: rearm
+                        .summary
                         .labels
                         .iter()
                         .filter(|label| labels::parse_loop_next_run(label).is_some())
@@ -389,10 +397,10 @@ impl Reconciler {
                 },
             )
             .await?;
-        if let Some(sink) = event_sink {
+        if let Some(sink) = rearm.event_sink {
             sink.emit(spur_acp::SpurEventBody::LoopArmed {
-                loop_id: loop_id.to_string(),
-                generation,
+                loop_id: rearm.loop_id.to_string(),
+                generation: rearm.generation,
                 next_run,
             });
         }
