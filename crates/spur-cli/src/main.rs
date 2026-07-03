@@ -361,6 +361,11 @@ enum Commands {
         #[command(subcommand)]
         command: AnalystCommands,
     },
+    /// Shared embedding sidecar server
+    Embed {
+        #[command(subcommand)]
+        command: EmbedCommands,
+    },
     /// External code-context tools (search/read/callers/callees across indexed packages)
     Context {
         #[command(subcommand)]
@@ -622,6 +627,19 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn cli_accepts_embed_serve_subcommand() {
+        let socket = PathBuf::from("/tmp/spur-embed.sock");
+        let matches = Cli::command()
+            .try_get_matches_from(["spur", "embed", "serve", "--socket", "/tmp/spur-embed.sock"])
+            .expect("embed serve should parse");
+        assert_eq!(matches.subcommand_name(), Some("embed"));
+        let (_, sub) = matches.subcommand().expect("embed subcommand");
+        assert_eq!(sub.subcommand_name(), Some("serve"));
+        let (_, serve) = sub.subcommand().expect("embed serve subcommand");
+        assert_eq!(serve.get_one::<PathBuf>("socket"), Some(&socket));
+    }
+
+    #[test]
     fn cli_accepts_top_level_mcp_command() {
         let root = PathBuf::from(".");
         let matches = Cli::command()
@@ -799,6 +817,16 @@ enum AnalystCommands {
         /// the MCP client launch directory.
         #[arg(long, value_name = "PATH")]
         root: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EmbedCommands {
+    /// Serve query embeddings over a Unix domain socket.
+    Serve {
+        /// Unix domain socket path. Defaults to SPUR_EMBED_SOCKET, then ~/.spur/embed.sock.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
     },
 }
 
@@ -1394,6 +1422,9 @@ async fn run() -> Result<()> {
                 )
             }
             AnalystCommands::Mcp { root } => commands::mcp::run_analyst_server(root).await,
+        },
+        Commands::Embed { command } => match command {
+            EmbedCommands::Serve { socket } => commands::embed::serve(socket).await,
         },
         Commands::Context { command } => match command {
             ContextCommands::Mcp { url, token } => {

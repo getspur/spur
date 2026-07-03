@@ -486,13 +486,13 @@ impl KnowledgeIntent {
 }
 
 #[cfg(feature = "embed")]
-struct EmbedModelCell<M> {
+pub(crate) struct EmbedModelCell<M> {
     model: OnceLock<Arc<Mutex<M>>>,
     loading: Mutex<bool>,
 }
 
 #[cfg(feature = "embed")]
-struct EmbedLoadPermit<'a, M> {
+pub(crate) struct EmbedLoadPermit<'a, M> {
     cell: &'a EmbedModelCell<M>,
     completed: bool,
 }
@@ -506,7 +506,7 @@ impl<M> EmbedModelCell<M> {
         }
     }
 
-    fn ready(&self) -> Option<Arc<Mutex<M>>> {
+    pub(crate) fn ready(&self) -> Option<Arc<Mutex<M>>> {
         self.model.get().cloned()
     }
 
@@ -514,7 +514,7 @@ impl<M> EmbedModelCell<M> {
         self.model.get().is_some()
     }
 
-    fn begin_load(&self) -> Option<EmbedLoadPermit<'_, M>> {
+    pub(crate) fn begin_load(&self) -> Option<EmbedLoadPermit<'_, M>> {
         if self.is_ready() {
             return None;
         }
@@ -563,7 +563,7 @@ impl<M> EmbedModelCell<M> {
 
 #[cfg(feature = "embed")]
 impl<M> EmbedLoadPermit<'_, M> {
-    fn complete(mut self, model: Option<M>) -> Option<Arc<Mutex<M>>> {
+    pub(crate) fn complete(mut self, model: Option<M>) -> Option<Arc<Mutex<M>>> {
         if let Some(model) = model {
             let _ = self.cell.model.set(Arc::new(Mutex::new(model)));
         }
@@ -583,14 +583,14 @@ impl<M> Drop for EmbedLoadPermit<'_, M> {
 }
 
 #[cfg(feature = "embed")]
-fn embed_model_cell(
+pub(crate) fn embed_model_cell(
     _embedding_model: EmbeddingModelSelection,
 ) -> &'static EmbedModelCell<fastembed::TextEmbedding> {
     &EMBEDDING_GEMMA_EMBED_MODEL
 }
 
 #[cfg(feature = "embed")]
-fn load_embed_model(
+pub(crate) fn load_embed_model(
     embedding_model: EmbeddingModelSelection,
 ) -> Result<fastembed::TextEmbedding, String> {
     tracing::info!(
