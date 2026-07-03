@@ -308,10 +308,13 @@ async fn main() -> anyhow::Result<()> {
 
     let mut chunks = 0usize;
     if let Some(mut rx) = notif_rx {
-        // Prompt has returned; drain buffered broadcast items with a
-        // 500ms cap for any LocalSet-scheduled stragglers.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        // Rolling idle drain: the per-notification idle window resets on
+        // traffic so a slow turn is not cut off mid-stream; the hard cap
+        // bounds a runaway stream.
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
+            let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = idle_deadline.min(hard_deadline);
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 break;
@@ -328,6 +331,26 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     println!("[ok] prompt streamed {chunks} notifications");
+
+    // The usage slot is written when the prompt turn completes inside the
+    // ACP thread, so wait for the connection's busy guard to clear before
+    // reading it. list_sessions is read-only and cheap; a "busy (prompt in
+    // flight)" error means the turn is still running.
+    let busy_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        match conn.list_sessions(ListSessionsRequest::new()).await {
+            Err(e) if e.to_string().contains("busy (") => {
+                if tokio::time::Instant::now() >= busy_deadline {
+                    println!(
+                        "[WARN] prompt still in flight after 90s; usage read may be premature"
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            _ => break,
+        }
+    }
     let usage = conn.take_last_prompt_usage();
     println!("{}", format_usage_report(usage.as_ref()));
 
