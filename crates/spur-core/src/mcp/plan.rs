@@ -45,6 +45,7 @@ const PLAN_REMAINDER_TOOL_NAMES: &[&str] = &[
     "pause_loop",
     "resume_loop",
     "kill_loop",
+    "set_loop_autonomy",
     "review_task",
     "submit_plan_mutation",
 ];
@@ -66,6 +67,7 @@ const PLAN_TOOL_NAMES: &[&str] = &[
     "pause_loop",
     "resume_loop",
     "kill_loop",
+    "set_loop_autonomy",
     "review_task",
     "submit_plan_mutation",
 ];
@@ -140,6 +142,7 @@ impl PlanMcpModule {
             "pause_loop" => server.handle_pause_loop(id, arguments).await,
             "resume_loop" => server.handle_resume_loop(id, arguments).await,
             "kill_loop" => server.handle_kill_loop(id, arguments).await,
+            "set_loop_autonomy" => server.handle_set_loop_autonomy(id, arguments).await,
             "review_task" => {
                 if let Some(plan_id) = arguments.get("plan_id").and_then(|v| v.as_str()) {
                     if let Err((code, message)) =
@@ -232,6 +235,7 @@ fn plan_tool_definition(name: &str) -> ToolDefinition {
         "pause_loop" => pause_loop_def(),
         "resume_loop" => resume_loop_def(),
         "kill_loop" => kill_loop_def(),
+        "set_loop_autonomy" => set_loop_autonomy_def(),
         "review_task" => review_task_def(),
         "submit_plan_mutation" => submit_plan_mutation_def(),
         other => panic!("unknown plan MCP tool definition: {other}"),
@@ -607,6 +611,14 @@ fn kill_loop_def() -> ToolDefinition {
         name: "kill_loop".into(),
         description: "Retire a loop by appending a terminal LoopRun audit record with outcome retired, removing all spur:loop-next-run:* labels, and closing the loop issue identified by loop_id. Repeated calls on an already-closed loop return current state without writing another record.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::LoopIdParams>(),
+    }
+}
+
+fn set_loop_autonomy_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "set_loop_autonomy".into(),
+        description: "Set a loop's autonomy to l1, l2, or l3. Demotions are immediate; promotions advance one level at a time and require three consecutive approved real generations at the current level. Updates the [[spur-loop v1]] spec body and spur:autonomy:* label together.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::SetLoopAutonomyParams>(),
     }
 }
 

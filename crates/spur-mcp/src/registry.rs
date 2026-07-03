@@ -328,6 +328,7 @@ const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
     "preview_task_base",
     "plan_truncate_and_restart",
     "recover_orphaned_dispatch",
+    "set_loop_autonomy",
     "review_task",
     "submit_plan_mutation",
     "graph_triage",
