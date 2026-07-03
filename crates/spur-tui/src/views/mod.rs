@@ -61,7 +61,7 @@ use ratatui::Frame;
 use spur_acp::SpurEvent;
 
 use crate::action::Action;
-use crate::components::status_bar::{HintOverride, LicenseBadge};
+use crate::components::status_bar::HintOverride;
 use crate::components::tombstone::Tombstone;
 
 // ── macOS Option-key normalisation ────────────────────────────────────
@@ -137,7 +137,6 @@ pub struct ViewContext<'a> {
     pub plan_projection: &'a spur_core::PlanProjectionStore,
     pub synopsis: &'a spur_core::SessionSynopsisProjection,
     pub brain_status: &'a crate::app::BrainStatus,
-    pub license_badge: Option<&'a LicenseBadge>,
     pub flag_summary: Option<(usize, usize)>,
     pub tombstone: Option<&'a Tombstone>,
     pub transient_hint_override: Option<HintOverride<'a>>,
@@ -169,7 +168,6 @@ impl ViewContext<'_> {
             plan_projection: TEST_PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             synopsis: TEST_SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &TEST_BRAIN_STATUS,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,

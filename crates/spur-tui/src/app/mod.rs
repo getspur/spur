@@ -52,7 +52,7 @@ use crate::components::palette_sources::{
     CommandSource, PaletteSource, SessionSource, ViewSource, WorkerSource,
 };
 use crate::components::quit_confirm::QuitConfirmDialog;
-use crate::components::status_bar::{HintOverride, LicenseBadge, LicenseBadgeTone};
+use crate::components::status_bar::HintOverride;
 use crate::components::tombstone::{Tombstone, TombstoneKind};
 use crate::components::upgrade_modal::{self, UpgradeModalState};
 use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
@@ -223,44 +223,6 @@ pub enum BrainStatus {
     Error(String),
 }
 
-fn format_plan(plan: EventLicensePlan) -> &'static str {
-    match plan {
-        EventLicensePlan::Community => "community",
-        EventLicensePlan::StarterLtd => "starter-ltd",
-        EventLicensePlan::BuilderLtd => "builder-ltd",
-        EventLicensePlan::FounderLtd => "founder-ltd",
-        EventLicensePlan::Pro => "pro",
-        EventLicensePlan::Team => "team",
-        EventLicensePlan::Enterprise => "enterprise",
-        EventLicensePlan::Unknown => "unknown",
-    }
-}
-
-fn license_badge_from_state(state: &LicenseStateEvent) -> Option<LicenseBadge> {
-    use LicenseStatusEvent::*;
-
-    match state.status {
-        ConfigError => Some(LicenseBadge::new(
-            "license config",
-            LicenseBadgeTone::Danger,
-        )),
-        Inactive => Some(LicenseBadge::new("community", LicenseBadgeTone::Neutral)),
-        Invalid => Some(LicenseBadge::new("invalid", LicenseBadgeTone::Danger)),
-        Degraded => {
-            let label = format!("{} degraded", format_plan(state.plan));
-            Some(LicenseBadge::new(label, LicenseBadgeTone::Warning))
-        }
-        Active => {
-            let label = if matches!(state.plan, EventLicensePlan::Unknown) {
-                "licensed".to_string()
-            } else {
-                format_plan(state.plan).to_string()
-            };
-            Some(LicenseBadge::new(label, LicenseBadgeTone::Success))
-        }
-    }
-}
-
 /// Convert the ACP broadcast representation into the license resolver input.
 /// This is the inverse of `spur_core::license_runtime::to_event_state`.
 fn license_state_event_to_state(state: &LicenseStateEvent) -> spur_license::LicenseState {
@@ -421,7 +383,6 @@ pub struct App {
     /// Populated on every `SpurEventBody::WorkerNotification`.
     pub(crate) worker_streams: crate::worker_streams::WorkerStreams,
     license_state: LicenseStateEvent,
-    license_badge: Option<LicenseBadge>,
     flag_summary: Option<(usize, usize)>, // (active_count, total_count)
     /// Plan C Tier 2 — long-lived feature-gate snapshot reflecting the
     /// embedded policy (community baseline + `SPUR_LICENSE_TEST_STRIP_KEYS`).
@@ -653,7 +614,6 @@ impl App {
             plan_projection: &self.plan_projection,
             synopsis: &self.synopsis,
             brain_status: &self.brain_status,
-            license_badge: self.license_badge.as_ref(),
             flag_summary: self.flag_summary,
             tombstone: self.tombstones.peek(self.current_view()),
             transient_hint_override,

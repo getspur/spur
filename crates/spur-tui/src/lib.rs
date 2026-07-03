@@ -201,7 +201,6 @@ pub mod test_support {
             plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
             synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
             brain_status: &IDLE,
-            license_badge: None,
             flag_summary: None,
             tombstone: None,
             transient_hint_override: None,
