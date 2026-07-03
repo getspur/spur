@@ -20,6 +20,44 @@ impl App {
                 None
             }
 
+            Action::RefreshLoops => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::RefreshLoops);
+                }
+                None
+            }
+
+            Action::InspectLoop { loop_id } => {
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::InspectLoop { loop_id });
+                }
+                None
+            }
+
+            Action::PauseLoop { loop_id } => {
+                self.flash_hint_short(format!("Pausing loop {loop_id}..."));
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::PauseLoop { loop_id });
+                }
+                None
+            }
+
+            Action::ResumeLoop { loop_id } => {
+                self.flash_hint_short(format!("Resuming loop {loop_id}..."));
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::ResumeLoop { loop_id });
+                }
+                None
+            }
+
+            Action::KillLoop { loop_id } => {
+                self.flash_hint_short(format!("Retiring loop {loop_id}..."));
+                if let Some(ref tx) = self.user_input_tx {
+                    let _ = tx.try_send(UserInput::KillLoop { loop_id });
+                }
+                None
+            }
+
             Action::ClaimPlan { plan_id } => {
                 self.flash_hint_short(format!("Claiming plan {plan_id}..."));
                 if let Some(ref tx) = self.user_input_tx {
