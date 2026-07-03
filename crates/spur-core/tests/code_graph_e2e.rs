@@ -2831,6 +2831,114 @@ async fn code_read_symbol_marks_stale_but_returns_indexed_source() {
     assert_eq!(body["file_oid"], file_oid(&artifact, &root.file_path));
 }
 
+const EDITED_FIXTURE_KEEPING_ROOT: &str = "pub fn added_before() -> bool {
+    true
+}
+
+pub fn launch_order() -> bool {
+    orchestrate_order()
+}
+
+pub fn orchestrate_order() -> bool {
+    let parsed = parse_order();
+    let charged = charge_order();
+    parsed && charged && added_before()
+}
+
+fn parse_order() -> bool {
+    true
+}
+
+fn charge_order() -> bool {
+    audit_order()
+}
+
+fn audit_order() -> bool {
+    true
+}
+";
+
+#[tokio::test]
+async fn code_read_symbol_serves_current_worktree_source_when_stale_symbol_survives() {
+    let _lock = cwd_lock().await;
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    std::fs::write(
+        worktree.path().join("src/lib.rs"),
+        EDITED_FIXTURE_KEEPING_ROOT,
+    )
+    .expect("edit fixture after graph build");
+    let expected_source = source_for_range(worktree.path(), &root.file_path, 9, 13);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({ "stable_symbol_id": root.stable_symbol_id }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["stale"], true);
+    assert_eq!(body["source_origin"], "worktree");
+    assert_eq!(body["line_range"], json!({ "start": 9, "end": 13 }));
+    assert_eq!(body["source"], expected_source);
+    assert!(body["source"]
+        .as_str()
+        .expect("source text")
+        .contains("added_before()"));
+    assert_eq!(
+        body["file_oid"],
+        spur_graph::git_blob_oid(EDITED_FIXTURE_KEEPING_ROOT.as_bytes())
+    );
+    assert_eq!(body["symbol"]["qualified_name"], ROOT_SYMBOL);
+}
+
+#[tokio::test]
+async fn code_read_symbol_source_format_serves_current_worktree_source_when_stale() {
+    let _lock = cwd_lock().await;
+    let worktree = TempDir::new().expect("temp worktree");
+    copy_fixture_crate(worktree.path());
+    commit_fixture(worktree.path());
+    let artifact = build_graph_artifact(worktree.path());
+    let root = symbol_by_entity(&artifact, ROOT_SYMBOL);
+    std::fs::write(
+        worktree.path().join("src/lib.rs"),
+        EDITED_FIXTURE_KEEPING_ROOT,
+    )
+    .expect("edit fixture after graph build");
+    let expected_source = source_for_range(worktree.path(), &root.file_path, 9, 13);
+    let _cwd = enter_dir(worktree.path());
+    let server = test_server();
+
+    let body = tool_body(
+        call_tool(
+            &server,
+            "code_read_symbol",
+            json!({
+                "stable_symbol_id": root.stable_symbol_id,
+                "response_format": "source"
+            }),
+        )
+        .await,
+    );
+
+    assert_eq!(body["stale"], true);
+    assert_eq!(body["source_origin"], "worktree");
+    assert_eq!(body["range"], json!({ "start": 9, "end": 13 }));
+    assert_eq!(body["source"], expected_source);
+    assert_eq!(body["name"], ROOT_SYMBOL);
+    assert_eq!(
+        body["file_oid"],
+        spur_graph::git_blob_oid(EDITED_FIXTURE_KEEPING_ROOT.as_bytes())
+    );
+}
+
 #[tokio::test]
 async fn code_read_symbol_clamps_and_echoes_context_lines() {
     let _lock = cwd_lock().await;
