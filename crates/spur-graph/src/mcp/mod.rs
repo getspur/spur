@@ -762,6 +762,11 @@ fn code_symbol_search_def() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 200,
                     "default": 20
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["full", "compact", "table"],
+                    "description": "Output shape. full is the default candidate-array response; compact omits healthy metadata defaults; table also omits healthy metadata defaults. The candidates array shape is identical across all three formats."
                 }
             },
             "required": ["query"]
