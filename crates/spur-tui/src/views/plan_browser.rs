@@ -17,6 +17,7 @@ use crate::action::{Action, ViewId};
 use crate::components::status_bar::{HintOverride, StatusBar, StatusBarProps};
 use crate::theme::{resolve_token, ColorDepth, Theme};
 
+use super::plan_provenance::loop_origin_badge;
 use super::{View, ViewContext};
 
 fn token(theme: &Theme, name: &str) -> Color {
@@ -665,6 +666,7 @@ impl PlanBrowserView {
         let header = Row::new([
             Cell::from("Plan").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Work item").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Origin").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Title").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Owner").style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("State").style(Style::default().add_modifier(Modifier::BOLD)),
@@ -681,6 +683,12 @@ impl PlanBrowserView {
                 Row::new([
                     Cell::from(truncate(&plan.plan_id, 16)),
                     Cell::from(truncate(&plan.epic_id, 12)),
+                    Cell::from(
+                        plan.loop_origin
+                            .as_ref()
+                            .map(loop_origin_badge)
+                            .unwrap_or_default(),
+                    ),
                     Cell::from(plan.title.as_str()),
                     Cell::from(truncate(&Self::owner_label(&plan.owner_state), 12)),
                     Cell::from(Self::lifecycle_label(plan.lifecycle)),
@@ -694,6 +702,7 @@ impl PlanBrowserView {
         let widths = [
             Constraint::Length(16),
             Constraint::Length(12),
+            Constraint::Length(10),
             Constraint::Min(12),
             Constraint::Length(12),
             Constraint::Length(12),
@@ -788,10 +797,15 @@ impl PlanBrowserView {
         theme: &Theme,
         now: DateTime<Utc>,
     ) -> Vec<Line<'static>> {
-        vec![
+        let mut lines = vec![
             Self::field_line("Plan", plan.plan_id.clone(), theme),
             Self::field_line("Work item", plan.epic_id.clone(), theme),
             Self::field_line("Title", plan.title.clone(), theme),
+        ];
+        if let Some(origin) = plan.loop_origin.as_ref() {
+            lines.push(Self::field_line("Origin", loop_origin_badge(origin), theme));
+        }
+        lines.extend([
             Self::field_line("Description", Self::body_preview_text(plan), theme),
             Self::field_line("Owner", Self::owner_detail(&plan.owner_state), theme),
             Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle), theme),
@@ -804,7 +818,8 @@ impl PlanBrowserView {
                 "p: implementation plan   o: work item   c: claim   s: start/resume",
                 theme,
             ),
-        ]
+        ]);
+        lines
     }
 
     fn render_plan_lines(
@@ -813,10 +828,15 @@ impl PlanBrowserView {
         theme: &Theme,
         now: DateTime<Utc>,
     ) -> Vec<Line<'static>> {
-        vec![
+        let mut lines = vec![
             Self::field_line("Plan", plan.plan_id.clone(), theme),
             Self::field_line("Work item", plan.epic_id.clone(), theme),
             Self::field_line("Title", plan.title.clone(), theme),
+        ];
+        if let Some(origin) = plan.loop_origin.as_ref() {
+            lines.push(Self::field_line("Origin", loop_origin_badge(origin), theme));
+        }
+        lines.extend([
             Self::field_line("Owner", Self::owner_detail(&plan.owner_state), theme),
             Self::field_line("Lifecycle", Self::lifecycle_label(plan.lifecycle), theme),
             Self::field_line("Progress", Self::progress_text(plan.counts.as_ref()), theme),
@@ -825,7 +845,8 @@ impl PlanBrowserView {
             Self::field_line("Created", Self::created_text(plan, now), theme),
             Self::field_line("Description", Self::body_preview_text(plan), theme),
             Self::action_line("Press p again to open the implementation plan board", theme),
-        ]
+        ]);
+        lines
     }
 
     fn render_work_item_lines(&self, plan: &PlanSummaryEvent, theme: &Theme) -> Vec<Line<'static>> {
@@ -1144,6 +1165,7 @@ impl View for PlanBrowserView {
                 plan_id,
             } => {
                 self.hint = Some(format!("Loop {loop_id} gen {generation}: plan {plan_id}"));
+                self.pending_focus_plan_id = Some(plan_id.clone());
             }
             SpurEventBody::LoopRunRecorded {
                 loop_id,
