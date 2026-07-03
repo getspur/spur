@@ -215,6 +215,7 @@ mod plan_truncate_and_restart_tests {
                                 result_summary: summary.clone(),
                                 artifact_uri: None,
                                 dispatched_base_oid: entry.dispatched_base_oid.clone(),
+                                estimated_cost_micros: None,
                             },
                         ),
                     )
@@ -1411,5 +1412,253 @@ mod reconciler_fast_forward_tests {
     #[test]
     fn legacy_reclaim_skipped_when_rev1_bootstrap_metadata_exists() {
         assert!(!super::legacy_reclaim_needed(true));
+    }
+}
+
+#[cfg(test)]
+mod loop_lifecycle_mcp_tests {
+    use super::*;
+    use crate::plan::PmLike;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn no_op_ctx() -> DetachedContinuationCtx {
+        DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }
+    }
+
+    async fn new_server_with_mock_pm() -> (
+        Arc<McpCallbackServer>,
+        Arc<crate::plan::test_util::MockPm>,
+    ) {
+        let session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into()));
+        let mock_pm = crate::plan::test_util::MockPm::new().arc();
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::pro_feature_gate(),
+        );
+        server.__test_set_pm_like(mock_pm.clone() as Arc<dyn crate::plan::PmLike>);
+        (Arc::new(server), mock_pm)
+    }
+
+    fn valid_loop_spec() -> serde_json::Value {
+        json!({
+            "goal": "Keep CI green",
+            "pattern": "ci-sweeper",
+            "cadence_secs": 60,
+            "template": {
+                "tasks": [{
+                    "task_id": "triage",
+                    "agent": "codex",
+                    "task": "Triage the CI state and report findings",
+                    "labels": [crate::plan::labels::LOOP_TRIAGE_TASK]
+                }]
+            },
+            "governors": {
+                "max_cost_micros_per_generation": 2_000_000,
+                "max_generations_per_day": 24,
+                "max_tasks_per_generation": 5,
+                "consecutive_failure_backoff": {
+                    "k": 2,
+                    "factor": 2,
+                    "auto_pause_after": 4
+                }
+            }
+        })
+    }
+
+    fn response_text_json(response: &serde_json::Value) -> serde_json::Value {
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected text JSON success response, got {response}"));
+        serde_json::from_str(text).expect("response text must be JSON")
+    }
+
+    fn response_loop_id(response: &serde_json::Value) -> String {
+        response["result"]["loop_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected loop_id in response, got {response}"))
+            .to_string()
+    }
+
+    fn find_loop_issue<'a>(
+        issues: &'a [spur_pm::Issue],
+        loop_id: &str,
+    ) -> &'a spur_pm::Issue {
+        let label = crate::plan::labels::loop_id_label(loop_id);
+        issues
+            .iter()
+            .find(|issue| issue.labels.contains(&label))
+            .unwrap_or_else(|| panic!("missing loop issue for {loop_id}; issues={issues:?}"))
+    }
+
+    async fn submit_valid_loop(
+        server: &McpCallbackServer,
+    ) -> (String, serde_json::Value) {
+        let response = server
+            .__test_call_tool("submit_loop", json!({ "spec": valid_loop_spec() }))
+            .await;
+        assert!(
+            response.get("error").is_none(),
+            "submit_loop should succeed: {response}"
+        );
+        (response_loop_id(&response), response)
+    }
+
+    #[tokio::test]
+    async fn submit_loop_creates_loop_issue_with_sentinel_and_next_run() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+
+        let (loop_id, response) = submit_valid_loop(&server).await;
+        let issues = mock_pm.issues().await;
+        let issue = find_loop_issue(&issues, &loop_id);
+
+        assert_eq!(issue.issue_type.as_deref(), Some("task"));
+        assert!(issue.body.contains("[[spur-loop v1]]"));
+        assert!(issue.labels.contains(&crate::plan::labels::loop_id_label(&loop_id)));
+        assert!(issue.labels.contains(&format!(
+            "{}l1",
+            crate::plan::labels::AUTONOMY_PREFIX
+        )));
+        assert!(
+            issue.labels
+                .iter()
+                .any(|label| crate::plan::labels::parse_loop_next_run(label).is_some()),
+            "loop issue must carry next-run label: {:?}",
+            issue.labels
+        );
+        assert_eq!(response["result"]["issue_id"], issue.id);
+        assert_eq!(
+            crate::plan::loops::spec::LoopSpec::parse(&issue.body)
+                .expect("loop sentinel parses")
+                .loop_id,
+            loop_id
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_loop_rejects_template_without_triage_task() {
+        let (server, _mock_pm) = new_server_with_mock_pm().await;
+        let mut spec = valid_loop_spec();
+        spec["template"]["tasks"][0]["labels"] = json!([]);
+
+        let response = server
+            .__test_call_tool("submit_loop", json!({ "spec": spec }))
+            .await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected error response, got {response}"));
+        assert!(
+            message.contains("triage"),
+            "error should mention triage, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_toggle_label_and_reset_backoff() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+        mock_pm
+            .update_issue(
+                &issue_id,
+                spur_pm::IssueUpdate {
+                    add_labels: vec![crate::plan::labels::loop_next_run_label(4_000)],
+                    remove_labels: vec![crate::plan::labels::loop_next_run_label(0)],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("seed later next-run");
+
+        let paused = server
+            .__test_call_tool("pause_loop", json!({ "loop_id": loop_id }))
+            .await;
+        assert!(paused.get("error").is_none(), "pause_loop failed: {paused}");
+        let issue = mock_pm.issue(&issue_id).await;
+        assert!(issue.labels.contains(&crate::plan::labels::LOOP_PAUSED.to_string()));
+
+        let before_resume = chrono::Utc::now().timestamp();
+        let resumed = server
+            .__test_call_tool("resume_loop", json!({ "loop_id": loop_id }))
+            .await;
+        let after_resume = chrono::Utc::now().timestamp();
+        assert!(resumed.get("error").is_none(), "resume_loop failed: {resumed}");
+        let issue = mock_pm.issue(&issue_id).await;
+        assert!(!issue.labels.contains(&crate::plan::labels::LOOP_PAUSED.to_string()));
+        let next_runs: Vec<i64> = issue
+            .labels
+            .iter()
+            .filter_map(|label| crate::plan::labels::parse_loop_next_run(label))
+            .collect();
+        assert_eq!(next_runs.len(), 1, "resume must leave one next-run label");
+        assert!(
+            (before_resume..=after_resume).contains(&next_runs[0]),
+            "resume must replace old next-run labels with now; next_runs={next_runs:?}, labels={:?}",
+            issue.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn get_loop_status_returns_spec_and_recent_runs() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let (loop_id, _) = submit_valid_loop(&server).await;
+        let issue_id = find_loop_issue(&mock_pm.issues().await, &loop_id).id.clone();
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            super::pro_feature_gate().as_ref(),
+        )
+        .expect("pro gate");
+        let adv = mock_pm.advanced().expect("mock PM supports comments");
+        for (generation, outcome) in [(1, "approved"), (2, "failed"), (3, "failed")] {
+            adv.add_comment(
+                &issue_id,
+                &crate::plan::audit_sentinel::encode_comment(
+                    &crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+                        loop_id: loop_id.clone(),
+                        generation,
+                        plan_id: format!("plan-{generation}"),
+                        outcome: outcome.to_string(),
+                        tasks_discovered: generation,
+                        approved: u32::from(outcome == "approved"),
+                        rejected: 0,
+                        failed: u32::from(outcome == "failed"),
+                        cancelled: 0,
+                        escalations: 0,
+                        cost_micros: 100 * u64::from(generation),
+                        started_at: i64::from(generation),
+                        ended_at: i64::from(generation),
+                    },
+                ),
+            )
+            .await
+            .expect("seed loop-run");
+        }
+
+        let response = server
+            .__test_call_tool(
+                "get_loop_status",
+                json!({ "loop_id": loop_id, "recent_runs": 2 }),
+            )
+            .await;
+        assert!(
+            response.get("error").is_none(),
+            "get_loop_status failed: {response}"
+        );
+        let status = response_text_json(&response);
+
+        assert_eq!(status["spec"]["goal"], "Keep CI green");
+        assert_eq!(status["recent_runs"].as_array().expect("runs").len(), 2);
+        assert_eq!(status["recent_runs"][0]["generation"], 2);
+        assert_eq!(status["recent_runs"][1]["generation"], 3);
+        assert_eq!(status["consecutive_failures"], 2);
+        assert_eq!(status["effective_interval_secs"], 120);
+        assert_eq!(status["paused"], false);
     }
 }

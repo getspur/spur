@@ -421,6 +421,7 @@ async fn server_nonadvisory_review_error_invalidates_active_plan_cache() {
                         dispatched_base_oid: Some(
                             "0000000000000000000000000000000000000001".into(),
                         ),
+                        estimated_cost_micros: None,
                     },
                 )),
                 ..Default::default()

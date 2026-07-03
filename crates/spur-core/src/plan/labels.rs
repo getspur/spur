@@ -167,6 +167,18 @@ pub fn plan_owner_lease_expires_at(ts: i64) -> String {
     format!("{PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX}{ts}")
 }
 
+pub fn loop_id_label(id: &str) -> String {
+    format!("{LOOP_ID_PREFIX}{}", compact_label_component(id))
+}
+
+pub fn loop_next_run_label(ts: i64) -> String {
+    format!("{LOOP_NEXT_RUN_PREFIX}{ts}")
+}
+
+pub fn loop_generation_label(n: u32) -> String {
+    format!("{LOOP_GENERATION_PREFIX}{n}")
+}
+
 pub fn signal_kind(kind: &str) -> String {
     format!("signal:{kind}")
 }
@@ -184,6 +196,14 @@ pub const REVIEW_REJECTED: &str = "spur:review-rejected";
 /// to avoid observing partially-persisted plan graphs as ready work.
 /// If creation fails mid-loop, the epic will NOT carry this label.
 pub const PLAN_COMPLETE: &str = "spur:plan-complete";
+pub const LOOP_PAUSED: &str = "spur:loop-paused";
+pub const PAUSE_ALL_LOOPS: &str = "spur:pause-all-loops";
+pub const LOOP_TRIAGE_TASK: &str = "spur:loop-triage-task";
+pub const AUTONOMY_PREFIX: &str = "spur:autonomy:";
+pub const LOOP_ID_PREFIX: &str = "spur:loop-id:";
+pub const LOOP_NEXT_RUN_PREFIX: &str = "spur:loop-next-run:";
+pub const LOOP_GENERATION_PREFIX: &str = "spur:loop-generation:";
+pub const LOOP_BUDGET_MICROS_PREFIX: &str = "spur:loop-budget-micros:";
 /// Marker applied to an epic while `build_epic_subgraph` is still creating
 /// children + dependency edges. The reconciler must not dispatch tasks from a
 /// plan while this marker is present.
@@ -204,6 +224,22 @@ pub fn parse_lease_expires_at(label: &str) -> Option<i64> {
     label.strip_prefix(LEASE_EXPIRES_AT_PREFIX)?.parse().ok()
 }
 
+pub fn parse_loop_budget_micros(label: &str) -> Option<u64> {
+    label.strip_prefix(LOOP_BUDGET_MICROS_PREFIX)?.parse().ok()
+}
+
+pub fn parse_loop_id(label: &str) -> Option<&str> {
+    label.strip_prefix(LOOP_ID_PREFIX)
+}
+
+pub fn parse_loop_next_run(label: &str) -> Option<i64> {
+    label.strip_prefix(LOOP_NEXT_RUN_PREFIX)?.parse().ok()
+}
+
+pub fn parse_loop_generation(label: &str) -> Option<u32> {
+    label.strip_prefix(LOOP_GENERATION_PREFIX)?.parse().ok()
+}
+
 pub fn parse_plan_owner(label: &str) -> Option<&str> {
     label.strip_prefix(PLAN_OWNER_PREFIX)
 }
@@ -217,6 +253,23 @@ pub fn parse_plan_owner_lease_expires_at(label: &str) -> Option<i64> {
         .strip_prefix(PLAN_OWNER_LEASE_EXPIRES_AT_PREFIX)?
         .parse()
         .ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AutonomyLevel {
+    L1,
+    L2,
+    L3,
+}
+
+/// Parses `spur:autonomy:l1|l2|l3`. Unknown suffixes return None.
+pub fn parse_autonomy(label: &str) -> Option<AutonomyLevel> {
+    match label.strip_prefix(AUTONOMY_PREFIX)? {
+        "l1" => Some(AutonomyLevel::L1),
+        "l2" => Some(AutonomyLevel::L2),
+        "l3" => Some(AutonomyLevel::L3),
+        _ => None,
+    }
 }
 
 /// Returns `Some(task_id)` if the given label is a `spur:plan-task-id:<id>` label.

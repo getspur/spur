@@ -113,6 +113,7 @@ mod tests {
                 result_summary: Some("done".to_string()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("abc123".to_string()),
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::Approval {
                 delegation_id: "del-1".to_string(),
@@ -156,6 +157,7 @@ mod tests {
                 result_summary: Some("first summary".to_string()),
                 artifact_uri: None,
                 dispatched_base_oid: Some("base-1".to_string()),
+                estimated_cost_micros: None,
             },
             AuditSentinelKind::ReviewFeedback {
                 delegation_id: "del-1".to_string(),
@@ -178,6 +180,7 @@ mod tests {
                 result_summary: Some("second summary".to_string()),
                 artifact_uri: None,
                 dispatched_base_oid: None,
+                estimated_cost_micros: None,
             },
         ];
 
