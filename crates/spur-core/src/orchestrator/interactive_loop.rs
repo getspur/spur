@@ -910,7 +910,7 @@ impl Orchestrator {
                     InteractiveInput::RefreshPlans => {
                         if let Some(pm) = &self.pm_service {
                             let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                            match load_plan_summaries(pm, current_session).await {
+                            match load_plan_summaries(pm.as_ref(), current_session).await {
                                 Ok(load) => {
                                     self.funnel.emit(SpurEventBody::PlansLoaded {
                                         plans: load.plans,
@@ -1067,7 +1067,7 @@ impl Orchestrator {
                                 });
                             } else if let Some(pm) = &self.pm_service {
                                 let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                                match load_plan_summaries(pm, current_session).await {
+                                match load_plan_summaries(pm.as_ref(), current_session).await {
                                     Ok(load) => {
                                         self.funnel.emit(SpurEventBody::PlansLoaded {
                                             plans: load.plans,
@@ -1112,7 +1112,7 @@ impl Orchestrator {
                                 });
                             } else if let Some(pm) = &self.pm_service {
                                 let current_session = brain.as_ref().map(|b| &b.spur_session_id);
-                                match load_plan_summaries(pm, current_session).await {
+                                match load_plan_summaries(pm.as_ref(), current_session).await {
                                     Ok(load) => {
                                         self.funnel.emit(SpurEventBody::PlansLoaded {
                                             plans: load.plans,
