@@ -143,10 +143,26 @@ async fn load_loop_issue(
     pm: &dyn crate::plan::PmLike,
     loop_id: &str,
 ) -> Result<Option<spur_pm::Issue>, String> {
+    load_loop_issue_with_closed(pm, loop_id, false).await
+}
+
+async fn load_loop_issue_including_closed(
+    pm: &dyn crate::plan::PmLike,
+    loop_id: &str,
+) -> Result<Option<spur_pm::Issue>, String> {
+    load_loop_issue_with_closed(pm, loop_id, true).await
+}
+
+async fn load_loop_issue_with_closed(
+    pm: &dyn crate::plan::PmLike,
+    loop_id: &str,
+    include_closed: bool,
+) -> Result<Option<spur_pm::Issue>, String> {
     let summaries = pm
         .list_issues(spur_pm::IssueFilter {
             labels: vec![crate::plan::labels::loop_id_label(loop_id)],
             issue_type: Some("task".to_string()),
+            include_closed,
             limit: Some(2),
             ..Default::default()
         })
@@ -159,6 +175,33 @@ async fn load_loop_issue(
         .await
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+async fn next_loop_retirement_generation(
+    pm: &dyn crate::plan::PmLike,
+    loop_id: &str,
+) -> Result<u32, String> {
+    let summaries = pm
+        .list_issues(spur_pm::IssueFilter {
+            labels: vec![crate::plan::labels::loop_id_label(loop_id)],
+            issue_type: Some("epic".to_string()),
+            include_closed: true,
+            limit: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let max_seen = summaries
+        .iter()
+        .filter_map(|summary| {
+            summary
+                .labels
+                .iter()
+                .find_map(|label| crate::plan::labels::parse_loop_generation(label))
+        })
+        .max()
+        .unwrap_or(0);
+    Ok(max_seen.saturating_add(1))
 }
 
 impl McpCallbackServer {
@@ -1379,6 +1422,121 @@ impl McpCallbackServer {
             "issue_id": issue.id,
             "paused": false,
             "next_run": now,
+        });
+        let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+    }
+
+    pub(crate) async fn handle_kill_loop(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let input: crate::tool_schemas::LoopIdParams = match serde_json::from_value(args) {
+            Ok(input) => input,
+            Err(error) => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("kill_loop: invalid parameters: {error}"),
+                )
+            }
+        };
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+        if let Err(message) = validate_loop_id_param(&input.loop_id) {
+            return JsonRpcResponse::invalid_params(id, format!("kill_loop: {message}"));
+        }
+        let Some(pm) = self.submit_plan_substrate_pm() else {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                "kill_loop: requires a beads PM backend (configured backend: none)",
+            );
+        };
+        let issue = match load_loop_issue_including_closed(pm, &input.loop_id).await {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32004,
+                    format!("kill_loop: unknown loop_id '{}'", input.loop_id),
+                )
+            }
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("kill_loop: failed to load loop issue: {error}"),
+                )
+            }
+        };
+
+        if issue.status != "open" {
+            let next_run = issue
+                .labels
+                .iter()
+                .filter_map(|label| crate::plan::labels::parse_loop_next_run(label))
+                .max();
+            let output = json!({
+                "loop_id": input.loop_id,
+                "issue_id": issue.id,
+                "retired": true,
+                "status": issue.status,
+                "next_run": next_run,
+            });
+            let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+            return JsonRpcResponse::success(
+                id,
+                json!({ "content": [{ "type": "text", "text": text }] }),
+            );
+        }
+
+        let now = unix_now_secs();
+        let generation = match next_loop_retirement_generation(pm, &input.loop_id).await {
+            Ok(generation) => generation,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("kill_loop: failed to compute retirement generation: {error}"),
+                )
+            }
+        };
+        let mut remove_labels: Vec<String> = issue
+            .labels
+            .iter()
+            .filter(|label| crate::plan::labels::parse_loop_next_run(label).is_some())
+            .cloned()
+            .collect();
+        remove_labels.sort();
+        remove_labels.dedup();
+        let run = crate::plan::loops::run_record::retired_loop_run(&input.loop_id, generation, now);
+        if let Err(error) = pm
+            .update_issue(
+                &issue.id,
+                spur_pm::IssueUpdate {
+                    status: Some(pm.closed_status().to_string()),
+                    comment: Some(crate::plan::audit_sentinel::encode_comment(&run)),
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                format!(
+                    "kill_loop: failed to retire loop '{}': {error}",
+                    input.loop_id
+                ),
+            );
+        }
+        let output = json!({
+            "loop_id": input.loop_id,
+            "issue_id": issue.id,
+            "retired": true,
+            "status": pm.closed_status(),
+            "next_run": Value::Null,
         });
         let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
         JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
