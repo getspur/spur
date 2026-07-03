@@ -1255,6 +1255,33 @@ pub enum SpurEventBody {
         plan_id: String,
     },
 
+    /// A loop issue has been re-armed for a future scheduler pass.
+    LoopArmed {
+        loop_id: String,
+        generation: u32,
+        /// Unix timestamp seconds encoded in `spur:loop-next-run:*`.
+        next_run: i64,
+    },
+    /// A loop generation has been persisted as an implementation plan.
+    LoopGenerationStarted {
+        loop_id: String,
+        generation: u32,
+        plan_id: String,
+    },
+    /// A loop run audit was recorded on the owning loop issue.
+    LoopRunRecorded {
+        loop_id: String,
+        generation: u32,
+        outcome: String,
+        cost_micros: u64,
+    },
+    /// A loop pause state changed.
+    LoopPaused {
+        loop_id: String,
+        /// One of `paused`, `auto_paused`, `resumed`, or `retired`.
+        by: String,
+    },
+
     /// Startup sweep observed a stale `spur:plan-pending` epic.
     PlanPendingSweep {
         #[serde(default, skip_serializing_if = "Option::is_none")]

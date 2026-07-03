@@ -1095,6 +1095,35 @@ impl View for PlanBrowserView {
                     None => format!("{operation} blocked: {display_error}"),
                 });
             }
+            SpurEventBody::LoopArmed {
+                loop_id,
+                generation,
+                next_run,
+            } => {
+                self.hint = Some(format!(
+                    "Loop {loop_id} gen {generation}: armed next {next_run}"
+                ));
+            }
+            SpurEventBody::LoopGenerationStarted {
+                loop_id,
+                generation,
+                plan_id,
+            } => {
+                self.hint = Some(format!("Loop {loop_id} gen {generation}: plan {plan_id}"));
+            }
+            SpurEventBody::LoopRunRecorded {
+                loop_id,
+                generation,
+                outcome,
+                cost_micros,
+            } => {
+                self.hint = Some(format!(
+                    "Loop {loop_id} gen {generation}: [{outcome}] {cost_micros} micros"
+                ));
+            }
+            SpurEventBody::LoopPaused { loop_id, by } => {
+                self.hint = Some(format!("Loop {loop_id}: {by}"));
+            }
             _ => {}
         }
     }

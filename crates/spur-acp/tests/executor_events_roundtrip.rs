@@ -592,6 +592,44 @@ fn plan_command_error_roundtrips() {
 }
 
 #[test]
+fn loop_events_roundtrip_with_bounded_payloads() {
+    let cases = [
+        SpurEventBody::LoopArmed {
+            loop_id: "loop-daily-triage".into(),
+            generation: 7,
+            next_run: 1_783_036_800,
+        },
+        SpurEventBody::LoopGenerationStarted {
+            loop_id: "loop-daily-triage".into(),
+            generation: 7,
+            plan_id: "plan-7".into(),
+        },
+        SpurEventBody::LoopRunRecorded {
+            loop_id: "loop-daily-triage".into(),
+            generation: 7,
+            outcome: "partial".into(),
+            cost_micros: 42_000,
+        },
+        SpurEventBody::LoopPaused {
+            loop_id: "loop-daily-triage".into(),
+            by: "auto_paused".into(),
+        },
+    ];
+
+    for body in cases {
+        let event = SpurEvent::now(body);
+        let encoded = serde_json::to_value(&event).expect("serialize loop event");
+        let round: SpurEvent =
+            serde_json::from_value(encoded.clone()).expect("round-trip loop event");
+        assert_eq!(round.body, event.body);
+
+        let payload = encoded["body"].as_object().expect("body object");
+        let payload = payload.values().next().expect("loop event payload");
+        assert_eq!(payload["loop_id"], serde_json::json!("loop-daily-triage"));
+    }
+}
+
+#[test]
 fn plan_completed_roundtrips() {
     use spur_acp::{SpurEvent, SpurEventBody};
 

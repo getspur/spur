@@ -1,6 +1,8 @@
 use super::McpCallbackServer;
 use super::*;
 
+const RATCHET_MIN_STABLE_GENERATIONS: u32 = 3;
+
 fn unix_now_secs() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -16,12 +18,89 @@ fn loop_issue_title(goal: &str) -> String {
 }
 
 fn autonomy_label(level: crate::plan::labels::AutonomyLevel) -> String {
-    let suffix = match level {
-        crate::plan::labels::AutonomyLevel::L1 => "l1",
-        crate::plan::labels::AutonomyLevel::L2 => "l2",
-        crate::plan::labels::AutonomyLevel::L3 => "l3",
-    };
-    format!("{}{suffix}", crate::plan::labels::AUTONOMY_PREFIX)
+    format!("{}{}", crate::plan::labels::AUTONOMY_PREFIX, level.as_str())
+}
+
+fn parse_autonomy_level_param(level: &str) -> Result<crate::plan::labels::AutonomyLevel, String> {
+    crate::plan::labels::AutonomyLevel::parse(level)
+        .ok_or_else(|| "level must be one of l1, l2, or l3".to_string())
+}
+
+fn is_real_generation_outcome(outcome: &str) -> bool {
+    matches!(outcome, "approved" | "partial" | "failed")
+}
+
+fn stable_approved_generations_at_level(
+    audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
+    loop_id: &str,
+    current_level: crate::plan::labels::AutonomyLevel,
+) -> u32 {
+    let current_level = current_level.as_str();
+    let mut stable = 0u32;
+    for audit in audits.iter().rev() {
+        let crate::plan::audit_sentinel::AuditSentinelKind::LoopRun {
+            loop_id: record_loop_id,
+            autonomy,
+            outcome,
+            ..
+        } = audit
+        else {
+            continue;
+        };
+        if record_loop_id != loop_id || !is_real_generation_outcome(outcome) {
+            continue;
+        }
+        if outcome == "approved" && autonomy.as_deref() == Some(current_level) {
+            stable = stable.saturating_add(1);
+            continue;
+        }
+        break;
+    }
+    stable
+}
+
+async fn load_persisted_plan_task_map(
+    pm: &dyn crate::plan::PmLike,
+    plan_id: &str,
+    task_ids: &[String],
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let expected = task_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let summaries = pm
+        .list_issues(spur_pm::IssueFilter {
+            labels: vec![crate::plan::labels::plan_id(plan_id)],
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| {
+            format!("submit_plan: failed to list persisted plan issues for {plan_id}: {error}")
+        })?;
+
+    let mut task_map = std::collections::HashMap::new();
+    for summary in summaries {
+        let Some(task_id) = summary
+            .labels
+            .iter()
+            .find_map(|label| crate::plan::labels::parse_plan_task_id(label))
+        else {
+            continue;
+        };
+        if expected.contains(&task_id) {
+            task_map.insert(task_id, summary.id);
+        }
+    }
+
+    for task_id in task_ids {
+        if !task_map.contains_key(task_id) {
+            return Err(format!(
+                "submit_plan: persisted task map missing child for task '{task_id}' in plan {plan_id}"
+            ));
+        }
+    }
+
+    Ok(task_map)
 }
 
 fn validate_loop_spec_for_submit(spec: &crate::plan::loops::spec::LoopSpec) -> Result<(), String> {
@@ -99,10 +178,26 @@ async fn load_loop_issue(
     pm: &dyn crate::plan::PmLike,
     loop_id: &str,
 ) -> Result<Option<spur_pm::Issue>, String> {
+    load_loop_issue_with_closed(pm, loop_id, false).await
+}
+
+async fn load_loop_issue_including_closed(
+    pm: &dyn crate::plan::PmLike,
+    loop_id: &str,
+) -> Result<Option<spur_pm::Issue>, String> {
+    load_loop_issue_with_closed(pm, loop_id, true).await
+}
+
+async fn load_loop_issue_with_closed(
+    pm: &dyn crate::plan::PmLike,
+    loop_id: &str,
+    include_closed: bool,
+) -> Result<Option<spur_pm::Issue>, String> {
     let summaries = pm
         .list_issues(spur_pm::IssueFilter {
             labels: vec![crate::plan::labels::loop_id_label(loop_id)],
             issue_type: Some("task".to_string()),
+            include_closed,
             limit: Some(2),
             ..Default::default()
         })
@@ -115,6 +210,33 @@ async fn load_loop_issue(
         .await
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+async fn next_loop_retirement_generation(
+    pm: &dyn crate::plan::PmLike,
+    loop_id: &str,
+) -> Result<u32, String> {
+    let summaries = pm
+        .list_issues(spur_pm::IssueFilter {
+            labels: vec![crate::plan::labels::loop_id_label(loop_id)],
+            issue_type: Some("epic".to_string()),
+            include_closed: true,
+            limit: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let max_seen = summaries
+        .iter()
+        .filter_map(|summary| {
+            summary
+                .labels
+                .iter()
+                .find_map(|label| crate::plan::labels::parse_loop_generation(label))
+        })
+        .max()
+        .unwrap_or(0);
+    Ok(max_seen.saturating_add(1))
 }
 
 impl McpCallbackServer {
@@ -778,9 +900,6 @@ impl McpCallbackServer {
         &self,
         mut input: SubmitPlanAsEpicInput,
     ) -> Result<SubmitPlanAsEpicResult, String> {
-        if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
-            return Err(feature_error_message(error));
-        }
         let pm = self
             .submit_plan_substrate_pm()
             .ok_or_else(|| "submit_plan: persist_as_epic requires a beads PM backend (configured backend: none)".to_string())?;
@@ -791,119 +910,62 @@ impl McpCallbackServer {
             ));
         }
 
-        let auto_serialized = match input.precomputed_auto_serialized {
+        let auto_serialized = match input.precomputed_auto_serialized.take() {
             Some(overlaps) => overlaps,
             None => crate::plan::submit_plan_normalize_tasks(&mut input.tasks)?,
         };
+        let task_count = input.tasks.len();
+        let task_ids = input
+            .tasks
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect::<Vec<_>>();
 
-        let plan_id = uuid::Uuid::new_v4().to_string();
-        let owner_label =
-            crate::plan::labels::plan_owner(&input.brain_session_id.as_session_id().0);
-        let epic_title = match input
-            .epic_title
-            .take()
-            .map(|title| title.trim().to_string())
-        {
-            Some(title) if !title.is_empty() => title,
-            _ => {
-                let parent_epic_id = input.parent_epic_id.as_deref().ok_or_else(|| {
-                    "submit_plan: epic_title is required when persist_as_epic is true".to_string()
-                })?;
-                let parent = pm.get_issue(parent_epic_id).await.map_err(|error| {
-                    format!("submit_plan: failed to load parent epic {parent_epic_id}: {error}")
-                })?;
-                let branch = match input.base.as_ref() {
-                    Some(crate::BaseTarget::Branch { name }) => name.as_str(),
-                    _ => "unspecified base",
-                };
-                format!("{} ({branch})", parent.title)
-            }
-        };
-
-        let epic_subgraph = build_epic_subgraph_with_activation_labels(
+        let plan_id = crate::plan::persist_plan_as_epic(
             pm,
             self.feature_gate.as_ref(),
-            &plan_id,
-            &epic_title,
-            input.epic_body.as_deref(),
-            &input.tasks,
-            input.parent_epic_id.as_deref(),
-            vec![owner_label],
+            crate::plan::PersistPlanAsEpicInput {
+                tasks: input.tasks,
+                base: input.base,
+                parent_epic_id: input.parent_epic_id,
+                epic_title: input.epic_title,
+                epic_body: input.epic_body,
+                epic_labels: Vec::new(),
+                brain_session_id: input.brain_session_id,
+                execution_mode: input.execution_mode.to_string(),
+                precomputed_auto_serialized: input.precomputed_auto_serialized,
+                repo_root: self.repo_root.clone(),
+                active_plans: Arc::clone(&self.active_plans),
+                event_sink: self.event_sink.clone(),
+                reconciler_fast_forward: self.reconciler_fast_forward.clone(),
+            },
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
 
-        if let Some(adv) = pm.advanced() {
-            let audit = crate::plan::audit_sentinel::AuditSentinelKind::PlanOwnershipAcquired {
-                plan_id: plan_id.clone(),
-                owner: input.brain_session_id.to_string(),
-                token: uuid::Uuid::new_v4().to_string(),
-                reason: input.execution_mode.to_string(),
-            };
-            let body = crate::plan::audit_sentinel::encode_comment(&audit);
-            if let Err(e) = adv.add_comment(&epic_subgraph.epic_id, &body).await {
-                tracing::warn!(
-                    target: "spur.audit.emit_failure",
-                    kind = "plan_ownership_acquired",
-                    epic_id = %epic_subgraph.epic_id,
-                    plan_id = %plan_id,
-                    "PlanOwnershipAcquired audit comment emission failed (owner label is persisted; audit missing): {e}"
-                );
-            }
+        let state = {
+            let active_plans = self.active_plans.lock().await;
+            active_plans
+                .get(&plan_id)
+                .map(|cached| Arc::clone(&cached.state))
         }
-
-        let entries = build_entries_with_task_map(input.tasks, Some(&epic_subgraph.task_map));
-        let task_count = entries.len();
-        let base_snapshot = resolve_plan_base(self.repo_root.as_ref(), input.base.as_ref()).await?;
-        let state = crate::plan::PlanState {
-            plan_id: plan_id.clone(),
-            tasks: entries,
-            brain_session_id: input.brain_session_id.clone(),
-            base_snapshot_branch: base_snapshot.branch,
-            base_snapshot_oid: base_snapshot.oid,
-            merge_state: crate::plan::PlanMergeState::NotStarted,
-            epic_id: Some(epic_subgraph.epic_id.clone()),
-        };
-        let state = Arc::new(tokio::sync::Mutex::new(state));
-
-        if let Some(adv) = pm.advanced() {
-            let (base_snapshot_branch, base_snapshot_oid) = {
-                let state = state.lock().await;
-                (
-                    state.base_snapshot_branch.clone(),
-                    state.base_snapshot_oid.clone(),
-                )
-            };
-            emit_plan_submit_audit(
-                adv,
-                &plan_id,
-                &epic_subgraph,
-                PlanSubmitAuditContext {
-                    base_snapshot_branch: base_snapshot_branch.as_deref(),
-                    base_snapshot_oid: base_snapshot_oid.as_deref(),
-                    execution_mode: Some(input.execution_mode),
-                    brain_session_id: Some(input.brain_session_id.as_session_id()),
-                    explicit_base: input.base.as_ref(),
-                },
-            )
-            .await;
-        }
-
-        self.active_plans.lock().await.insert(
-            plan_id.clone(),
-            CachedPlan::new(Arc::clone(&state), unknown_beads_version()),
-        );
-
-        {
+        .ok_or_else(|| {
+            format!("submit_plan: persisted plan '{plan_id}' missing from active plan cache")
+        })?;
+        let epic_id = {
             let state = state.lock().await;
-            crate::plan::snapshot::emit_plan_snapshot(self.event_sink.as_deref(), &state);
-        }
-        self.fast_forward_reconciler();
+            state
+                .epic_id
+                .clone()
+                .ok_or_else(|| format!("submit_plan: persisted plan '{plan_id}' has no epic_id"))?
+        };
+        let task_map = load_persisted_plan_task_map(pm, &plan_id, &task_ids).await?;
 
         Ok(SubmitPlanAsEpicResult {
             plan_id,
             task_count,
             auto_serialized,
-            epic_subgraph,
+            epic_subgraph: EpicSubgraph { epic_id, task_map },
         })
     }
 
@@ -1307,6 +1369,12 @@ impl McpCallbackServer {
                 ),
             );
         }
+        if let Some(sink) = self.event_sink.as_deref() {
+            sink.emit(spur_acp::SpurEventBody::LoopPaused {
+                loop_id: input.loop_id.clone(),
+                by: "paused".to_string(),
+            });
+        }
         let output = json!({
             "loop_id": input.loop_id,
             "issue_id": issue.id,
@@ -1391,11 +1459,311 @@ impl McpCallbackServer {
             );
         }
         self.fast_forward_reconciler();
+        if let Some(sink) = self.event_sink.as_deref() {
+            sink.emit(spur_acp::SpurEventBody::LoopPaused {
+                loop_id: input.loop_id.clone(),
+                by: "resumed".to_string(),
+            });
+        }
         let output = json!({
             "loop_id": input.loop_id,
             "issue_id": issue.id,
             "paused": false,
             "next_run": now,
+        });
+        let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+    }
+
+    pub(crate) async fn handle_kill_loop(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let input: crate::tool_schemas::LoopIdParams = match serde_json::from_value(args) {
+            Ok(input) => input,
+            Err(error) => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("kill_loop: invalid parameters: {error}"),
+                )
+            }
+        };
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+        if let Err(message) = validate_loop_id_param(&input.loop_id) {
+            return JsonRpcResponse::invalid_params(id, format!("kill_loop: {message}"));
+        }
+        let Some(pm) = self.submit_plan_substrate_pm() else {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                "kill_loop: requires a beads PM backend (configured backend: none)",
+            );
+        };
+        let issue = match load_loop_issue_including_closed(pm, &input.loop_id).await {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32004,
+                    format!("kill_loop: unknown loop_id '{}'", input.loop_id),
+                )
+            }
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("kill_loop: failed to load loop issue: {error}"),
+                )
+            }
+        };
+
+        if issue.status != "open" {
+            let next_run = issue
+                .labels
+                .iter()
+                .filter_map(|label| crate::plan::labels::parse_loop_next_run(label))
+                .max();
+            let output = json!({
+                "loop_id": input.loop_id,
+                "issue_id": issue.id,
+                "retired": true,
+                "status": issue.status,
+                "next_run": next_run,
+            });
+            let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+            return JsonRpcResponse::success(
+                id,
+                json!({ "content": [{ "type": "text", "text": text }] }),
+            );
+        }
+
+        let now = unix_now_secs();
+        let generation = match next_loop_retirement_generation(pm, &input.loop_id).await {
+            Ok(generation) => generation,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("kill_loop: failed to compute retirement generation: {error}"),
+                )
+            }
+        };
+        let mut remove_labels: Vec<String> = issue
+            .labels
+            .iter()
+            .filter(|label| crate::plan::labels::parse_loop_next_run(label).is_some())
+            .cloned()
+            .collect();
+        remove_labels.sort();
+        remove_labels.dedup();
+        let run = crate::plan::loops::run_record::retired_loop_run(&input.loop_id, generation, now);
+        if let Err(error) = pm
+            .update_issue(
+                &issue.id,
+                spur_pm::IssueUpdate {
+                    status: Some(pm.closed_status().to_string()),
+                    comment: Some(crate::plan::audit_sentinel::encode_comment(&run)),
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                format!(
+                    "kill_loop: failed to retire loop '{}': {error}",
+                    input.loop_id
+                ),
+            );
+        }
+        if let Some(sink) = self.event_sink.as_deref() {
+            sink.emit(spur_acp::SpurEventBody::LoopPaused {
+                loop_id: input.loop_id.clone(),
+                by: "retired".to_string(),
+            });
+        }
+        let output = json!({
+            "loop_id": input.loop_id,
+            "issue_id": issue.id,
+            "retired": true,
+            "status": pm.closed_status(),
+            "next_run": Value::Null,
+        });
+        let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+        JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
+    }
+
+    pub(crate) async fn handle_set_loop_autonomy(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let input: crate::tool_schemas::SetLoopAutonomyParams = match serde_json::from_value(args) {
+            Ok(input) => input,
+            Err(error) => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("set_loop_autonomy: invalid parameters: {error}"),
+                )
+            }
+        };
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+        if let Err(message) = validate_loop_id_param(&input.loop_id) {
+            return JsonRpcResponse::invalid_params(id, format!("set_loop_autonomy: {message}"));
+        }
+        let target_level = match parse_autonomy_level_param(&input.level) {
+            Ok(level) => level,
+            Err(message) => {
+                return JsonRpcResponse::invalid_params(id, format!("set_loop_autonomy: {message}"))
+            }
+        };
+        let Some(pm) = self.submit_plan_substrate_pm() else {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                "set_loop_autonomy: requires a beads PM backend (configured backend: none)",
+            );
+        };
+        let issue = match load_loop_issue(pm, &input.loop_id).await {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32004,
+                    format!("set_loop_autonomy: unknown loop_id '{}'", input.loop_id),
+                )
+            }
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("set_loop_autonomy: failed to load loop issue: {error}"),
+                )
+            }
+        };
+        let mut spec = match crate::plan::loops::spec::LoopSpec::parse(&issue.body) {
+            Ok(spec) => spec,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("set_loop_autonomy: failed to parse loop spec: {error}"),
+                )
+            }
+        };
+        let current_level = spec.autonomy;
+        if target_level > current_level {
+            let direct_steps = target_level as u8 - current_level as u8;
+            if direct_steps != 1 {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!(
+                        "set_loop_autonomy: promotions may advance one level per call (current {}, requested {})",
+                        current_level.as_str(),
+                        target_level.as_str()
+                    ),
+                );
+            }
+        }
+
+        let mut stable_generations = 0;
+        if target_level > current_level {
+            if let Err(error) = self.require_feature(FeatureKey::PM_PRO_BEADS_ADVANCED) {
+                return JsonRpcResponse::mcp_error(id, error);
+            }
+            let Some(advanced) = pm.advanced() else {
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    "set_loop_autonomy: beads advanced comments API is unavailable",
+                );
+            };
+            let audits = match crate::plan::projector::collect_sorted_audits_for_issue(
+                &issue.id,
+                match advanced.list_comments(&issue.id).await {
+                    Ok(comments) => comments,
+                    Err(error) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32000,
+                            format!("set_loop_autonomy: failed to list loop comments: {error}"),
+                        )
+                    }
+                },
+            ) {
+                Ok(audits) => audits,
+                Err(error) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!("set_loop_autonomy: failed to parse loop audits: {error}"),
+                    )
+                }
+            };
+            stable_generations =
+                stable_approved_generations_at_level(&audits, &input.loop_id, current_level);
+            if stable_generations < RATCHET_MIN_STABLE_GENERATIONS {
+                let shortfall = RATCHET_MIN_STABLE_GENERATIONS - stable_generations;
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!(
+                        "set_loop_autonomy: promotion from {} to {} requires {} consecutive approved real generations at current level {}; observed {}, short by {}",
+                        current_level.as_str(),
+                        target_level.as_str(),
+                        RATCHET_MIN_STABLE_GENERATIONS,
+                        current_level.as_str(),
+                        stable_generations,
+                        shortfall
+                    ),
+                );
+            }
+        }
+
+        spec.autonomy = target_level;
+        let target_label = autonomy_label(target_level);
+        let mut remove_labels: Vec<String> = issue
+            .labels
+            .iter()
+            .filter(|label| {
+                crate::plan::labels::parse_autonomy(label).is_some()
+                    && label.as_str() != target_label.as_str()
+            })
+            .cloned()
+            .collect();
+        remove_labels.sort();
+        remove_labels.dedup();
+        if let Err(error) = pm
+            .update_issue(
+                &issue.id,
+                spur_pm::IssueUpdate {
+                    body: Some(spec.to_sentinel_body()),
+                    add_labels: vec![target_label],
+                    remove_labels,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                format!(
+                    "set_loop_autonomy: failed to update loop '{}': {error}",
+                    input.loop_id
+                ),
+            );
+        }
+
+        let output = json!({
+            "loop_id": input.loop_id,
+            "issue_id": issue.id,
+            "previous_level": current_level.as_str(),
+            "level": target_level.as_str(),
+            "stable_generations": stable_generations,
         });
         let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
         JsonRpcResponse::success(id, json!({ "content": [{ "type": "text", "text": text }] }))
