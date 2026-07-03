@@ -289,6 +289,22 @@ fn claude_code_status_bar_hides_effort_and_unsupported_usage() {
 }
 
 #[test]
+fn unsupported_usage_flag_does_not_hide_real_live_usage_data() {
+    // `usage_supported` is a frozen per-agent-kind prediction captured at
+    // session start (see spur-acp's `agent_quirks::usage_emit_default`), not
+    // a live protocol capability — ACP has no capability flag for
+    // `UsageUpdate` emission. When the live agent sends real usage data
+    // despite that prediction saying "unsupported", the gauge must still
+    // render it: arrived data is strictly better evidence than a guess.
+    let line = render_status(160, Some("Sonnet 4.5"), None, false, Some(47), Some(100));
+
+    assert!(
+        line.contains("ctx 47%"),
+        "real live usage data must render even when usage_supported predicted false: {line}"
+    );
+}
+
+#[test]
 fn supported_usage_without_update_renders_placeholder() {
     let line = render_status(160, Some("GPT-5 Codex"), Some("Medium"), true, None, None);
 
