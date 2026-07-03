@@ -114,7 +114,9 @@ fn codex_model_picker_end_to_end() {
 
     // 4. Submit "/model gpt-5-codex" — typed wire dispatch.
     match route("/model gpt-5-codex", &[], &[], &registry, false) {
-        SubmitDecision::SetSessionConfigOption { config_id, value } => {
+        SubmitDecision::SetSessionConfigOption {
+            config_id, value, ..
+        } => {
             assert_eq!(config_id, "model");
             assert_eq!(value, "gpt-5-codex");
         }
@@ -125,7 +127,9 @@ fn codex_model_picker_end_to_end() {
     //    config_id "reasoning_effort" (the renaming happens in the
     //    synthesizer's allow-list).
     match route("/effort high", &[], &[], &registry, false) {
-        SubmitDecision::SetSessionConfigOption { config_id, value } => {
+        SubmitDecision::SetSessionConfigOption {
+            config_id, value, ..
+        } => {
             assert_eq!(
                 config_id, "reasoning_effort",
                 "/effort must dispatch the ACP config_id, not the slash name"
@@ -173,7 +177,9 @@ fn codex_model_picker_end_to_end() {
     );
 
     match route("/model o3", &[], &[], &registry, false) {
-        SubmitDecision::SetSessionConfigOption { config_id, value } => {
+        SubmitDecision::SetSessionConfigOption {
+            config_id, value, ..
+        } => {
             assert_eq!(config_id, "model");
             assert_eq!(value, "o3");
         }

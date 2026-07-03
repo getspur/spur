@@ -113,6 +113,41 @@ fn usage_update_sets_context() {
     assert_eq!(s.context_size, Some(200_000));
 }
 
+#[test]
+fn usage_update_stores_agent_reported_cost_when_present() {
+    let usage: UsageUpdate = serde_json::from_value(serde_json::json!({
+        "used": 42,
+        "size": 200_000,
+        "cost": {
+            "amount": 1.35,
+            "currency": "USD"
+        }
+    }))
+    .expect("valid usage update with cost");
+    let update = SessionUpdate::UsageUpdate(usage);
+    let notif = SessionNotification::new(nid(), update);
+    let mut s = spur_tui::test_support::new_session_state();
+    spur_tui::test_support::apply_notification(&mut s, &notif);
+
+    assert_eq!(s.context_used, Some(42));
+    assert_eq!(s.context_size, Some(200_000));
+    assert_eq!(
+        s.agent_reported_cost,
+        Some((1.35, "USD".to_string())),
+        "agent-reported cost must be stored separately from SPUR's estimate"
+    );
+}
+
+#[test]
+fn usage_update_without_cost_leaves_agent_reported_cost_absent() {
+    let update = SessionUpdate::UsageUpdate(UsageUpdate::new(42u64, 200_000u64));
+    let notif = SessionNotification::new(nid(), update);
+    let mut s = spur_tui::test_support::new_session_state();
+    spur_tui::test_support::apply_notification(&mut s, &notif);
+
+    assert_eq!(s.agent_reported_cost, None);
+}
+
 /// Documents the residual ad-hoc race; current state-machine ordering prevents it in production.
 #[test]
 fn unrelated_brain_then_prompt_dispatched_drains_to_that_view() {
