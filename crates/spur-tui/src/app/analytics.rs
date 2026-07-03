@@ -371,6 +371,7 @@ impl App {
             ViewId::MermaidOverlay(session) => guard.by_session.contains_key(session),
             ViewId::SessionPicker
             | ViewId::IssueBrowser
+            | ViewId::LoopBrowser
             | ViewId::PlanBrowser
             | ViewId::Insights => false,
         }
