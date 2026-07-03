@@ -1221,6 +1221,7 @@ impl IssueBrowserView {
                 stream_in_flight: false,
                 esc_consumed_by_composer: false,
                 notebook_ready: false,
+                session_lifecycle_caps: None,
                 issue_count,
                 alert_summary: None,
                 license_badge: None,
