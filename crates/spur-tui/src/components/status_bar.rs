@@ -193,17 +193,19 @@ impl StatusBar {
             .map(|m| format!(" [{m}]"))
             .unwrap_or_default();
 
-        let usage_text = match (
-            props.usage_supported,
-            props.context_used,
-            props.context_size,
-        ) {
-            (false, _, _) => None,
-            (true, Some(used), Some(size)) if size > 0 => {
+        // `usage_supported` is a frozen per-agent-kind prediction captured at
+        // session start (ACP has no capability flag for `UsageUpdate`
+        // emission, so it's a guess). Arrived data is strictly better
+        // evidence than that guess, so real `context_used`/`context_size`
+        // always render; the flag only governs the "nothing arrived yet"
+        // placeholder.
+        let usage_text = match (props.context_used, props.context_size) {
+            (Some(used), Some(size)) if size > 0 => {
                 let pct = (used as f64 / size as f64) * 100.0;
                 Some(format!("ctx {:.0}%", pct))
             }
-            (true, _, _) => Some("ctx --%".to_string()),
+            _ if props.usage_supported => Some("ctx --%".to_string()),
+            _ => None,
         };
 
         // Build the review span: warning+bold when reviews are pending, muted otherwise.
