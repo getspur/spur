@@ -62,6 +62,16 @@ const MANIFEST_QUERY_BYTES: &[ManifestQueryBytes<'static>] = &[
         bytes: include_bytes!("../../queries/cpp/spur-edges.scm"),
     },
     ManifestQueryBytes {
+        language: "go",
+        query: "tags",
+        bytes: include_bytes!("../../queries/go/tags.scm"),
+    },
+    ManifestQueryBytes {
+        language: "go",
+        query: "spur-edges",
+        bytes: include_bytes!("../../queries/go/spur-edges.scm"),
+    },
+    ManifestQueryBytes {
         language: "markdown",
         query: "tags",
         bytes: include_bytes!("../../queries/markdown/tags.scm"),

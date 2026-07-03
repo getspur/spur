@@ -28,6 +28,7 @@ pub enum Language {
     JupyterNotebook,
     C,
     Cpp,
+    Go,
     Lua,
     Shell,
     Sql,
@@ -76,6 +77,12 @@ pub(crate) const CPP_BUILTIN_METHODS: &[&str] = &[
     "str",
     "substr",
     "swap",
+];
+
+/// Precision heuristic for common Go builtins, not an exhaustive builtin list.
+pub(crate) const GO_BUILTIN_METHODS: &[&str] = &[
+    "append", "cap", "close", "complex", "copy", "delete", "error", "len", "make", "new", "panic",
+    "print", "println", "recover",
 ];
 
 /// Precision heuristic for common Python standard-library methods, not an exhaustive builtin list.
@@ -322,6 +329,7 @@ impl Language {
             Self::JupyterNotebook => tree_sitter_md::LANGUAGE.into(),
             Self::C => tree_sitter_c::LANGUAGE.into(),
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::Go => tree_sitter_go::LANGUAGE.into(),
             Self::Lua => tree_sitter_lua::LANGUAGE.into(),
             Self::Shell => tree_sitter_bash::LANGUAGE.into(),
             Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
@@ -339,6 +347,7 @@ impl Language {
             Self::JupyterNotebook => jupyter_notebook_config(),
             Self::C => c_config(),
             Self::Cpp => cpp_config(),
+            Self::Go => go_config(),
             Self::Lua => lua_config(),
             Self::Shell => shell_config(),
             Self::Sql => sql_config(),
@@ -353,6 +362,7 @@ impl Language {
             Self::TypeScript | Self::Tsx | Self::Javascript => TS_BUILTIN_METHODS,
             Self::C => C_BUILTIN_METHODS,
             Self::Cpp => CPP_BUILTIN_METHODS,
+            Self::Go => GO_BUILTIN_METHODS,
             Self::Lua => LUA_BUILTIN_METHODS,
             Self::Shell => SHELL_BUILTIN_METHODS,
             Self::Markdown | Self::JupyterNotebook | Self::Sql => &[],
@@ -370,6 +380,7 @@ impl Language {
             Self::JupyterNotebook => "jupyter_notebook",
             Self::C => "c",
             Self::Cpp => "cpp",
+            Self::Go => "go",
             Self::Lua => "lua",
             Self::Shell => "shell",
             Self::Sql => "sql",
@@ -579,6 +590,33 @@ pub(crate) fn cpp_config() -> LanguageConfig {
     }
 }
 
+pub(crate) fn go_config() -> LanguageConfig {
+    LanguageConfig {
+        language: tree_sitter_go::LANGUAGE.into(),
+        inline_language: None,
+        queries: &[
+            ("tags", include_str!("../../queries/go/tags.scm")),
+            (
+                "spur-edges",
+                include_str!("../../queries/go/spur-edges.scm"),
+            ),
+        ],
+        definition_kind_map: &[
+            ("definition.module", NodeKind::Module),
+            ("definition.function", NodeKind::Function),
+            ("definition.method", NodeKind::Method),
+            ("definition.struct", NodeKind::Struct),
+            ("definition.interface", NodeKind::Interface),
+            ("definition.type_alias", NodeKind::TypeAlias),
+            ("definition.constant", NodeKind::Constant),
+            ("definition.field", NodeKind::Field),
+        ],
+        relation_kind_map: None,
+        preserve_bare_import_path: true,
+        is_method: None,
+    }
+}
+
 pub(crate) fn lua_config() -> LanguageConfig {
     LanguageConfig {
         language: tree_sitter_lua::LANGUAGE.into(),
@@ -745,6 +783,12 @@ fn c_matcher(path: &std::path::Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("c"))
 }
 
+fn go_matcher(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("go"))
+}
+
 fn lua_matcher(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -825,6 +869,13 @@ pub(crate) fn language_registry() -> &'static [LanguageDescriptor] {
             language: Language::Cpp,
             label: "cpp",
             extensions: CPP_EXTENSIONS,
+        },
+        LanguageDescriptor {
+            matcher: go_matcher,
+            factory: go_config,
+            language: Language::Go,
+            label: "go",
+            extensions: &["go"],
         },
         LanguageDescriptor {
             matcher: lua_matcher,
@@ -1777,6 +1828,7 @@ mod gate_contract {
         for (label, methods) in [
             ("c", C_BUILTIN_METHODS),
             ("cpp", CPP_BUILTIN_METHODS),
+            ("go", GO_BUILTIN_METHODS),
             ("lua", LUA_BUILTIN_METHODS),
             ("python", PYTHON_BUILTIN_METHODS),
             ("rust", RUST_BUILTIN_METHODS),
@@ -2172,6 +2224,10 @@ mod gate_contract {
                 ]),
             ),
             (
+                Language::Go.label(),
+                relation_set(&["imports", "calls", "constructs", "contains", "defines"]),
+            ),
+            (
                 Language::Lua.label(),
                 relation_set(&["imports", "calls", "contains", "defines"]),
             ),
@@ -2279,6 +2335,16 @@ mod gate_contract {
                 "definition.macro",
                 "definition.field",
                 "definition.constant",
+            ],
+            Language::Go => &[
+                "definition.module",
+                "definition.function",
+                "definition.method",
+                "definition.struct",
+                "definition.interface",
+                "definition.type_alias",
+                "definition.constant",
+                "definition.field",
             ],
             Language::Lua => &["definition.function", "definition.method"],
             Language::Shell => &["definition.function"],
