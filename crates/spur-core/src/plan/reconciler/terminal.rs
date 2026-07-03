@@ -229,6 +229,25 @@ impl super::Reconciler {
             &crate::plan::audit_sentinel::encode_comment(&run),
         )
         .await?;
+        if let Some(sink) = self
+            .dispatch
+            .as_ref()
+            .and_then(|dispatch| dispatch.event_sink())
+        {
+            if let AuditSentinelKind::LoopRun {
+                outcome,
+                cost_micros,
+                ..
+            } = &run
+            {
+                sink.emit(spur_acp::SpurEventBody::LoopRunRecorded {
+                    loop_id,
+                    generation,
+                    outcome: outcome.clone(),
+                    cost_micros: *cost_micros,
+                });
+            }
+        }
         Ok(true)
     }
 

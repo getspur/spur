@@ -98,8 +98,16 @@ impl Reconciler {
                         )),
                     )
                     .await?;
-                self.rearm_loop(&summary, now, interval_secs, Vec::new())
-                    .await?;
+                self.rearm_loop(
+                    &summary,
+                    &spec.loop_id,
+                    next_generation,
+                    now,
+                    interval_secs,
+                    Vec::new(),
+                    dispatch.event_sink(),
+                )
+                .await?;
                 did_work = true;
                 continue;
             }
@@ -117,8 +125,16 @@ impl Reconciler {
                         )),
                     )
                     .await?;
-                self.rearm_loop(&summary, now, interval_secs, Vec::new())
-                    .await?;
+                self.rearm_loop(
+                    &summary,
+                    &spec.loop_id,
+                    next_generation,
+                    now,
+                    interval_secs,
+                    Vec::new(),
+                    dispatch.event_sink(),
+                )
+                .await?;
                 did_work = true;
                 continue;
             }
@@ -133,8 +149,16 @@ impl Reconciler {
                 &spec.template,
             )
             .await;
-            self.rearm_loop(&summary, now, interval_secs, Vec::new())
-                .await?;
+            self.rearm_loop(
+                &summary,
+                &spec.loop_id,
+                next_generation,
+                now,
+                interval_secs,
+                Vec::new(),
+                dispatch.event_sink(),
+            )
+            .await?;
             did_work = true;
         }
 
@@ -222,6 +246,12 @@ impl Reconciler {
                 },
             )
             .await?;
+        if let Some(sink) = dispatch.event_sink() {
+            sink.emit(spur_acp::SpurEventBody::LoopPaused {
+                loop_id: spec.loop_id.clone(),
+                by: "auto_paused".to_string(),
+            });
+        }
         crate::plan::push_loop_escalation_continuation(
             dispatch.continuation_ctx().as_ref(),
             dispatch.materializer().as_ref(),
@@ -237,9 +267,12 @@ impl Reconciler {
     async fn rearm_loop(
         &self,
         summary: &IssueSummary,
+        loop_id: &str,
+        generation: u32,
         now: i64,
         interval_secs: u64,
         add_labels: Vec<String>,
+        event_sink: Option<&std::sync::Arc<dyn spur_mcp::events::McpEventSink>>,
     ) -> anyhow::Result<()> {
         let interval = i64::try_from(interval_secs).unwrap_or(i64::MAX);
         let next_run = now.saturating_add(interval);
@@ -259,7 +292,15 @@ impl Reconciler {
                     ..Default::default()
                 },
             )
-            .await
+            .await?;
+        if let Some(sink) = event_sink {
+            sink.emit(spur_acp::SpurEventBody::LoopArmed {
+                loop_id: loop_id.to_string(),
+                generation,
+                next_run,
+            });
+        }
+        Ok(())
     }
 }
 
