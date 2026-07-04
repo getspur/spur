@@ -99,6 +99,7 @@ mod tests {
             display: Default::default(),
             commands: Default::default(),
             permissions: Default::default(),
+            profile: None,
             skip_permissions: false,
             skip_permissions_args: vec![],
             skip_permissions_session_mode: None,
