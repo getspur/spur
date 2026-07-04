@@ -1202,7 +1202,7 @@ impl View for PlanBrowserView {
     fn tick(&mut self) {}
 }
 
-fn truncate(value: &str, max_chars: usize) -> String {
+pub(crate) fn truncate(value: &str, max_chars: usize) -> String {
     let count = value.chars().count();
     if count <= max_chars {
         value.to_string()
