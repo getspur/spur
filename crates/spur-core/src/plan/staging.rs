@@ -230,6 +230,7 @@ mod tests {
                 agent: "test-agent".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "test".into(),
                 depends_on: deps.iter().map(|s| s.to_string()).collect(),
                 issue_id: Some(format!("bd-{task_id}")),

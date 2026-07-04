@@ -65,11 +65,13 @@ use agent_client_protocol::schema::v1::{
     WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Handled, UntypedMessage};
 
 use crate::config::LogConfig;
 use crate::connection::child_stderr_bridge::ChildStderrBridge;
-use crate::connection::{AgentConnection, ExtNotificationPayload};
+use crate::connection::{
+    AgentClientRequestKind, AgentClientRequestPayload, AgentConnection, ExtNotificationPayload,
+};
 use crate::error::AcpError;
 use crate::spur_agent_caps::SpurAgentCaps;
 use crate::types::{AgentHealth, AgentKind};
@@ -202,6 +204,8 @@ pub struct NativeAcpConnection {
     command: String,
     /// Extra arguments passed to the binary on startup.
     extra_args: Vec<String>,
+    /// Additional absolute workspace roots sent with ACP `session/new`.
+    additional_directories: Vec<PathBuf>,
     /// Channel to send commands to the dedicated ACP thread.
     cmd_tx: Option<mpsc::UnboundedSender<AcpCommand>>,
     /// Join handle for the dedicated thread.
@@ -215,6 +219,10 @@ pub struct NativeAcpConnection {
     ext_notification_rx: Option<mpsc::UnboundedReceiver<ExtNotificationPayload>>,
     /// Paired sender for `ext_notification_rx`, cloned into the ACP thread.
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    /// Receiver for defensive agent-originated client requests.
+    agent_client_request_rx: Option<mpsc::UnboundedReceiver<AgentClientRequestPayload>>,
+    /// Paired sender for `agent_client_request_rx`, cloned into the ACP thread.
+    agent_client_request_tx: mpsc::UnboundedSender<AgentClientRequestPayload>,
     /// Connection-scoped broadcast of session notifications. Cloned into
     /// `SpurAcpClientDynamic` (via `acp_thread_main`); subscribers obtained
     /// via `subscribe_session_notifications` live for the connection's
@@ -393,6 +401,55 @@ fn dispatch_cancel(
         }));
 }
 
+fn handle_agent_client_request(
+    request: UntypedMessage,
+    responder: agent_client_protocol::Responder<serde_json::Value>,
+    agent_client_request_tx: &mpsc::UnboundedSender<AgentClientRequestPayload>,
+    agent_name: &str,
+) -> agent_client_protocol::Result<
+    Handled<(
+        UntypedMessage,
+        agent_client_protocol::Responder<serde_json::Value>,
+    )>,
+> {
+    match request.method() {
+        "logout" => {
+            tracing::info!(
+                agent = %agent_name,
+                "NativeAcpConnection: agent requested logout"
+            );
+            let _ = agent_client_request_tx.send(AgentClientRequestPayload {
+                kind: AgentClientRequestKind::Logout,
+            });
+            responder.respond(serde_json::json!({}))?;
+            Ok(Handled::Yes)
+        }
+        "authenticate" => {
+            let method_id = serde_json::from_value::<AuthenticateRequest>(request.params().clone())
+                .map(|request| request.method_id.to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            tracing::info!(
+                agent = %agent_name,
+                method_id = %method_id,
+                "NativeAcpConnection: agent requested authenticate, but credential forwarding is not configured"
+            );
+            let _ = agent_client_request_tx.send(AgentClientRequestPayload {
+                kind: AgentClientRequestKind::Authenticate { method_id },
+            });
+            responder.respond_with_result(Err(
+                agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                    "reason": "authenticate requested by agent, but Spur credential forwarding is not configured"
+                })),
+            ))?;
+            Ok(Handled::Yes)
+        }
+        _ => Ok(Handled::No {
+            message: (request, responder),
+            retry: false,
+        }),
+    }
+}
+
 impl NativeAcpConnection {
     /// Create a new native ACP connection.
     ///
@@ -417,6 +474,8 @@ impl NativeAcpConnection {
         permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ) -> Self {
         let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtNotificationPayload>();
+        let (agent_client_request_tx, agent_client_request_rx) =
+            mpsc::unbounded_channel::<AgentClientRequestPayload>();
         // Capacity 4096 per the broadcast-sizing invariant (anchor 3ff4e86):
         // bursty history replay from `load_session` can produce O(hundreds)
         // of notifications in rapid succession, and the floor was established
@@ -427,12 +486,15 @@ impl NativeAcpConnection {
             agent_kind,
             command: command.into(),
             extra_args,
+            additional_directories: Vec::new(),
             cmd_tx: None,
             thread_handle: None,
             health_status: AgentHealth::Unknown,
             permission_tx,
             ext_notification_rx: Some(ext_rx),
             ext_notification_tx: ext_tx,
+            agent_client_request_rx: Some(agent_client_request_rx),
+            agent_client_request_tx,
             session_notif_tx,
             advertised_modes: Arc::new(Mutex::new(HashMap::new())),
             session_capabilities: Arc::new(Mutex::new(None)),
@@ -448,6 +510,11 @@ impl NativeAcpConnection {
     /// tests use this to redirect the registry into a tempdir.
     pub fn set_repo_root(&mut self, root: PathBuf) {
         self.repo_root = root;
+    }
+
+    /// Configure additional workspace roots sent on every new ACP session.
+    pub fn set_additional_directories(&mut self, additional_directories: Vec<PathBuf>) {
+        self.additional_directories = additional_directories;
     }
 
     /// Override the log configuration used by the spawn site (controls the
@@ -580,6 +647,7 @@ impl AgentConnection for NativeAcpConnection {
         let thread_agent_name = agent_name.clone();
         let permission_tx = self.permission_tx.clone();
         let ext_tx = self.ext_notification_tx.clone();
+        let agent_client_request_tx = self.agent_client_request_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
         let advertised_modes = self.advertised_modes.clone();
         let last_prompt_usage = self.last_prompt_usage.clone();
@@ -597,6 +665,7 @@ impl AgentConnection for NativeAcpConnection {
                     cmd_rx,
                     permission_tx,
                     ext_tx,
+                    agent_client_request_tx,
                     session_notif_tx_for_thread,
                     advertised_modes,
                     last_prompt_usage,
@@ -662,6 +731,7 @@ impl AgentConnection for NativeAcpConnection {
 
         let mut request = NewSessionRequest::new(&cwd);
         request.mcp_servers = mcp_servers;
+        request.additional_directories = self.additional_directories.clone();
 
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
@@ -1169,6 +1239,12 @@ impl AgentConnection for NativeAcpConnection {
         self.ext_notification_rx.take()
     }
 
+    fn take_agent_client_request_rx(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<AgentClientRequestPayload>> {
+        self.agent_client_request_rx.take()
+    }
+
     fn subscribe_session_notifications(
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<SessionNotification>> {
@@ -1195,6 +1271,7 @@ fn acp_thread_main(
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    agent_client_request_tx: mpsc::UnboundedSender<AgentClientRequestPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
@@ -1438,6 +1515,8 @@ fn acp_thread_main(
             let perm_tx_h = permission_tx.clone();
             let session_notif_tx_h = session_notif_tx.clone();
             let ext_notification_tx_h = ext_notification_tx.clone();
+            let agent_client_request_tx_h = agent_client_request_tx.clone();
+            let agent_name_request_h = agent_name.clone();
             let session_event_standardizer_h = session_event_standardizer.clone();
 
             let cwd_read = cwd.clone();
@@ -1460,6 +1539,18 @@ fn acp_thread_main(
             Client
                 .builder()
                 .name(format!("spur-acp-{}", agent_name))
+                // ── defensive agent-originated auth/logout requests ───────
+                .on_receive_request(
+                    async move |req: UntypedMessage, responder, _cx| {
+                        handle_agent_client_request(
+                            req,
+                            responder,
+                            &agent_client_request_tx_h,
+                            &agent_name_request_h,
+                        )
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
                 // ── session/request_permission ────────────────────────────
                 .on_receive_request(
                     async move |req: RequestPermissionRequest, responder, cx| {
@@ -2697,9 +2788,9 @@ mod resume_delete_dispatch_tests {
     use crate::AcpError;
     use agent_client_protocol::schema::v1::{
         CloseSessionRequest, CloseSessionResponse, DeleteSessionRequest, DeleteSessionResponse,
-        ListSessionsRequest, ListSessionsResponse, ResumeSessionRequest, ResumeSessionResponse,
-        SessionCapabilities, SessionCloseCapabilities, SessionDeleteCapabilities, SessionId,
-        SessionListCapabilities, SessionResumeCapabilities,
+        ListSessionsRequest, ListSessionsResponse, NewSessionResponse, ResumeSessionRequest,
+        ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
+        SessionDeleteCapabilities, SessionId, SessionListCapabilities, SessionResumeCapabilities,
     };
     use tokio::sync::mpsc::{self, error::TryRecvError};
 
@@ -2725,6 +2816,42 @@ mod resume_delete_dispatch_tests {
             .expect("test mutex must not be poisoned")
             .replace(capabilities);
         (conn, rx)
+    }
+
+    #[tokio::test]
+    async fn new_session_dispatches_configured_additional_directories() {
+        let (mut conn, mut rx) = connection_with_command_channel();
+        let cwd = PathBuf::from("/tmp/spur-main");
+        let additional = vec![
+            PathBuf::from("/tmp/spur-extra"),
+            PathBuf::from("/Volumes/Projects/other-root"),
+        ];
+        conn.set_additional_directories(additional.clone());
+
+        let expected_cwd = cwd.clone();
+        let expected_additional = additional.clone();
+        let handle = tokio::spawn(async move { conn.new_session(cwd, vec![]).await });
+
+        match rx.recv().await.expect("new session command must be sent") {
+            AcpCommand::NewSession { request, reply } => {
+                assert_eq!(request.cwd, expected_cwd);
+                assert_eq!(request.additional_directories, expected_additional);
+                assert!(request
+                    .additional_directories
+                    .iter()
+                    .all(|path| path.is_absolute()));
+                reply
+                    .send(Ok(NewSessionResponse::new(SessionId::new("sid"))))
+                    .expect("test receiver must still be waiting");
+            }
+            _ => panic!("expected NewSession command"),
+        }
+
+        let response = handle
+            .await
+            .expect("new_session task must not panic")
+            .unwrap();
+        assert_eq!(response.session_id, SessionId::new("sid"));
     }
 
     #[tokio::test]
