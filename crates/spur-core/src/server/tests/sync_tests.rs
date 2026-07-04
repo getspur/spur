@@ -41,6 +41,7 @@ async fn create_dispatch_task(
         &[PlanTask {
             task_id: "task-a".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -122,6 +123,7 @@ async fn resolve_dispatch_orphan_proceeds_when_ready_label_is_label_only() {
         &[PlanTask {
             task_id: "task-a".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -277,6 +279,7 @@ async fn resolve_dispatch_orphan_skips_when_delegation_label_has_no_audit() {
         &[PlanTask {
             task_id: "task-a".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,

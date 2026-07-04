@@ -556,11 +556,13 @@ pub type LatestTaskSpec = (
     Vec<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
     Option<HashMap<String, String>>,
 );
 
 pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> {
     let mut task_id_and_context_files = None;
+    let mut latest_profile = None;
     let mut latest_model = None;
     let mut latest_effort = None;
     let mut latest_config_overrides = None;
@@ -568,6 +570,7 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
         if let AuditSentinelKind::TaskSpec {
             task_id,
             context_files,
+            profile,
             model,
             effort,
             config_overrides,
@@ -576,6 +579,9 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
         {
             if task_id_and_context_files.is_none() {
                 task_id_and_context_files = Some((task_id.clone(), context_files.clone()));
+            }
+            if latest_profile.is_none() {
+                latest_profile = profile.clone();
             }
             if latest_model.is_none() {
                 latest_model = model.clone();
@@ -593,6 +599,7 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
         (
             task_id,
             context_files,
+            latest_profile,
             latest_model,
             latest_effort,
             latest_config_overrides,
@@ -1337,6 +1344,7 @@ pub async fn project_plan_from_beads(
         audits: Vec<crate::plan::audit_sentinel::AuditSentinelKind>,
         task_id: String,
         context_files: Vec<String>,
+        profile: Option<String>,
         model: Option<String>,
         effort: Option<String>,
         config_overrides: Option<HashMap<String, String>>,
@@ -1349,13 +1357,23 @@ pub async fn project_plan_from_beads(
             adv.list_comments(&task_issue.id).await?,
         )?;
         let task_spec = latest_task_spec(&audits);
-        let (task_id, context_files, model, effort, config_overrides) = task_spec
-            .unwrap_or_else(|| (task_id_for_issue(&task_issue), Vec::new(), None, None, None));
+        let (task_id, context_files, profile, model, effort, config_overrides) = task_spec
+            .unwrap_or_else(|| {
+                (
+                    task_id_for_issue(&task_issue),
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            });
         projected_tasks.push(ProjectedTask {
             issue: task_issue,
             audits,
             task_id,
             context_files,
+            profile,
             model,
             effort,
             config_overrides,
@@ -1406,6 +1424,7 @@ pub async fn project_plan_from_beads(
             spec: PlanTask {
                 task_id: projected_task.task_id.clone(),
                 agent,
+                profile: projected_task.profile.clone(),
                 model: projected_task.model.clone(),
                 effort: projected_task.effort.clone(),
                 config_overrides: projected_task.config_overrides.clone(),
@@ -3260,6 +3279,7 @@ mod tests {
                 spec: PlanTask {
                     task_id: "a".into(),
                     agent: "codex".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -3281,6 +3301,7 @@ mod tests {
                 spec: PlanTask {
                     task_id: "b".into(),
                     agent: "codex".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -3352,6 +3373,7 @@ mod tests {
                 spec: PlanTask {
                     task_id: "t1".into(),
                     agent: "codex".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
