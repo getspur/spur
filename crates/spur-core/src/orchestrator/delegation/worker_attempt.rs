@@ -89,6 +89,12 @@ pub(crate) struct WorkerAttemptOutcome {
     pub(crate) artifact: Option<spur_acp::WorkerArtifact>,
 }
 
+#[cfg(test)]
+type WorkerConnectionFactory<'a> = dyn Fn(&spur_acp::config::AgentConfig, Vec<String>, &std::path::Path) -> Box<dyn AgentConnection>
+    + Send
+    + Sync
+    + 'a;
+
 /// Run a single worker attempt: snapshot brain state, create worktree,
 /// spawn agent, prompt, collect diff.
 ///
@@ -138,6 +144,8 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     pub(crate) worker_mcp_server: Option<Arc<WorkerMcpServer>>,
     pub(crate) pm_service: Option<&'a PmService>,
     pub(crate) feature_gate: &'a spur_license::FeatureGate,
+    #[cfg(test)]
+    pub(crate) connection_factory: Option<&'a WorkerConnectionFactory<'a>>,
 }
 
 async fn persist_dispatched_base_oid_label(
@@ -220,6 +228,75 @@ async fn preapply_prior_branch_for_reuse(
                 prior_branch = prior_branch,
                 error = %scrub_err,
                 "pre-apply: failed to scrub worktree after apply failure"
+            );
+        }
+    }
+}
+
+async fn apply_model_effort_override(
+    connection: &mut dyn AgentConnection,
+    initialize: &spur_acp::InitializeResponse,
+    session_response: &spur_acp::NewSessionResponse,
+    agent_kind: spur_acp::types::AgentKind,
+    model: Option<&str>,
+    effort: Option<&str>,
+) {
+    let caps = spur_acp::SpurAgentCaps::new(initialize, session_response, agent_kind);
+    let session_id = session_response.session_id.clone();
+    let session_id_for_log = session_id.0.to_string();
+
+    if let Some(model) = model {
+        let config_id = caps
+            .model_option()
+            .map(|option| option.id.clone())
+            .unwrap_or_else(|| spur_acp::SessionConfigId::new("model"));
+        let config_id_for_log = config_id.0.to_string();
+        let request = spur_acp::SetSessionConfigOptionRequest::new(
+            session_id.clone(),
+            config_id,
+            spur_acp::SessionConfigValueId::new(model),
+        );
+
+        if let Err(error) = connection.set_session_config_option(request).await {
+            tracing::warn!(
+                target: "spur::worker::model_override",
+                session_id = %session_id_for_log,
+                config_id = %config_id_for_log,
+                value = %model,
+                error = %error,
+                "worker model override failed"
+            );
+        }
+    }
+
+    if let Some(effort) = effort {
+        let Some(option) =
+            spur_acp::spur_agent_caps::thought_level_option_from(&caps.config_options)
+        else {
+            tracing::debug!(
+                target: "spur::worker::effort_override",
+                session_id = %session_id_for_log,
+                value = %effort,
+                "worker effort override skipped"
+            );
+            return;
+        };
+        let config_id = option.id.clone();
+        let config_id_for_log = config_id.0.to_string();
+        let request = spur_acp::SetSessionConfigOptionRequest::new(
+            session_id,
+            config_id,
+            spur_acp::SessionConfigValueId::new(effort),
+        );
+
+        if let Err(error) = connection.set_session_config_option(request).await {
+            tracing::warn!(
+                target: "spur::worker::effort_override",
+                session_id = %session_id_for_log,
+                config_id = %config_id_for_log,
+                value = %effort,
+                error = %error,
+                "worker effort override failed"
             );
         }
     }
@@ -391,6 +468,19 @@ pub(crate) async fn run_one_worker_attempt(
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
     let spawn_args = ctx.agent_config.effective_args();
+    #[cfg(test)]
+    let mut connection: Box<dyn AgentConnection> =
+        if let Some(connection_factory) = ctx.connection_factory {
+            connection_factory(ctx.agent_config, spawn_args, &worktrees.repo_root)
+        } else {
+            connection::build_connection_from_transport(
+                ctx.agent_config,
+                spawn_args,
+                None,
+                &worktrees.repo_root,
+            )
+        };
+    #[cfg(not(test))]
     let mut connection: Box<dyn AgentConnection> = connection::build_connection_from_transport(
         ctx.agent_config,
         spawn_args,
@@ -435,10 +525,13 @@ pub(crate) async fn run_one_worker_attempt(
     }
 
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
-    if let Err(e) = connection.initialize(init_request).await {
-        let _ = worktrees.remove_worktree(&worker_session).await;
-        return Err(AttemptSetupError::InitFailed(e.to_string()));
-    }
+    let init_response = match connection.initialize(init_request).await {
+        Ok(response) => response,
+        Err(e) => {
+            let _ = worktrees.remove_worktree(&worker_session).await;
+            return Err(AttemptSetupError::InitFailed(e.to_string()));
+        }
+    };
 
     // Emit WorkerSpawned event.
     funnel.emit(SpurEventBody::WorkerSpawned {
@@ -474,6 +567,16 @@ pub(crate) async fn run_one_worker_attempt(
             return Err(AttemptSetupError::SessionFailed(e.to_string()));
         }
     };
+
+    apply_model_effort_override(
+        &mut *connection,
+        &init_response,
+        &session_response,
+        ctx.agent_config.kind,
+        ctx.model,
+        ctx.effort,
+    )
+    .await;
 
     // 3. Send task to worker.
     let prompt_text = format!(
@@ -989,6 +1092,601 @@ mod context_files_wiring_tests {
     fn format_worker_task_is_available_in_orchestrator_module() {
         let out = format_worker_task("t", &["x".into()]);
         assert!(out.contains("## Relevant Files"));
+    }
+}
+
+#[cfg(test)]
+mod model_effort_override_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use std::path::Path;
+    use std::pin::Pin;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SetConfigCall {
+        session_id: String,
+        config_id: String,
+        value: String,
+    }
+
+    struct OverrideRecordingConnection {
+        calls: Arc<Mutex<Vec<SetConfigCall>>>,
+        rejected_config_id: Option<String>,
+    }
+
+    #[async_trait]
+    impl AgentConnection for OverrideRecordingConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            panic!("OverrideRecordingConnection::initialize must not be called")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            panic!("OverrideRecordingConnection::new_session must not be called")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn set_session_config_option(
+            &mut self,
+            request: spur_acp::SetSessionConfigOptionRequest,
+        ) -> anyhow::Result<spur_acp::SetSessionConfigOptionResponse> {
+            let call = SetConfigCall {
+                session_id: request.session_id.0.to_string(),
+                config_id: request.config_id.0.to_string(),
+                value: request.value.0.to_string(),
+            };
+            self.calls
+                .lock()
+                .expect("set config recorder poisoned")
+                .push(call);
+
+            if self
+                .rejected_config_id
+                .as_ref()
+                .is_some_and(|id| id == request.config_id.0.as_ref())
+            {
+                return Err(anyhow::anyhow!("rejected {}", request.config_id.0));
+            }
+
+            Ok(spur_acp::SetSessionConfigOptionResponse::new(vec![]))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        target: String,
+        fields: String,
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedEvents {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl CapturedEvents {
+        fn contains(&self, level: tracing::Level, target: &str, needle: &str) -> bool {
+            self.events
+                .lock()
+                .expect("event capture poisoned")
+                .iter()
+                .any(|event| {
+                    event.level == level && event.target == target && event.fields.contains(needle)
+                })
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::DEBUG
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = StringVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("event capture poisoned")
+                .push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    target: event.metadata().target().to_string(),
+                    fields: visitor.0,
+                });
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct StringVisitor(String);
+
+    impl Visit for StringVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?};", field.name()));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.push_str(&format!("{}={value};", field.name()));
+        }
+    }
+
+    fn fixture_select_option(
+        id: &str,
+        current: &str,
+        choices: &[(&str, &str)],
+        category: spur_acp::SessionConfigOptionCategory,
+    ) -> spur_acp::SessionConfigOption {
+        let opts: Vec<spur_acp::SessionConfigSelectOption> = choices
+            .iter()
+            .map(|(value, name)| {
+                spur_acp::SessionConfigSelectOption::new(
+                    spur_acp::SessionConfigValueId::new(*value),
+                    *name,
+                )
+            })
+            .collect();
+        spur_acp::SessionConfigOption::select(
+            spur_acp::SessionConfigId::new(id),
+            id,
+            spur_acp::SessionConfigValueId::new(current),
+            opts,
+        )
+        .category(category)
+    }
+
+    fn session_response(
+        config_options: Vec<spur_acp::SessionConfigOption>,
+    ) -> spur_acp::NewSessionResponse {
+        let mut response = spur_acp::NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-1"));
+        response.config_options = Some(config_options);
+        response
+    }
+
+    async fn apply_with(
+        calls: Arc<Mutex<Vec<SetConfigCall>>>,
+        rejected_config_id: Option<&str>,
+        session_response: &spur_acp::NewSessionResponse,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> CapturedEvents {
+        let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
+        let mut connection = OverrideRecordingConnection {
+            calls,
+            rejected_config_id: rejected_config_id.map(str::to_owned),
+        };
+        let events = CapturedEvents::default();
+        let _serialize = crate::tracing_test_lock::guard();
+        let _guard = tracing::subscriber::set_default(events.clone());
+
+        apply_model_effort_override(
+            &mut connection,
+            &init,
+            session_response,
+            spur_acp::types::AgentKind::CodexAcp,
+            model,
+            effort,
+        )
+        .await;
+
+        events
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        if !out.status.success() {
+            panic!(
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn setup_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README.md"), "base\n").expect("write readme");
+        std::fs::create_dir_all(dir.path().join(".spur/worktrees")).expect("create worktree dir");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "base"]);
+        dir
+    }
+
+    #[tokio::test]
+    async fn no_model_or_effort_makes_no_set_config_calls() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![]);
+
+        apply_with(Arc::clone(&calls), None, &response, None, None).await;
+
+        assert!(calls
+            .lock()
+            .expect("set config recorder poisoned")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_override_uses_advertised_model_option_id() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![fixture_select_option(
+            "vendor_model",
+            "default",
+            &[("gpt-5-codex", "GPT-5 Codex")],
+            spur_acp::SessionConfigOptionCategory::Model,
+        )]);
+
+        apply_with(
+            Arc::clone(&calls),
+            None,
+            &response,
+            Some("gpt-5-codex"),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            *calls.lock().expect("set config recorder poisoned"),
+            vec![SetConfigCall {
+                session_id: "acp-1".to_string(),
+                config_id: "vendor_model".to_string(),
+                value: "gpt-5-codex".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn effort_override_uses_advertised_thought_level_option_id() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![fixture_select_option(
+            "thinking_level",
+            "medium",
+            &[("high", "High")],
+            spur_acp::SessionConfigOptionCategory::ThoughtLevel,
+        )]);
+
+        apply_with(Arc::clone(&calls), None, &response, None, Some("high")).await;
+
+        assert_eq!(
+            *calls.lock().expect("set config recorder poisoned"),
+            vec![SetConfigCall {
+                session_id: "acp-1".to_string(),
+                config_id: "thinking_level".to_string(),
+                value: "high".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_override_is_applied_before_effort_override() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![
+            fixture_select_option(
+                "model",
+                "default",
+                &[("gpt-5-codex", "GPT-5 Codex")],
+                spur_acp::SessionConfigOptionCategory::Model,
+            ),
+            fixture_select_option(
+                "reasoning_effort",
+                "medium",
+                &[("high", "High")],
+                spur_acp::SessionConfigOptionCategory::ThoughtLevel,
+            ),
+        ]);
+
+        apply_with(
+            Arc::clone(&calls),
+            None,
+            &response,
+            Some("gpt-5-codex"),
+            Some("high"),
+        )
+        .await;
+
+        assert_eq!(
+            *calls.lock().expect("set config recorder poisoned"),
+            vec![
+                SetConfigCall {
+                    session_id: "acp-1".to_string(),
+                    config_id: "model".to_string(),
+                    value: "gpt-5-codex".to_string(),
+                },
+                SetConfigCall {
+                    session_id: "acp-1".to_string(),
+                    config_id: "reasoning_effort".to_string(),
+                    value: "high".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_model_override_warns_and_effort_still_runs() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![
+            fixture_select_option(
+                "model",
+                "default",
+                &[("gpt-5-codex", "GPT-5 Codex")],
+                spur_acp::SessionConfigOptionCategory::Model,
+            ),
+            fixture_select_option(
+                "reasoning_effort",
+                "medium",
+                &[("high", "High")],
+                spur_acp::SessionConfigOptionCategory::ThoughtLevel,
+            ),
+        ]);
+
+        let events = apply_with(
+            Arc::clone(&calls),
+            Some("model"),
+            &response,
+            Some("gpt-5-codex"),
+            Some("high"),
+        )
+        .await;
+
+        assert_eq!(calls.lock().expect("set config recorder poisoned").len(), 2);
+        assert!(
+            events.contains(
+                tracing::Level::WARN,
+                "spur::worker::model_override",
+                "worker model override failed"
+            ),
+            "expected model override warning, got {:?}",
+            events.events.lock().expect("event capture poisoned")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_effort_option_debugs_and_skips_effort() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![fixture_select_option(
+            "model",
+            "default",
+            &[("gpt-5-codex", "GPT-5 Codex")],
+            spur_acp::SessionConfigOptionCategory::Model,
+        )]);
+
+        let events = apply_with(
+            Arc::clone(&calls),
+            None,
+            &response,
+            Some("gpt-5-codex"),
+            Some("high"),
+        )
+        .await;
+
+        assert_eq!(
+            *calls.lock().expect("set config recorder poisoned"),
+            vec![SetConfigCall {
+                session_id: "acp-1".to_string(),
+                config_id: "model".to_string(),
+                value: "gpt-5-codex".to_string(),
+            }]
+        );
+        assert!(
+            events.contains(
+                tracing::Level::DEBUG,
+                "spur::worker::effort_override",
+                "worker effort override skipped"
+            ),
+            "expected effort override debug event, got {:?}",
+            events.events.lock().expect("event capture poisoned")
+        );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum WorkerPathEvent {
+        Initialize,
+        NewSession,
+        SetConfig { config_id: String, value: String },
+        Prompt,
+    }
+
+    struct WorkerPathRecordingConnection {
+        events: Arc<Mutex<Vec<WorkerPathEvent>>>,
+    }
+
+    #[async_trait]
+    impl AgentConnection for WorkerPathRecordingConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            self.events
+                .lock()
+                .expect("worker path recorder poisoned")
+                .push(WorkerPathEvent::Initialize);
+            Ok(spur_acp::InitializeResponse::new(
+                spur_acp::ProtocolVersion::LATEST,
+            ))
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            self.events
+                .lock()
+                .expect("worker path recorder poisoned")
+                .push(WorkerPathEvent::NewSession);
+            let mut response =
+                spur_acp::NewSessionResponse::new(spur_acp::AcpSessionId::new("worker-acp"));
+            response.config_options = Some(vec![fixture_select_option(
+                "model",
+                "default",
+                &[("gpt-5-codex", "GPT-5 Codex")],
+                spur_acp::SessionConfigOptionCategory::Model,
+            )]);
+            Ok(response)
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            let mut events = self.events.lock().expect("worker path recorder poisoned");
+            let set_config_idx = events.iter().position(|event| {
+                matches!(
+                    event,
+                    WorkerPathEvent::SetConfig { config_id, value }
+                        if config_id == "model" && value == "gpt-5-codex"
+                )
+            });
+            let prompt_idx = events
+                .iter()
+                .position(|event| matches!(event, WorkerPathEvent::Prompt));
+            assert!(
+                set_config_idx.is_some(),
+                "model override missing before prompt"
+            );
+            assert!(prompt_idx.is_none(), "prompt called more than once");
+            events.push(WorkerPathEvent::Prompt);
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn set_session_config_option(
+            &mut self,
+            request: spur_acp::SetSessionConfigOptionRequest,
+        ) -> anyhow::Result<spur_acp::SetSessionConfigOptionResponse> {
+            self.events
+                .lock()
+                .expect("worker path recorder poisoned")
+                .push(WorkerPathEvent::SetConfig {
+                    config_id: request.config_id.0.to_string(),
+                    value: request.value.0.to_string(),
+                });
+            Ok(spur_acp::SetSessionConfigOptionResponse::new(vec![]))
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_attempt_applies_model_override_before_prompt() {
+        let repo = setup_repo();
+        let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+        let worker_session = SessionId::new();
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("codex");
+        agent_config.kind = spur_acp::types::AgentKind::CodexAcp;
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_factory = Arc::clone(&events);
+
+        let outcome = run_one_worker_attempt(
+            worker_session.clone(),
+            WorkerAttemptCtx {
+                brain_session_id: &brain_session_id,
+                agent: "codex",
+                model: Some("gpt-5-codex"),
+                effort: None,
+                task: "do the task",
+                request_id: "delegation-1",
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                    Box::new(WorkerPathRecordingConnection {
+                        events: Arc::clone(&events_for_factory),
+                    })
+                }),
+            },
+            &mut worktrees,
+            &funnel,
+        )
+        .await
+        .expect("worker attempt succeeds");
+
+        assert_eq!(outcome.worker_session, worker_session);
+        assert_eq!(
+            *events.lock().expect("worker path recorder poisoned"),
+            vec![
+                WorkerPathEvent::Initialize,
+                WorkerPathEvent::NewSession,
+                WorkerPathEvent::SetConfig {
+                    config_id: "model".to_string(),
+                    value: "gpt-5-codex".to_string(),
+                },
+                WorkerPathEvent::Prompt,
+            ]
+        );
     }
 }
 

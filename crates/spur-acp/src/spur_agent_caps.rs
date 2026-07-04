@@ -232,7 +232,7 @@ fn model_option_from(options: &[SessionConfigOption]) -> Option<&SessionConfigOp
     option_by_category_or_absent_id(options, KnownConfigCategory::Model, "model")
 }
 
-fn thought_level_option_from(options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
+pub fn thought_level_option_from(options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
     option_by_category_or_absent_id(
         options,
         KnownConfigCategory::ThoughtLevel,
