@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use spur_acp::{BrainSessionId, SessionId};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -505,6 +506,100 @@ impl WorktreeManager {
             .await?;
         self.run_git(&["clean", "-fd"], Some(worktree_path)).await?;
         Ok(())
+    }
+
+    /// Make SPUR-injected, worktree-relative paths invisible to Git in this
+    /// worktree only. Git's per-worktree `core.excludesFile` shadows any user
+    /// global excludes file in this ephemeral worker checkout; that is
+    /// acceptable because it keeps injected files out of status, `add -A`, and
+    /// task diffs without mutating shared repo excludes.
+    pub async fn add_worktree_excludes(
+        &self,
+        worktree_path: &Path,
+        patterns: &[String],
+    ) -> Result<PathBuf> {
+        self.run_git(
+            &["config", "extensions.worktreeConfig", "true"],
+            Some(worktree_path),
+        )
+        .await
+        .context("failed to enable per-worktree git config")?;
+
+        let exclude_path = self.worktree_excludes_path(worktree_path).await?;
+        let exclude_path_str = exclude_path
+            .to_str()
+            .ok_or_else(|| anyhow!("worktree git dir is not valid UTF-8"))?;
+        self.run_git(
+            &[
+                "config",
+                "--worktree",
+                "core.excludesFile",
+                exclude_path_str,
+            ],
+            Some(worktree_path),
+        )
+        .await
+        .context("failed to set per-worktree excludes file")?;
+
+        if let Some(parent) = exclude_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create excludes dir {}", parent.display()))?;
+        }
+        let existing = match std::fs::read_to_string(&exclude_path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to read {}", exclude_path.display()));
+            }
+        };
+        let mut seen = existing
+            .lines()
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&exclude_path)
+            .with_context(|| format!("failed to open {}", exclude_path.display()))?;
+
+        if !existing.is_empty() && !existing.ends_with('\n') {
+            writeln!(file)
+                .with_context(|| format!("failed to append to {}", exclude_path.display()))?;
+        }
+        for pattern in patterns {
+            if seen.insert(pattern.clone()) {
+                writeln!(file, "{pattern}")
+                    .with_context(|| format!("failed to append to {}", exclude_path.display()))?;
+            }
+        }
+
+        Ok(exclude_path)
+    }
+
+    /// Worktree-relative paths SPUR registered as excluded in this worker.
+    pub async fn worktree_excluded_paths(&self, worktree_path: &Path) -> Vec<String> {
+        let Ok(exclude_path) = self.worktree_excludes_path(worktree_path).await else {
+            return Vec::new();
+        };
+        std::fs::read_to_string(exclude_path)
+            .ok()
+            .map(|contents| {
+                contents
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn worktree_excludes_path(&self, worktree_path: &Path) -> Result<PathBuf> {
+        let git_dir = self
+            .run_git(&["rev-parse", "--absolute-git-dir"], Some(worktree_path))
+            .await
+            .context("failed to resolve worktree git dir")?;
+        Ok(Path::new(git_dir.trim()).join("spur-excludes"))
     }
 
     /// Create a worktree at an explicit path and branch without registering it
@@ -2086,6 +2181,77 @@ mod finalize_worker_branch_tests {
 
         assert_eq!(outcome.case, FinalizeCase::NoOp);
         assert_eq!(commit_count(&worker_path, &base), "0");
+    }
+
+    #[tokio::test]
+    async fn excluded_injected_file_is_invisible_to_status_and_finalize() {
+        let dir = init_repo();
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        let injected = ".claude/agents/spur-x.md".to_string();
+
+        std::fs::create_dir_all(worker_path.join(".claude/agents")).unwrap();
+        std::fs::write(worker_path.join(&injected), "persona\n").unwrap();
+        let excludes = manager
+            .add_worktree_excludes(&worker_path, std::slice::from_ref(&injected))
+            .await
+            .unwrap();
+        manager
+            .add_worktree_excludes(&worker_path, std::slice::from_ref(&injected))
+            .await
+            .unwrap();
+
+        assert!(!excludes.starts_with(&worker_path));
+        assert_eq!(
+            manager.worktree_excluded_paths(&worker_path).await,
+            vec![injected]
+        );
+        assert!(!manager.worktree_dirty(&worker_path).await.unwrap());
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", true)
+            .await
+            .unwrap();
+        assert_eq!(outcome.case, FinalizeCase::NoOp);
+        assert_eq!(commit_count(&worker_path, &base), "0");
+    }
+
+    #[tokio::test]
+    async fn excluded_file_never_enters_squashed_commit_or_diff() {
+        let dir = init_repo();
+        let (manager, worker_path, session, base) = setup_worker(&dir);
+        let injected = ".claude/agents/spur-x.md".to_string();
+
+        std::fs::create_dir_all(worker_path.join(".claude/agents")).unwrap();
+        std::fs::write(worker_path.join(&injected), "persona\n").unwrap();
+        manager
+            .add_worktree_excludes(&worker_path, std::slice::from_ref(&injected))
+            .await
+            .unwrap();
+
+        std::fs::write(worker_path.join("real-one.txt"), "one\n").unwrap();
+        run_git(&worker_path, &["add", "-A"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "wip one"]);
+        std::fs::write(worker_path.join("real-two.txt"), "two\n").unwrap();
+        run_git(&worker_path, &["add", "-A"]);
+        run_git(&worker_path, &["commit", "-q", "-m", "wip two"]);
+
+        let outcome = manager
+            .finalize_worker_branch(&session, "task message", true)
+            .await
+            .unwrap();
+        assert_eq!(outcome.case, FinalizeCase::Squashed);
+        assert_eq!(commit_count(&worker_path, &base), "1");
+
+        let committed_paths = run_git(&worker_path, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(committed_paths.contains("real-one.txt"));
+        assert!(committed_paths.contains("real-two.txt"));
+        assert!(!committed_paths.contains("spur-x.md"));
+
+        let (diff, basis) = manager.collect_diff(&session).await.unwrap();
+        assert_eq!(basis, "base_commit..HEAD");
+        let diff = diff.expect("squashed worker commit should produce a diff");
+        assert!(diff.contains("real-one.txt"));
+        assert!(diff.contains("real-two.txt"));
+        assert!(!diff.contains("spur-x.md"));
     }
 
     #[tokio::test]
