@@ -100,6 +100,10 @@ pub enum AuditSentinelKind {
         task_id: String,
         #[serde(default)]
         context_files: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
         /// bd-2m2u Phase 2c — extended fields populated by `ModifyTaskSpec`.
         /// Legacy comments lack these (default `None`); the projector falls back
         /// to the live beads issue body / agent label / `blocked_by`.
@@ -562,6 +566,8 @@ mod tests {
             AuditSentinelKind::TaskSpec {
                 task_id: "t1".into(),
                 context_files: vec!["docs/spec.md".into(), "src/lib.rs".into()],
+                model: None,
+                effort: None,
                 task_text: None,
                 agent: None,
                 depends_on: None,

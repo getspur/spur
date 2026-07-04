@@ -57,6 +57,14 @@ fn rewrite_definitions_refs(value: &mut Value) {
 pub struct DelegateToWorkerInput {
     /// Name of the worker agent to delegate to.
     pub agent: String,
+    /// Override the worker's model (config-option value id, e.g. "gpt-5-codex"). Fail-soft if the agent rejects it.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Override the worker's reasoning effort (thought-level value id, e.g. "low"/"medium"/"high"). Fail-soft if the agent rejects it.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Task description for the worker.
     pub task: String,
     /// Optional supplementary file paths.
@@ -80,6 +88,14 @@ pub struct DelegateToWorkerInput {
 pub struct DelegateParallelTaskInput {
     /// Worker agent name.
     pub agent: String,
+    /// Override the worker's model (config-option value id, e.g. "gpt-5-codex"). Fail-soft if the agent rejects it.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Override the worker's reasoning effort (thought-level value id, e.g. "low"/"medium"/"high"). Fail-soft if the agent rejects it.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Task description.
     pub task: String,
     /// Optional supplementary file paths for this task.

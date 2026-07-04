@@ -28,6 +28,8 @@ async fn create_persisted_plan(
     let tasks = vec![PlanTask {
         task_id: format!("{plan_id}-task"),
         agent: "codex".into(),
+        model: None,
+        effort: None,
         task: format!("Task for {plan_id}"),
         depends_on: Vec::new(),
         issue_id: None,

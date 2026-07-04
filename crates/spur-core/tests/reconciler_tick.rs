@@ -128,6 +128,8 @@ fn plan_task(task_id: &str) -> PlanTask {
     PlanTask {
         task_id: task_id.to_string(),
         agent: "codex".to_string(),
+        model: None,
+        effort: None,
         task: format!("Do {task_id}."),
         depends_on: Vec::new(),
         issue_id: None,
@@ -174,6 +176,8 @@ fn dependent_plan_tasks() -> Vec<PlanTask> {
         PlanTask {
             task_id: "T1".to_string(),
             agent: "codex".to_string(),
+            model: None,
+            effort: None,
             task: "Build dependency output.".to_string(),
             depends_on: Vec::new(),
             issue_id: None,
@@ -183,6 +187,8 @@ fn dependent_plan_tasks() -> Vec<PlanTask> {
         PlanTask {
             task_id: "T2".to_string(),
             agent: "codex".to_string(),
+            model: None,
+            effort: None,
             task: "Use dependency output.".to_string(),
             depends_on: vec!["T1".to_string()],
             issue_id: None,
@@ -1746,6 +1752,8 @@ async fn tick_once_persists_failed_completion_when_respond_to_drops() {
     let task_spec = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
         task_id: "t1".to_string(),
         context_files: Vec::new(),
+        model: None,
+        effort: None,
         task_text: None,
         agent: Some("codex".into()),
         depends_on: None,
