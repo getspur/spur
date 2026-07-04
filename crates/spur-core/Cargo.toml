@@ -103,6 +103,11 @@ name = "retry_reflexion"
 path = "tests/retry_reflexion.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "agent_profile_delegation_e2e"
+path = "tests/agent_profile_delegation_e2e.rs"
+required-features = ["test-support"]
+
 [[bench]]
 name = "event_replay"
 harness = false
