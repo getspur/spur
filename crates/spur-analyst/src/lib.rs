@@ -1,169 +1,33 @@
 //! Shared Rust query layer over `.spur/analyst.duckdb`.
 
 pub mod api;
+pub(crate) mod db;
 pub(crate) mod embed_client;
 pub mod embed_service;
 pub mod mcp;
 
-use std::{
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-#[cfg(test)]
-use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
-};
+use std::path::Path;
 
 use anyhow::{anyhow, Context as _, Result};
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 
 pub use api::*;
 
-use api::{AnalystDuckDbResourceCaps, KnowledgePathResultContext, SymbolInput};
+use api::{KnowledgePathResultContext, SymbolInput};
 
-static LANCE_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-// duckpgq is distributed via DuckDB's community repo (not the core repo) and is
-// only published for DuckDB <= 1.4.4. Install it once per process; the LOAD is
-// best-effort and the caller falls back to recursive SQL on failure.
-static DUCKPGQ_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-static ANALYST_TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-#[cfg(test)]
-static ANALYST_CONNECTION_OPEN_COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+use db::{
+    connection::open_analyst_connection_read_only,
+    extensions::{
+        load_analyst_duckpgq_extension, load_analyst_icu_extension, load_analyst_lance_extension,
+    },
+    sql::{sql_escape_literal, sql_string_literal},
+};
 
 const MAX_CONTEXT_CANDIDATES: usize = 40;
 const MAX_GRAPH_CANDIDATES: usize = 30;
 pub const MAX_SYMBOL_RISK_COMMUNITY_IDS: usize = 40;
 pub const MAX_CONTEXT_PATH_HOPS: usize = 6;
 pub const MAX_CONTEXT_PATHS: usize = 12;
-// Keep this at 2GB or above: 512MB starved real-index hybrid
-// context-candidate queries into DuckDB OOM, whose abort path can
-// double-free aggregate state and SIGABRT the process (duckdb#19391).
-const DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT: &str = "4GB";
-const DEFAULT_ANALYST_DUCKDB_THREADS: usize = 4;
-const ANALYST_DUCKDB_MEMORY_LIMIT_ENV: &str = "SPUR_ANALYST_DUCKDB_MEMORY_LIMIT";
-const ANALYST_DUCKDB_THREADS_ENV: &str = "SPUR_ANALYST_DUCKDB_THREADS";
-
-pub(crate) fn open_analyst_connection_read_only(db_path: &Path) -> Result<duckdb::Connection> {
-    open_analyst_connection_read_only_with_caps(db_path, AnalystDuckDbResourceCaps::from_env())
-}
-
-pub(crate) fn load_analyst_icu_extension(conn: &duckdb::Connection) {
-    // The analyst scorecard can depend on TIMESTAMPTZ arithmetic whose overloads
-    // live in DuckDB's ICU extension. Keep this best-effort and let query
-    // preparation surface genuine failures in the existing per-stage shape.
-    let _ = conn.execute_batch("INSTALL icu; LOAD icu;");
-}
-
-pub(crate) fn load_analyst_lance_extension(conn: &duckdb::Connection) {
-    // Hybrid retrieval uses DuckDB's Lance extension when available. Keep this
-    // best-effort so missing extension binaries degrade to BM25-only search.
-    LANCE_INSTALLED.get_or_init(|| {
-        let _ = conn.execute_batch("INSTALL lance;");
-    });
-    let _ = conn.execute_batch("LOAD lance;");
-}
-
-#[cfg(test)]
-pub(crate) fn reset_analyst_connection_open_count_for_test(db_path: &Path) {
-    let counts = ANALYST_CONNECTION_OPEN_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut counts = counts
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    counts.remove(db_path);
-}
-
-#[cfg(test)]
-pub(crate) fn analyst_connection_open_count_for_test(db_path: &Path) -> usize {
-    let Some(counts) = ANALYST_CONNECTION_OPEN_COUNTS.get() else {
-        return 0;
-    };
-    let counts = counts
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    counts.get(db_path).copied().unwrap_or(0)
-}
-
-#[cfg(test)]
-fn record_analyst_connection_open_for_test(db_path: &Path) {
-    let counts = ANALYST_CONNECTION_OPEN_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut counts = counts
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *counts.entry(db_path.to_path_buf()).or_insert(0) += 1;
-}
-
-fn open_analyst_connection_read_only_with_caps(
-    db_path: &Path,
-    caps: AnalystDuckDbResourceCaps,
-) -> Result<duckdb::Connection> {
-    let config = duckdb::Config::default()
-        .access_mode(duckdb::AccessMode::ReadOnly)
-        .context("failed to configure read-only duckdb")?;
-    let conn = duckdb::Connection::open_with_flags(db_path, config).with_context(|| {
-        format!(
-            "failed to open analyst DuckDB read-only at {}",
-            db_path.display()
-        )
-    })?;
-    let temp_dir = analyst_connection_temp_directory(db_path);
-    apply_analyst_duckdb_resource_caps(&conn, &caps, &temp_dir)?;
-    #[cfg(test)]
-    record_analyst_connection_open_for_test(db_path);
-    Ok(conn)
-}
-
-fn analyst_connection_temp_directory(db_path: &Path) -> PathBuf {
-    // DuckDB spill file names are not safe to share across independent
-    // processes; keep every analyst connection on private temp storage.
-    let counter = ANALYST_TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-    analyst_temp_directory_parent(db_path).join(format!("ro-{}-{counter}", std::process::id()))
-}
-
-fn analyst_temp_directory_parent(db_path: &Path) -> PathBuf {
-    let mut file_name = db_path
-        .file_name()
-        .map(|file_name| file_name.to_owned())
-        .unwrap_or_else(|| "analyst.duckdb".into());
-    file_name.push(".tmp");
-    db_path
-        .parent()
-        .map(|parent| parent.join(&file_name))
-        .unwrap_or_else(|| PathBuf::from(file_name))
-}
-
-fn apply_analyst_duckdb_resource_caps(
-    conn: &duckdb::Connection,
-    caps: &AnalystDuckDbResourceCaps,
-    temp_dir: &Path,
-) -> Result<()> {
-    std::fs::create_dir_all(temp_dir).with_context(|| {
-        format!(
-            "failed to create analyst DuckDB temp directory {}",
-            temp_dir.display()
-        )
-    })?;
-
-    let memory_limit = caps.memory_limit.replace('\'', "''");
-    let temp_directory = sql_string_literal(&temp_dir.to_string_lossy());
-    // preserve_insertion_order=false shrinks the working set of large
-    // aggregations; analyst queries that care about order use explicit
-    // ORDER BY clauses.
-    conn.execute_batch(&format!(
-        "SET temp_directory = {temp_directory};\nSET memory_limit = '{memory_limit}';\nSET threads = {};\nSET preserve_insertion_order = false;",
-        caps.threads,
-    ))
-    .with_context(|| {
-        format!(
-            "failed to apply analyst DuckDB resource caps (memory_limit={:?}, threads={}, temp_directory={})",
-            caps.memory_limit,
-            caps.threads,
-            temp_dir.display()
-        )
-    })?;
-    Ok(())
-}
 
 pub fn query_symbol_risk_community<S: AsRef<str>>(
     db_path: &Path,
@@ -267,7 +131,7 @@ pub fn query_context_candidates_with_conn(
         .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
         .ok();
 
-    let escaped_query = query.replace('\'', "''");
+    let escaped_query = sql_escape_literal(query);
     let sql_scope = scope.as_sql_scope();
     let sql_intent = options.intent.as_sql_intent();
     let query_vec_sql = format_query_vec_sql(options.query_vec.as_deref());
@@ -563,11 +427,7 @@ fn query_duckpgq_direct_paths(
     target_stable_id: &str,
     max_paths: usize,
 ) -> Result<Vec<KnowledgePathRow>> {
-    DUCKPGQ_INSTALLED.get_or_init(|| {
-        let _ = conn.execute_batch("INSTALL duckpgq FROM community;");
-    });
-    conn.execute_batch("LOAD duckpgq;")
-        .context("failed to load DuckPGQ extension")?;
+    load_analyst_duckpgq_extension(conn)?;
     let source_sql = sql_string_literal(source_stable_id);
     let target_sql = sql_string_literal(target_stable_id);
     let sql = format!(
@@ -620,11 +480,7 @@ fn query_duckpgq_shortest_hops(
     target_stable_id: &str,
     max_hops: usize,
 ) -> Result<Option<usize>> {
-    DUCKPGQ_INSTALLED.get_or_init(|| {
-        let _ = conn.execute_batch("INSTALL duckpgq FROM community;");
-    });
-    conn.execute_batch("LOAD duckpgq;")
-        .context("failed to load DuckPGQ extension")?;
+    load_analyst_duckpgq_extension(conn)?;
     let source_sql = sql_string_literal(source_stable_id);
     let target_sql = sql_string_literal(target_stable_id);
     let sql = format!(
@@ -830,10 +686,6 @@ fn query_recursive_undirected_context_path_rows(
 
 fn i64_to_usize(value: i64) -> usize {
     usize::try_from(value).unwrap_or_default()
-}
-
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn bounded_symbol_inputs<S: AsRef<str>>(
@@ -1229,6 +1081,8 @@ pub fn query_graph_candidates_with_conn(
 mod tests {
     use std::path::PathBuf;
 
+    use crate::db::connection::open_analyst_connection_read_only_with_caps;
+
     use duckdb::Connection;
     use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 
@@ -1239,6 +1093,27 @@ mod tests {
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS - 1])).is_none());
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS + 1])).is_none());
         assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS])).is_some());
+    }
+
+    #[test]
+    fn db_sql_string_literal_wraps_and_escapes_quotes() {
+        assert_eq!(
+            crate::db::sql::sql_string_literal("O'Malley"),
+            "'O''Malley'"
+        );
+    }
+
+    #[test]
+    fn db_path_selection_falls_back_to_parent_spur_db_for_worker_worktree() {
+        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+        let repo_spur = repo_dir.path().join(".spur");
+        let worker_dir = repo_spur.join("worktrees").join("worker-1");
+        std::fs::create_dir_all(&worker_dir).expect("create worker dir");
+        std::fs::write(repo_spur.join("analyst.duckdb"), b"db").expect("write repo analyst db");
+
+        let selected = crate::db::paths::select_analyst_db_path(&worker_dir);
+
+        assert_eq!(selected, repo_spur.join("analyst.duckdb"));
     }
 
     #[test]

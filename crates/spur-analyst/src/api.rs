@@ -2,6 +2,11 @@ use std::{env, path::Path};
 
 use anyhow::{anyhow, Result};
 
+use crate::db::connection::{
+    ANALYST_DUCKDB_MEMORY_LIMIT_ENV, ANALYST_DUCKDB_THREADS_ENV,
+    DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT, DEFAULT_ANALYST_DUCKDB_THREADS,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AnalystDuckDbResourceCaps {
     pub(crate) memory_limit: String,
@@ -11,8 +16,8 @@ pub(crate) struct AnalystDuckDbResourceCaps {
 impl Default for AnalystDuckDbResourceCaps {
     fn default() -> Self {
         Self {
-            memory_limit: crate::DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT.to_owned(),
-            threads: crate::DEFAULT_ANALYST_DUCKDB_THREADS,
+            memory_limit: DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT.to_owned(),
+            threads: DEFAULT_ANALYST_DUCKDB_THREADS,
         }
     }
 }
@@ -20,13 +25,13 @@ impl Default for AnalystDuckDbResourceCaps {
 impl AnalystDuckDbResourceCaps {
     pub(crate) fn from_env() -> Self {
         let mut caps = Self::default();
-        match env::var(crate::ANALYST_DUCKDB_MEMORY_LIMIT_ENV) {
+        match env::var(ANALYST_DUCKDB_MEMORY_LIMIT_ENV) {
             Ok(value) => {
                 let value = value.trim();
                 if value.is_empty() {
                     tracing::warn!(
-                        env_var = crate::ANALYST_DUCKDB_MEMORY_LIMIT_ENV,
-                        default = crate::DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT,
+                        env_var = ANALYST_DUCKDB_MEMORY_LIMIT_ENV,
+                        default = DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT,
                         "invalid empty analyst DuckDB memory limit override; using default"
                     );
                 } else {
@@ -35,28 +40,28 @@ impl AnalystDuckDbResourceCaps {
             }
             Err(env::VarError::NotPresent) => {}
             Err(error) => tracing::warn!(
-                env_var = crate::ANALYST_DUCKDB_MEMORY_LIMIT_ENV,
+                env_var = ANALYST_DUCKDB_MEMORY_LIMIT_ENV,
                 error = %error,
-                default = crate::DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT,
+                default = DEFAULT_ANALYST_DUCKDB_MEMORY_LIMIT,
                 "invalid analyst DuckDB memory limit override; using default"
             ),
         }
 
-        match env::var(crate::ANALYST_DUCKDB_THREADS_ENV) {
+        match env::var(ANALYST_DUCKDB_THREADS_ENV) {
             Ok(value) => match value.trim().parse::<usize>() {
                 Ok(threads) if threads > 0 => caps.threads = threads,
                 _ => tracing::warn!(
-                    env_var = crate::ANALYST_DUCKDB_THREADS_ENV,
+                    env_var = ANALYST_DUCKDB_THREADS_ENV,
                     value = %value,
-                    default = crate::DEFAULT_ANALYST_DUCKDB_THREADS,
+                    default = DEFAULT_ANALYST_DUCKDB_THREADS,
                     "invalid analyst DuckDB threads override; using default"
                 ),
             },
             Err(env::VarError::NotPresent) => {}
             Err(error) => tracing::warn!(
-                env_var = crate::ANALYST_DUCKDB_THREADS_ENV,
+                env_var = ANALYST_DUCKDB_THREADS_ENV,
                 error = %error,
-                default = crate::DEFAULT_ANALYST_DUCKDB_THREADS,
+                default = DEFAULT_ANALYST_DUCKDB_THREADS,
                 "invalid analyst DuckDB threads override; using default"
             ),
         }

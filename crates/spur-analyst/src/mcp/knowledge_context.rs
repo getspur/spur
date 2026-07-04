@@ -1,12 +1,16 @@
 use std::sync::Arc;
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use crate::{
-    load_analyst_icu_extension, load_analyst_lance_extension, open_analyst_connection_read_only,
+    db::{
+        connection::open_analyst_connection_read_only,
+        extensions::{load_analyst_icu_extension, load_analyst_lance_extension},
+        paths::{analyst_db_path, current_repo_root},
+    },
     query_context_candidates_with_conn, query_context_paths_with_conn,
     query_graph_candidates_with_conn, query_symbol_risk_community_with_conn, KnowledgeCandidate,
     KnowledgePathOptions, KnowledgePathResult, KnowledgeQueryIntent, KnowledgeQueryOptions,
@@ -17,11 +21,11 @@ use crate::{
 use crate::{query_context_paths, query_symbol_risk_community};
 use futures::future::join_all;
 use serde_json::{json, Value};
+use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 #[cfg(feature = "embed")]
 use spur_graph::{
     embedding_query_text_for_model, fastembed_cache_dir, EmbeddingModelSelection, EMBED_MODEL_ENV,
 };
-use spur_graph::{resolve_worktree_root_from, EMBEDDING_VECTOR_DIMENSIONS};
 
 use super::overlay::{
     open_worktree_overlay, overlay_rebuild_key_for_dirty_worktree,
@@ -1247,44 +1251,6 @@ fn parse_anchor_array_v2(
         .collect()
 }
 
-pub(crate) fn analyst_db_path() -> Result<PathBuf, McpHandlerError> {
-    let root = current_repo_root()?;
-    Ok(select_analyst_db_path(&root))
-}
-
-fn current_repo_root() -> Result<PathBuf, McpHandlerError> {
-    if let Some(worktree) = spur_graph::mcp::scoped_worktree_root() {
-        return Ok(worktree);
-    }
-    let current_dir = std::env::current_dir().map_err(|error| {
-        McpHandlerError::Internal(format!("failed to read current directory: {error}"))
-    })?;
-    Ok(resolve_worktree_root_from(current_dir))
-}
-
-fn select_analyst_db_path(root: &Path) -> PathBuf {
-    let local_db = root.join(".spur").join("analyst.duckdb");
-    if local_db.exists() {
-        return local_db;
-    }
-    parent_spur_worktree_analyst_db(root).unwrap_or(local_db)
-}
-
-fn parent_spur_worktree_analyst_db(root: &Path) -> Option<PathBuf> {
-    for ancestor in root.ancestors() {
-        if ancestor.file_name().is_some_and(|name| name == "worktrees") {
-            let spur_dir = ancestor.parent()?;
-            if spur_dir.file_name().is_some_and(|name| name == ".spur") {
-                let db_path = spur_dir.join("analyst.duckdb");
-                if db_path.exists() {
-                    return Some(db_path);
-                }
-            }
-        }
-    }
-    None
-}
-
 fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Value {
     base_pack(
         request,
@@ -2480,6 +2446,7 @@ mod tests {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::task::JoinHandle;
 
+    use crate::db::sql::{sql_escape_literal, sql_escape_path};
     use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
     use spur_graph::{
         artifact_from_facts, build_facts, embedding_query_text_for_model, write_artifact_parquet,
@@ -3657,14 +3624,6 @@ pub fn dispatch_approval_evidence() -> &'static str {
             .expect("seed fixture section vectors");
     }
 
-    fn sql_escape_path(path: &Path) -> String {
-        path.display().to_string().replace('\'', "''")
-    }
-
-    fn sql_escape_literal(value: &str) -> String {
-        value.replace('\'', "''")
-    }
-
     fn env_lock() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().expect("env lock")
     }
@@ -4183,7 +4142,7 @@ pub fn lexical_signal_anchor() {
         let _embed_guard = disable_embed_query_for_test();
         let (_temp_dir, repo) = kcp2_fixture_repo(true);
         let db_path = repo.join(".spur").join("analyst.duckdb");
-        crate::reset_analyst_connection_open_count_for_test(&db_path);
+        crate::db::connection::reset_analyst_connection_open_count_for_test(&db_path);
 
         let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
             knowledge_context_pack(&json!({
@@ -4199,7 +4158,7 @@ pub fn lexical_signal_anchor() {
 
         assert!(pack.get("error").is_none(), "{pack:#}");
         assert_eq!(
-            crate::analyst_connection_open_count_for_test(&db_path),
+            crate::db::connection::analyst_connection_open_count_for_test(&db_path),
             1,
             "v1 candidate and graph retrieval should share one analyst connection"
         );
@@ -4211,7 +4170,7 @@ pub fn lexical_signal_anchor() {
         let _embed_guard = disable_embed_query_for_test();
         let (_temp_dir, repo) = kcp2_fixture_repo(true);
         let db_path = repo.join(".spur").join("analyst.duckdb");
-        crate::reset_analyst_connection_open_count_for_test(&db_path);
+        crate::db::connection::reset_analyst_connection_open_count_for_test(&db_path);
 
         let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
             knowledge_context_pack_2(&json!({
@@ -4234,7 +4193,7 @@ pub fn lexical_signal_anchor() {
 
         assert!(pack.get("error").is_none(), "{pack:#}");
         assert_eq!(
-            crate::analyst_connection_open_count_for_test(&db_path),
+            crate::db::connection::analyst_connection_open_count_for_test(&db_path),
             1,
             "v2 candidates, paths, and symbol enrichment should share one analyst connection"
         );
