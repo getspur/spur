@@ -22,6 +22,12 @@
 
 ((block
   . (identifier) @_kw
+  . (string_lit) @provider.type
+  . (block_start)) @definition.resource
+ (#eq? @_kw "provider"))
+
+((block
+  . (identifier) @_kw
   . (string_lit) @resource.name
   . (block_start)) @definition.variable
  (#eq? @_kw "variable"))

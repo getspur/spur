@@ -146,17 +146,25 @@ fn hcl_reference_edges_skip_reserved_roots_and_bare_identifiers() {
 }
 
 #[test]
-fn hcl_loop_var_and_provider_alias_refs_stay_unresolved_evidence() {
+fn hcl_loop_var_refs_stay_unresolved_evidence_but_provider_alias_refs_resolve() {
     let facts = build_fixture(RESERVED_ROOT_FIXTURE);
 
-    for target in ["s.id", "aws.west"] {
-        let edge = reference_edge(&facts, target);
-        assert_eq!(edge.edge_kind, Some(GraphEdgeKind::ReferencesAddress));
-        assert_eq!(
-            edge.target_node_id, None,
-            "`{target}` matches the address shape but must stay unresolved evidence"
-        );
-    }
+    let loop_var = reference_edge(&facts, "s.id");
+    assert_eq!(loop_var.edge_kind, Some(GraphEdgeKind::ReferencesAddress));
+    assert_eq!(
+        loop_var.target_node_id, None,
+        "`s.id` matches the address shape but must stay unresolved evidence"
+    );
+
+    let provider_alias = reference_edge(&facts, "aws.west");
+    assert_eq!(
+        provider_alias.edge_kind,
+        Some(GraphEdgeKind::ReferencesAddress)
+    );
+    assert!(
+        provider_alias.target_node_id.is_some(),
+        "`aws.west` should resolve to the aliased provider block"
+    );
 }
 
 #[test]
