@@ -1489,6 +1489,7 @@ impl Reconciler {
             let request = crate::DelegationRequest {
                 id: delegation_id.clone().into(),
                 agent: task.spec.agent.clone(),
+                profile: None,
                 model: task.spec.model.clone(),
                 effort: task.spec.effort.clone(),
                 config_overrides: task.spec.config_overrides.clone(),
