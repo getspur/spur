@@ -826,6 +826,7 @@ impl SimState {
                 AuditSentinelKind::TaskSpec {
                     task_id: task.task_id.to_string(),
                     context_files: Vec::new(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -1098,6 +1099,7 @@ fn dummy_request() -> spur_core::DelegationRequest {
     spur_core::DelegationRequest {
         id: "dummy".to_string().into(),
         agent: "codex".to_string(),
+        profile: None,
         model: None,
         effort: None,
         config_overrides: None,

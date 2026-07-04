@@ -1,6 +1,6 @@
 # Agent Profile — canonical Claude-markdown agent definitions, per-kind materialization & selection
 
-**Status:** draft — design approved in principle (interactive exploration + live ACP probes), pending review and implementation plan
+**Status:** implemented (AP1–AP8)
 **Date:** 2026-07-04
 **Owners:** Kevin Truong (kevin.truong.ds@gmail.com)
 **Scope:** Add a per-delegation `profile` so the brain can dispatch a worker *as a named agent persona* — system prompt, description, default model/effort — defined once in Claude's standard agent-markdown format and applied to any worker kind that supports it, e.g. `delegate_to_worker(agent="claude-code", profile="code-reviewer")`. Builds directly on the shipped per-delegation model/effort override (m11, PR #48) and composes with the in-progress generic `config_overrides` (m12).

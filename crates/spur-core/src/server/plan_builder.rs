@@ -105,6 +105,7 @@ pub(crate) async fn build_epic_subgraph_with_activation_labels(
             &child_id,
             &task.task_id,
             &task.agent,
+            task.profile.as_deref(),
             task.model.as_deref(),
             task.effort.as_deref(),
             task.config_overrides.as_ref(),
@@ -894,6 +895,7 @@ mod topo_tests {
         PlanTask {
             task_id: id.to_string(),
             agent: "x".to_string(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -910,6 +912,7 @@ mod topo_tests {
         let tasks = vec![PlanTask {
             task_id: "t1".to_string(),
             agent: "codex".to_string(),
+            profile: None,
             task: "body".to_string(),
             depends_on: Vec::new(),
             issue_id: None,
@@ -931,6 +934,35 @@ mod topo_tests {
             .labels
             .iter()
             .any(|label| { label.contains("gpt-5-codex") || label.contains("low") }));
+    }
+
+    #[test]
+    fn profile_does_not_pollute_agent_label() {
+        let tasks = vec![PlanTask {
+            task_id: "t1".to_string(),
+            agent: "codex".to_string(),
+            profile: Some("code-reviewer".to_string()),
+            task: "body".to_string(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            issue_title: None,
+            context_files: Vec::new(),
+            model: None,
+            effort: None,
+            config_overrides: None,
+        }];
+
+        let (_, children) = super::plan_epic_issue_creates("plan-1", "Epic", None, &tasks).unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(children[0]
+            .1
+            .labels
+            .contains(&crate::plan::labels::agent("codex")));
+        assert!(!children[0]
+            .1
+            .labels
+            .iter()
+            .any(|label| label.contains("profile") || label.contains("code-reviewer")));
     }
 
     #[test]

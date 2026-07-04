@@ -89,7 +89,7 @@ pub(crate) struct WorkerAttemptOutcome {
     pub(crate) artifact: Option<spur_acp::WorkerArtifact>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type WorkerConnectionFactory<'a> = dyn Fn(&spur_acp::config::AgentConfig, Vec<String>, &std::path::Path) -> Box<dyn AgentConnection>
     + Send
     + Sync
@@ -122,6 +122,10 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     pub(crate) model: Option<&'a str>,
     #[allow(dead_code)]
     pub(crate) effort: Option<&'a str>,
+    pub(crate) profile: Option<&'a str>,
+    /// Loaded+validated by `execute_delegation` when the profile is managed;
+    /// `None` means select-only pass-through.
+    pub(crate) profile_def: Option<&'a crate::agent_profiles::AgentProfile>,
     #[allow(dead_code)]
     pub(crate) config_overrides: Option<&'a std::collections::HashMap<String, String>>,
     pub(crate) task: &'a str,
@@ -146,7 +150,7 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     pub(crate) worker_mcp_server: Option<Arc<WorkerMcpServer>>,
     pub(crate) pm_service: Option<&'a PmService>,
     pub(crate) feature_gate: &'a spur_license::FeatureGate,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) connection_factory: Option<&'a WorkerConnectionFactory<'a>>,
 }
 
@@ -235,11 +239,14 @@ async fn preapply_prior_branch_for_reuse(
     }
 }
 
-async fn apply_config_overrides(
+#[allow(clippy::too_many_arguments)]
+async fn apply_session_overrides(
     connection: &mut dyn AgentConnection,
     initialize: &spur_acp::InitializeResponse,
     session_response: &spur_acp::NewSessionResponse,
     agent_kind: spur_acp::types::AgentKind,
+    profile: Option<&str>,
+    strategy: &spur_acp::ProfileStrategy,
     model: Option<&str>,
     effort: Option<&str>,
     config_overrides: Option<&std::collections::HashMap<String, String>>,
@@ -247,6 +254,49 @@ async fn apply_config_overrides(
     let caps = spur_acp::SpurAgentCaps::new(initialize, session_response, agent_kind);
     let session_id = session_response.session_id.clone();
     let session_id_for_log = session_id.0.to_string();
+
+    if let Some(profile) = profile {
+        match &strategy.select {
+            spur_acp::SelectStrategy::ConfigOption { id } => {
+                let request = spur_acp::SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    spur_acp::SessionConfigId::new(id.as_str()),
+                    spur_acp::SessionConfigValueId::new(profile),
+                );
+                if let Err(error) = connection.set_session_config_option(request).await {
+                    tracing::warn!(
+                        target: "spur::worker::profile",
+                        session_id = %session_id_for_log,
+                        config_id = %id,
+                        value = %profile,
+                        error = %error,
+                        "profile selection failed; default persona"
+                    );
+                }
+            }
+            spur_acp::SelectStrategy::SessionMode => {
+                let request =
+                    spur_acp::SetSessionModeRequest::new(session_id.clone(), profile.to_string());
+                if let Err(error) = connection.set_session_mode(request).await {
+                    tracing::warn!(
+                        target: "spur::worker::profile",
+                        session_id = %session_id_for_log,
+                        value = %profile,
+                        error = %error,
+                        "profile set_mode failed; default persona"
+                    );
+                }
+            }
+            spur_acp::SelectStrategy::None => {
+                tracing::debug!(
+                    target: "spur::worker::profile",
+                    session_id = %session_id_for_log,
+                    value = %profile,
+                    "kind has no selection surface; skipped"
+                );
+            }
+        }
+    }
 
     if let Some(model) = model {
         let config_id = caps
@@ -323,6 +373,71 @@ async fn apply_config_overrides(
                 );
             }
         }
+    }
+}
+
+async fn materialize_profile(
+    worktrees: &WorktreeManager,
+    worktree_path: &std::path::Path,
+    kind: spur_acp::types::AgentKind,
+    strategy: &spur_acp::ProfileStrategy,
+    profile: &crate::agent_profiles::AgentProfile,
+) {
+    if !strategy.materialize {
+        return;
+    }
+
+    let Some(rendered) = crate::agent_profiles::render::render_for_kind(profile, kind) else {
+        return;
+    };
+
+    let target = worktree_path.join(&rendered.rel_path);
+    let ours = worktrees
+        .worktree_excluded_paths(worktree_path)
+        .await
+        .iter()
+        .any(|path| path == &rendered.rel_path);
+    if target.exists() && !ours {
+        tracing::warn!(
+            target: "spur::worker::profile",
+            path = %rendered.rel_path,
+            "committed agent file exists; select-only against it"
+        );
+        return;
+    }
+
+    if let Some(parent) = target.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                target: "spur::worker::profile",
+                path = %rendered.rel_path,
+                error = %error,
+                "profile directory creation failed; select-only"
+            );
+            return;
+        }
+    }
+    if let Err(error) = std::fs::write(&target, &rendered.contents) {
+        tracing::warn!(
+            target: "spur::worker::profile",
+            path = %rendered.rel_path,
+            error = %error,
+            "profile write failed; select-only"
+        );
+        return;
+    }
+
+    if let Err(error) = worktrees
+        .add_worktree_excludes(worktree_path, std::slice::from_ref(&rendered.rel_path))
+        .await
+    {
+        let _ = std::fs::remove_file(&target);
+        tracing::warn!(
+            target: "spur::worker::profile",
+            path = %rendered.rel_path,
+            error = %error,
+            "exclude setup failed; removed injected file, select-only"
+        );
     }
 }
 
@@ -487,12 +602,27 @@ pub(crate) async fn run_one_worker_attempt(
     )
     .await;
 
+    let profile_strategy = spur_acp::ProfileStrategy::resolve(
+        ctx.agent_config.kind,
+        ctx.agent_config.profile.as_ref(),
+    );
+    if let Some(profile_def) = ctx.profile_def {
+        materialize_profile(
+            worktrees,
+            &worktree_info.path,
+            ctx.agent_config.kind,
+            &profile_strategy,
+            profile_def,
+        )
+        .await;
+    }
+
     // 2. Spawn worker agent in worktree via AgentConnection.
     // Workers never receive a permission_tx, so L2 auto-approve is
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
     let spawn_args = ctx.agent_config.effective_args();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let mut connection: Box<dyn AgentConnection> =
         if let Some(connection_factory) = ctx.connection_factory {
             connection_factory(ctx.agent_config, spawn_args, &worktrees.repo_root)
@@ -504,7 +634,7 @@ pub(crate) async fn run_one_worker_attempt(
                 &worktrees.repo_root,
             )
         };
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let mut connection: Box<dyn AgentConnection> = connection::build_connection_from_transport(
         ctx.agent_config,
         spawn_args,
@@ -600,11 +730,13 @@ pub(crate) async fn run_one_worker_attempt(
         }
     };
 
-    apply_config_overrides(
+    apply_session_overrides(
         &mut *connection,
         &init_response,
         &session_response,
         ctx.agent_config.kind,
+        ctx.profile,
+        &profile_strategy,
         ctx.model,
         ctx.effort,
         ctx.config_overrides,
@@ -1332,11 +1464,14 @@ mod model_effort_override_tests {
         let _serialize = crate::tracing_test_lock::guard();
         let _guard = tracing::subscriber::set_default(events.clone());
 
-        apply_config_overrides(
+        let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp);
+        apply_session_overrides(
             &mut connection,
             &init,
             session_response,
             spur_acp::types::AgentKind::CodexAcp,
+            None,
+            &strategy,
             model,
             effort,
             config_overrides,
@@ -1818,6 +1953,8 @@ mod model_effort_override_tests {
                 agent: "codex",
                 model: Some("gpt-5-codex"),
                 effort: None,
+                profile: None,
+                profile_def: None,
                 config_overrides: None,
                 task: "do the task",
                 request_id: "delegation-1",
@@ -1858,6 +1995,628 @@ mod model_effort_override_tests {
                     value: "gpt-5-codex".to_string(),
                 },
                 WorkerPathEvent::Prompt,
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod profile_override_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use std::path::Path;
+    use std::pin::Pin;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum OverrideCall {
+        Config { config_id: String, value: String },
+        Mode { mode_id: String },
+        Prompt,
+    }
+
+    struct ProfileRecordingConnection {
+        calls: Arc<Mutex<Vec<OverrideCall>>>,
+        rejected_config_id: Option<String>,
+        reject_mode: bool,
+        session_response: spur_acp::NewSessionResponse,
+    }
+
+    #[async_trait]
+    impl AgentConnection for ProfileRecordingConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            Ok(spur_acp::InitializeResponse::new(
+                spur_acp::ProtocolVersion::LATEST,
+            ))
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            Ok(self.session_response.clone())
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            self.calls
+                .lock()
+                .expect("profile recorder poisoned")
+                .push(OverrideCall::Prompt);
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+
+        async fn set_session_config_option(
+            &mut self,
+            request: spur_acp::SetSessionConfigOptionRequest,
+        ) -> anyhow::Result<spur_acp::SetSessionConfigOptionResponse> {
+            self.calls
+                .lock()
+                .expect("profile recorder poisoned")
+                .push(OverrideCall::Config {
+                    config_id: request.config_id.0.to_string(),
+                    value: request.value.0.to_string(),
+                });
+            if self
+                .rejected_config_id
+                .as_ref()
+                .is_some_and(|id| id == request.config_id.0.as_ref())
+            {
+                return Err(anyhow::anyhow!("rejected {}", request.config_id.0));
+            }
+            Ok(spur_acp::SetSessionConfigOptionResponse::new(vec![]))
+        }
+
+        async fn set_session_mode(
+            &mut self,
+            request: spur_acp::SetSessionModeRequest,
+        ) -> anyhow::Result<spur_acp::SetSessionModeResponse> {
+            self.calls
+                .lock()
+                .expect("profile recorder poisoned")
+                .push(OverrideCall::Mode {
+                    mode_id: request.mode_id.0.to_string(),
+                });
+            if self.reject_mode {
+                return Err(anyhow::anyhow!("rejected {}", request.mode_id.0));
+            }
+            Ok(spur_acp::SetSessionModeResponse::new())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        target: String,
+        fields: String,
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedEvents {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl CapturedEvents {
+        fn contains(&self, level: tracing::Level, target: &str, needle: &str) -> bool {
+            self.events
+                .lock()
+                .expect("event capture poisoned")
+                .iter()
+                .any(|event| {
+                    event.level == level && event.target == target && event.fields.contains(needle)
+                })
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::DEBUG
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = StringVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("event capture poisoned")
+                .push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    target: event.metadata().target().to_string(),
+                    fields: visitor.0,
+                });
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct StringVisitor(String);
+
+    impl Visit for StringVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?};", field.name()));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.push_str(&format!("{}={value};", field.name()));
+        }
+    }
+
+    fn fixture_select_option(
+        id: &str,
+        current: &str,
+        choices: &[(&str, &str)],
+        category: spur_acp::SessionConfigOptionCategory,
+    ) -> spur_acp::SessionConfigOption {
+        let opts: Vec<spur_acp::SessionConfigSelectOption> = choices
+            .iter()
+            .map(|(value, name)| {
+                spur_acp::SessionConfigSelectOption::new(
+                    spur_acp::SessionConfigValueId::new(*value),
+                    *name,
+                )
+            })
+            .collect();
+        spur_acp::SessionConfigOption::select(
+            spur_acp::SessionConfigId::new(id),
+            id,
+            spur_acp::SessionConfigValueId::new(current),
+            opts,
+        )
+        .category(category)
+    }
+
+    fn session_response(
+        config_options: Vec<spur_acp::SessionConfigOption>,
+    ) -> spur_acp::NewSessionResponse {
+        let mut response = spur_acp::NewSessionResponse::new(spur_acp::AcpSessionId::new("acp-1"));
+        response.config_options = Some(config_options);
+        response
+    }
+
+    fn model_and_effort_session_response() -> spur_acp::NewSessionResponse {
+        session_response(vec![
+            fixture_select_option(
+                "model",
+                "default",
+                &[("opus", "Opus"), ("sonnet", "Sonnet")],
+                spur_acp::SessionConfigOptionCategory::Model,
+            ),
+            fixture_select_option(
+                "reasoning_effort",
+                "medium",
+                &[("high", "High")],
+                spur_acp::SessionConfigOptionCategory::ThoughtLevel,
+            ),
+        ])
+    }
+
+    async fn apply_profile_with(
+        kind: spur_acp::types::AgentKind,
+        strategy: spur_acp::ProfileStrategy,
+        profile: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        rejected_config_id: Option<&str>,
+        reject_mode: bool,
+    ) -> (Vec<OverrideCall>, CapturedEvents) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
+        let response = model_and_effort_session_response();
+        let mut connection = ProfileRecordingConnection {
+            calls: Arc::clone(&calls),
+            rejected_config_id: rejected_config_id.map(str::to_owned),
+            reject_mode,
+            session_response: response.clone(),
+        };
+        let events = CapturedEvents::default();
+        let _serialize = crate::tracing_test_lock::guard();
+        let _guard = tracing::subscriber::set_default(events.clone());
+
+        apply_session_overrides(
+            &mut connection,
+            &init,
+            &response,
+            kind,
+            profile,
+            &strategy,
+            model,
+            effort,
+            None,
+        )
+        .await;
+
+        let recorded = calls.lock().expect("profile recorder poisoned").clone();
+        (recorded, events)
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        if !out.status.success() {
+            panic!(
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn setup_repo_with_committed_agent() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README.md"), "base\n").expect("write readme");
+        std::fs::create_dir_all(dir.path().join(".spur/worktrees")).expect("create worktree dir");
+        std::fs::create_dir_all(dir.path().join(".claude/agents"))
+            .expect("create committed agent dir");
+        std::fs::write(
+            dir.path().join(".claude/agents/code-reviewer.md"),
+            "committed persona\n",
+        )
+        .expect("write committed agent");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "base"]);
+        dir
+    }
+
+    fn managed_profile() -> crate::agent_profiles::AgentProfile {
+        crate::agent_profiles::AgentProfile::parse(
+            "code-reviewer",
+            "---\nname: code-reviewer\ndescription: Reviews diffs\nmodel: opus\neffort: high\n---\nmanaged persona\n",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_profile_makes_no_selection_rpc_and_preserves_model_effort_order() {
+        let (calls, _) = apply_profile_with(
+            spur_acp::types::AgentKind::CodexAcp,
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp),
+            None,
+            Some("opus"),
+            Some("high"),
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![
+                OverrideCall::Config {
+                    config_id: "model".to_string(),
+                    value: "opus".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "reasoning_effort".to_string(),
+                    value: "high".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_profile_selects_agent_before_model_and_effort() {
+        let (calls, _) = apply_profile_with(
+            spur_acp::types::AgentKind::ClaudeCodeAcp,
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp),
+            Some("code-reviewer"),
+            Some("opus"),
+            Some("high"),
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![
+                OverrideCall::Config {
+                    config_id: "agent".to_string(),
+                    value: "code-reviewer".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "model".to_string(),
+                    value: "opus".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "reasoning_effort".to_string(),
+                    value: "high".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_profile_selects_mode_config_option() {
+        let (calls, _) = apply_profile_with(
+            spur_acp::types::AgentKind::OpenCode,
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::OpenCode),
+            Some("code-reviewer"),
+            None,
+            None,
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![OverrideCall::Config {
+                config_id: "mode".to_string(),
+                value: "code-reviewer".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn kiro_profile_uses_session_mode_not_config_option() {
+        let (calls, _) = apply_profile_with(
+            spur_acp::types::AgentKind::Kiro,
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::Kiro),
+            Some("code-reviewer"),
+            None,
+            None,
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![OverrideCall::Mode {
+                mode_id: "code-reviewer".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_profile_has_no_selection_rpc_but_model_still_applies() {
+        let (calls, _) = apply_profile_with(
+            spur_acp::types::AgentKind::CodexAcp,
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp),
+            Some("code-reviewer"),
+            Some("opus"),
+            None,
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![OverrideCall::Config {
+                config_id: "model".to_string(),
+                value: "opus".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_profile_selection_warns_and_model_still_runs() {
+        let (calls, events) = apply_profile_with(
+            spur_acp::types::AgentKind::ClaudeCodeAcp,
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp),
+            Some("code-reviewer"),
+            Some("opus"),
+            None,
+            Some("agent"),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![
+                OverrideCall::Config {
+                    config_id: "agent".to_string(),
+                    value: "code-reviewer".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "model".to_string(),
+                    value: "opus".to_string(),
+                },
+            ]
+        );
+        assert!(
+            events.contains(
+                tracing::Level::WARN,
+                "spur::worker::profile",
+                "profile selection failed; default persona"
+            ),
+            "expected profile selection warning, got {:?}",
+            events.events.lock().expect("event capture poisoned")
+        );
+    }
+
+    #[tokio::test]
+    async fn d8_profile_defaults_feed_model_rpc_but_request_model_wins() {
+        let profile = managed_profile();
+        let (model, effort) =
+            crate::orchestrator::delegation::execute::resolve_effective_model_effort(
+                None,
+                None,
+                Some(&profile),
+            );
+        let (calls, _) = apply_profile_with(
+            spur_acp::types::AgentKind::ClaudeCodeAcp,
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp),
+            Some("code-reviewer"),
+            model.as_deref(),
+            effort.as_deref(),
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(
+            calls,
+            vec![
+                OverrideCall::Config {
+                    config_id: "agent".to_string(),
+                    value: "code-reviewer".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "model".to_string(),
+                    value: "opus".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "reasoning_effort".to_string(),
+                    value: "high".to_string(),
+                },
+            ]
+        );
+
+        let (model, effort) =
+            crate::orchestrator::delegation::execute::resolve_effective_model_effort(
+                Some("sonnet"),
+                None,
+                Some(&profile),
+            );
+        let (calls, _) = apply_profile_with(
+            spur_acp::types::AgentKind::ClaudeCodeAcp,
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp),
+            Some("code-reviewer"),
+            model.as_deref(),
+            effort.as_deref(),
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(
+            calls,
+            vec![
+                OverrideCall::Config {
+                    config_id: "agent".to_string(),
+                    value: "code-reviewer".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "model".to_string(),
+                    value: "sonnet".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "reasoning_effort".to_string(),
+                    value: "high".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn materialization_collision_leaves_non_owned_file_and_still_selects_profile() {
+        let repo = setup_repo_with_committed_agent();
+        let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+        let worker_session = SessionId::new();
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("claude-code");
+        agent_config.kind = spur_acp::types::AgentKind::ClaudeCodeAcp;
+        let profile = managed_profile();
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_factory = Arc::clone(&calls);
+        let session = session_response(vec![]);
+
+        let outcome = run_one_worker_attempt(
+            worker_session.clone(),
+            WorkerAttemptCtx {
+                brain_session_id: &brain_session_id,
+                agent: "claude-code",
+                profile: Some("code-reviewer"),
+                profile_def: Some(&profile),
+                model: None,
+                effort: None,
+                config_overrides: None,
+                task: "do the task",
+                request_id: "delegation-1",
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                    Box::new(ProfileRecordingConnection {
+                        calls: Arc::clone(&calls_for_factory),
+                        rejected_config_id: None,
+                        reject_mode: false,
+                        session_response: session.clone(),
+                    })
+                }),
+            },
+            &mut worktrees,
+            &funnel,
+        )
+        .await
+        .expect("worker attempt succeeds");
+
+        assert_eq!(outcome.worker_session, worker_session);
+        assert_eq!(
+            std::fs::read_to_string(
+                outcome
+                    .worktree_path
+                    .join(".claude/agents/code-reviewer.md")
+            )
+            .unwrap(),
+            "committed persona\n"
+        );
+        assert_eq!(
+            *calls.lock().expect("profile recorder poisoned"),
+            vec![
+                OverrideCall::Config {
+                    config_id: "agent".to_string(),
+                    value: "code-reviewer".to_string(),
+                },
+                OverrideCall::Prompt,
             ]
         );
     }

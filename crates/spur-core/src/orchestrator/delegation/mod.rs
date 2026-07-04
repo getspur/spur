@@ -101,6 +101,7 @@ pub(crate) async fn handle_delegations(
         let DelegationRequest {
             id: request_id,
             agent,
+            profile,
             model,
             effort,
             config_overrides,
@@ -318,6 +319,7 @@ pub(crate) async fn handle_delegations(
                 }
                 r = execute_delegation(
                     agent,
+                    profile,
                     model,
                     effort,
                     config_overrides,
