@@ -26,6 +26,8 @@ fn minimal_tasks() -> Vec<PlanTask> {
         PlanTask {
             task_id: "t1".into(),
             agent: "claude-code-acp".into(),
+            model: None,
+            effort: None,
             task: "Do T1.".into(),
             depends_on: vec![],
             issue_id: None,
@@ -35,6 +37,8 @@ fn minimal_tasks() -> Vec<PlanTask> {
         PlanTask {
             task_id: "t2".into(),
             agent: "claude-code-acp".into(),
+            model: None,
+            effort: None,
             task: "Do T2.".into(),
             depends_on: vec!["t1".into()],
             issue_id: None,

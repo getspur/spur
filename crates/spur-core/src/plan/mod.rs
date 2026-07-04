@@ -45,6 +45,10 @@ use spur_acp::{BrainSessionId, DelegationResult, DelegationStatus};
 pub struct PlanTask {
     pub task_id: String,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub task: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -787,6 +791,8 @@ mod approved_dep_closure_tests {
             spec: PlanTask {
                 task_id: id.to_string(),
                 agent: "codex".to_string(),
+                model: None,
+                effort: None,
                 task: format!("Do {id}"),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
                 issue_id: Some(format!("bd-{id}")),
@@ -896,6 +902,8 @@ mod scope_snapshot_integration_tests {
         PlanTask {
             task_id: task_id.into(),
             agent: agent.into(),
+            model: None,
+            effort: None,
             task: format!("Do {task_id}"),
             depends_on: deps.into_iter().map(String::from).collect(),
             issue_id: Some(format!("bd-{task_id}")),
@@ -1201,6 +1209,8 @@ pub fn derive_epic_plan_from_issues(
         plan_tasks.push(PlanTask {
             task_id: id.clone(),
             agent,
+            model: None,
+            effort: None,
             task: task_text,
             depends_on,
             issue_id: Some(id),
@@ -1334,7 +1344,9 @@ pub async fn derive_epic_plan(
                     .map_err(|e| format!("failed to list comments for task '{issue_id}': {e}"))?,
             )
             .map_err(|e| format!("failed to parse audits for task '{issue_id}': {e}"))?;
-            if let Some((_, context_files)) = crate::plan::projector::latest_task_spec(&audits) {
+            if let Some((_, context_files, _, _)) =
+                crate::plan::projector::latest_task_spec(&audits)
+            {
                 task.context_files = context_files;
             }
         }
@@ -1806,11 +1818,15 @@ pub(crate) async fn emit_task_spec_audit(
     issue_id: &str,
     task_id: &str,
     agent: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
     context_files: &[String],
 ) -> anyhow::Result<()> {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
         task_text: None,
         agent: Some(agent.to_string()),
         depends_on: None,
@@ -1839,6 +1855,8 @@ pub(crate) async fn emit_extended_task_spec_audit(
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
+        model: None,
+        effort: None,
         task_text: task_text.map(str::to_string),
         agent: agent.map(str::to_string),
         depends_on: depends_on.map(<[String]>::to_vec),
@@ -5396,6 +5414,8 @@ mod tests {
         PlanTask {
             task_id: id.into(),
             agent: "test-agent".into(),
+            model: None,
+            effort: None,
             task: "test task".into(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
@@ -5481,6 +5501,8 @@ mod tests {
             spec: super::PlanTask {
                 task_id: "T1".into(),
                 agent: "x".into(),
+                model: None,
+                effort: None,
                 task: "do".into(),
                 depends_on: vec![],
                 issue_id: None,
@@ -5521,6 +5543,8 @@ mod tests {
         let base_spec = super::PlanTask {
             task_id: task_id.into(),
             agent: "x".into(),
+            model: None,
+            effort: None,
             task: "do".into(),
             depends_on: vec![],
             issue_id: None,
@@ -5617,6 +5641,8 @@ mod tests {
         PlanTask {
             task_id: id.into(),
             agent: "test-agent".into(),
+            model: None,
+            effort: None,
             task: "test task".into(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
@@ -6001,6 +6027,8 @@ mod tests {
             spec: super::PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Implement worker retry".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
@@ -6039,6 +6067,8 @@ mod tests {
             spec: super::PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Implement review feedback".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
@@ -6075,6 +6105,8 @@ mod tests {
             spec: super::PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Implement review feedback".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
@@ -6559,6 +6591,8 @@ mod tests {
             super::PlanTask {
                 task_id: "A".to_string(),
                 agent: "x".to_string(),
+                model: None,
+                effort: None,
                 task: "a".to_string(),
                 depends_on: vec![],
                 issue_id: None,
@@ -6568,6 +6602,8 @@ mod tests {
             super::PlanTask {
                 task_id: "B".to_string(),
                 agent: "x".to_string(),
+                model: None,
+                effort: None,
                 task: "b".to_string(),
                 depends_on: vec!["A".to_string()],
                 issue_id: None,
@@ -6577,6 +6613,8 @@ mod tests {
             super::PlanTask {
                 task_id: "C".to_string(),
                 agent: "x".to_string(),
+                model: None,
+                effort: None,
                 task: "c".to_string(),
                 depends_on: vec!["B".to_string()],
                 issue_id: None,
@@ -7004,7 +7042,7 @@ mod tests {
             comments: std::sync::Mutex::new(vec![]),
         };
         let context_files = vec!["src/lib.rs".to_string(), "docs/spec.md".to_string()];
-        super::emit_task_spec_audit(&adv, "bd-1", "T1", "codex", &context_files)
+        super::emit_task_spec_audit(&adv, "bd-1", "T1", "codex", None, None, &context_files)
             .await
             .expect("task-spec audit");
 
@@ -7018,11 +7056,15 @@ mod tests {
             crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
                 task_id,
                 context_files,
+                model,
+                effort,
                 task_text,
                 agent,
                 depends_on,
             } if task_id == "T1"
                 && context_files == vec!["src/lib.rs".to_string(), "docs/spec.md".to_string()]
+                && model.is_none()
+                && effort.is_none()
                 && task_text.is_none()
                 && agent.as_deref() == Some("codex")
                 && depends_on.is_none()
@@ -7035,7 +7077,7 @@ mod tests {
             comments: std::sync::Mutex::new(vec![]),
         };
         let context_files: Vec<String> = Vec::new();
-        super::emit_task_spec_audit(&adv, "bd-2", "T2", "gemini", &context_files)
+        super::emit_task_spec_audit(&adv, "bd-2", "T2", "gemini", None, None, &context_files)
             .await
             .expect("task-spec audit");
 
@@ -7049,11 +7091,15 @@ mod tests {
             crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
                 task_id,
                 context_files,
+                model,
+                effort,
                 task_text,
                 agent,
                 depends_on,
             } if task_id == "T2"
                 && context_files.is_empty()
+                && model.is_none()
+                && effort.is_none()
                 && task_text.is_none()
                 && agent.as_deref() == Some("gemini")
                 && depends_on.is_none()
@@ -7131,6 +7177,8 @@ mod tests {
                 spec: PlanTask {
                     task_id: "dep".into(),
                     agent: "a".into(),
+                    model: None,
+                    effort: None,
                     task: "T".into(),
                     depends_on: vec![],
                     issue_id: None,
@@ -7149,6 +7197,8 @@ mod tests {
                 spec: PlanTask {
                     task_id: "esc".into(),
                     agent: "a".into(),
+                    model: None,
+                    effort: None,
                     task: "T".into(),
                     depends_on: vec!["dep".into()],
                     issue_id: None,
@@ -7718,6 +7768,8 @@ mod tests {
                 spec: super::PlanTask {
                     task_id: "a".into(),
                     agent: "codex".into(),
+                    model: None,
+                    effort: None,
                     task: "ship it".into(),
                     depends_on: vec![],
                     issue_id: None,
@@ -7757,6 +7809,8 @@ mod tests {
                 spec: super::PlanTask {
                     task_id: "a".into(),
                     agent: "codex".into(),
+                    model: None,
+                    effort: None,
                     task: "ship it".into(),
                     depends_on: vec![],
                     issue_id: None,
@@ -8185,6 +8239,8 @@ mod tests {
             spec: PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Do T1".into(),
                 depends_on: Vec::new(),
                 issue_id: Some("bd-1".into()),

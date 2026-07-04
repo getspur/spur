@@ -22,6 +22,8 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
         PlanTask {
             task_id: "a".into(),
             agent: "claude-code-acp".into(),
+            model: None,
+            effort: None,
             task: "Do A.".into(),
             depends_on: Vec::new(),
             issue_id: None,
@@ -31,6 +33,8 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
         PlanTask {
             task_id: "b".into(),
             agent: "claude-code-acp".into(),
+            model: None,
+            effort: None,
             task: "Do B.".into(),
             depends_on: vec!["a".into()],
             issue_id: Some("bd-42".into()),
@@ -42,6 +46,8 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
         v.push(PlanTask {
             task_id: "c".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Do C.".into(),
             depends_on: vec!["a".into(), "b".into()],
             issue_id: None,
@@ -127,6 +133,8 @@ fn cycle_produces_error() {
         PlanTask {
             task_id: "a".into(),
             agent: "x".into(),
+            model: None,
+            effort: None,
             task: "A".into(),
             depends_on: vec!["b".into()],
             issue_id: None,
@@ -136,6 +144,8 @@ fn cycle_produces_error() {
         PlanTask {
             task_id: "b".into(),
             agent: "x".into(),
+            model: None,
+            effort: None,
             task: "B".into(),
             depends_on: vec!["a".into()],
             issue_id: None,
@@ -193,6 +203,8 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             spec: spur_core::plan::PlanTask {
                 task_id: "t1".into(),
                 agent: "a".into(),
+                model: None,
+                effort: None,
                 task: "T".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
@@ -274,6 +286,8 @@ fn tasks_abc() -> Vec<PlanTask> {
         PlanTask {
             task_id: "a".into(),
             agent: "claude-code-acp".into(),
+            model: None,
+            effort: None,
             task: "Do A.".into(),
             depends_on: Vec::new(),
             issue_id: None,
@@ -283,6 +297,8 @@ fn tasks_abc() -> Vec<PlanTask> {
         PlanTask {
             task_id: "b".into(),
             agent: "claude-code-acp".into(),
+            model: None,
+            effort: None,
             task: "Do B.".into(),
             depends_on: vec!["a".into()],
             issue_id: None,
@@ -292,6 +308,8 @@ fn tasks_abc() -> Vec<PlanTask> {
         PlanTask {
             task_id: "c".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Do C.".into(),
             depends_on: vec!["b".into()],
             issue_id: None,
@@ -359,6 +377,8 @@ fn build_entries_does_not_overwrite_existing_issue_id() {
     let tasks = vec![PlanTask {
         task_id: "a".into(),
         agent: "claude-code-acp".into(),
+        model: None,
+        effort: None,
         task: "Do A.".into(),
         depends_on: Vec::new(),
         // pre-existing source-issue reference

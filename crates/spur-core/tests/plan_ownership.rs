@@ -54,6 +54,8 @@ fn one_task() -> Vec<PlanTask> {
     vec![PlanTask {
         task_id: "t1".into(),
         agent: "codex".into(),
+        model: None,
+        effort: None,
         task: "Task".into(),
         depends_on: vec![],
         issue_id: None,

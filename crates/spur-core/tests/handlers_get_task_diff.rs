@@ -92,6 +92,8 @@ fn make_plan_with_cached_result(plan_id: &str) -> PlanState {
             spec: PlanTask {
                 task_id: "task-cached".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "do thing".into(),
                 depends_on: vec![],
                 issue_id: None,
@@ -126,6 +128,8 @@ fn make_plan_needing_recovery(plan_id: &str) -> PlanState {
             spec: PlanTask {
                 task_id: "task-recover".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "do thing".into(),
                 depends_on: vec![],
                 issue_id: Some("issue-task".into()),
@@ -330,6 +334,8 @@ fn plan_with_in_memory_history() -> PlanState {
             spec: PlanTask {
                 task_id: "task-h".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "do thing".into(),
                 depends_on: vec![],
                 issue_id: None,
