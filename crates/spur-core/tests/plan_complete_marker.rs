@@ -26,6 +26,7 @@ fn minimal_tasks() -> Vec<PlanTask> {
         PlanTask {
             task_id: "t1".into(),
             agent: "claude-code-acp".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -38,6 +39,7 @@ fn minimal_tasks() -> Vec<PlanTask> {
         PlanTask {
             task_id: "t2".into(),
             agent: "claude-code-acp".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,

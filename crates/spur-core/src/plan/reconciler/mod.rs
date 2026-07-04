@@ -386,7 +386,7 @@ fn expected_plan_id_from_audits(
 fn expected_plan_task_id_from_audits(
     audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
 ) -> Option<String> {
-    if let Some((task_id, _, _, _, _)) = crate::plan::projector::latest_task_spec(audits) {
+    if let Some((task_id, _, _, _, _, _)) = crate::plan::projector::latest_task_spec(audits) {
         return Some(task_id);
     }
     use crate::plan::audit_sentinel::AuditSentinelKind;
@@ -1489,7 +1489,7 @@ impl Reconciler {
             let request = crate::DelegationRequest {
                 id: delegation_id.clone().into(),
                 agent: task.spec.agent.clone(),
-                profile: None,
+                profile: task.spec.profile.clone(),
                 model: task.spec.model.clone(),
                 effort: task.spec.effort.clone(),
                 config_overrides: task.spec.config_overrides.clone(),

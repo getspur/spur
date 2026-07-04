@@ -431,6 +431,11 @@ fn submit_plan_def() -> ToolDefinition {
                                 "type": "string",
                                 "description": "Worker agent to execute this task"
                             },
+                            "profile": {
+                                "type": "string",
+                                "description": "Named agent profile from `.spur/agents/<name>.md` (or a pass-through agent/mode name the worker binary already knows). Materialized into the worker worktree and selected on the fresh session; fail-soft on selection.",
+                                "default": null
+                            },
                             "model": {
                                 "type": "string",
                                 "description": "Override the worker's model (config-option value id, e.g. \"gpt-5-codex\"). Fail-soft if the agent rejects it.",

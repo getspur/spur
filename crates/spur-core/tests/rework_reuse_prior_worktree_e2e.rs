@@ -442,6 +442,7 @@ async fn validation_rejects_reuse_without_worker_branch() {
             spec: PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -509,6 +510,7 @@ async fn replay_determinism_preserves_reuse_prior_worktree_in_projection() {
         &[PlanTask {
             task_id: "T1".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,

@@ -22,6 +22,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
         PlanTask {
             task_id: "a".into(),
             agent: "claude-code-acp".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -34,6 +35,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
         PlanTask {
             task_id: "b".into(),
             agent: "claude-code-acp".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -48,6 +50,7 @@ fn sample_tasks(with_c: bool) -> Vec<PlanTask> {
         v.push(PlanTask {
             task_id: "c".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -136,6 +139,7 @@ fn cycle_produces_error() {
         PlanTask {
             task_id: "a".into(),
             agent: "x".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -148,6 +152,7 @@ fn cycle_produces_error() {
         PlanTask {
             task_id: "b".into(),
             agent: "x".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -208,6 +213,7 @@ async fn review_approve_releases_plan_lock_before_beads_io() {
             spec: spur_core::plan::PlanTask {
                 task_id: "t1".into(),
                 agent: "a".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -292,6 +298,7 @@ fn tasks_abc() -> Vec<PlanTask> {
         PlanTask {
             task_id: "a".into(),
             agent: "claude-code-acp".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -304,6 +311,7 @@ fn tasks_abc() -> Vec<PlanTask> {
         PlanTask {
             task_id: "b".into(),
             agent: "claude-code-acp".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -316,6 +324,7 @@ fn tasks_abc() -> Vec<PlanTask> {
         PlanTask {
             task_id: "c".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -386,6 +395,7 @@ fn build_entries_does_not_overwrite_existing_issue_id() {
     let tasks = vec![PlanTask {
         task_id: "a".into(),
         agent: "claude-code-acp".into(),
+        profile: None,
         model: None,
         effort: None,
         config_overrides: None,
