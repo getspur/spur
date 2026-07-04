@@ -30,6 +30,7 @@ async fn create_persisted_plan(
         agent: "codex".into(),
         model: None,
         effort: None,
+        config_overrides: None,
         task: format!("Task for {plan_id}"),
         depends_on: Vec::new(),
         issue_id: None,
