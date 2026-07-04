@@ -19,7 +19,7 @@ Today a worker's *identity* (system prompt, persona, tool posture) is fixed by w
 
 This spec adds the smallest end-to-end path that:
 
-1. establishes **one canonical profile format** — Claude agent markdown — stored in `.spur/profiles/<name>.md`,
+1. establishes **one canonical profile format** — Claude agent markdown — stored in `.spur/agents/<name>.md`,
 2. accepts an optional `profile` field on `delegate_to_worker` / `delegate_parallel` / `submit_plan` task entries, carried exactly like m11's `model`/`effort` (structured field, never a beads label),
 3. **materializes** the profile into the worker worktree in the worker kind's native format, as an ephemeral git-invisible overlay,
 4. **selects** the profile on the fresh worker session via the per-kind strategy verified by the probes, fail-soft.
@@ -65,13 +65,13 @@ This spec adds the smallest end-to-end path that:
 
 | # | Question | Choice | Rationale |
 |---|---|---|---|
-| D1 | Canonical format | **Claude agent markdown**, stored in `.spur/profiles/<name>.md`. | §3.2. Canonical source lives under `.spur/` (like `.spur/skills/`) rather than `.claude/agents/` directly, so SPUR profiles don't pollute the user's interactive claude sessions and the SPUR-managed set is unambiguous. |
+| D1 | Canonical format | **Claude agent markdown**, stored in `.spur/agents/<name>.md`. | §3.2. Canonical source lives under `.spur/` (like `.spur/skills/`) rather than `.claude/agents/` directly, so SPUR profiles don't pollute the user's interactive claude sessions and the SPUR-managed set is unambiguous. |
 | D2 | How the override enters the system | **`profile: Option<String>` on `DelegationRequest` and plan task entries**, mirroring m11 `model`/`effort` exactly. | Same D1–D3 rationale as the m11 spec: label-grammar-safe, schema-discoverable, serde-clean. |
 | D3 | Selection mechanism | **Post-session RPCs only in v1** (`set_config_option` / `set_mode`), applied in the same lifecycle slot as m11. | Probe-verified on claude/opencode/kiro; requires zero argv plumbing; one code path, one fail-soft contract. |
-| D4 | Materialization vs selection coupling | **Orthogonal.** If `.spur/profiles/<name>.md` exists → materialize + select. If not → select-only pass-through. | The probes showed target tools discover agents from other sources too (user-committed files, plugins). A brain may select `superpowers:code-reviewer` on claude without SPUR owning the definition. |
+| D4 | Materialization vs selection coupling | **Orthogonal.** If `.spur/agents/<name>.md` exists → materialize + select. If not → select-only pass-through. | The probes showed target tools discover agents from other sources too (user-committed files, plugins). A brain may select `superpowers:code-reviewer` on claude without SPUR owning the definition. |
 | D5 | Git invisibility of materialized files | **Per-worktree exclude:** `extensions.worktreeConfig` + `core.excludesFile` in the worktree's `config.worktree`, pointing at a spur-written exclude list enumerating exactly the injected paths. | Ignored files are invisible to `status --porcelain`, `add -A`, and `diff` — neutralizes every leak path in §3.1 with zero changes to `finalize_worker_branch`, and survives `clean -fd` scrubs. Shared `info/exclude` rejected: leaks patterns into the main checkout and races concurrent delegations. |
 | D6 | Ordering | **Materialize after `apply_overlays`, before the connection is built.** | Overlay-conflict handling scrubs with `clean -fd`, which would delete not-yet-excluded files; the agent process must find files on disk before session create. |
-| D7 | Unknown profile at submit | **Hard error at the MCP tool layer when the profile is neither in `.spur/profiles/` nor explicitly marked pass-through by existing on no side.** Concretely: tool accepts any string; dispatch logs `info!` distinguishing `materialized` vs `pass-through`. Apply-time rejection stays fail-soft. | A typo'd profile silently running the default persona is worse than a rejected dispatch, but hard-failing pass-through selection would break D4. The compromise: validate existence only for the materialization half; selection remains fail-soft with a `warn!` (same contract as m11 D6). |
+| D7 | Unknown profile at submit | **Hard error at the MCP tool layer when the profile is neither in `.spur/agents/` nor explicitly marked pass-through by existing on no side.** Concretely: tool accepts any string; dispatch logs `info!` distinguishing `materialized` vs `pass-through`. Apply-time rejection stays fail-soft. | A typo'd profile silently running the default persona is worse than a rejected dispatch, but hard-failing pass-through selection would break D4. The compromise: validate existence only for the materialization half; selection remains fail-soft with a `warn!` (same contract as m11 D6). |
 | D8 | Profile frontmatter `model:` / SPUR-extension `effort:` | **Act as defaults, not overrides:** effective model = request `model` ▸ profile `model` ▸ agent default (same for effort), resolved before the existing m11 helper runs. | One precedence rule, no new apply mechanism; the m11 helper stays the single writer of model/effort. Claude ignores unknown frontmatter keys, so an `effort:` extension keeps the file claude-loadable. |
 | D9 | Where the per-kind strategy lives | **`ProfileStrategy` derived from `AgentKind` with optional `[agents.entries.profile]` config override** (`select = "config_option:agent" \| "config_option:mode" \| "session_mode" \| "none"`, `materialize = "claude_md" \| "opencode_md" \| "kiro_json" \| "codex_toml" \| "none"`). | Defaults encode the probe matrix; config override absorbs upstream adapter changes (e.g. codex gaining an `agent` option) without a code release — consistent with how `AgentConfig` already declares permissions/commands wiring. |
 | D10 | License/feature gate | **No.** | Mirrors m11 D8: no new RPC, no new cost surface. |
@@ -95,7 +95,7 @@ delegate_to_worker(
                                      run_one_worker_attempt
                                        create worktree → apply_overlays        (existing)
                                        ── NEW: materialize_profile(kind, profile)
-                                             .spur/profiles/code-reviewer.md
+                                             .spur/agents/code-reviewer.md
                                                → <worktree>/.claude/agents/code-reviewer.md
                                              + per-worktree exclude entry
                                        spawn → initialize → new_session(cwd=worktree)
@@ -111,7 +111,7 @@ delegate_to_worker(
 
 1. **`crates/spur-core/src/delegation_types.rs`** — add `profile: Option<String>` to `DelegationRequest`.
 2. **`crates/spur-core/src/mcp/delegation.rs` + `tool_schemas.rs`** — accept/document optional `profile` on `delegate_to_worker`, `delegate_parallel.tasks[]`, `submit_plan.tasks[]`.
-3. **`crates/spur-core/src/profiles/` (NEW module)** — canonical parser (frontmatter + body, reusing `skills/frontmatter.rs` machinery) and per-kind renderers (`claude_md` verbatim, `opencode_md`, `kiro_json`, `codex_toml`), each emitting the SPUR-MANAGED marker.
+3. **`crates/spur-core/src/agent_profiles/` (NEW module)** — canonical parser (frontmatter + body, reusing `skills/frontmatter.rs` machinery) and per-kind renderers (`claude_md` verbatim, `opencode_md`, `kiro_json`, `codex_toml`), each emitting the SPUR-MANAGED marker.
 4. **`crates/spur-worktree/src/manager.rs`** — `add_worktree_excludes(worktree, paths)`: enables `extensions.worktreeConfig` (idempotent, repo-level once) and writes the per-worktree exclude file.
 5. **`crates/spur-core/src/orchestrator/delegation/worker_attempt.rs`** — materialization call between overlay apply and connection build; generalize `apply_model_effort_override` → `apply_session_overrides` adding the profile-selection arm (config-option or set-mode per strategy), profile first, then model/effort.
 6. **`crates/spur-acp/src/config/mod.rs`** — optional `[agents.entries.profile]` block (D9); `AgentKind → ProfileStrategy` defaults.
@@ -154,7 +154,7 @@ delegate_to_worker(
 - **Prompt-plane fallback** for kinds with no surface (kimi), config-gated.
 - **Audit sentinel extension** — record applied `profile` (and m11 model/effort) on the `[[spur-audit v1]]` dispatch record.
 - **TUI session-detail surfacing** of the applied persona.
-- **`spur profiles` CLI** — list/validate/import (e.g. ingest an existing `.claude/agents/*.md` into `.spur/profiles/`).
+- **`spur agents` CLI** — list/validate/import (e.g. ingest an existing `.claude/agents/*.md` into `.spur/agents/`).
 - **Seed bump** — `seed_agents.toml` still pins claude-agent-acp 0.33.1 and deprecated `@zed-industries/codex-acp`; live config runs 0.54.1 / `@agentclientprotocol/codex-acp@1.0.2`.
 
 ## 9. Glossary
