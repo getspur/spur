@@ -519,7 +519,7 @@ const GRAPH_POINTER_RELATIVE_PATH: &str = ".spur/graph-index.pointer.json";
 const GRAPH_GIT_METADATA_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_GRAPH_REBUILD_LATENCY_BUDGET: Duration = Duration::from_millis(750);
 const COLD_OPEN_GRAPH_REBUILD_TIMEOUT: Duration = Duration::from_secs(120);
-const INCREMENTAL_FAILURES_BEFORE_FULL_REBUILD: u32 = 3;
+pub const INCREMENTAL_FAILURES_BEFORE_FULL_REBUILD: u32 = 3;
 const MARKDOWN_OVERLAY_EXTENSIONS: &[&str] = &["md", "markdown"];
 
 tokio::task_local! {

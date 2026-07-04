@@ -1,4 +1,3 @@
-#[cfg(feature = "embed")]
 use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
@@ -24,6 +23,10 @@ use spur_graph::{
 };
 use spur_graph::{resolve_worktree_root_from, EMBEDDING_VECTOR_DIMENSIONS};
 
+use super::overlay::{
+    open_worktree_overlay, overlay_rebuild_key_for_dirty_worktree,
+    shared_overlay_session_coordinator, write_delta_for_session, OverlayMergeSession,
+};
 use super::McpHandlerError;
 
 const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
@@ -233,11 +236,12 @@ pub async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerE
     }
 
     let query_vec = embed_query(&request.base.query).await.map(Vec::from);
-    let conn = open_pack_connection(&db_path, "knowledge_context_pack_2")?;
+    let pack_connection =
+        open_pack_connection_with_overlay(&db_path, "knowledge_context_pack_2").await?;
     let query_result = query_candidates_for_request_with_conn(
         &request.base,
         &db_path,
-        &conn,
+        pack_connection.candidate_conn(),
         "knowledge_context_pack_2",
         query_vec,
     )?;
@@ -248,14 +252,16 @@ pub async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerE
         &query_result,
         &exact_context,
         &db_path,
-        &conn,
+        pack_connection.graph_conn(),
     );
-    drop(conn);
-    Ok(pack_query_result_v2_with_graph_sections(
+    let staleness = pack_connection.staleness.clone();
+    drop(pack_connection);
+    Ok(pack_query_result_v2_with_graph_sections_and_staleness(
         &request,
         query_result,
         exact_context,
         graph_sections,
+        staleness,
     )
     .await)
 }
@@ -273,6 +279,143 @@ fn open_pack_connection(
     load_analyst_icu_extension(&conn);
     load_analyst_lance_extension(&conn);
     Ok(conn)
+}
+
+#[derive(Clone, Debug)]
+struct PackStaleness {
+    delta_applied: bool,
+    algo_as_of: Option<String>,
+}
+
+impl PackStaleness {
+    fn base_only(algo_as_of: Option<String>) -> Self {
+        Self {
+            delta_applied: false,
+            algo_as_of,
+        }
+    }
+
+    fn from_session(session: &OverlayMergeSession) -> Self {
+        Self {
+            delta_applied: session.delta_applied(),
+            algo_as_of: session.algo_as_of().map(str::to_owned),
+        }
+    }
+
+    fn default_for_result(result: &KnowledgeQueryResult) -> Self {
+        Self::base_only(result.graph_content_hash.clone())
+    }
+}
+
+struct PackConnection {
+    base_conn: duckdb::Connection,
+    overlay_conn: Option<duckdb::Connection>,
+    staleness: PackStaleness,
+}
+
+impl PackConnection {
+    fn candidate_conn(&self) -> &duckdb::Connection {
+        &self.base_conn
+    }
+
+    fn graph_conn(&self) -> &duckdb::Connection {
+        self.overlay_conn.as_ref().unwrap_or(&self.base_conn)
+    }
+}
+
+async fn open_pack_connection_with_overlay(
+    db_path: &Path,
+    tool_name: &str,
+) -> Result<PackConnection, McpHandlerError> {
+    let base_conn = open_pack_connection(db_path, tool_name)?;
+    let base_graph_hash = graph_content_hash_from_conn(&base_conn);
+    let mut staleness = PackStaleness::base_only(base_graph_hash.clone());
+
+    let overlay_session = overlay_session_for_current_worktree(db_path, base_graph_hash).await;
+    let overlay_conn = match overlay_session.as_ref().and_then(|session| {
+        session
+            .delta_dir()
+            .map(|delta_dir| (session.base_db_path(), delta_dir))
+    }) {
+        Some((base_path, delta_dir)) => match open_worktree_overlay(base_path, delta_dir) {
+            Ok(conn) => {
+                load_analyst_icu_extension(&conn);
+                load_analyst_lance_extension(&conn);
+                staleness = overlay_session
+                    .as_ref()
+                    .map(|session| PackStaleness::from_session(session))
+                    .unwrap_or_else(|| PackStaleness::base_only(staleness.algo_as_of.clone()));
+                Some(conn)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    delta_dir = %delta_dir.display(),
+                    "failed to open analyst worktree overlay; serving base analyst DB"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    if overlay_conn.is_none() {
+        if let Some(session) = overlay_session.as_ref() {
+            staleness = PackStaleness {
+                delta_applied: false,
+                algo_as_of: session.algo_as_of().map(str::to_owned),
+            };
+        }
+    }
+
+    Ok(PackConnection {
+        base_conn,
+        overlay_conn,
+        staleness,
+    })
+}
+
+async fn overlay_session_for_current_worktree(
+    db_path: &Path,
+    base_graph_hash: Option<String>,
+) -> Option<Arc<OverlayMergeSession>> {
+    let worktree = current_repo_root().ok()?;
+    let seed = spur_graph::cache::load_base_seed_for_worktree(&worktree)?;
+    let rebuild_key = overlay_rebuild_key_for_dirty_worktree(&worktree)?;
+    let coordinator = shared_overlay_session_coordinator();
+    let artifact = Arc::clone(&seed.artifact);
+    let build_worktree = worktree.clone();
+    let build_key = rebuild_key.clone();
+
+    Some(
+        coordinator
+            .get_or_build_session(
+                worktree,
+                rebuild_key,
+                db_path.to_path_buf(),
+                base_graph_hash,
+                move |mode| {
+                    let artifact = Arc::clone(&artifact);
+                    let worktree = build_worktree.clone();
+                    let key = build_key.clone();
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            write_delta_for_session(&worktree, &key, &artifact, mode)
+                        })
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("analyst overlay delta task failed: {error}")
+                        })?
+                    }
+                },
+            )
+            .await,
+    )
+}
+
+fn graph_content_hash_from_conn(conn: &duckdb::Connection) -> Option<String> {
+    conn.query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
+        .ok()
 }
 
 fn query_candidates_for_request_with_conn(
@@ -1294,6 +1437,17 @@ async fn pack_query_result_with_exact_context(
     result: KnowledgeQueryResult,
     exact_context: ExactGraphContext,
 ) -> Value {
+    let staleness = PackStaleness::default_for_result(&result);
+    pack_query_result_with_exact_context_and_staleness(request, result, exact_context, staleness)
+        .await
+}
+
+async fn pack_query_result_with_exact_context_and_staleness(
+    request: &KnowledgeContextPackRequest,
+    result: KnowledgeQueryResult,
+    exact_context: ExactGraphContext,
+    pack_staleness: PackStaleness,
+) -> Value {
     let (mut primary_evidence, supporting_docs) = split_evidence(&result.candidates, request);
     let total_candidates = result.candidates.len();
     let total_code = result
@@ -1370,7 +1524,7 @@ async fn pack_query_result_with_exact_context(
         }
     };
     let impact = aggregate_impact_value(&exact_context.impacts);
-    let staleness = staleness_value(&result, &exact_context);
+    let staleness = staleness_value(&result, &exact_context, &pack_staleness);
     let mut pack = base_pack(request, result.graph_content_hash.clone(), staleness);
     let returned_primary = primary_evidence.len();
     let returned_supporting_docs = supporting_docs.len();
@@ -1417,13 +1571,38 @@ async fn pack_query_result_v2_with_graph_reasoning(
     pack_query_result_v2_with_graph_sections(request, result, exact_context, graph_sections).await
 }
 
+#[cfg(test)]
 async fn pack_query_result_v2_with_graph_sections(
     request: &KnowledgeContextPackV2Request,
     result: KnowledgeQueryResult,
     exact_context: ExactGraphContext,
     graph_sections: GraphReasoningSections,
 ) -> Value {
-    let mut pack = pack_query_result_with_exact_context(&request.base, result, exact_context).await;
+    let staleness = PackStaleness::default_for_result(&result);
+    pack_query_result_v2_with_graph_sections_and_staleness(
+        request,
+        result,
+        exact_context,
+        graph_sections,
+        staleness,
+    )
+    .await
+}
+
+async fn pack_query_result_v2_with_graph_sections_and_staleness(
+    request: &KnowledgeContextPackV2Request,
+    result: KnowledgeQueryResult,
+    exact_context: ExactGraphContext,
+    graph_sections: GraphReasoningSections,
+    staleness: PackStaleness,
+) -> Value {
+    let mut pack = pack_query_result_with_exact_context_and_staleness(
+        &request.base,
+        result,
+        exact_context,
+        staleness,
+    )
+    .await;
     insert_v2_sections(&mut pack, graph_sections);
     pack
 }
@@ -1942,7 +2121,11 @@ fn confidence_score_thresholds(grounding: Option<&str>) -> (f64, f64) {
     }
 }
 
-fn staleness_value(result: &KnowledgeQueryResult, exact_context: &ExactGraphContext) -> Value {
+fn staleness_value(
+    result: &KnowledgeQueryResult,
+    exact_context: &ExactGraphContext,
+    pack_staleness: &PackStaleness,
+) -> Value {
     let analyst_hash = result.graph_content_hash.clone();
     let exact_hash = exact_context.graph_content_hash.clone();
     let analyst_matches_exact_graph = analyst_matches_exact_graph(result, exact_context)
@@ -1958,6 +2141,8 @@ fn staleness_value(result: &KnowledgeQueryResult, exact_context: &ExactGraphCont
         "exact_graph_verified": exact_context.graph_content_hash.is_some(),
         "analyst_matches_exact_graph": analyst_matches_exact_graph,
         "response_file_oids_match": exact_context.response_file_oids_match,
+        "delta_applied": pack_staleness.delta_applied,
+        "algo_as_of": pack_staleness.algo_as_of.clone(),
         "exact_graph_note": "Exact graph tools remain the source-of-truth follow-up for current working tree source and impact."
     })
 }
@@ -2307,6 +2492,12 @@ mod tests {
         _temp_dir: tempfile::TempDir,
         db_path: PathBuf,
         query_vec: Vec<f32>,
+    }
+
+    struct OverlayPackFixture {
+        _temp_dir: tempfile::TempDir,
+        repo: PathBuf,
+        base_hash: String,
     }
 
     #[test]
@@ -3208,6 +3399,183 @@ mod tests {
         (temp_dir, repo)
     }
 
+    fn kcp2_overlay_fixture_repo(force_delta_failure: bool) -> OverlayPackFixture {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let repo = temp_dir.path().join("repo");
+        write_minimal_graph_fixture(
+            &repo,
+            r#"
+pub fn dispatch_approval_evidence() -> &'static str {
+    "base"
+}
+"#,
+        );
+        fs::create_dir_all(repo.join(".spur")).expect("create .spur");
+
+        let facts = build_facts(&repo, None).expect("build base graph facts").0;
+        let artifact = artifact_from_facts(&facts, &repo).expect("build base graph artifact");
+        let base_hash = artifact.graph_content_hash.clone();
+        write_graph_artifact_for_test(&repo, &artifact);
+        commit_fixture(&repo);
+
+        let artifact_dir = repo.join(".spur/graph/test-artifact.parquet");
+        let db_path = repo.join(".spur").join("analyst.duckdb");
+        seed_overlay_pack_analyst_db(&db_path, &artifact_dir, &base_hash);
+
+        fs::write(
+            repo.join("src/lib.rs"),
+            r#"
+pub fn dispatch_approval_evidence() -> &'static str {
+    "dirty"
+}
+"#,
+        )
+        .expect("dirty fixture source");
+
+        if force_delta_failure {
+            fs::write(repo.join(".spur/analyst-overlays"), b"not a directory")
+                .expect("force delta output path failure");
+        }
+
+        OverlayPackFixture {
+            _temp_dir: temp_dir,
+            repo,
+            base_hash,
+        }
+    }
+
+    fn seed_overlay_pack_analyst_db(db_path: &Path, artifact_dir: &Path, graph_hash: &str) {
+        let conn = Connection::open(db_path).expect("open overlay pack fixture db");
+        conn.execute_batch(
+            "INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;",
+        )
+        .expect("load overlay pack fixture extensions");
+        let artifact_dir = sql_escape_path(artifact_dir);
+        let graph_hash = sql_escape_literal(graph_hash);
+        conn.execute_batch(&format!(
+            r#"
+            CREATE TABLE _meta (graph_content_hash VARCHAR);
+            INSERT INTO _meta VALUES ('{graph_hash}');
+
+            CREATE OR REPLACE TABLE node_dense_id_map AS
+            WITH referenced_ids AS (
+              SELECT stable_symbol_id FROM read_parquet('{artifact_dir}/nodes.parquet')
+              UNION
+              SELECT source_stable_id AS stable_symbol_id FROM read_parquet('{artifact_dir}/edges.parquet')
+              UNION
+              SELECT target_stable_id FROM read_parquet('{artifact_dir}/edges.parquet')
+              UNION
+              SELECT source_stable_id FROM read_parquet('{artifact_dir}/edges_by_dst.parquet')
+              UNION
+              SELECT target_stable_id FROM read_parquet('{artifact_dir}/edges_by_dst.parquet')
+              UNION
+              SELECT source_stable_id FROM read_parquet('{artifact_dir}/edges_unresolved.parquet')
+            )
+            SELECT
+              stable_symbol_id,
+              ROW_NUMBER() OVER (ORDER BY stable_symbol_id) AS dense_id
+            FROM (
+              SELECT DISTINCT stable_symbol_id
+              FROM referenced_ids
+              WHERE stable_symbol_id IS NOT NULL
+            );
+
+            CREATE OR REPLACE VIEW nodes AS
+            SELECT n.* REPLACE (m.dense_id AS node_id)
+            FROM read_parquet('{artifact_dir}/nodes.parquet') n
+            JOIN node_dense_id_map m USING (stable_symbol_id);
+
+            CREATE OR REPLACE VIEW edges AS
+            SELECT e.* REPLACE (
+              s.dense_id AS src_id,
+              d.dense_id AS dst_id
+            )
+            FROM read_parquet('{artifact_dir}/edges.parquet') e
+            JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id
+            JOIN node_dense_id_map d ON d.stable_symbol_id = e.target_stable_id;
+
+            CREATE OR REPLACE VIEW edges_by_dst AS
+            SELECT e.* REPLACE (
+              s.dense_id AS src_id,
+              d.dense_id AS dst_id
+            )
+            FROM read_parquet('{artifact_dir}/edges_by_dst.parquet') e
+            JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id
+            JOIN node_dense_id_map d ON d.stable_symbol_id = e.target_stable_id;
+
+            CREATE OR REPLACE VIEW edges_unresolved AS
+            SELECT e.* REPLACE (s.dense_id AS src_id)
+            FROM read_parquet('{artifact_dir}/edges_unresolved.parquet') e
+            JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id;
+
+            CREATE OR REPLACE VIEW files AS
+            SELECT *
+            FROM read_parquet('{artifact_dir}/files.parquet');
+
+            CREATE OR REPLACE VIEW file_manifests AS
+            SELECT *
+            FROM read_parquet('{artifact_dir}/file_manifests.parquet');
+
+            CREATE OR REPLACE VIEW tombstones AS
+            SELECT *
+            FROM read_parquet('{artifact_dir}/tombstones.parquet');
+
+            CREATE TABLE sections_search (
+                stable_symbol_id VARCHAR,
+                qualified_name VARCHAR,
+                file_path VARCHAR,
+                heading_level INTEGER,
+                content_hash VARCHAR,
+                body_text VARCHAR
+            );
+
+            CREATE TABLE symbol_text AS
+            SELECT stable_symbol_id,
+                   entity_name,
+                   qualified_name,
+                   file_path,
+                   symbol_kind,
+                   entity_name || ' dispatch approval evidence' AS doc_text
+            FROM nodes
+            WHERE symbol_kind = 'function';
+
+            CREATE TABLE v_symbol_scorecard AS
+            SELECT stable_symbol_id,
+                   entity_name,
+                   qualified_name,
+                   symbol_kind,
+                   file_path,
+                   0.42::DOUBLE AS pagerank,
+                   0::BIGINT AS in_degree,
+                   0::BIGINT AS out_degree,
+                   0::BIGINT AS callers,
+                   0::BIGINT AS importers,
+                   0::BIGINT AS inbound_total,
+                   0::BIGINT AS churn_90d,
+                   NULL::TIMESTAMP AS last_touched,
+                   0.0::DOUBLE AS blast_radius_score,
+                   'fixture' AS posture
+            FROM symbol_text;
+
+            CREATE TABLE v_symbol_inbound AS
+            SELECT stable_symbol_id, 0::BIGINT AS callers
+            FROM symbol_text;
+            "#
+        ))
+        .expect("create overlay pack fixture schema");
+        conn.execute_batch(
+            r#"
+            PRAGMA create_fts_index('main.sections_search', 'stable_symbol_id', 'body_text', overwrite=1, stemmer='porter');
+            PRAGMA create_fts_index('main.symbol_text', 'stable_symbol_id', 'doc_text', overwrite=1);
+            "#,
+        )
+        .expect("create overlay pack fixture fts indexes");
+        let macro_sql = context_candidate_macro_sql();
+        conn.execute_batch(&macro_sql)
+            .expect("define overlay pack fixture context search macro");
+        drop(conn);
+    }
+
     fn context_candidate_macro_sql() -> String {
         INIT_SEARCH_SQL
             .split("CREATE OR REPLACE MACRO search_context_candidates(q, requested_scope, intent) AS TABLE")
@@ -3289,6 +3657,10 @@ mod tests {
 
     fn sql_escape_path(path: &Path) -> String {
         path.display().to_string().replace('\'', "''")
+    }
+
+    fn sql_escape_literal(value: &str) -> String {
+        value.replace('\'', "''")
     }
 
     fn env_lock() -> MutexGuard<'static, ()> {
@@ -3930,6 +4302,118 @@ pub fn lexical_signal_anchor() {
         assert_eq!(pack["community_context"], json!([]));
         assert_eq!(pack["temporal_context"], json!([]));
         assert_eq!(pack["caveats"], json!([]));
+        assert_eq!(pack["staleness"]["delta_applied"], false);
+        assert_eq!(pack["staleness"]["algo_as_of"], "fixture-hash");
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_staleness_reports_overlay_session_state() {
+        let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
+        let request = KnowledgeContextPackV2Request::parse(&json!({
+            "query": "semantic search",
+            "intent": "review",
+            "scope": "code",
+            "graph_reasoning": {
+                "paths": false,
+                "communities": false,
+                "risk": false
+            }
+        }))
+        .expect("request");
+        let result = KnowledgeQueryResult {
+            db_path: db_path.display().to_string(),
+            graph_content_hash: Some("fixture-hash".into()),
+            candidates: vec![candidate(Some("sym-one"), "symbol_one", 7.5)],
+        };
+        let exact_context = ExactGraphContext {
+            graph_content_hash: Some("fixture-hash".into()),
+            response_file_oids_match: Some(true),
+            impacts: Vec::new(),
+        };
+
+        let delta_pack = pack_query_result_v2_with_graph_sections_and_staleness(
+            &request,
+            result.clone(),
+            exact_context.clone(),
+            GraphReasoningSections::default(),
+            PackStaleness {
+                delta_applied: true,
+                algo_as_of: Some("fixture-hash".to_owned()),
+            },
+        )
+        .await;
+
+        assert_eq!(delta_pack["staleness"]["delta_applied"], true);
+        assert_eq!(delta_pack["staleness"]["algo_as_of"], "fixture-hash");
+
+        let degraded_pack = pack_query_result_v2_with_graph_sections_and_staleness(
+            &request,
+            result,
+            exact_context,
+            GraphReasoningSections::default(),
+            PackStaleness {
+                delta_applied: false,
+                algo_as_of: Some("fixture-hash".to_owned()),
+            },
+        )
+        .await;
+
+        assert_eq!(degraded_pack["staleness"]["delta_applied"], false);
+        assert_eq!(degraded_pack["staleness"]["algo_as_of"], "fixture-hash");
+    }
+
+    #[tokio::test]
+    async fn knowledge_context_pack_2_reports_overlay_staleness_end_to_end() {
+        let _lock = async_env_lock().await;
+        let _embed_guard = disable_embed_query_for_test();
+
+        let happy = kcp2_overlay_fixture_repo(false);
+        let happy_pack =
+            spur_graph::mcp::with_worktree_root_for_request(happy.repo.clone(), async {
+                knowledge_context_pack_2(&json!({
+                    "query": "dispatch approval evidence",
+                    "intent": "review",
+                    "scope": "code",
+                    "limit": 5,
+                    "graph_reasoning": {
+                        "paths": false,
+                        "communities": false,
+                        "risk": false
+                    }
+                }))
+                .await
+            })
+            .await
+            .expect("happy overlay pack response");
+
+        assert!(happy_pack.get("error").is_none(), "{happy_pack:#}");
+        assert_eq!(happy_pack["staleness"]["available"], true);
+        assert_eq!(happy_pack["staleness"]["delta_applied"], true);
+        assert_eq!(happy_pack["staleness"]["algo_as_of"], happy.base_hash);
+
+        let degraded = kcp2_overlay_fixture_repo(true);
+        let degraded_pack =
+            spur_graph::mcp::with_worktree_root_for_request(degraded.repo.clone(), async {
+                knowledge_context_pack_2(&json!({
+                    "query": "dispatch approval evidence",
+                    "intent": "review",
+                    "scope": "code",
+                    "limit": 5,
+                    "graph_reasoning": {
+                        "paths": false,
+                        "communities": false,
+                        "risk": false
+                    }
+                }))
+                .await
+            })
+            .await
+            .expect("degraded overlay pack response");
+
+        assert!(degraded_pack.get("error").is_none(), "{degraded_pack:#}");
+        assert_eq!(degraded_pack["staleness"]["available"], true);
+        assert_eq!(degraded_pack["staleness"]["delta_applied"], false);
+        assert_eq!(degraded_pack["staleness"]["algo_as_of"], degraded.base_hash);
     }
 
     #[tokio::test]
