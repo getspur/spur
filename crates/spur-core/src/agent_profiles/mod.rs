@@ -5,6 +5,8 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+pub mod render;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
     pub name: String,
