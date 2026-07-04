@@ -599,6 +599,8 @@ fn prior_branch_for_reuse_uses_last_attempt_only_when_reuse_requested() {
         spec: crate::plan::PlanTask {
             task_id: "T1".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Task".into(),
             depends_on: vec![],
             issue_id: Some("bd-1".into()),
@@ -1220,7 +1222,7 @@ async fn seed_mock_ready_tasks_plan(
     .await
     .expect("plan submit audit");
     for (issue_id, task_id) in issue_ids.iter().zip(task_ids) {
-        crate::plan::emit_task_spec_audit(adv, issue_id, task_id, "codex", &[])
+        crate::plan::emit_task_spec_audit(adv, issue_id, task_id, "codex", None, None, &[])
             .await
             .expect("task spec audit");
     }
@@ -2275,21 +2277,39 @@ async fn seed_ready_overlay_plan(
     )
     .await
     .expect("plan submit audit");
-    crate::plan::emit_task_spec_audit(adv, &dep_issue_id, "X", "codex", &["x.rs".to_string()])
-        .await
-        .expect("dep task spec audit");
+    crate::plan::emit_task_spec_audit(
+        adv,
+        &dep_issue_id,
+        "X",
+        "codex",
+        None,
+        None,
+        &["x.rs".to_string()],
+    )
+    .await
+    .expect("dep task spec audit");
     crate::plan::emit_task_spec_audit(
         adv,
         &second_dep_issue_id,
         "Z",
         "codex",
+        None,
+        None,
         &["z.rs".to_string()],
     )
     .await
     .expect("second dep task spec audit");
-    crate::plan::emit_task_spec_audit(adv, &ready_issue_id, "Y", "codex", &["y.rs".to_string()])
-        .await
-        .expect("ready task spec audit");
+    crate::plan::emit_task_spec_audit(
+        adv,
+        &ready_issue_id,
+        "Y",
+        "codex",
+        None,
+        None,
+        &["y.rs".to_string()],
+    )
+    .await
+    .expect("ready task spec audit");
 
     for (issue_id, task_id, worker_branch) in [
         (&dep_issue_id, "X", &x_worker_branch),
@@ -3055,6 +3075,8 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
         &[crate::plan::PlanTask {
             task_id: "T1".to_string(),
             agent: "codex".to_string(),
+            model: None,
+            effort: None,
             task: "do work".to_string(),
             depends_on: vec![],
             issue_id: None,
