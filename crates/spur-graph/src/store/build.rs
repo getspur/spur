@@ -15,8 +15,9 @@ use crate::extract::{
     build_facts_for_paths,
     languages::all_supported_extensions,
     tree_sitter::{
-        classify_import_origin, function_singleton_safe, language_family,
-        ImportOriginClassification, ImportWorkspaceIndex,
+        classify_import_origin, function_singleton_safe,
+        is_import_resolution_fallback_candidate_kind, language_family, ImportOriginClassification,
+        ImportWorkspaceIndex,
     },
 };
 use crate::identity::{stable_symbol_id_for_external_path, EXTERNAL_FILE_PATH};
@@ -2120,7 +2121,7 @@ fn is_import_rebind_type_like_candidate_kind(kind: &str) -> bool {
 }
 
 fn is_import_rebind_fallback_candidate_kind(kind: &str) -> bool {
-    matches!(kind, "enum_variant" | "constant")
+    NodeKind::from_discriminator(kind).is_some_and(is_import_resolution_fallback_candidate_kind)
 }
 
 fn same_import_rebind_language(source_file_path: &str, target_file_path: &str) -> bool {
@@ -2529,10 +2530,10 @@ mod tests {
     use super::{
         artifact_from_facts, artifact_from_facts_incremental, buckets_from_artifact,
         compose_artifact, current_symbol_ids_from_buckets, empty_bucket,
-        import_workspace_index_from_buckets, manifest_version_from_query_bytes,
-        rebind_cross_file_edges, rebind_import_edges, rebind_remaining_edges,
-        symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry, ExternalImportRegistry,
-        FileBucket, FileImportIndex, ManifestQueryBytes, RebindTarget,
+        import_workspace_index_from_buckets, is_import_rebind_fallback_candidate_kind,
+        manifest_version_from_query_bytes, rebind_cross_file_edges, rebind_import_edges,
+        rebind_remaining_edges, symbols_by_entity_name_from_buckets, BuildMode, CurrentFileEntry,
+        ExternalImportRegistry, FileBucket, FileImportIndex, ManifestQueryBytes, RebindTarget,
         GRAPH_INDEX_VERSION_TEMPORAL,
     };
     use crate::content_hash::{compute_graph_content_hash, git_blob_oid};
@@ -2543,9 +2544,50 @@ mod tests {
         GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader, GraphNode,
         GraphSymbolArtifact, NodeId, NodeKind, RelationKind, RunId, SourceSpan, SpanId,
     };
+
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
     use tracing::{Event, Id, Metadata, Subscriber};
+
+    #[test]
+    fn import_rebind_fallback_candidate_kind_agrees_with_node_kind_discriminators() {
+        for (kind, expected) in [
+            (NodeKind::Module, false),
+            (NodeKind::Function, false),
+            (NodeKind::Class, false),
+            (NodeKind::Interface, false),
+            (NodeKind::Struct, false),
+            (NodeKind::Impl, false),
+            (NodeKind::Trait, false),
+            (NodeKind::Enum, false),
+            (NodeKind::EnumVariant, true),
+            (NodeKind::File, false),
+            (NodeKind::External, false),
+            (NodeKind::Method, false),
+            (NodeKind::Field, false),
+            (NodeKind::Constant, true),
+            (NodeKind::TypeAlias, false),
+            (NodeKind::Macro, false),
+            (NodeKind::Section, false),
+            (NodeKind::Commit, false),
+            (NodeKind::McpTool, false),
+            (NodeKind::Cell, false),
+            (NodeKind::Port, false),
+            (NodeKind::Resource, false),
+        ] {
+            assert_eq!(
+                is_import_rebind_fallback_candidate_kind(kind.discriminator()),
+                expected,
+                "{kind:?}"
+            );
+            assert_eq!(
+                NodeKind::from_discriminator(kind.discriminator()),
+                Some(kind)
+            );
+        }
+
+        assert!(!is_import_rebind_fallback_candidate_kind("future_kind"));
+    }
 
     #[test]
     fn schema_version_carries_phase_1b_vocabulary() {

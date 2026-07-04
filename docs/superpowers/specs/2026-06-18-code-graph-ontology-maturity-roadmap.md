@@ -70,6 +70,9 @@ A syntax capture should become a new `NodeKind` only when all are true:
 5. It does not create high-cardinality noise that overwhelms exploration.
 6. Existing `NodeKind`, labels, `symbol_kind`, or metadata cannot answer the
    workflow with comparable quality.
+7. Its identity-stability cost is acceptable: re-kinding a symbol severs its
+   temporal lineage because kind is part of the stable-symbol-id hash
+   (`crates/spur-graph/src/identity.rs:54-66`).
 
 If these are not true, keep the capture as one of:
 
@@ -98,6 +101,16 @@ Prefer metadata when the distinction answers "how was this edge produced?".
 Prefer `GraphEdgeKind` when the distinction is a sub-mode of an existing
 predicate. Prefer a new `RelationKind` only when the distinction answers "what
 relationship is this?".
+
+Treat `NodeKind` as the highest-cost carrier. It is hashed into
+`stable_symbol_id` (`crates/spur-graph/src/identity.rs:54-66`), enters resolver
+allowlists, and forces a `SCHEMA_VERSION` bump plus a full rebuild. A new
+`NodeKind` is the last resort: justify it only when the distinction must drive
+resolution or identity - an allowlist, a stable-id boundary, or a
+containment/ownership rule - and no lower-cost carrier (`metadata`,
+`GraphEdgeKind`, `RelationKind`, or label) can satisfy a proven consumer. The
+`Resource` promotion met this bar because HCL address resolution needed a
+resolver allowlist.
 
 ## Candidate Future Symbol Kinds
 
@@ -133,6 +146,10 @@ Existing graph clients need these guarantees:
 - Adding enum variants is a compatibility event. Rust clients with closed enum
   deserializers can fail on unknown variants, so new variants require a graph
   index version or manifest-version bump, release notes, and a migration plan.
+- Kind assignment is a stable contract. Re-kinding an existing symbol severs its
+  temporal lineage/history because kind is part of the `stable_symbol_id` hash
+  (`crates/spur-graph/src/identity.rs:54-66`), so "add now, maybe retract later"
+  is not a neutral choice.
 - Prefer additive metadata or dual emission before splitting a predicate that
   existing queries depend on.
 - Preserve the `contains` lexical spine. Derived semantic relations such as
