@@ -60,6 +60,8 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
         &[PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Implement the feature".into(),
             depends_on: vec![],
             issue_id: None,
@@ -90,6 +92,8 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
             spec: PlanTask {
                 task_id: "t1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Implement the feature".into(),
                 depends_on: Vec::new(),
                 issue_id: Some(task_issue_id.clone()),
