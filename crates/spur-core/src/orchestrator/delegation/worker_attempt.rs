@@ -548,6 +548,14 @@ pub(crate) async fn run_one_worker_attempt(
         });
     }
 
+    if let Some(request_rx) = connection.take_agent_client_request_rx() {
+        crate::notification_pump::spawn_agent_client_request_pump(
+            request_rx,
+            worker_session.clone(),
+            funnel.clone(),
+        );
+    }
+
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
     let init_response = match connection.initialize(init_request).await {
         Ok(response) => response,
