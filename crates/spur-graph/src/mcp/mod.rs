@@ -1019,6 +1019,25 @@ async fn code_graph_backend_response(
         rebuild_coordinator,
         handler,
         GraphRefreshStrategy::OverlayThenRebuild,
+        false,
+    )
+    .await
+}
+
+/// Like [`code_graph_backend_response`], but also accepts
+/// `response_format: "source"` -- the one format only `code_read_symbol`
+/// supports.
+async fn code_graph_backend_response_allowing_source(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
+) -> CodeGraphResult {
+    code_graph_backend_response_with_refresh(
+        args,
+        rebuild_coordinator,
+        handler,
+        GraphRefreshStrategy::OverlayThenRebuild,
+        true,
     )
     .await
 }
@@ -1033,6 +1052,7 @@ async fn code_graph_backend_response_rebuild_only(
         rebuild_coordinator,
         handler,
         GraphRefreshStrategy::RebuildOnly,
+        false,
     )
     .await
 }
@@ -1043,91 +1063,176 @@ enum GraphRefreshStrategy {
     RebuildOnly,
 }
 
+/// Outcome of retrying a code_* lookup against a dirty-worktree overlay or a
+/// full/incremental rebuild.
+enum RefreshOutcome {
+    /// The retry produced a usable, freshness-annotated response body.
+    Fresh(Value),
+    /// The retry got a fresher view (overlay or rebuilt artifact) but the
+    /// handler still errors against it -- more authoritative than whatever
+    /// error (if any) the caller already had.
+    Errored(CodeGraphError),
+    /// The retry could not get a fresher view at all (budget exceeded, or the
+    /// rebuild itself failed). The caller decides what to do with its
+    /// pre-existing body/error.
+    NotRefreshed(RebuildStatus),
+}
+
+/// Shared escalation ladder: try the cheap dirty-file overlay first (when the
+/// strategy allows it), then fall back to a full/incremental rebuild. Used
+/// both when a successful-but-stale response needs refreshing, and when the
+/// handler's first pass returned `Err` (e.g. "not found") against a dirty
+/// worktree, since a brand-new or renamed symbol can look "missing" from the
+/// static base artifact even though it's genuinely present in the worktree.
+#[allow(clippy::too_many_arguments)]
+async fn attempt_refresh(
+    backend: &CodeSearchBackend,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    rebuild_candidate: RebuildCandidate,
+    source: GraphMetadataSource,
+    args: &Value,
+    response_format: ResponseFormat,
+    refresh_strategy: GraphRefreshStrategy,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
+) -> RefreshOutcome {
+    if refresh_strategy == GraphRefreshStrategy::OverlayThenRebuild {
+        match overlay_response_for_backend(
+            backend,
+            &rebuild_candidate,
+            source.clone(),
+            args,
+            response_format,
+            &handler,
+        )
+        .await
+        {
+            Ok(fresh_body) => return RefreshOutcome::Fresh(fresh_body),
+            Err(error) => {
+                tracing::warn!(
+                    target: "spur_graph::mcp",
+                    error = ?error,
+                    "code graph overlay refresh failed; falling back to rebuild"
+                );
+            }
+        }
+    }
+    let rebuild = match backend {
+        CodeSearchBackend::Parquet(_) => {
+            try_rebuild_artifact_from_worktree(Arc::clone(&rebuild_coordinator), rebuild_candidate)
+                .await
+        }
+        CodeSearchBackend::InMemory { artifact, .. } => {
+            try_rebuild_artifact(
+                Arc::clone(&rebuild_coordinator),
+                Arc::clone(artifact),
+                rebuild_candidate,
+                None,
+            )
+            .await
+        }
+    };
+    match rebuild {
+        RebuildAttempt::Fresh(rebuilt_artifact) => {
+            let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
+            match handler(args, &client) {
+                Ok(mut fresh_body) => {
+                    let fresh_files = response_file_set_from_body(&rebuilt_artifact, &fresh_body);
+                    GraphResponseMetadata::analyze_artifact_with_files(
+                        &rebuilt_artifact,
+                        &fresh_files,
+                    )
+                    .await
+                    .metadata
+                    .with_rebuild_status(RebuildStatus::Fresh)
+                    .insert_into_for_format(&mut fresh_body, response_format);
+                    RefreshOutcome::Fresh(fresh_body)
+                }
+                Err(error) => {
+                    RefreshOutcome::Errored(error.with_artifact_metadata(&rebuilt_artifact))
+                }
+            }
+        }
+        RebuildAttempt::StaleBudgetExceeded => {
+            RefreshOutcome::NotRefreshed(RebuildStatus::StaleBudgetExceeded)
+        }
+        RebuildAttempt::StaleRebuildFailed => {
+            RefreshOutcome::NotRefreshed(RebuildStatus::StaleRebuildFailed)
+        }
+    }
+}
+
 async fn code_graph_backend_response_with_refresh(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
     refresh_strategy: GraphRefreshStrategy,
+    allow_source: bool,
 ) -> CodeGraphResult {
-    let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
+    let response_format = ResponseFormat::parse_inner(args, allow_source)
+        .map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
         .await
         .map_err(CodeGraphError::without_metadata)?;
     let source = backend.metadata_source();
-    let mut body = handler(args, backend.client()).map_err(|mut error| {
-        if error.metadata.is_none() && error.temporal_code.is_none() {
-            error.metadata = Some(Box::new(source.clone()));
-        }
-        error
-    })?;
-    let files = backend
-        .response_file_set_from_body(&body)
-        .map_err(CodeGraphError::from)?;
-    let mut analysis =
-        GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files)).await;
 
-    if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
-        if refresh_strategy == GraphRefreshStrategy::OverlayThenRebuild {
-            match overlay_response_for_backend(
+    let (mut body, mut analysis) = match handler(args, backend.client()) {
+        Ok(body) => {
+            let files = backend
+                .response_file_set_from_body(&body)
+                .map_err(CodeGraphError::from)?;
+            let analysis =
+                GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files)).await;
+            (body, analysis)
+        }
+        Err(mut original_error) => {
+            if original_error.metadata.is_none() && original_error.temporal_code.is_none() {
+                original_error.metadata = Some(Box::new(source.clone()));
+            }
+            // The worktree-dirty check is cheap (git rev-parse + git status)
+            // and doesn't need a successful body to run, so a "not found"
+            // response still deserves a chance against the overlay before we
+            // give up -- otherwise a brand-new or renamed symbol that only
+            // exists in an uncommitted edit looks permanently missing.
+            let analysis = GraphResponseMetadata::analyze_source_inner(source.clone(), None).await;
+            let Some(rebuild_candidate) = analysis.rebuild_candidate else {
+                return Err(original_error);
+            };
+            return match attempt_refresh(
                 &backend,
-                &rebuild_candidate,
+                Arc::clone(&rebuild_coordinator),
+                rebuild_candidate,
                 source.clone(),
                 args,
                 response_format,
+                refresh_strategy,
                 &handler,
             )
             .await
             {
-                Ok(fresh_body) => return Ok(fresh_body),
-                Err(error) => {
-                    tracing::warn!(
-                        target: "spur_graph::mcp",
-                        error = ?error,
-                        "code graph overlay refresh failed; falling back to rebuild"
-                    );
-                }
-            }
+                RefreshOutcome::Fresh(fresh_body) => Ok(fresh_body),
+                RefreshOutcome::Errored(fresh_error) => Err(fresh_error),
+                RefreshOutcome::NotRefreshed(_status) => Err(original_error),
+            };
         }
-        let rebuild = match &backend {
-            CodeSearchBackend::Parquet(_) => {
-                try_rebuild_artifact_from_worktree(
-                    Arc::clone(&rebuild_coordinator),
-                    rebuild_candidate,
-                )
-                .await
-            }
-            CodeSearchBackend::InMemory { artifact, .. } => {
-                try_rebuild_artifact(
-                    Arc::clone(&rebuild_coordinator),
-                    Arc::clone(artifact),
-                    rebuild_candidate,
-                    None,
-                )
-                .await
-            }
-        };
-        match rebuild {
-            RebuildAttempt::Fresh(rebuilt_artifact) => {
-                let client = InMemoryClient::new(Arc::clone(&rebuilt_artifact));
-                let mut fresh_body = handler(args, &client)
-                    .map_err(|error| error.with_artifact_metadata(&rebuilt_artifact))?;
-                let fresh_files = response_file_set_from_body(&rebuilt_artifact, &fresh_body);
-                GraphResponseMetadata::analyze_artifact_with_files(&rebuilt_artifact, &fresh_files)
-                    .await
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::Fresh)
-                    .insert_into_for_format(&mut fresh_body, response_format);
-                return Ok(fresh_body);
-            }
-            RebuildAttempt::StaleBudgetExceeded => {
-                analysis.metadata = analysis
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::StaleBudgetExceeded);
-            }
-            RebuildAttempt::StaleRebuildFailed => {
-                analysis.metadata = analysis
-                    .metadata
-                    .with_rebuild_status(RebuildStatus::StaleRebuildFailed);
+    };
+
+    if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
+        match attempt_refresh(
+            &backend,
+            Arc::clone(&rebuild_coordinator),
+            rebuild_candidate,
+            source.clone(),
+            args,
+            response_format,
+            refresh_strategy,
+            &handler,
+        )
+        .await
+        {
+            RefreshOutcome::Fresh(fresh_body) => return Ok(fresh_body),
+            RefreshOutcome::Errored(fresh_error) => return Err(fresh_error),
+            RefreshOutcome::NotRefreshed(status) => {
+                analysis.metadata = analysis.metadata.with_rebuild_status(status);
             }
         }
     }
@@ -1175,33 +1280,6 @@ fn overlay_client_for_backend<'a>(
         &rebuild_candidate.worktree,
         &changed_paths,
     )
-}
-
-async fn code_graph_backend_response_without_rebuild(
-    args: &Value,
-    rebuild_coordinator: Arc<RebuildCoordinator>,
-    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult,
-) -> CodeGraphResult {
-    let response_format =
-        ResponseFormat::parse_allowing_source(args).map_err(CodeGraphError::without_metadata)?;
-    let backend = open_code_search_backend_for_request(Some(rebuild_coordinator))
-        .await
-        .map_err(CodeGraphError::without_metadata)?;
-    let source = backend.metadata_source();
-    let mut body = handler(args, backend.client()).map_err(|mut error| {
-        if error.metadata.is_none() && error.temporal_code.is_none() {
-            error.metadata = Some(Box::new(source.clone()));
-        }
-        error
-    })?;
-    let files = backend
-        .response_file_set_from_body(&body)
-        .map_err(CodeGraphError::from)?;
-    GraphResponseMetadata::analyze_source_inner(source, Some(&files))
-        .await
-        .metadata
-        .insert_into_for_format(&mut body, response_format);
-    Ok(body)
 }
 
 struct CodeSearchBody {
@@ -1701,7 +1779,7 @@ async fn code_read_symbol_response(
     args: &Value,
     rebuild_coordinator: Arc<RebuildCoordinator>,
 ) -> CodeGraphResult {
-    code_graph_backend_response_without_rebuild(
+    code_graph_backend_response_allowing_source(
         args,
         rebuild_coordinator,
         code_read_symbol_with_client,
