@@ -1,9 +1,24 @@
 use super::peer_mailbox::drain_peer_acks_with_timeout;
 use super::*;
 
+pub(crate) fn resolve_effective_model_effort(
+    request_model: Option<&str>,
+    request_effort: Option<&str>,
+    profile_def: Option<&crate::agent_profiles::AgentProfile>,
+) -> (Option<String>, Option<String>) {
+    let effective_model = request_model
+        .map(str::to_owned)
+        .or_else(|| profile_def.and_then(|profile| profile.model.clone()));
+    let effective_effort = request_effort
+        .map(str::to_owned)
+        .or_else(|| profile_def.and_then(|profile| profile.effort.clone()));
+    (effective_model, effective_effort)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_delegation(
     agent: String,
+    profile: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     config_overrides: Option<std::collections::HashMap<String, String>>,
@@ -80,6 +95,31 @@ pub(crate) async fn execute_delegation(
             );
         }
     };
+
+    let profile_def = match profile.as_deref() {
+        Some(name) => match crate::agent_profiles::AgentProfile::load(&repo_root, name) {
+            Ok(profile_def) => profile_def,
+            Err(error) => {
+                return (
+                    DelegationResult {
+                        status: DelegationStatus::Failed {
+                            error: format!("Failed to load worker profile '{name}': {error:#}"),
+                        },
+                        diff: None,
+                        diff_summary: None,
+                        summary: None,
+                        estimated_cost_usd: 0.0,
+                        worker_branch: None,
+                        artifact: None,
+                    },
+                    None,
+                );
+            }
+        },
+        None => None,
+    };
+    let (effective_model, effective_effort) =
+        resolve_effective_model_effort(model.as_deref(), effort.as_deref(), profile_def.as_ref());
 
     // Phase 5 / Task 26 — resolve the worker `mcp_servers` vec ONCE per
     // delegation. The worker MCP server is default-on: only an explicit
@@ -165,8 +205,10 @@ pub(crate) async fn execute_delegation(
             WorkerAttemptCtx {
                 brain_session_id: &brain_session_id,
                 agent: &agent,
-                model: model.as_deref(),
-                effort: effort.as_deref(),
+                model: effective_model.as_deref(),
+                effort: effective_effort.as_deref(),
+                profile: profile.as_deref(),
+                profile_def: profile_def.as_ref(),
                 config_overrides: config_overrides.as_ref(),
                 task: &current_task,
                 request_id: &request_id,
@@ -184,7 +226,7 @@ pub(crate) async fn execute_delegation(
                 worker_mcp_server: worker_mcp_server.as_ref().map(Arc::clone),
                 pm_service: pm_service.as_deref(),
                 feature_gate: feature_gate.as_ref(),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 connection_factory: None,
             },
             &mut worktrees,
