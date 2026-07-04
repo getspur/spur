@@ -445,6 +445,72 @@ mod inline_completion_materialization_tests {
 }
 
 #[cfg(test)]
+mod agent_profile_validation_tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use spur_acp::{BrainSessionId, SessionId};
+
+    fn no_op_ctx() -> super::DetachedContinuationCtx {
+        super::DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_to_worker_rejects_malformed_managed_profile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".spur/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("code-reviewer.md"),
+            "---\nname: other\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+
+        let brain_session = BrainSessionId::new(SessionId("brain".into()));
+        let (mut server, mut channel) = super::McpCallbackServer::new(
+            Some(&brain_session),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
+        );
+        server.set_repo_root(tmp.path().to_path_buf());
+        super::install_core_delegation_registry(&mut server);
+
+        let response = server
+            .__test_call_tool(
+                "delegate_to_worker",
+                json!({
+                    "agent": "claude-code-acp",
+                    "profile": "code-reviewer",
+                    "task": "review this"
+                }),
+            )
+            .await;
+
+        assert_eq!(response["error"]["code"], -32602);
+        let message = response["error"]["message"]
+            .as_str()
+            .expect("error message");
+        assert!(
+            message.contains("code-reviewer"),
+            "error should name the profile: {message}"
+        );
+        assert!(
+            message.contains("does not match file name"),
+            "error should name the parse failure: {message}"
+        );
+        assert!(
+            channel.request_rx.try_recv().is_err(),
+            "invalid profile must not dispatch"
+        );
+    }
+}
+
+#[cfg(test)]
 mod continuation_producer_tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::AtomicU32;

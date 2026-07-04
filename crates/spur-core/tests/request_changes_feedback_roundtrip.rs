@@ -60,6 +60,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
         &[PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -93,6 +94,7 @@ async fn request_changes_feedback_survives_reprojection_and_reaches_worker() {
             spec: PlanTask {
                 task_id: "t1".into(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,

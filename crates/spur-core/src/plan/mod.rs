@@ -46,6 +46,8 @@ pub struct PlanTask {
     pub task_id: String,
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
@@ -793,6 +795,7 @@ mod approved_dep_closure_tests {
             spec: PlanTask {
                 task_id: id.to_string(),
                 agent: "codex".to_string(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -905,6 +908,7 @@ mod scope_snapshot_integration_tests {
         PlanTask {
             task_id: task_id.into(),
             agent: agent.into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -1213,6 +1217,7 @@ pub fn derive_epic_plan_from_issues(
         plan_tasks.push(PlanTask {
             task_id: id.clone(),
             agent,
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -1349,7 +1354,7 @@ pub async fn derive_epic_plan(
                     .map_err(|e| format!("failed to list comments for task '{issue_id}': {e}"))?,
             )
             .map_err(|e| format!("failed to parse audits for task '{issue_id}': {e}"))?;
-            if let Some((_, context_files, _, _, _)) =
+            if let Some((_, context_files, _, _, _, _)) =
                 crate::plan::projector::latest_task_spec(&audits)
             {
                 task.context_files = context_files;
@@ -1824,6 +1829,7 @@ pub(crate) async fn emit_task_spec_audit(
     issue_id: &str,
     task_id: &str,
     agent: &str,
+    profile: Option<&str>,
     model: Option<&str>,
     effort: Option<&str>,
     config_overrides: Option<&HashMap<String, String>>,
@@ -1832,6 +1838,7 @@ pub(crate) async fn emit_task_spec_audit(
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
+        profile: profile.map(str::to_string),
         model: model.map(str::to_string),
         effort: effort.map(str::to_string),
         config_overrides: config_overrides.cloned(),
@@ -1851,6 +1858,7 @@ pub(crate) async fn emit_task_spec_audit(
 /// bd-2m2u Phase 2c — emit a `TaskSpec` audit with extended fields populated by
 /// `ModifyTaskSpec`. The projector reads these to override the live beads-issue
 /// body / agent label / `blocked_by` set after a brain spec rewrite.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn emit_extended_task_spec_audit(
     advanced: &dyn spur_pm::BeadsAdvanced,
     issue_id: &str,
@@ -1858,11 +1866,13 @@ pub(crate) async fn emit_extended_task_spec_audit(
     context_files: &[String],
     task_text: Option<&str>,
     agent: Option<&str>,
+    profile: Option<&str>,
     depends_on: Option<&[String]>,
 ) -> anyhow::Result<()> {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
+        profile: profile.map(str::to_string),
         model: None,
         effort: None,
         config_overrides: None,
@@ -5423,6 +5433,7 @@ mod tests {
         PlanTask {
             task_id: id.into(),
             agent: "test-agent".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -5511,6 +5522,7 @@ mod tests {
             spec: super::PlanTask {
                 task_id: "T1".into(),
                 agent: "x".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -5554,6 +5566,7 @@ mod tests {
         let base_spec = super::PlanTask {
             task_id: task_id.into(),
             agent: "x".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -5653,6 +5666,7 @@ mod tests {
         PlanTask {
             task_id: id.into(),
             agent: "test-agent".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -6040,6 +6054,7 @@ mod tests {
             spec: super::PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6081,6 +6096,7 @@ mod tests {
             spec: super::PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6120,6 +6136,7 @@ mod tests {
             spec: super::PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6607,6 +6624,7 @@ mod tests {
             super::PlanTask {
                 task_id: "A".to_string(),
                 agent: "x".to_string(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6619,6 +6637,7 @@ mod tests {
             super::PlanTask {
                 task_id: "B".to_string(),
                 agent: "x".to_string(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6631,6 +6650,7 @@ mod tests {
             super::PlanTask {
                 task_id: "C".to_string(),
                 agent: "x".to_string(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -7069,6 +7089,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &context_files,
         )
         .await
@@ -7086,6 +7107,7 @@ mod tests {
                 context_files,
                 model,
                 effort,
+                profile,
                 config_overrides,
                 task_text,
                 agent,
@@ -7094,6 +7116,7 @@ mod tests {
                 && context_files == vec!["src/lib.rs".to_string(), "docs/spec.md".to_string()]
                 && model.is_none()
                 && effort.is_none()
+                && profile.is_none()
                 && config_overrides.is_none()
                 && task_text.is_none()
                 && agent.as_deref() == Some("codex")
@@ -7115,6 +7138,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &context_files,
         )
         .await
@@ -7132,6 +7156,7 @@ mod tests {
                 context_files,
                 model,
                 effort,
+                profile,
                 config_overrides,
                 task_text,
                 agent,
@@ -7140,6 +7165,7 @@ mod tests {
                 && context_files.is_empty()
                 && model.is_none()
                 && effort.is_none()
+                && profile.is_none()
                 && config_overrides.is_none()
                 && task_text.is_none()
                 && agent.as_deref() == Some("gemini")
@@ -7218,6 +7244,7 @@ mod tests {
                 spec: PlanTask {
                     task_id: "dep".into(),
                     agent: "a".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -7239,6 +7266,7 @@ mod tests {
                 spec: PlanTask {
                     task_id: "esc".into(),
                     agent: "a".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -7811,6 +7839,7 @@ mod tests {
                 spec: super::PlanTask {
                     task_id: "a".into(),
                     agent: "codex".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -7853,6 +7882,7 @@ mod tests {
                 spec: super::PlanTask {
                     task_id: "a".into(),
                     agent: "codex".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -8284,6 +8314,7 @@ mod tests {
             spec: PlanTask {
                 task_id: "T1".into(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,

@@ -81,6 +81,29 @@ async fn call_delegate_to_worker(args: Value) -> spur_core::DelegationRequest {
 }
 
 #[tokio::test]
+async fn profile_survives_to_delegation_request() {
+    let request = call_delegate_to_worker(json!({
+        "agent": "claude-code-acp",
+        "profile": "code-reviewer",
+        "task": "test task"
+    }))
+    .await;
+
+    assert_eq!(request.profile.as_deref(), Some("code-reviewer"));
+}
+
+#[tokio::test]
+async fn profile_defaults_to_none_when_absent() {
+    let request = call_delegate_to_worker(json!({
+        "agent": "claude-code-acp",
+        "task": "test task"
+    }))
+    .await;
+
+    assert!(request.profile.is_none());
+}
+
+#[tokio::test]
 async fn base_repo_main_survives() {
     let request = call_delegate_to_worker(json!({
         "agent": "claude-code-acp",

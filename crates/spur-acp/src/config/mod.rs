@@ -14,6 +14,7 @@ pub use layered::{load_layered, merge_tables};
 pub use validator::{validate_agent_config, ConfigError};
 
 use crate::domain::delegation::TimeoutFallback;
+use crate::profile_strategy::ProfileConfig;
 use crate::types::{AgentKind, AgentRole, CostTier, TransportKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -134,6 +135,11 @@ pub struct AgentConfig {
     #[serde(default)]
     pub permissions: PermissionsConfig,
 
+    /// Per-kind profile wiring override (spec D9). When absent, defaults
+    /// derive from `kind` via `ProfileStrategy::for_kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileConfig>,
+
     /// Enables bypass mode for this agent. When true, `skip_permissions_args`
     /// (if any) are appended at spawn, `skip_permissions_session_mode` (if
     /// set) is applied after session creation, and any ACP permission
@@ -187,6 +193,7 @@ impl AgentConfig {
             display: DisplayConfig::default(),
             commands: CommandsConfig::default(),
             permissions: PermissionsConfig::default(),
+            profile: None,
             skip_permissions: false,
             skip_permissions_args: Vec::new(),
             skip_permissions_session_mode: None,

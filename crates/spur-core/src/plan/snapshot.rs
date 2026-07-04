@@ -364,6 +364,7 @@ mod tests {
             spec: PlanTask {
                 task_id: task_id.to_string(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
