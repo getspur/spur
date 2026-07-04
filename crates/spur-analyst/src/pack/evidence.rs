@@ -2,20 +2,8 @@ use serde_json::{json, Value};
 
 use crate::KnowledgeCandidate;
 
+use super::impact::normalized_code_selector;
 use super::{code_next_tools, KnowledgeContextPackRequest, KnowledgeIntent};
-
-pub(crate) const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
-pub(crate) const MAX_IMPACT_SYMBOLS: usize = 2;
-pub(crate) const MAX_IMPACT_NEIGHBORS: usize = 2;
-
-#[derive(Debug, Clone)]
-pub(crate) struct SymbolImpactSummary {
-    pub(crate) selector: String,
-    pub(crate) callers_count: u64,
-    pub(crate) callees_count: u64,
-    pub(crate) caller_neighbors: Vec<Value>,
-    pub(crate) callee_neighbors: Vec<Value>,
-}
 
 pub(crate) fn split_evidence(
     candidates: &[KnowledgeCandidate],
@@ -101,103 +89,8 @@ fn grounding_score_prefix(grounding: &str) -> &str {
     }
 }
 
-pub(crate) fn normalized_code_selector(stable_symbol_id: &str) -> String {
-    format!("graph://symbol/{}", raw_stable_symbol_id(stable_symbol_id))
-}
-
-pub(crate) fn raw_stable_symbol_id(stable_symbol_id: &str) -> &str {
-    stable_symbol_id
-        .strip_prefix("graph://symbol/")
-        .unwrap_or(stable_symbol_id)
-}
-
 pub(crate) fn is_test_file(file_path: &str) -> bool {
     file_path.contains("/tests/")
         || file_path.ends_with("_test.rs")
         || file_path.ends_with("_tests.rs")
-}
-
-pub(crate) fn primary_evidence_with_impact(
-    mut primary_evidence: Vec<Value>,
-    impacts: &[Option<SymbolImpactSummary>],
-) -> Vec<Value> {
-    for impact in impacts.iter().flatten() {
-        if let Some(evidence) = primary_evidence.iter_mut().find(|evidence| {
-            evidence.get("stable_symbol_id").and_then(Value::as_str)
-                == Some(impact.selector.as_str())
-        }) {
-            if let Some(object) = evidence.as_object_mut() {
-                object.insert("impact".into(), compact_impact_value(impact));
-            }
-        }
-    }
-    primary_evidence
-}
-
-fn compact_impact_value(impact: &SymbolImpactSummary) -> Value {
-    json!({
-        "callers_count": impact.callers_count,
-        "callees_count": impact.callees_count,
-        "popular_sink": impact.callers_count > POPULAR_SINK_CALLERS_THRESHOLD,
-    })
-}
-
-pub(crate) fn aggregate_impact_value(impacts: &[Option<SymbolImpactSummary>]) -> Value {
-    let impacts: Vec<&SymbolImpactSummary> = impacts.iter().filter_map(Option::as_ref).collect();
-    if impacts.is_empty() {
-        return json!({
-            "summary": "impact counts are deferred to exact graph follow-up tools",
-            "callers_count": null,
-            "callees_count": null,
-            "popular_sink": null
-        });
-    }
-
-    let callers_count = impacts
-        .iter()
-        .map(|impact| impact.callers_count)
-        .sum::<u64>();
-    let callees_count = impacts
-        .iter()
-        .map(|impact| impact.callees_count)
-        .sum::<u64>();
-    let popular_sink = impacts
-        .iter()
-        .any(|impact| impact.callers_count > POPULAR_SINK_CALLERS_THRESHOLD);
-    let caller_neighbors = aggregate_neighbors(
-        impacts
-            .iter()
-            .flat_map(|impact| impact.caller_neighbors.iter()),
-        popular_sink,
-    );
-    let callee_neighbors = aggregate_neighbors(
-        impacts
-            .iter()
-            .flat_map(|impact| impact.callee_neighbors.iter()),
-        popular_sink,
-    );
-
-    json!({
-        "summary": if popular_sink {
-            "popular sink counted but not expanded"
-        } else {
-            "bounded exact graph impact summary"
-        },
-        "callers_count": callers_count,
-        "callees_count": callees_count,
-        "popular_sink": popular_sink,
-        "caller_neighbors": caller_neighbors,
-        "callee_neighbors": callee_neighbors
-    })
-}
-
-fn aggregate_neighbors<'a>(
-    neighbors: impl Iterator<Item = &'a Value>,
-    suppress: bool,
-) -> Vec<Value> {
-    if suppress {
-        Vec::new()
-    } else {
-        neighbors.take(MAX_IMPACT_NEIGHBORS).cloned().collect()
-    }
 }
