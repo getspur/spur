@@ -12,6 +12,7 @@ fn test_delegate_to_worker_schema_stability() {
     assert_eq!(json["title"], "DelegateToWorkerInput");
     assert!(json["properties"].get("agent").is_some());
     assert!(json["properties"].get("task").is_some());
+    assert!(json["properties"].get("config_overrides").is_some());
     assert!(json["properties"].get("delegation_plan").is_some());
     assert_eq!(json["additionalProperties"], json!(false));
 }
@@ -33,6 +34,7 @@ fn test_delegate_parallel_task_schema_stability() {
     assert_eq!(json["title"], "DelegateParallelTaskInput");
     assert!(json["properties"].get("agent").is_some());
     assert!(json["properties"].get("task").is_some());
+    assert!(json["properties"].get("config_overrides").is_some());
     assert!(json["properties"].get("delegation_plan").is_some());
     assert_eq!(json["additionalProperties"], json!(false));
 }

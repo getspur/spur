@@ -67,6 +67,7 @@ fn task_entry(
             agent: "codex".to_string(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: format!("task {task_id}"),
             depends_on: Vec::new(),
             issue_id: None,
