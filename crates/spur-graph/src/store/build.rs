@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str;
 use std::time::Instant;
 
@@ -191,6 +191,14 @@ pub struct BuildStats {
     pub changed_paths: usize,
     pub changed_or_added_paths: BTreeSet<String>,
     pub removed_paths: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorktreeDeltaArtifact {
+    pub artifact: GraphIndexArtifact,
+    pub changed_files: usize,
+    pub new_symbols: usize,
+    pub tombstoned_symbols: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -464,41 +472,21 @@ pub fn artifact_from_facts_incremental(
     );
     let (mut buckets, changed_paths, changed_or_added_paths, reused_buckets) = {
         let _entered = changed_span.enter();
-        let prev_content_oids: BTreeMap<_, _> = prev
-            .file_manifests
-            .iter()
-            .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
-            .collect();
-
-        let mut buckets = BTreeMap::new();
-        let mut changed_paths = Vec::new();
-        let mut changed_or_added_paths = BTreeSet::new();
-        let mut reused = 0_usize;
-        for current in current_entries.values() {
-            if prev_content_oids
-                .get(current.path.as_str())
-                .is_some_and(|content_oid| *content_oid == current.content_oid)
-            {
-                if let Some(bucket) = prev_buckets.get(&current.path) {
-                    buckets.insert(current.path.clone(), bucket.clone());
-                    reused += 1;
-                    continue;
-                }
-            }
-            if current.extractable {
-                changed_or_added_paths.insert(current.path.clone());
-                changed_paths.push(root.join(&current.path));
-            }
-        }
-        changed_span.record("changed_paths", changed_paths.len());
+        let diff = changed_paths_from_previous(prev, &root, &current_entries, &prev_buckets);
+        changed_span.record("changed_paths", diff.changed_paths.len());
         tracing::info!(
             target: "spur_graph::build::changed_paths",
-            changed_paths = changed_paths.len(),
-            reused,
+            changed_paths = diff.changed_paths.len(),
+            reused = diff.reused_buckets,
             elapsed_ms = elapsed_ms(changed_started),
             "spur-graph build phase completed"
         );
-        (buckets, changed_paths, changed_or_added_paths, reused)
+        (
+            diff.buckets,
+            diff.changed_paths,
+            diff.changed_or_added_paths,
+            diff.reused_buckets,
+        )
     };
     let changed_count = changed_paths.len();
     let removed_paths = removed_paths_from_previous(prev, &current_entries);
@@ -509,6 +497,7 @@ pub fn artifact_from_facts_incremental(
         removed_paths: removed_paths.clone(),
     };
 
+    let mut changed_tombstones = Vec::new();
     if !changed_paths.is_empty() {
         let extract_started = Instant::now();
         let extract_span = tracing::info_span!(
@@ -542,6 +531,8 @@ pub fn artifact_from_facts_incremental(
             }
             result?
         };
+        changed_tombstones =
+            tombstones_from_changed_paths(prev, &root, &changed_paths, &changed_facts)?;
         let changed_buckets = buckets_from_facts(&changed_facts, &root, &current_entries)?;
         buckets.extend(changed_buckets);
     }
@@ -557,7 +548,7 @@ pub fn artifact_from_facts_incremental(
         let _entered = compose_span.enter();
         add_missing_manifest_buckets(&mut buckets, &current_entries);
 
-        let tombstones = tombstones_from_removed_paths(prev, &current_entries);
+        let tombstones = tombstones_for_worktree(prev, &current_entries, changed_tombstones);
         let artifact = compose_artifact(buckets, &current_entries, manifest_version, tombstones);
         tracing::info!(
             target: "spur_graph::build::compose",
@@ -581,6 +572,72 @@ pub fn artifact_from_facts_incremental(
         "spur-graph build completed"
     );
     Ok((artifact, BuildMode::Incremental, stats))
+}
+
+pub(crate) fn build_worktree_delta_artifact(
+    prev: &GraphIndexArtifact,
+    root: &Path,
+) -> anyhow::Result<WorktreeDeltaArtifact> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize `{}`", root.display()))?;
+    let manifest_version = current_manifest_version();
+    if prev.manifest_version != manifest_version {
+        anyhow::bail!(
+            "cannot write worktree delta for manifest_version {}; expected {}",
+            prev.manifest_version,
+            manifest_version
+        );
+    }
+
+    let current_entries = discover_current_entries(&root)?;
+    let prev_buckets = buckets_from_artifact(prev);
+    let diff = changed_paths_from_previous(prev, &root, &current_entries, &prev_buckets);
+
+    let changed_facts = if diff.changed_paths.is_empty() {
+        GraphFacts::empty()
+    } else {
+        build_facts_for_paths(&root, &diff.changed_paths)?
+    };
+    let changed_tombstones =
+        tombstones_from_changed_paths(prev, &root, &diff.changed_paths, &changed_facts)?;
+    let tombstones = tombstones_for_worktree(prev, &current_entries, changed_tombstones);
+
+    let changed_entries: BTreeMap<_, _> = current_entries
+        .iter()
+        .filter(|(path, _entry)| diff.changed_or_added_paths.contains(*path))
+        .map(|(path, entry)| (path.clone(), entry.clone()))
+        .collect();
+    let mut buckets = if diff.changed_paths.is_empty() {
+        BTreeMap::new()
+    } else {
+        buckets_from_facts(&changed_facts, &root, &current_entries)?
+    };
+    add_missing_manifest_buckets(&mut buckets, &changed_entries);
+    rebind_cross_file_edges(&mut buckets);
+
+    let graph_content_hash = compute_graph_content_hash(
+        changed_entries
+            .values()
+            .map(|entry| (entry.path.as_str(), entry.content_oid.as_str())),
+    );
+    let artifact = rebuild_from_buckets(buckets, manifest_version, graph_content_hash, tombstones);
+    let prev_symbol_ids: HashSet<_> = prev
+        .symbols
+        .iter()
+        .map(|symbol| symbol.stable_symbol_id.as_str())
+        .collect();
+    let tombstoned_symbols = artifact
+        .tombstones
+        .iter()
+        .filter(|tombstone| prev_symbol_ids.contains(tombstone.stable_file_id.as_str()))
+        .count();
+    Ok(WorktreeDeltaArtifact {
+        changed_files: diff.changed_paths.len(),
+        new_symbols: artifact.symbols.len(),
+        tombstoned_symbols,
+        artifact,
+    })
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -917,6 +974,54 @@ fn content_oid_for(current_entries: &BTreeMap<String, CurrentFileEntry>, path: &
         .unwrap_or_default()
 }
 
+struct ChangedPathDiff {
+    buckets: BTreeMap<String, FileBucket>,
+    changed_paths: Vec<PathBuf>,
+    changed_or_added_paths: BTreeSet<String>,
+    reused_buckets: usize,
+}
+
+fn changed_paths_from_previous(
+    prev: &GraphIndexArtifact,
+    root: &Path,
+    current_entries: &BTreeMap<String, CurrentFileEntry>,
+    prev_buckets: &BTreeMap<String, FileBucket>,
+) -> ChangedPathDiff {
+    let prev_content_oids: BTreeMap<_, _> = prev
+        .file_manifests
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
+        .collect();
+
+    let mut buckets = BTreeMap::new();
+    let mut changed_paths = Vec::new();
+    let mut changed_or_added_paths = BTreeSet::new();
+    let mut reused_buckets = 0_usize;
+    for current in current_entries.values() {
+        if prev_content_oids
+            .get(current.path.as_str())
+            .is_some_and(|content_oid| *content_oid == current.content_oid)
+        {
+            if let Some(bucket) = prev_buckets.get(&current.path) {
+                buckets.insert(current.path.clone(), bucket.clone());
+                reused_buckets += 1;
+                continue;
+            }
+        }
+        if current.extractable {
+            changed_or_added_paths.insert(current.path.clone());
+            changed_paths.push(root.join(&current.path));
+        }
+    }
+
+    ChangedPathDiff {
+        buckets,
+        changed_paths,
+        changed_or_added_paths,
+        reused_buckets,
+    }
+}
+
 fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, FileBucket> {
     let mut manifest_by_path = BTreeMap::new();
     for manifest in &artifact.file_manifests {
@@ -1085,6 +1190,100 @@ fn tombstones_from_removed_paths(
         .collect();
     tombstones.sort_by(|a, b| a.path.cmp(&b.path));
     tombstones
+}
+
+fn tombstones_from_changed_paths(
+    prev: &GraphIndexArtifact,
+    root: &Path,
+    changed_paths: &[PathBuf],
+    changed_facts: &GraphFacts,
+) -> anyhow::Result<Vec<GraphTombstoneEntry>> {
+    let current_symbol_ids_by_path = symbol_ids_by_path_from_facts(changed_facts);
+    let changed_path_keys: BTreeSet<String> = changed_paths
+        .iter()
+        .map(|path| relative_path(root, path))
+        .collect::<anyhow::Result<_>>()?;
+
+    let mut tombstones = Vec::new();
+    let empty_current_ids = BTreeSet::new();
+    for path in changed_path_keys {
+        let current_symbol_ids = current_symbol_ids_by_path
+            .get(&path)
+            .unwrap_or(&empty_current_ids);
+        tombstones.extend(
+            prev.symbols
+                .iter()
+                .filter(|symbol| symbol.file_path == path)
+                .filter(|symbol| !current_symbol_ids.contains(&symbol.stable_symbol_id))
+                .map(|symbol| GraphTombstoneEntry {
+                    path: path.clone(),
+                    stable_file_id: symbol.stable_symbol_id.clone(),
+                }),
+        );
+    }
+    sort_and_dedup_tombstones(&mut tombstones);
+    Ok(tombstones)
+}
+
+fn tombstones_for_worktree(
+    prev: &GraphIndexArtifact,
+    current_entries: &BTreeMap<String, CurrentFileEntry>,
+    changed_tombstones: Vec<GraphTombstoneEntry>,
+) -> Vec<GraphTombstoneEntry> {
+    let mut tombstones = tombstones_from_removed_paths(prev, current_entries);
+    tombstones.extend(changed_tombstones);
+    sort_and_dedup_tombstones(&mut tombstones);
+    tombstones
+}
+
+fn sort_and_dedup_tombstones(tombstones: &mut Vec<GraphTombstoneEntry>) {
+    tombstones.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.stable_file_id.cmp(&right.stable_file_id))
+    });
+    tombstones.dedup_by(|left, right| {
+        left.path == right.path && left.stable_file_id == right.stable_file_id
+    });
+}
+
+fn symbol_ids_by_path_from_facts(facts: &GraphFacts) -> BTreeMap<String, BTreeSet<String>> {
+    let spans_by_id: HashMap<_, _> = facts
+        .spans
+        .iter()
+        .map(|span| (span.span_id, span))
+        .collect();
+    let mut symbol_ids_by_path: BTreeMap<String, BTreeSet<String>> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .map(|node| (node.label.clone(), BTreeSet::new()))
+        .collect();
+
+    for node in &facts.nodes {
+        if !is_symbol_tombstone_candidate(node.kind) {
+            continue;
+        }
+        let Some(span_id) = node.source_span_id else {
+            continue;
+        };
+        let Some(span) = spans_by_id.get(&span_id).copied() else {
+            continue;
+        };
+        let Some(file_path) = file_path_for_span(facts, span) else {
+            continue;
+        };
+        symbol_ids_by_path
+            .entry(file_path)
+            .or_default()
+            .insert(node.stable_key.clone());
+    }
+
+    symbol_ids_by_path
+}
+
+fn is_symbol_tombstone_candidate(kind: NodeKind) -> bool {
+    !matches!(kind, NodeKind::File | NodeKind::Commit | NodeKind::External)
 }
 
 fn removed_paths_from_previous(
@@ -2520,7 +2719,7 @@ fn enclosing_scope(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -4017,6 +4216,44 @@ fn submit_plan_def() -> ToolDefinition {
             .file_manifests
             .iter()
             .any(|entry| entry.path == "src/a.rs"));
+    }
+
+    #[test]
+    fn incremental_emits_tombstone_for_symbol_removed_from_changed_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write lib.rs");
+
+        let prev = artifact_from_facts(&build_facts(root, None).expect("extract").0, root)
+            .expect("artifact");
+        let alpha_stable_symbol_id = prev
+            .symbols
+            .iter()
+            .find(|symbol| symbol.file_path == "src/lib.rs" && symbol.entity_name == "alpha")
+            .expect("alpha symbol")
+            .stable_symbol_id
+            .clone();
+
+        fs::write(root.join("src/lib.rs"), "pub fn beta() {}\n").expect("rewrite lib.rs");
+        let (next, mode, _stats) =
+            artifact_from_facts_incremental(&prev, root).expect("incremental");
+        let beta_stable_symbol_id = next
+            .symbols
+            .iter()
+            .find(|symbol| symbol.file_path == "src/lib.rs" && symbol.entity_name == "beta")
+            .expect("beta symbol")
+            .stable_symbol_id
+            .clone();
+
+        assert_eq!(mode, BuildMode::Incremental);
+        let tombstone_ids: BTreeSet<_> = next
+            .tombstones
+            .iter()
+            .map(|tombstone| tombstone.stable_file_id.as_str())
+            .collect();
+        assert!(tombstone_ids.contains(alpha_stable_symbol_id.as_str()));
+        assert!(!tombstone_ids.contains(beta_stable_symbol_id.as_str()));
     }
 
     #[test]
