@@ -101,6 +101,7 @@ pub(crate) async fn handle_delegations(
         let DelegationRequest {
             id: request_id,
             agent,
+            profile: _,
             model,
             effort,
             config_overrides,

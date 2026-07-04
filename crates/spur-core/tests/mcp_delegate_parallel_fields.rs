@@ -23,6 +23,22 @@ use std::sync::Arc;
 mod common;
 
 #[test]
+fn per_task_profile_survives_to_delegation_requests() {
+    let args = json!({
+        "tasks": [
+            { "agent": "claude-code-acp", "profile": "code-reviewer", "task": "Task A" },
+            { "agent": "claude-code-acp", "task": "Task B" }
+        ]
+    });
+
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("test-brain".into()));
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+
+    assert_eq!(parsed[0].profile.as_deref(), Some("code-reviewer"));
+    assert!(parsed[1].profile.is_none());
+}
+
+#[test]
 fn per_task_context_files_survive_to_delegation_requests() {
     let args = json!({
         "tasks": [
