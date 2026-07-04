@@ -431,6 +431,16 @@ fn submit_plan_def() -> ToolDefinition {
                                 "type": "string",
                                 "description": "Worker agent to execute this task"
                             },
+                            "model": {
+                                "type": "string",
+                                "description": "Override the worker's model (config-option value id, e.g. \"gpt-5-codex\"). Fail-soft if the agent rejects it.",
+                                "default": null
+                            },
+                            "effort": {
+                                "type": "string",
+                                "description": "Override the worker's reasoning effort (thought-level value id, e.g. \"low\"/\"medium\"/\"high\"). Fail-soft if the agent rejects it.",
+                                "default": null
+                            },
                             "task": {
                                 "type": "string",
                                 "description": "Task description (CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT)"

@@ -284,6 +284,8 @@ mod tests {
             spec: super::super::PlanTask {
                 task_id: task_id.to_string(),
                 agent: "claude-code-acp".into(),
+                model: None,
+                effort: None,
                 task: "task body".into(),
                 depends_on: Vec::new(),
                 issue_id: Some(task_id.to_string()),

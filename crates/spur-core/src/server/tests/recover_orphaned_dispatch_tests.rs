@@ -115,6 +115,8 @@ async fn setup_recovery_task(
         &[PlanTask {
             task_id: "task-a".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Recover this orphan".into(),
             depends_on: Vec::new(),
             issue_id: None,
@@ -328,6 +330,8 @@ async fn recover_orphaned_dispatch_promotes_dispatched_task_to_awaiting_review()
         &[PlanTask {
             task_id: "task-a".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Recover this orphan".into(),
             depends_on: Vec::new(),
             issue_id: None,
@@ -930,6 +934,8 @@ async fn recover_orphaned_dispatch_rejects_label_only_delegation_without_audit()
         &[PlanTask {
             task_id: "task-a".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Recover this orphan".into(),
             depends_on: Vec::new(),
             issue_id: None,
