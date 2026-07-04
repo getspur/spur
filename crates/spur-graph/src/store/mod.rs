@@ -25,8 +25,8 @@ pub use lance_sections::{
 pub use parquet::{
     load_temporal_artifact_parquet, read_artifact_header_parquet, read_artifact_parquet,
     stamp_sidecar_status, stream_temporal_artifact_parquet, write_artifact_parquet,
-    GraphArtifactManifest, GraphArtifactSidecarRowCounts, GraphArtifactSidecarStatus,
-    TemporalArtifactTable, WriteOptions,
+    write_worktree_delta, DeltaSummary, GraphArtifactManifest, GraphArtifactSidecarRowCounts,
+    GraphArtifactSidecarStatus, TemporalArtifactTable, WriteOptions,
 };
 pub use pointer::{
     read_current_pointer, resolve_artifact_location, write_current_pointer, ArtifactCacheKey,
