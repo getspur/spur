@@ -1014,6 +1014,41 @@ async fn code_graph_backend_response(
     rebuild_coordinator: Arc<RebuildCoordinator>,
     handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
 ) -> CodeGraphResult {
+    code_graph_backend_response_with_refresh(
+        args,
+        rebuild_coordinator,
+        handler,
+        GraphRefreshStrategy::OverlayThenRebuild,
+    )
+    .await
+}
+
+async fn code_graph_backend_response_rebuild_only(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
+) -> CodeGraphResult {
+    code_graph_backend_response_with_refresh(
+        args,
+        rebuild_coordinator,
+        handler,
+        GraphRefreshStrategy::RebuildOnly,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphRefreshStrategy {
+    OverlayThenRebuild,
+    RebuildOnly,
+}
+
+async fn code_graph_backend_response_with_refresh(
+    args: &Value,
+    rebuild_coordinator: Arc<RebuildCoordinator>,
+    handler: impl Fn(&Value, &dyn GraphQueryClient) -> CodeGraphResult + Send + Sync,
+    refresh_strategy: GraphRefreshStrategy,
+) -> CodeGraphResult {
     let response_format = ResponseFormat::parse(args).map_err(CodeGraphError::without_metadata)?;
     let backend = open_code_search_backend_for_request(Some(Arc::clone(&rebuild_coordinator)))
         .await
@@ -1032,23 +1067,25 @@ async fn code_graph_backend_response(
         GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files)).await;
 
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
-        match overlay_response_for_backend(
-            &backend,
-            &rebuild_candidate,
-            source.clone(),
-            args,
-            response_format,
-            &handler,
-        )
-        .await
-        {
-            Ok(fresh_body) => return Ok(fresh_body),
-            Err(error) => {
-                tracing::warn!(
-                    target: "spur_graph::mcp",
-                    error = ?error,
-                    "code graph overlay refresh failed; falling back to rebuild"
-                );
+        if refresh_strategy == GraphRefreshStrategy::OverlayThenRebuild {
+            match overlay_response_for_backend(
+                &backend,
+                &rebuild_candidate,
+                source.clone(),
+                args,
+                response_format,
+                &handler,
+            )
+            .await
+            {
+                Ok(fresh_body) => return Ok(fresh_body),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "spur_graph::mcp",
+                        error = ?error,
+                        "code graph overlay refresh failed; falling back to rebuild"
+                    );
+                }
             }
         }
         let rebuild = match &backend {
@@ -1628,10 +1665,11 @@ pub async fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerError> {
 }
 
 pub async fn code_symbol_info_rebuild_aware(args: &Value) -> Result<Value, McpHandlerError> {
-    with_loaded_graph_artifact(Some(shared_rebuild_coordinator()), |loaded| {
-        let client = InMemoryClient::new(Arc::clone(&loaded.artifact));
-        code_symbol_info_with_client(args, &client)
-    })
+    code_graph_backend_response_rebuild_only(
+        args,
+        shared_rebuild_coordinator(),
+        code_symbol_info_with_client,
+    )
     .await
     .map_err(CodeGraphError::into_handler_error)
 }
