@@ -148,6 +148,8 @@ impl DelegationMcpModule {
         let delegation = DelegationRequest {
             id: request_id.clone(),
             agent: parsed.agent.clone(),
+            model: parsed.model,
+            effort: parsed.effort,
             task: parsed.task,
             context_files: parsed.context_files.unwrap_or_default(),
             prior_branch_for_reuse: None,

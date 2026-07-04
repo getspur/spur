@@ -83,6 +83,8 @@ mod plan_truncate_and_restart_tests {
             spec: crate::plan::PlanTask {
                 task_id: task_id.into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: format!("task {task_id}"),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
                 issue_id: Some(format!("bd-{task_id}")),
@@ -1261,6 +1263,8 @@ mod reconciler_fast_forward_tests {
                 spec: crate::plan::PlanTask {
                     task_id: "t1".into(),
                     agent: "codex".into(),
+                    model: None,
+                    effort: None,
                     task: "Task".into(),
                     depends_on: Vec::new(),
                     issue_id: Some("bd-1".into()),
@@ -1301,6 +1305,8 @@ mod reconciler_fast_forward_tests {
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Task".into(),
             depends_on: Vec::new(),
             issue_id: None,
@@ -1386,6 +1392,8 @@ mod reconciler_fast_forward_tests {
                 spec: crate::plan::PlanTask {
                     task_id: "t1".into(),
                     agent: "codex".into(),
+                    model: None,
+                    effort: None,
                     task: "Task".into(),
                     depends_on: Vec::new(),
                     issue_id: Some("bd-1".into()),
@@ -1413,6 +1421,8 @@ mod reconciler_fast_forward_tests {
                     spec: crate::plan::PlanTask {
                         task_id: "t1".into(),
                         agent: "codex".into(),
+                        model: None,
+                        effort: None,
                         task: "Task".into(),
                         depends_on: Vec::new(),
                         issue_id: Some("bd-1".into()),
@@ -1431,6 +1441,8 @@ mod reconciler_fast_forward_tests {
                     spec: crate::plan::PlanTask {
                         task_id: "t2".into(),
                         agent: "codex".into(),
+                        model: None,
+                        effort: None,
                         task: "Task 2".into(),
                         depends_on: Vec::new(),
                         issue_id: Some("bd-2".into()),
@@ -1472,6 +1484,8 @@ mod reconciler_fast_forward_tests {
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Task".into(),
             depends_on: Vec::new(),
             issue_id: None,
@@ -1529,6 +1543,8 @@ mod reconciler_fast_forward_tests {
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Task".into(),
             depends_on: Vec::new(),
             issue_id: None,

@@ -299,6 +299,8 @@ async fn recover_persisted_plans_skips_unowned_legacy_plan() {
     let tasks = vec![spur_core::plan::PlanTask {
         task_id: "t1".into(),
         agent: "codex".into(),
+        model: None,
+        effort: None,
         task: "Do something".into(),
         depends_on: Vec::new(),
         issue_id: None,

@@ -65,6 +65,8 @@ fn task_entry(
         spec: crate::plan::PlanTask {
             task_id: task_id.to_string(),
             agent: "codex".to_string(),
+            model: None,
+            effort: None,
             task: format!("task {task_id}"),
             depends_on: Vec::new(),
             issue_id: None,

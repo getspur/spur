@@ -113,6 +113,8 @@ pub struct OverlayCommit {
 pub struct DelegationRequest {
     pub id: DelegationId,
     pub agent: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
     pub task: String,
     pub context_files: Vec<String>,
     pub prior_branch_for_reuse: Option<String>,
