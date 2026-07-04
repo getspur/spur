@@ -1,7 +1,10 @@
 use std::fs;
+use std::path::Path;
 
 use pretty_assertions::assert_eq;
-use spur_graph::{build_facts, NodeKind, RelationKind};
+use spur_graph::extract::languages::Language;
+use spur_graph::extract::tree_sitter::BytesExtractor;
+use spur_graph::{artifact_from_facts, build_facts, NodeKind, RelationKind};
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator as _};
 
 const GO_TAGS_QUERY: &str = include_str!("../queries/go/tags.scm");
@@ -38,6 +41,14 @@ type Handle int
 
 func (p Point) Scale(factor int) Point {
 	return Point{X: p.X * factor, Y: p.Y * factor}
+}
+
+type Path struct {
+	Length int
+}
+
+func (p *Path) Scale(factor int) Path {
+	return Path{Length: p.Length * factor}
 }
 
 func Add(a int, b int) int {
@@ -101,6 +112,13 @@ fn build_go_fixture(source: &str) -> spur_graph::extract::GraphFacts {
     build_facts(dir.path(), None).expect("extract").0
 }
 
+fn build_go_artifact(source: &str) -> spur_graph::GraphIndexArtifact {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(dir.path().join("geometry.go"), source).expect("write geometry.go");
+    let facts = build_facts(dir.path(), None).expect("extract").0;
+    artifact_from_facts(&facts, dir.path()).expect("artifact")
+}
+
 #[test]
 fn go_fixture_parses_without_errors() {
     let tree = parse_go(GO_FIXTURE);
@@ -119,7 +137,7 @@ fn go_tags_query_captures_functions_and_methods() {
     );
     let mut methods = definition_names(GO_FIXTURE, "definition.method");
     methods.sort();
-    assert_eq!(methods, ["Area", "Scale"]);
+    assert_eq!(methods, ["Area", "Scale", "Scale"]);
 }
 
 #[test]
@@ -132,14 +150,17 @@ fn go_tags_query_fans_out_multi_name_const_spec() {
 
 #[test]
 fn go_tags_query_captures_types_and_fields() {
-    assert_eq!(definition_names(GO_FIXTURE, "definition.struct"), ["Point"]);
+    assert_eq!(
+        definition_names(GO_FIXTURE, "definition.struct"),
+        ["Point", "Path"]
+    );
     assert_eq!(
         definition_names(GO_FIXTURE, "definition.interface"),
         ["Shape"]
     );
     assert_eq!(
         definition_names(GO_FIXTURE, "definition.field"),
-        ["X", "Y", "Label"]
+        ["X", "Y", "Label", "Length"]
     );
     assert_eq!(
         definition_names(GO_FIXTURE, "definition.module"),
@@ -178,6 +199,7 @@ fn go_extractor_builds_symbols_with_expected_kinds() {
     assert!(has_node(NodeKind::Method, "Scale"));
     assert!(has_node(NodeKind::Method, "Area"));
     assert!(has_node(NodeKind::Struct, "Point"));
+    assert!(has_node(NodeKind::Struct, "Path"));
     assert!(has_node(NodeKind::Interface, "Shape"));
     assert!(has_node(NodeKind::TypeAlias, "Meters"));
     assert!(has_node(NodeKind::TypeAlias, "Handle"));
@@ -201,6 +223,47 @@ fn go_extractor_builds_symbols_with_expected_kinds() {
             .iter()
             .any(|node| node.kind == NodeKind::TypeAlias && node.label == "Point"),
         "struct type_spec must not double-emit as a type alias"
+    );
+}
+
+#[test]
+fn go_method_symbols_are_scoped_by_receiver_type() {
+    let mut extractor = BytesExtractor::for_language(Language::Go).expect("extractor");
+    let symbols = extractor
+        .extract(Path::new("geometry.go"), GO_FIXTURE.as_bytes())
+        .expect("extract symbols");
+    let scale_methods: Vec<_> = symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_kind == "method" && symbol.entity_name == "Scale")
+        .collect();
+
+    assert_eq!(scale_methods.len(), 2);
+    assert!(scale_methods
+        .iter()
+        .any(|symbol| symbol.enclosing_scope.as_deref() == Some("Point")));
+    assert!(scale_methods
+        .iter()
+        .any(|symbol| symbol.enclosing_scope.as_deref() == Some("Path")));
+
+    let artifact = build_go_artifact(GO_FIXTURE);
+    let mut qualified_names: Vec<_> = artifact
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_kind == "method" && symbol.entity_name == "Scale")
+        .map(|symbol| {
+            (
+                symbol.qualified_name.as_str(),
+                symbol.enclosing_scope.as_deref(),
+            )
+        })
+        .collect();
+    qualified_names.sort();
+    assert_eq!(
+        qualified_names,
+        [
+            ("Path::Scale", Some("Path")),
+            ("Point::Scale", Some("Point")),
+        ]
     );
 }
 
