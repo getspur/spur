@@ -536,6 +536,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
             spec: PlanTask {
                 task_id: "t-review".into(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,

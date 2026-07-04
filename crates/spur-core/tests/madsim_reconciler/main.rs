@@ -826,6 +826,7 @@ impl SimState {
                 AuditSentinelKind::TaskSpec {
                     task_id: task.task_id.to_string(),
                     context_files: Vec::new(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
