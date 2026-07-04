@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
@@ -115,6 +116,7 @@ pub struct DelegationRequest {
     pub agent: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub config_overrides: Option<HashMap<String, String>>,
     pub task: String,
     pub context_files: Vec<String>,
     pub prior_branch_for_reuse: Option<String>,
