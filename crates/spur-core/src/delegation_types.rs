@@ -114,6 +114,7 @@ pub struct OverlayCommit {
 pub struct DelegationRequest {
     pub id: DelegationId,
     pub agent: String,
+    pub profile: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub config_overrides: Option<HashMap<String, String>>,

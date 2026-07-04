@@ -20,6 +20,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 spec: PlanTask {
                     task_id: "t0".into(),
                     agent: "a".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -41,6 +42,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 spec: PlanTask {
                     task_id: "t1".into(),
                     agent: "a".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -62,6 +64,7 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 spec: PlanTask {
                     task_id: "t2".into(),
                     agent: "a".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                     config_overrides: None,

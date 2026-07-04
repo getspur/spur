@@ -122,6 +122,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
     let tasks = vec![PlanTask {
         task_id: "task-a".into(),
         agent: "codex".into(),
+        profile: None,
         model: None,
         effort: None,
         config_overrides: None,

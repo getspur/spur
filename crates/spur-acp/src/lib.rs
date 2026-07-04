@@ -78,6 +78,7 @@ pub mod ext;
 pub mod orphan_registry;
 pub mod orphan_sweeper;
 pub mod process_inspector;
+pub mod profile_strategy;
 pub mod protocol;
 pub mod registry;
 pub mod session_info_cache;
@@ -97,6 +98,7 @@ pub use connection::{
     StreamJsonAdapter, TestStubConnection,
 };
 pub use error::AcpError;
+pub use profile_strategy::{ProfileConfig, ProfileStrategy, SelectStrategy};
 pub use registry::AgentRegistry;
 pub use session_info_cache::SessionInfoCache;
 pub use session_liveness::SelfHeldSet;
