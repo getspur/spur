@@ -531,6 +531,8 @@ pub fn parse_parallel_tasks(
         out.push(DelegationRequest {
             id: DelegationId::new(),
             agent: task.agent,
+            model: task.model,
+            effort: task.effort,
             task: task.task,
             context_files: task.context_files.unwrap_or_default(),
             prior_branch_for_reuse: None,

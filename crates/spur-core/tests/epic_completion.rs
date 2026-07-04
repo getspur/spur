@@ -204,6 +204,8 @@ async fn seed_mock_plan(
             &audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
                 task_id: (*task_id).to_string(),
                 context_files: Vec::new(),
+                model: None,
+                effort: None,
                 task_text: None,
                 agent: Some("codex".into()),
                 depends_on: None,
@@ -794,6 +796,8 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     let task_spec = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
         task_id: "t1".to_string(),
         context_files: Vec::new(),
+        model: None,
+        effort: None,
         task_text: None,
         agent: Some("codex".into()),
         depends_on: None,
@@ -1089,6 +1093,8 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
         let task_spec = audit_sentinel::encode_comment(&AuditSentinelKind::TaskSpec {
             task_id: format!("t{index}"),
             context_files: Vec::new(),
+            model: None,
+            effort: None,
             task_text: None,
             agent: Some("codex".into()),
             depends_on: None,

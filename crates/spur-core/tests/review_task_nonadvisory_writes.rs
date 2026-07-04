@@ -224,6 +224,8 @@ fn awaiting_review_plan() -> Arc<AsyncMutex<PlanState>> {
             spec: PlanTask {
                 task_id: "t1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Do the thing".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),

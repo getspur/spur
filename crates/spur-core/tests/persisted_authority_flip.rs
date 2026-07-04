@@ -168,6 +168,8 @@ fn persisted_task(agent: &str) -> Vec<PlanTask> {
     vec![PlanTask {
         task_id: "t1".into(),
         agent: agent.into(),
+        model: None,
+        effort: None,
         task: "Task".into(),
         depends_on: vec![],
         issue_id: None,
@@ -180,6 +182,8 @@ fn persisted_task_with_context(agent: &str, context_files: &[&str]) -> Vec<PlanT
     vec![PlanTask {
         task_id: "t1".into(),
         agent: agent.into(),
+        model: None,
+        effort: None,
         task: "Task".into(),
         depends_on: vec![],
         issue_id: None,
@@ -599,6 +603,8 @@ async fn t_v0c_4_reject_closes_task_and_blocks_watcher() {
             spec: PlanTask {
                 task_id: "t1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Task".into(),
                 depends_on: Vec::new(),
                 issue_id: Some(task_id.clone()),
@@ -681,6 +687,8 @@ async fn t_v0c_5_request_changes_stays_open_and_reconciler_redispatches() {
             spec: PlanTask {
                 task_id: "t1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Task".into(),
                 depends_on: Vec::new(),
                 issue_id: Some(task_id.clone()),
