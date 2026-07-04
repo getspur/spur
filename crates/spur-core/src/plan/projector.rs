@@ -551,19 +551,35 @@ fn partial_compare_status(legacy: &PlanTaskStatus, shadow: &PlanTaskStatus) -> S
     }
 }
 
-pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<(String, Vec<String>)> {
+pub type LatestTaskSpec = (String, Vec<String>, Option<String>, Option<String>);
+
+pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> {
+    let mut task_id_and_context_files = None;
+    let mut latest_model = None;
+    let mut latest_effort = None;
     for audit in audits.iter().rev() {
         if let AuditSentinelKind::TaskSpec {
             task_id,
             context_files,
+            model,
+            effort,
             ..
         } = audit
         {
-            return Some((task_id.clone(), context_files.clone()));
+            if task_id_and_context_files.is_none() {
+                task_id_and_context_files = Some((task_id.clone(), context_files.clone()));
+            }
+            if latest_model.is_none() {
+                latest_model = model.clone();
+            }
+            if latest_effort.is_none() {
+                latest_effort = effort.clone();
+            }
         }
     }
 
-    None
+    task_id_and_context_files
+        .map(|(task_id, context_files)| (task_id, context_files, latest_model, latest_effort))
 }
 
 /// Latest extended `TaskSpec` fields (bd-2m2u Phase 2c). Returns the most
@@ -1303,6 +1319,8 @@ pub async fn project_plan_from_beads(
         audits: Vec<crate::plan::audit_sentinel::AuditSentinelKind>,
         task_id: String,
         context_files: Vec<String>,
+        model: Option<String>,
+        effort: Option<String>,
     }
 
     let mut projected_tasks = Vec::with_capacity(tasks.len());
@@ -1312,13 +1330,15 @@ pub async fn project_plan_from_beads(
             adv.list_comments(&task_issue.id).await?,
         )?;
         let task_spec = latest_task_spec(&audits);
-        let (task_id, context_files) =
-            task_spec.unwrap_or_else(|| (task_id_for_issue(&task_issue), Vec::new()));
+        let (task_id, context_files, model, effort) =
+            task_spec.unwrap_or_else(|| (task_id_for_issue(&task_issue), Vec::new(), None, None));
         projected_tasks.push(ProjectedTask {
             issue: task_issue,
             audits,
             task_id,
             context_files,
+            model,
+            effort,
         });
     }
 
@@ -1366,6 +1386,8 @@ pub async fn project_plan_from_beads(
             spec: PlanTask {
                 task_id: projected_task.task_id.clone(),
                 agent,
+                model: projected_task.model.clone(),
+                effort: projected_task.effort.clone(),
                 task: projected_task.issue.body.clone(),
                 depends_on,
                 issue_id: Some(projected_task.issue.id.clone()),
@@ -3217,6 +3239,8 @@ mod tests {
                 spec: PlanTask {
                     task_id: "a".into(),
                     agent: "codex".into(),
+                    model: None,
+                    effort: None,
                     task: "A".into(),
                     depends_on: Vec::new(),
                     issue_id: Some("bd-1".into()),
@@ -3235,6 +3259,8 @@ mod tests {
                 spec: PlanTask {
                     task_id: "b".into(),
                     agent: "codex".into(),
+                    model: None,
+                    effort: None,
                     task: "B".into(),
                     depends_on: vec!["a".into()],
                     issue_id: Some("bd-2".into()),
@@ -3303,6 +3329,8 @@ mod tests {
                 spec: PlanTask {
                     task_id: "t1".into(),
                     agent: "codex".into(),
+                    model: None,
+                    effort: None,
                     task: "task".into(),
                     depends_on: Vec::new(),
                     issue_id: Some("bd-1".into()),

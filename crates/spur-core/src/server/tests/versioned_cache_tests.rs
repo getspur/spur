@@ -23,6 +23,8 @@ fn sample_tasks() -> Vec<PlanTask> {
     vec![PlanTask {
         task_id: "task-1".into(),
         agent: "codex".into(),
+        model: None,
+        effort: None,
         task: "Do thing".into(),
         depends_on: Vec::new(),
         issue_id: None,
