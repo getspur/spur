@@ -17,21 +17,19 @@ use crate::{
 };
 #[cfg(test)]
 use crate::{query_context_paths, query_symbol_risk_community};
-use futures::future::join_all;
 use serde_json::{json, Value};
 
 use crate::pack::{
-    analyst_matches_exact_graph, base_pack, caveat_value, insert_v2_sections, is_test_file,
-    normalized_code_selector, pack_query_result_v2_with_graph_sections_and_staleness,
+    analyst_matches_exact_graph, base_pack, caveat_value, exact_graph_context_for_result,
+    insert_v2_sections, is_test_file, pack_query_result_v2_with_graph_sections_and_staleness,
     pack_query_result_with_exact_context, push_graph_path_caveat, raw_stable_symbol_id,
     symbol_caveat_value, ExactGraphContext, GraphReasoningSections, KnowledgeContextPackRequest,
-    KnowledgeContextPackV2Request, PackErrorExt, PackStaleness, SymbolImpactSummary,
-    MAX_IMPACT_NEIGHBORS, MAX_IMPACT_SYMBOLS, POPULAR_SINK_CALLERS_THRESHOLD,
+    KnowledgeContextPackV2Request, PackErrorExt as _, PackStaleness,
 };
 #[cfg(test)]
 use crate::pack::{
     code_next_tools, pack_query_result, pack_query_result_v2_with_graph_sections,
-    recommended_next_tools, KnowledgeIntent,
+    recommended_next_tools, KnowledgeIntent, SymbolImpactSummary, POPULAR_SINK_CALLERS_THRESHOLD,
 };
 
 use super::overlay::{
@@ -298,107 +296,6 @@ fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Va
         "message": format!("analyst DB not found at {}", db_path.display()),
         "db_path": db_path.display().to_string()
     }))
-}
-
-async fn exact_graph_context_for_result(
-    request: &KnowledgeContextPackRequest,
-    result: &KnowledgeQueryResult,
-) -> ExactGraphContext {
-    let selectors = top_n_code_selectors(&result.candidates, request);
-    let Some(first_selector) = selectors.first() else {
-        return ExactGraphContext::default();
-    };
-
-    let symbol_info = spur_graph::mcp::code_symbol_info_rebuild_aware(&json!({
-        "selector": first_selector,
-    }))
-    .await;
-    let mut context = match symbol_info {
-        Ok(body) => ExactGraphContext {
-            graph_content_hash: body
-                .get("graph_content_hash")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            response_file_oids_match: body
-                .get("response_file_oids_match")
-                .and_then(Value::as_bool),
-            impacts: Vec::new(),
-        },
-        Err(_) => return ExactGraphContext::default(),
-    };
-
-    context.impacts = join_all(
-        selectors
-            .iter()
-            .map(|selector| impact_summary_for_selector(selector)),
-    )
-    .await;
-    context
-}
-
-async fn impact_summary_for_selector(selector: &str) -> Option<SymbolImpactSummary> {
-    let callers_args = json!({
-        "selector": selector,
-        "include_unresolved": true,
-    });
-    let callees_args = json!({
-        "selector": selector,
-        "include_unresolved": true,
-    });
-    let (callers, callees) = tokio::join!(
-        spur_graph::mcp::code_callers(&callers_args),
-        spur_graph::mcp::code_callees(&callees_args)
-    );
-    let callers = callers.ok()?;
-    let callees = callees.ok()?;
-
-    let callers_count = array_len(&callers, "callers")?;
-    let callees_count = array_len(&callees, "callees")?;
-    let popular_sink = callers_count > POPULAR_SINK_CALLERS_THRESHOLD;
-
-    Some(SymbolImpactSummary {
-        selector: selector.to_owned(),
-        callers_count,
-        callees_count,
-        caller_neighbors: representative_neighbors(&callers, "callers", popular_sink),
-        callee_neighbors: representative_neighbors(&callees, "callees", false),
-    })
-}
-
-fn array_len(body: &Value, field: &str) -> Option<u64> {
-    body.get(field)
-        .and_then(Value::as_array)
-        .map(|values| values.len() as u64)
-}
-
-fn representative_neighbors(body: &Value, field: &str, suppress: bool) -> Vec<Value> {
-    if suppress {
-        return Vec::new();
-    }
-    body.get(field)
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .take(MAX_IMPACT_NEIGHBORS)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
-fn top_n_code_selectors(
-    candidates: &[KnowledgeCandidate],
-    request: &KnowledgeContextPackRequest,
-) -> Vec<String> {
-    candidates
-        .iter()
-        .filter(|candidate| request.include_tests || !is_test_file(&candidate.file_path))
-        .filter(|candidate| candidate.kind == "code" || candidate.kind == "symbol")
-        .filter_map(|candidate| candidate.stable_symbol_id.as_deref())
-        .map(normalized_code_selector)
-        .take(MAX_IMPACT_SYMBOLS)
-        .collect()
 }
 
 #[cfg(test)]
