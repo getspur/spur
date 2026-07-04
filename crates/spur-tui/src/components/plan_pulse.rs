@@ -5,14 +5,22 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use spur_acp::PlanLoopOriginEvent;
 use spur_core::{TrackedPlan, TrackedTask};
+use unicode_width::UnicodeWidthStr;
+
+use crate::views::plan_browser::truncate;
 
 const POTENTIAL_CLOBBER_LABEL: &str = "signal:potential-clobber";
 const CLOBBER_BADGE_LABEL: &str = "⚠ CLOBBER";
 const CLOBBER_BADGE_TEXT: &str = " ⚠ CLOBBER ";
+const PULSE_TEXT_WIDTH: usize = 48;
+const EPIC_ID_MAX_CHARS: usize = 12;
+const PLAN_ID_MAX_CHARS: usize = 16;
+const ALT_P_HINT: &str = " | Alt+P";
 
-pub fn pulse_text(plan: &TrackedPlan) -> String {
-    let mut text = base_pulse_text(plan);
+pub fn pulse_text(plan: &TrackedPlan, loop_origin: Option<&PlanLoopOriginEvent>) -> String {
+    let mut text = base_pulse_text(plan, loop_origin);
     if plan_has_potential_clobber_signal(plan) {
         text.push_str(" | ");
         text.push_str(CLOBBER_BADGE_LABEL);
@@ -20,28 +28,38 @@ pub fn pulse_text(plan: &TrackedPlan) -> String {
     text
 }
 
-pub fn render(frame: &mut Frame, area: Rect, plan: &TrackedPlan) {
-    let line = pulse_line(plan);
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    plan: &TrackedPlan,
+    loop_origin: Option<&PlanLoopOriginEvent>,
+) {
+    let line = pulse_line(plan, loop_origin);
     frame.render_widget(Paragraph::new(line).right_aligned(), area);
 }
 
-fn base_pulse_text(plan: &TrackedPlan) -> String {
+fn base_pulse_text(plan: &TrackedPlan, loop_origin: Option<&PlanLoopOriginEvent>) -> String {
+    let status = short_status(&plan.status);
+    let progress = compact_progress(plan);
+    let failed = plan.counts.failed + plan.counts.rejected + plan.counts.cancelled;
+    let next_action = short_next_action(&plan.next_action);
+    let suffix = pulse_suffix(plan, loop_origin, status, &progress, failed, next_action);
+    let id = compact_plan_id(plan, status, &progress, failed, next_action, &suffix);
+
     format!(
-        "plan {} {} | {} | rv:{} fl:{} | next:{} | Alt+P",
-        plan.plan_id,
-        short_status(&plan.status),
-        compact_progress(plan),
-        plan.counts.awaiting_review,
-        plan.counts.failed + plan.counts.rejected + plan.counts.cancelled,
-        short_next_action(&plan.next_action),
+        "{} {}|{}|rv:{} fl:{} nxt:{}{}",
+        id, status, progress, plan.counts.awaiting_review, failed, next_action, suffix,
     )
 }
 
-fn pulse_line(plan: &TrackedPlan) -> Line<'static> {
+fn pulse_line(plan: &TrackedPlan, loop_origin: Option<&PlanLoopOriginEvent>) -> Line<'static> {
     let pulse_style = Style::default()
         .fg(Color::Green)
         .add_modifier(Modifier::BOLD);
-    let mut spans = vec![Span::styled(base_pulse_text(plan), pulse_style)];
+    let mut spans = vec![Span::styled(
+        base_pulse_text(plan, loop_origin),
+        pulse_style,
+    )];
     if plan_has_potential_clobber_signal(plan) {
         spans.push(Span::styled(" |", pulse_style));
         spans.push(Span::styled(
@@ -50,6 +68,81 @@ fn pulse_line(plan: &TrackedPlan) -> Line<'static> {
         ));
     }
     Line::from(spans)
+}
+
+fn compact_plan_id(
+    plan: &TrackedPlan,
+    status: &str,
+    progress: &str,
+    failed: u32,
+    next_action: &str,
+    suffix: &str,
+) -> String {
+    let (id, preferred_chars) = match plan.epic_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(epic_id) => (epic_id, EPIC_ID_MAX_CHARS),
+        None => (plan.plan_id.as_str(), PLAN_ID_MAX_CHARS),
+    };
+    let fixed_text = format!(
+        " {}|{}|rv:{} fl:{} nxt:{}{}",
+        status, progress, plan.counts.awaiting_review, failed, next_action, suffix,
+    );
+    let available_chars =
+        PULSE_TEXT_WIDTH.saturating_sub(UnicodeWidthStr::width(fixed_text.as_str()));
+    truncate(id, preferred_chars.min(available_chars))
+}
+
+fn pulse_suffix(
+    plan: &TrackedPlan,
+    loop_origin: Option<&PlanLoopOriginEvent>,
+    status: &str,
+    progress: &str,
+    failed: u32,
+    next_action: &str,
+) -> String {
+    let Some(origin) = loop_origin else {
+        return ALT_P_HINT.to_string();
+    };
+
+    let badge = format!(" {}", loop_origin_badge(origin));
+    let badge_with_hint = format!("{badge}{ALT_P_HINT}");
+    if base_text_width_with_untruncated_id(
+        plan,
+        status,
+        progress,
+        failed,
+        next_action,
+        &badge_with_hint,
+    ) <= PULSE_TEXT_WIDTH
+    {
+        badge_with_hint
+    } else {
+        badge
+    }
+}
+
+fn base_text_width_with_untruncated_id(
+    plan: &TrackedPlan,
+    status: &str,
+    progress: &str,
+    failed: u32,
+    next_action: &str,
+    suffix: &str,
+) -> usize {
+    let id = match plan.epic_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(epic_id) => truncate(epic_id, EPIC_ID_MAX_CHARS),
+        None => truncate(&plan.plan_id, PLAN_ID_MAX_CHARS),
+    };
+    UnicodeWidthStr::width(
+        format!(
+            "{} {}|{}|rv:{} fl:{} nxt:{}{}",
+            id, status, progress, plan.counts.awaiting_review, failed, next_action, suffix,
+        )
+        .as_str(),
+    )
+}
+
+fn loop_origin_badge(origin: &PlanLoopOriginEvent) -> String {
+    format!("⟳ gen {}", origin.generation)
 }
 
 fn short_status(status: &str) -> &str {
@@ -123,8 +216,9 @@ fn contains_potential_clobber_label(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use ratatui::{backend::TestBackend, style::Color, style::Style, Terminal};
-    use spur_acp::{PlanSnapshotCounts, SessionId};
+    use spur_acp::{PlanLoopOriginEvent, PlanSnapshotCounts, SessionId};
     use spur_core::{TrackedPlan, TrackedTask};
+    use unicode_width::UnicodeWidthStr;
 
     use super::{pulse_text, render};
 
@@ -146,6 +240,13 @@ mod tests {
             },
             tasks: Vec::new(),
             updated_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn sample_loop_origin() -> PlanLoopOriginEvent {
+        PlanLoopOriginEvent {
+            loop_id: "loop-1".into(),
+            generation: 4,
         }
     }
 
@@ -212,8 +313,8 @@ mod tests {
             "Use get_task_diff to review each awaiting task, then review_task to approve or reject.",
         );
         assert_eq!(
-            pulse_text(&plan),
-            "plan p-123 run | 0/3 | rv:1 fl:0 | next:review | Alt+P"
+            pulse_text(&plan, None),
+            "p-123 run|0/3|rv:1 fl:0 nxt:review | Alt+P"
         );
     }
 
@@ -221,9 +322,75 @@ mod tests {
     fn pulse_text_compacts_progress_from_counts() {
         let plan = sample_plan("Workers still running. Poll get_plan_status to monitor.");
         assert_eq!(
-            pulse_text(&plan),
-            "plan p-123 run | 0/3 | rv:1 fl:0 | next:wait | Alt+P"
+            pulse_text(&plan, None),
+            "p-123 run|0/3|rv:1 fl:0 nxt:wait | Alt+P"
         );
+    }
+
+    #[test]
+    fn pulse_text_uses_epic_id_when_present() {
+        let mut plan = sample_plan("Workers still running. Poll get_plan_status to monitor.");
+        plan.plan_id = "0ce4d22e-a783-48b7-acda-4f1fee79672b".into();
+        plan.epic_id = Some("bd-1dwm".into());
+
+        assert_eq!(
+            pulse_text(&plan, None),
+            "bd-1dwm run|0/3|rv:1 fl:0 nxt:wait | Alt+P"
+        );
+    }
+
+    #[test]
+    fn pulse_text_falls_back_to_truncated_plan_id_when_epic_id_is_absent() {
+        let mut plan = sample_plan("Workers still running. Poll get_plan_status to monitor.");
+        plan.plan_id = "0ce4d22e-a783-48b7-acda-4f1fee79672b".into();
+
+        assert_eq!(
+            pulse_text(&plan, None),
+            "0ce4d22e-a... run|0/3|rv:1 fl:0 nxt:wait | Alt+P"
+        );
+    }
+
+    #[test]
+    fn pulse_text_appends_loop_origin_badge_ahead_of_alt_p_hint() {
+        let mut plan = sample_plan("Workers still running. Poll get_plan_status to monitor.");
+        plan.epic_id = Some("bd-1dwm".into());
+        let origin = sample_loop_origin();
+
+        assert_eq!(
+            pulse_text(&plan, Some(&origin)),
+            "bd-1dwm run|0/3|rv:1 fl:0 nxt:wait ⟳ gen 4"
+        );
+    }
+
+    #[test]
+    fn pulse_text_stays_within_session_detail_header_budget_with_loop_origin() {
+        let mut plan = sample_plan(
+            "Use get_task_diff to review each awaiting task, then review_task to approve or reject.",
+        );
+        plan.plan_id = "0ce4d22e-a783-48b7-acda-4f1fee79672b".into();
+        plan.epic_id = Some("bd-1dwm".into());
+        plan.counts = PlanSnapshotCounts {
+            pending: 30,
+            ready: 20,
+            dispatched: 20,
+            awaiting_review: 12,
+            approved: 47,
+            rejected: 3,
+            failed: 4,
+            cancelled: 1,
+            ..Default::default()
+        };
+        let origin = sample_loop_origin();
+
+        let text = pulse_text(&plan, Some(&origin));
+
+        assert_eq!(text, "bd-1dwm run|55/137|rv:12 fl:8 nxt:review ⟳ gen 4");
+        assert!(
+            UnicodeWidthStr::width(text.as_str()) <= 48,
+            "pulse text exceeded 48 display columns: {text}"
+        );
+        assert!(text.contains("⟳ gen 4"), "pulse text: {text}");
+        assert!(!text.contains("Alt+P"), "pulse text: {text}");
     }
 
     #[test]
@@ -231,13 +398,13 @@ mod tests {
         let mut plan = sample_plan("Workers still running. Poll get_plan_status to monitor.");
         plan.tasks.push(sample_task_with_potential_clobber_label());
 
-        let text = pulse_text(&plan);
+        let text = pulse_text(&plan, None);
         assert!(text.contains("⚠ CLOBBER"), "rendered pulse text: {text}");
 
         let backend = TestBackend::new(96, 1);
         let mut terminal = Terminal::new(backend).expect("test backend");
         terminal
-            .draw(|frame| render(frame, frame.area(), &plan))
+            .draw(|frame| render(frame, frame.area(), &plan, None))
             .expect("render plan pulse");
 
         let rendered = rendered_buffer_text(&terminal);
