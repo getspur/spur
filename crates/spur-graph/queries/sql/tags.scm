@@ -16,6 +16,21 @@
   (object_reference
     name: (identifier) @name)) @definition.function
 
+(create_trigger
+  (keyword_trigger)
+  (object_reference
+    name: (identifier) @name)
+  [
+    (keyword_before)
+    (keyword_after)
+    (keyword_instead)
+  ]) @definition.function
+
+(create_index
+  (keyword_index)
+  column: (identifier) @name
+  (keyword_on)) @definition.constant
+
 (create_type
   (object_reference
     name: (identifier) @name)

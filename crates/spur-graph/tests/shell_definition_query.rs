@@ -75,6 +75,26 @@ function deploy {
 }
 
 #[test]
+fn shell_tags_query_captures_alias_definitions() {
+    let source = r#"
+alias ll='ls -la'
+echo ll
+"#;
+    let tree = parse_shell(source);
+    assert!(
+        !tree.root_node().has_error(),
+        "{}",
+        tree.root_node().to_sexp()
+    );
+
+    let aliases: Vec<_> = definition_names(source, "definition.constant")
+        .into_iter()
+        .filter_map(|name| name.split_once('=').map(|(name, _)| name.to_owned()))
+        .collect();
+    assert_eq!(aliases, ["ll"]);
+}
+
+#[test]
 fn shell_extractor_builds_symbols_imports_and_calls() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -93,6 +113,9 @@ deploy() {
   prepare
   ./run-task.sh
 }
+
+alias ll='ls -la'
+echo ll
 "#,
     )
     .expect("write deploy.sh");
@@ -107,6 +130,17 @@ deploy() {
         .nodes
         .iter()
         .any(|node| node.kind == NodeKind::Function && node.label == "deploy"));
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Constant && node.label == "ll"));
+    assert!(
+        !facts
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Constant && node.label == "echo"),
+        "non-alias commands must not become constants"
+    );
     assert!(facts
         .edges
         .iter()
