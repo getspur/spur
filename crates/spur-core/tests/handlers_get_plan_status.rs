@@ -33,6 +33,7 @@ fn make_plan_state(plan_id: &str) -> PlanState {
                 agent: "codex".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "do the thing".into(),
                 depends_on: vec![],
                 issue_id: None,

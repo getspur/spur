@@ -386,7 +386,7 @@ fn expected_plan_id_from_audits(
 fn expected_plan_task_id_from_audits(
     audits: &[crate::plan::audit_sentinel::AuditSentinelKind],
 ) -> Option<String> {
-    if let Some((task_id, _, _, _)) = crate::plan::projector::latest_task_spec(audits) {
+    if let Some((task_id, _, _, _, _)) = crate::plan::projector::latest_task_spec(audits) {
         return Some(task_id);
     }
     use crate::plan::audit_sentinel::AuditSentinelKind;
@@ -1491,6 +1491,7 @@ impl Reconciler {
                 agent: task.spec.agent.clone(),
                 model: task.spec.model.clone(),
                 effort: task.spec.effort.clone(),
+                config_overrides: task.spec.config_overrides.clone(),
                 task: task_text,
                 context_files: task.spec.context_files.clone(),
                 prior_branch_for_reuse: prior_branch_for_reuse(task),

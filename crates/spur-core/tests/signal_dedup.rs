@@ -89,6 +89,7 @@ async fn build_single_task_plan(pm: &PmService, plan_id: &str) -> String {
         agent: "codex".into(),
         model: None,
         effort: None,
+        config_overrides: None,
         task: "Signal watcher task".into(),
         depends_on: vec![],
         issue_id: None,

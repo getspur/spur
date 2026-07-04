@@ -307,6 +307,19 @@ pub trait AgentConnection: Send + Sync {
         None
     }
 
+    /// Take ownership of the receiver that reports defensive handling for
+    /// agent-originated `authenticate` / `logout` requests.
+    ///
+    /// Native ACP transports use this for agents that send those method names
+    /// toward the client even though ACP 1.0 defines them as agent-side
+    /// methods. The orchestrator can translate the payloads into user-visible
+    /// auth state while the transport still responds on the JSON-RPC wire.
+    fn take_agent_client_request_rx(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<AgentClientRequestPayload>> {
+        None
+    }
+
     /// Subscribe to the connection-scoped broadcast of `SessionNotification`s.
     ///
     /// Implementations that publish notifications through a long-lived
@@ -332,6 +345,23 @@ pub trait AgentConnection: Send + Sync {
 pub struct ExtNotificationPayload {
     pub method: String,
     pub params: serde_json::Value,
+}
+
+/// An agent-originated request that arrived on the client side of the ACP
+/// connection.
+///
+/// ACP 1.0 models `authenticate` / `logout` as agent-side methods, so these
+/// payloads are a defensive bridge for agents that nevertheless send those
+/// method names back to the client mid-session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentClientRequestPayload {
+    pub kind: AgentClientRequestKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentClientRequestKind {
+    Authenticate { method_id: String },
+    Logout,
 }
 
 /// Test-only `AgentConnection` impl that panics on all I/O. Useful for
