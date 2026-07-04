@@ -213,6 +213,17 @@ spur warns at startup for:
 
 Warnings don't block startup.
 
+## Per-delegation profiles
+
+Worker delegations may pass `profile = "<name>"` through `delegate_to_worker`,
+`delegate_parallel`, or `submit_plan` task entries. Managed profiles live at
+`.spur/agents/<name>.md` in Claude agent-markdown format. When present, SPUR
+renders the profile into the worker worktree in the worker kind's native agent
+file location and git-excludes that rendered file for the worker worktree only.
+
+The optional `[agents.entries.profile]` config block can override the default
+per-kind profile selection strategy when an adapter changes its ACP surface.
+
 ### Feature flag
 
 The brain-delegation framework is gated by:
