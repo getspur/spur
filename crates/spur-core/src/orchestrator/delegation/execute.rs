@@ -226,7 +226,7 @@ pub(crate) async fn execute_delegation(
                 worker_mcp_server: worker_mcp_server.as_ref().map(Arc::clone),
                 pm_service: pm_service.as_deref(),
                 feature_gate: feature_gate.as_ref(),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 connection_factory: None,
             },
             &mut worktrees,

@@ -89,7 +89,7 @@ pub(crate) struct WorkerAttemptOutcome {
     pub(crate) artifact: Option<spur_acp::WorkerArtifact>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type WorkerConnectionFactory<'a> = dyn Fn(&spur_acp::config::AgentConfig, Vec<String>, &std::path::Path) -> Box<dyn AgentConnection>
     + Send
     + Sync
@@ -150,7 +150,7 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     pub(crate) worker_mcp_server: Option<Arc<WorkerMcpServer>>,
     pub(crate) pm_service: Option<&'a PmService>,
     pub(crate) feature_gate: &'a spur_license::FeatureGate,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) connection_factory: Option<&'a WorkerConnectionFactory<'a>>,
 }
 
@@ -239,6 +239,7 @@ async fn preapply_prior_branch_for_reuse(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_session_overrides(
     connection: &mut dyn AgentConnection,
     initialize: &spur_acp::InitializeResponse,
@@ -621,7 +622,7 @@ pub(crate) async fn run_one_worker_attempt(
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
     let spawn_args = ctx.agent_config.effective_args();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let mut connection: Box<dyn AgentConnection> =
         if let Some(connection_factory) = ctx.connection_factory {
             connection_factory(ctx.agent_config, spawn_args, &worktrees.repo_root)
@@ -633,7 +634,7 @@ pub(crate) async fn run_one_worker_attempt(
                 &worktrees.repo_root,
             )
         };
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let mut connection: Box<dyn AgentConnection> = connection::build_connection_from_transport(
         ctx.agent_config,
         spawn_args,
