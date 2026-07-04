@@ -88,6 +88,7 @@ mod tests {
             name: name.into(),
             command: "x".into(),
             args: vec![],
+            additional_directories: vec![],
             transport: crate::types::TransportKind::Acp,
             kind: crate::types::AgentKind::Generic,
             role: crate::types::AgentRole::Both,

@@ -805,6 +805,7 @@ pub(super) fn build_connection_from_transport(
                 permission_tx,
             );
             conn.set_repo_root(repo_root.to_path_buf());
+            conn.set_additional_directories(config.additional_directories.clone());
             Box::new(conn)
         }
         TransportKind::Stdio => Box::new(StdioAdapter::new(
