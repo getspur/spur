@@ -150,6 +150,7 @@ impl DelegationMcpModule {
             agent: parsed.agent.clone(),
             model: parsed.model,
             effort: parsed.effort,
+            config_overrides: parsed.config_overrides,
             task: parsed.task,
             context_files: parsed.context_files.unwrap_or_default(),
             prior_branch_for_reuse: None,

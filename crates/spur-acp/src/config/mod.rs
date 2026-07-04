@@ -88,6 +88,9 @@ pub struct AgentConfig {
     /// Arguments to pass to the command (e.g., ["acp"], ["--experimental-acp"]).
     #[serde(default)]
     pub args: Vec<String>,
+    /// Additional absolute workspace roots to expose to ACP sessions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<PathBuf>,
     /// Which transport protocol to use.
     pub transport: TransportKind,
     /// Wire-level idiom used by the adapter layer for TUI rendering.
@@ -173,6 +176,7 @@ impl AgentConfig {
             name: name.into(),
             command: String::new(),
             args: Vec::new(),
+            additional_directories: Vec::new(),
             transport: crate::types::TransportKind::Acp,
             kind: crate::types::AgentKind::Generic,
             role: crate::types::AgentRole::Both,
@@ -235,6 +239,24 @@ impl AgentConfig {
             out.extend(perms.args.iter().cloned());
         }
         out
+    }
+}
+
+pub(crate) fn sanitize_agent_additional_directories(config: &mut SpurConfig) {
+    for agent in &mut config.agents.entries {
+        let agent_name = agent.name.clone();
+        agent.additional_directories.retain(|path| {
+            if path.is_absolute() {
+                true
+            } else {
+                tracing::warn!(
+                    agent = %agent_name,
+                    path = %path.display(),
+                    "agent additional_directories entry is not absolute; skipping"
+                );
+                false
+            }
+        });
     }
 }
 

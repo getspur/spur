@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,6 +67,10 @@ pub struct DelegateToWorkerInput {
     #[schemars(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Generic session config overrides by advertised config-option id. Fail-soft per entry if the agent rejects it.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_overrides: Option<HashMap<String, String>>,
     /// Task description for the worker.
     pub task: String,
     /// Optional supplementary file paths.
@@ -96,6 +102,10 @@ pub struct DelegateParallelTaskInput {
     #[schemars(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Generic session config overrides by advertised config-option id. Fail-soft per entry if the agent rejects it.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_overrides: Option<HashMap<String, String>>,
     /// Task description.
     pub task: String,
     /// Optional supplementary file paths for this task.

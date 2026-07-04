@@ -601,6 +601,7 @@ fn prior_branch_for_reuse_uses_last_attempt_only_when_reuse_requested() {
             agent: "codex".into(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: "Task".into(),
             depends_on: vec![],
             issue_id: Some("bd-1".into()),
@@ -1222,7 +1223,7 @@ async fn seed_mock_ready_tasks_plan(
     .await
     .expect("plan submit audit");
     for (issue_id, task_id) in issue_ids.iter().zip(task_ids) {
-        crate::plan::emit_task_spec_audit(adv, issue_id, task_id, "codex", None, None, &[])
+        crate::plan::emit_task_spec_audit(adv, issue_id, task_id, "codex", None, None, None, &[])
             .await
             .expect("task spec audit");
     }
@@ -2284,6 +2285,7 @@ async fn seed_ready_overlay_plan(
         "codex",
         None,
         None,
+        None,
         &["x.rs".to_string()],
     )
     .await
@@ -2295,6 +2297,7 @@ async fn seed_ready_overlay_plan(
         "codex",
         None,
         None,
+        None,
         &["z.rs".to_string()],
     )
     .await
@@ -2304,6 +2307,7 @@ async fn seed_ready_overlay_plan(
         &ready_issue_id,
         "Y",
         "codex",
+        None,
         None,
         None,
         &["y.rs".to_string()],
@@ -3077,6 +3081,7 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
             agent: "codex".to_string(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: "do work".to_string(),
             depends_on: vec![],
             issue_id: None,

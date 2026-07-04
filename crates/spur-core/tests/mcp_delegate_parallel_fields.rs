@@ -42,6 +42,35 @@ fn per_task_context_files_survive_to_delegation_requests() {
 }
 
 #[test]
+fn per_task_config_overrides_survive_to_delegation_requests() {
+    let args = json!({
+        "tasks": [
+            {
+                "agent": "claude-code-acp",
+                "task": "Task A",
+                "config_overrides": {
+                    "mode": "plan",
+                    "context_window": "200000"
+                }
+            }
+        ]
+    });
+
+    let brain_sid = spur_acp::BrainSessionId::new(spur_acp::SessionId("test-brain".into()));
+    let parsed = spur_core::parse_parallel_tasks(&args, &brain_sid).expect("parse ok");
+    let overrides = parsed[0]
+        .config_overrides
+        .as_ref()
+        .expect("config overrides");
+
+    assert_eq!(overrides.get("mode").map(String::as_str), Some("plan"));
+    assert_eq!(
+        overrides.get("context_window").map(String::as_str),
+        Some("200000")
+    );
+}
+
+#[test]
 fn per_task_issue_id_and_delegation_plan_survive_unshared() {
     let args = json!({
         "tasks": [
