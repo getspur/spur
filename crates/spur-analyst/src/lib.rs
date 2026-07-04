@@ -5,26 +5,26 @@ pub(crate) mod db;
 pub mod embedding;
 pub mod mcp;
 pub(crate) mod pack;
+pub mod search;
 
 use std::path::Path;
 
 use anyhow::{anyhow, Context as _, Result};
-use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 
 pub use api::*;
+pub use search::{
+    context_candidates::{query_context_candidates, query_context_candidates_with_conn},
+    graph_candidates::{query_graph_candidates, query_graph_candidates_with_conn},
+};
 
 use api::{KnowledgePathResultContext, SymbolInput};
 
 use db::{
     connection::open_analyst_connection_read_only,
-    extensions::{
-        load_analyst_duckpgq_extension, load_analyst_icu_extension, load_analyst_lance_extension,
-    },
-    sql::{sql_escape_literal, sql_string_literal},
+    extensions::{load_analyst_duckpgq_extension, load_analyst_icu_extension},
+    sql::sql_string_literal,
 };
 
-const MAX_CONTEXT_CANDIDATES: usize = 40;
-const MAX_GRAPH_CANDIDATES: usize = 30;
 pub const MAX_SYMBOL_RISK_COMMUNITY_IDS: usize = 40;
 pub const MAX_CONTEXT_PATH_HOPS: usize = 6;
 pub const MAX_CONTEXT_PATHS: usize = 12;
@@ -100,93 +100,6 @@ pub fn query_symbol_risk_community_with_conn<S: AsRef<str>>(
     }
 
     Ok(result)
-}
-
-pub fn query_context_candidates(
-    db_path: &Path,
-    query: &str,
-    scope: KnowledgeSearchScope,
-    options: KnowledgeQueryOptions,
-) -> Result<KnowledgeQueryResult> {
-    let conn = open_analyst_connection_read_only(db_path)?;
-    load_analyst_icu_extension(&conn);
-    load_analyst_lance_extension(&conn);
-    query_context_candidates_with_conn(&conn, db_path, query, scope, options)
-}
-
-pub fn query_context_candidates_with_conn(
-    conn: &duckdb::Connection,
-    db_path: &Path,
-    query: &str,
-    scope: KnowledgeSearchScope,
-    options: KnowledgeQueryOptions,
-) -> Result<KnowledgeQueryResult> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Err(anyhow!("knowledge context query must be non-empty"));
-    }
-    let limit = options.limit.clamp(1, MAX_CONTEXT_CANDIDATES);
-
-    let graph_content_hash = conn
-        .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
-        .ok();
-
-    let escaped_query = sql_escape_literal(query);
-    let sql_scope = scope.as_sql_scope();
-    let sql_intent = options.intent.as_sql_intent();
-    let query_vec_sql = format_query_vec_sql(options.query_vec.as_deref());
-    let mut hybrid_failed = false;
-    let candidates = match query_context_candidates_inner(
-        conn,
-        &escaped_query,
-        sql_scope,
-        sql_intent,
-        query_vec_sql.as_deref(),
-        limit,
-    ) {
-        Ok(candidates) => candidates,
-        Err(error) if query_vec_sql.is_some() => {
-            hybrid_failed = true;
-            tracing::warn!(
-                error = %format!("{error:#}"),
-                query,
-                scope = sql_scope,
-                intent = sql_intent,
-                limit,
-                "hybrid search failed; degrading to BM25-only context candidate search"
-            );
-            let _ = conn.execute_batch("ROLLBACK;");
-            query_context_candidates_inner(
-                conn,
-                &escaped_query,
-                sql_scope,
-                sql_intent,
-                None,
-                limit,
-            )?
-        }
-        Err(error) => return Err(error),
-    };
-    if query_vec_sql.is_some()
-        && !hybrid_failed
-        && candidates
-            .iter()
-            .all(|candidate| !candidate.grounding.starts_with("hybrid-"))
-    {
-        tracing::warn!(
-            query,
-            scope = sql_scope,
-            intent = sql_intent,
-            limit,
-            "hybrid search produced no surviving hybrid-grounded context candidates"
-        );
-    }
-
-    Ok(KnowledgeQueryResult {
-        db_path: db_path.display().to_string(),
-        graph_content_hash,
-        candidates,
-    })
 }
 
 pub fn query_context_paths(
@@ -946,137 +859,6 @@ fn symbol_input_values_sql(inputs: &[SymbolInput]) -> String {
         .join(", ")
 }
 
-fn query_context_candidates_inner(
-    conn: &duckdb::Connection,
-    escaped_query: &str,
-    sql_scope: &str,
-    sql_intent: &str,
-    query_vec_sql: Option<&str>,
-    limit: usize,
-) -> Result<Vec<KnowledgeCandidate>> {
-    let macro_call = match query_vec_sql {
-        Some(query_vec_sql) => format!(
-            "search_context_candidates_hybrid('{escaped_query}', '{sql_scope}', '{sql_intent}', {query_vec_sql})"
-        ),
-        None => format!("search_context_candidates('{escaped_query}', '{sql_scope}', '{sql_intent}')"),
-    };
-    let sql = format!(
-        "SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, \
-         signal, neighbor_kind, edge_bind_method, grounding \
-         FROM {macro_call} \
-         LIMIT {limit}"
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .context("failed to prepare context candidate query")?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(KnowledgeCandidate {
-                kind: row.get(0)?,
-                title: row.get(1)?,
-                file_path: row.get(2)?,
-                stable_symbol_id: row.get(3)?,
-                symbol_kind: row.get(4)?,
-                score: row.get(5)?,
-                signal: row.get(6)?,
-                neighbor_kind: row.get(7)?,
-                edge_bind_method: row.get(8)?,
-                grounding: row.get(9)?,
-            })
-        })
-        .context("failed to run context candidate query")?;
-    let candidates = rows
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("failed to read context candidate rows")?;
-
-    Ok(candidates)
-}
-
-fn format_query_vec_sql(query_vec: Option<&[f32]>) -> Option<String> {
-    let query_vec = query_vec?;
-    if query_vec.len() != EMBEDDING_VECTOR_DIMENSIONS
-        || query_vec.iter().any(|value| !value.is_finite())
-    {
-        return None;
-    }
-
-    let mut sql = String::from("[");
-    for (index, value) in query_vec.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(", ");
-        }
-        sql.push_str(&value.to_string());
-    }
-    sql.push_str("]::FLOAT[");
-    sql.push_str(&EMBEDDING_VECTOR_DIMENSIONS.to_string());
-    sql.push(']');
-    Some(sql)
-}
-
-pub fn query_graph_candidates(
-    db_path: &Path,
-    query: &str,
-    options: KnowledgeQueryOptions,
-) -> Result<KnowledgeQueryResult> {
-    let conn = open_analyst_connection_read_only(db_path)?;
-    load_analyst_icu_extension(&conn);
-    query_graph_candidates_with_conn(&conn, db_path, query, options)
-}
-
-pub fn query_graph_candidates_with_conn(
-    conn: &duckdb::Connection,
-    db_path: &Path,
-    query: &str,
-    options: KnowledgeQueryOptions,
-) -> Result<KnowledgeQueryResult> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Err(anyhow!("knowledge graph query must be non-empty"));
-    }
-    let limit = options.limit.clamp(1, MAX_GRAPH_CANDIDATES);
-
-    let graph_content_hash = conn
-        .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
-        .ok();
-
-    let escaped_query = query.replace('\'', "''");
-    let sql_intent = options.intent.as_sql_intent();
-    let sql = format!(
-        "SELECT kind, title, file_path, stable_symbol_id, symbol_kind, score, \
-         signal, neighbor_kind, edge_bind_method, grounding \
-         FROM search_graph('{escaped_query}', '{sql_intent}') \
-         LIMIT {limit}"
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .context("failed to prepare graph candidate query")?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(KnowledgeCandidate {
-                kind: row.get(0)?,
-                title: row.get(1)?,
-                file_path: row.get(2)?,
-                stable_symbol_id: row.get(3)?,
-                symbol_kind: row.get(4)?,
-                score: row.get(5)?,
-                signal: row.get(6)?,
-                neighbor_kind: row.get(7)?,
-                edge_bind_method: row.get(8)?,
-                grounding: row.get(9)?,
-            })
-        })
-        .context("failed to run graph candidate query")?;
-    let candidates = rows
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("failed to read graph candidate rows")?;
-
-    Ok(KnowledgeQueryResult {
-        db_path: db_path.display().to_string(),
-        graph_content_hash,
-        candidates,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1089,10 +871,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_modules_expose_candidate_retrieval_boundaries() {
+        assert!(crate::search::hybrid::format_query_vec_sql(Some(&vec![
+            0.0;
+            EMBEDDING_VECTOR_DIMENSIONS
+                - 1
+        ]))
+        .is_none());
+
+        let mut result = KnowledgeQueryResult {
+            db_path: "fixture.duckdb".to_owned(),
+            graph_content_hash: Some("fixture-hash".to_owned()),
+            candidates: vec![KnowledgeCandidate {
+                kind: "code".to_owned(),
+                title: "bm25".to_owned(),
+                file_path: "src/lib.rs".to_owned(),
+                stable_symbol_id: Some("sym-1".to_owned()),
+                symbol_kind: Some("function".to_owned()),
+                score: 0.5,
+                signal: None,
+                neighbor_kind: None,
+                edge_bind_method: None,
+                grounding: "bm25-code".to_owned(),
+            }],
+        };
+        crate::search::graph_candidates::merge_graph_candidates(
+            &mut result,
+            KnowledgeQueryResult {
+                db_path: "fixture.duckdb".to_owned(),
+                graph_content_hash: Some("fixture-hash".to_owned()),
+                candidates: vec![KnowledgeCandidate {
+                    kind: "code".to_owned(),
+                    title: "graph".to_owned(),
+                    file_path: "src/lib.rs".to_owned(),
+                    stable_symbol_id: Some("sym-1".to_owned()),
+                    symbol_kind: Some("function".to_owned()),
+                    score: 0.9,
+                    signal: None,
+                    neighbor_kind: Some("primary".to_owned()),
+                    edge_bind_method: None,
+                    grounding: "graph".to_owned(),
+                }],
+            },
+        );
+
+        assert_eq!(result.candidates[0].title, "graph");
+    }
+
+    #[test]
     fn format_query_vec_sql_rejects_wrong_dimension() {
-        assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS - 1])).is_none());
-        assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS + 1])).is_none());
-        assert!(format_query_vec_sql(Some(&vec![0.0; EMBEDDING_VECTOR_DIMENSIONS])).is_some());
+        assert!(crate::search::hybrid::format_query_vec_sql(Some(&vec![
+            0.0;
+            EMBEDDING_VECTOR_DIMENSIONS
+                - 1
+        ]))
+        .is_none());
+        assert!(crate::search::hybrid::format_query_vec_sql(Some(&vec![
+            0.0;
+            EMBEDDING_VECTOR_DIMENSIONS
+                + 1
+        ]))
+        .is_none());
+        assert!(crate::search::hybrid::format_query_vec_sql(Some(&vec![
+                0.0;
+                EMBEDDING_VECTOR_DIMENSIONS
+            ]))
+        .is_some());
     }
 
     #[test]
