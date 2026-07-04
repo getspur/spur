@@ -47,7 +47,7 @@ LOAD icu;
 /// Must match `manifest.json::schema_version` in the artifact dir. Hard-fail
 /// on mismatch to prevent silent miscompiles where `init.sql` view definitions
 /// parse but produce wrong results against a newer parquet schema.
-pub const SUPPORTED_GRAPH_SCHEMA_VERSION: &str = "spur-graph-schema-v9";
+pub const SUPPORTED_GRAPH_SCHEMA_VERSION: &str = "spur-graph-schema-v10";
 
 /// Default relative path to the analyst DuckDB inside a worktree.
 pub const DEFAULT_ANALYST_DB_REL: &str = ".spur/analyst.duckdb";
@@ -790,6 +790,14 @@ mod tests {
 
     fn temp_root() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    #[test]
+    fn supported_graph_schema_version_matches_graph_store() {
+        assert_eq!(
+            SUPPORTED_GRAPH_SCHEMA_VERSION,
+            spur_graph::store::SCHEMA_VERSION
+        );
     }
 
     #[test]
