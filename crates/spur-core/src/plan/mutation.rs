@@ -59,6 +59,7 @@ pub enum PlanMutationOp {
         issue_id: String,
         new_task: Option<String>,
         new_agent: Option<String>,
+        new_profile: Option<String>,
         new_context_files: Option<Vec<String>>,
         new_depends_on: Option<Vec<String>>,
     },

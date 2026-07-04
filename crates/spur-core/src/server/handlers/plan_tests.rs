@@ -83,6 +83,7 @@ mod plan_truncate_and_restart_tests {
             spec: crate::plan::PlanTask {
                 task_id: task_id.into(),
                 agent: "codex".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -1264,6 +1265,7 @@ mod reconciler_fast_forward_tests {
                 spec: crate::plan::PlanTask {
                     task_id: "t1".into(),
                     agent: "codex".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                 config_overrides: None,
@@ -1307,6 +1309,7 @@ mod reconciler_fast_forward_tests {
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
                 config_overrides: None,
@@ -1395,6 +1398,7 @@ mod reconciler_fast_forward_tests {
                 spec: crate::plan::PlanTask {
                     task_id: "t1".into(),
                     agent: "codex".into(),
+                    profile: None,
                     model: None,
                     effort: None,
                 config_overrides: None,
@@ -1425,6 +1429,7 @@ mod reconciler_fast_forward_tests {
                     spec: crate::plan::PlanTask {
                         task_id: "t1".into(),
                         agent: "codex".into(),
+                        profile: None,
                         model: None,
                         effort: None,
                 config_overrides: None,
@@ -1446,6 +1451,7 @@ mod reconciler_fast_forward_tests {
                     spec: crate::plan::PlanTask {
                         task_id: "t2".into(),
                         agent: "codex".into(),
+                        profile: None,
                         model: None,
                         effort: None,
                 config_overrides: None,
@@ -1490,6 +1496,7 @@ mod reconciler_fast_forward_tests {
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
                 config_overrides: None,
@@ -1550,6 +1557,7 @@ mod reconciler_fast_forward_tests {
         let tasks = vec![crate::plan::PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
                 config_overrides: None,
