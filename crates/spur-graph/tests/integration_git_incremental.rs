@@ -8,7 +8,11 @@ use std::sync::{Arc, Mutex};
 
 mod support;
 
-use spur_graph::mcp::markdown_overlay_base_delta_for_worktree;
+use serde_json::json;
+use spur_graph::mcp::{
+    code_symbol_info_rebuild_aware, markdown_overlay_base_delta_for_worktree,
+    with_worktree_root_for_request,
+};
 use spur_graph::store::cache::{
     emit_base_seed_stats, load_base_artifact_for_worktree, load_base_seed_for_worktree,
     lookup_canonical, write_with_dedup,
@@ -594,6 +598,53 @@ fn corrupted_self_pointer_falls_back_to_main_worktree_pointer() {
 }
 
 #[test]
+fn code_symbol_info_rebuild_aware_uses_seed_rebuild_for_stale_current_with_valid_seed() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn lib() {}\n");
+    repo.git(&["add", "src/lib.rs"]);
+    repo.git(&["commit", "-m", "baseline"]);
+
+    let seed_artifact = build_full(repo.path());
+    write_git_cache(repo.path(), &seed_artifact);
+
+    let mut stale_current = build_full(repo.path());
+    stale_current.manifest_version = "legacy-manifest-version".to_owned();
+    write_current_only_cache(repo.path(), &stale_current);
+
+    repo.write(
+        "src/lib.rs",
+        "pub fn lib() {}\n\npub fn added_after_seed() {}\n",
+    );
+    let changed_full = build_full(repo.path());
+    assert_ne!(
+        changed_full.graph_content_hash, stale_current.graph_content_hash,
+        "dirty fixture must distinguish overlay metadata from full rebuild metadata"
+    );
+
+    let args = json!({
+        "selector": "src/lib.rs::lib",
+    });
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let (response, lines) = capture_base_seed_trace(|| {
+        runtime
+            .block_on(with_worktree_root_for_request(
+                repo.path().to_path_buf(),
+                code_symbol_info_rebuild_aware(&args),
+            ))
+            .expect("symbol info response")
+    });
+
+    assert_base_seed_source_trace(&lines, "self_pointer");
+    assert_eq!(response["symbol"]["entity_name"], "lib");
+    assert_eq!(response["rebuild_status"], "fresh");
+    assert_eq!(response["response_file_oids_match"], true);
+    assert_eq!(
+        response["graph_content_hash"], changed_full.graph_content_hash,
+        "stale CURRENT should be refreshed through a seed-aware materialized rebuild"
+    );
+}
+
+#[test]
 fn missing_canonical_artifact_returns_none_and_full_rebuild_still_works() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn lib() {}\n");
@@ -804,7 +855,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceMakeWriter {
 impl io::Write for TraceWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let line = String::from_utf8_lossy(buf).to_string();
-        if line.contains("worker base seed selected") {
+        if line.contains("worker base seed selected")
+            || line.contains("worker base seed source selected")
+        {
             self.lines.lock().expect("trace lines lock").push(line);
         }
         Ok(buf.len())
@@ -857,6 +910,21 @@ fn assert_base_seed_trace(
     assert!(
         reused >= minimum_reused_buckets,
         "expected reused_buckets >= {minimum_reused_buckets}, got {reused} in {line}"
+    );
+}
+
+fn assert_base_seed_source_trace(lines: &[String], expected_base: &str) {
+    let line = lines
+        .iter()
+        .find(|line| {
+            line.contains("spur_graph::base_seed")
+                && line.contains("worker base seed source selected")
+        })
+        .unwrap_or_else(|| panic!("missing base seed source trace event in {lines:?}"));
+    assert!(
+        line.contains(&format!("base=\"{expected_base}\""))
+            || line.contains(&format!("base={expected_base}")),
+        "unexpected base seed source trace line: {line}"
     );
 }
 
