@@ -273,7 +273,8 @@ impl SessionDetailView {
         ]);
         frame.render_widget(Paragraph::new(header), header_left);
         if let Some(plan) = tracked_plan {
-            crate::components::plan_pulse::render(frame, header_right, plan);
+            let loop_origin = ctx.plan_projection.loop_origin(&plan.plan_id);
+            crate::components::plan_pulse::render(frame, header_right, plan, loop_origin);
         }
 
         // ── React trace ─────────────────────────────────────────────────
