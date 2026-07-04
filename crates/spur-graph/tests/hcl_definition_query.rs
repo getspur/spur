@@ -43,6 +43,10 @@ module "vpc" {
 output "web_ip" {
   value = aws_instance.web.public_ip
 }
+
+provider "aws" {
+  alias = "west"
+}
 "#;
 
 fn parse_hcl(source: &str) -> tree_sitter::Tree {
@@ -143,6 +147,10 @@ fn hcl_tags_query_captures_labeled_blocks() {
         contained_texts(TERRAFORM_FIXTURE, "definition.output", "resource.name"),
         [r#""web_ip""#]
     );
+    assert_eq!(
+        contained_texts(TERRAFORM_FIXTURE, "definition.resource", "provider.type"),
+        [r#""aws""#]
+    );
 }
 
 #[test]
@@ -195,6 +203,7 @@ fn terraform_extractor_builds_address_symbols() {
     assert!(has_node(NodeKind::Constant, "output.web_ip"));
     assert!(has_node(NodeKind::Constant, "local.name_prefix"));
     assert!(has_node(NodeKind::Constant, "local.port"));
+    assert!(has_node(NodeKind::Resource, "aws.west"));
 
     for bare in ["aws_instance", "web", "aws_ami", "ubuntu", "vpc", "region"] {
         assert!(
@@ -217,6 +226,16 @@ fn hcl_extension_shares_the_terraform_address_vocabulary() {
 
     assert!(has_node(NodeKind::Constant, "var.cluster"));
     assert!(has_node(NodeKind::Constant, "local.retries"));
+}
+
+#[test]
+fn terraform_extractor_builds_default_provider_address() {
+    let facts = build_fixture(&[("main.tf", "provider \"aws\" {}\n")]);
+
+    assert!(facts
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Resource && node.label == "aws"));
 }
 
 #[test]

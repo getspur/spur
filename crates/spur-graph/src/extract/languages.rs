@@ -694,7 +694,10 @@ pub(crate) fn shell_config() -> LanguageConfig {
                 include_str!("../../queries/shell/spur-edges.scm"),
             ),
         ],
-        definition_kind_map: &[("definition.function", NodeKind::Function)],
+        definition_kind_map: &[
+            ("definition.function", NodeKind::Function),
+            ("definition.constant", NodeKind::Constant),
+        ],
         relation_kind_map: None,
         preserve_bare_import_path: true,
         is_method: None,
@@ -719,6 +722,7 @@ pub(crate) fn sql_config() -> LanguageConfig {
             ("definition.enum", NodeKind::Enum),
             ("definition.field", NodeKind::Field),
             ("definition.module", NodeKind::Module),
+            ("definition.constant", NodeKind::Constant),
         ],
         relation_kind_map: None,
         preserve_bare_import_path: true,
@@ -1030,13 +1034,21 @@ pub(crate) fn emit_definitions_with_parents<'tree>(
     let mut bindings = parent_bindings.to_vec();
     let mut emitted = Vec::new();
     for (kind, node, label) in definitions {
-        // Language adapters must provide an inner @name capture for every definition.
-        // If a grammar edge case lacks one, skip it until the query is extended.
         let Some(label) = label else {
             continue;
         };
-        let parent = nearest_parent(file_node_id, &bindings, node);
-        let fqn = scoped_name(parent.fqn.unwrap_or(""), &fqn_segment(kind, &label));
+        let syntax_parent = nearest_parent(file_node_id, &bindings, node);
+        let receiver_scope = go_method_receiver_scope(node, source);
+        let receiver_parent = receiver_scope
+            .as_deref()
+            .and_then(|scope| parent_for_scope(&bindings, scope));
+        let parent = receiver_parent.unwrap_or(syntax_parent);
+        let fqn_prefix = receiver_parent
+            .and_then(|parent| parent.fqn)
+            .or(receiver_scope.as_deref())
+            .or(parent.fqn)
+            .unwrap_or("");
+        let fqn = scoped_name(fqn_prefix, &fqn_segment(kind, &label));
         let node_id = builder.add_node(relative_path, label, fqn.clone(), kind, file_id, node);
         builder.add_edge(parent.node_id, Some(node_id), RelationKind::Contains, None);
         if parent.node_id != file_node_id {
@@ -1063,11 +1075,15 @@ pub(crate) fn extracted_symbols<'tree>(
             continue;
         };
         let parent = nearest_extracted_parent(&bindings, node);
-        let enclosing_scope = parent.map(|parent| parent.fqn.clone());
-        let fqn = scoped_name(
-            parent.map(|parent| parent.fqn.as_str()).unwrap_or(""),
-            &fqn_segment(kind, &label),
-        );
+        let receiver_scope = go_method_receiver_scope(node, source);
+        let enclosing_scope = receiver_scope
+            .clone()
+            .or_else(|| parent.map(|parent| parent.fqn.clone()));
+        let fqn_prefix = receiver_scope
+            .as_deref()
+            .or_else(|| parent.map(|parent| parent.fqn.as_str()))
+            .unwrap_or("");
+        let fqn = scoped_name(fqn_prefix, &fqn_segment(kind, &label));
         let range = node.range();
         let symbol_text = child_text(node, source);
         symbols.push(ExtractedSymbol {
@@ -1631,6 +1647,9 @@ fn definition_name(
     }
 
     match definition.name.as_str() {
+        "definition.resource" if is_hcl_provider_block(definition, source, captures) => {
+            hcl_provider_address(definition, source, captures)
+        }
         "definition.resource" if is_hcl_block(definition) => {
             hcl_block_address(definition, source, captures, None)
         }
@@ -1651,6 +1670,11 @@ fn definition_name(
                 .into_iter()
                 .next()
                 .map(|name| format!("local.{name}"))
+        }
+        "definition.constant" if definition.node.kind() == "command" => {
+            contained_capture_text(definition, source, captures, "name")
+                .into_iter()
+                .find_map(|name| shell_alias_name(&name))
         }
         _ => contained_capture_text(definition, source, captures, "name")
             .into_iter()
@@ -1684,6 +1708,50 @@ fn hcl_label_address(
 ) -> Option<String> {
     let block_name = hcl_label_text(definition, source, captures, "resource.name")?;
     Some(format!("{prefix}.{block_name}"))
+}
+
+fn is_hcl_provider_block(
+    definition: &CaptureHit<'_>,
+    source: &str,
+    captures: &[CaptureHit<'_>],
+) -> bool {
+    is_hcl_block(definition)
+        && hcl_label_text(definition, source, captures, "provider.type").is_some()
+}
+
+fn hcl_provider_address(
+    definition: &CaptureHit<'_>,
+    source: &str,
+    captures: &[CaptureHit<'_>],
+) -> Option<String> {
+    let provider_type = hcl_label_text(definition, source, captures, "provider.type")?;
+    hcl_provider_alias(definition.node, source)
+        .map(|alias| format!("{provider_type}.{alias}"))
+        .or(Some(provider_type))
+}
+
+fn hcl_provider_alias(block: Node<'_>, source: &str) -> Option<String> {
+    let body = direct_named_child_by_kind(block, "body")?;
+    for index in 0..body.named_child_count() {
+        let Some(attribute) = body.named_child(index) else {
+            continue;
+        };
+        if attribute.kind() != "attribute" {
+            continue;
+        }
+        let Some(name) = direct_named_child_by_kind(attribute, "identifier") else {
+            continue;
+        };
+        if child_text(name, source).trim() != "alias" {
+            continue;
+        }
+        let literals = named_descendants_by_kind(attribute, "string_lit");
+        match literals.as_slice() {
+            [literal] => return string_lit_text(*literal, source),
+            _ => return None,
+        }
+    }
+    None
 }
 
 const HCL_RESERVED_REFERENCE_ROOTS: &[&str] =
@@ -1741,6 +1809,42 @@ fn hcl_label_text(
                 && capture.match_index == parent.match_index
         })
         .and_then(|capture| string_lit_text(capture.node, source))
+}
+
+fn shell_alias_name(text: &str) -> Option<String> {
+    let name = text.split_once('=').map_or(text, |(name, _)| name).trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+fn parent_for_scope<'a>(bindings: &'a [DefinitionBinding<'_>], scope: &str) -> Option<Parent<'a>> {
+    bindings
+        .iter()
+        .rev()
+        .find(|binding| binding.fqn == scope)
+        .map(|binding| Parent {
+            node_id: binding.node_id,
+            fqn: Some(&binding.fqn),
+        })
+}
+
+fn go_method_receiver_scope(node: Node<'_>, source: &str) -> Option<String> {
+    if node.kind() != "method_declaration" {
+        return None;
+    }
+    let receiver = node.child_by_field_name("receiver")?;
+    let declaration = direct_named_child_by_kind(receiver, "parameter_declaration")?;
+    let receiver_type = declaration.child_by_field_name("type")?;
+    Some(go_receiver_type_scope(receiver_type, source))
+}
+
+fn go_receiver_type_scope(mut node: Node<'_>, source: &str) -> String {
+    while node.kind() == "pointer_type" {
+        let Some(child) = node.named_child(0) else {
+            break;
+        };
+        node = child;
+    }
+    child_text(node, source).trim().to_owned()
 }
 
 fn nearest_parent<'a>(
@@ -2560,7 +2664,7 @@ mod gate_contract {
                 "definition.local",
             ],
             Language::Lua => &["definition.function", "definition.method"],
-            Language::Shell => &["definition.function"],
+            Language::Shell => &["definition.function", "definition.constant"],
             Language::Sql => &[
                 "definition.struct",
                 "definition.type_alias",
@@ -2568,6 +2672,7 @@ mod gate_contract {
                 "definition.enum",
                 "definition.field",
                 "definition.module",
+                "definition.constant",
             ],
             Language::Markdown => &["definition.section"],
             Language::JupyterNotebook => &[],

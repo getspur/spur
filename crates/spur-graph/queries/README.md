@@ -43,12 +43,12 @@ The shared capture vocabulary is:
 `@definition.constant` is captured for Rust, Python, TypeScript/TSX/JavaScript
 top-level non-function `const` bindings, C file-scope `const` variables, and
 C++ namespace/file-scope `const` and `constexpr` variables, and Go
-package-level `const` and `var` bindings.
+package-level `const` and `var` bindings, Shell aliases, and SQL indexes.
 `@definition.enum_variant` is captured for Rust, TypeScript/TSX/JavaScript, C,
 and C++ enum members.
-`@definition.resource` is captured for Hcl/Terraform `resource` blocks; the
-family's `@definition.data` and `@definition.module` captures fold into the
-same `NodeKind::Resource` column, and `@definition.variable` /
+`@definition.resource` is captured for Hcl/Terraform `resource` and `provider`
+blocks; the family's `@definition.data` and `@definition.module` captures fold
+into the same `NodeKind::Resource` column, and `@definition.variable` /
 `@definition.output` / `@definition.local` fold into `constant`.
 
 ## Coverage Matrix
@@ -73,8 +73,8 @@ Legend:
 | Hcl | - | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | Y |
 | Terraform | - | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | Y |
 | Lua | - | Y | Y | - | - | - | - | - | - | - | - | - | - | - | - | - |
-| Shell | - | Y | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
-| Sql | Y | Y | - | - | - | Y | Y | - | - | Y | - | Y | - | - | - | - |
+| Shell | - | Y | - | - | - | - | - | - | - | - | - | - | - | Y | - | - |
+| Sql | Y | Y | - | - | - | Y | Y | - | - | Y | - | Y | - | Y | - | - |
 | Markdown | - | - | - | - | - | - | - | - | - | - | - | - | Y | - | - | - |
 | JupyterNotebook | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 
@@ -112,21 +112,32 @@ Notes:
   identifier as its own definition node so `const A, B = 1, 2` and
   `var A, B = 1, 2` fan out into one constant per name. Only top-level `const`
   and `var` declarations are captured (function-local declarations are
-  skipped). The Go
-  `package_clause` spans only the clause itself, so top-level symbols are not
-  nested under the module node and keep bare-name FQNs, matching the
+  skipped). Receiver methods use the receiver type as their logical scope, so
+  `func (p Point) Scale()` and `func (p *Path) Scale()` remain bare `Scale`
+  labels but become `Point::Scale` / `Path::Scale` identities. The Go
+  `package_clause` spans only the clause itself, so other top-level symbols are
+  not nested under the module node and keep bare-name FQNs, matching the
   shell/sql convention.
 - Hcl (.hcl) and Terraform (.tf) share the tree-sitter-hcl grammar and the
   same query set. Symbols carry canonical Terraform address labels:
   `resource`/`data`/`module` blocks become `NodeKind::Resource` nodes labeled
-  `<type>.<name>` / `data.<type>.<name>` / `module.<name>`, and
-  `variable`/`output` blocks plus each `locals` attribute become
+  `<type>.<name>` / `data.<type>.<name>` / `module.<name>`, provider blocks
+  become `NodeKind::Resource` nodes labeled `<provider>` or
+  `<provider>.<alias>`, and `variable`/`output` blocks plus each `locals`
+  attribute become
   `NodeKind::Constant` nodes labeled `var.<name>` / `output.<name>` /
-  `local.<name>`. Provider blocks are deliberately unmodeled in v1, so
-  provider alias references (`aws.west`) remain unresolved evidence.
+  `local.<name>`. Provider references such as `provider = aws.west` resolve to
+  the aliased provider block when that block is present in the same module
+  scope.
   `.tf.json` files are JSON syntax and are out of scope (the extension
   matcher sees `json`); Terragrunt-flavored `.hcl` parses as generic HCL with
   no dedicated `dependency`/`include` modeling.
+- Shell captures function definitions and `alias name=value` declarations;
+  aliases fold into `NodeKind::Constant`.
+- Sql captures `CREATE TRIGGER` as `NodeKind::Function` and `CREATE INDEX` as
+  `NodeKind::Constant`. `tree-sitter-sequel` 0.3 exposes no
+  `create_procedure` node, so `CREATE PROCEDURE` remains a grammar-blocked
+  TODO.
 
 ## Relation Coverage Matrix
 
@@ -193,9 +204,8 @@ unresolved evidence. No call channel exists — all Terraform functions are
 builtins. Recall ceiling: address references resolve iff the target address
 is defined in the same module directory (or is a workspace singleton), which
 Terraform semantics make a tight bound; the expected residue on idiomatic
-multi-module repos (~5–15%) is provider alias refs, for-expression loop-var
-attribute access, and exotic splats — all left unresolved, never wrongly
-bound.
+multi-module repos (~5–15%) is for-expression loop-var attribute access and
+exotic splats — all left unresolved, never wrongly bound.
 
 ### Notebook Semantic Facts
 
