@@ -59,6 +59,12 @@ fn rewrite_definitions_refs(value: &mut Value) {
 pub struct DelegateToWorkerInput {
     /// Name of the worker agent to delegate to.
     pub agent: String,
+    /// Named agent profile from `.spur/agents/<name>.md` (or a pass-through
+    /// agent/mode name the worker binary already knows). Materialized into the
+    /// worker worktree and selected on the fresh session; fail-soft on selection.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Override the worker's model (config-option value id, e.g. "gpt-5-codex"). Fail-soft if the agent rejects it.
     #[schemars(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +100,12 @@ pub struct DelegateToWorkerInput {
 pub struct DelegateParallelTaskInput {
     /// Worker agent name.
     pub agent: String,
+    /// Named agent profile from `.spur/agents/<name>.md` (or a pass-through
+    /// agent/mode name the worker binary already knows). Materialized into the
+    /// worker worktree and selected on the fresh session; fail-soft on selection.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Override the worker's model (config-option value id, e.g. "gpt-5-codex"). Fail-soft if the agent rejects it.
     #[schemars(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
