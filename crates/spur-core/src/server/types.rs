@@ -533,6 +533,7 @@ pub fn parse_parallel_tasks(
             agent: task.agent,
             model: task.model,
             effort: task.effort,
+            config_overrides: task.config_overrides,
             task: task.task,
             context_files: task.context_files.unwrap_or_default(),
             prior_branch_for_reuse: None,

@@ -279,6 +279,7 @@ mod tests {
                 agent: "codex".to_string(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: format!("Do {task_id}."),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
                 issue_id: Some(format!("bd-{task_id}")),

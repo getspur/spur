@@ -8,6 +8,8 @@
 //! undocumented in upstream AGENTS.md). See plan 2026-04-20-adaptive-plan-
 //! repair-v0a.md "Review addendum II" for the full justification.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 pub const SENTINEL_PREFIX: &str = "[[spur-audit v1]]";
@@ -104,6 +106,8 @@ pub enum AuditSentinelKind {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_overrides: Option<HashMap<String, String>>,
         /// bd-2m2u Phase 2c — extended fields populated by `ModifyTaskSpec`.
         /// Legacy comments lack these (default `None`); the projector falls back
         /// to the live beads issue body / agent label / `blocked_by`.
@@ -568,6 +572,7 @@ mod tests {
                 context_files: vec!["docs/spec.md".into(), "src/lib.rs".into()],
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task_text: None,
                 agent: None,
                 depends_on: None,
