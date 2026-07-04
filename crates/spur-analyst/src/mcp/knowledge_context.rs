@@ -247,14 +247,15 @@ pub async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerE
     )?;
 
     let exact_context = exact_graph_context_for_result(&request.base, &query_result).await;
+    let staleness = pack_connection.staleness.clone();
     let graph_sections = graph_reasoning_sections_for_pack_with_conn(
         &request,
         &query_result,
         &exact_context,
         &db_path,
         pack_connection.graph_conn(),
+        &staleness,
     );
-    let staleness = pack_connection.staleness.clone();
     drop(pack_connection);
     Ok(pack_query_result_v2_with_graph_sections_and_staleness(
         &request,
@@ -1628,9 +1629,10 @@ fn graph_reasoning_sections_for_pack_with_conn(
     exact_context: &ExactGraphContext,
     db_path: &Path,
     conn: &duckdb::Connection,
+    staleness: &PackStaleness,
 ) -> GraphReasoningSections {
     match analyst_matches_exact_graph(result, exact_context) {
-        Some(false) if request.graph_reasoning.any_enabled() => {
+        Some(false) if request.graph_reasoning.any_enabled() && !staleness.delta_applied => {
             stale_graph_reasoning_sections(result, exact_context)
         }
         _ => graph_reasoning_sections_with_conn(request, result, db_path, conn),
