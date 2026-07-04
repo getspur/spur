@@ -117,6 +117,13 @@ fn inrust_manifest_diff_handles_add_modify_delete() {
         .expect("baseline b")
         .stable_file_id
         .clone();
+    let alpha_id = baseline
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == "alpha")
+        .expect("baseline alpha")
+        .stable_symbol_id
+        .clone();
 
     repo.write("src/a.rs", "pub fn alpha_changed() {}\n");
     repo.write("src/c.rs", "pub fn gamma() {}\n");
@@ -131,9 +138,17 @@ fn inrust_manifest_diff_handles_add_modify_delete() {
         .any(|symbol| symbol.entity_name == "alpha_changed"));
     assert!(manifest_entry(&next, "src/c.rs").is_some());
     assert!(manifest_entry(&next, "src/b.rs").is_none());
-    assert_eq!(next.tombstones.len(), 1);
-    assert_eq!(next.tombstones[0].path, "src/b.rs");
-    assert_eq!(next.tombstones[0].stable_file_id, removed_id);
+    // One tombstone for the whole-file removal of b.rs, one for `alpha` being
+    // renamed to `alpha_changed` within the still-present a.rs.
+    assert_eq!(next.tombstones.len(), 2);
+    assert!(next
+        .tombstones
+        .iter()
+        .any(|tombstone| tombstone.path == "src/b.rs" && tombstone.stable_file_id == removed_id));
+    assert!(next
+        .tombstones
+        .iter()
+        .any(|tombstone| tombstone.path == "src/a.rs" && tombstone.stable_file_id == alpha_id));
 }
 
 #[test]
