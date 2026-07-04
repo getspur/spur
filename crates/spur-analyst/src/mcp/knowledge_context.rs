@@ -1,6 +1,9 @@
 use std::{path::Path, sync::Arc};
 
 use crate::embedding::EmbeddingRuntime;
+#[cfg(test)]
+use crate::search::hybrid::confidence_score_thresholds;
+use crate::search::{graph_candidates::merge_graph_candidates, hybrid::evidence_confidence};
 use crate::{
     db::{
         connection::open_analyst_connection_read_only,
@@ -28,10 +31,6 @@ use super::McpHandlerError;
 const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
 const MAX_IMPACT_SYMBOLS: usize = 2;
 const MAX_IMPACT_NEIGHBORS: usize = 2;
-const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
-const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
-const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 0.80;
-const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
 
 pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
@@ -303,31 +302,6 @@ fn query_candidates_for_request_with_conn(
     Ok(query_result)
 }
 
-fn merge_graph_candidates(result: &mut KnowledgeQueryResult, graph_result: KnowledgeQueryResult) {
-    result.candidates.extend(graph_result.candidates);
-
-    let mut deduped = Vec::with_capacity(result.candidates.len());
-    for candidate in result.candidates.drain(..) {
-        let Some(stable_symbol_id) = candidate.stable_symbol_id.as_deref() else {
-            deduped.push(candidate);
-            continue;
-        };
-
-        if let Some(existing) = deduped
-            .iter_mut()
-            .find(|existing| existing.stable_symbol_id.as_deref() == Some(stable_symbol_id))
-        {
-            if candidate.score > existing.score {
-                *existing = candidate;
-            }
-        } else {
-            deduped.push(candidate);
-        }
-    }
-
-    result.candidates = deduped;
-}
-
 fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Value {
     base_pack(
         request,
@@ -548,24 +522,10 @@ async fn pack_query_result_with_exact_context_and_staleness(
     let recommended_next_tools =
         recommended_next_tools(request.intent, &primary_evidence, &supporting_docs);
     let answerable = !primary_evidence.is_empty() || !supporting_docs.is_empty();
-    let confidence = if !answerable {
-        "low"
+    let confidence = if answerable {
+        evidence_confidence(&primary_evidence, &supporting_docs)
     } else {
-        let top_evidence = primary_evidence.first();
-        let top_score = top_evidence
-            .and_then(|evidence| evidence.get("score").and_then(Value::as_f64))
-            .unwrap_or(0.0);
-        let top_grounding =
-            top_evidence.and_then(|evidence| evidence.get("grounding").and_then(Value::as_str));
-        let (high_score, medium_score) = confidence_score_thresholds(top_grounding);
-        let evidence_count = primary_evidence.len() + supporting_docs.len();
-        if top_score > high_score && evidence_count >= 3 {
-            "high"
-        } else if top_score > medium_score && evidence_count >= 2 {
-            "medium"
-        } else {
-            "low"
-        }
+        "low"
     };
     let impact = aggregate_impact_value(&exact_context.impacts);
     let staleness = staleness_value(&result, &exact_context, &pack_staleness);
@@ -1149,15 +1109,6 @@ fn caveat_value(
         "message": message.into(),
         "stable_symbol_id": stable_symbol_id,
     })
-}
-
-fn confidence_score_thresholds(grounding: Option<&str>) -> (f64, f64) {
-    match grounding {
-        Some(grounding) if grounding.starts_with("hybrid-") => {
-            (HYBRID_HIGH_CONFIDENCE_SCORE, HYBRID_MEDIUM_CONFIDENCE_SCORE)
-        }
-        _ => (BM25_HIGH_CONFIDENCE_SCORE, BM25_MEDIUM_CONFIDENCE_SCORE),
-    }
 }
 
 fn staleness_value(
