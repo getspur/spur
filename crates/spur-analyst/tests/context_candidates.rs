@@ -1,21 +1,32 @@
 #![allow(clippy::needless_raw_string_hashes)]
 
 use std::fs;
-use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::SystemTime;
 
+use anyhow::Context as _;
+use serde_json::{json, Value};
 use spur_analyst::{
-    query_context_candidates, query_context_paths, query_graph_candidates,
-    query_symbol_risk_community, KnowledgePathEngine, KnowledgePathOptions, KnowledgePathStatus,
-    KnowledgeQueryOptions, KnowledgeSearchScope, SymbolEvidenceStatus, MAX_CONTEXT_PATHS,
-    MAX_CONTEXT_PATH_HOPS,
+    mcp::knowledge_context_pack_2, query_context_candidates, query_context_paths,
+    query_graph_candidates, query_symbol_risk_community, KnowledgePathEngine, KnowledgePathOptions,
+    KnowledgePathStatus, KnowledgeQueryOptions, KnowledgeSearchScope, SymbolEvidenceStatus,
+    MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
 };
-use spur_graph::store::{write_sections_dataset, SECTIONS_DATASET_DIR};
-use spur_graph::{artifact_from_facts, build_facts, EMBEDDING_VECTOR_DIMENSIONS};
+use spur_graph::store::{
+    write_artifact_parquet, write_current_pointer, write_sections_dataset, SECTIONS_DATASET_DIR,
+};
+use spur_graph::{
+    artifact_from_facts, build_facts, GraphIndexArtifact, GraphIndexPointer, SourceKind,
+    WriteOptions, EMBEDDING_VECTOR_DIMENSIONS,
+};
 
 const INIT_SEARCH_SQL: &str = include_str!("../../spur-context/analyst/init_search.sql");
+const ANALYST_EMBED_MODE_ENV: &str = "SPUR_ANALYST_EMBED_MODE";
 const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ASYNC_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[test]
 fn context_candidates_return_stable_ids_for_docs_and_code() {
@@ -343,6 +354,171 @@ fn context_candidates_surface_semantic_only_docs_via_hybrid_fusion() {
         }),
         "hybrid fusion should surface the semantic-only doc: {:?}",
         candidate_brief(&hybrid.candidates)
+    );
+}
+
+#[tokio::test]
+async fn knowledge_context_pack_2_dirty_worktree_queries_leave_base_duckdb_bytes_unchanged() {
+    let _lock = async_env_lock().await;
+    let _embed = EnvGuard::set(ANALYST_EMBED_MODE_ENV, "off");
+    let fixture = OverlayKcp2Fixture::new().expect("fixture");
+    fixture
+        .dirty_alpha_worktree()
+        .expect("dirty alpha worktree");
+    let dirty_artifact =
+        graph_artifact_for_root(&fixture.alpha_worktree).expect("dirty alpha artifact");
+    let alpha_target = symbol_id(&dirty_artifact, "alpha_dirty_target");
+
+    let snapshot = DuckDbSnapshot::capture(&fixture.base_db_path).expect("snapshot base db");
+
+    let found = run_overlay_pack(
+        &fixture.alpha_worktree,
+        "alpha entry overlay beacon",
+        &[alpha_target.as_str()],
+    )
+    .await
+    .expect("alpha pack");
+    assert_pack_ok(&found);
+    assert_eq!(found["staleness"]["delta_applied"], true, "{found:#}");
+    assert_eq!(
+        first_graph_path_status(&found),
+        Some("path_found"),
+        "{found:#}"
+    );
+
+    let no_target = run_overlay_pack(
+        &fixture.alpha_worktree,
+        "alpha entry overlay beacon",
+        &["00000000"],
+    )
+    .await
+    .expect("alpha missing-anchor pack");
+    assert_pack_ok(&no_target);
+    assert_eq!(
+        first_graph_path_status(&no_target),
+        Some("no_path"),
+        "{no_target:#}"
+    );
+
+    let base_only_candidates = run_overlay_pack(
+        &fixture.alpha_worktree,
+        "bravo entry overlay beacon",
+        &[alpha_target.as_str()],
+    )
+    .await
+    .expect("bravo source pack");
+    assert_pack_ok(&base_only_candidates);
+
+    snapshot
+        .assert_unchanged(&fixture.base_db_path)
+        .expect("base analyst db must remain byte-for-byte unchanged");
+}
+
+#[tokio::test]
+async fn knowledge_context_pack_2_worktree_overlays_do_not_leak_between_dirty_worktrees() {
+    let _lock = async_env_lock().await;
+    let _embed = EnvGuard::set(ANALYST_EMBED_MODE_ENV, "off");
+    let fixture = OverlayKcp2Fixture::new().expect("fixture");
+    fixture
+        .dirty_alpha_worktree()
+        .expect("dirty alpha worktree");
+    fixture
+        .dirty_bravo_worktree()
+        .expect("dirty bravo worktree");
+
+    let alpha_artifact =
+        graph_artifact_for_root(&fixture.alpha_worktree).expect("dirty alpha artifact");
+    let bravo_artifact =
+        graph_artifact_for_root(&fixture.bravo_worktree).expect("dirty bravo artifact");
+    let alpha_target = symbol_id(&alpha_artifact, "alpha_dirty_target");
+    let bravo_target = symbol_id(&bravo_artifact, "bravo_dirty_target");
+
+    let alpha_found = run_overlay_pack(
+        &fixture.alpha_worktree,
+        "alpha entry overlay beacon",
+        &[alpha_target.as_str()],
+    )
+    .await
+    .expect("alpha found pack");
+    assert_pack_ok(&alpha_found);
+    assert_eq!(
+        first_graph_path_status(&alpha_found),
+        Some("path_found"),
+        "{alpha_found:#}"
+    );
+
+    let alpha_no_bravo = run_overlay_pack(
+        &fixture.alpha_worktree,
+        "alpha entry overlay beacon",
+        &[bravo_target.as_str()],
+    )
+    .await
+    .expect("alpha no-bravo pack");
+    assert_pack_ok(&alpha_no_bravo);
+    assert_eq!(
+        first_graph_path_status(&alpha_no_bravo),
+        Some("no_path"),
+        "{alpha_no_bravo:#}"
+    );
+
+    let bravo_found = run_overlay_pack(
+        &fixture.bravo_worktree,
+        "bravo entry overlay beacon",
+        &[bravo_target.as_str()],
+    )
+    .await
+    .expect("bravo found pack");
+    assert_pack_ok(&bravo_found);
+    assert_eq!(
+        first_graph_path_status(&bravo_found),
+        Some("path_found"),
+        "{bravo_found:#}"
+    );
+
+    let bravo_no_alpha = run_overlay_pack(
+        &fixture.bravo_worktree,
+        "bravo entry overlay beacon",
+        &[alpha_target.as_str()],
+    )
+    .await
+    .expect("bravo no-alpha pack");
+    assert_pack_ok(&bravo_no_alpha);
+    assert_eq!(
+        first_graph_path_status(&bravo_no_alpha),
+        Some("no_path"),
+        "{bravo_no_alpha:#}"
+    );
+}
+
+#[tokio::test]
+async fn knowledge_context_pack_2_deleted_file_symbols_are_absent_from_merged_paths() {
+    let _lock = async_env_lock().await;
+    let _embed = EnvGuard::set(ANALYST_EMBED_MODE_ENV, "off");
+    let fixture = OverlayKcp2Fixture::new().expect("fixture");
+    fixture
+        .delete_deleted_worktree_file()
+        .expect("delete fixture source");
+
+    let deleted_helper = symbol_id(&fixture.base_artifact, "deleted_helper");
+    let pack = run_overlay_pack(
+        &fixture.deleted_worktree,
+        "deleted entry overlay beacon",
+        &[deleted_helper.as_str()],
+    )
+    .await
+    .expect("deleted pack");
+    assert_pack_ok(&pack);
+    assert_eq!(pack["staleness"]["delta_applied"], true, "{pack:#}");
+    assert_eq!(first_graph_path_status(&pack), Some("no_path"), "{pack:#}");
+
+    let rows = pack["graph_paths"][0]["rows"]
+        .as_array()
+        .expect("path rows");
+    assert!(
+        rows.iter().all(|row| {
+            row["source_stable_id"] != deleted_helper && row["target_stable_id"] != deleted_helper
+        }),
+        "deleted-file symbols must not appear in merged path rows: {pack:#}"
     );
 }
 
@@ -1508,6 +1684,395 @@ fn create_simple_directed_path_fixture(conn: &duckdb::Connection) {
     .expect("create simple path fixture schema");
 }
 
+struct OverlayKcp2Fixture {
+    _temp_dir: tempfile::TempDir,
+    _main_repo: PathBuf,
+    base_db_path: PathBuf,
+    base_artifact: GraphIndexArtifact,
+    alpha_worktree: PathBuf,
+    bravo_worktree: PathBuf,
+    deleted_worktree: PathBuf,
+}
+
+impl OverlayKcp2Fixture {
+    fn new() -> anyhow::Result<Self> {
+        let temp_dir = tempfile::tempdir().context("tempdir")?;
+        let spur_root = temp_dir.path().join("spur-root");
+        let main_repo = spur_root.join("repo");
+        let parent_spur = spur_root.join(".spur");
+        let worktrees_dir = parent_spur.join("worktrees");
+
+        write_overlay_fixture_sources(&main_repo)?;
+        commit_fixture_repo(&main_repo)?;
+
+        let base_artifact = graph_artifact_for_root(&main_repo)?;
+        let artifact_dir = main_repo.join(".spur/graph/test-artifact.parquet");
+        let written = write_artifact_parquet(
+            &base_artifact,
+            &artifact_dir,
+            WriteOptions::default(),
+            Vec::new(),
+        )
+        .context("write graph artifact")?;
+        write_current_pointer(&main_repo, &written).context("write graph CURRENT pointer")?;
+        write_graph_index_pointer(&main_repo, &base_artifact, &written)
+            .context("write graph index pointer")?;
+
+        fs::create_dir_all(&worktrees_dir).context("create worktrees dir")?;
+        let base_db_path = parent_spur.join("analyst.duckdb");
+        seed_overlay_pack_analyst_db(&base_db_path, &written, &base_artifact.graph_content_hash)
+            .context("seed analyst db")?;
+
+        let alpha_worktree = add_detached_worktree(&main_repo, &worktrees_dir, "alpha")?;
+        let bravo_worktree = add_detached_worktree(&main_repo, &worktrees_dir, "bravo")?;
+        let deleted_worktree = add_detached_worktree(&main_repo, &worktrees_dir, "deleted")?;
+
+        Ok(Self {
+            _temp_dir: temp_dir,
+            _main_repo: main_repo,
+            base_db_path,
+            base_artifact,
+            alpha_worktree,
+            bravo_worktree,
+            deleted_worktree,
+        })
+    }
+
+    fn dirty_alpha_worktree(&self) -> anyhow::Result<()> {
+        fs::write(
+            self.alpha_worktree.join("src/a.rs"),
+            "pub fn alpha_entry() {\n    alpha_dirty_target();\n}\n\npub fn alpha_dirty_target() {}\n",
+        )
+        .context("dirty alpha source")
+    }
+
+    fn dirty_bravo_worktree(&self) -> anyhow::Result<()> {
+        fs::write(
+            self.bravo_worktree.join("src/b.rs"),
+            "pub fn bravo_entry() {\n    bravo_dirty_target();\n}\n\npub fn bravo_dirty_target() {}\n",
+        )
+        .context("dirty bravo source")
+    }
+
+    fn delete_deleted_worktree_file(&self) -> anyhow::Result<()> {
+        fs::remove_file(self.deleted_worktree.join("src/deleted.rs"))
+            .context("remove deleted fixture source")
+    }
+}
+
+struct DuckDbSnapshot {
+    bytes: Vec<u8>,
+    modified: SystemTime,
+}
+
+impl DuckDbSnapshot {
+    fn capture(path: &Path) -> anyhow::Result<Self> {
+        let metadata = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+        Ok(Self {
+            bytes: fs::read(path).with_context(|| format!("read {}", path.display()))?,
+            modified: metadata
+                .modified()
+                .with_context(|| format!("read mtime {}", path.display()))?,
+        })
+    }
+
+    fn assert_unchanged(&self, path: &Path) -> anyhow::Result<()> {
+        let after = Self::capture(path)?;
+        anyhow::ensure!(
+            after.bytes == self.bytes,
+            "base analyst DB bytes changed after read-only pack queries"
+        );
+        anyhow::ensure!(
+            after.modified == self.modified,
+            "base analyst DB mtime changed after read-only pack queries"
+        );
+        Ok(())
+    }
+}
+
+async fn run_overlay_pack(worktree: &Path, query: &str, anchors: &[&str]) -> anyhow::Result<Value> {
+    let anchors = anchors
+        .iter()
+        .map(|anchor| format!("graph://symbol/{anchor}"))
+        .collect::<Vec<_>>();
+    let args = json!({
+        "query": query,
+        "intent": "review",
+        "scope": "code",
+        "limit": 1,
+        "max_symbol_bodies": 0,
+        "graph_reasoning": {
+            "paths": true,
+            "communities": false,
+            "risk": false,
+            "max_path_hops": 2,
+            "max_paths": 1,
+            "anchors": anchors
+        }
+    });
+
+    spur_graph::mcp::with_worktree_root_for_request(worktree.to_path_buf(), async {
+        knowledge_context_pack_2(&args).await
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+fn assert_pack_ok(pack: &Value) {
+    assert!(pack.get("error").is_none(), "{pack:#}");
+    assert_eq!(pack["answerable"], true, "{pack:#}");
+}
+
+fn first_graph_path_status(pack: &Value) -> Option<&str> {
+    let path = pack["graph_paths"]
+        .as_array()
+        .and_then(|paths| paths.first())?;
+    path["status"].as_str()
+}
+
+fn write_overlay_fixture_sources(root: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(root.join("src")).context("create src dir")?;
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"overlay-kcp2-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .context("write fixture manifest")?;
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub mod a;\npub mod b;\npub mod deleted;\n",
+    )
+    .context("write fixture lib")?;
+    fs::write(root.join("src/a.rs"), "pub fn alpha_entry() {}\n").context("write alpha source")?;
+    fs::write(root.join("src/b.rs"), "pub fn bravo_entry() {}\n").context("write bravo source")?;
+    fs::write(
+        root.join("src/deleted.rs"),
+        "pub fn deleted_entry() {\n    deleted_helper();\n}\n\npub fn deleted_helper() {}\n",
+    )
+    .context("write deleted source")?;
+    Ok(())
+}
+
+fn commit_fixture_repo(root: &Path) -> anyhow::Result<()> {
+    git(root, &["init", "-q"])?;
+    git(root, &["config", "user.email", "test@spur"])?;
+    git(root, &["config", "user.name", "SPUR Test"])?;
+    git(root, &["add", "."])?;
+    git(root, &["commit", "-m", "fixture"])?;
+    Ok(())
+}
+
+fn add_detached_worktree(
+    main_repo: &Path,
+    worktrees_dir: &Path,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
+    let path = worktrees_dir.join(name);
+    let output = Command::new("git")
+        .arg("worktree")
+        .arg("add")
+        .arg("--detach")
+        .arg(&path)
+        .arg("HEAD")
+        .current_dir(main_repo)
+        .output()
+        .with_context(|| format!("run git worktree add for {name}"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git worktree add {name} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(path)
+}
+
+fn graph_artifact_for_root(root: &Path) -> anyhow::Result<GraphIndexArtifact> {
+    let facts = build_facts(root, None).context("build graph facts")?.0;
+    artifact_from_facts(&facts, root).context("build graph artifact")
+}
+
+fn write_graph_index_pointer(
+    worktree: &Path,
+    artifact: &GraphIndexArtifact,
+    artifact_dir: &Path,
+) -> anyhow::Result<()> {
+    let head = git(worktree, &["rev-parse", "HEAD"])?.trim().to_owned();
+    let pointer = GraphIndexPointer {
+        schema: "spur-graph-pointer-v1".to_owned(),
+        graph_content_hash: artifact.graph_content_hash.clone(),
+        manifest_version: artifact.manifest_version.clone(),
+        source_kind: SourceKind::Git,
+        indexed_commit_oid: Some(head),
+        canonical_artifact_path: artifact_dir
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", artifact_dir.display()))?,
+    };
+    let pointer_path = worktree.join(".spur/graph-index.pointer.json");
+    let pointer_parent = pointer_path.parent().context("pointer parent")?;
+    fs::create_dir_all(pointer_parent).context("create pointer parent")?;
+    fs::write(pointer_path, serde_json::to_vec_pretty(&pointer)?).context("write pointer")?;
+    Ok(())
+}
+
+fn seed_overlay_pack_analyst_db(
+    db_path: &Path,
+    artifact_dir: &Path,
+    graph_hash: &str,
+) -> anyhow::Result<()> {
+    let parent = db_path.parent().context("analyst db parent")?;
+    fs::create_dir_all(parent).context("create analyst db parent")?;
+    let conn = duckdb::Connection::open(db_path).context("open overlay pack fixture db")?;
+    conn.execute_batch("INSTALL fts; LOAD fts; INSTALL icu; LOAD icu; INSTALL lance; LOAD lance;")
+        .context("load overlay pack fixture extensions")?;
+    let artifact_dir = sql_escape_path(artifact_dir);
+    let graph_hash = sql_escape_literal(graph_hash);
+    conn.execute_batch(&format!(
+        r#"
+        CREATE TABLE _meta (graph_content_hash VARCHAR);
+        INSERT INTO _meta VALUES ('{graph_hash}');
+
+        CREATE OR REPLACE TABLE node_dense_id_map AS
+        WITH referenced_ids AS (
+          SELECT stable_symbol_id FROM read_parquet('{artifact_dir}/nodes.parquet')
+          UNION
+          SELECT source_stable_id AS stable_symbol_id FROM read_parquet('{artifact_dir}/edges.parquet')
+          UNION
+          SELECT target_stable_id FROM read_parquet('{artifact_dir}/edges.parquet')
+          UNION
+          SELECT source_stable_id FROM read_parquet('{artifact_dir}/edges_by_dst.parquet')
+          UNION
+          SELECT target_stable_id FROM read_parquet('{artifact_dir}/edges_by_dst.parquet')
+          UNION
+          SELECT source_stable_id FROM read_parquet('{artifact_dir}/edges_unresolved.parquet')
+        )
+        SELECT
+          stable_symbol_id,
+          ROW_NUMBER() OVER (ORDER BY stable_symbol_id) AS dense_id
+        FROM (
+          SELECT DISTINCT stable_symbol_id
+          FROM referenced_ids
+          WHERE stable_symbol_id IS NOT NULL
+        );
+
+        CREATE OR REPLACE VIEW nodes AS
+        SELECT n.* REPLACE (m.dense_id AS node_id)
+        FROM read_parquet('{artifact_dir}/nodes.parquet') n
+        JOIN node_dense_id_map m USING (stable_symbol_id);
+
+        CREATE OR REPLACE VIEW edges AS
+        SELECT e.* REPLACE (
+          s.dense_id AS src_id,
+          d.dense_id AS dst_id
+        )
+        FROM read_parquet('{artifact_dir}/edges.parquet') e
+        JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id
+        JOIN node_dense_id_map d ON d.stable_symbol_id = e.target_stable_id;
+
+        CREATE OR REPLACE VIEW edges_by_dst AS
+        SELECT e.* REPLACE (
+          s.dense_id AS src_id,
+          d.dense_id AS dst_id
+        )
+        FROM read_parquet('{artifact_dir}/edges_by_dst.parquet') e
+        JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id
+        JOIN node_dense_id_map d ON d.stable_symbol_id = e.target_stable_id;
+
+        CREATE OR REPLACE VIEW edges_unresolved AS
+        SELECT e.* REPLACE (s.dense_id AS src_id)
+        FROM read_parquet('{artifact_dir}/edges_unresolved.parquet') e
+        JOIN node_dense_id_map s ON s.stable_symbol_id = e.source_stable_id;
+
+        CREATE OR REPLACE VIEW files AS
+        SELECT *
+        FROM read_parquet('{artifact_dir}/files.parquet');
+
+        CREATE OR REPLACE VIEW file_manifests AS
+        SELECT *
+        FROM read_parquet('{artifact_dir}/file_manifests.parquet');
+
+        CREATE OR REPLACE VIEW tombstones AS
+        SELECT *
+        FROM read_parquet('{artifact_dir}/tombstones.parquet');
+
+        CREATE TABLE sections_search (
+            stable_symbol_id VARCHAR,
+            qualified_name VARCHAR,
+            file_path VARCHAR,
+            heading_level INTEGER,
+            content_hash VARCHAR,
+            body_text VARCHAR
+        );
+
+        CREATE TABLE symbol_text AS
+        SELECT stable_symbol_id,
+               entity_name,
+               qualified_name,
+               file_path,
+               symbol_kind,
+               entity_name || ' ' || replace(entity_name, '_', ' ') || ' overlay beacon' AS doc_text
+        FROM nodes
+        WHERE symbol_kind = 'function';
+
+        CREATE TABLE v_symbol_scorecard AS
+        SELECT stable_symbol_id,
+               entity_name,
+               qualified_name,
+               symbol_kind,
+               file_path,
+               0.42::DOUBLE AS pagerank,
+               0::BIGINT AS in_degree,
+               0::BIGINT AS out_degree,
+               0::BIGINT AS callers,
+               0::BIGINT AS importers,
+               0::BIGINT AS inbound_total,
+               0::BIGINT AS churn_90d,
+               NULL::TIMESTAMP AS last_touched,
+               0.0::DOUBLE AS blast_radius_score,
+               'fixture' AS posture
+        FROM symbol_text;
+
+        CREATE TABLE v_symbol_inbound AS
+        SELECT stable_symbol_id, 0::BIGINT AS callers
+        FROM symbol_text;
+        "#
+    ))
+    .context("create overlay pack fixture schema")?;
+    conn.execute_batch(
+        r#"
+        PRAGMA create_fts_index('main.sections_search', 'stable_symbol_id', 'body_text', overwrite=1, stemmer='porter');
+        PRAGMA create_fts_index('main.symbol_text', 'stable_symbol_id', 'doc_text', overwrite=1);
+        "#,
+    )
+    .context("create overlay pack fixture fts indexes")?;
+    let macro_sql = context_candidate_macro_sql();
+    conn.execute_batch(&macro_sql)
+        .context("define overlay pack fixture context search macro")?;
+    Ok(())
+}
+
+fn symbol_id(artifact: &GraphIndexArtifact, entity_name: &str) -> String {
+    artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.entity_name == entity_name)
+        .unwrap_or_else(|| panic!("symbol {entity_name} should be indexed"))
+        .stable_symbol_id
+        .clone()
+}
+
+fn git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("run git {}", args.join(" ")))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).context("git stdout UTF-8")
+}
+
 fn candidate_brief(
     candidates: &[spur_analyst::KnowledgeCandidate],
 ) -> Vec<(String, String, String, String)> {
@@ -1585,6 +2150,10 @@ fn sql_escape_path(path: &Path) -> String {
     path.display().to_string().replace('\'', "''")
 }
 
+fn sql_escape_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
 struct EnvGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -1609,4 +2178,11 @@ impl Drop for EnvGuard {
 
 fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().expect("env lock")
+}
+
+async fn async_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    ASYNC_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
