@@ -202,6 +202,8 @@ pub struct NativeAcpConnection {
     command: String,
     /// Extra arguments passed to the binary on startup.
     extra_args: Vec<String>,
+    /// Additional absolute workspace roots sent with ACP `session/new`.
+    additional_directories: Vec<PathBuf>,
     /// Channel to send commands to the dedicated ACP thread.
     cmd_tx: Option<mpsc::UnboundedSender<AcpCommand>>,
     /// Join handle for the dedicated thread.
@@ -427,6 +429,7 @@ impl NativeAcpConnection {
             agent_kind,
             command: command.into(),
             extra_args,
+            additional_directories: Vec::new(),
             cmd_tx: None,
             thread_handle: None,
             health_status: AgentHealth::Unknown,
@@ -448,6 +451,11 @@ impl NativeAcpConnection {
     /// tests use this to redirect the registry into a tempdir.
     pub fn set_repo_root(&mut self, root: PathBuf) {
         self.repo_root = root;
+    }
+
+    /// Configure additional workspace roots sent on every new ACP session.
+    pub fn set_additional_directories(&mut self, additional_directories: Vec<PathBuf>) {
+        self.additional_directories = additional_directories;
     }
 
     /// Override the log configuration used by the spawn site (controls the
@@ -662,6 +670,7 @@ impl AgentConnection for NativeAcpConnection {
 
         let mut request = NewSessionRequest::new(&cwd);
         request.mcp_servers = mcp_servers;
+        request.additional_directories = self.additional_directories.clone();
 
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
@@ -2697,9 +2706,9 @@ mod resume_delete_dispatch_tests {
     use crate::AcpError;
     use agent_client_protocol::schema::v1::{
         CloseSessionRequest, CloseSessionResponse, DeleteSessionRequest, DeleteSessionResponse,
-        ListSessionsRequest, ListSessionsResponse, ResumeSessionRequest, ResumeSessionResponse,
-        SessionCapabilities, SessionCloseCapabilities, SessionDeleteCapabilities, SessionId,
-        SessionListCapabilities, SessionResumeCapabilities,
+        ListSessionsRequest, ListSessionsResponse, NewSessionResponse, ResumeSessionRequest,
+        ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
+        SessionDeleteCapabilities, SessionId, SessionListCapabilities, SessionResumeCapabilities,
     };
     use tokio::sync::mpsc::{self, error::TryRecvError};
 
@@ -2725,6 +2734,42 @@ mod resume_delete_dispatch_tests {
             .expect("test mutex must not be poisoned")
             .replace(capabilities);
         (conn, rx)
+    }
+
+    #[tokio::test]
+    async fn new_session_dispatches_configured_additional_directories() {
+        let (mut conn, mut rx) = connection_with_command_channel();
+        let cwd = PathBuf::from("/tmp/spur-main");
+        let additional = vec![
+            PathBuf::from("/tmp/spur-extra"),
+            PathBuf::from("/Volumes/Projects/other-root"),
+        ];
+        conn.set_additional_directories(additional.clone());
+
+        let expected_cwd = cwd.clone();
+        let expected_additional = additional.clone();
+        let handle = tokio::spawn(async move { conn.new_session(cwd, vec![]).await });
+
+        match rx.recv().await.expect("new session command must be sent") {
+            AcpCommand::NewSession { request, reply } => {
+                assert_eq!(request.cwd, expected_cwd);
+                assert_eq!(request.additional_directories, expected_additional);
+                assert!(request
+                    .additional_directories
+                    .iter()
+                    .all(|path| path.is_absolute()));
+                reply
+                    .send(Ok(NewSessionResponse::new(SessionId::new("sid"))))
+                    .expect("test receiver must still be waiting");
+            }
+            _ => panic!("expected NewSession command"),
+        }
+
+        let response = handle
+            .await
+            .expect("new_session task must not panic")
+            .unwrap();
+        assert_eq!(response.session_id, SessionId::new("sid"));
     }
 
     #[tokio::test]
