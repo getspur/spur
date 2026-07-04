@@ -68,6 +68,33 @@ impl EmbeddingRuntime {
             }
         }
     }
+
+    #[cfg(feature = "embed")]
+    #[expect(
+        clippy::unused_self,
+        reason = "EmbeddingRuntime owns the sidecar service boundary"
+    )]
+    pub(crate) fn sidecar_model_name(&self) -> &'static str {
+        EmbeddingModelSelection::from_env().model_name()
+    }
+
+    #[cfg(feature = "embed")]
+    #[expect(
+        clippy::unused_self,
+        reason = "EmbeddingRuntime owns the sidecar service boundary"
+    )]
+    pub(crate) fn sidecar_ready(&self) -> bool {
+        in_process::embed_model_ready(EmbeddingModelSelection::from_env())
+    }
+
+    #[cfg(feature = "embed")]
+    #[expect(
+        clippy::unused_self,
+        reason = "EmbeddingRuntime owns the sidecar service boundary"
+    )]
+    pub(crate) fn embed_sidecar_texts(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+        in_process::embed_texts_in_process(EmbeddingModelSelection::from_env(), texts)
+    }
 }
 
 pub fn warm_embed_model() {
@@ -84,7 +111,7 @@ fn warm_embed_model_auto() {
         None => {
             let embedding_model = EmbeddingModelSelection::from_env();
             let spawn_result = std::thread::Builder::new()
-                .name("spur-mcp-embed-sidecar-probe".into())
+                .name("spur-analyst-embed-sidecar-probe".into())
                 .spawn(move || {
                     let reachable = ping_sidecar_blocking(AUTO_SIDECAR_PING_TIMEOUT);
                     record_auto_sidecar_probe(reachable);
@@ -124,7 +151,7 @@ fn ping_sidecar_blocking(timeout_duration: Duration) -> bool {
             return false;
         }
     };
-    runtime.block_on(crate::embed_client::ping(timeout_duration))
+    runtime.block_on(super::sidecar_client::ping(timeout_duration))
 }
 
 fn auto_sidecar_probe_cache() -> &'static Mutex<Option<AutoSidecarProbeCache>> {
@@ -173,11 +200,11 @@ async fn auto_sidecar_reachable() -> bool {
         return reachable;
     }
 
-    let reachable = crate::embed_client::ping(AUTO_SIDECAR_PING_TIMEOUT).await;
+    let reachable = super::sidecar_client::ping(AUTO_SIDECAR_PING_TIMEOUT).await;
     record_auto_sidecar_probe(reachable);
     reachable
 }
 
 async fn embed_query_with_sidecar(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    crate::embed_client::embed_query(query, EMBED_INFERENCE_TIMEOUT).await
+    super::sidecar_client::embed_query(query, EMBED_INFERENCE_TIMEOUT).await
 }
