@@ -78,36 +78,122 @@ This spec adds the smallest end-to-end path that:
 
 ## 5. Architecture
 
-### 5.1 Data flow
+### 5.1 Component architecture
 
-```
-brain                                spur-core                                   worker agent
-─────                                ─────────                                   ────────────
-delegate_to_worker(
-  agent="claude-code",               DelegationRequest {
-  profile="code-reviewer",   ──────►   profile: Some("code-reviewer"),
-  model=None, effort=None,             model/effort: None, ... }
-  task=...)                          │
-                                     ▼
-                                     execute_delegation → WorkerAttemptCtx { profile, ... }
-                                     │
-                                     ▼
-                                     run_one_worker_attempt
-                                       create worktree → apply_overlays        (existing)
-                                       ── NEW: materialize_profile(kind, profile)
-                                             .spur/agents/code-reviewer.md
-                                               → <worktree>/.claude/agents/code-reviewer.md
-                                             + per-worktree exclude entry
-                                       spawn → initialize → new_session(cwd=worktree)
-                                       ── m11 (extended): apply_session_overrides(
-                                             profile, model, effort)
-                                             1. select profile  (per ProfileStrategy)
-                                             2. model/effort    (existing helper,
-                                                D8 precedence pre-resolved)
-                                       drive_prompt_notifications  ◄── prompt runs as persona
+```mermaid
+graph TB
+    subgraph BRAIN["brain session (any ACP agent)"]
+        BT["delegate_to_worker / delegate_parallel / submit_plan<br/>(agent, profile?, model?, effort?)"]
+    end
+
+    subgraph CORE["spur-core"]
+        MCP["mcp/delegation.rs + tool_schemas.rs<br/>parse + validate profile (D7)"]
+        DR["DelegationRequest<br/>{ agent, profile?, model?, effort? }"]
+        EXE["orchestrator/delegation/execute.rs<br/>registry.get(agent) → AgentConfig"]
+        WAT["worker_attempt.rs<br/>run_one_worker_attempt"]
+        PROF["agent_profiles/ (NEW)<br/>parse .spur/agents/*.md<br/>render per kind, SPUR-MANAGED marker"]
+        APPLY["apply_session_overrides<br/>(m11 generalized: profile → model → effort)"]
+    end
+
+    subgraph WTREE["spur-worktree"]
+        WM["WorktreeManager<br/>create + apply_overlays + finalize"]
+        EXC["add_worktree_excludes (NEW)<br/>extensions.worktreeConfig<br/>+ per-worktree core.excludesFile (D5)"]
+    end
+
+    subgraph ACP["spur-acp"]
+        STRAT["ProfileStrategy (NEW)<br/>AgentKind defaults<br/>+ [agents.entries.profile] override (D9)"]
+        CONN["NativeAcpConnection<br/>set_session_config_option / set_session_mode<br/>(no new RPCs)"]
+    end
+
+    subgraph WORKER["worker worktree + process"]
+        FILES["native agent files (git-excluded overlay)<br/>.claude/agents/*.md · .opencode/agent/*.md<br/>.kiro/agents/*.json · .codex/agents/*.toml"]
+        BIN["worker binary<br/>ACP session, cwd = worktree"]
+    end
+
+    BT --> MCP --> DR --> EXE --> WAT
+    WAT --> WM
+    WM --> EXC
+    WAT --> PROF --> FILES
+    STRAT --> APPLY
+    WAT --> APPLY --> CONN --> BIN
+    BIN -. "discovers agents via session cwd (probe-verified)" .-> FILES
+    WM -. "finalize: add -A cannot see excluded files" .-> FILES
 ```
 
-### 5.2 Touchpoints
+### 5.2 Data flow (dispatch → persona session → captured diff)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as brain
+    participant M as spur-mcp tool layer
+    participant O as spur-core orchestrator
+    participant W as spur-worktree
+    participant P as agent_profiles renderer
+    participant A as worker agent (ACP)
+
+    B->>M: delegate_to_worker(agent, profile, model?, effort?, task)
+    M->>M: parse .spur/agents/<profile>.md — hard error if malformed (D7)
+    M->>O: DelegationRequest { profile, ... }
+    O->>W: create worktree @ dispatched base
+    O->>W: apply_overlays (task diffs — existing)
+    alt profile managed in .spur/agents/ (D4)
+        O->>P: render(kind, profile)
+        P->>W: write native agent file into worktree
+        O->>W: add_worktree_excludes(injected paths) — git-invisible (D5)
+    else pass-through selection (D4)
+        Note over O,P: no file written — select-only
+    end
+    O->>A: spawn process (effective_args unchanged)
+    O->>A: initialize
+    O->>A: session/new (cwd = worktree, worker MCP servers)
+    A-->>O: configOptions / modes advertised
+    O->>A: select profile per ProfileStrategy (fail-soft, D3)
+    O->>A: set model / effort (m11 helper, D8 precedence)
+    O->>A: session/prompt (task)
+    A-->>O: session/update notifications … turn ends
+    O->>W: finalize_worker_branch (git add -A ignores excluded overlay)
+    W-->>O: collect_diff — clean of injected files
+    O-->>B: DelegationResult (diff, summary)
+```
+
+### 5.3 Logic flow (per-delegation profile resolution & apply)
+
+```mermaid
+flowchart TD
+    S(["dispatch: profile?"]) -->|"None"| M11["m11 only: apply model/effort"]
+    S -->|"Some(name)"| EXISTS{"name in .spur/agents/ ?"}
+
+    EXISTS -->|"yes"| PARSE{"parses as claude agent md?"}
+    EXISTS -->|"no"| PASS["pass-through: select-only (D4)"]
+    PARSE -->|"no"| ERR["hard error before worktree creation (D7)"]
+    PARSE -->|"yes"| RES["resolve D8 precedence:<br/>request ▸ profile frontmatter ▸ agent default"]
+
+    RES --> MAT{"ProfileStrategy.materialize"}
+    MAT -->|"claude_md · opencode_md · kiro_json · codex_toml"| WRITE["render into worktree<br/>+ per-worktree exclude"]
+    MAT -->|"none (kimi)"| SKIPM["skip materialize"]
+    WRITE --> COLL{"target path exists and<br/>not SPUR-MANAGED?"}
+    COLL -->|"yes"| WARN1["warn! keep committed file,<br/>select-only against it"]
+    COLL -->|"no"| SEL
+    SKIPM --> SEL
+    PASS --> SEL
+    WARN1 --> SEL
+
+    SEL{"ProfileStrategy.select"}
+    SEL -->|"config_option:agent (claude)"| RPC1["set_session_config_option('agent', name)"]
+    SEL -->|"config_option:mode (opencode)"| RPC2["set_session_config_option('mode', name)"]
+    SEL -->|"session_mode (kiro)"| RPC3["session/set_mode(name)"]
+    SEL -->|"none (codex, kimi)"| DBG["debug! skip — subagent file may still<br/>be used by codex main thread"]
+
+    RPC1 & RPC2 & RPC3 --> OK{"accepted?"}
+    OK -->|"yes"| NEXT["apply model/effort (m11)"]
+    OK -->|"no"| WARN2["warn! fail-soft —<br/>worker runs default persona"] --> NEXT
+    DBG --> NEXT
+    M11 --> PROMPT
+    NEXT --> PROMPT["send task prompt — turn runs as persona"]
+```
+
+### 5.4 Touchpoints
 
 1. **`crates/spur-core/src/delegation_types.rs`** — add `profile: Option<String>` to `DelegationRequest`.
 2. **`crates/spur-core/src/mcp/delegation.rs` + `tool_schemas.rs`** — accept/document optional `profile` on `delegate_to_worker`, `delegate_parallel.tasks[]`, `submit_plan.tasks[]`.
@@ -117,7 +203,7 @@ delegate_to_worker(
 6. **`crates/spur-acp/src/config/mod.rs`** — optional `[agents.entries.profile]` block (D9); `AgentKind → ProfileStrategy` defaults.
 7. **Plan path** — `server/types.rs` task entries, `plan_builder.rs` (labels unchanged), `plan/reconciler/mod.rs` threading, `submit_plan_mutation` field rewrite: identical shape to m11's plumbing.
 
-### 5.3 Boundary discipline
+### 5.5 Boundary discipline
 
 | Crate | Change |
 |---|---|
