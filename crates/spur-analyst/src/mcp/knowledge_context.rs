@@ -1,10 +1,6 @@
-use std::sync::Arc;
-use std::{
-    path::Path,
-    sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
-};
+use std::{path::Path, sync::Arc};
 
+use crate::embedding::EmbeddingRuntime;
 use crate::{
     db::{
         connection::open_analyst_connection_read_only,
@@ -21,11 +17,6 @@ use crate::{
 use crate::{query_context_paths, query_symbol_risk_community};
 use futures::future::join_all;
 use serde_json::{json, Value};
-use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
-#[cfg(feature = "embed")]
-use spur_graph::{
-    embedding_query_text_for_model, fastembed_cache_dir, EmbeddingModelSelection, EMBED_MODEL_ENV,
-};
 
 use super::overlay::{
     open_worktree_overlay, overlay_rebuild_key_for_dirty_worktree,
@@ -40,174 +31,6 @@ const BM25_HIGH_CONFIDENCE_SCORE: f64 = 8.0;
 const BM25_MEDIUM_CONFIDENCE_SCORE: f64 = 3.0;
 const HYBRID_HIGH_CONFIDENCE_SCORE: f64 = 0.80;
 const HYBRID_MEDIUM_CONFIDENCE_SCORE: f64 = 0.55;
-const ANALYST_EMBED_MODE_ENV: &str = "SPUR_ANALYST_EMBED_MODE";
-
-const EMBED_INFERENCE_TIMEOUT: Duration = Duration::from_millis(1500);
-const AUTO_SIDECAR_PING_TIMEOUT: Duration = Duration::from_millis(100);
-const AUTO_SIDECAR_UNAVAILABLE_TTL: Duration = Duration::from_secs(3);
-static AUTO_SIDECAR_PROBE_CACHE: OnceLock<Mutex<Option<AutoSidecarProbeCache>>> = OnceLock::new();
-#[cfg(feature = "embed")]
-static EMBEDDING_GEMMA_EMBED_MODEL: EmbedModelCell<fastembed::TextEmbedding> =
-    EmbedModelCell::new();
-#[cfg(all(test, feature = "embed"))]
-static DISABLE_EMBED_QUERY_FOR_TESTS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AnalystEmbedMode {
-    Auto,
-    InProcess,
-    Sidecar,
-    Off,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AutoSidecarProbeCache {
-    reachable: bool,
-    checked_at: Instant,
-}
-
-impl AnalystEmbedMode {
-    fn current() -> Self {
-        #[cfg(test)]
-        if let Some(mode) =
-            ANALYST_EMBED_MODE_OVERRIDE_FOR_TESTS.with(|override_mode| override_mode.get())
-        {
-            return mode;
-        }
-
-        Self::from_env()
-    }
-
-    fn from_env() -> Self {
-        match std::env::var(ANALYST_EMBED_MODE_ENV) {
-            Ok(value) => Self::parse_env_value(&value),
-            Err(std::env::VarError::NotPresent) => Self::Auto,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    env = ANALYST_EMBED_MODE_ENV,
-                    "failed to read analyst embed mode; falling back to auto"
-                );
-                Self::Auto
-            }
-        }
-    }
-
-    fn parse_env_value(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "auto" => Self::Auto,
-            "inprocess" => Self::InProcess,
-            "sidecar" => Self::Sidecar,
-            "off" => Self::Off,
-            _ => {
-                tracing::warn!(
-                    value,
-                    env = ANALYST_EMBED_MODE_ENV,
-                    "unknown analyst embed mode; falling back to auto"
-                );
-                Self::Auto
-            }
-        }
-    }
-
-    #[cfg(feature = "embed")]
-    fn allows_in_process(self, entrypoint: &'static str) -> bool {
-        match self {
-            Self::Auto | Self::InProcess => true,
-            Self::Off => false,
-            Self::Sidecar => {
-                tracing::debug!(
-                    mode = "sidecar",
-                    entrypoint,
-                    "analyst embed sidecar mode does not allow in-process model loading"
-                );
-                false
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static ANALYST_EMBED_MODE_OVERRIDE_FOR_TESTS: std::cell::Cell<Option<AnalystEmbedMode>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-struct AnalystEmbedModeOverrideGuard {
-    previous: Option<AnalystEmbedMode>,
-}
-
-#[cfg(test)]
-impl Drop for AnalystEmbedModeOverrideGuard {
-    fn drop(&mut self) {
-        ANALYST_EMBED_MODE_OVERRIDE_FOR_TESTS.with(|override_mode| {
-            override_mode.set(self.previous);
-        });
-    }
-}
-
-#[cfg(test)]
-fn set_analyst_embed_mode_for_test(mode: AnalystEmbedMode) -> AnalystEmbedModeOverrideGuard {
-    let previous = ANALYST_EMBED_MODE_OVERRIDE_FOR_TESTS.with(|override_mode| {
-        let previous = override_mode.get();
-        override_mode.set(Some(mode));
-        previous
-    });
-    AnalystEmbedModeOverrideGuard { previous }
-}
-
-fn auto_sidecar_probe_cache() -> &'static Mutex<Option<AutoSidecarProbeCache>> {
-    AUTO_SIDECAR_PROBE_CACHE.get_or_init(|| Mutex::new(None))
-}
-
-fn cached_auto_sidecar_reachable(now: Instant) -> Option<bool> {
-    let cache = auto_sidecar_probe_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let cached = (*cache)?;
-    if cached.reachable {
-        return Some(true);
-    }
-
-    let age = now
-        .checked_duration_since(cached.checked_at)
-        .unwrap_or(Duration::ZERO);
-    (age < AUTO_SIDECAR_UNAVAILABLE_TTL).then_some(false)
-}
-
-fn record_auto_sidecar_probe(reachable: bool) {
-    let mut cache = auto_sidecar_probe_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *cache = Some(AutoSidecarProbeCache {
-        reachable,
-        checked_at: Instant::now(),
-    });
-}
-
-#[cfg(test)]
-fn reset_auto_sidecar_probe_for_test() {
-    let mut cache = auto_sidecar_probe_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *cache = None;
-}
-
-async fn auto_sidecar_reachable() -> bool {
-    // Cache policy: a reachable sidecar is sticky for the process so serving
-    // processes keep sharing it and never fall back to loading their own model.
-    // Misses are cached briefly to avoid adding a socket probe to every BM25
-    // fallback query while still letting a newly started sidecar be discovered.
-    if let Some(reachable) = cached_auto_sidecar_reachable(Instant::now()) {
-        return reachable;
-    }
-
-    let reachable = crate::embed_client::ping(AUTO_SIDECAR_PING_TIMEOUT).await;
-    record_auto_sidecar_probe(reachable);
-    reachable
-}
 
 pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
@@ -216,7 +39,10 @@ pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerErr
         return Ok(unavailable_pack(&request, &db_path));
     }
 
-    let query_vec = embed_query(&request.query).await.map(Vec::from);
+    let query_vec = EmbeddingRuntime::global()
+        .embed_query(&request.query)
+        .await
+        .map(Vec::from);
     let query_result = {
         let conn = open_pack_connection(&db_path, "knowledge_context_pack")?;
         query_candidates_for_request_with_conn(
@@ -239,7 +65,10 @@ pub async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerE
         return Ok(unavailable_pack_v2(&request, &db_path));
     }
 
-    let query_vec = embed_query(&request.base.query).await.map(Vec::from);
+    let query_vec = EmbeddingRuntime::global()
+        .embed_query(&request.base.query)
+        .await
+        .map(Vec::from);
     let pack_connection =
         open_pack_connection_with_overlay(&db_path, "knowledge_context_pack_2").await?;
     let query_result = query_candidates_for_request_with_conn(
@@ -691,418 +520,6 @@ impl KnowledgeIntent {
             Self::Plan => KnowledgeQueryIntent::Plan,
         }
     }
-}
-
-#[cfg(feature = "embed")]
-pub(crate) struct EmbedModelCell<M> {
-    model: OnceLock<Arc<Mutex<M>>>,
-    loading: Mutex<bool>,
-}
-
-#[cfg(feature = "embed")]
-pub(crate) struct EmbedLoadPermit<'a, M> {
-    cell: &'a EmbedModelCell<M>,
-    completed: bool,
-}
-
-#[cfg(feature = "embed")]
-impl<M> EmbedModelCell<M> {
-    const fn new() -> Self {
-        Self {
-            model: OnceLock::new(),
-            loading: Mutex::new(false),
-        }
-    }
-
-    pub(crate) fn ready(&self) -> Option<Arc<Mutex<M>>> {
-        self.model.get().cloned()
-    }
-
-    fn is_ready(&self) -> bool {
-        self.model.get().is_some()
-    }
-
-    pub(crate) fn begin_load(&self) -> Option<EmbedLoadPermit<'_, M>> {
-        if self.is_ready() {
-            return None;
-        }
-
-        let mut loading = self
-            .loading
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.is_ready() || *loading {
-            return None;
-        }
-
-        *loading = true;
-        Some(EmbedLoadPermit {
-            cell: self,
-            completed: false,
-        })
-    }
-
-    #[cfg(test)]
-    fn is_loading_for_test(&self) -> bool {
-        *self
-            .loading
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    #[cfg(test)]
-    fn load_if_idle(&self, load: impl FnOnce() -> Option<M>) -> Option<Arc<Mutex<M>>> {
-        if let Some(model) = self.ready() {
-            return Some(model);
-        }
-
-        let permit = self.begin_load()?;
-        permit.complete(load())
-    }
-
-    fn clear_loading(&self) {
-        let mut loading = self
-            .loading
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *loading = false;
-    }
-}
-
-#[cfg(feature = "embed")]
-impl<M> EmbedLoadPermit<'_, M> {
-    pub(crate) fn complete(mut self, model: Option<M>) -> Option<Arc<Mutex<M>>> {
-        if let Some(model) = model {
-            let _ = self.cell.model.set(Arc::new(Mutex::new(model)));
-        }
-        self.cell.clear_loading();
-        self.completed = true;
-        self.cell.ready()
-    }
-}
-
-#[cfg(feature = "embed")]
-impl<M> Drop for EmbedLoadPermit<'_, M> {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.cell.clear_loading();
-        }
-    }
-}
-
-#[cfg(feature = "embed")]
-pub(crate) fn embed_model_cell(
-    _embedding_model: EmbeddingModelSelection,
-) -> &'static EmbedModelCell<fastembed::TextEmbedding> {
-    &EMBEDDING_GEMMA_EMBED_MODEL
-}
-
-#[cfg(feature = "embed")]
-pub(crate) fn load_embed_model(
-    embedding_model: EmbeddingModelSelection,
-) -> Result<fastembed::TextEmbedding, String> {
-    tracing::info!(
-        model = embedding_model.model_name(),
-        "Loading embedding model for knowledge_context_pack hybrid search"
-    );
-    let mut init_options = fastembed::InitOptions::new(embedding_model.fastembed_model())
-        .with_show_download_progress(false);
-    if let Some(cache_dir) = fastembed_cache_dir() {
-        init_options = init_options.with_cache_dir(cache_dir);
-    }
-
-    fastembed::TextEmbedding::try_new(init_options).map_err(|error| error.to_string())
-}
-
-#[cfg(feature = "embed")]
-fn start_embed_model_load_if_needed(embedding_model: EmbeddingModelSelection) -> bool {
-    if !AnalystEmbedMode::current().allows_in_process("start_embed_model_load_if_needed") {
-        return false;
-    }
-
-    let Some(permit) = embed_model_cell(embedding_model).begin_load() else {
-        return false;
-    };
-
-    let spawn_result = std::thread::Builder::new()
-        .name("spur-mcp-embed-warm".into())
-        .spawn(move || {
-            tracing::info!(
-                model = embedding_model.model_name(),
-                "Pre-warming embedding model for knowledge_context_pack"
-            );
-            let load_result = load_embed_model(embedding_model);
-            match load_result {
-                Ok(model) => {
-                    let _ = permit.complete(Some(model));
-                    tracing::info!(
-                        model = embedding_model.model_name(),
-                        "embedding model loaded successfully"
-                    );
-                }
-                Err(error) => {
-                    let _ = permit.complete(None);
-                    tracing::warn!(
-                        %error,
-                        model = embedding_model.model_name(),
-                        "embedding model failed to load; will retry on a later warm or query"
-                    );
-                }
-            }
-        });
-
-    match spawn_result {
-        Ok(_handle) => true,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                model = embedding_model.model_name(),
-                "failed to spawn embedding model warm-up thread"
-            );
-            false
-        }
-    }
-}
-
-#[cfg(feature = "embed")]
-pub fn warm_embed_model() {
-    match AnalystEmbedMode::current() {
-        AnalystEmbedMode::Off => {}
-        AnalystEmbedMode::Sidecar => {
-            tracing::debug!(
-                mode = "sidecar",
-                "embedding model warm-up skipped; sidecar mode never loads in-process"
-            );
-        }
-        AnalystEmbedMode::InProcess => warm_embed_model_in_process(),
-        AnalystEmbedMode::Auto => warm_embed_model_auto(),
-    }
-}
-
-#[cfg(not(feature = "embed"))]
-pub fn warm_embed_model() {}
-
-#[cfg(feature = "embed")]
-fn warm_embed_model_in_process() {
-    warm_embed_model_in_process_for_model(EmbeddingModelSelection::from_env());
-}
-
-#[cfg(feature = "embed")]
-fn warm_embed_model_in_process_for_model(embedding_model: EmbeddingModelSelection) {
-    if !start_embed_model_load_if_needed(embedding_model) {
-        tracing::debug!(
-            model = embedding_model.model_name(),
-            "embedding model warm-up skipped; already ready or loading"
-        );
-    }
-}
-
-#[cfg(feature = "embed")]
-fn warm_embed_model_auto() {
-    match cached_auto_sidecar_reachable(Instant::now()) {
-        Some(true) => {
-            tracing::debug!("embedding model warm-up skipped; cached sidecar probe is reachable");
-        }
-        Some(false) => warm_embed_model_in_process(),
-        None => {
-            let embedding_model = EmbeddingModelSelection::from_env();
-            let spawn_result = std::thread::Builder::new()
-                .name("spur-mcp-embed-sidecar-probe".into())
-                .spawn(move || {
-                    let reachable = ping_sidecar_blocking(AUTO_SIDECAR_PING_TIMEOUT);
-                    record_auto_sidecar_probe(reachable);
-                    if reachable {
-                        tracing::debug!(
-                            "embedding model warm-up skipped; sidecar probe is reachable"
-                        );
-                    } else {
-                        warm_embed_model_in_process_for_model(embedding_model);
-                    }
-                });
-
-            if let Err(error) = spawn_result {
-                tracing::warn!(
-                    %error,
-                    "failed to spawn embedding sidecar probe thread; falling back to in-process warm-up"
-                );
-                warm_embed_model_in_process_for_model(embedding_model);
-            }
-        }
-    }
-}
-
-#[cfg(feature = "embed")]
-fn ping_sidecar_blocking(timeout_duration: Duration) -> bool {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                "failed to create runtime for embedding sidecar ping"
-            );
-            return false;
-        }
-    };
-    runtime.block_on(crate::embed_client::ping(timeout_duration))
-}
-
-async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    match AnalystEmbedMode::current() {
-        AnalystEmbedMode::Off => None,
-        AnalystEmbedMode::Sidecar => embed_query_with_sidecar(query).await,
-        AnalystEmbedMode::Auto => {
-            if auto_sidecar_reachable().await {
-                return embed_query_with_sidecar(query).await;
-            }
-            embed_query_in_process(query).await
-        }
-        AnalystEmbedMode::InProcess => embed_query_in_process(query).await,
-    }
-}
-
-async fn embed_query_with_sidecar(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    crate::embed_client::embed_query(query, EMBED_INFERENCE_TIMEOUT).await
-}
-
-#[cfg(feature = "embed")]
-async fn embed_query_in_process(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    if !AnalystEmbedMode::current().allows_in_process("embed_query") {
-        return None;
-    }
-
-    #[cfg(test)]
-    if DISABLE_EMBED_QUERY_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
-        return None;
-    }
-
-    let embedding_model = EmbeddingModelSelection::from_env();
-    let model_cell = embed_model_cell(embedding_model);
-    if !model_cell.is_ready() {
-        let load_started = start_embed_model_load_if_needed(embedding_model);
-        if model_cell.is_ready() {
-            return embed_query_with_ready_model(query, embedding_model).await;
-        }
-        tracing::debug!(
-            load_started,
-            model = embedding_model.model_name(),
-            env = EMBED_MODEL_ENV,
-            "embedding model not ready; degrading to BM25-only search"
-        );
-        return None;
-    }
-
-    embed_query_with_ready_model(query, embedding_model).await
-}
-
-#[cfg(not(feature = "embed"))]
-#[expect(
-    clippy::unused_async,
-    reason = "the disabled stub matches the embed-enabled async signature"
-)]
-async fn embed_query_in_process(_query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    tracing::debug!(
-        "in-process embedding model unavailable in builds without the `embed` feature; degrading to BM25-only search"
-    );
-    None
-}
-
-#[cfg(feature = "embed")]
-async fn embed_query_with_ready_model(
-    query: &str,
-    embedding_model: EmbeddingModelSelection,
-) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    embed_with_ready_model(
-        embed_model_cell(embedding_model),
-        query,
-        EMBED_INFERENCE_TIMEOUT,
-        move |model, query| {
-            let query = embedding_query_text_for_model(query.as_str(), embedding_model);
-            let mut model = model
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let embeddings = model.embed(vec![query.as_ref()], None).ok()?;
-            let embedding = embeddings.into_iter().next()?;
-            embedding.try_into().ok()
-        },
-    )
-    .await
-}
-
-#[cfg(feature = "embed")]
-async fn embed_with_ready_model<M, F>(
-    cell: &EmbedModelCell<M>,
-    query: &str,
-    timeout_duration: Duration,
-    inference: F,
-) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]>
-where
-    M: Send + 'static,
-    F: FnOnce(Arc<Mutex<M>>, String) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> + Send + 'static,
-{
-    let model = cell.ready()?;
-    let query = query.to_owned();
-    run_embed_inference_with_timeout(timeout_duration, move || inference(model, query)).await
-}
-
-#[cfg(feature = "embed")]
-async fn run_embed_inference_with_timeout<F>(
-    timeout_duration: Duration,
-    inference: F,
-) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]>
-where
-    F: FnOnce() -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> + Send + 'static,
-{
-    let started = Instant::now();
-    let result =
-        tokio::time::timeout(timeout_duration, tokio::task::spawn_blocking(inference)).await;
-    let elapsed = started.elapsed();
-    let elapsed_ms = duration_millis(elapsed);
-    let timeout_ms = duration_millis(timeout_duration);
-
-    match result {
-        Ok(Ok(Some(embedding))) => {
-            tracing::debug!(
-                elapsed_ms,
-                timeout_ms,
-                "knowledge_context_pack embed inference completed"
-            );
-            Some(embedding)
-        }
-        Ok(Ok(None)) => {
-            tracing::warn!(
-                elapsed_ms,
-                timeout_ms,
-                "knowledge_context_pack embed inference failed; degrading to BM25-only search"
-            );
-            None
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                %error,
-                elapsed_ms,
-                timeout_ms,
-                "knowledge_context_pack embed inference task failed; degrading to BM25-only search"
-            );
-            None
-        }
-        Err(_timeout) => {
-            tracing::warn!(
-                elapsed_ms,
-                timeout_ms,
-                "knowledge_context_pack embed inference timed out; degrading to BM25-only search"
-            );
-            None
-        }
-    }
-}
-
-#[cfg(feature = "embed")]
-fn duration_millis(duration: Duration) -> u64 {
-    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Clone, Copy)]
@@ -2440,6 +1857,12 @@ mod tests {
 
     use super::*;
     use crate::embed_service::{EmbedService, SPUR_EMBED_SOCKET_ENV};
+    #[cfg(feature = "embed")]
+    use crate::embedding::{embed_model_cell, embed_with_ready_model, EmbedModelCell};
+    use crate::embedding::{
+        reset_auto_sidecar_probe_for_test, set_analyst_embed_mode_for_test, warm_embed_model,
+        AnalystEmbedMode, EmbeddingRuntime,
+    };
     use crate::query_context_candidates;
     use duckdb::Connection;
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -2503,6 +1926,10 @@ mod tests {
 
     fn test_embedding_vec(first_value: f32) -> Vec<f32> {
         test_embedding(first_value).to_vec()
+    }
+
+    async fn embed_query(query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
+        EmbeddingRuntime::global().embed_query(query).await
     }
 
     struct EnvVarGuard {
@@ -2700,10 +2127,25 @@ mod tests {
     #[cfg(feature = "embed")]
     #[test]
     fn embed_model_cell_selection_uses_single_gemma_cell() {
-        assert!(std::ptr::eq(
-            embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M),
-            &EMBEDDING_GEMMA_EMBED_MODEL
-        ));
+        let first = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+        let second = embed_model_cell(EmbeddingModelSelection::EmbeddingGemma300M);
+
+        assert!(std::ptr::eq(first, second));
+    }
+
+    #[cfg(feature = "embed")]
+    #[tokio::test]
+    async fn embedding_runtime_facade_can_embed_query() {
+        let _lock = async_env_lock().await;
+        let _mode_guard = set_analyst_embed_mode_for_test(AnalystEmbedMode::Off);
+
+        assert!(
+            EmbeddingRuntime::global()
+                .embed_query("ranking beacon")
+                .await
+                .is_none(),
+            "off mode should make the shared embedding runtime skip vector search"
+        );
     }
 
     #[cfg(feature = "embed")]
@@ -3643,14 +3085,13 @@ pub fn dispatch_approval_evidence() -> &'static str {
     #[cfg(feature = "embed")]
     impl Drop for EmbedQueryDisableGuard {
         fn drop(&mut self) {
-            DISABLE_EMBED_QUERY_FOR_TESTS.store(self.previous, std::sync::atomic::Ordering::SeqCst);
+            crate::embedding::set_embed_query_disabled_for_test(self.previous);
         }
     }
 
     #[cfg(feature = "embed")]
     fn disable_embed_query_for_test() -> EmbedQueryDisableGuard {
-        let previous =
-            DISABLE_EMBED_QUERY_FOR_TESTS.swap(true, std::sync::atomic::Ordering::SeqCst);
+        let previous = crate::embedding::set_embed_query_disabled_for_test(true);
         EmbedQueryDisableGuard { previous }
     }
 
