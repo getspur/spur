@@ -538,6 +538,7 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
                 agent: "codex".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "Review task".into(),
                 depends_on: vec![],
                 issue_id: Some(task_a_id.clone()),

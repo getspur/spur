@@ -114,6 +114,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
         agent: "codex".into(),
         model: None,
         effort: None,
+        config_overrides: None,
         task: "Diff recovery".into(),
         depends_on: Vec::new(),
         issue_id: None,

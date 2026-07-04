@@ -551,18 +551,26 @@ fn partial_compare_status(legacy: &PlanTaskStatus, shadow: &PlanTaskStatus) -> S
     }
 }
 
-pub type LatestTaskSpec = (String, Vec<String>, Option<String>, Option<String>);
+pub type LatestTaskSpec = (
+    String,
+    Vec<String>,
+    Option<String>,
+    Option<String>,
+    Option<HashMap<String, String>>,
+);
 
 pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> {
     let mut task_id_and_context_files = None;
     let mut latest_model = None;
     let mut latest_effort = None;
+    let mut latest_config_overrides = None;
     for audit in audits.iter().rev() {
         if let AuditSentinelKind::TaskSpec {
             task_id,
             context_files,
             model,
             effort,
+            config_overrides,
             ..
         } = audit
         {
@@ -575,11 +583,21 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
             if latest_effort.is_none() {
                 latest_effort = effort.clone();
             }
+            if latest_config_overrides.is_none() {
+                latest_config_overrides = config_overrides.clone();
+            }
         }
     }
 
-    task_id_and_context_files
-        .map(|(task_id, context_files)| (task_id, context_files, latest_model, latest_effort))
+    task_id_and_context_files.map(|(task_id, context_files)| {
+        (
+            task_id,
+            context_files,
+            latest_model,
+            latest_effort,
+            latest_config_overrides,
+        )
+    })
 }
 
 /// Latest extended `TaskSpec` fields (bd-2m2u Phase 2c). Returns the most
@@ -1321,6 +1339,7 @@ pub async fn project_plan_from_beads(
         context_files: Vec<String>,
         model: Option<String>,
         effort: Option<String>,
+        config_overrides: Option<HashMap<String, String>>,
     }
 
     let mut projected_tasks = Vec::with_capacity(tasks.len());
@@ -1330,8 +1349,8 @@ pub async fn project_plan_from_beads(
             adv.list_comments(&task_issue.id).await?,
         )?;
         let task_spec = latest_task_spec(&audits);
-        let (task_id, context_files, model, effort) =
-            task_spec.unwrap_or_else(|| (task_id_for_issue(&task_issue), Vec::new(), None, None));
+        let (task_id, context_files, model, effort, config_overrides) = task_spec
+            .unwrap_or_else(|| (task_id_for_issue(&task_issue), Vec::new(), None, None, None));
         projected_tasks.push(ProjectedTask {
             issue: task_issue,
             audits,
@@ -1339,6 +1358,7 @@ pub async fn project_plan_from_beads(
             context_files,
             model,
             effort,
+            config_overrides,
         });
     }
 
@@ -1388,6 +1408,7 @@ pub async fn project_plan_from_beads(
                 agent,
                 model: projected_task.model.clone(),
                 effort: projected_task.effort.clone(),
+                config_overrides: projected_task.config_overrides.clone(),
                 task: projected_task.issue.body.clone(),
                 depends_on,
                 issue_id: Some(projected_task.issue.id.clone()),
@@ -3241,6 +3262,7 @@ mod tests {
                     agent: "codex".into(),
                     model: None,
                     effort: None,
+                    config_overrides: None,
                     task: "A".into(),
                     depends_on: Vec::new(),
                     issue_id: Some("bd-1".into()),
@@ -3261,6 +3283,7 @@ mod tests {
                     agent: "codex".into(),
                     model: None,
                     effort: None,
+                    config_overrides: None,
                     task: "B".into(),
                     depends_on: vec!["a".into()],
                     issue_id: Some("bd-2".into()),
@@ -3331,6 +3354,7 @@ mod tests {
                     agent: "codex".into(),
                     model: None,
                     effort: None,
+                    config_overrides: None,
                     task: "task".into(),
                     depends_on: Vec::new(),
                     issue_id: Some("bd-1".into()),
