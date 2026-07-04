@@ -1858,6 +1858,7 @@ pub(crate) async fn emit_task_spec_audit(
 /// bd-2m2u Phase 2c — emit a `TaskSpec` audit with extended fields populated by
 /// `ModifyTaskSpec`. The projector reads these to override the live beads-issue
 /// body / agent label / `blocked_by` set after a brain spec rewrite.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn emit_extended_task_spec_audit(
     advanced: &dyn spur_pm::BeadsAdvanced,
     issue_id: &str,
