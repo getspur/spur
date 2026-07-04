@@ -4,19 +4,11 @@ use serde_json::{json, Value};
 use crate::search::hybrid::evidence_confidence;
 use crate::KnowledgeQueryResult;
 
-use super::evidence::{
-    aggregate_impact_value, primary_evidence_with_impact, split_evidence, SymbolImpactSummary,
-};
+use super::evidence::split_evidence;
+use super::impact::{aggregate_impact_value, primary_evidence_with_impact, ExactGraphContext};
 use super::next_tools::recommended_next_tools;
 use super::staleness::{staleness_value, PackStaleness};
 use super::{KnowledgeContextPackRequest, KnowledgeContextPackV2Request};
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ExactGraphContext {
-    pub(crate) graph_content_hash: Option<String>,
-    pub(crate) response_file_oids_match: Option<bool>,
-    pub(crate) impacts: Vec<Option<SymbolImpactSummary>>,
-}
 
 #[derive(Default)]
 pub(crate) struct GraphReasoningSections {
