@@ -599,6 +599,7 @@ fn prior_branch_for_reuse_uses_last_attempt_only_when_reuse_requested() {
         spec: crate::plan::PlanTask {
             task_id: "T1".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -1223,9 +1224,19 @@ async fn seed_mock_ready_tasks_plan(
     .await
     .expect("plan submit audit");
     for (issue_id, task_id) in issue_ids.iter().zip(task_ids) {
-        crate::plan::emit_task_spec_audit(adv, issue_id, task_id, "codex", None, None, None, &[])
-            .await
-            .expect("task spec audit");
+        crate::plan::emit_task_spec_audit(
+            adv,
+            issue_id,
+            task_id,
+            "codex",
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect("task spec audit");
     }
 
     issue_ids
@@ -1956,6 +1967,83 @@ async fn l2_autonomy_dispatches_all_ready_tasks() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn plan_task_profile_round_trips_to_dispatch_and_retry() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-profile-plan".into()));
+    let issue_id = seed_mock_ready_task_plan(&pm, "P-PROFILE", "T1", &brain_session_id).await;
+    let adv =
+        crate::plan::PmLike::advanced(pm.as_ref()).expect("mock pm should expose beads advanced");
+    crate::plan::emit_task_spec_audit(
+        adv,
+        &issue_id,
+        "T1",
+        "codex",
+        Some("code-reviewer"),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect("profile task spec audit");
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(2);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm.clone(),
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("initial tick");
+    let first = delegation_rx.recv().await.expect("initial dispatch");
+    let first_delegation_id = first.id.as_str().to_string();
+    assert_eq!(first.profile.as_deref(), Some("code-reviewer"));
+
+    adv.add_comment(
+        &issue_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                delegation_id: first_delegation_id.clone(),
+                completion_state: crate::plan::audit_sentinel::CompletionState::Failed,
+                superseded: false,
+                worker_branch: None,
+                result_summary: Some("failed before retry".to_string()),
+                artifact_uri: None,
+                dispatched_base_oid: None,
+                estimated_cost_micros: None,
+            },
+        ),
+    )
+    .await
+    .expect("failed completion audit");
+    crate::plan::clear_dispatch_intent(pm.as_ref(), &issue_id, &first_delegation_id)
+        .await
+        .expect("clear first dispatch labels");
+    adv.add_comment(
+        &issue_id,
+        &crate::plan::audit_sentinel::encode_comment(
+            &crate::plan::audit_sentinel::AuditSentinelKind::RetryRequested {
+                delegation_id: first_delegation_id,
+                attempt: 1,
+                error: "brain retry".to_string(),
+                worker_branch: None,
+                amended_prompt_summary: None,
+            },
+        ),
+    )
+    .await
+    .expect("retry requested audit");
+
+    reconciler.tick_once().await.expect("retry tick");
+    let retry = delegation_rx.recv().await.expect("retry dispatch");
+    assert_eq!(retry.profile.as_deref(), Some("code-reviewer"));
+}
+
 #[tokio::test]
 async fn global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_plan() {
     let pm = crate::plan::test_util::MockPm::new().arc();
@@ -2286,6 +2374,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         None,
+        None,
         &["x.rs".to_string()],
     )
     .await
@@ -2298,6 +2387,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         None,
+        None,
         &["z.rs".to_string()],
     )
     .await
@@ -2307,6 +2397,7 @@ async fn seed_ready_overlay_plan(
         &ready_issue_id,
         "Y",
         "codex",
+        None,
         None,
         None,
         None,
@@ -3079,6 +3170,7 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
         &[crate::plan::PlanTask {
             task_id: "T1".to_string(),
             agent: "codex".to_string(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
