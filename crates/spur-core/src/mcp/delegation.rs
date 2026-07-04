@@ -33,6 +33,7 @@ pub struct DelegationMcpDeps {
     delegation_tx: mpsc::Sender<DelegationRequest>,
     workers: Vec<WorkerInfo>,
     brain_session_id: Arc<OnceCell<BrainSessionId>>,
+    repo_root: Option<std::path::PathBuf>,
     active_delegations: Arc<tokio::sync::Mutex<HashSet<DelegationId>>>,
     completed_delegations:
         Arc<tokio::sync::Mutex<HashMap<DelegationId, (DelegationResult, tokio::time::Instant)>>>,
@@ -53,6 +54,7 @@ impl DelegationMcpDeps {
             delegation_tx: server.delegation_sender(),
             workers: server.workers_snapshot(),
             brain_session_id: server.brain_session_id_cell(),
+            repo_root: server.repo_root().map(std::path::Path::to_path_buf),
             active_delegations: server.active_delegations_handle(),
             completed_delegations: server.completed_delegations_handle(),
             task_tracker: server.task_tracker_handle(),
@@ -78,6 +80,7 @@ impl DelegationMcpDeps {
             delegation_tx,
             workers: Vec::new(),
             brain_session_id,
+            repo_root: None,
             active_delegations: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             completed_delegations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             task_tracker: TaskTracker::new(),
@@ -141,6 +144,12 @@ impl DelegationMcpModule {
                 }
             };
 
+        if let Some(profile) = parsed.profile.as_deref() {
+            if let Err(error) = validate_managed_profile(self.deps.repo_root.as_deref(), profile) {
+                return JsonRpcResponse::mcp_error(id, error);
+            }
+        }
+
         let request_id = DelegationId::new();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let attempt_tracker = new_attempt_tracker();
@@ -148,6 +157,7 @@ impl DelegationMcpModule {
         let delegation = DelegationRequest {
             id: request_id.clone(),
             agent: parsed.agent.clone(),
+            profile: parsed.profile,
             model: parsed.model,
             effort: parsed.effort,
             config_overrides: parsed.config_overrides,
@@ -678,6 +688,24 @@ impl ToolModule for DelegationMcpModule {
         };
         Ok(ToolResponse::from_json_rpc(response))
     }
+}
+
+fn validate_managed_profile(
+    repo_root: Option<&std::path::Path>,
+    profile: &str,
+) -> Result<(), McpError> {
+    let Some(repo_root) = repo_root else {
+        return Ok(());
+    };
+
+    crate::agent_profiles::AgentProfile::load(repo_root, profile)
+        .map(|_| ())
+        .map_err(|error| {
+            McpError::invalid_params(
+                format!("Invalid agent profile `{profile}`: {error:#}"),
+                None,
+            )
+        })
 }
 
 fn delegate_to_worker_def() -> ToolDefinition {
