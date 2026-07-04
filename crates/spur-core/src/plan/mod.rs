@@ -49,6 +49,8 @@ pub struct PlanTask {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_overrides: Option<HashMap<String, String>>,
     pub task: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -793,6 +795,7 @@ mod approved_dep_closure_tests {
                 agent: "codex".to_string(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: format!("Do {id}"),
                 depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
                 issue_id: Some(format!("bd-{id}")),
@@ -904,6 +907,7 @@ mod scope_snapshot_integration_tests {
             agent: agent.into(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: format!("Do {task_id}"),
             depends_on: deps.into_iter().map(String::from).collect(),
             issue_id: Some(format!("bd-{task_id}")),
@@ -1211,6 +1215,7 @@ pub fn derive_epic_plan_from_issues(
             agent,
             model: None,
             effort: None,
+            config_overrides: None,
             task: task_text,
             depends_on,
             issue_id: Some(id),
@@ -1344,7 +1349,7 @@ pub async fn derive_epic_plan(
                     .map_err(|e| format!("failed to list comments for task '{issue_id}': {e}"))?,
             )
             .map_err(|e| format!("failed to parse audits for task '{issue_id}': {e}"))?;
-            if let Some((_, context_files, _, _)) =
+            if let Some((_, context_files, _, _, _)) =
                 crate::plan::projector::latest_task_spec(&audits)
             {
                 task.context_files = context_files;
@@ -1813,6 +1818,7 @@ pub async fn emit_worker_started_audit(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn emit_task_spec_audit(
     advanced: &dyn spur_pm::BeadsAdvanced,
     issue_id: &str,
@@ -1820,6 +1826,7 @@ pub(crate) async fn emit_task_spec_audit(
     agent: &str,
     model: Option<&str>,
     effort: Option<&str>,
+    config_overrides: Option<&HashMap<String, String>>,
     context_files: &[String],
 ) -> anyhow::Result<()> {
     let kind = crate::plan::audit_sentinel::AuditSentinelKind::TaskSpec {
@@ -1827,6 +1834,7 @@ pub(crate) async fn emit_task_spec_audit(
         context_files: context_files.to_vec(),
         model: model.map(str::to_string),
         effort: effort.map(str::to_string),
+        config_overrides: config_overrides.cloned(),
         task_text: None,
         agent: Some(agent.to_string()),
         depends_on: None,
@@ -1857,6 +1865,7 @@ pub(crate) async fn emit_extended_task_spec_audit(
         context_files: context_files.to_vec(),
         model: None,
         effort: None,
+        config_overrides: None,
         task_text: task_text.map(str::to_string),
         agent: agent.map(str::to_string),
         depends_on: depends_on.map(<[String]>::to_vec),
@@ -5416,6 +5425,7 @@ mod tests {
             agent: "test-agent".into(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: "test task".into(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
@@ -5503,6 +5513,7 @@ mod tests {
                 agent: "x".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "do".into(),
                 depends_on: vec![],
                 issue_id: None,
@@ -5545,6 +5556,7 @@ mod tests {
             agent: "x".into(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: "do".into(),
             depends_on: vec![],
             issue_id: None,
@@ -5643,6 +5655,7 @@ mod tests {
             agent: "test-agent".into(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: "test task".into(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
@@ -6029,6 +6042,7 @@ mod tests {
                 agent: "codex".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "Implement worker retry".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
@@ -6069,6 +6083,7 @@ mod tests {
                 agent: "codex".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "Implement review feedback".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
@@ -6107,6 +6122,7 @@ mod tests {
                 agent: "codex".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "Implement review feedback".into(),
                 depends_on: vec![],
                 issue_id: Some("bd-1".into()),
@@ -6593,6 +6609,7 @@ mod tests {
                 agent: "x".to_string(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "a".to_string(),
                 depends_on: vec![],
                 issue_id: None,
@@ -6604,6 +6621,7 @@ mod tests {
                 agent: "x".to_string(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "b".to_string(),
                 depends_on: vec!["A".to_string()],
                 issue_id: None,
@@ -6615,6 +6633,7 @@ mod tests {
                 agent: "x".to_string(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "c".to_string(),
                 depends_on: vec!["B".to_string()],
                 issue_id: None,
@@ -7042,9 +7061,18 @@ mod tests {
             comments: std::sync::Mutex::new(vec![]),
         };
         let context_files = vec!["src/lib.rs".to_string(), "docs/spec.md".to_string()];
-        super::emit_task_spec_audit(&adv, "bd-1", "T1", "codex", None, None, &context_files)
-            .await
-            .expect("task-spec audit");
+        super::emit_task_spec_audit(
+            &adv,
+            "bd-1",
+            "T1",
+            "codex",
+            None,
+            None,
+            None,
+            &context_files,
+        )
+        .await
+        .expect("task-spec audit");
 
         let comments = adv.comments.lock().expect("comments lock");
         let body = comments.first().expect("task-spec comment");
@@ -7058,6 +7086,7 @@ mod tests {
                 context_files,
                 model,
                 effort,
+                config_overrides,
                 task_text,
                 agent,
                 depends_on,
@@ -7065,6 +7094,7 @@ mod tests {
                 && context_files == vec!["src/lib.rs".to_string(), "docs/spec.md".to_string()]
                 && model.is_none()
                 && effort.is_none()
+                && config_overrides.is_none()
                 && task_text.is_none()
                 && agent.as_deref() == Some("codex")
                 && depends_on.is_none()
@@ -7077,9 +7107,18 @@ mod tests {
             comments: std::sync::Mutex::new(vec![]),
         };
         let context_files: Vec<String> = Vec::new();
-        super::emit_task_spec_audit(&adv, "bd-2", "T2", "gemini", None, None, &context_files)
-            .await
-            .expect("task-spec audit");
+        super::emit_task_spec_audit(
+            &adv,
+            "bd-2",
+            "T2",
+            "gemini",
+            None,
+            None,
+            None,
+            &context_files,
+        )
+        .await
+        .expect("task-spec audit");
 
         let comments = adv.comments.lock().expect("comments lock");
         let body = comments.first().expect("task-spec comment");
@@ -7093,6 +7132,7 @@ mod tests {
                 context_files,
                 model,
                 effort,
+                config_overrides,
                 task_text,
                 agent,
                 depends_on,
@@ -7100,6 +7140,7 @@ mod tests {
                 && context_files.is_empty()
                 && model.is_none()
                 && effort.is_none()
+                && config_overrides.is_none()
                 && task_text.is_none()
                 && agent.as_deref() == Some("gemini")
                 && depends_on.is_none()
@@ -7179,6 +7220,7 @@ mod tests {
                     agent: "a".into(),
                     model: None,
                     effort: None,
+                    config_overrides: None,
                     task: "T".into(),
                     depends_on: vec![],
                     issue_id: None,
@@ -7199,6 +7241,7 @@ mod tests {
                     agent: "a".into(),
                     model: None,
                     effort: None,
+                    config_overrides: None,
                     task: "T".into(),
                     depends_on: vec!["dep".into()],
                     issue_id: None,
@@ -7770,6 +7813,7 @@ mod tests {
                     agent: "codex".into(),
                     model: None,
                     effort: None,
+                    config_overrides: None,
                     task: "ship it".into(),
                     depends_on: vec![],
                     issue_id: None,
@@ -7811,6 +7855,7 @@ mod tests {
                     agent: "codex".into(),
                     model: None,
                     effort: None,
+                    config_overrides: None,
                     task: "ship it".into(),
                     depends_on: vec![],
                     issue_id: None,
@@ -8241,6 +8286,7 @@ mod tests {
                 agent: "codex".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "Do T1".into(),
                 depends_on: Vec::new(),
                 issue_id: Some("bd-1".into()),

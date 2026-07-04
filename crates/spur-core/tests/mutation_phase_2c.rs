@@ -314,6 +314,7 @@ async fn mutation_op_modify_task_spec_emits_extended_taskspec_audit() {
                 context_files,
                 model,
                 effort,
+                config_overrides,
                 ..
             } => Some((
                 task_text.clone(),
@@ -322,6 +323,7 @@ async fn mutation_op_modify_task_spec_emits_extended_taskspec_audit() {
                 context_files.clone(),
                 model.clone(),
                 effort.clone(),
+                config_overrides.clone(),
             )),
             _ => None,
         })
@@ -332,6 +334,7 @@ async fn mutation_op_modify_task_spec_emits_extended_taskspec_audit() {
     assert_eq!(extended.3, vec!["docs/spec.md".to_string()]);
     assert!(extended.4.is_none());
     assert!(extended.5.is_none());
+    assert!(extended.6.is_none());
 }
 
 // ─── Test 4b ─────────────────────────────────────────────────────────────
@@ -350,6 +353,7 @@ fn legacy_taskspec_audit_round_trips_without_extended_fields() {
             depends_on,
             model,
             effort,
+            config_overrides,
         } => {
             assert_eq!(task_id, "bd-1");
             assert_eq!(context_files, vec!["src/a.rs".to_string()]);
@@ -358,6 +362,7 @@ fn legacy_taskspec_audit_round_trips_without_extended_fields() {
             assert!(depends_on.is_none());
             assert!(model.is_none());
             assert!(effort.is_none());
+            assert!(config_overrides.is_none());
         }
         other => panic!("expected TaskSpec, got {other:?}"),
     }

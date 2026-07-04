@@ -301,6 +301,7 @@ async fn recover_persisted_plans_skips_unowned_legacy_plan() {
         agent: "codex".into(),
         model: None,
         effort: None,
+        config_overrides: None,
         task: "Do something".into(),
         depends_on: Vec::new(),
         issue_id: None,
