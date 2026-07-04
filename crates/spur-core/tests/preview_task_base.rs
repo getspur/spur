@@ -94,6 +94,7 @@ fn task_entry(
             agent: "codex".to_string(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: format!("task {task_id}"),
             depends_on: depends_on.into_iter().map(str::to_string).collect(),
             issue_id: None,

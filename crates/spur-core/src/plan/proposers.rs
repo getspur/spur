@@ -286,6 +286,7 @@ mod tests {
                 agent: "claude-code-acp".into(),
                 model: None,
                 effort: None,
+                config_overrides: None,
                 task: "task body".into(),
                 depends_on: Vec::new(),
                 issue_id: Some(task_id.to_string()),
