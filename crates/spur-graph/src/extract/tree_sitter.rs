@@ -2831,8 +2831,31 @@ fn is_import_resolution_type_like_candidate_kind(kind: NodeKind) -> bool {
     )
 }
 
-fn is_import_resolution_fallback_candidate_kind(kind: NodeKind) -> bool {
-    matches!(kind, NodeKind::EnumVariant | NodeKind::Constant)
+pub(crate) fn is_import_resolution_fallback_candidate_kind(kind: NodeKind) -> bool {
+    match kind {
+        NodeKind::Module => false,
+        NodeKind::Function => false,
+        NodeKind::Class => false,
+        NodeKind::Interface => false,
+        NodeKind::Struct => false,
+        NodeKind::Impl => false,
+        NodeKind::Trait => false,
+        NodeKind::Enum => false,
+        NodeKind::EnumVariant => true,
+        NodeKind::File => false,
+        NodeKind::External => false,
+        NodeKind::Method => false,
+        NodeKind::Field => false,
+        NodeKind::Constant => true,
+        NodeKind::TypeAlias => false,
+        NodeKind::Macro => false,
+        NodeKind::Section => false,
+        NodeKind::Commit => false,
+        NodeKind::McpTool => false,
+        NodeKind::Cell => false,
+        NodeKind::Port => false,
+        NodeKind::Resource => false,
+    }
 }
 
 fn same_file_duplicate_function_candidate(
@@ -3705,6 +3728,40 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_resolution_fallback_candidate_kind_is_total_for_node_kinds() {
+        for (kind, expected) in [
+            (NodeKind::Module, false),
+            (NodeKind::Function, false),
+            (NodeKind::Class, false),
+            (NodeKind::Interface, false),
+            (NodeKind::Struct, false),
+            (NodeKind::Impl, false),
+            (NodeKind::Trait, false),
+            (NodeKind::Enum, false),
+            (NodeKind::EnumVariant, true),
+            (NodeKind::File, false),
+            (NodeKind::External, false),
+            (NodeKind::Method, false),
+            (NodeKind::Field, false),
+            (NodeKind::Constant, true),
+            (NodeKind::TypeAlias, false),
+            (NodeKind::Macro, false),
+            (NodeKind::Section, false),
+            (NodeKind::Commit, false),
+            (NodeKind::McpTool, false),
+            (NodeKind::Cell, false),
+            (NodeKind::Port, false),
+            (NodeKind::Resource, false),
+        ] {
+            assert_eq!(
+                is_import_resolution_fallback_candidate_kind(kind),
+                expected,
+                "{kind:?}"
+            );
+        }
+    }
 
     fn import_workspace_index(
         rust_crates: &[&str],
