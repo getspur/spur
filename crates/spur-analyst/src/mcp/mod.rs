@@ -2,6 +2,7 @@
 
 mod doc_navigate;
 mod knowledge_context;
+mod overlay;
 mod query;
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ pub use doc_navigate::doc_navigate;
 #[cfg(feature = "embed")]
 pub(crate) use knowledge_context::{embed_model_cell, load_embed_model};
 pub use knowledge_context::{knowledge_context_pack, knowledge_context_pack_2, warm_embed_model};
+pub use overlay::open_worktree_overlay;
 pub use query::query;
 
 /// Metadata for a single analyst-owned MCP tool.
