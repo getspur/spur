@@ -174,6 +174,7 @@ async fn mutation_op_retry_task_rolls_back_on_executor_failure() {
                 issue_id: target.clone(),
                 new_task: None,
                 new_agent: None,
+                new_profile: None,
                 new_context_files: None,
                 new_depends_on: Some(vec![dep.clone()]),
             },
@@ -239,6 +240,7 @@ async fn mutation_op_modify_task_spec_updates_issue_body_labels_and_blocked_by()
             issue_id: target.clone(),
             new_task: Some("New body content".into()),
             new_agent: Some("claude-code-acp".into()),
+            new_profile: None,
             new_context_files: Some(vec!["src/lib.rs".into()]),
             new_depends_on: Some(vec![new_dep.clone()]),
         }],
@@ -293,6 +295,7 @@ async fn mutation_op_modify_task_spec_emits_extended_taskspec_audit() {
             issue_id: target.clone(),
             new_task: Some("rewritten task".into()),
             new_agent: Some("claude-code-acp".into()),
+            new_profile: None,
             new_context_files: Some(vec!["docs/spec.md".into()]),
             new_depends_on: Some(vec![]),
         }],
@@ -351,6 +354,7 @@ fn legacy_taskspec_audit_round_trips_without_extended_fields() {
             task_text,
             agent,
             depends_on,
+            profile,
             model,
             effort,
             config_overrides,
@@ -360,6 +364,7 @@ fn legacy_taskspec_audit_round_trips_without_extended_fields() {
             assert!(task_text.is_none());
             assert!(agent.is_none());
             assert!(depends_on.is_none());
+            assert!(profile.is_none());
             assert!(model.is_none());
             assert!(effort.is_none());
             assert!(config_overrides.is_none());
@@ -397,6 +402,7 @@ async fn mutation_op_modify_task_spec_rolls_back_to_prior_spec() {
             issue_id: target.clone(),
             new_task: Some("new body".into()),
             new_agent: Some("claude-code-acp".into()),
+            new_profile: None,
             new_context_files: None,
             new_depends_on: Some(vec![dep.clone()]),
         }],
@@ -561,6 +567,7 @@ async fn submit_plan_mutation_validates_no_cycles_post_hoc() {
             issue_id: a.clone(),
             new_task: None,
             new_agent: None,
+            new_profile: None,
             new_context_files: None,
             new_depends_on: Some(vec![b.clone()]),
         }],
@@ -599,6 +606,7 @@ async fn submit_plan_mutation_rolls_back_on_cycle_detection() {
             issue_id: a.clone(),
             new_task: Some("would-be new body".into()),
             new_agent: Some("claude-code-acp".into()),
+            new_profile: None,
             new_context_files: None,
             new_depends_on: Some(vec![b.clone()]),
         }],

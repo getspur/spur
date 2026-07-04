@@ -72,6 +72,10 @@ pub(crate) fn stable_symbol_id_for_discriminator(
     )
 }
 
+pub fn spur_overlay_repro_probe_marker_zzy001() -> u64 {
+    42
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;

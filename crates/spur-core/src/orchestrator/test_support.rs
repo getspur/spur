@@ -181,6 +181,95 @@ pub async fn call_shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
     super::session::shutdown_mcp_server(funnel, session, &mut adapted, Some(&mut guard_slot)).await;
 }
 
+// ─── Worker-attempt helpers ───────────────────────────────────────
+// Test-only. Expose the private worker-attempt path to integration tests with
+// a caller-supplied AgentConnection, avoiding real vendor process spawns.
+
+pub type WorkerConnectionFactoryForTest<'a> = dyn Fn(
+        &spur_acp::config::AgentConfig,
+        Vec<String>,
+        &std::path::Path,
+    ) -> Box<dyn spur_acp::connection::AgentConnection>
+    + Send
+    + Sync
+    + 'a;
+
+pub struct WorkerAttemptOutcomeForTest {
+    pub worker_session: spur_acp::SessionId,
+    pub candidate_status: spur_acp::DelegationStatus,
+    pub diff: Option<String>,
+    pub worktree_path: std::path::PathBuf,
+}
+
+pub async fn run_worker_attempt_with_connection_for_test<'a>(
+    repo_root: std::path::PathBuf,
+    agent_config: spur_acp::config::AgentConfig,
+    profile: Option<String>,
+    task: String,
+    connection_factory: &'a WorkerConnectionFactoryForTest<'a>,
+) -> anyhow::Result<WorkerAttemptOutcomeForTest> {
+    let profile_def = match profile.as_deref() {
+        Some(name) => crate::agent_profiles::AgentProfile::load(&repo_root, name)?,
+        None => None,
+    };
+    let (model, effort) = super::delegation::execute::resolve_effective_model_effort(
+        None,
+        None,
+        profile_def.as_ref(),
+    );
+
+    let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo_root);
+    let (funnel, _events_rx) = crate::event_funnel::test_channel();
+    let brain_session_id = spur_acp::BrainSessionId::new(spur_acp::SessionId::new());
+    let worker_session = spur_acp::SessionId::new();
+    let fault_hooks = super::FaultInjectionHooks::default();
+    let feature_gate = spur_license::FeatureGate::new_with_install_id(
+        spur_license::policy::PolicyResolver::embedded(),
+        spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+    );
+
+    let outcome = super::delegation::run_one_worker_attempt(
+        worker_session.clone(),
+        super::delegation::WorkerAttemptCtx {
+            brain_session_id: &brain_session_id,
+            agent: agent_config.name.as_str(),
+            model: model.as_deref(),
+            effort: effort.as_deref(),
+            profile: profile.as_deref(),
+            profile_def: profile_def.as_ref(),
+            config_overrides: None,
+            task: task.as_str(),
+            request_id: "test-delegation",
+            attempt: 1,
+            agent_config: &agent_config,
+            delegation_plan: None,
+            issue_id: None,
+            prior_branch_for_reuse: None,
+            peer_mailbox: None,
+            ack_tx: None,
+            base: None,
+            dispatched_base_oid_tx: None,
+            fault_injection_hooks: &fault_hooks,
+            worker_mcp_servers: &[],
+            worker_mcp_server: None,
+            pm_service: None,
+            feature_gate: &feature_gate,
+            connection_factory: Some(connection_factory),
+        },
+        &mut worktrees,
+        &funnel,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    Ok(WorkerAttemptOutcomeForTest {
+        worker_session: outcome.worker_session,
+        candidate_status: outcome.candidate_status,
+        diff: outcome.diff,
+        worktree_path: outcome.worktree_path,
+    })
+}
+
 /// Wraps `register_gate` + `wait_gate` in a retry loop.
 ///
 /// On `Retry`, bumps `attempt_n` and re-enters. Bounded by
