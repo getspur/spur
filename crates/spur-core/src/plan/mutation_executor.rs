@@ -153,7 +153,7 @@ pub async fn apply_mutation(
                 )
                 .with_context(|| format!("parse comments for parent issue {parent}"))?;
                 let parent_context_files = super::projector::latest_task_spec(&parent_audits)
-                    .map(|(_, context_files, _, _, _)| context_files)
+                    .map(|(_, context_files, _, _, _, _)| context_files)
                     .unwrap_or_default();
                 let original_downstreams = downstream_issue_ids(pm.as_ref(), parent).await?;
 
@@ -191,6 +191,7 @@ pub async fn apply_mutation(
                             &id,
                             &id,
                             parent_agent,
+                            None,
                             None,
                             None,
                             None,
@@ -278,6 +279,7 @@ pub async fn apply_mutation(
                 issue_id,
                 new_task,
                 new_agent,
+                new_profile,
                 new_context_files,
                 new_depends_on,
             } => {
@@ -289,6 +291,7 @@ pub async fn apply_mutation(
                         issue_id,
                         new_task: new_task.as_deref(),
                         new_agent: new_agent.as_deref(),
+                        new_profile: new_profile.as_deref(),
                         new_context_files: new_context_files.as_deref(),
                         new_depends_on: new_depends_on.as_deref(),
                     },
@@ -1303,6 +1306,7 @@ struct ModifyTaskSpecInput<'a> {
     issue_id: &'a str,
     new_task: Option<&'a str>,
     new_agent: Option<&'a str>,
+    new_profile: Option<&'a str>,
     new_context_files: Option<&'a [String]>,
     new_depends_on: Option<&'a [String]>,
 }
@@ -1427,9 +1431,9 @@ async fn apply_modify_task_spec(
             .with_context(|| format!("list comments for modify target {issue_id}"))?,
     )
     .with_context(|| format!("parse comments for modify target {issue_id}"))?;
-    let (prior_task_id, prior_context_files, _, _, _) =
+    let (prior_task_id, prior_context_files, _, _, _, _) =
         super::projector::latest_task_spec(&prior_audits)
-            .unwrap_or_else(|| (issue_id.to_string(), Vec::new(), None, None, None));
+            .unwrap_or_else(|| (issue_id.to_string(), Vec::new(), None, None, None, None));
     let context_files: Vec<String> = match input.new_context_files {
         Some(files) => files.to_vec(),
         None => prior_context_files,
@@ -1442,6 +1446,7 @@ async fn apply_modify_task_spec(
         &context_files,
         input.new_task,
         input.new_agent,
+        input.new_profile,
         input.new_depends_on,
     )
     .await
@@ -1993,6 +1998,61 @@ mod tests {
         assert_eq!(first.len(), 2);
         assert!(second.is_empty());
         assert_eq!(created.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn modify_task_spec_rewrites_profile_in_task_spec_audit() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let issue_id = pm
+            .create_issue(IssueCreate {
+                title: "Profile task".into(),
+                description: Some("Original task".into()),
+                issue_type: Some("task".into()),
+                labels: vec![crate::plan::labels::agent("codex")],
+                ..Default::default()
+            })
+            .await
+            .expect("create task");
+        crate::plan::emit_task_spec_audit(
+            adv,
+            &issue_id,
+            "T1",
+            "codex",
+            Some("default-reviewer"),
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect("initial task spec");
+        let batch = MutationBatch {
+            mutation_id: uuid::Uuid::parse_str("33333333-3333-4333-8333-333333333333")
+                .expect("valid mutation id"),
+            trigger_signal_id: None,
+            trigger_task_id: issue_id.clone(),
+            ops: vec![PlanMutationOp::ModifyTaskSpec {
+                issue_id: issue_id.clone(),
+                new_task: None,
+                new_agent: None,
+                new_profile: Some("code-reviewer".to_string()),
+                new_context_files: None,
+                new_depends_on: None,
+            }],
+        };
+
+        apply_mutation(pm.clone(), test_feature_gate(), &batch)
+            .await
+            .expect("apply mutation");
+        let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+            &issue_id,
+            adv.list_comments(&issue_id).await.expect("comments"),
+        )
+        .expect("parse audits");
+        let (_, _, profile, _, _, _) =
+            crate::plan::projector::latest_task_spec(&audits).expect("latest task spec");
+        assert_eq!(profile.as_deref(), Some("code-reviewer"));
     }
 
     fn summary(id: &str) -> IssueSummary {

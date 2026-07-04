@@ -87,6 +87,7 @@ async fn setup_persisted_merge_ready_plan(
     let tasks = vec![PlanTask {
         task_id: "task-a".into(),
         agent: "codex".into(),
+        profile: None,
         model: None,
         effort: None,
         config_overrides: None,
@@ -294,6 +295,7 @@ async fn setup_persisted_retried_plan(plan_id: &str, clear_cache: bool) -> Persi
     let tasks = vec![PlanTask {
         task_id: "task-a".into(),
         agent: "codex".into(),
+        profile: None,
         model: None,
         effort: None,
         config_overrides: None,
@@ -592,6 +594,7 @@ async fn setup_cached_overlay_diff_plan(
         PlanTask {
             task_id: "task-a".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -604,6 +607,7 @@ async fn setup_cached_overlay_diff_plan(
         PlanTask {
             task_id: "task-b".into(),
             agent: "codex".into(),
+            profile: None,
             model: None,
             effort: None,
             config_overrides: None,
