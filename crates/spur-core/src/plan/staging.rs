@@ -228,6 +228,7 @@ mod tests {
             spec: PlanTask {
                 task_id: task_id.into(),
                 agent: "test-agent".into(),
+                profile: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
