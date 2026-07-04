@@ -65,11 +65,13 @@ use agent_client_protocol::schema::v1::{
     WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Handled, UntypedMessage};
 
 use crate::config::LogConfig;
 use crate::connection::child_stderr_bridge::ChildStderrBridge;
-use crate::connection::{AgentConnection, ExtNotificationPayload};
+use crate::connection::{
+    AgentClientRequestKind, AgentClientRequestPayload, AgentConnection, ExtNotificationPayload,
+};
 use crate::error::AcpError;
 use crate::spur_agent_caps::SpurAgentCaps;
 use crate::types::{AgentHealth, AgentKind};
@@ -217,6 +219,10 @@ pub struct NativeAcpConnection {
     ext_notification_rx: Option<mpsc::UnboundedReceiver<ExtNotificationPayload>>,
     /// Paired sender for `ext_notification_rx`, cloned into the ACP thread.
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    /// Receiver for defensive agent-originated client requests.
+    agent_client_request_rx: Option<mpsc::UnboundedReceiver<AgentClientRequestPayload>>,
+    /// Paired sender for `agent_client_request_rx`, cloned into the ACP thread.
+    agent_client_request_tx: mpsc::UnboundedSender<AgentClientRequestPayload>,
     /// Connection-scoped broadcast of session notifications. Cloned into
     /// `SpurAcpClientDynamic` (via `acp_thread_main`); subscribers obtained
     /// via `subscribe_session_notifications` live for the connection's
@@ -395,6 +401,55 @@ fn dispatch_cancel(
         }));
 }
 
+fn handle_agent_client_request(
+    request: UntypedMessage,
+    responder: agent_client_protocol::Responder<serde_json::Value>,
+    agent_client_request_tx: &mpsc::UnboundedSender<AgentClientRequestPayload>,
+    agent_name: &str,
+) -> agent_client_protocol::Result<
+    Handled<(
+        UntypedMessage,
+        agent_client_protocol::Responder<serde_json::Value>,
+    )>,
+> {
+    match request.method() {
+        "logout" => {
+            tracing::info!(
+                agent = %agent_name,
+                "NativeAcpConnection: agent requested logout"
+            );
+            let _ = agent_client_request_tx.send(AgentClientRequestPayload {
+                kind: AgentClientRequestKind::Logout,
+            });
+            responder.respond(serde_json::json!({}))?;
+            Ok(Handled::Yes)
+        }
+        "authenticate" => {
+            let method_id = serde_json::from_value::<AuthenticateRequest>(request.params().clone())
+                .map(|request| request.method_id.to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            tracing::info!(
+                agent = %agent_name,
+                method_id = %method_id,
+                "NativeAcpConnection: agent requested authenticate, but credential forwarding is not configured"
+            );
+            let _ = agent_client_request_tx.send(AgentClientRequestPayload {
+                kind: AgentClientRequestKind::Authenticate { method_id },
+            });
+            responder.respond_with_result(Err(
+                agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                    "reason": "authenticate requested by agent, but Spur credential forwarding is not configured"
+                })),
+            ))?;
+            Ok(Handled::Yes)
+        }
+        _ => Ok(Handled::No {
+            message: (request, responder),
+            retry: false,
+        }),
+    }
+}
+
 impl NativeAcpConnection {
     /// Create a new native ACP connection.
     ///
@@ -419,6 +474,8 @@ impl NativeAcpConnection {
         permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ) -> Self {
         let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtNotificationPayload>();
+        let (agent_client_request_tx, agent_client_request_rx) =
+            mpsc::unbounded_channel::<AgentClientRequestPayload>();
         // Capacity 4096 per the broadcast-sizing invariant (anchor 3ff4e86):
         // bursty history replay from `load_session` can produce O(hundreds)
         // of notifications in rapid succession, and the floor was established
@@ -436,6 +493,8 @@ impl NativeAcpConnection {
             permission_tx,
             ext_notification_rx: Some(ext_rx),
             ext_notification_tx: ext_tx,
+            agent_client_request_rx: Some(agent_client_request_rx),
+            agent_client_request_tx,
             session_notif_tx,
             advertised_modes: Arc::new(Mutex::new(HashMap::new())),
             session_capabilities: Arc::new(Mutex::new(None)),
@@ -588,6 +647,7 @@ impl AgentConnection for NativeAcpConnection {
         let thread_agent_name = agent_name.clone();
         let permission_tx = self.permission_tx.clone();
         let ext_tx = self.ext_notification_tx.clone();
+        let agent_client_request_tx = self.agent_client_request_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
         let advertised_modes = self.advertised_modes.clone();
         let last_prompt_usage = self.last_prompt_usage.clone();
@@ -605,6 +665,7 @@ impl AgentConnection for NativeAcpConnection {
                     cmd_rx,
                     permission_tx,
                     ext_tx,
+                    agent_client_request_tx,
                     session_notif_tx_for_thread,
                     advertised_modes,
                     last_prompt_usage,
@@ -1178,6 +1239,12 @@ impl AgentConnection for NativeAcpConnection {
         self.ext_notification_rx.take()
     }
 
+    fn take_agent_client_request_rx(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<AgentClientRequestPayload>> {
+        self.agent_client_request_rx.take()
+    }
+
     fn subscribe_session_notifications(
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<SessionNotification>> {
@@ -1204,6 +1271,7 @@ fn acp_thread_main(
     mut cmd_rx: mpsc::UnboundedReceiver<AcpCommand>,
     permission_tx: Option<mpsc::UnboundedSender<crate::types::PermissionRequest>>,
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
+    agent_client_request_tx: mpsc::UnboundedSender<AgentClientRequestPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
     advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
@@ -1447,6 +1515,8 @@ fn acp_thread_main(
             let perm_tx_h = permission_tx.clone();
             let session_notif_tx_h = session_notif_tx.clone();
             let ext_notification_tx_h = ext_notification_tx.clone();
+            let agent_client_request_tx_h = agent_client_request_tx.clone();
+            let agent_name_request_h = agent_name.clone();
             let session_event_standardizer_h = session_event_standardizer.clone();
 
             let cwd_read = cwd.clone();
@@ -1469,6 +1539,18 @@ fn acp_thread_main(
             Client
                 .builder()
                 .name(format!("spur-acp-{}", agent_name))
+                // ── defensive agent-originated auth/logout requests ───────
+                .on_receive_request(
+                    async move |req: UntypedMessage, responder, _cx| {
+                        handle_agent_client_request(
+                            req,
+                            responder,
+                            &agent_client_request_tx_h,
+                            &agent_name_request_h,
+                        )
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
                 // ── session/request_permission ────────────────────────────
                 .on_receive_request(
                     async move |req: RequestPermissionRequest, responder, cx| {
