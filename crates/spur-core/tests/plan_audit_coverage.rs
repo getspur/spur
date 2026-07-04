@@ -131,6 +131,8 @@ async fn plan_audit_coverage_all_four_sentinels() {
     let tasks = vec![PlanTask {
         task_id: "t1".into(),
         agent: "codex".into(),
+        model: None,
+        effort: None,
         task: "Do the thing.".into(),
         depends_on: vec![],
         issue_id: None,
@@ -212,6 +214,8 @@ async fn plan_audit_coverage_all_four_sentinels() {
         spec: PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Do the thing.".into(),
             depends_on: vec![],
             issue_id: Some(task_issue_id.clone()),
@@ -642,6 +646,8 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
     let tasks = vec![PlanTask {
         task_id: "t1".into(),
         agent: "codex".into(),
+        model: None,
+        effort: None,
         task: "Do the rejection thing.".into(),
         depends_on: vec![],
         issue_id: None,
@@ -685,6 +691,8 @@ async fn reject_closes_issue_and_adds_review_rejected_label() {
         spec: PlanTask {
             task_id: "t1".into(),
             agent: "codex".into(),
+            model: None,
+            effort: None,
             task: "Do the rejection thing.".into(),
             depends_on: vec![],
             issue_id: Some(task_issue_id.clone()),
@@ -796,6 +804,8 @@ async fn request_changes_leaves_issue_open_and_not_review_ready() {
             spec: PlanTask {
                 task_id: "t1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Do the request changes thing.".into(),
                 depends_on: vec![],
                 issue_id: Some(task_issue_id.clone()),
@@ -884,6 +894,8 @@ async fn request_changes_does_not_emit_dispatch_audit() {
             spec: PlanTask {
                 task_id: "t1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Do the request changes thing.".into(),
                 depends_on: vec![],
                 issue_id: Some(task_issue_id.clone()),
@@ -976,6 +988,8 @@ async fn approve_closes_issue_and_clears_ready_for_review() {
             spec: PlanTask {
                 task_id: "t1".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Approve the task.".into(),
                 depends_on: vec![],
                 issue_id: Some(task_issue_id.clone()),

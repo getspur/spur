@@ -101,6 +101,8 @@ pub(crate) async fn handle_delegations(
         let DelegationRequest {
             id: request_id,
             agent,
+            model,
+            effort,
             task,
             context_files,
             prior_branch_for_reuse,
@@ -315,6 +317,8 @@ pub(crate) async fn handle_delegations(
                 }
                 r = execute_delegation(
                     agent,
+                    model,
+                    effort,
                     task,
                     context_files,
                     prior_branch_for_reuse,

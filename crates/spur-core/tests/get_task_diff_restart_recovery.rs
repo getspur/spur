@@ -112,6 +112,8 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
     let tasks = vec![PlanTask {
         task_id: "task-a".into(),
         agent: "codex".into(),
+        model: None,
+        effort: None,
         task: "Diff recovery".into(),
         depends_on: Vec::new(),
         issue_id: None,

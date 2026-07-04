@@ -826,6 +826,8 @@ impl SimState {
                 AuditSentinelKind::TaskSpec {
                     task_id: task.task_id.to_string(),
                     context_files: Vec::new(),
+                    model: None,
+                    effort: None,
                     task_text: Some(format!("Implement {}", task.task_id)),
                     agent: Some("codex".to_string()),
                     depends_on: Some(task.depends_on.iter().map(|dep| dep.to_string()).collect()),
@@ -1095,6 +1097,8 @@ fn dummy_request() -> spur_core::DelegationRequest {
     spur_core::DelegationRequest {
         id: "dummy".to_string().into(),
         agent: "codex".to_string(),
+        model: None,
+        effort: None,
         task: "dummy".to_string(),
         context_files: Vec::new(),
         prior_branch_for_reuse: None,
