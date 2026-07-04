@@ -4,6 +4,8 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_delegation(
     agent: String,
+    model: Option<String>,
+    effort: Option<String>,
     original_task: String,
     context_files: Vec<String>,
     prior_branch_for_reuse: Option<String>,
@@ -162,6 +164,8 @@ pub(crate) async fn execute_delegation(
             WorkerAttemptCtx {
                 brain_session_id: &brain_session_id,
                 agent: &agent,
+                model: model.as_deref(),
+                effort: effort.as_deref(),
                 task: &current_task,
                 request_id: &request_id,
                 attempt: attempt_n,

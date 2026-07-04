@@ -89,6 +89,8 @@ mod tests {
         PlanTask {
             task_id: task_id.to_string(),
             agent: "codex".to_string(),
+            model: None,
+            effort: None,
             task: "do work".to_string(),
             depends_on: Vec::new(),
             issue_id: Some(format!("I-{task_id}")),

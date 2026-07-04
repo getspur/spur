@@ -228,6 +228,8 @@ mod tests {
             spec: PlanTask {
                 task_id: task_id.into(),
                 agent: "test-agent".into(),
+                model: None,
+                effort: None,
                 task: "test".into(),
                 depends_on: deps.iter().map(|s| s.to_string()).collect(),
                 issue_id: Some(format!("bd-{task_id}")),
