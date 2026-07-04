@@ -2112,6 +2112,14 @@ impl Orchestrator {
             });
         }
 
+        if let Some(request_rx) = connection.take_agent_client_request_rx() {
+            crate::notification_pump::spawn_agent_client_request_pump(
+                request_rx,
+                session_id.clone(),
+                self.funnel.clone(),
+            );
+        }
+
         // Fan out session notifications from the connection's broadcast
         // into the SpurEvent bus — see notification_pump::spawn_session_notification_pump.
         // `presub_notif_rx` was subscribed before new_session so we don't
@@ -2485,6 +2493,14 @@ impl Orchestrator {
                     });
                 }
             });
+        }
+
+        if let Some(request_rx) = connection.take_agent_client_request_rx() {
+            crate::notification_pump::spawn_agent_client_request_pump(
+                request_rx,
+                session_id.clone(),
+                self.funnel.clone(),
+            );
         }
 
         // Fan out session notifications from the connection's broadcast

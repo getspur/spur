@@ -14,6 +14,7 @@
 use tokio::sync::broadcast::{error::RecvError, Receiver};
 use tokio::task::JoinHandle;
 
+use spur_acp::connection::{AgentClientRequestKind, AgentClientRequestPayload};
 use spur_acp::domain::events::SpurEventBody;
 use spur_acp::types::SessionId;
 use spur_acp::SessionNotification;
@@ -52,4 +53,85 @@ pub fn spawn_session_notification_pump(
             }
         }
     })
+}
+
+pub fn spawn_agent_client_request_pump(
+    mut request_rx: tokio::sync::mpsc::UnboundedReceiver<AgentClientRequestPayload>,
+    spur_session_id: SessionId,
+    funnel: FunnelHandle,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(payload) = request_rx.recv().await {
+            let message = match payload.kind {
+                AgentClientRequestKind::Logout => {
+                    "Agent requested logout; authentication is required before continuing."
+                        .to_string()
+                }
+                AgentClientRequestKind::Authenticate { method_id } => {
+                    format!(
+                        "Agent requested authentication with method '{method_id}', but Spur credential forwarding is not configured."
+                    )
+                }
+            };
+            funnel.emit(SpurEventBody::AuthRequired {
+                session: spur_session_id.clone(),
+                message,
+            });
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn agent_client_request_pump_emits_auth_required_events() {
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let (funnel, mut event_rx) = crate::event_funnel::test_channel();
+        let session = SessionId("brain-session".to_string());
+        let handle = spawn_agent_client_request_pump(request_rx, session.clone(), funnel);
+
+        request_tx
+            .send(AgentClientRequestPayload {
+                kind: AgentClientRequestKind::Logout,
+            })
+            .expect("pump should still be running");
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("logout should emit an event")
+            .expect("event channel should remain open");
+        assert!(matches!(
+            event,
+            SpurEventBody::AuthRequired {
+                session: ref actual_session,
+                ..
+            } if actual_session == &session
+        ));
+
+        request_tx
+            .send(AgentClientRequestPayload {
+                kind: AgentClientRequestKind::Authenticate {
+                    method_id: "api-key".to_string(),
+                },
+            })
+            .expect("pump should still be running");
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("authenticate should emit an event")
+            .expect("event channel should remain open");
+        assert!(matches!(
+            event,
+            SpurEventBody::AuthRequired {
+                session: ref actual_session,
+                message
+            } if actual_session == &session && message.contains("api-key")
+        ));
+
+        handle.abort();
+    }
 }
