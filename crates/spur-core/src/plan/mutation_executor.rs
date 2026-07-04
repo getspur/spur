@@ -153,8 +153,8 @@ pub async fn apply_mutation(
                 )
                 .with_context(|| format!("parse comments for parent issue {parent}"))?;
                 let parent_context_files = super::projector::latest_task_spec(&parent_audits)
-                .map(|(_, context_files)| context_files)
-                .unwrap_or_default();
+                    .map(|(_, context_files, _, _)| context_files)
+                    .unwrap_or_default();
                 let original_downstreams = downstream_issue_ids(pm.as_ref(), parent).await?;
 
                 let mut child_ids: Vec<String> = Vec::with_capacity(children.len());
@@ -191,6 +191,8 @@ pub async fn apply_mutation(
                             &id,
                             &id,
                             parent_agent,
+                            None,
+                            None,
                             &parent_context_files,
                         )
                         .await
@@ -1424,8 +1426,9 @@ async fn apply_modify_task_spec(
             .with_context(|| format!("list comments for modify target {issue_id}"))?,
     )
     .with_context(|| format!("parse comments for modify target {issue_id}"))?;
-    let (prior_task_id, prior_context_files) = super::projector::latest_task_spec(&prior_audits)
-        .unwrap_or_else(|| (issue_id.to_string(), Vec::new()));
+    let (prior_task_id, prior_context_files, _, _) =
+        super::projector::latest_task_spec(&prior_audits)
+            .unwrap_or_else(|| (issue_id.to_string(), Vec::new(), None, None));
     let context_files: Vec<String> = match input.new_context_files {
         Some(files) => files.to_vec(),
         None => prior_context_files,

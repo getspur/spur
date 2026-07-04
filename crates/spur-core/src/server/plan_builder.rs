@@ -105,6 +105,8 @@ pub(crate) async fn build_epic_subgraph_with_activation_labels(
             &child_id,
             &task.task_id,
             &task.agent,
+            task.model.as_deref(),
+            task.effort.as_deref(),
             &task.context_files,
         )
         .await
@@ -891,12 +893,41 @@ mod topo_tests {
         PlanTask {
             task_id: id.to_string(),
             agent: "x".to_string(),
+            model: None,
+            effort: None,
             task: "body".to_string(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
             issue_title: None,
             context_files: Vec::new(),
         }
+    }
+
+    #[test]
+    fn model_effort_do_not_pollute_agent_label() {
+        let tasks = vec![PlanTask {
+            task_id: "t1".to_string(),
+            agent: "codex".to_string(),
+            task: "body".to_string(),
+            depends_on: Vec::new(),
+            issue_id: None,
+            issue_title: None,
+            context_files: Vec::new(),
+            model: Some("gpt-5-codex".to_string()),
+            effort: Some("low".to_string()),
+        }];
+
+        let (_, children) = super::plan_epic_issue_creates("plan-1", "Epic", None, &tasks).unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(children[0]
+            .1
+            .labels
+            .contains(&crate::plan::labels::agent("codex")));
+        assert!(!children[0]
+            .1
+            .labels
+            .iter()
+            .any(|label| { label.contains("gpt-5-codex") || label.contains("low") }));
     }
 
     #[test]

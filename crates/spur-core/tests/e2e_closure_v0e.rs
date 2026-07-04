@@ -536,6 +536,8 @@ async fn t_v0e_1_no_persisted_direct_dispatch() {
             spec: PlanTask {
                 task_id: "t-review".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "Review task".into(),
                 depends_on: vec![],
                 issue_id: Some(task_a_id.clone()),

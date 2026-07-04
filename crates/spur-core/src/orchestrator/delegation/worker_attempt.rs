@@ -112,6 +112,10 @@ pub(crate) struct WorkerAttemptOutcome {
 pub(crate) struct WorkerAttemptCtx<'a> {
     pub(crate) brain_session_id: &'a spur_acp::BrainSessionId,
     pub(crate) agent: &'a str,
+    #[allow(dead_code)]
+    pub(crate) model: Option<&'a str>,
+    #[allow(dead_code)]
+    pub(crate) effort: Option<&'a str>,
     pub(crate) task: &'a str,
     pub(crate) request_id: &'a str,
     pub(crate) attempt: u32,
