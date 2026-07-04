@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use spur_analyst::embed_service::{EmbedService, MAX_EMBED_TEXTS};
+use spur_analyst::embedding::sidecar_service::{EmbedService, MAX_EMBED_TEXTS};
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
