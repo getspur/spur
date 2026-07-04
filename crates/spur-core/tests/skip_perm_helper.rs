@@ -134,6 +134,7 @@ fn cfg(skip: bool, mode: Option<&str>) -> AgentConfig {
         name: "mock".into(),
         command: "mock".into(),
         args: vec![],
+        additional_directories: vec![],
         transport: TransportKind::Acp,
         kind: AgentKind::Generic,
         role: AgentRole::Both,
