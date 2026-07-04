@@ -107,6 +107,7 @@ pub(crate) async fn build_epic_subgraph_with_activation_labels(
             &task.agent,
             task.model.as_deref(),
             task.effort.as_deref(),
+            task.config_overrides.as_ref(),
             &task.context_files,
         )
         .await
@@ -895,6 +896,7 @@ mod topo_tests {
             agent: "x".to_string(),
             model: None,
             effort: None,
+            config_overrides: None,
             task: "body".to_string(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             issue_id: None,
@@ -915,6 +917,7 @@ mod topo_tests {
             context_files: Vec::new(),
             model: Some("gpt-5-codex".to_string()),
             effort: Some("low".to_string()),
+            config_overrides: None,
         }];
 
         let (_, children) = super::plan_epic_issue_creates("plan-1", "Epic", None, &tasks).unwrap();
