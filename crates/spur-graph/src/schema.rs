@@ -309,6 +309,12 @@ impl NodeKind {
             Self::Resource => "resource",
         }
     }
+
+    pub fn from_discriminator(discriminator: &str) -> Option<Self> {
+        let deserializer =
+            serde::de::value::StrDeserializer::<serde::de::value::Error>::new(discriminator);
+        Self::deserialize(deserializer).ok()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1081,6 +1087,41 @@ mod change_kind_tests {
         assert_eq!(kind, NodeKind::Resource);
         assert_eq!(serde_json::to_string(&kind).unwrap(), "\"resource\"");
         assert_eq!(kind.discriminator(), "resource");
+    }
+
+    #[test]
+    fn node_kind_from_discriminator_agrees_with_discriminators() {
+        for kind in [
+            NodeKind::Module,
+            NodeKind::Function,
+            NodeKind::Class,
+            NodeKind::Interface,
+            NodeKind::Struct,
+            NodeKind::Impl,
+            NodeKind::Trait,
+            NodeKind::Enum,
+            NodeKind::EnumVariant,
+            NodeKind::File,
+            NodeKind::External,
+            NodeKind::Method,
+            NodeKind::Field,
+            NodeKind::Constant,
+            NodeKind::TypeAlias,
+            NodeKind::Macro,
+            NodeKind::Section,
+            NodeKind::Commit,
+            NodeKind::McpTool,
+            NodeKind::Cell,
+            NodeKind::Port,
+            NodeKind::Resource,
+        ] {
+            assert_eq!(
+                NodeKind::from_discriminator(kind.discriminator()),
+                Some(kind)
+            );
+        }
+
+        assert_eq!(NodeKind::from_discriminator("future_kind"), None);
     }
 
     #[test]
