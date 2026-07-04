@@ -194,6 +194,14 @@ pub struct BuildStats {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct WorktreeDeltaArtifact {
+    pub artifact: GraphIndexArtifact,
+    pub changed_files: usize,
+    pub new_symbols: usize,
+    pub tombstoned_symbols: usize,
+}
+
+#[derive(Debug, Clone)]
 struct FileBucket {
     file: GraphFileArtifact,
     file_node_id: Option<NodeId>,
@@ -464,41 +472,21 @@ pub fn artifact_from_facts_incremental(
     );
     let (mut buckets, changed_paths, changed_or_added_paths, reused_buckets) = {
         let _entered = changed_span.enter();
-        let prev_content_oids: BTreeMap<_, _> = prev
-            .file_manifests
-            .iter()
-            .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
-            .collect();
-
-        let mut buckets = BTreeMap::new();
-        let mut changed_paths = Vec::new();
-        let mut changed_or_added_paths = BTreeSet::new();
-        let mut reused = 0_usize;
-        for current in current_entries.values() {
-            if prev_content_oids
-                .get(current.path.as_str())
-                .is_some_and(|content_oid| *content_oid == current.content_oid)
-            {
-                if let Some(bucket) = prev_buckets.get(&current.path) {
-                    buckets.insert(current.path.clone(), bucket.clone());
-                    reused += 1;
-                    continue;
-                }
-            }
-            if current.extractable {
-                changed_or_added_paths.insert(current.path.clone());
-                changed_paths.push(root.join(&current.path));
-            }
-        }
-        changed_span.record("changed_paths", changed_paths.len());
+        let diff = changed_paths_from_previous(prev, &root, &current_entries, &prev_buckets);
+        changed_span.record("changed_paths", diff.changed_paths.len());
         tracing::info!(
             target: "spur_graph::build::changed_paths",
-            changed_paths = changed_paths.len(),
-            reused,
+            changed_paths = diff.changed_paths.len(),
+            reused = diff.reused_buckets,
             elapsed_ms = elapsed_ms(changed_started),
             "spur-graph build phase completed"
         );
-        (buckets, changed_paths, changed_or_added_paths, reused)
+        (
+            diff.buckets,
+            diff.changed_paths,
+            diff.changed_or_added_paths,
+            diff.reused_buckets,
+        )
     };
     let changed_count = changed_paths.len();
     let removed_paths = removed_paths_from_previous(prev, &current_entries);
@@ -584,6 +572,72 @@ pub fn artifact_from_facts_incremental(
         "spur-graph build completed"
     );
     Ok((artifact, BuildMode::Incremental, stats))
+}
+
+pub(crate) fn build_worktree_delta_artifact(
+    prev: &GraphIndexArtifact,
+    root: &Path,
+) -> anyhow::Result<WorktreeDeltaArtifact> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize `{}`", root.display()))?;
+    let manifest_version = current_manifest_version();
+    if prev.manifest_version != manifest_version {
+        anyhow::bail!(
+            "cannot write worktree delta for manifest_version {}; expected {}",
+            prev.manifest_version,
+            manifest_version
+        );
+    }
+
+    let current_entries = discover_current_entries(&root)?;
+    let prev_buckets = buckets_from_artifact(prev);
+    let diff = changed_paths_from_previous(prev, &root, &current_entries, &prev_buckets);
+
+    let changed_facts = if diff.changed_paths.is_empty() {
+        GraphFacts::empty()
+    } else {
+        build_facts_for_paths(&root, &diff.changed_paths)?
+    };
+    let changed_tombstones =
+        tombstones_from_changed_paths(prev, &root, &diff.changed_paths, &changed_facts)?;
+    let tombstones = tombstones_for_worktree(prev, &current_entries, changed_tombstones);
+
+    let changed_entries: BTreeMap<_, _> = current_entries
+        .iter()
+        .filter(|(path, _entry)| diff.changed_or_added_paths.contains(*path))
+        .map(|(path, entry)| (path.clone(), entry.clone()))
+        .collect();
+    let mut buckets = if diff.changed_paths.is_empty() {
+        BTreeMap::new()
+    } else {
+        buckets_from_facts(&changed_facts, &root, &current_entries)?
+    };
+    add_missing_manifest_buckets(&mut buckets, &changed_entries);
+    rebind_cross_file_edges(&mut buckets);
+
+    let graph_content_hash = compute_graph_content_hash(
+        changed_entries
+            .values()
+            .map(|entry| (entry.path.as_str(), entry.content_oid.as_str())),
+    );
+    let artifact = rebuild_from_buckets(buckets, manifest_version, graph_content_hash, tombstones);
+    let prev_symbol_ids: HashSet<_> = prev
+        .symbols
+        .iter()
+        .map(|symbol| symbol.stable_symbol_id.as_str())
+        .collect();
+    let tombstoned_symbols = artifact
+        .tombstones
+        .iter()
+        .filter(|tombstone| prev_symbol_ids.contains(tombstone.stable_file_id.as_str()))
+        .count();
+    Ok(WorktreeDeltaArtifact {
+        changed_files: diff.changed_paths.len(),
+        new_symbols: artifact.symbols.len(),
+        tombstoned_symbols,
+        artifact,
+    })
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -918,6 +972,54 @@ fn content_oid_for(current_entries: &BTreeMap<String, CurrentFileEntry>, path: &
         .get(path)
         .map(|entry| entry.content_oid.clone())
         .unwrap_or_default()
+}
+
+struct ChangedPathDiff {
+    buckets: BTreeMap<String, FileBucket>,
+    changed_paths: Vec<PathBuf>,
+    changed_or_added_paths: BTreeSet<String>,
+    reused_buckets: usize,
+}
+
+fn changed_paths_from_previous(
+    prev: &GraphIndexArtifact,
+    root: &Path,
+    current_entries: &BTreeMap<String, CurrentFileEntry>,
+    prev_buckets: &BTreeMap<String, FileBucket>,
+) -> ChangedPathDiff {
+    let prev_content_oids: BTreeMap<_, _> = prev
+        .file_manifests
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
+        .collect();
+
+    let mut buckets = BTreeMap::new();
+    let mut changed_paths = Vec::new();
+    let mut changed_or_added_paths = BTreeSet::new();
+    let mut reused_buckets = 0_usize;
+    for current in current_entries.values() {
+        if prev_content_oids
+            .get(current.path.as_str())
+            .is_some_and(|content_oid| *content_oid == current.content_oid)
+        {
+            if let Some(bucket) = prev_buckets.get(&current.path) {
+                buckets.insert(current.path.clone(), bucket.clone());
+                reused_buckets += 1;
+                continue;
+            }
+        }
+        if current.extractable {
+            changed_or_added_paths.insert(current.path.clone());
+            changed_paths.push(root.join(&current.path));
+        }
+    }
+
+    ChangedPathDiff {
+        buckets,
+        changed_paths,
+        changed_or_added_paths,
+        reused_buckets,
+    }
 }
 
 fn buckets_from_artifact(artifact: &GraphIndexArtifact) -> BTreeMap<String, FileBucket> {

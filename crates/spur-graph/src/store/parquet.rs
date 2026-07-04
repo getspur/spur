@@ -23,7 +23,7 @@ use parquet::schema::parser::parse_message_type;
 use parquet::schema::types::{ColumnPath, SchemaDescriptor};
 
 use super::{ShardIndexEntry, TemporalShardSink};
-use crate::store::build::{EXTRACTOR_VERSION, SCHEMA_VERSION};
+use crate::store::build::{build_worktree_delta_artifact, EXTRACTOR_VERSION, SCHEMA_VERSION};
 use crate::{
     ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, GitPath, GraphEdgeArtifact,
     GraphEdgeKind, GraphFileArtifact, GraphFileManifestEntry, GraphIndexArtifact, GraphIndexHeader,
@@ -246,6 +246,120 @@ impl ColumnData {
             Self::RequiredListString(values) => values.len(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeltaSummary {
+    pub changed_files: usize,
+    pub new_symbols: usize,
+    pub tombstoned_symbols: usize,
+}
+
+pub fn write_worktree_delta(
+    prev: &GraphIndexArtifact,
+    worktree_root: &Path,
+    out_dir: &Path,
+) -> anyhow::Result<DeltaSummary> {
+    let delta = build_worktree_delta_artifact(prev, worktree_root)?;
+    let artifact = &delta.artifact;
+
+    fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create `{}`", out_dir.display()))?;
+
+    let mut files = file_rows(artifact)?;
+    let mut nodes = node_rows(artifact)?;
+    files.sort_by(|a, b| a.file.file_path.cmp(&b.file.file_path));
+    nodes.sort_by(|a, b| {
+        a.symbol
+            .file_path
+            .cmp(&b.symbol.file_path)
+            .then(a.symbol.stable_symbol_id.cmp(&b.symbol.stable_symbol_id))
+    });
+
+    let endpoint_ids = endpoint_id_map(&files, &nodes)?;
+    let (mut resolved_edges, mut unresolved_edges) = edge_rows(artifact, &endpoint_ids)?;
+    resolved_edges.sort_by(|a, b| {
+        a.src_id
+            .get()
+            .cmp(&b.src_id.get())
+            .then(a.dst_id.get().cmp(&b.dst_id.get()))
+    });
+    unresolved_edges.sort_by_key(|edge| edge.src_id.get());
+
+    let mut file_manifests = artifact.file_manifests.clone();
+    file_manifests.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut tombstones = artifact.tombstones.clone();
+    tombstones.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let nodes_path = out_dir.join("nodes.parquet");
+    let edges_path = out_dir.join("edges.parquet");
+    let unresolved_edges_path = out_dir.join("edges_unresolved.parquet");
+    let files_path = out_dir.join("files.parquet");
+    let file_manifests_path = out_dir.join("file_manifests.parquet");
+    let tombstones_path = out_dir.join("tombstones.parquet");
+
+    std::thread::scope(|scope| {
+        let nodes_handle = scope.spawn(|| write_nodes(&nodes_path, &nodes));
+        let edges_handle = scope.spawn(|| write_edges(&edges_path, &resolved_edges));
+        let unresolved_edges_handle =
+            scope.spawn(|| write_unresolved_edges(&unresolved_edges_path, &unresolved_edges));
+        let files_handle = scope.spawn(|| write_files(&files_path, &files));
+        let file_manifests_handle =
+            scope.spawn(|| write_file_manifests(&file_manifests_path, &file_manifests));
+        let tombstones_handle = scope.spawn(|| write_tombstones(&tombstones_path, &tombstones));
+
+        join_scoped(nodes_handle, "write delta nodes.parquet")?;
+        join_scoped(edges_handle, "write delta edges.parquet")?;
+        join_scoped(
+            unresolved_edges_handle,
+            "write delta edges_unresolved.parquet",
+        )?;
+        join_scoped(files_handle, "write delta files.parquet")?;
+        join_scoped(file_manifests_handle, "write delta file_manifests.parquet")?;
+        join_scoped(tombstones_handle, "write delta tombstones.parquet")?;
+        Ok::<_, anyhow::Error>(())
+    })?;
+
+    let manifest = GraphArtifactManifest {
+        graph_index_version: artifact.header.graph_index_version.clone(),
+        schema_version: SCHEMA_VERSION.to_owned(),
+        manifest_version: artifact.manifest_version.clone(),
+        graph_content_hash: artifact.graph_content_hash.clone(),
+        indexed_commit_oid: None,
+        extractor_version: EXTRACTOR_VERSION.to_owned(),
+        complete: true,
+        row_counts: GraphArtifactRowCounts {
+            nodes: nodes.len(),
+            edges: resolved_edges.len(),
+            edges_by_dst: None,
+            edges_unresolved: unresolved_edges.len(),
+            files: files.len(),
+            file_manifests: file_manifests.len(),
+            tombstones: tombstones.len(),
+            commits: 0,
+            symbol_snapshots: 0,
+            temporal_edges: 0,
+            diagnostics: 0,
+        },
+        sidecar_complete: false,
+        sidecar_row_counts: GraphArtifactSidecarRowCounts::default(),
+        parquet_writer: GraphArtifactParquetWriter {
+            compression: "zstd-3".to_owned(),
+            row_group_size: PARQUET_ROW_GROUP_SIZE,
+        },
+        edges_by_dst_present: false,
+        temporal_shards: Vec::new(),
+    };
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).context("failed to encode Parquet manifest")?;
+    write_manifest(out_dir, &manifest_json)?;
+    fsync_dir(out_dir)?;
+
+    Ok(DeltaSummary {
+        changed_files: delta.changed_files,
+        new_symbols: delta.new_symbols,
+        tombstoned_symbols: delta.tombstoned_symbols,
+    })
 }
 
 pub fn write_artifact_parquet(
@@ -3399,14 +3513,72 @@ mod helpers_test {
 
 #[cfg(test)]
 mod parquet_temporal_test {
-    use std::fs::File;
+    use std::collections::BTreeMap;
+    use std::fs::{self, File};
+    use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::store::build::artifact_from_facts;
     use crate::{
-        ChangeKind, CommitArtifact, EdgeEndpoint, RenamePrev, SnapshotKey, SymbolSnapshotArtifact,
-        TemporalEdgeArtifact,
+        build_facts, ChangeKind, CommitArtifact, EdgeEndpoint, RenamePrev, SnapshotKey,
+        SymbolSnapshotArtifact, TemporalEdgeArtifact,
     };
     use parquet::file::reader::{FileReader as _, SerializedFileReader};
+
+    #[test]
+    fn write_worktree_delta_writes_only_changed_rows_without_touching_base_artifact(
+    ) -> anyhow::Result<()> {
+        let repo = tempfile::tempdir()?;
+        let root = repo.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(
+            root.join("src/a.rs"),
+            "pub fn alpha() {}\npub fn alpha_helper() {}\n",
+        )?;
+        fs::write(root.join("src/b.rs"), "pub fn beta() {}\n")?;
+
+        let prev = artifact_from_facts(&build_facts(root, None)?.0, root)?;
+
+        let artifacts = tempfile::tempdir()?;
+        let base_dir = artifacts.path().join("base");
+        write_artifact_parquet(&prev, &base_dir, WriteOptions::default(), Vec::new())?;
+        let base_before = snapshot_directory_bytes(&base_dir)?;
+
+        fs::write(root.join("src/a.rs"), "pub fn alpha_changed() {}\n")?;
+
+        let delta_dir = artifacts.path().join("delta");
+        let summary = write_worktree_delta(&prev, root, &delta_dir)?;
+        let manifest = read_artifact_header_parquet(&delta_dir)?;
+        let delta = read_artifact_parquet(&delta_dir)?;
+
+        assert_eq!(summary.changed_files, 1);
+        assert_eq!(manifest.row_counts.file_manifests, 1);
+        assert_eq!(manifest.row_counts.files, 1);
+        assert_eq!(manifest.row_counts.nodes, delta.symbols.len());
+        assert_eq!(delta.file_manifests.len(), 1);
+        assert_eq!(delta.file_manifests[0].path, "src/a.rs");
+        assert!(delta
+            .symbols
+            .iter()
+            .all(|symbol| symbol.file_path == "src/a.rs"));
+        assert!(delta
+            .symbols
+            .iter()
+            .any(|symbol| symbol.entity_name == "alpha_changed"));
+        assert!(!delta
+            .symbols
+            .iter()
+            .any(|symbol| symbol.entity_name == "beta"));
+        assert_eq!(summary.new_symbols, delta.symbols.len());
+        assert_eq!(summary.tombstoned_symbols, delta.tombstones.len());
+        assert!(delta
+            .tombstones
+            .iter()
+            .any(|tombstone| tombstone.path == "src/a.rs"));
+
+        assert_eq!(snapshot_directory_bytes(&base_dir)?, base_before);
+        Ok(())
+    }
 
     #[test]
     fn commits_round_trip() -> anyhow::Result<()> {
@@ -4372,6 +4544,29 @@ mod parquet_temporal_test {
             stable_symbol_id: stable_symbol_id.to_owned(),
             commit: commit.to_owned(),
         }
+    }
+
+    fn snapshot_directory_bytes(dir: &Path) -> anyhow::Result<BTreeMap<PathBuf, Vec<u8>>> {
+        fn visit(
+            root: &Path,
+            dir: &Path,
+            snapshot: &mut BTreeMap<PathBuf, Vec<u8>>,
+        ) -> anyhow::Result<()> {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(root, &path, snapshot)?;
+                } else {
+                    snapshot.insert(path.strip_prefix(root)?.to_path_buf(), fs::read(&path)?);
+                }
+            }
+            Ok(())
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(dir, dir, &mut snapshot)?;
+        Ok(snapshot)
     }
 
     fn empty_artifact(graph_content_hash: &str) -> GraphIndexArtifact {
