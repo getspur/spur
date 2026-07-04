@@ -31,6 +31,8 @@ fn make_plan_state(plan_id: &str) -> PlanState {
             spec: PlanTask {
                 task_id: "t-0".into(),
                 agent: "codex".into(),
+                model: None,
+                effort: None,
                 task: "do the thing".into(),
                 depends_on: vec![],
                 issue_id: None,

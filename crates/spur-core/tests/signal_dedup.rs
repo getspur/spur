@@ -87,6 +87,8 @@ async fn build_single_task_plan(pm: &PmService, plan_id: &str) -> String {
     let tasks = vec![PlanTask {
         task_id: "t1".into(),
         agent: "codex".into(),
+        model: None,
+        effort: None,
         task: "Signal watcher task".into(),
         depends_on: vec![],
         issue_id: None,

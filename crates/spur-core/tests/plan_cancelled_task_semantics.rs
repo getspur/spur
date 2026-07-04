@@ -20,6 +20,8 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 spec: PlanTask {
                     task_id: "t0".into(),
                     agent: "a".into(),
+                    model: None,
+                    effort: None,
                     task: "T0".into(),
                     depends_on: vec![],
                     issue_id: None,
@@ -38,6 +40,8 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 spec: PlanTask {
                     task_id: "t1".into(),
                     agent: "a".into(),
+                    model: None,
+                    effort: None,
                     task: "T1".into(),
                     depends_on: vec![],
                     issue_id: None,
@@ -56,6 +60,8 @@ async fn approve_does_not_enqueue_new_dispatches() {
                 spec: PlanTask {
                     task_id: "t2".into(),
                     agent: "a".into(),
+                    model: None,
+                    effort: None,
                     task: "T2".into(),
                     depends_on: vec!["t1".into(), "t0".into()],
                     issue_id: None,
