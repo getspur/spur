@@ -93,6 +93,26 @@ async fn base_repo_main_survives() {
 }
 
 #[tokio::test]
+async fn config_overrides_survive() {
+    let request = call_delegate_to_worker(json!({
+        "agent": "claude-code-acp",
+        "task": "test task",
+        "config_overrides": {
+            "mode": "plan",
+            "context_window": "200000"
+        }
+    }))
+    .await;
+
+    let overrides = request.config_overrides.expect("config overrides");
+    assert_eq!(overrides.get("mode").map(String::as_str), Some("plan"));
+    assert_eq!(
+        overrides.get("context_window").map(String::as_str),
+        Some("200000")
+    );
+}
+
+#[tokio::test]
 async fn base_branch_survives() {
     let request = call_delegate_to_worker(json!({
         "agent": "claude-code-acp",

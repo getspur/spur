@@ -441,6 +441,12 @@ fn submit_plan_def() -> ToolDefinition {
                                 "description": "Override the worker's reasoning effort (thought-level value id, e.g. \"low\"/\"medium\"/\"high\"). Fail-soft if the agent rejects it.",
                                 "default": null
                             },
+                            "config_overrides": {
+                                "type": "object",
+                                "additionalProperties": { "type": "string" },
+                                "description": "Generic worker session config overrides by advertised config-option id. Fail-soft per entry if the agent rejects it.",
+                                "default": null
+                            },
                             "task": {
                                 "type": "string",
                                 "description": "Task description (CONTEXT / GOAL / CONSTRAINTS / EXPECTED_OUTPUT)"

@@ -122,6 +122,8 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     pub(crate) model: Option<&'a str>,
     #[allow(dead_code)]
     pub(crate) effort: Option<&'a str>,
+    #[allow(dead_code)]
+    pub(crate) config_overrides: Option<&'a std::collections::HashMap<String, String>>,
     pub(crate) task: &'a str,
     pub(crate) request_id: &'a str,
     pub(crate) attempt: u32,
@@ -233,13 +235,14 @@ async fn preapply_prior_branch_for_reuse(
     }
 }
 
-async fn apply_model_effort_override(
+async fn apply_config_overrides(
     connection: &mut dyn AgentConnection,
     initialize: &spur_acp::InitializeResponse,
     session_response: &spur_acp::NewSessionResponse,
     agent_kind: spur_acp::types::AgentKind,
     model: Option<&str>,
     effort: Option<&str>,
+    config_overrides: Option<&std::collections::HashMap<String, String>>,
 ) {
     let caps = spur_acp::SpurAgentCaps::new(initialize, session_response, agent_kind);
     let session_id = session_response.session_id.clone();
@@ -270,34 +273,55 @@ async fn apply_model_effort_override(
     }
 
     if let Some(effort) = effort {
-        let Some(option) =
+        if let Some(option) =
             spur_acp::spur_agent_caps::thought_level_option_from(&caps.config_options)
-        else {
+        {
+            let config_id = option.id.clone();
+            let config_id_for_log = config_id.0.to_string();
+            let request = spur_acp::SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                config_id,
+                spur_acp::SessionConfigValueId::new(effort),
+            );
+
+            if let Err(error) = connection.set_session_config_option(request).await {
+                tracing::warn!(
+                    target: "spur::worker::effort_override",
+                    session_id = %session_id_for_log,
+                    config_id = %config_id_for_log,
+                    value = %effort,
+                    error = %error,
+                    "worker effort override failed"
+                );
+            }
+        } else {
             tracing::debug!(
                 target: "spur::worker::effort_override",
                 session_id = %session_id_for_log,
                 value = %effort,
                 "worker effort override skipped"
             );
-            return;
-        };
-        let config_id = option.id.clone();
-        let config_id_for_log = config_id.0.to_string();
-        let request = spur_acp::SetSessionConfigOptionRequest::new(
-            session_id,
-            config_id,
-            spur_acp::SessionConfigValueId::new(effort),
-        );
+        }
+    }
 
-        if let Err(error) = connection.set_session_config_option(request).await {
-            tracing::warn!(
-                target: "spur::worker::effort_override",
-                session_id = %session_id_for_log,
-                config_id = %config_id_for_log,
-                value = %effort,
-                error = %error,
-                "worker effort override failed"
+    if let Some(config_overrides) = config_overrides {
+        for (config_id, value) in config_overrides {
+            let request = spur_acp::SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                spur_acp::SessionConfigId::new(config_id.as_str()),
+                spur_acp::SessionConfigValueId::new(value.as_str()),
             );
+
+            if let Err(error) = connection.set_session_config_option(request).await {
+                tracing::warn!(
+                    target: "spur::worker::config_override",
+                    session_id = %session_id_for_log,
+                    config_id = %config_id,
+                    value = %value,
+                    error = %error,
+                    "worker config override failed"
+                );
+            }
         }
     }
 }
@@ -524,6 +548,14 @@ pub(crate) async fn run_one_worker_attempt(
         });
     }
 
+    if let Some(request_rx) = connection.take_agent_client_request_rx() {
+        crate::notification_pump::spawn_agent_client_request_pump(
+            request_rx,
+            worker_session.clone(),
+            funnel.clone(),
+        );
+    }
+
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST);
     let init_response = match connection.initialize(init_request).await {
         Ok(response) => response,
@@ -568,13 +600,14 @@ pub(crate) async fn run_one_worker_attempt(
         }
     };
 
-    apply_model_effort_override(
+    apply_config_overrides(
         &mut *connection,
         &init_response,
         &session_response,
         ctx.agent_config.kind,
         ctx.model,
         ctx.effort,
+        ctx.config_overrides,
     )
     .await;
 
@@ -1100,6 +1133,7 @@ mod model_effort_override_tests {
     use super::*;
     use async_trait::async_trait;
     use futures::Stream;
+    use std::collections::HashMap;
     use std::path::Path;
     use std::pin::Pin;
     use std::process::Command;
@@ -1287,6 +1321,7 @@ mod model_effort_override_tests {
         session_response: &spur_acp::NewSessionResponse,
         model: Option<&str>,
         effort: Option<&str>,
+        config_overrides: Option<&HashMap<String, String>>,
     ) -> CapturedEvents {
         let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
         let mut connection = OverrideRecordingConnection {
@@ -1297,13 +1332,14 @@ mod model_effort_override_tests {
         let _serialize = crate::tracing_test_lock::guard();
         let _guard = tracing::subscriber::set_default(events.clone());
 
-        apply_model_effort_override(
+        apply_config_overrides(
             &mut connection,
             &init,
             session_response,
             spur_acp::types::AgentKind::CodexAcp,
             model,
             effort,
+            config_overrides,
         )
         .await;
 
@@ -1343,7 +1379,7 @@ mod model_effort_override_tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let response = session_response(vec![]);
 
-        apply_with(Arc::clone(&calls), None, &response, None, None).await;
+        apply_with(Arc::clone(&calls), None, &response, None, None, None).await;
 
         assert!(calls
             .lock()
@@ -1366,6 +1402,7 @@ mod model_effort_override_tests {
             None,
             &response,
             Some("gpt-5-codex"),
+            None,
             None,
         )
         .await;
@@ -1390,7 +1427,15 @@ mod model_effort_override_tests {
             spur_acp::SessionConfigOptionCategory::ThoughtLevel,
         )]);
 
-        apply_with(Arc::clone(&calls), None, &response, None, Some("high")).await;
+        apply_with(
+            Arc::clone(&calls),
+            None,
+            &response,
+            None,
+            Some("high"),
+            None,
+        )
+        .await;
 
         assert_eq!(
             *calls.lock().expect("set config recorder poisoned"),
@@ -1426,6 +1471,7 @@ mod model_effort_override_tests {
             &response,
             Some("gpt-5-codex"),
             Some("high"),
+            None,
         )
         .await;
 
@@ -1470,6 +1516,7 @@ mod model_effort_override_tests {
             &response,
             Some("gpt-5-codex"),
             Some("high"),
+            None,
         )
         .await;
 
@@ -1482,6 +1529,130 @@ mod model_effort_override_tests {
             ),
             "expected model override warning, got {:?}",
             events.events.lock().expect("event capture poisoned")
+        );
+    }
+
+    #[tokio::test]
+    async fn config_overrides_apply_raw_config_ids() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![]);
+        let config_overrides = HashMap::from([
+            ("mode".to_string(), "plan".to_string()),
+            ("context_window".to_string(), "200000".to_string()),
+        ]);
+
+        apply_with(
+            Arc::clone(&calls),
+            None,
+            &response,
+            None,
+            None,
+            Some(&config_overrides),
+        )
+        .await;
+
+        let mut actual = calls.lock().expect("set config recorder poisoned").clone();
+        actual.sort_by(|a, b| a.config_id.cmp(&b.config_id));
+        assert_eq!(
+            actual,
+            vec![
+                SetConfigCall {
+                    session_id: "acp-1".to_string(),
+                    config_id: "context_window".to_string(),
+                    value: "200000".to_string(),
+                },
+                SetConfigCall {
+                    session_id: "acp-1".to_string(),
+                    config_id: "mode".to_string(),
+                    value: "plan".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_config_override_warns_and_other_override_still_runs() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![]);
+        let config_overrides = HashMap::from([
+            ("mode".to_string(), "plan".to_string()),
+            ("context_window".to_string(), "200000".to_string()),
+        ]);
+
+        let events = apply_with(
+            Arc::clone(&calls),
+            Some("mode"),
+            &response,
+            None,
+            None,
+            Some(&config_overrides),
+        )
+        .await;
+
+        let actual = calls.lock().expect("set config recorder poisoned");
+        assert_eq!(actual.len(), 2);
+        assert!(actual
+            .iter()
+            .any(|call| call.config_id == "context_window" && call.value == "200000"));
+        assert!(
+            events.contains(
+                tracing::Level::WARN,
+                "spur::worker::config_override",
+                "worker config override failed"
+            ),
+            "expected config override warning, got {:?}",
+            events.events.lock().expect("event capture poisoned")
+        );
+    }
+
+    #[tokio::test]
+    async fn model_effort_and_config_overrides_apply_in_order() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let response = session_response(vec![
+            fixture_select_option(
+                "model",
+                "default",
+                &[("gpt-5-codex", "GPT-5 Codex")],
+                spur_acp::SessionConfigOptionCategory::Model,
+            ),
+            fixture_select_option(
+                "reasoning_effort",
+                "medium",
+                &[("high", "High")],
+                spur_acp::SessionConfigOptionCategory::ThoughtLevel,
+            ),
+        ]);
+        let config_overrides = HashMap::from([("mode".to_string(), "plan".to_string())]);
+
+        apply_with(
+            Arc::clone(&calls),
+            None,
+            &response,
+            Some("gpt-5-codex"),
+            Some("high"),
+            Some(&config_overrides),
+        )
+        .await;
+
+        assert_eq!(
+            *calls.lock().expect("set config recorder poisoned"),
+            vec![
+                SetConfigCall {
+                    session_id: "acp-1".to_string(),
+                    config_id: "model".to_string(),
+                    value: "gpt-5-codex".to_string(),
+                },
+                SetConfigCall {
+                    session_id: "acp-1".to_string(),
+                    config_id: "reasoning_effort".to_string(),
+                    value: "high".to_string(),
+                },
+                SetConfigCall {
+                    session_id: "acp-1".to_string(),
+                    config_id: "mode".to_string(),
+                    value: "plan".to_string(),
+                },
+            ]
         );
     }
 
@@ -1501,6 +1672,7 @@ mod model_effort_override_tests {
             &response,
             Some("gpt-5-codex"),
             Some("high"),
+            None,
         )
         .await;
 
@@ -1646,6 +1818,7 @@ mod model_effort_override_tests {
                 agent: "codex",
                 model: Some("gpt-5-codex"),
                 effort: None,
+                config_overrides: None,
                 task: "do the task",
                 request_id: "delegation-1",
                 attempt: 1,

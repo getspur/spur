@@ -124,6 +124,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         agent: "codex".into(),
         model: None,
         effort: None,
+        config_overrides: None,
         task: "Integrate worker branch".into(),
         depends_on: Vec::new(),
         issue_id: None,

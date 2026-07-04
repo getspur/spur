@@ -84,9 +84,11 @@ fn load_layered_from_paths(repo_root: &Path, user_path: Option<&Path>) -> Result
         merge_tables(&mut merged, read_table(&project_path)?);
     }
 
-    Value::Table(merged)
+    let mut config = Value::Table(merged)
         .try_into()
-        .map_err(|err| anyhow!("failed to build merged SpurConfig: {err}"))
+        .map_err(|err| anyhow!("failed to build merged SpurConfig: {err}"))?;
+    super::sanitize_agent_additional_directories(&mut config);
+    Ok(config)
 }
 
 /// Load the effective config for `repo_root` with precedence:
@@ -261,9 +263,71 @@ pub fn default_user_baseline(_repo_root: &Path) -> Result<Value> {
 mod tests {
     use crate::config::SpurConfig;
     use std::fs;
+    use std::sync::{Arc, Mutex, PoisonError};
     use toml::Value;
+    use tracing::field::{Field, Visit};
 
     use super::*;
+
+    static TRACING_SUBSCRIBER_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Default)]
+    struct CapturedWarnings {
+        fields: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CapturedWarnings {
+        fn contains(&self, needle: &str) -> bool {
+            self.fields
+                .lock()
+                .expect("warning capture poisoned")
+                .iter()
+                .any(|fields| fields.contains(needle))
+        }
+    }
+
+    impl tracing::Subscriber for CapturedWarnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::WARN
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() > tracing::Level::WARN {
+                return;
+            }
+            let mut visitor = StringVisitor::default();
+            event.record(&mut visitor);
+            self.fields
+                .lock()
+                .expect("warning capture poisoned")
+                .push(visitor.0);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct StringVisitor(String);
+
+    impl Visit for StringVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?};", field.name()));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.push_str(&format!("{}={value};", field.name()));
+        }
+    }
 
     fn t(s: &str) -> toml::value::Table {
         match toml::from_str::<Value>(s).unwrap() {
@@ -359,6 +423,47 @@ mod tests {
         assert_eq!(
             cfg.skills.bundled_dir.as_deref(),
             Some(std::path::Path::new("/repo/assets/skills"))
+        );
+    }
+
+    #[test]
+    fn load_layered_filters_non_absolute_agent_additional_directories_with_warning() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join(".spur")).unwrap();
+        fs::write(
+            repo.path().join(".spur/config.toml"),
+            r#"
+[[agents.entries]]
+name = "codex"
+command = "codex"
+transport = "acp"
+additional_directories = ["/tmp/spur-extra", "relative/root", "../parent"]
+"#,
+        )
+        .unwrap();
+
+        let warnings = CapturedWarnings::default();
+        let _serialize = TRACING_SUBSCRIBER_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = tracing::subscriber::set_default(warnings.clone());
+
+        let cfg = load_layered_from_paths(repo.path(), None).unwrap();
+
+        let agent = cfg
+            .agents
+            .entries
+            .iter()
+            .find(|agent| agent.name == "codex")
+            .expect("codex config should load");
+        assert_eq!(
+            agent.additional_directories,
+            vec![std::path::PathBuf::from("/tmp/spur-extra")]
+        );
+        assert!(
+            warnings.contains("relative/root") && warnings.contains("../parent"),
+            "expected warnings for skipped relative paths, got {:?}",
+            warnings.fields.lock().expect("warning capture poisoned")
         );
     }
 
