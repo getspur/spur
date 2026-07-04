@@ -1,9 +1,9 @@
 use std::{path::Path, sync::Arc};
 
 use crate::embedding::EmbeddingRuntime;
+use crate::search::graph_candidates::merge_graph_candidates;
 #[cfg(test)]
 use crate::search::hybrid::confidence_score_thresholds;
-use crate::search::{graph_candidates::merge_graph_candidates, hybrid::evidence_confidence};
 use crate::{
     db::{
         connection::open_analyst_connection_read_only,
@@ -13,24 +13,32 @@ use crate::{
     query_context_candidates_with_conn, query_context_paths_with_conn,
     query_graph_candidates_with_conn, query_symbol_risk_community_with_conn, KnowledgeCandidate,
     KnowledgePathOptions, KnowledgePathResult, KnowledgeQueryOptions, KnowledgeQueryResult,
-    SymbolEvidenceCaveat, SymbolEvidenceStatus, SymbolRiskScorecardRow,
+    SymbolEvidenceStatus, SymbolRiskScorecardRow,
 };
 #[cfg(test)]
 use crate::{query_context_paths, query_symbol_risk_community};
 use futures::future::join_all;
 use serde_json::{json, Value};
 
-use crate::pack::{KnowledgeContextPackRequest, KnowledgeContextPackV2Request, KnowledgeIntent};
+use crate::pack::{
+    analyst_matches_exact_graph, base_pack, caveat_value, insert_v2_sections, is_test_file,
+    normalized_code_selector, pack_query_result_v2_with_graph_sections_and_staleness,
+    pack_query_result_with_exact_context, push_graph_path_caveat, raw_stable_symbol_id,
+    symbol_caveat_value, ExactGraphContext, GraphReasoningSections, KnowledgeContextPackRequest,
+    KnowledgeContextPackV2Request, PackErrorExt, PackStaleness, SymbolImpactSummary,
+    MAX_IMPACT_NEIGHBORS, MAX_IMPACT_SYMBOLS, POPULAR_SINK_CALLERS_THRESHOLD,
+};
+#[cfg(test)]
+use crate::pack::{
+    code_next_tools, pack_query_result, pack_query_result_v2_with_graph_sections,
+    recommended_next_tools, KnowledgeIntent,
+};
 
 use super::overlay::{
     open_worktree_overlay, overlay_rebuild_key_for_dirty_worktree,
     shared_overlay_session_coordinator, write_delta_for_session, OverlayMergeSession,
 };
 use super::McpHandlerError;
-
-const POPULAR_SINK_CALLERS_THRESHOLD: u64 = 30;
-const MAX_IMPACT_SYMBOLS: usize = 2;
-const MAX_IMPACT_NEIGHBORS: usize = 2;
 
 pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
@@ -115,32 +123,6 @@ fn open_pack_connection(
     Ok(conn)
 }
 
-#[derive(Clone, Debug)]
-struct PackStaleness {
-    delta_applied: bool,
-    algo_as_of: Option<String>,
-}
-
-impl PackStaleness {
-    fn base_only(algo_as_of: Option<String>) -> Self {
-        Self {
-            delta_applied: false,
-            algo_as_of,
-        }
-    }
-
-    fn from_session(session: &OverlayMergeSession) -> Self {
-        Self {
-            delta_applied: session.delta_applied(),
-            algo_as_of: session.algo_as_of().map(str::to_owned),
-        }
-    }
-
-    fn default_for_result(result: &KnowledgeQueryResult) -> Self {
-        Self::base_only(result.graph_content_hash.clone())
-    }
-}
-
 struct PackConnection {
     base_conn: duckdb::Connection,
     overlay_conn: Option<duckdb::Connection>,
@@ -177,7 +159,10 @@ async fn open_pack_connection_with_overlay(
                 load_analyst_lance_extension(&conn);
                 staleness = overlay_session
                     .as_ref()
-                    .map(|session| PackStaleness::from_session(session))
+                    .map(|session| PackStaleness {
+                        delta_applied: session.delta_applied(),
+                        algo_as_of: session.algo_as_of().map(str::to_owned),
+                    })
                     .unwrap_or_else(|| PackStaleness::base_only(staleness.algo_as_of.clone()));
                 Some(conn)
             }
@@ -315,30 +300,6 @@ fn unavailable_pack(request: &KnowledgeContextPackRequest, db_path: &Path) -> Va
     }))
 }
 
-#[cfg(test)]
-async fn pack_query_result(
-    request: &KnowledgeContextPackRequest,
-    result: KnowledgeQueryResult,
-) -> Value {
-    pack_query_result_with_exact_context(request, result, ExactGraphContext::default()).await
-}
-
-#[derive(Debug, Clone, Default)]
-struct ExactGraphContext {
-    graph_content_hash: Option<String>,
-    response_file_oids_match: Option<bool>,
-    impacts: Vec<Option<SymbolImpactSummary>>,
-}
-
-#[derive(Debug, Clone)]
-struct SymbolImpactSummary {
-    selector: String,
-    callers_count: u64,
-    callees_count: u64,
-    caller_neighbors: Vec<Value>,
-    callee_neighbors: Vec<Value>,
-}
-
 async fn exact_graph_context_for_result(
     request: &KnowledgeContextPackRequest,
     result: &KnowledgeQueryResult,
@@ -440,177 +401,6 @@ fn top_n_code_selectors(
         .collect()
 }
 
-fn normalized_code_selector(stable_symbol_id: &str) -> String {
-    format!("graph://symbol/{}", raw_stable_symbol_id(stable_symbol_id))
-}
-
-fn raw_stable_symbol_id(stable_symbol_id: &str) -> &str {
-    stable_symbol_id
-        .strip_prefix("graph://symbol/")
-        .unwrap_or(stable_symbol_id)
-}
-
-async fn pack_query_result_with_exact_context(
-    request: &KnowledgeContextPackRequest,
-    result: KnowledgeQueryResult,
-    exact_context: ExactGraphContext,
-) -> Value {
-    let staleness = PackStaleness::default_for_result(&result);
-    pack_query_result_with_exact_context_and_staleness(request, result, exact_context, staleness)
-        .await
-}
-
-async fn pack_query_result_with_exact_context_and_staleness(
-    request: &KnowledgeContextPackRequest,
-    result: KnowledgeQueryResult,
-    exact_context: ExactGraphContext,
-    pack_staleness: PackStaleness,
-) -> Value {
-    let (mut primary_evidence, supporting_docs) = split_evidence(&result.candidates, request);
-    let total_candidates = result.candidates.len();
-    let total_code = result
-        .candidates
-        .iter()
-        .filter(|candidate| candidate.kind == "code" || candidate.kind == "symbol")
-        .count();
-    let total_docs = result
-        .candidates
-        .iter()
-        .filter(|candidate| candidate.kind == "doc")
-        .count();
-    if request.max_symbol_bodies > 0 {
-        let body_selectors: Vec<(String, usize)> = primary_evidence
-            .iter()
-            .enumerate()
-            .take(request.max_symbol_bodies as usize)
-            .filter_map(|(index, evidence)| {
-                evidence
-                    .get("stable_symbol_id")
-                    .and_then(Value::as_str)
-                    .map(|selector| (selector.to_owned(), index))
-            })
-            .collect();
-
-        let body_results = join_all(body_selectors.into_iter().map(
-            |(selector, index)| async move {
-                (
-                    index,
-                    spur_graph::mcp::code_read_symbol(&json!({
-                        "selector": selector,
-                    }))
-                    .await,
-                )
-            },
-        ))
-        .await;
-
-        for (index, body_result) in body_results {
-            if let Ok(body) = body_result {
-                if let Some(source) = body.get("source").and_then(Value::as_str) {
-                    if let Some(evidence) = primary_evidence.get_mut(index) {
-                        if let Some(object) = evidence.as_object_mut() {
-                            object.insert("source".into(), json!(source));
-                            if let Some(line_range) = body.get("line_range") {
-                                object.insert("line_range".into(), line_range.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let recommended_next_tools =
-        recommended_next_tools(request.intent, &primary_evidence, &supporting_docs);
-    let answerable = !primary_evidence.is_empty() || !supporting_docs.is_empty();
-    let confidence = if answerable {
-        evidence_confidence(&primary_evidence, &supporting_docs)
-    } else {
-        "low"
-    };
-    let impact = aggregate_impact_value(&exact_context.impacts);
-    let staleness = staleness_value(&result, &exact_context, &pack_staleness);
-    let mut pack = base_pack(request, result.graph_content_hash.clone(), staleness);
-    let returned_primary = primary_evidence.len();
-    let returned_supporting_docs = supporting_docs.len();
-
-    if let Some(object) = pack.as_object_mut() {
-        object.insert("answerable".into(), json!(answerable));
-        object.insert("confidence".into(), json!(confidence));
-        object.insert(
-            "primary_evidence".into(),
-            Value::Array(primary_evidence_with_impact(
-                primary_evidence,
-                &exact_context.impacts,
-            )),
-        );
-        object.insert("supporting_docs".into(), Value::Array(supporting_docs));
-        object.insert("impact".into(), impact);
-        object.insert(
-            "recommended_next_tools".into(),
-            Value::Array(recommended_next_tools),
-        );
-        object.insert(
-            "candidates".into(),
-            json!({
-                "total": total_candidates,
-                "returned_primary": returned_primary,
-                "returned_supporting_docs": returned_supporting_docs,
-                "total_code": total_code,
-                "total_docs": total_docs,
-            }),
-        );
-    }
-    pack
-}
-
-#[cfg(test)]
-async fn pack_query_result_v2_with_graph_reasoning(
-    request: &KnowledgeContextPackV2Request,
-    result: KnowledgeQueryResult,
-    exact_context: ExactGraphContext,
-    db_path: &Path,
-) -> Value {
-    let graph_sections =
-        graph_reasoning_sections_for_pack(request, &result, &exact_context, db_path);
-    pack_query_result_v2_with_graph_sections(request, result, exact_context, graph_sections).await
-}
-
-#[cfg(test)]
-async fn pack_query_result_v2_with_graph_sections(
-    request: &KnowledgeContextPackV2Request,
-    result: KnowledgeQueryResult,
-    exact_context: ExactGraphContext,
-    graph_sections: GraphReasoningSections,
-) -> Value {
-    let staleness = PackStaleness::default_for_result(&result);
-    pack_query_result_v2_with_graph_sections_and_staleness(
-        request,
-        result,
-        exact_context,
-        graph_sections,
-        staleness,
-    )
-    .await
-}
-
-async fn pack_query_result_v2_with_graph_sections_and_staleness(
-    request: &KnowledgeContextPackV2Request,
-    result: KnowledgeQueryResult,
-    exact_context: ExactGraphContext,
-    graph_sections: GraphReasoningSections,
-    staleness: PackStaleness,
-) -> Value {
-    let mut pack = pack_query_result_with_exact_context_and_staleness(
-        &request.base,
-        result,
-        exact_context,
-        staleness,
-    )
-    .await;
-    insert_v2_sections(&mut pack, graph_sections);
-    pack
-}
-
 #[cfg(test)]
 fn graph_reasoning_sections_for_pack(
     request: &KnowledgeContextPackV2Request,
@@ -658,24 +448,6 @@ fn unavailable_pack_v2(request: &KnowledgeContextPackV2Request, db_path: &Path) 
     pack
 }
 
-#[derive(Default)]
-struct GraphReasoningSections {
-    graph_paths: Vec<Value>,
-    risk_scorecard: Vec<Value>,
-    community_context: Vec<Value>,
-    temporal_context: Vec<Value>,
-    caveats: Vec<Value>,
-}
-
-impl GraphReasoningSections {
-    fn with_caveat(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            caveats: vec![caveat_value(code, message, None)],
-            ..Self::default()
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GraphPathBudgetPlan {
     target_cap: usize,
@@ -704,6 +476,18 @@ fn stale_graph_reasoning_sections(
             "analyst DB graph hash {analyst_hash} differs from exact graph hash {exact_hash}; graph reasoning skipped until analyst DB is rebuilt"
         ),
     )
+}
+
+#[cfg(test)]
+async fn pack_query_result_v2_with_graph_reasoning(
+    request: &KnowledgeContextPackV2Request,
+    result: KnowledgeQueryResult,
+    exact_context: ExactGraphContext,
+    db_path: &Path,
+) -> Value {
+    let graph_sections =
+        graph_reasoning_sections_for_pack(request, &result, &exact_context, db_path);
+    pack_query_result_v2_with_graph_sections(request, result, exact_context, graph_sections).await
 }
 
 #[cfg(test)]
@@ -945,7 +729,7 @@ fn collect_graph_paths_with_query<F>(
         ) {
             Ok(path_result) => {
                 if let Some(caveat) = path_result.caveat.as_deref() {
-                    push_graph_path_caveat(sections, caveat, source);
+                    push_graph_path_caveat(&mut sections.caveats, caveat, source);
                 }
                 sections.graph_paths.push(json!({
                     "source_stable_id": source,
@@ -961,7 +745,7 @@ fn collect_graph_paths_with_query<F>(
             }
             Err(error) => {
                 let caveat = format!("context path search unavailable: {error:#}");
-                push_graph_path_caveat(sections, caveat.clone(), source);
+                push_graph_path_caveat(&mut sections.caveats, caveat.clone(), source);
                 sections.graph_paths.push(json!({
                     "source_stable_id": source,
                     "target_stable_id": target,
@@ -975,17 +759,6 @@ fn collect_graph_paths_with_query<F>(
                 }));
             }
         }
-    }
-}
-
-fn push_graph_path_caveat(
-    sections: &mut GraphReasoningSections,
-    message: impl Into<String>,
-    source: &str,
-) {
-    let caveat = caveat_value("graph_path_unavailable", message, Some(source.to_owned()));
-    if !sections.caveats.contains(&caveat) {
-        sections.caveats.push(caveat);
     }
 }
 
@@ -1059,391 +832,8 @@ fn temporal_context_from_risk_rows(rows: &[SymbolRiskScorecardRow]) -> Vec<Value
         .collect()
 }
 
-fn insert_v2_sections(pack: &mut Value, sections: GraphReasoningSections) {
-    if let Some(object) = pack.as_object_mut() {
-        object.insert("graph_paths".into(), Value::Array(sections.graph_paths));
-        object.insert(
-            "risk_scorecard".into(),
-            Value::Array(sections.risk_scorecard),
-        );
-        object.insert(
-            "community_context".into(),
-            Value::Array(sections.community_context),
-        );
-        object.insert(
-            "temporal_context".into(),
-            Value::Array(sections.temporal_context),
-        );
-        object.insert("caveats".into(), Value::Array(sections.caveats));
-        object.entry("candidates").or_insert_with(|| {
-            json!({
-                "total": 0,
-                "returned_primary": 0,
-                "returned_supporting_docs": 0,
-                "total_code": 0,
-                "total_docs": 0,
-            })
-        });
-    }
-}
-
 fn to_json_value<T: serde::Serialize>(value: &T) -> Option<Value> {
     serde_json::to_value(value).ok()
-}
-
-fn symbol_caveat_value(caveat: &SymbolEvidenceCaveat) -> Value {
-    caveat_value(
-        caveat.code.clone(),
-        caveat.message.clone(),
-        caveat.stable_symbol_id.clone(),
-    )
-}
-
-fn caveat_value(
-    code: impl Into<String>,
-    message: impl Into<String>,
-    stable_symbol_id: Option<String>,
-) -> Value {
-    json!({
-        "code": code.into(),
-        "message": message.into(),
-        "stable_symbol_id": stable_symbol_id,
-    })
-}
-
-fn staleness_value(
-    result: &KnowledgeQueryResult,
-    exact_context: &ExactGraphContext,
-    pack_staleness: &PackStaleness,
-) -> Value {
-    let analyst_hash = result.graph_content_hash.clone();
-    let exact_hash = exact_context.graph_content_hash.clone();
-    let analyst_matches_exact_graph = analyst_matches_exact_graph(result, exact_context)
-        .map(Value::Bool)
-        .unwrap_or(Value::Null);
-
-    json!({
-        "available": analyst_hash.is_some(),
-        "analyst_db": result.db_path.clone(),
-        "analyst_graph_content_hash": analyst_hash.clone(),
-        "graph_hash_present": result.graph_content_hash.is_some(),
-        "exact_graph_hash": exact_hash.clone(),
-        "exact_graph_verified": exact_context.graph_content_hash.is_some(),
-        "analyst_matches_exact_graph": analyst_matches_exact_graph,
-        "response_file_oids_match": exact_context.response_file_oids_match,
-        "delta_applied": pack_staleness.delta_applied,
-        "algo_as_of": pack_staleness.algo_as_of.clone(),
-        "exact_graph_note": "Exact graph tools remain the source-of-truth follow-up for current working tree source and impact."
-    })
-}
-
-fn analyst_matches_exact_graph(
-    result: &KnowledgeQueryResult,
-    exact_context: &ExactGraphContext,
-) -> Option<bool> {
-    Some(result.graph_content_hash.as_deref()? == exact_context.graph_content_hash.as_deref()?)
-}
-
-fn primary_evidence_with_impact(
-    mut primary_evidence: Vec<Value>,
-    impacts: &[Option<SymbolImpactSummary>],
-) -> Vec<Value> {
-    for impact in impacts.iter().flatten() {
-        if let Some(evidence) = primary_evidence.iter_mut().find(|evidence| {
-            evidence.get("stable_symbol_id").and_then(Value::as_str)
-                == Some(impact.selector.as_str())
-        }) {
-            if let Some(object) = evidence.as_object_mut() {
-                object.insert("impact".into(), compact_impact_value(impact));
-            }
-        }
-    }
-    primary_evidence
-}
-
-fn compact_impact_value(impact: &SymbolImpactSummary) -> Value {
-    json!({
-        "callers_count": impact.callers_count,
-        "callees_count": impact.callees_count,
-        "popular_sink": impact.callers_count > POPULAR_SINK_CALLERS_THRESHOLD,
-    })
-}
-
-fn aggregate_impact_value(impacts: &[Option<SymbolImpactSummary>]) -> Value {
-    let impacts: Vec<&SymbolImpactSummary> = impacts.iter().filter_map(Option::as_ref).collect();
-    if impacts.is_empty() {
-        return json!({
-            "summary": "impact counts are deferred to exact graph follow-up tools",
-            "callers_count": null,
-            "callees_count": null,
-            "popular_sink": null
-        });
-    }
-
-    let callers_count = impacts
-        .iter()
-        .map(|impact| impact.callers_count)
-        .sum::<u64>();
-    let callees_count = impacts
-        .iter()
-        .map(|impact| impact.callees_count)
-        .sum::<u64>();
-    let popular_sink = impacts
-        .iter()
-        .any(|impact| impact.callers_count > POPULAR_SINK_CALLERS_THRESHOLD);
-    let caller_neighbors = aggregate_neighbors(
-        impacts
-            .iter()
-            .flat_map(|impact| impact.caller_neighbors.iter()),
-        popular_sink,
-    );
-    let callee_neighbors = aggregate_neighbors(
-        impacts
-            .iter()
-            .flat_map(|impact| impact.callee_neighbors.iter()),
-        popular_sink,
-    );
-
-    json!({
-        "summary": if popular_sink {
-            "popular sink counted but not expanded"
-        } else {
-            "bounded exact graph impact summary"
-        },
-        "callers_count": callers_count,
-        "callees_count": callees_count,
-        "popular_sink": popular_sink,
-        "caller_neighbors": caller_neighbors,
-        "callee_neighbors": callee_neighbors
-    })
-}
-
-fn aggregate_neighbors<'a>(
-    neighbors: impl Iterator<Item = &'a Value>,
-    suppress: bool,
-) -> Vec<Value> {
-    if suppress {
-        Vec::new()
-    } else {
-        neighbors.take(MAX_IMPACT_NEIGHBORS).cloned().collect()
-    }
-}
-
-fn base_pack(
-    request: &KnowledgeContextPackRequest,
-    graph_content_hash: Option<String>,
-    staleness: Value,
-) -> Value {
-    json!({
-        "query": request.query,
-        "intent": request.intent.as_str(),
-        "scope": request.scope.as_str(),
-        "limit": request.limit,
-        "include_tests": request.include_tests,
-        "max_symbol_bodies": request.max_symbol_bodies,
-        "answerable": false,
-        "confidence": "low",
-        "graph_content_hash": graph_content_hash,
-        "staleness": staleness,
-        "primary_evidence": [],
-        "supporting_docs": [],
-        "impact": {
-            "summary": "no analyst evidence available",
-            "callers_count": null,
-            "callees_count": null,
-            "popular_sink": null
-        },
-        "recommended_next_tools": []
-    })
-}
-
-trait PackErrorExt {
-    fn with_error(self, error: Value) -> Value;
-}
-
-impl PackErrorExt for Value {
-    fn with_error(mut self, error: Value) -> Value {
-        if let Some(object) = self.as_object_mut() {
-            object.insert("error".into(), error);
-        }
-        self
-    }
-}
-
-fn split_evidence(
-    candidates: &[KnowledgeCandidate],
-    request: &KnowledgeContextPackRequest,
-) -> (Vec<Value>, Vec<Value>) {
-    let mut primary = Vec::new();
-    let mut docs = Vec::new();
-    let max_primary = request.limit as usize;
-
-    for candidate in candidates {
-        if !request.include_tests && is_test_file(&candidate.file_path) {
-            continue;
-        }
-        let evidence = evidence_from_candidate(candidate, request.intent);
-        if candidate.kind == "doc" {
-            docs.push(evidence);
-        } else if primary.len() < max_primary {
-            primary.push(evidence);
-        } else {
-            docs.push(evidence);
-        }
-    }
-
-    (primary, docs)
-}
-
-fn evidence_from_candidate(candidate: &KnowledgeCandidate, intent: KnowledgeIntent) -> Value {
-    let is_code = candidate.kind == "code" || candidate.kind == "symbol";
-    let next = if is_code {
-        code_next_tools(intent)
-    } else if let Some(root) = candidate.stable_symbol_id.as_deref() {
-        vec![json!({ "tool": "doc_navigate", "root": root })]
-    } else {
-        vec![json!({ "tool": "code_semantic_search", "query": candidate.title })]
-    };
-    let stable_symbol_id = candidate.stable_symbol_id.as_ref().map(|id| {
-        if is_code {
-            normalized_code_selector(id)
-        } else {
-            id.clone()
-        }
-    });
-    json!({
-        "kind": if is_code { "symbol" } else { "doc" },
-        "title": candidate.title,
-        "file": candidate.file_path,
-        "stable_symbol_id": stable_symbol_id,
-        "symbol_kind": candidate.symbol_kind,
-        "score": candidate.score,
-        "signal": candidate.signal,
-        "neighbor_kind": candidate.neighbor_kind,
-        "edge_bind_method": candidate.edge_bind_method,
-        "grounding": candidate.grounding,
-        "why_relevant": build_why_relevant(candidate),
-        "next": next
-    })
-}
-
-fn build_why_relevant(candidate: &KnowledgeCandidate) -> String {
-    let mut parts = vec![format!(
-        "{} {:.1}",
-        grounding_score_prefix(&candidate.grounding),
-        candidate.score
-    )];
-    if let Some(signal) = &candidate.signal {
-        parts.push(signal.clone());
-    }
-    if let Some(kind) = &candidate.symbol_kind {
-        parts.push(format!("kind={kind}"));
-    }
-    parts.push(format!("grounding={}", candidate.grounding));
-    parts.join(", ")
-}
-
-fn grounding_score_prefix(grounding: &str) -> &str {
-    match grounding {
-        "bm25-code" | "bm25-doc" => "BM25",
-        "bm25-graph" => "BM25+graph",
-        "bm25-graph-expanded" => "graph",
-        "ann-embedding" => "ANN",
-        _ if grounding.starts_with("bm25-") => "BM25",
-        _ => grounding,
-    }
-}
-
-fn recommended_next_tools(
-    intent: KnowledgeIntent,
-    primary_evidence: &[Value],
-    supporting_docs: &[Value],
-) -> Vec<Value> {
-    let top_symbol = primary_evidence
-        .iter()
-        .find_map(|evidence| evidence.get("stable_symbol_id").and_then(Value::as_str));
-    let top_file = primary_evidence
-        .iter()
-        .find_map(|evidence| evidence.get("file").and_then(Value::as_str));
-    let top_doc_root = supporting_docs
-        .iter()
-        .chain(primary_evidence.iter())
-        .filter(|evidence| evidence.get("kind").and_then(Value::as_str) == Some("doc"))
-        .find_map(|evidence| evidence.get("stable_symbol_id").and_then(Value::as_str));
-
-    match (intent, top_symbol) {
-        (KnowledgeIntent::Change, Some(selector)) => vec![
-            json!({ "tool": "code_callers", "selector": selector, "reason": "Find direct change impact before editing." }),
-            json!({ "tool": "code_callees", "selector": selector, "reason": "Trace direct dependencies for the selected symbol." }),
-            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body." }),
-        ],
-        (KnowledgeIntent::Debug, Some(selector)) => vec![
-            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body before debugging." }),
-            json!({ "tool": "code_symbol_history", "selector": selector, "reason": "Inspect recent edits that may explain the failure." }),
-            json!({ "tool": "code_subgraph", "selector": selector, "radius": 2, "reason": "Map nearby dependencies and callers around the failing symbol." }),
-        ],
-        (KnowledgeIntent::Review, Some(selector)) => vec![
-            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body for review." }),
-            json!({ "tool": "code_callers", "selector": selector, "reason": "Verify behavioral impact from direct callers." }),
-        ],
-        (KnowledgeIntent::Plan, Some(_)) => {
-            let mut tools = Vec::new();
-            if let Some(root) = top_doc_root {
-                tools.push(json!({
-                    "tool": "doc_navigate",
-                    "root": root,
-                    "reason": "Start planning from the most relevant documentation evidence."
-                }));
-            }
-            if let Some(file) = top_file {
-                tools.push(json!({
-                    "tool": "code_file_symbols",
-                    "file": file,
-                    "reason": "Survey symbols in the relevant file before planning edits."
-                }));
-            }
-            tools
-        }
-        (KnowledgeIntent::Explain, Some(selector)) => vec![json!({
-            "tool": "code_read_symbol",
-            "selector": selector,
-            "reason": "Read exact current symbol body for grounded follow-up."
-        })],
-        _ => vec![json!({
-            "tool": "code_semantic_search",
-            "query": "",
-            "reason": "No symbol evidence was available; broaden retrieval with semantic search."
-        })],
-    }
-}
-
-fn code_next_tools(intent: KnowledgeIntent) -> Vec<Value> {
-    match intent {
-        KnowledgeIntent::Change => vec![
-            json!({ "tool": "code_callers" }),
-            json!({ "tool": "code_callees" }),
-            json!({ "tool": "code_read_symbol" }),
-        ],
-        KnowledgeIntent::Debug => vec![
-            json!({ "tool": "code_read_symbol" }),
-            json!({ "tool": "code_symbol_history" }),
-        ],
-        KnowledgeIntent::Review => vec![
-            json!({ "tool": "code_read_symbol" }),
-            json!({ "tool": "code_callers" }),
-        ],
-        KnowledgeIntent::Plan => vec![
-            json!({ "tool": "code_read_symbol" }),
-            json!({ "tool": "code_file_symbols" }),
-        ],
-        KnowledgeIntent::Explain => vec![json!({ "tool": "code_read_symbol" })],
-    }
-}
-
-fn is_test_file(file_path: &str) -> bool {
-    file_path.contains("/tests/")
-        || file_path.ends_with("_test.rs")
-        || file_path.ends_with("_tests.rs")
 }
 
 #[cfg(test)]
@@ -2855,6 +2245,23 @@ pub fn lexical_signal_anchor() {
             _temp_dir: temp_dir,
             db_path,
             query_vec,
+        }
+    }
+
+    #[test]
+    fn pack_response_helpers_are_split_into_pack_modules() {
+        let pack_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pack");
+        for module in [
+            "response.rs",
+            "evidence.rs",
+            "caveats.rs",
+            "next_tools.rs",
+            "staleness.rs",
+        ] {
+            assert!(
+                pack_dir.join(module).exists(),
+                "missing pack response module {module}"
+            );
         }
     }
 
