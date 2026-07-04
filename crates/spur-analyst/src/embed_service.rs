@@ -230,7 +230,7 @@ fn production_service(embedding_model: EmbeddingModelSelection) -> EmbedService 
     EmbedService::new(
         embedding_model.model_name(),
         move || {
-            crate::mcp::embed_model_cell(embedding_model)
+            crate::embedding::embed_model_cell(embedding_model)
                 .ready()
                 .is_some()
         },
@@ -255,14 +255,14 @@ fn embed_with_production_model(
 fn ready_or_load_model(
     embedding_model: EmbeddingModelSelection,
 ) -> Result<Arc<std::sync::Mutex<fastembed::TextEmbedding>>, String> {
-    let cell = crate::mcp::embed_model_cell(embedding_model);
+    let cell = crate::embedding::embed_model_cell(embedding_model);
     loop {
         if let Some(model) = cell.ready() {
             return Ok(model);
         }
 
         if let Some(permit) = cell.begin_load() {
-            let loaded = crate::mcp::load_embed_model(embedding_model);
+            let loaded = crate::embedding::load_embed_model(embedding_model);
             return match loaded {
                 Ok(model) => permit
                     .complete(Some(model))
