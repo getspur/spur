@@ -185,6 +185,7 @@ pub mod delegation_watchdog;
 pub mod scheduler;
 pub use scheduler::{BrainScheduler, ScheduledAction};
 
+pub mod agent_profiles;
 pub mod event_funnel;
 pub mod event_replay;
 pub mod event_sink;
