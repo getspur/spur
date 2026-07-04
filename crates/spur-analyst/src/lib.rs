@@ -4,6 +4,7 @@ pub mod api;
 pub(crate) mod db;
 pub mod embedding;
 pub mod mcp;
+pub(crate) mod pack;
 
 use std::path::Path;
 
