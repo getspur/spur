@@ -49,7 +49,7 @@ fn start_embed_model_load_if_needed(embedding_model: EmbeddingModelSelection) ->
     };
 
     let spawn_result = std::thread::Builder::new()
-        .name("spur-mcp-embed-warm".into())
+        .name("spur-analyst-embed-warm".into())
         .spawn(move || {
             tracing::info!(
                 model = embedding_model.model_name(),
@@ -100,6 +100,51 @@ pub(crate) fn warm_embed_model_in_process_for_model(embedding_model: EmbeddingMo
             model = embedding_model.model_name(),
             "embedding model warm-up skipped; already ready or loading"
         );
+    }
+}
+
+#[cfg(feature = "embed")]
+pub(crate) fn embed_model_ready(embedding_model: EmbeddingModelSelection) -> bool {
+    embed_model_cell(embedding_model).ready().is_some()
+}
+
+#[cfg(feature = "embed")]
+pub(crate) fn embed_texts_in_process(
+    embedding_model: EmbeddingModelSelection,
+    texts: Vec<String>,
+) -> Result<Vec<Vec<f32>>, String> {
+    let model = ready_or_load_model(embedding_model)?;
+    let refs = texts.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut model = model
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    model.embed(refs, None).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "embed")]
+fn ready_or_load_model(
+    embedding_model: EmbeddingModelSelection,
+) -> Result<Arc<Mutex<fastembed::TextEmbedding>>, String> {
+    let cell = embed_model_cell(embedding_model);
+    loop {
+        if let Some(model) = cell.ready() {
+            return Ok(model);
+        }
+
+        if let Some(permit) = cell.begin_load() {
+            let loaded = load_embed_model(embedding_model);
+            return match loaded {
+                Ok(model) => permit
+                    .complete(Some(model))
+                    .ok_or_else(|| "embedding model loaded but was not available".to_owned()),
+                Err(error) => {
+                    let _ = permit.complete(None);
+                    Err(error)
+                }
+            };
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 

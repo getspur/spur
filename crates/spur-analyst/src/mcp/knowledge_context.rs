@@ -1856,7 +1856,7 @@ mod tests {
     use tracing::{Event, Metadata, Subscriber};
 
     use super::*;
-    use crate::embed_service::{EmbedService, SPUR_EMBED_SOCKET_ENV};
+    use crate::embedding::sidecar_service::{EmbedService, SPUR_EMBED_SOCKET_ENV};
     #[cfg(feature = "embed")]
     use crate::embedding::{embed_model_cell, embed_with_ready_model, EmbedModelCell};
     use crate::embedding::{
