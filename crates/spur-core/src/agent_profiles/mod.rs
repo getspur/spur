@@ -3,6 +3,7 @@
 //! act as defaults under D8 precedence (request -> profile -> agent default).
 
 use anyhow::{bail, Context, Result};
+use std::borrow::Cow;
 use std::path::Path;
 
 pub mod render;
@@ -20,7 +21,12 @@ pub struct AgentProfile {
 
 impl AgentProfile {
     pub fn parse(expected_name: &str, raw: &str) -> Result<Self> {
-        let rest = raw
+        let normalized = if raw.contains("\r\n") {
+            Cow::Owned(raw.replace("\r\n", "\n"))
+        } else {
+            Cow::Borrowed(raw)
+        };
+        let rest = normalized
             .strip_prefix("---\n")
             .context("agent profile missing YAML frontmatter fence")?;
         let idx = rest
@@ -52,6 +58,9 @@ impl AgentProfile {
             bail!("agent profile name `{name}` does not match file name `{expected_name}`");
         }
         let description = description.context("agent profile frontmatter missing `description`")?;
+        if description.trim().is_empty() {
+            bail!("agent profile frontmatter description must be non-empty");
+        }
 
         Ok(Self {
             name,
@@ -109,6 +118,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_crlf_line_endings() {
+        let raw = "---\r\nname: windows\r\ndescription: d\r\n---\r\nbody\r\n";
+        let p = AgentProfile::parse("windows", raw).unwrap();
+        assert_eq!(p.name, "windows");
+        assert_eq!(p.description, "d");
+        assert_eq!(p.body, "body\n");
+        assert_eq!(p.raw, raw);
+    }
+
+    #[test]
     fn frontmatter_name_mismatch_is_error() {
         let raw = "---\nname: other\ndescription: d\n---\nbody\n";
         assert!(AgentProfile::parse("minimal", raw).is_err());
@@ -118,6 +137,18 @@ mod tests {
     fn missing_frontmatter_or_description_is_error() {
         assert!(AgentProfile::parse("x", "no frontmatter").is_err());
         assert!(AgentProfile::parse("x", "---\nname: x\n---\nbody\n").is_err());
+    }
+
+    #[test]
+    fn empty_description_is_error() {
+        assert!(AgentProfile::parse("x", "---\nname: x\n---\nbody\n").is_err());
+        let error = AgentProfile::parse("x", "---\nname: x\ndescription:\n---\nbody\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "agent profile frontmatter description must be non-empty"
+        );
     }
 
     #[test]
