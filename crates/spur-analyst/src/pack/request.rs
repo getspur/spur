@@ -18,17 +18,7 @@ pub(crate) struct KnowledgeContextPackRequest {
 
 impl KnowledgeContextPackRequest {
     pub(crate) fn parse(args: &Value) -> Result<Self, McpHandlerError> {
-        let query = args
-            .get("query")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|query| !query.is_empty())
-            .ok_or_else(|| {
-                McpHandlerError::InvalidParams(
-                    "knowledge_context_pack requires non-empty string field 'query'".into(),
-                )
-            })?
-            .to_owned();
+        let query = parse_query(args)?;
         let intent = KnowledgeIntent::parse(parse_enum(
             args,
             "intent",
@@ -42,17 +32,7 @@ impl KnowledgeContextPackRequest {
             "all",
         )?);
         let limit = parse_u64(args, "limit", 8, 1, 20)?;
-        let include_tests = args
-            .get("include_tests")
-            .map(|value| {
-                value.as_bool().ok_or_else(|| {
-                    McpHandlerError::InvalidParams(
-                        "knowledge_context_pack field 'include_tests' must be a boolean".into(),
-                    )
-                })
-            })
-            .transpose()?
-            .unwrap_or(true);
+        let include_tests = parse_include_tests(args)?;
         let max_symbol_bodies = parse_u64(args, "max_symbol_bodies", 3, 0, 5)?;
 
         Ok(Self {
@@ -73,6 +53,32 @@ impl KnowledgeContextPackRequest {
                     KnowledgeIntent::Debug | KnowledgeIntent::Change
                 ))
     }
+}
+
+fn parse_query(args: &Value) -> Result<String, McpHandlerError> {
+    args.get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            McpHandlerError::InvalidParams(
+                "knowledge_context_pack requires non-empty string field 'query'".into(),
+            )
+        })
+}
+
+fn parse_include_tests(args: &Value) -> Result<bool, McpHandlerError> {
+    args.get("include_tests")
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                McpHandlerError::InvalidParams(
+                    "knowledge_context_pack field 'include_tests' must be a boolean".into(),
+                )
+            })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(true))
 }
 
 #[derive(Clone, Debug)]
@@ -109,50 +115,16 @@ impl GraphReasoningOptions {
         intent: KnowledgeIntent,
         scope: KnowledgeScope,
     ) -> Result<Self, McpHandlerError> {
-        let paths_default = matches!(
-            intent,
-            KnowledgeIntent::Change | KnowledgeIntent::Review | KnowledgeIntent::Debug
-        );
-        let risk_default = !matches!(scope, KnowledgeScope::Docs);
+        let defaults = GraphReasoningDefaults::from(intent, scope);
         let Some(value) = args.get("graph_reasoning") else {
-            return Ok(Self {
-                paths: paths_default,
-                communities: true,
-                communities_explicit: false,
-                risk: risk_default,
-                max_path_hops: KnowledgePathOptions::default().max_hops,
-                max_paths: KnowledgePathOptions::default().max_paths,
-                anchors: Vec::new(),
-            });
+            return Ok(defaults.into_options());
         };
         let object = value.as_object().ok_or_else(|| {
             McpHandlerError::InvalidParams(
                 "knowledge_context_pack_2 field 'graph_reasoning' must be an object".into(),
             )
         })?;
-        let communities = parse_optional_bool_v2(object, "communities")?;
-
-        Ok(Self {
-            paths: parse_optional_bool_v2(object, "paths")?.unwrap_or(paths_default),
-            communities: communities.unwrap_or(true),
-            communities_explicit: communities.is_some(),
-            risk: parse_optional_bool_v2(object, "risk")?.unwrap_or(risk_default),
-            max_path_hops: parse_clamped_usize_v2(
-                object,
-                "max_path_hops",
-                KnowledgePathOptions::default().max_hops,
-                1,
-                MAX_CONTEXT_PATH_HOPS,
-            )?,
-            max_paths: parse_clamped_usize_v2(
-                object,
-                "max_paths",
-                KnowledgePathOptions::default().max_paths,
-                1,
-                MAX_CONTEXT_PATHS,
-            )?,
-            anchors: parse_anchor_array_v2(object)?,
-        })
+        parse_graph_reasoning_object(object, defaults)
     }
 
     pub(crate) fn should_query_communities(&self, code_symbol_count: usize) -> bool {
@@ -165,6 +137,67 @@ impl GraphReasoningOptions {
     pub(crate) fn any_enabled(&self) -> bool {
         self.paths || self.communities || self.risk
     }
+}
+
+struct GraphReasoningDefaults {
+    paths: bool,
+    risk: bool,
+    max_path_hops: usize,
+    max_paths: usize,
+}
+
+impl GraphReasoningDefaults {
+    fn from(intent: KnowledgeIntent, scope: KnowledgeScope) -> Self {
+        Self {
+            paths: matches!(
+                intent,
+                KnowledgeIntent::Change | KnowledgeIntent::Review | KnowledgeIntent::Debug
+            ),
+            risk: !matches!(scope, KnowledgeScope::Docs),
+            max_path_hops: KnowledgePathOptions::default().max_hops,
+            max_paths: KnowledgePathOptions::default().max_paths,
+        }
+    }
+
+    fn into_options(self) -> GraphReasoningOptions {
+        GraphReasoningOptions {
+            paths: self.paths,
+            communities: true,
+            communities_explicit: false,
+            risk: self.risk,
+            max_path_hops: self.max_path_hops,
+            max_paths: self.max_paths,
+            anchors: Vec::new(),
+        }
+    }
+}
+
+fn parse_graph_reasoning_object(
+    object: &serde_json::Map<String, Value>,
+    defaults: GraphReasoningDefaults,
+) -> Result<GraphReasoningOptions, McpHandlerError> {
+    let communities = parse_optional_bool_v2(object, "communities")?;
+    Ok(GraphReasoningOptions {
+        paths: parse_optional_bool_v2(object, "paths")?.unwrap_or(defaults.paths),
+        communities: communities.unwrap_or(true),
+        communities_explicit: communities.is_some(),
+        risk: parse_optional_bool_v2(object, "risk")?.unwrap_or(defaults.risk),
+        max_path_hops: parse_clamped_usize_v2(
+            object,
+            "max_path_hops",
+            defaults.max_path_hops,
+            1,
+            MAX_CONTEXT_PATH_HOPS,
+        )?,
+        max_paths: parse_clamped_usize_v2(
+            object,
+            "max_paths",
+            defaults.max_paths,
+            1,
+            MAX_CONTEXT_PATHS,
+        )?,
+        anchors: parse_anchor_array_v2(object)?,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
