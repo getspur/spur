@@ -52,6 +52,9 @@ impl AgentProfile {
             bail!("agent profile name `{name}` does not match file name `{expected_name}`");
         }
         let description = description.context("agent profile frontmatter missing `description`")?;
+        if description.trim().is_empty() {
+            bail!("agent profile frontmatter description must be non-empty");
+        }
 
         Ok(Self {
             name,
@@ -118,6 +121,18 @@ mod tests {
     fn missing_frontmatter_or_description_is_error() {
         assert!(AgentProfile::parse("x", "no frontmatter").is_err());
         assert!(AgentProfile::parse("x", "---\nname: x\n---\nbody\n").is_err());
+    }
+
+    #[test]
+    fn empty_description_is_error() {
+        assert!(AgentProfile::parse("x", "---\nname: x\n---\nbody\n").is_err());
+        let error = AgentProfile::parse("x", "---\nname: x\ndescription:\n---\nbody\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "agent profile frontmatter description must be non-empty"
+        );
     }
 
     #[test]
