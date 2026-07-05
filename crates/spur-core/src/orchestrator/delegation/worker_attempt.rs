@@ -287,6 +287,15 @@ async fn apply_session_overrides(
                     );
                 }
             }
+            spur_acp::SelectStrategy::SpawnArg { flag } => {
+                tracing::debug!(
+                    target: "spur::worker::profile",
+                    session_id = %session_id_for_log,
+                    flag = %flag,
+                    value = %profile,
+                    "profile selected at process spawn; skipped post-spawn RPC"
+                );
+            }
             spur_acp::SelectStrategy::None => {
                 tracing::debug!(
                     target: "spur::worker::profile",
@@ -374,6 +383,20 @@ async fn apply_session_overrides(
             }
         }
     }
+}
+
+fn append_spawn_profile_args(
+    mut spawn_args: Vec<String>,
+    profile: Option<&str>,
+    strategy: &spur_acp::ProfileStrategy,
+) -> Vec<String> {
+    if let (Some(profile), spur_acp::SelectStrategy::SpawnArg { flag }) =
+        (profile, &strategy.select)
+    {
+        spawn_args.push(flag.clone());
+        spawn_args.push(profile.to_string());
+    }
+    spawn_args
 }
 
 async fn materialize_profile(
@@ -651,7 +674,11 @@ pub(crate) async fn run_one_worker_attempt(
     // Workers never receive a permission_tx, so L2 auto-approve is
     // implicitly always on for them. skip_permissions still has effect
     // via L1a (spawn args).
-    let spawn_args = ctx.agent_config.effective_args();
+    let spawn_args = append_spawn_profile_args(
+        ctx.agent_config.effective_args(),
+        ctx.profile,
+        &profile_strategy,
+    );
     #[cfg(any(test, feature = "test-support"))]
     let mut connection: Box<dyn AgentConnection> =
         if let Some(connection_factory) = ctx.connection_factory {
@@ -2418,7 +2445,7 @@ mod profile_override_tests {
     }
 
     #[tokio::test]
-    async fn kiro_profile_uses_session_mode_not_config_option() {
+    async fn kiro_profile_uses_spawn_arg_not_post_spawn_rpc() {
         let (calls, _) = apply_profile_with(
             spur_acp::types::AgentKind::Kiro,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::Kiro),
@@ -2430,11 +2457,97 @@ mod profile_override_tests {
         )
         .await;
 
+        assert_eq!(calls, vec![]);
+    }
+
+    #[test]
+    fn kiro_profile_strategy_selects_spawn_agent_arg() {
+        let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::Kiro);
+
         assert_eq!(
-            calls,
-            vec![OverrideCall::Mode {
-                mode_id: "code-reviewer".to_string(),
-            }]
+            format!("{:?}", strategy.select),
+            r#"SpawnArg { flag: "--agent" }"#
+        );
+    }
+
+    #[tokio::test]
+    async fn kiro_profile_is_appended_to_spawn_args() {
+        let repo = setup_repo_with_committed_agent();
+        let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+        let worker_session = SessionId::new();
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("kiro");
+        agent_config.kind = spur_acp::types::AgentKind::Kiro;
+        agent_config.args = vec!["acp".to_string()];
+        let profile = managed_profile();
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+        let spawn_args = Arc::new(Mutex::new(Vec::<String>::new()));
+        let spawn_args_for_factory = Arc::clone(&spawn_args);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_factory = Arc::clone(&calls);
+        let session = session_response(vec![]);
+
+        let outcome = run_one_worker_attempt(
+            worker_session.clone(),
+            WorkerAttemptCtx {
+                brain_session_id: &brain_session_id,
+                agent: "kiro",
+                profile: Some("code-reviewer"),
+                profile_def: Some(&profile),
+                model: None,
+                effort: None,
+                config_overrides: None,
+                task: "do the task",
+                request_id: "delegation-1",
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, args, _repo_root| {
+                    *spawn_args_for_factory
+                        .lock()
+                        .expect("spawn args recorder poisoned") = args;
+                    Box::new(ProfileRecordingConnection {
+                        calls: Arc::clone(&calls_for_factory),
+                        rejected_config_id: None,
+                        reject_mode: false,
+                        session_response: session.clone(),
+                    })
+                }),
+            },
+            &mut worktrees,
+            &funnel,
+        )
+        .await
+        .expect("worker attempt succeeds");
+
+        assert_eq!(outcome.worker_session, worker_session);
+        assert_eq!(
+            *spawn_args.lock().expect("spawn args recorder poisoned"),
+            vec![
+                "acp".to_string(),
+                "--agent".to_string(),
+                "code-reviewer".to_string(),
+            ]
+        );
+        assert_eq!(
+            *calls.lock().expect("profile recorder poisoned"),
+            vec![OverrideCall::Prompt]
         );
     }
 
@@ -2457,6 +2570,45 @@ mod profile_override_tests {
                 config_id: "model".to_string(),
                 value: "opus".to_string(),
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_session_mode_warns_and_model_still_runs() {
+        let (calls, events) = apply_profile_with(
+            spur_acp::types::AgentKind::Generic,
+            spur_acp::ProfileStrategy {
+                select: spur_acp::SelectStrategy::SessionMode,
+                materialize: false,
+            },
+            Some("code-reviewer"),
+            Some("opus"),
+            None,
+            None,
+            true,
+        )
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![
+                OverrideCall::Mode {
+                    mode_id: "code-reviewer".to_string(),
+                },
+                OverrideCall::Config {
+                    config_id: "model".to_string(),
+                    value: "opus".to_string(),
+                },
+            ]
+        );
+        assert!(
+            events.contains(
+                tracing::Level::WARN,
+                "spur::worker::profile",
+                "profile set_mode failed; default persona"
+            ),
+            "expected profile set_mode warning, got {:?}",
+            events.events.lock().expect("event capture poisoned")
         );
     }
 

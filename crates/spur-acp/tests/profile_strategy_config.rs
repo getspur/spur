@@ -16,7 +16,13 @@ fn defaults_encode_the_probe_matrix() {
             SelectStrategy::ConfigOption { id: "mode".into() },
             true,
         ),
-        (Kiro, SelectStrategy::SessionMode, true),
+        (
+            Kiro,
+            SelectStrategy::SpawnArg {
+                flag: "--agent".into(),
+            },
+            true,
+        ),
         (CodexAcp, SelectStrategy::None, true),
         (Kimi, SelectStrategy::None, false),
         (Gemini, SelectStrategy::None, false),
@@ -57,6 +63,19 @@ fn config_block_supports_all_select_strings_and_materialize_override() {
     let strategy = ProfileStrategy::resolve(AgentKind::ClaudeCodeAcp, Some(&cfg));
     assert_eq!(strategy.select, SelectStrategy::SessionMode);
     assert!(!strategy.materialize);
+
+    let cfg = ProfileConfig {
+        select: Some("spawn_arg:--agent".into()),
+        materialize: Some(true),
+    };
+    let strategy = ProfileStrategy::resolve(AgentKind::Generic, Some(&cfg));
+    assert_eq!(
+        strategy.select,
+        SelectStrategy::SpawnArg {
+            flag: "--agent".into()
+        }
+    );
+    assert!(strategy.materialize);
 
     let cfg = ProfileConfig {
         select: Some("none".into()),
