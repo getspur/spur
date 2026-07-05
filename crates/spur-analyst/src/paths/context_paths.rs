@@ -12,7 +12,9 @@ use crate::{
 
 use super::{
     graph_content_hash, i64_to_usize, path_result, query_duckpgq_direct_paths,
-    query_duckpgq_shortest_hops, unavailable_path_result,
+    query_duckpgq_shortest_hops,
+    query_sql::{recursive_path_sql, RecursivePathMode},
+    unavailable_path_result,
 };
 
 pub const MAX_CONTEXT_PATH_HOPS: usize = 6;
@@ -205,59 +207,7 @@ fn query_recursive_context_path_rows(
     max_paths: usize,
     engine: KnowledgePathEngine,
 ) -> Result<Vec<KnowledgePathRow>> {
-    let sql = format!(
-        "WITH RECURSIVE traversable_edges AS ( \
-           SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
-           FROM edges \
-           WHERE (relation = 'calls' \
-                  AND edge_kind IN ('calls', 'calls_dyn', 'references_hof')) \
-              OR (relation = 'imports' AND bind_method = 'singleton') \
-         ), \
-         walk(current_id, depth, node_path, sort_key) AS ( \
-           SELECT ?1::VARCHAR AS current_id, 0::INTEGER AS depth, [?1::VARCHAR] AS node_path, ?1::VARCHAR AS sort_key \
-           UNION ALL \
-           SELECT e.target_stable_id, w.depth + 1, list_append(w.node_path, e.target_stable_id), \
-                  w.sort_key || '>' || e.target_stable_id \
-           FROM walk w \
-           JOIN traversable_edges e ON e.source_stable_id = w.current_id \
-           WHERE w.depth < {max_hops} \
-             AND e.target_stable_id IS NOT NULL \
-             AND NOT list_contains(w.node_path, e.target_stable_id) \
-         ), \
-         complete_paths AS ( \
-           SELECT row_number() OVER (ORDER BY depth, sort_key) - 1 AS path_index, depth, node_path \
-           FROM ( \
-             SELECT DISTINCT depth, node_path, sort_key \
-             FROM walk \
-             WHERE current_id = ?2 AND depth > 0 \
-           ) \
-           ORDER BY depth, sort_key \
-           LIMIT {max_paths} \
-         ), \
-         path_edges AS ( \
-           SELECT path_index, idx - 1 AS hop_index, \
-                  list_extract(node_path, idx) AS source_stable_id, \
-                  list_extract(node_path, idx + 1) AS target_stable_id \
-           FROM complete_paths \
-           CROSS JOIN range(1, depth + 1) AS r(idx) \
-         ), \
-         ranked_edges AS ( \
-           SELECT pe.path_index, pe.hop_index, e.source_stable_id, e.target_stable_id, \
-                  e.relation, e.edge_kind, e.confidence, e.bind_method, \
-                  row_number() OVER ( \
-                    PARTITION BY pe.path_index, pe.hop_index \
-                    ORDER BY e.relation, e.edge_kind, e.confidence, e.bind_method \
-                  ) AS edge_rank \
-           FROM path_edges pe \
-           JOIN traversable_edges e \
-             ON e.source_stable_id = pe.source_stable_id \
-            AND e.target_stable_id = pe.target_stable_id \
-         ) \
-         SELECT path_index, hop_index, source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
-         FROM ranked_edges \
-         WHERE edge_rank = 1 \
-         ORDER BY path_index, hop_index"
-    );
+    let sql = recursive_path_sql(max_hops, max_paths, RecursivePathMode::Directed);
     let mut stmt = conn
         .prepare(&sql)
         .context("failed to prepare recursive context path query")?;
@@ -291,64 +241,7 @@ fn query_recursive_undirected_context_path_rows(
     max_paths: usize,
     engine: KnowledgePathEngine,
 ) -> Result<Vec<KnowledgePathRow>> {
-    let sql = format!(
-        "WITH RECURSIVE traversable_edges AS ( \
-            SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
-            FROM edges \
-            WHERE (relation = 'calls' \
-                   AND edge_kind IN ('calls', 'calls_dyn', 'references_hof')) \
-               OR (relation = 'imports' AND bind_method = 'singleton') \
-         ), \
-         edges_undirected AS ( \
-            SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method, 'forward' AS direction FROM traversable_edges \
-            UNION ALL \
-            SELECT target_stable_id AS source_stable_id, source_stable_id AS target_stable_id, relation, edge_kind, confidence, bind_method, 'reverse' AS direction FROM traversable_edges \
-         ), \
-         walk(current_id, depth, node_path, sort_key) AS ( \
-            SELECT ?1::VARCHAR AS current_id, 0::INTEGER AS depth, [?1::VARCHAR] AS node_path, ?1::VARCHAR AS sort_key \
-            UNION ALL \
-            SELECT e.target_stable_id, w.depth + 1, list_append(w.node_path, e.target_stable_id), \
-                   w.sort_key || '>' || e.target_stable_id \
-            FROM walk w \
-            JOIN edges_undirected e ON e.source_stable_id = w.current_id \
-            WHERE w.depth < {max_hops} \
-              AND e.target_stable_id IS NOT NULL \
-              AND NOT list_contains(w.node_path, e.target_stable_id) \
-          ), \
-          complete_paths AS ( \
-            SELECT row_number() OVER (ORDER BY depth, sort_key) - 1 AS path_index, depth, node_path \
-            FROM ( \
-              SELECT DISTINCT depth, node_path, sort_key \
-              FROM walk \
-              WHERE current_id = ?2 AND depth > 0 \
-            ) \
-            ORDER BY depth, sort_key \
-            LIMIT {max_paths} \
-          ), \
-          path_edges AS ( \
-            SELECT path_index, idx - 1 AS hop_index, \
-                   list_extract(node_path, idx) AS source_stable_id, \
-                   list_extract(node_path, idx + 1) AS target_stable_id \
-            FROM complete_paths \
-            CROSS JOIN range(1, depth + 1) AS r(idx) \
-          ), \
-          ranked_edges AS ( \
-            SELECT pe.path_index, pe.hop_index, e.source_stable_id, e.target_stable_id, \
-                   e.relation, e.edge_kind, e.confidence, e.bind_method, e.direction, \
-                   row_number() OVER ( \
-                     PARTITION BY pe.path_index, pe.hop_index \
-                     ORDER BY e.relation, e.edge_kind, e.confidence, e.bind_method \
-                   ) AS edge_rank \
-            FROM path_edges pe \
-            JOIN edges_undirected e \
-              ON e.source_stable_id = pe.source_stable_id \
-             AND e.target_stable_id = pe.target_stable_id \
-          ) \
-          SELECT path_index, hop_index, source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method, direction \
-          FROM ranked_edges \
-          WHERE edge_rank = 1 \
-          ORDER BY path_index, hop_index"
-    );
+    let sql = recursive_path_sql(max_hops, max_paths, RecursivePathMode::Undirected);
     let mut stmt = conn
         .prepare(&sql)
         .context("failed to prepare undirected recursive context path query")?;
