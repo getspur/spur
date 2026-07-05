@@ -1,4 +1,5 @@
 mod context_paths;
+mod query_sql;
 mod risk_community;
 
 use anyhow::{Context as _, Result};
@@ -8,8 +9,10 @@ use crate::{
         KnowledgePathEngine, KnowledgePathResult, KnowledgePathResultContext, KnowledgePathRow,
         KnowledgePathStatus,
     },
-    db::{extensions::load_analyst_duckpgq_extension, sql::sql_string_literal},
+    db::extensions::load_analyst_duckpgq_extension,
 };
+
+use query_sql::{duckpgq_direct_paths_sql, duckpgq_shortest_hops_sql};
 
 pub use context_paths::{
     query_context_paths, query_context_paths_with_conn, MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS,
@@ -83,22 +86,7 @@ fn query_duckpgq_direct_paths(
     max_paths: usize,
 ) -> Result<Vec<KnowledgePathRow>> {
     load_analyst_duckpgq_extension(conn)?;
-    let source_sql = sql_string_literal(source_stable_id);
-    let target_sql = sql_string_literal(target_stable_id);
-    let sql = format!(
-        "SELECT source_stable_id, target_stable_id, relation, edge_kind, confidence, bind_method \
-         FROM GRAPH_TABLE (code \
-           MATCH (a:duckpgq_nodes)-[e:duckpgq_edges]->(b:duckpgq_nodes) \
-           WHERE a.stable_symbol_id = {source_sql} \
-             AND b.stable_symbol_id = {target_sql} \
-           COLUMNS (a.stable_symbol_id AS source_stable_id, \
-                    b.stable_symbol_id AS target_stable_id, \
-                    e.relation AS relation, \
-                    e.edge_kind AS edge_kind, \
-                    e.confidence AS confidence, \
-                    e.bind_method AS bind_method)) \
-         LIMIT {max_paths}"
-    );
+    let sql = duckpgq_direct_paths_sql(source_stable_id, target_stable_id, max_paths);
     let mut stmt = conn
         .prepare(&sql)
         .context("failed to prepare DuckPGQ direct path query")?;
@@ -136,17 +124,7 @@ fn query_duckpgq_shortest_hops(
     max_hops: usize,
 ) -> Result<Option<usize>> {
     load_analyst_duckpgq_extension(conn)?;
-    let source_sql = sql_string_literal(source_stable_id);
-    let target_sql = sql_string_literal(target_stable_id);
-    let sql = format!(
-        "SELECT hops \
-         FROM GRAPH_TABLE (code \
-           MATCH p = ANY SHORTEST (a:duckpgq_nodes)-[e:duckpgq_edges]->{{1,{max_hops}}}(b:duckpgq_nodes) \
-           WHERE a.stable_symbol_id = {source_sql} \
-             AND b.stable_symbol_id = {target_sql} \
-           COLUMNS (path_length(p) AS hops)) \
-         LIMIT 1"
-    );
+    let sql = duckpgq_shortest_hops_sql(source_stable_id, target_stable_id, max_hops);
     let mut stmt = conn
         .prepare(&sql)
         .context("failed to prepare DuckPGQ shortest path query")?;
