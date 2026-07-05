@@ -26,13 +26,14 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
             &profile.name,
         )),
         AgentKind::OpenCode => {
+            // OpenCode's agent frontmatter schema accepts only `description`;
+            // `model`/`effort` are selected via the runtime config layer, not
+            // the per-agent file. `tools` has no slot either — log the drop.
             log_tools_drop(profile);
+            let description = yaml_escape_scalar(&profile.description);
             Some(render_markdown_profile(
                 format!(".opencode/agent/{}.md", profile.name),
-                format!(
-                    "---\ndescription: {}\n---\n{}",
-                    profile.description, profile.body
-                ),
+                format!("---\ndescription: {description}\n---\n{}", profile.body),
                 &profile.name,
             ))
         }
@@ -113,6 +114,32 @@ fn marker_for(profile_name: &str, bytes: &[u8]) -> Marker {
     }
 }
 
+/// Quote/escape a frontmatter scalar for YAML emission. The source parser at
+/// `AgentProfile::parse` is intentionally minimal (no quote handling), so this
+/// only kicks in for values that would confuse a real YAML parser — values
+/// containing `:`, `#`, leading/trailing whitespace, newlines, quotes, or the
+/// fence sequence `---`. Plain values emit unchanged to preserve byte-for-byte
+/// compatibility with existing rendered files.
+fn yaml_escape_scalar(s: &str) -> String {
+    let needs_quoting = s.is_empty()
+        || s.starts_with(' ')
+        || s.ends_with(' ')
+        || s.contains(':')
+        || s.contains('#')
+        || s.contains('"')
+        || s.contains('\\')
+        || s.contains('\n')
+        || s == "---";
+    if !needs_quoting {
+        return s.to_string();
+    }
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
+}
+
 fn render_markdown_profile(
     rel_path: String,
     mut unmarked_contents: String,
@@ -177,14 +204,8 @@ fn extract_markdown_marker(existing: &str) -> Option<(Marker, String)> {
         }
         line_start = line_end;
     }
-    if line_start < existing.len() {
-        let line = &existing[line_start..];
-        if let Some(marker) = parse_marker(line) {
-            let mut unmarked = String::with_capacity(line_start);
-            unmarked.push_str(&existing[..line_start]);
-            return Some((marker, unmarked));
-        }
-    }
+    // split_inclusive('\n') covers the trailing no-newline chunk, so after the
+    // loop `line_start == existing.len()` and there is nothing left to inspect.
     None
 }
 
@@ -431,5 +452,56 @@ mod tests {
         for kind in [AgentKind::Kimi, AgentKind::Gemini, AgentKind::Generic] {
             assert!(render_for_kind(&profile(), kind).is_none());
         }
+    }
+
+    // Claim C: description containing `:` must not emit malformed YAML.
+    #[test]
+    fn opencode_description_with_colon_is_yaml_quoted() {
+        let raw = "---\nname: colon\ndescription: a: b\n---\nbody\n";
+        let p = crate::agent_profiles::AgentProfile::parse("colon", raw).unwrap();
+        let r = render_for_kind(&p, AgentKind::OpenCode).unwrap();
+        // The emitted frontmatter must be a single `description:` line whose
+        // value is a valid YAML scalar. `description: a: b` (unquoted) is not.
+        let frontmatter = r
+            .contents
+            .strip_prefix("---\n")
+            .and_then(|s| s.split("\n---\n").next())
+            .unwrap();
+        // Expect double-quoted form for values containing `:`.
+        assert!(
+            frontmatter == r#"description: "a: b""#,
+            "expected quoted YAML scalar; got {frontmatter:?}"
+        );
+    }
+
+    // Claim C: simple descriptions still emit unquoted (byte-stable for
+    // existing rendered files).
+    #[test]
+    fn opencode_description_simple_stays_unquoted() {
+        let r = render_for_kind(&profile(), AgentKind::OpenCode).unwrap();
+        assert!(r
+            .contents
+            .starts_with("---\ndescription: Reviews diffs\n---\n"));
+    }
+
+    // Claim D regression guard: extract_marker must find a marker on a body
+    // that lacks a trailing newline.
+    #[test]
+    fn extract_marker_handles_body_without_trailing_newline() {
+        let r = render_for_kind(&profile(), AgentKind::OpenCode).unwrap();
+        let marker_line = r
+            .contents
+            .lines()
+            .find(|l| l.contains("SPUR-MANAGED"))
+            .unwrap();
+        let body = "Some agent body text.\n";
+        let with_nl = format!("{body}{marker_line}\n");
+        let no_nl = format!("{body}{marker_line}");
+        assert!(extract_marker_and_unmarked(".md", &with_nl)
+            .unwrap()
+            .is_some());
+        assert!(extract_marker_and_unmarked(".md", &no_nl)
+            .unwrap()
+            .is_some());
     }
 }
