@@ -79,6 +79,41 @@ fn analyst_mcp_module_advertises_exact_public_tool_names() {
     assert_eq!(names, EXPECTED_TOOL_NAMES);
 }
 
+#[test]
+fn doc_navigate_is_split_into_application_modules_and_thin_mcp_adapter() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let doc_nav = src.join("doc_nav");
+
+    for module in ["mod.rs", "artifact.rs", "query.rs", "projection.rs"] {
+        let path = doc_nav.join(module);
+        assert!(path.is_file(), "missing doc_nav module {}", path.display());
+        assert!(
+            line_count(&path) < 300,
+            "{} should stay below 300 lines",
+            path.display()
+        );
+    }
+
+    let adapter = src.join("mcp").join("tools").join("doc_navigate.rs");
+    assert!(
+        adapter.is_file(),
+        "missing thin MCP adapter {}",
+        adapter.display()
+    );
+    assert!(
+        line_count(&adapter) <= 80,
+        "{} should remain a thin adapter",
+        adapter.display()
+    );
+
+    let old_module = src.join("mcp").join("doc_navigate.rs");
+    assert!(
+        !old_module.exists(),
+        "{} should move into doc_nav/* plus mcp/tools/doc_navigate.rs",
+        old_module.display()
+    );
+}
+
 #[tokio::test]
 async fn analyst_mcp_dispatch_keeps_all_public_tool_names_reachable() {
     let module = AnalystMcpModule::new();
@@ -191,6 +226,13 @@ fn assert_json_snapshot(name: &str, actual: &Value) {
         );
     });
     assert_eq!(expected, actual, "snapshot mismatch for {}", path.display());
+}
+
+fn line_count(path: &Path) -> usize {
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+        .lines()
+        .count()
 }
 
 fn normalize_pack_snapshot(mut value: Value, db_path: &Path) -> Value {
