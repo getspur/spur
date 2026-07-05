@@ -522,6 +522,47 @@ async fn knowledge_context_pack_2_deleted_file_symbols_are_absent_from_merged_pa
     );
 }
 
+#[tokio::test]
+async fn knowledge_context_pack_2_dirty_overlay_preserves_base_temporal_scorecard_for_unchanged_symbols(
+) {
+    let _lock = async_env_lock().await;
+    let _embed = EnvGuard::set(ANALYST_EMBED_MODE_ENV, "off");
+    let fixture = OverlayKcp2Fixture::new().expect("fixture");
+    fixture
+        .dirty_alpha_worktree()
+        .expect("dirty alpha worktree");
+    let deleted_helper = symbol_id(&fixture.base_artifact, "deleted_helper");
+
+    let pack = run_overlay_risk_pack(&fixture.alpha_worktree, "deleted helper overlay beacon")
+        .await
+        .expect("deleted helper risk pack");
+    assert_pack_ok(&pack);
+    assert_eq!(pack["staleness"]["delta_applied"], true, "{pack:#}");
+
+    let caveat_codes = pack["caveats"]
+        .as_array()
+        .expect("caveats")
+        .iter()
+        .filter_map(|caveat| caveat["code"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !caveat_codes.contains(&"scorecard_unavailable"),
+        "dirty overlays should expose v_symbol_scorecard: {pack:#}"
+    );
+
+    let scorecard = pack["risk_scorecard"]
+        .as_array()
+        .expect("risk scorecard")
+        .iter()
+        .find(|row| row["stable_symbol_id"] == deleted_helper)
+        .unwrap_or_else(|| panic!("deleted_helper scorecard row missing: {pack:#}"));
+    assert_eq!(scorecard["status"], "available", "{pack:#}");
+    assert_eq!(scorecard["file_path"], "src/deleted.rs", "{pack:#}");
+    assert_eq!(scorecard["churn_90d"], 13, "{pack:#}");
+    assert_eq!(scorecard["blast_radius_score"], 8.5, "{pack:#}");
+    assert_eq!(scorecard["posture"], "hot-central", "{pack:#}");
+}
+
 #[test]
 fn graph_candidates_return_primary_and_neighbor_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1818,6 +1859,27 @@ async fn run_overlay_pack(worktree: &Path, query: &str, anchors: &[&str]) -> any
     .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
+async fn run_overlay_risk_pack(worktree: &Path, query: &str) -> anyhow::Result<Value> {
+    let args = json!({
+        "query": query,
+        "intent": "review",
+        "scope": "code",
+        "limit": 1,
+        "max_symbol_bodies": 0,
+        "graph_reasoning": {
+            "paths": false,
+            "communities": true,
+            "risk": true
+        }
+    });
+
+    spur_graph::mcp::with_worktree_root_for_request(worktree.to_path_buf(), async {
+        knowledge_context_pack_2(&args).await
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
 fn assert_pack_ok(pack: &Value) {
     assert!(pack.get("error").is_none(), "{pack:#}");
     assert_eq!(pack["answerable"], true, "{pack:#}");
@@ -2023,10 +2085,46 @@ fn seed_overlay_pack_analyst_db(
                0::BIGINT AS callers,
                0::BIGINT AS importers,
                0::BIGINT AS inbound_total,
-               0::BIGINT AS churn_90d,
-               NULL::TIMESTAMP AS last_touched,
-               0.0::DOUBLE AS blast_radius_score,
-               'fixture' AS posture
+               CASE WHEN entity_name = 'deleted_helper' THEN 13 ELSE 0 END::BIGINT AS churn_90d,
+               CASE
+                 WHEN entity_name = 'deleted_helper'
+                 THEN TIMESTAMP '2026-06-15 12:00:00'
+                 ELSE NULL::TIMESTAMP
+               END AS last_touched,
+               CASE WHEN entity_name = 'deleted_helper' THEN 8.5 ELSE 0.0 END::DOUBLE AS blast_radius_score,
+               CASE WHEN entity_name = 'deleted_helper' THEN 'hot-central' ELSE 'fixture' END AS posture
+        FROM symbol_text;
+
+        CREATE TABLE v_symbol_churn_90d AS
+        SELECT stable_symbol_id,
+               CASE WHEN entity_name = 'deleted_helper' THEN 13 ELSE 0 END::BIGINT AS events,
+               CASE WHEN entity_name = 'deleted_helper' THEN 3 ELSE 0 END::BIGINT AS commits,
+               0::BIGINT AS added,
+               CASE WHEN entity_name = 'deleted_helper' THEN 13 ELSE 0 END::BIGINT AS modified,
+               0::BIGINT AS deleted,
+               0::BIGINT AS renamed,
+               CASE
+                 WHEN entity_name = 'deleted_helper'
+                 THEN TIMESTAMP '2026-06-15 12:00:00'
+                 ELSE NULL::TIMESTAMP
+               END AS last_touched
+        FROM symbol_text;
+
+        CREATE TABLE v_blast_radius AS
+        SELECT stable_symbol_id,
+               entity_name,
+               symbol_kind,
+               file_path,
+               CASE WHEN entity_name = 'deleted_helper' THEN 1 ELSE 0 END::BIGINT AS caller_count,
+               CASE WHEN entity_name = 'deleted_helper' THEN 1 ELSE 0 END::BIGINT AS hot_caller_count,
+               CASE WHEN entity_name = 'deleted_helper' THEN 4 ELSE 0 END::BIGINT AS caller_churn_90d,
+               CASE WHEN entity_name = 'deleted_helper' THEN 13 ELSE 0 END::BIGINT AS self_churn_90d,
+               CASE
+                 WHEN entity_name = 'deleted_helper'
+                 THEN TIMESTAMP '2026-06-15 12:00:00'
+                 ELSE NULL::TIMESTAMP
+               END AS self_last_touched,
+               CASE WHEN entity_name = 'deleted_helper' THEN 8.5 ELSE 0.0 END::DOUBLE AS blast_radius_score
         FROM symbol_text;
 
         CREATE TABLE v_symbol_inbound AS

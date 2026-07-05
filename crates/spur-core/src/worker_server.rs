@@ -7,7 +7,6 @@
 //! per-delegation lifecycle guards remain in this module.
 
 use std::borrow::Cow;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -429,6 +428,9 @@ struct DispatcherDeps {
     /// worker MCP server is per brain session and runs in the brain process,
     /// so code_* handlers cannot derive the worker worktree from process cwd.
     delegation_worktree_roots: Arc<parking_lot::Mutex<std::collections::HashMap<String, PathBuf>>>,
+    /// Persistent graph MCP module so refresh/rebuild singleflight state is
+    /// shared across worker code graph calls for this server.
+    graph_mcp_module: spur_graph::mcp::GraphMcpModule,
     /// Per-delegation read-tool aggregation buffers. Each entry is `Arc`'d
     /// so concurrent in-flight read calls and the (future T21) background
     /// flusher can hold cheap references without contending for the outer
@@ -475,27 +477,41 @@ struct WorkerAuthMiddlewareState {
         Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
 }
 
-async fn invoke_code_graph_for_worker<F, Fut>(
+async fn invoke_code_graph_for_worker(
     deps: Arc<DispatcherDeps>,
     worker_ctx: WorkerCallContext,
-    invoke: F,
-) -> Result<Value, McpHandlerError>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<Value, McpHandlerError>>,
-{
+    tool_name: &'static str,
+    args: Value,
+) -> Result<Value, McpHandlerError> {
     let worktree_root = {
         deps.delegation_worktree_roots
             .lock()
             .get(&worker_ctx.delegation_id)
             .cloned()
     };
-    let future = invoke();
+    let graph_mcp_module = deps.graph_mcp_module.clone();
+    let future = async move {
+        match graph_mcp_module.dispatch(tool_name, args).await {
+            Ok(body) => Ok(body),
+            Err(error) => Err(code_graph_dispatch_error(error).await),
+        }
+    };
     if let Some(worktree_root) = worktree_root {
         crate::server::handlers::code_graph::with_worktree_root_for_request(worktree_root, future)
             .await
     } else {
         future.await
+    }
+}
+
+async fn code_graph_dispatch_error(error: spur_graph::mcp::CodeGraphError) -> McpHandlerError {
+    let response = error.into_error_response().await;
+    match response.code {
+        -32602 => McpHandlerError::InvalidParams(response.message),
+        -32004 => McpHandlerError::NotFound(response.message),
+        -32001 => McpHandlerError::Unauthorized(response.message),
+        -32603 => McpHandlerError::Internal(response.message),
+        _ => McpHandlerError::Internal(response.message),
     }
 }
 
@@ -1169,10 +1185,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_resolve(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_resolve", args).await
             },
         )
         .await
@@ -1195,10 +1208,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_file_symbols(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_file_symbols", args).await
             },
         )
         .await
@@ -1221,10 +1231,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_symbol_info(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_symbol_info", args).await
             },
         )
         .await
@@ -1247,10 +1254,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_read_symbol(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_read_symbol", args).await
             },
         )
         .await
@@ -1273,10 +1277,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_callers(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_callers", args).await
             },
         )
         .await
@@ -1299,10 +1300,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_callees(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_callees", args).await
             },
         )
         .await
@@ -1325,10 +1323,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_search(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_symbol_search", args).await
             },
         )
         .await
@@ -1351,10 +1346,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_subgraph(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_subgraph", args).await
             },
         )
         .await
@@ -1377,10 +1369,7 @@ impl WorkerToolHandler {
             context,
             Some(None),
             move |worker_ctx| async move {
-                invoke_code_graph_for_worker(deps, worker_ctx, || {
-                    crate::server::handlers::code_graph::code_symbol_history(&args)
-                })
-                .await
+                invoke_code_graph_for_worker(deps, worker_ctx, "code_symbol_history", args).await
             },
         )
         .await
@@ -1821,6 +1810,8 @@ impl WorkerMcpServer {
         let active_delegations = Arc::new(AtomicU32::new(0));
         let peak_active_delegations = Arc::new(AtomicU32::new(0));
         let delegation_guards = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let graph_mcp_module =
+            spur_graph::mcp::GraphMcpModule::new(spur_graph::mcp::GraphMcpDeps::default());
         let dispatcher_deps = Arc::new(DispatcherDeps {
             pm_service: deps.pm_service,
             feature_gate: deps.feature_gate,
@@ -1830,6 +1821,7 @@ impl WorkerMcpServer {
             repo_root: deps.repo_root,
             delegations: Arc::clone(&delegations),
             delegation_worktree_roots: Arc::clone(&delegation_worktree_roots),
+            graph_mcp_module,
             read_audit_buffers: Arc::clone(&read_audit_buffers),
             flush_tx,
             active_delegations: Arc::clone(&active_delegations),
