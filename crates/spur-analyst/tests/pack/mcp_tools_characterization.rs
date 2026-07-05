@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard};
 use serde_json::{json, Value};
 use spur_analyst::mcp::{AnalystMcpModule, McpHandlerError};
 
-const INIT_SEARCH_SQL: &str = include_str!("../../spur-context/analyst/init_search.sql");
+const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
 const EMBED_MODE_ENV: &str = "SPUR_ANALYST_EMBED_MODE";
 const EXPECTED_TOOL_NAMES: &[&str] = &[
     "doc_navigate",
