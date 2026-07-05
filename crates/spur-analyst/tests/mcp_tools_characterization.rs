@@ -114,6 +114,33 @@ fn doc_navigate_is_split_into_application_modules_and_thin_mcp_adapter() {
     );
 }
 
+#[test]
+fn query_is_split_into_thin_tool_adapter_and_arrow_value_module() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let adapter = src.join("mcp").join("tools").join("query.rs");
+    let arrow_values = src.join("mcp").join("value").join("arrow.rs");
+
+    for path in [&adapter, &arrow_values] {
+        assert!(
+            path.is_file(),
+            "missing query split module {}",
+            path.display()
+        );
+        assert!(
+            line_count(path) < 260,
+            "{} should stay below 260 lines",
+            path.display()
+        );
+    }
+
+    let old_module = src.join("mcp").join("query.rs");
+    assert!(
+        !old_module.exists(),
+        "{} should move into mcp/tools/query.rs plus mcp/value/arrow.rs",
+        old_module.display()
+    );
+}
+
 #[tokio::test]
 async fn analyst_mcp_dispatch_keeps_all_public_tool_names_reachable() {
     let module = AnalystMcpModule::new();
