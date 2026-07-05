@@ -44,7 +44,7 @@ pub fn discovery_for_kind(kind: AgentKind) -> Option<SessionDiscoveryKind> {
         AgentKind::Kiro => Some(SessionDiscoveryKind::Kiro),
         AgentKind::Kimi => Some(SessionDiscoveryKind::Kimi),
         AgentKind::OpenCode => Some(SessionDiscoveryKind::OpenCode),
-        _ => None,
+        AgentKind::Gemini | AgentKind::Generic => None,
     }
 }
 

@@ -8,7 +8,16 @@ use crate::types::AgentKind;
 /// Whether this agent kind is expected to emit `SessionUpdate::UsageUpdate`.
 #[must_use]
 pub fn usage_emit_default(kind: AgentKind) -> bool {
-    !matches!(kind, AgentKind::ClaudeCodeAcp)
+    match kind {
+        AgentKind::ClaudeStreamJson => true,
+        AgentKind::ClaudeCodeAcp => false,
+        AgentKind::CodexAcp => true,
+        AgentKind::Kiro => true,
+        AgentKind::Kimi => true,
+        AgentKind::Gemini => true,
+        AgentKind::OpenCode => true,
+        AgentKind::Generic => true,
+    }
 }
 
 #[cfg(test)]
