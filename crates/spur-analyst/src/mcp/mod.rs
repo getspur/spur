@@ -2,7 +2,6 @@
 
 mod doc_navigate;
 mod knowledge_context;
-mod overlay;
 mod query;
 
 use serde::{Deserialize, Serialize};
@@ -12,9 +11,9 @@ use thiserror::Error;
 use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 
 pub use crate::embedding::warm_embed_model;
+pub use crate::overlay::open_worktree_overlay;
 pub use doc_navigate::doc_navigate;
 pub use knowledge_context::{knowledge_context_pack, knowledge_context_pack_2};
-pub use overlay::open_worktree_overlay;
 pub use query::query;
 
 /// Metadata for a single analyst-owned MCP tool.
