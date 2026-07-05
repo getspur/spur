@@ -141,6 +141,53 @@ fn query_is_split_into_thin_tool_adapter_and_arrow_value_module() {
     );
 }
 
+#[test]
+fn knowledge_context_is_split_into_pack_service_and_thin_mcp_adapter() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let adapter = src.join("mcp").join("tools").join("knowledge_context.rs");
+    let service = src.join("pack").join("service.rs");
+
+    for path in [&adapter, &service] {
+        assert!(
+            path.is_file(),
+            "missing knowledge context split module {}",
+            path.display()
+        );
+    }
+
+    let adapter_source = fs::read_to_string(&adapter)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", adapter.display()));
+    assert!(
+        adapter_source.contains("service::knowledge_context_pack(request).await")
+            && adapter_source.contains("service::knowledge_context_pack_2(request).await"),
+        "{} should delegate parsed requests to pack::service",
+        adapter.display()
+    );
+    assert!(
+        !adapter_source.contains("EmbeddingRuntime")
+            && !adapter_source.contains("query_context_candidates"),
+        "{} should stay a thin MCP adapter",
+        adapter.display()
+    );
+    assert!(
+        rust_symbolish_count(&adapter) < 90,
+        "{} should remain under the 90-symbol adapter budget",
+        adapter.display()
+    );
+    assert!(
+        rust_symbolish_count(&service) < 260,
+        "{} should remain under the 260-symbol service budget",
+        service.display()
+    );
+
+    let old_module = src.join("mcp").join("knowledge_context.rs");
+    assert!(
+        !old_module.exists(),
+        "{} should move into mcp/tools/knowledge_context.rs plus pack/service.rs",
+        old_module.display()
+    );
+}
+
 #[tokio::test]
 async fn analyst_mcp_dispatch_keeps_all_public_tool_names_reachable() {
     let module = AnalystMcpModule::new();
@@ -259,6 +306,36 @@ fn line_count(path: &Path) -> usize {
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
         .lines()
+        .count()
+}
+
+fn rust_symbolish_count(path: &Path) -> usize {
+    let source = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    source
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| {
+            [
+                "fn ",
+                "async fn ",
+                "pub fn ",
+                "pub async fn ",
+                "pub(crate) fn ",
+                "pub(crate) async fn ",
+                "struct ",
+                "pub struct ",
+                "enum ",
+                "pub enum ",
+                "impl ",
+                "const ",
+                "pub const ",
+                "mod ",
+                "pub(crate) mod ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        })
         .count()
 }
 
