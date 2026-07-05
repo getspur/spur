@@ -1,8 +1,8 @@
 //! Analyst-owned MCP tools.
 
-mod knowledge_context;
 mod tools {
     pub(crate) mod doc_navigate;
+    pub(crate) mod knowledge_context;
     pub(crate) mod query;
 }
 mod value {
@@ -17,8 +17,8 @@ use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 
 pub use crate::embedding::warm_embed_model;
 pub use crate::overlay::open_worktree_overlay;
-pub use knowledge_context::{knowledge_context_pack, knowledge_context_pack_2};
 pub use tools::doc_navigate::doc_navigate;
+pub use tools::knowledge_context::{knowledge_context_pack, knowledge_context_pack_2};
 pub use tools::query::query;
 
 /// Metadata for a single analyst-owned MCP tool.
