@@ -5,28 +5,11 @@ use crate::search::hybrid::evidence_confidence;
 use crate::KnowledgeQueryResult;
 
 use super::evidence::split_evidence;
+use super::graph_reasoning::{insert_v2_sections, GraphReasoningSections};
 use super::impact::{aggregate_impact_value, primary_evidence_with_impact, ExactGraphContext};
 use super::next_tools::recommended_next_tools;
 use super::staleness::{staleness_value, PackStaleness};
 use super::{KnowledgeContextPackRequest, KnowledgeContextPackV2Request};
-
-#[derive(Default)]
-pub(crate) struct GraphReasoningSections {
-    pub(crate) graph_paths: Vec<Value>,
-    pub(crate) risk_scorecard: Vec<Value>,
-    pub(crate) community_context: Vec<Value>,
-    pub(crate) temporal_context: Vec<Value>,
-    pub(crate) caveats: Vec<Value>,
-}
-
-impl GraphReasoningSections {
-    pub(crate) fn with_caveat(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            caveats: vec![super::caveat_value(code, message, None)],
-            ..Self::default()
-        }
-    }
-}
 
 #[cfg(test)]
 pub(crate) async fn pack_query_result(
@@ -194,34 +177,6 @@ pub(crate) async fn pack_query_result_v2_with_graph_sections_and_staleness(
     .await;
     insert_v2_sections(&mut pack, graph_sections);
     pack
-}
-
-pub(crate) fn insert_v2_sections(pack: &mut Value, sections: GraphReasoningSections) {
-    if let Some(object) = pack.as_object_mut() {
-        object.insert("graph_paths".into(), Value::Array(sections.graph_paths));
-        object.insert(
-            "risk_scorecard".into(),
-            Value::Array(sections.risk_scorecard),
-        );
-        object.insert(
-            "community_context".into(),
-            Value::Array(sections.community_context),
-        );
-        object.insert(
-            "temporal_context".into(),
-            Value::Array(sections.temporal_context),
-        );
-        object.insert("caveats".into(), Value::Array(sections.caveats));
-        object.entry("candidates").or_insert_with(|| {
-            json!({
-                "total": 0,
-                "returned_primary": 0,
-                "returned_supporting_docs": 0,
-                "total_code": 0,
-                "total_docs": 0,
-            })
-        });
-    }
 }
 
 pub(crate) fn base_pack(
