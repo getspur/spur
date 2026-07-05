@@ -237,69 +237,108 @@ fn query_def() -> ToolDefinition {
 /// `knowledge_context_pack` alias (which routes to v2 behavior).
 fn knowledge_context_pack_2_input_schema() -> serde_json::Value {
     json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": { "type": "string", "minLength": 1 },
-                "intent": {
-                    "type": "string",
-                    "enum": ["explain", "change", "review", "debug", "plan"],
-                    "default": "explain"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["all", "docs", "code", "graph"],
-                    "default": "all"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 8
-                },
-                "include_tests": { "type": "boolean", "default": true },
-                "max_symbol_bodies": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 5,
-                    "default": 3
-                },
-                "graph_reasoning": {
-                    "type": "object",
-                    "properties": {
-                        "paths": {
-                            "type": "boolean",
-                            "description": "When true, include bounded graph path evidence between top code candidates and graph anchors."
-                        },
-                        "communities": {
-                            "type": "boolean",
-                            "description": "When true, include component/community context for grounded code candidates."
-                        },
-                        "risk": {
-                            "type": "boolean",
-                            "description": "When true, include scorecard risk signals for grounded code candidates."
-                        },
-                        "max_path_hops": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_CONTEXT_PATH_HOPS,
-                            "default": 4
-                        },
-                        "max_paths": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_CONTEXT_PATHS,
-                            "default": 6
-                        },
-                        "anchors": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Optional graph://symbol/<id> or bare stable symbol IDs to use as path targets."
-                        }
-                    },
-                    "additionalProperties": false
-                }
-            },
-            "additionalProperties": false
+        "type": "object",
+        "required": ["query"],
+        "properties": knowledge_context_pack_2_properties_schema(),
+        "additionalProperties": false
+    })
+}
+
+fn knowledge_context_pack_2_properties_schema() -> serde_json::Value {
+    json!({
+        "query": query_property_schema(),
+        "intent": intent_property_schema(),
+        "scope": scope_property_schema(),
+        "limit": limit_property_schema(),
+        "include_tests": include_tests_property_schema(),
+        "max_symbol_bodies": max_symbol_bodies_property_schema(),
+        "graph_reasoning": graph_reasoning_property_schema(),
+    })
+}
+
+fn query_property_schema() -> serde_json::Value {
+    json!({ "type": "string", "minLength": 1 })
+}
+
+fn intent_property_schema() -> serde_json::Value {
+    json!({
+        "type": "string",
+        "enum": ["explain", "change", "review", "debug", "plan"],
+        "default": "explain"
+    })
+}
+
+fn scope_property_schema() -> serde_json::Value {
+    json!({
+        "type": "string",
+        "enum": ["all", "docs", "code", "graph"],
+        "default": "all"
+    })
+}
+
+fn limit_property_schema() -> serde_json::Value {
+    json!({ "type": "integer", "minimum": 1, "maximum": 20, "default": 8 })
+}
+
+fn include_tests_property_schema() -> serde_json::Value {
+    json!({ "type": "boolean", "default": true })
+}
+
+fn max_symbol_bodies_property_schema() -> serde_json::Value {
+    json!({ "type": "integer", "minimum": 0, "maximum": 5, "default": 3 })
+}
+
+fn graph_reasoning_property_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": graph_reasoning_properties_schema(),
+        "additionalProperties": false
+    })
+}
+
+fn graph_reasoning_properties_schema() -> serde_json::Value {
+    json!({
+        "paths": graph_reasoning_flag_schema(
+            "When true, include bounded graph path evidence between top code candidates and graph anchors.",
+        ),
+        "communities": graph_reasoning_flag_schema(
+            "When true, include component/community context for grounded code candidates.",
+        ),
+        "risk": graph_reasoning_flag_schema(
+            "When true, include scorecard risk signals for grounded code candidates.",
+        ),
+        "max_path_hops": max_path_hops_property_schema(),
+        "max_paths": max_paths_property_schema(),
+        "anchors": anchors_property_schema(),
+    })
+}
+
+fn graph_reasoning_flag_schema(description: &str) -> serde_json::Value {
+    json!({ "type": "boolean", "description": description })
+}
+
+fn max_path_hops_property_schema() -> serde_json::Value {
+    json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": MAX_CONTEXT_PATH_HOPS,
+        "default": 4
+    })
+}
+
+fn max_paths_property_schema() -> serde_json::Value {
+    json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": MAX_CONTEXT_PATHS,
+        "default": 6
+    })
+}
+
+fn anchors_property_schema() -> serde_json::Value {
+    json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Optional graph://symbol/<id> or bare stable symbol IDs to use as path targets."
     })
 }
