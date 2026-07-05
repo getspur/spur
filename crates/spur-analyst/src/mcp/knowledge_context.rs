@@ -29,11 +29,11 @@ use crate::pack::{
     ExactGraphContext, KnowledgeIntent, SymbolImpactSummary, POPULAR_SINK_CALLERS_THRESHOLD,
 };
 
-use super::overlay::{
+use super::McpHandlerError;
+use crate::overlay::{
     open_worktree_overlay, overlay_rebuild_key_for_dirty_worktree,
     shared_overlay_session_coordinator, write_delta_for_session, OverlayMergeSession,
 };
-use super::McpHandlerError;
 
 pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
     let request = KnowledgeContextPackRequest::parse(args)?;
