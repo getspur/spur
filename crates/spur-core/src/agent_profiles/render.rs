@@ -25,15 +25,19 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
             profile.raw.clone(),
             &profile.name,
         )),
-        AgentKind::OpenCode => Some(render_markdown_profile(
-            format!(".opencode/agent/{}.md", profile.name),
-            format!(
-                "---\ndescription: {}\n---\n{}",
-                profile.description, profile.body
-            ),
-            &profile.name,
-        )),
+        AgentKind::OpenCode => {
+            log_tools_drop(profile);
+            Some(render_markdown_profile(
+                format!(".opencode/agent/{}.md", profile.name),
+                format!(
+                    "---\ndescription: {}\n---\n{}",
+                    profile.description, profile.body
+                ),
+                &profile.name,
+            ))
+        }
         AgentKind::Kiro => {
+            log_tools_drop(profile);
             let unmarked = serde_json::json!({
                 "name": profile.name,
                 "description": profile.description,
@@ -52,6 +56,7 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
             })
         }
         AgentKind::CodexAcp => {
+            log_tools_drop(profile);
             let mut value = toml::value::Table::new();
             value.insert("name".into(), profile.name.clone().into());
             value.insert("description".into(), profile.description.clone().into());
@@ -78,6 +83,17 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
             })
         }
         AgentKind::Kimi | AgentKind::Gemini | AgentKind::Generic => None,
+    }
+}
+
+fn log_tools_drop(profile: &AgentProfile) {
+    if let Some(tools) = &profile.tools {
+        tracing::debug!(
+            target: "spur::agent_profiles",
+            profile = %profile.name,
+            tools = %tools,
+            "tools frontmatter has no target slot; dropping"
+        );
     }
 }
 
@@ -216,6 +232,8 @@ fn extract_toml_marker(existing: &str) -> Result<Option<(Marker, String)>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
 
     fn profile() -> crate::agent_profiles::AgentProfile {
         crate::agent_profiles::AgentProfile::parse(
@@ -223,6 +241,114 @@ mod tests {
             "---\nname: code-reviewer\ndescription: Reviews diffs\nmodel: opus\neffort: high\n---\nYou review code.\n",
         )
         .unwrap()
+    }
+
+    fn profile_with_tools() -> crate::agent_profiles::AgentProfile {
+        crate::agent_profiles::AgentProfile::parse(
+            "code-reviewer",
+            "---\nname: code-reviewer\ndescription: Reviews diffs\ntools: Read, Edit\n---\nYou review code.\n",
+        )
+        .unwrap()
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedDebugEvents(Arc<Mutex<Vec<CapturedDebugEvent>>>);
+
+    #[derive(Clone, Debug, Default)]
+    struct CapturedDebugEvent {
+        target: String,
+        fields: Vec<(String, String)>,
+    }
+
+    impl CapturedDebugEvents {
+        fn contains_tools_drop_for(&self, profile: &str, tools: &str) -> bool {
+            self.0.lock().unwrap().iter().any(|event| {
+                event.target == "spur::agent_profiles"
+                    && event.fields.iter().any(|(name, value)| {
+                        name == "message"
+                            && field_value_eq(
+                                value,
+                                "tools frontmatter has no target slot; dropping",
+                            )
+                    })
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(name, value)| name == "profile" && field_value_eq(value, profile))
+                    && event
+                        .fields
+                        .iter()
+                        .any(|(name, value)| name == "tools" && field_value_eq(value, tools))
+            })
+        }
+    }
+
+    fn field_value_eq(actual: &str, expected: &str) -> bool {
+        actual == expected || actual.trim_matches('"') == expected
+    }
+
+    impl tracing::Subscriber for CapturedDebugEvents {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::DEBUG
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::DEBUG {
+                return;
+            }
+            let mut visitor = DebugVisitor::default();
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(CapturedDebugEvent {
+                target: event.metadata().target().to_string(),
+                fields: visitor.fields,
+            });
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct DebugVisitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl Visit for DebugVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    #[test]
+    fn non_claude_renderers_debug_log_dropped_tools_frontmatter() {
+        let profile = profile_with_tools();
+        for kind in [AgentKind::OpenCode, AgentKind::Kiro, AgentKind::CodexAcp] {
+            let captured = CapturedDebugEvents::default();
+            let _serialize = crate::tracing_test_lock::guard();
+            tracing::subscriber::with_default(captured.clone(), || {
+                let _ = render_for_kind(&profile, kind).unwrap();
+            });
+            assert!(
+                captured.contains_tools_drop_for("code-reviewer", "Read, Edit"),
+                "expected tools drop debug log for {kind:?}; captured={:?}",
+                captured.0.lock().unwrap()
+            );
+        }
     }
 
     #[test]
