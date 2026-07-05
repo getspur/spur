@@ -1,6 +1,5 @@
 use serde_json::{json, Value};
 
-use crate::handlers::McpHandlerError;
 use crate::server::types::JsonRpcResponse;
 
 use super::McpCallbackServer;
@@ -60,60 +59,6 @@ impl McpCallbackServer {
     }
 }
 
-pub(crate) async fn code_resolve(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_resolve(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
-pub(crate) async fn code_search(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_search(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
-pub(crate) async fn code_file_symbols(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_file_symbols(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
-pub(crate) async fn code_symbol_info(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_symbol_info(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
-pub(crate) async fn code_read_symbol(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_read_symbol(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
-pub(crate) async fn code_callers(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_callers(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
-pub(crate) async fn code_callees(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_callees(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
-pub(crate) async fn code_subgraph(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_subgraph(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
-pub(crate) async fn code_symbol_history(args: &Value) -> Result<Value, McpHandlerError> {
-    spur_graph::mcp::code_symbol_history(args)
-        .await
-        .map_err(graph_handler_error)
-}
-
 async fn code_graph_response(
     id: Value,
     result: spur_graph::mcp::CodeGraphResult,
@@ -129,22 +74,6 @@ async fn code_graph_response(
                 None => JsonRpcResponse::error(id, response.code, response.message),
             }
         }
-    }
-}
-
-fn graph_handler_error(error: spur_graph::mcp::McpHandlerError) -> McpHandlerError {
-    match error {
-        spur_graph::mcp::McpHandlerError::InvalidParams(message) => {
-            McpHandlerError::InvalidParams(message)
-        }
-        spur_graph::mcp::McpHandlerError::NotFound(message) => McpHandlerError::NotFound(message),
-        spur_graph::mcp::McpHandlerError::Unauthorized(message) => {
-            McpHandlerError::Unauthorized(message)
-        }
-        spur_graph::mcp::McpHandlerError::UpstreamPm(message) => {
-            McpHandlerError::UpstreamPm(message)
-        }
-        spur_graph::mcp::McpHandlerError::Internal(message) => McpHandlerError::Internal(message),
     }
 }
 
