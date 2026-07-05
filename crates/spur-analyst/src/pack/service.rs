@@ -29,14 +29,15 @@ use crate::pack::{
     ExactGraphContext, KnowledgeIntent, SymbolImpactSummary, POPULAR_SINK_CALLERS_THRESHOLD,
 };
 
-use super::McpHandlerError;
+use crate::mcp::McpHandlerError;
 use crate::overlay::{
     open_worktree_overlay, overlay_rebuild_key_for_dirty_worktree,
     shared_overlay_session_coordinator, write_delta_for_session, OverlayMergeSession,
 };
 
-pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
-    let request = KnowledgeContextPackRequest::parse(args)?;
+pub(crate) async fn knowledge_context_pack(
+    request: KnowledgeContextPackRequest,
+) -> Result<Value, McpHandlerError> {
     let db_path = analyst_db_path()?;
     if !db_path.exists() {
         return Ok(unavailable_pack(&request, &db_path));
@@ -61,8 +62,9 @@ pub async fn knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerErr
     Ok(pack_query_result_with_exact_context(&request, query_result, exact_context).await)
 }
 
-pub async fn knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerError> {
-    let request = KnowledgeContextPackV2Request::parse(args)?;
+pub(crate) async fn knowledge_context_pack_2(
+    request: KnowledgeContextPackV2Request,
+) -> Result<Value, McpHandlerError> {
     let db_path = analyst_db_path()?;
     if !db_path.exists() {
         return Ok(unavailable_pack_v2(&request, &db_path));
@@ -374,6 +376,16 @@ mod tests {
         _temp_dir: tempfile::TempDir,
         repo: PathBuf,
         base_hash: String,
+    }
+
+    async fn run_knowledge_context_pack(args: &Value) -> Result<Value, McpHandlerError> {
+        let request = KnowledgeContextPackRequest::parse(args)?;
+        knowledge_context_pack(request).await
+    }
+
+    async fn run_knowledge_context_pack_2(args: &Value) -> Result<Value, McpHandlerError> {
+        let request = KnowledgeContextPackV2Request::parse(args)?;
+        knowledge_context_pack_2(request).await
     }
 
     #[test]
@@ -1832,7 +1844,7 @@ pub fn lexical_signal_anchor() {
         std::fs::create_dir_all(repo.join(".spur")).expect("create .spur");
 
         let result = spur_graph::mcp::with_worktree_root_for_request(repo.clone(), async {
-            knowledge_context_pack(&json!({ "query": "semantic search" })).await
+            run_knowledge_context_pack(&json!({ "query": "semantic search" })).await
         })
         .await
         .expect("structured unavailable response");
@@ -2000,7 +2012,7 @@ pub fn lexical_signal_anchor() {
         crate::db::connection::reset_analyst_connection_open_count_for_test(&db_path);
 
         let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
-            knowledge_context_pack(&json!({
+            run_knowledge_context_pack(&json!({
                 "query": "dispatch approval evidence",
                 "intent": "change",
                 "scope": "all",
@@ -2028,7 +2040,7 @@ pub fn lexical_signal_anchor() {
         crate::db::connection::reset_analyst_connection_open_count_for_test(&db_path);
 
         let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
-            knowledge_context_pack_2(&json!({
+            run_knowledge_context_pack_2(&json!({
                 "query": "dispatch approval evidence",
                 "intent": "review",
                 "scope": "all",
@@ -2186,7 +2198,7 @@ pub fn lexical_signal_anchor() {
         let happy = kcp2_overlay_fixture_repo(false);
         let happy_pack =
             spur_graph::mcp::with_worktree_root_for_request(happy.repo.clone(), async {
-                knowledge_context_pack_2(&json!({
+                run_knowledge_context_pack_2(&json!({
                     "query": "dispatch approval evidence",
                     "intent": "review",
                     "scope": "code",
@@ -2210,7 +2222,7 @@ pub fn lexical_signal_anchor() {
         let degraded = kcp2_overlay_fixture_repo(true);
         let degraded_pack =
             spur_graph::mcp::with_worktree_root_for_request(degraded.repo.clone(), async {
-                knowledge_context_pack_2(&json!({
+                run_knowledge_context_pack_2(&json!({
                     "query": "dispatch approval evidence",
                     "intent": "review",
                     "scope": "code",
@@ -2510,7 +2522,7 @@ pub fn lexical_signal_anchor() {
         let (_temp_dir, repo) = kcp2_fixture_repo(true);
 
         let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
-            knowledge_context_pack_2(&json!({
+            run_knowledge_context_pack_2(&json!({
                 "query": "dispatch approval evidence",
                 "intent": "review",
                 "scope": "all",
@@ -2583,7 +2595,7 @@ pub fn lexical_signal_anchor() {
         let (_temp_dir, repo) = kcp2_fixture_repo(false);
 
         let pack = spur_graph::mcp::with_worktree_root_for_request(repo, async {
-            knowledge_context_pack_2(&json!({
+            run_knowledge_context_pack_2(&json!({
                 "query": "dispatch approval evidence",
                 "intent": "review",
                 "scope": "all",

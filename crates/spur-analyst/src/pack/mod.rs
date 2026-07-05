@@ -5,6 +5,7 @@ mod impact;
 mod next_tools;
 mod request;
 mod response;
+pub(crate) mod service;
 mod staleness;
 
 pub(crate) use caveats::{caveat_value, push_graph_path_caveat, symbol_caveat_value};
