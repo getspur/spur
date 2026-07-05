@@ -4,6 +4,7 @@ pub mod api;
 pub(crate) mod db;
 pub mod embedding;
 pub mod mcp;
+pub(crate) mod overlay;
 pub(crate) mod pack;
 pub mod paths;
 pub mod search;
