@@ -1406,9 +1406,10 @@ async fn worker_code_search_freshness_uses_registered_worktree_root() {
     );
     assert!(candidate_entity_names(&body).contains(ROOT_SYMBOL));
     assert_eq!(
-        body["response_file_oids_match"], false,
-        "freshness must compare indexed file OIDs against the worker worktree, not the main cwd"
+        body["response_file_oids_match"], true,
+        "worker code search should refresh against the registered worker worktree, not the main cwd"
     );
+    assert_eq!(body["rebuild_status"], "fresh");
 }
 
 #[tokio::test]

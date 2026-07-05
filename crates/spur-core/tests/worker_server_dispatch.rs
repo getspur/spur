@@ -7,6 +7,7 @@
 //! unsupported).
 
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,6 +63,28 @@ impl Drop for CwdGuard {
 fn run_br(repo: &Path, args: &[&str]) {
     common::beads::run_br(repo, args)
         .unwrap_or_else(|err| panic!("test beads command {args:?} failed: {err}"));
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap_or_else(|error| panic!("run git {}: {error}", args.join(" ")));
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit_worker_fixture(repo: &Path) {
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["config", "user.email", "test@spur"]);
+    run_git(repo, &["config", "user.name", "SPUR Test"]);
+    run_git(repo, &["add", "."]);
+    run_git(repo, &["commit", "-m", "worker fixture"]);
 }
 
 async fn pm_service_fixture(repo: &Path) -> Arc<PmService> {
@@ -497,6 +520,52 @@ async fn code_graph_worker_tools_do_not_duplicate_structured_payload_as_text_con
         "worker code tools should not duplicate structured JSON into text content: {result:?}"
     );
     assert_eq!(result.is_error, Some(false));
+
+    server.shutdown(Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn code_symbol_search_refreshes_dirty_worker_worktree_for_new_symbol() {
+    let _cwd_lock = CWD_LOCK.lock().expect("cwd lock");
+    let (dir, server) = test_server_with_real_pm().await;
+    write_worker_graph_fixture(dir.path());
+    commit_worker_fixture(dir.path());
+    let source_path = dir.path().join("src/lib.rs");
+    let mut source = std::fs::read_to_string(&source_path).expect("read fixture source");
+    source.push_str("\npub fn worker_dirty_added_symbol() {}\n");
+    std::fs::write(&source_path, source).expect("write dirty fixture source");
+
+    server.register_delegation_worktree_root("d-dirty-search".into(), dir.path().to_path_buf());
+    let token = server.issue_token("d-dirty-search", Duration::from_secs(60));
+    let body = call_jsonrpc(
+        &server,
+        &token,
+        "tools/call",
+        json!({
+            "name": "code_symbol_search",
+            "arguments": {
+                "query": "worker_dirty_added_symbol",
+                "mode": "exact",
+                "limit": 20,
+            },
+        }),
+    )
+    .await;
+
+    assert!(
+        body.get("error").is_none(),
+        "worker code_symbol_search should succeed, got: {body}"
+    );
+    let candidates = body["result"]["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("candidates array present: {body}"));
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["entity_name"] == "worker_dirty_added_symbol"),
+        "dirty worker symbol should be visible through WorkerMcpServer: {body}"
+    );
+    assert_eq!(body["result"]["rebuild_status"], "fresh");
 
     server.shutdown(Duration::from_secs(5)).await;
 }
