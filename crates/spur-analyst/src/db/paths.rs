@@ -41,3 +41,19 @@ fn parent_spur_worktree_analyst_db(root: &Path) -> Option<PathBuf> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn db_path_selection_falls_back_to_parent_spur_db_for_worker_worktree() {
+        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+        let repo_spur = repo_dir.path().join(".spur");
+        let worker_dir = repo_spur.join("worktrees").join("worker-1");
+        std::fs::create_dir_all(&worker_dir).expect("create worker dir");
+        std::fs::write(repo_spur.join("analyst.duckdb"), b"db").expect("write repo analyst db");
+
+        let selected = super::select_analyst_db_path(&worker_dir);
+
+        assert_eq!(selected, repo_spur.join("analyst.duckdb"));
+    }
+}
