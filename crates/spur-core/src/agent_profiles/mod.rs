@@ -3,6 +3,7 @@
 //! act as defaults under D8 precedence (request -> profile -> agent default).
 
 use anyhow::{bail, Context, Result};
+use std::borrow::Cow;
 use std::path::Path;
 
 pub mod render;
@@ -20,7 +21,12 @@ pub struct AgentProfile {
 
 impl AgentProfile {
     pub fn parse(expected_name: &str, raw: &str) -> Result<Self> {
-        let rest = raw
+        let normalized = if raw.contains("\r\n") {
+            Cow::Owned(raw.replace("\r\n", "\n"))
+        } else {
+            Cow::Borrowed(raw)
+        };
+        let rest = normalized
             .strip_prefix("---\n")
             .context("agent profile missing YAML frontmatter fence")?;
         let idx = rest
@@ -109,6 +115,16 @@ mod tests {
         let raw = "---\nname: minimal\ndescription: d\n---\nbody\n";
         let p = AgentProfile::parse("minimal", raw).unwrap();
         assert!(p.model.is_none() && p.effort.is_none() && p.tools.is_none());
+    }
+
+    #[test]
+    fn parses_crlf_line_endings() {
+        let raw = "---\r\nname: windows\r\ndescription: d\r\n---\r\nbody\r\n";
+        let p = AgentProfile::parse("windows", raw).unwrap();
+        assert_eq!(p.name, "windows");
+        assert_eq!(p.description, "d");
+        assert_eq!(p.body, "body\n");
+        assert_eq!(p.raw, raw);
     }
 
     #[test]

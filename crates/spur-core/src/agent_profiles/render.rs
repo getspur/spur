@@ -43,14 +43,16 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
                 "description": profile.description,
                 "prompt": profile.body,
             });
-            let unmarked_contents =
-                serde_json::to_string_pretty(&unmarked).expect("static profile json");
+            let unmarked_contents = serde_json::to_string_pretty(&unmarked)
+                .unwrap_or_else(|error| unreachable!("serde_json serialization failed: {error}"));
             let marker = marker_for(&profile.name, unmarked_contents.as_bytes());
             let mut marked = unmarked;
             marked["x-spur-managed"] = serde_json::Value::String(marker.render_line());
             Some(RenderedProfile {
                 rel_path: format!(".kiro/agents/{}.json", profile.name),
-                contents: serde_json::to_string_pretty(&marked).expect("static profile json"),
+                contents: serde_json::to_string_pretty(&marked).unwrap_or_else(|error| {
+                    unreachable!("serde_json serialization failed: {error}")
+                }),
                 unmarked_contents,
                 marker_sha256: marker.sha256,
             })
@@ -68,7 +70,7 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
                 value.insert("model_reasoning_effort".into(), effort.clone().into());
             }
             let unmarked_contents = toml::to_string_pretty(&toml::Value::Table(value.clone()))
-                .expect("static profile toml");
+                .unwrap_or_else(|error| unreachable!("toml serialization failed: {error}"));
             let marker = marker_for(&profile.name, unmarked_contents.as_bytes());
             let mut spur = toml::value::Table::new();
             spur.insert("managed".into(), marker.render_line().into());
@@ -77,7 +79,7 @@ pub fn render_for_kind(profile: &AgentProfile, kind: AgentKind) -> Option<Render
             Some(RenderedProfile {
                 rel_path: format!(".codex/agents/{}.toml", profile.name),
                 contents: toml::to_string_pretty(&toml::Value::Table(value))
-                    .expect("static profile toml"),
+                    .unwrap_or_else(|error| unreachable!("toml serialization failed: {error}")),
                 unmarked_contents,
                 marker_sha256: marker.sha256,
             })
