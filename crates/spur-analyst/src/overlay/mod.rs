@@ -156,19 +156,7 @@ impl OverlaySessionCoordinator {
         }
 
         let mode = self.next_build_mode(&key);
-        let cell = {
-            let mut cells = self.cells.lock().await;
-            cells.retain(|_, cell| cell.strong_count() > 0);
-
-            if let Some(cell) = cells.get(&key).and_then(Weak::upgrade) {
-                cell
-            } else {
-                let cell = Arc::new(OverlaySessionCell::new());
-                cells.insert(key.clone(), Arc::downgrade(&cell));
-                cell
-            }
-        };
-
+        let cell = self.session_cell_for_key(&key).await;
         let build_result: Result<&Arc<OverlayMergeSession>> = cell
             .get_or_try_init(|| async {
                 let delta_dir = build(mode).await?;
@@ -180,6 +168,29 @@ impl OverlaySessionCoordinator {
             })
             .await;
 
+        self.session_from_build_result(key, mode, base_db_path, algo_as_of, build_result)
+    }
+
+    async fn session_cell_for_key(&self, key: &OverlaySessionKey) -> Arc<OverlaySessionCell> {
+        let mut cells = self.cells.lock().await;
+        cells.retain(|_, cell| cell.strong_count() > 0);
+
+        if let Some(cell) = cells.get(key).and_then(Weak::upgrade) {
+            return cell;
+        }
+        let cell = Arc::new(OverlaySessionCell::new());
+        cells.insert(key.clone(), Arc::downgrade(&cell));
+        cell
+    }
+
+    fn session_from_build_result(
+        &self,
+        key: OverlaySessionKey,
+        mode: OverlayBuildMode,
+        base_db_path: PathBuf,
+        algo_as_of: Option<String>,
+        build_result: Result<&Arc<OverlayMergeSession>>,
+    ) -> Arc<OverlayMergeSession> {
         match build_result {
             Ok(session) => {
                 self.reset_delta_failures(&key);

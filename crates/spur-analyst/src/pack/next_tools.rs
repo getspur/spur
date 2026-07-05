@@ -20,49 +20,71 @@ pub(crate) fn recommended_next_tools(
         .find_map(|evidence| evidence.get("stable_symbol_id").and_then(Value::as_str));
 
     match (intent, top_symbol) {
-        (KnowledgeIntent::Change, Some(selector)) => vec![
-            json!({ "tool": "code_callers", "selector": selector, "reason": "Find direct change impact before editing." }),
-            json!({ "tool": "code_callees", "selector": selector, "reason": "Trace direct dependencies for the selected symbol." }),
-            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body." }),
-        ],
-        (KnowledgeIntent::Debug, Some(selector)) => vec![
-            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body before debugging." }),
-            json!({ "tool": "code_symbol_history", "selector": selector, "reason": "Inspect recent edits that may explain the failure." }),
-            json!({ "tool": "code_subgraph", "selector": selector, "radius": 2, "reason": "Map nearby dependencies and callers around the failing symbol." }),
-        ],
-        (KnowledgeIntent::Review, Some(selector)) => vec![
-            json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body for review." }),
-            json!({ "tool": "code_callers", "selector": selector, "reason": "Verify behavioral impact from direct callers." }),
-        ],
-        (KnowledgeIntent::Plan, Some(_)) => {
-            let mut tools = Vec::new();
-            if let Some(root) = top_doc_root {
-                tools.push(json!({
-                    "tool": "doc_navigate",
-                    "root": root,
-                    "reason": "Start planning from the most relevant documentation evidence."
-                }));
-            }
-            if let Some(file) = top_file {
-                tools.push(json!({
-                    "tool": "code_file_symbols",
-                    "file": file,
-                    "reason": "Survey symbols in the relevant file before planning edits."
-                }));
-            }
-            tools
-        }
-        (KnowledgeIntent::Explain, Some(selector)) => vec![json!({
-            "tool": "code_read_symbol",
-            "selector": selector,
-            "reason": "Read exact current symbol body for grounded follow-up."
-        })],
-        _ => vec![json!({
-            "tool": "code_semantic_search",
-            "query": "",
-            "reason": "No symbol evidence was available; broaden retrieval with semantic search."
-        })],
+        (KnowledgeIntent::Change, Some(selector)) => change_next_tools(selector),
+        (KnowledgeIntent::Debug, Some(selector)) => debug_next_tools(selector),
+        (KnowledgeIntent::Review, Some(selector)) => review_next_tools(selector),
+        (KnowledgeIntent::Plan, Some(_)) => plan_next_tools(top_doc_root, top_file),
+        (KnowledgeIntent::Explain, Some(selector)) => explain_next_tools(selector),
+        _ => fallback_next_tools(),
     }
+}
+
+fn change_next_tools(selector: &str) -> Vec<Value> {
+    vec![
+        json!({ "tool": "code_callers", "selector": selector, "reason": "Find direct change impact before editing." }),
+        json!({ "tool": "code_callees", "selector": selector, "reason": "Trace direct dependencies for the selected symbol." }),
+        json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body." }),
+    ]
+}
+
+fn debug_next_tools(selector: &str) -> Vec<Value> {
+    vec![
+        json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body before debugging." }),
+        json!({ "tool": "code_symbol_history", "selector": selector, "reason": "Inspect recent edits that may explain the failure." }),
+        json!({ "tool": "code_subgraph", "selector": selector, "radius": 2, "reason": "Map nearby dependencies and callers around the failing symbol." }),
+    ]
+}
+
+fn review_next_tools(selector: &str) -> Vec<Value> {
+    vec![
+        json!({ "tool": "code_read_symbol", "selector": selector, "reason": "Read exact current symbol body for review." }),
+        json!({ "tool": "code_callers", "selector": selector, "reason": "Verify behavioral impact from direct callers." }),
+    ]
+}
+
+fn plan_next_tools(top_doc_root: Option<&str>, top_file: Option<&str>) -> Vec<Value> {
+    let mut tools = Vec::new();
+    if let Some(root) = top_doc_root {
+        tools.push(json!({
+            "tool": "doc_navigate",
+            "root": root,
+            "reason": "Start planning from the most relevant documentation evidence."
+        }));
+    }
+    if let Some(file) = top_file {
+        tools.push(json!({
+            "tool": "code_file_symbols",
+            "file": file,
+            "reason": "Survey symbols in the relevant file before planning edits."
+        }));
+    }
+    tools
+}
+
+fn explain_next_tools(selector: &str) -> Vec<Value> {
+    vec![json!({
+        "tool": "code_read_symbol",
+        "selector": selector,
+        "reason": "Read exact current symbol body for grounded follow-up."
+    })]
+}
+
+fn fallback_next_tools() -> Vec<Value> {
+    vec![json!({
+        "tool": "code_semantic_search",
+        "query": "",
+        "reason": "No symbol evidence was available; broaden retrieval with semantic search."
+    })]
 }
 
 pub(crate) fn code_next_tools(intent: KnowledgeIntent) -> Vec<Value> {
