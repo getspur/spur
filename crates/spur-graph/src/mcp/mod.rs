@@ -898,7 +898,7 @@ async fn code_search_response(
         .search_response_file_set(&search)
         .map_err(|error| CodeGraphError::from(error).with_metadata_source(source.clone()))?;
     let mut analysis =
-        GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files)).await;
+        GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files), None).await;
 
     if let Some(rebuild_candidate) = analysis.rebuild_candidate.take() {
         match overlay_response_for_backend(
@@ -1181,7 +1181,8 @@ async fn code_graph_backend_response_with_refresh(
                 .response_file_set_from_body(&body)
                 .map_err(CodeGraphError::from)?;
             let analysis =
-                GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files)).await;
+                GraphResponseMetadata::analyze_source_inner(source.clone(), Some(&files), None)
+                    .await;
             (body, analysis)
         }
         Err(mut original_error) => {
@@ -1193,7 +1194,13 @@ async fn code_graph_backend_response_with_refresh(
             // response still deserves a chance against the overlay before we
             // give up -- otherwise a brand-new or renamed symbol that only
             // exists in an uncommitted edit looks permanently missing.
-            let analysis = GraphResponseMetadata::analyze_source_inner(source.clone(), None).await;
+            let indexed_files = backend.base_file_set().ok();
+            let analysis = GraphResponseMetadata::analyze_source_inner(
+                source.clone(),
+                None,
+                indexed_files.as_deref(),
+            )
+            .await;
             let Some(rebuild_candidate) = analysis.rebuild_candidate else {
                 return Err(original_error);
             };
@@ -1230,7 +1237,13 @@ async fn code_graph_backend_response_with_refresh(
         .await
         {
             RefreshOutcome::Fresh(fresh_body) => return Ok(fresh_body),
-            RefreshOutcome::Errored(fresh_error) => return Err(fresh_error),
+            RefreshOutcome::Errored(fresh_error) => {
+                tracing::debug!(
+                    target: "spur_graph::mcp",
+                    error = ?fresh_error,
+                    "code graph refresh failed after a successful stale response; serving stale response"
+                );
+            }
             RefreshOutcome::NotRefreshed(status) => {
                 analysis.metadata = analysis.metadata.with_rebuild_status(status);
             }
@@ -1261,7 +1274,7 @@ async fn overlay_response_for_backend(
         let fresh_files = response_file_set_from_client(&overlay, &fresh_body)?;
         (fresh_body, fresh_files)
     };
-    GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files))
+    GraphResponseMetadata::analyze_source_inner(source, Some(&fresh_files), None)
         .await
         .metadata
         .with_rebuild_status(RebuildStatus::Fresh)
@@ -2685,14 +2698,19 @@ impl GraphResponseMetadata {
         artifact: &GraphIndexArtifact,
         files: &[(String, String)],
     ) -> GraphResponseAnalysis {
-        Self::analyze_source_inner(GraphMetadataSource::from_artifact(artifact), Some(files)).await
+        Self::analyze_source_inner(
+            GraphMetadataSource::from_artifact(artifact),
+            Some(files),
+            None,
+        )
+        .await
     }
 
     async fn from_source_inner(
         source: GraphMetadataSource,
         response_files: Option<&[(String, String)]>,
     ) -> Self {
-        Self::analyze_source_inner(source, response_files)
+        Self::analyze_source_inner(source, response_files, None)
             .await
             .metadata
     }
@@ -2700,6 +2718,7 @@ impl GraphResponseMetadata {
     async fn analyze_source_inner(
         source: GraphMetadataSource,
         response_files: Option<&[(String, String)]>,
+        rebuild_candidate_files: Option<&[(String, String)]>,
     ) -> GraphResponseAnalysis {
         let worktree = current_worktree_root();
         let pointer = worktree
@@ -2751,11 +2770,30 @@ impl GraphResponseMetadata {
             }
             _ => BTreeMap::new(),
         };
+        let rebuild_dirty_oids = match (
+            rebuild_candidate_files,
+            worktree.as_deref(),
+            worktree_head_oid.as_deref(),
+        ) {
+            (Some(files), Some(worktree), Some(worktree_head_oid)) => {
+                let files = files
+                    .iter()
+                    .map(|(rel_path, indexed_oid)| (rel_path.as_str(), indexed_oid.as_str()))
+                    .collect::<Vec<_>>();
+                dirty_indexed_file_oids_for_files(
+                    worktree,
+                    worktree_head_oid,
+                    &source.graph_content_hash,
+                    &files,
+                )
+            }
+            _ => dirty_oids.clone(),
+        };
         let rebuild_candidate = match (worktree.as_ref(), worktree_head_oid.as_deref()) {
             (Some(worktree), Some(head_oid))
-                if !dirty_oids.is_empty() || !supplemental_oids.is_empty() =>
+                if !rebuild_dirty_oids.is_empty() || !supplemental_oids.is_empty() =>
             {
-                let mut key_oids = dirty_oids.clone();
+                let mut key_oids = rebuild_dirty_oids;
                 key_oids.extend(supplemental_oids);
                 Some(RebuildCandidate {
                     worktree: worktree.clone(),
@@ -2929,11 +2967,25 @@ fn dirty_indexed_file_oids(
         .iter()
         .map(|entry| (entry.path.as_str(), entry.content_oid.as_str()))
         .collect::<Vec<_>>();
-    file_oid_cache::aggregate_file_oid_report(
+    dirty_indexed_file_oids_for_files(
         worktree,
         worktree_head_oid,
         &artifact.graph_content_hash,
         &files,
+    )
+}
+
+fn dirty_indexed_file_oids_for_files(
+    worktree: &Path,
+    worktree_head_oid: &str,
+    graph_content_hash: &str,
+    files: &[(&str, &str)],
+) -> BTreeMap<PathBuf, [u8; 20]> {
+    file_oid_cache::aggregate_file_oid_report(
+        worktree,
+        worktree_head_oid,
+        graph_content_hash,
+        files,
     )
     .dirty_oids
 }
@@ -6207,10 +6259,140 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn code_read_symbol_preserves_stale_success_when_refresh_loses_symbol() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn stable_symbol() -> bool {\n    true\n}\n",
+        )
+        .expect("write stable symbol");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index stable symbol"]);
+
+        let facts = build_facts(root, None).expect("extract stable symbol").0;
+        let artifact = artifact_from_facts(&facts, root).expect("stable symbol artifact");
+        let stable_symbol_id = artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.entity_name == "stable_symbol")
+            .expect("stable_symbol in artifact")
+            .stable_symbol_id
+            .clone();
+        write_current_artifact(root, &artifact);
+
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub const REPLACEMENT_SYMBOL: bool = false;\n",
+        )
+        .expect("replace tracked file content");
+
+        let response = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_read_symbol_response(
+                    &json!({
+                        "stable_symbol_id": stable_symbol_id,
+                    }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await;
+
+        let body = response.expect("stale read should preserve the successful indexed-source body");
+        assert_eq!(body["stale"], Value::Bool(true));
+        assert!(
+            body["source"]
+                .as_str()
+                .expect("source string")
+                .contains("pub fn stable_symbol() -> bool"),
+            "stale response should serve the indexed source: {body:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_source_inner_builds_rebuild_candidate_for_dirty_indexed_file_without_response_files(
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write alpha");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+
+        let facts = build_facts(root, None).expect("extract alpha").0;
+        let artifact = artifact_from_facts(&facts, root).expect("alpha artifact");
+        write_current_artifact(root, &artifact);
+
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn alpha() { let _edited = true; }\n",
+        )
+        .expect("edit tracked file");
+
+        let indexed_files = all_indexed_file_set(&artifact);
+        let analysis = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                GraphResponseMetadata::analyze_source_inner(
+                    GraphMetadataSource::from_artifact(&artifact),
+                    None,
+                    Some(&indexed_files),
+                )
+                .await
+            })
+            .await;
+
+        assert_eq!(analysis.metadata.worktree_dirty, Some(true));
+        assert!(
+            analysis.rebuild_candidate.is_some(),
+            "plain tracked-file edits must trigger retry candidate computation without response files"
+        );
+    }
+
     fn rebuild_candidate(root: &Path, key: RebuildKey) -> RebuildCandidate {
         RebuildCandidate {
             worktree: root.to_path_buf(),
             key,
         }
+    }
+
+    fn init_git_repo(root: &Path) {
+        run_git_test(root, &["init", "-q", "-b", "main"]);
+        run_git_test(
+            root,
+            &["config", "user.email", "spur-graph@example.invalid"],
+        );
+        run_git_test(root, &["config", "user.name", "Spur Graph Test"]);
+    }
+
+    fn write_current_artifact(root: &Path, artifact: &GraphIndexArtifact) {
+        let artifact_base = root.join(".spur/graph");
+        let written = crate::write_artifact_parquet(
+            artifact,
+            &artifact_base,
+            crate::WriteOptions::default(),
+            Vec::new(),
+        )
+        .expect("write worktree graph artifact");
+        crate::write_current_pointer(root, &written).expect("write CURRENT pointer");
+    }
+
+    fn run_git_test(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run git {args:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
