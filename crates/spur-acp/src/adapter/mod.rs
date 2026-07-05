@@ -220,6 +220,12 @@ pub enum SessionEventStandardizer {
 }
 
 impl SessionEventStandardizer {
+    /// Selects the standardizer for empirically discovered wire-protocol quirks.
+    ///
+    /// AgentKind dispatch stays exhaustive when the value is known up front, but
+    /// this wildcard is intentional: Kimi and Gemini are listed because their
+    /// session notifications needed reverse-engineered standardization, and a
+    /// new agent's needs are knowable only after observing its wire traffic.
     pub fn for_agent(kind: AgentKind) -> Self {
         match kind {
             AgentKind::Kimi => Self::Kimi(kimi::SessionStandardizer::default()),
