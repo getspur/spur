@@ -7,6 +7,8 @@ pub enum SelectStrategy {
     ConfigOption { id: String },
     /// `session/set_mode` with modeId = profile name.
     SessionMode,
+    /// Append this CLI flag and the profile name before spawning the agent process.
+    SpawnArg { flag: String },
     /// No selection surface.
     None,
 }
@@ -30,7 +32,9 @@ impl ProfileStrategy {
                 materialize: true,
             },
             AgentKind::Kiro => Self {
-                select: SelectStrategy::SessionMode,
+                select: SelectStrategy::SpawnArg {
+                    flag: "--agent".into(),
+                },
                 materialize: true,
             },
             AgentKind::CodexAcp | AgentKind::ClaudeStreamJson => Self {
@@ -65,6 +69,11 @@ fn parse_select_strategy(raw: &str) -> Option<SelectStrategy> {
     if let Some(id) = raw.strip_prefix("config_option:") {
         if !id.is_empty() {
             return Some(SelectStrategy::ConfigOption { id: id.into() });
+        }
+    }
+    if let Some(flag) = raw.strip_prefix("spawn_arg:") {
+        if !flag.is_empty() {
+            return Some(SelectStrategy::SpawnArg { flag: flag.into() });
         }
     }
     match raw {
