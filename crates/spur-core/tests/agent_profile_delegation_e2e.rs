@@ -168,10 +168,10 @@ async fn claude_profile_materializes_selects_before_prompt_and_stays_out_of_diff
         .worktree_path
         .join(".claude/agents/code-reviewer.md");
     assert!(rendered.exists(), "rendered claude profile should exist");
-    assert_eq!(
-        std::fs::read_to_string(&rendered).expect("rendered profile readable"),
-        PROFILE
-    );
+    let rendered_profile = std::fs::read_to_string(&rendered).expect("rendered profile readable");
+    assert!(rendered_profile.starts_with(PROFILE));
+    assert!(rendered_profile
+        .contains("<!-- SPUR-MANAGED v=1 skill=agent-profile:code-reviewer sha256="));
     assert_eq!(
         run_git(&outcome.worktree_path, &["status", "--porcelain"]),
         "",

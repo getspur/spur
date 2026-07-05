@@ -392,18 +392,48 @@ async fn materialize_profile(
     };
 
     let target = worktree_path.join(&rendered.rel_path);
-    let ours = worktrees
-        .worktree_excluded_paths(worktree_path)
-        .await
-        .iter()
-        .any(|path| path == &rendered.rel_path);
-    if target.exists() && !ours {
-        tracing::warn!(
-            target: "spur::worker::profile",
-            path = %rendered.rel_path,
-            "committed agent file exists; select-only against it"
-        );
-        return;
+    if target.exists() {
+        let existing = match std::fs::read_to_string(&target) {
+            Ok(existing) => existing,
+            Err(error) => {
+                tracing::warn!(
+                    target: "spur::worker::profile",
+                    path = %rendered.rel_path,
+                    error = %error,
+                    "profile ownership check failed; select-only"
+                );
+                return;
+            }
+        };
+        match crate::agent_profiles::render::classify_existing(&rendered, &existing) {
+            Ok(crate::agent_profiles::render::ExistingProfile::Unchanged) => return,
+            Ok(crate::agent_profiles::render::ExistingProfile::ManagedDifferent) => {}
+            Ok(crate::agent_profiles::render::ExistingProfile::NoMarker) => {
+                tracing::warn!(
+                    target: "spur::worker::profile",
+                    path = %rendered.rel_path,
+                    "committed agent file exists; select-only against it"
+                );
+                return;
+            }
+            Ok(crate::agent_profiles::render::ExistingProfile::Edited) => {
+                tracing::warn!(
+                    target: "spur::worker::profile",
+                    path = %rendered.rel_path,
+                    "managed agent file was edited; select-only"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "spur::worker::profile",
+                    path = %rendered.rel_path,
+                    error = %error,
+                    "profile ownership check failed; select-only"
+                );
+                return;
+            }
+        }
     }
 
     if let Some(parent) = target.parent() {
@@ -2619,6 +2649,48 @@ mod profile_override_tests {
                 OverrideCall::Prompt,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn materialization_rewrites_existing_managed_profile() {
+        let repo = setup_repo_with_committed_agent();
+        let worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let worktree = repo.path();
+        let strategy =
+            spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp);
+        let first = managed_profile();
+        let second = crate::agent_profiles::AgentProfile::parse(
+            "code-reviewer",
+            "---\nname: code-reviewer\ndescription: Reviews diffs\n---\nupdated managed persona\n",
+        )
+        .unwrap();
+        let target = worktree.join(".claude/agents/code-reviewer.md");
+
+        std::fs::remove_file(&target).expect("remove committed fixture");
+        materialize_profile(
+            &worktrees,
+            worktree,
+            spur_acp::types::AgentKind::ClaudeCodeAcp,
+            &strategy,
+            &first,
+        )
+        .await;
+        let first_contents = std::fs::read_to_string(&target).expect("first managed profile");
+
+        materialize_profile(
+            &worktrees,
+            worktree,
+            spur_acp::types::AgentKind::ClaudeCodeAcp,
+            &strategy,
+            &second,
+        )
+        .await;
+
+        let second_contents = std::fs::read_to_string(&target).expect("second managed profile");
+        assert_ne!(second_contents, first_contents);
+        assert!(second_contents.contains("updated managed persona"));
+        assert!(second_contents
+            .contains("<!-- SPUR-MANAGED v=1 skill=agent-profile:code-reviewer sha256="));
     }
 }
 
