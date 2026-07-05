@@ -1,8 +1,10 @@
 //! Analyst-owned MCP tools.
 
-mod doc_navigate;
 mod knowledge_context;
 mod query;
+mod tools {
+    pub(crate) mod doc_navigate;
+}
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -12,9 +14,9 @@ use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 
 pub use crate::embedding::warm_embed_model;
 pub use crate::overlay::open_worktree_overlay;
-pub use doc_navigate::doc_navigate;
 pub use knowledge_context::{knowledge_context_pack, knowledge_context_pack_2};
 pub use query::query;
+pub use tools::doc_navigate::doc_navigate;
 
 /// Metadata for a single analyst-owned MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]

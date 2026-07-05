@@ -2,6 +2,7 @@
 
 pub mod api;
 pub(crate) mod db;
+pub(crate) mod doc_nav;
 pub mod embedding;
 pub mod mcp;
 pub(crate) mod overlay;
