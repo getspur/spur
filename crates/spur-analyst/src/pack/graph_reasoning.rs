@@ -138,11 +138,7 @@ pub(crate) fn graph_reasoning_sections(
 
     if code_symbol_ids.is_empty() {
         if request.graph_reasoning.paths || wants_symbol_enrichment {
-            sections.caveats.push(caveat_value(
-                "graph_reasoning_no_code_candidates",
-                "graph reasoning sections require grounded code candidates",
-                None,
-            ));
+            push_no_code_candidates_caveat(&mut sections);
         }
         return sections;
     }
@@ -182,11 +178,7 @@ fn graph_reasoning_sections_with_conn(
 
     if code_symbol_ids.is_empty() {
         if request.graph_reasoning.paths || wants_symbol_enrichment {
-            sections.caveats.push(caveat_value(
-                "graph_reasoning_no_code_candidates",
-                "graph reasoning sections require grounded code candidates",
-                None,
-            ));
+            push_no_code_candidates_caveat(&mut sections);
         }
         return sections;
     }
@@ -196,29 +188,45 @@ fn graph_reasoning_sections_with_conn(
     }
 
     if wants_symbol_enrichment {
-        let symbol_enrichment_error =
-            match query_symbol_risk_community_with_conn(conn, db_path, &code_symbol_ids) {
-                Ok(result) => {
-                    apply_symbol_enrichment_result(
-                        request,
-                        wants_communities,
-                        &mut sections,
-                        result,
-                    );
-                    None
-                }
-                Err(error) => Some(error),
-            };
-        if let Some(error) = symbol_enrichment_error {
-            sections.caveats.push(caveat_value(
-                "symbol_enrichment_unavailable",
-                format!("symbol graph enrichment unavailable: {error:#}"),
-                None,
-            ));
-        }
+        apply_symbol_enrichment_with_conn(
+            conn,
+            db_path,
+            request,
+            wants_communities,
+            &code_symbol_ids,
+            &mut sections,
+        );
     }
 
     sections
+}
+
+fn push_no_code_candidates_caveat(sections: &mut GraphReasoningSections) {
+    sections.caveats.push(caveat_value(
+        "graph_reasoning_no_code_candidates",
+        "graph reasoning sections require grounded code candidates",
+        None,
+    ));
+}
+
+fn apply_symbol_enrichment_with_conn(
+    conn: &duckdb::Connection,
+    db_path: &Path,
+    request: &KnowledgeContextPackV2Request,
+    wants_communities: bool,
+    code_symbol_ids: &[String],
+    sections: &mut GraphReasoningSections,
+) {
+    match query_symbol_risk_community_with_conn(conn, db_path, code_symbol_ids) {
+        Ok(result) => {
+            apply_symbol_enrichment_result(request, wants_communities, sections, result);
+        }
+        Err(error) => sections.caveats.push(caveat_value(
+            "symbol_enrichment_unavailable",
+            format!("symbol graph enrichment unavailable: {error:#}"),
+            None,
+        )),
+    }
 }
 
 fn apply_symbol_enrichment_result(
@@ -361,38 +369,58 @@ fn collect_graph_paths_with_query<F>(
             },
         ) {
             Ok(path_result) => {
-                if let Some(caveat) = path_result.caveat.as_deref() {
-                    push_graph_path_caveat(&mut sections.caveats, caveat, source);
-                }
-                sections.graph_paths.push(json!({
-                    "source_stable_id": source,
-                    "target_stable_id": target,
-                    "graph_content_hash": path_result.graph_content_hash,
-                    "max_hops": path_result.max_hops,
-                    "max_paths": path_result.max_paths,
-                    "engine": path_result.engine,
-                    "status": path_result.status,
-                    "caveat": path_result.caveat,
-                    "rows": path_result.rows,
-                }));
+                push_graph_path_result(sections, source, &target, path_result);
             }
             Err(error) => {
-                let caveat = format!("context path search unavailable: {error:#}");
-                push_graph_path_caveat(&mut sections.caveats, caveat.clone(), source);
-                sections.graph_paths.push(json!({
-                    "source_stable_id": source,
-                    "target_stable_id": target,
-                    "graph_content_hash": null,
-                    "max_hops": request.graph_reasoning.max_path_hops,
-                    "max_paths": budget.per_target_max_paths,
-                    "engine": "unavailable",
-                    "status": "unavailable",
-                    "caveat": caveat,
-                    "rows": [],
-                }));
+                push_unavailable_graph_path(sections, request, budget, source, &target, error);
             }
         }
     }
+}
+
+fn push_graph_path_result(
+    sections: &mut GraphReasoningSections,
+    source: &str,
+    target: &str,
+    path_result: KnowledgePathResult,
+) {
+    if let Some(caveat) = path_result.caveat.as_deref() {
+        push_graph_path_caveat(&mut sections.caveats, caveat, source);
+    }
+    sections.graph_paths.push(json!({
+        "source_stable_id": source,
+        "target_stable_id": target,
+        "graph_content_hash": path_result.graph_content_hash,
+        "max_hops": path_result.max_hops,
+        "max_paths": path_result.max_paths,
+        "engine": path_result.engine,
+        "status": path_result.status,
+        "caveat": path_result.caveat,
+        "rows": path_result.rows,
+    }));
+}
+
+fn push_unavailable_graph_path(
+    sections: &mut GraphReasoningSections,
+    request: &KnowledgeContextPackV2Request,
+    budget: GraphPathBudgetPlan,
+    source: &str,
+    target: &str,
+    error: anyhow::Error,
+) {
+    let caveat = format!("context path search unavailable: {error:#}");
+    push_graph_path_caveat(&mut sections.caveats, caveat.clone(), source);
+    sections.graph_paths.push(json!({
+        "source_stable_id": source,
+        "target_stable_id": target,
+        "graph_content_hash": null,
+        "max_hops": request.graph_reasoning.max_path_hops,
+        "max_paths": budget.per_target_max_paths,
+        "engine": "unavailable",
+        "status": "unavailable",
+        "caveat": caveat,
+        "rows": [],
+    }));
 }
 
 fn resolve_anchor_targets(
