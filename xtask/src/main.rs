@@ -53,10 +53,14 @@ fn print_help() {
     eprintln!("  --force    with --remote on a non-Linux host, overwrite $CARGO_HOME/bin anyway");
     eprintln!();
     eprintln!("  coverage [--base <ref>] [--floor <pct>] [--diff-floor <pct>]");
-    eprintln!("           [--output <path>] [--dry-run]");
+    eprintln!("           [--output <path>] [--dry-run] [--measure-only | --gate-only]");
     eprintln!("      measure workspace + diff-vs-<ref> line coverage via cargo-llvm-cov");
     eprintln!("      and fail if either drops below its floor (default: base=main,");
     eprintln!("      floor=75, diff-floor=85, output=coverage/lcov.info)");
+    eprintln!("      --measure-only: run cargo-llvm-cov, write the lcov file, skip the git");
+    eprintln!("        diff gate (safe on the remote build VM, which has no git history)");
+    eprintln!("      --gate-only: read an already-written lcov file and run the git diff");
+    eprintln!("        gate, skip cargo-llvm-cov (must run locally, needs git history)");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,61 +182,77 @@ fn coverage_cmd(extra: Vec<String>) -> ExitCode {
 
     if options.dry_run {
         eprintln!("==> dry run — no commands executed");
-        eprintln!(
-            "would ensure installed: cargo {}",
-            command_args(&coverage::install_llvm_cov_command()).join(" ")
-        );
-        eprintln!(
-            "would run: cargo {}",
-            command_args(&coverage::llvm_cov_measure_command(
-                &workspace_root,
-                &options.output_path
-            ))
-            .join(" ")
-        );
-        eprintln!(
-            "would run: git {}",
-            command_args(&coverage::git_diff_command(&workspace_root, &options.base)).join(" ")
-        );
-        eprintln!(
-            "floor={:.2}% diff-floor={:.2}% base={}",
-            options.floor, options.diff_floor, options.base
-        );
+        if !options.gate_only {
+            eprintln!(
+                "would ensure installed: cargo {}",
+                command_args(&coverage::install_llvm_cov_command()).join(" ")
+            );
+            eprintln!(
+                "would run: cargo {}",
+                command_args(&coverage::llvm_cov_measure_command(
+                    &workspace_root,
+                    &options.output_path
+                ))
+                .join(" ")
+            );
+        }
+        if !options.measure_only {
+            eprintln!(
+                "would run: git {}",
+                command_args(&coverage::git_diff_command(&workspace_root, &options.base)).join(" ")
+            );
+            eprintln!(
+                "floor={:.2}% diff-floor={:.2}% base={}",
+                options.floor, options.diff_floor, options.base
+            );
+        }
         return ExitCode::SUCCESS;
     }
 
-    let mut version_check = coverage::llvm_cov_version_command();
-    version_check
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let installed = version_check
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !installed {
-        if let Err(err) = run_status(
-            &mut coverage::install_llvm_cov_command(),
-            "cargo install cargo-llvm-cov",
-        ) {
+    let lcov_path = workspace_root.join(&options.output_path);
+
+    if !options.gate_only {
+        let mut version_check = coverage::llvm_cov_version_command();
+        version_check
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let installed = version_check
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !installed {
+            if let Err(err) = run_status(
+                &mut coverage::install_llvm_cov_command(),
+                "cargo install cargo-llvm-cov",
+            ) {
+                eprintln!("xtask: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+
+        if let Some(parent) = lcov_path.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                eprintln!("xtask: failed to create {}: {err}", parent.display());
+                return ExitCode::FAILURE;
+            }
+        }
+
+        let mut measure = coverage::llvm_cov_measure_command(&workspace_root, &options.output_path);
+        if let Err(err) = run_status(&mut measure, "cargo llvm-cov --workspace --lib --lcov") {
             eprintln!("xtask: {err}");
             return ExitCode::FAILURE;
         }
     }
 
-    let lcov_path = workspace_root.join(&options.output_path);
-    if let Some(parent) = lcov_path.parent() {
-        if let Err(err) = fs::create_dir_all(parent) {
-            eprintln!("xtask: failed to create {}: {err}", parent.display());
-            return ExitCode::FAILURE;
-        }
+    if options.measure_only {
+        eprintln!("coverage measured: {}", lcov_path.display());
+        return ExitCode::SUCCESS;
     }
 
-    let mut measure = coverage::llvm_cov_measure_command(&workspace_root, &options.output_path);
-    if let Err(err) = run_status(&mut measure, "cargo llvm-cov --workspace --lib --lcov") {
-        eprintln!("xtask: {err}");
-        return ExitCode::FAILURE;
-    }
-
+    // The remote build syncs git-tracked file *contents* only (via `git
+    // ls-files`, not a real clone), so there's no branch history on the VM to
+    // diff against — this half of the gate must run wherever `git` has real
+    // history, i.e. locally (see `--gate-only` docs on CoverageOptions).
     let lcov_text = match fs::read_to_string(&lcov_path) {
         Ok(text) => text,
         Err(err) => {

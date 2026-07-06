@@ -13,6 +13,15 @@ pub(crate) struct CoverageOptions {
     pub(crate) diff_floor: f64,
     pub(crate) output_path: PathBuf,
     pub(crate) dry_run: bool,
+    /// Only run cargo-llvm-cov and write the lcov file — no git diff. The
+    /// remote build syncs git-tracked file *contents* only (via `git
+    /// ls-files`, not a real clone), so there's no branch history to diff
+    /// against on the VM; this phase is what's safe to run there.
+    pub(crate) measure_only: bool,
+    /// Only read an already-produced lcov file and run the git-diff gate —
+    /// no cargo-llvm-cov. Requires local git history, so this phase must run
+    /// on the machine that invoked `spur-cargo coverage`, not the remote VM.
+    pub(crate) gate_only: bool,
 }
 
 impl Default for CoverageOptions {
@@ -23,6 +32,8 @@ impl Default for CoverageOptions {
             diff_floor: 85.0,
             output_path: PathBuf::from("coverage/lcov.info"),
             dry_run: false,
+            measure_only: false,
+            gate_only: false,
         }
     }
 }
@@ -60,9 +71,16 @@ pub(crate) fn parse_coverage_options(extra: Vec<String>) -> Result<CoverageOptio
             options.output_path = PathBuf::from(value);
         } else if arg == "--dry-run" {
             options.dry_run = true;
+        } else if arg == "--measure-only" {
+            options.measure_only = true;
+        } else if arg == "--gate-only" {
+            options.gate_only = true;
         } else {
             return Err(format!("unknown coverage option {arg:?}"));
         }
+    }
+    if options.measure_only && options.gate_only {
+        return Err("--measure-only and --gate-only are mutually exclusive".to_owned());
     }
     Ok(options)
 }
@@ -374,6 +392,26 @@ mod tests {
         let error = parse_coverage_options(vec!["--bogus".to_owned()]).unwrap_err();
 
         assert!(error.contains("--bogus"));
+    }
+
+    #[test]
+    fn coverage_options_parses_measure_only_and_gate_only_flags() {
+        let measure = parse_coverage_options(vec!["--measure-only".to_owned()]).unwrap();
+        assert!(measure.measure_only);
+        assert!(!measure.gate_only);
+
+        let gate = parse_coverage_options(vec!["--gate-only".to_owned()]).unwrap();
+        assert!(gate.gate_only);
+        assert!(!gate.measure_only);
+    }
+
+    #[test]
+    fn coverage_options_rejects_measure_only_and_gate_only_together() {
+        let error =
+            parse_coverage_options(vec!["--measure-only".to_owned(), "--gate-only".to_owned()])
+                .unwrap_err();
+
+        assert!(error.contains("mutually exclusive"));
     }
 
     #[test]
