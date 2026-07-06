@@ -1,0 +1,223 @@
+{
+  "query": "dispatch approval evidence",
+  "intent": "review",
+  "scope": "all",
+  "limit": 5,
+  "include_tests": true,
+  "max_symbol_bodies": 0,
+  "answerable": true,
+  "confidence": "low",
+  "graph_content_hash": "kcp-fixture-hash",
+  "staleness": {
+    "available": true,
+    "analyst_db": "<fixture-analyst-db>",
+    "analyst_graph_content_hash": "kcp-fixture-hash",
+    "graph_hash_present": true,
+    "exact_graph_hash": null,
+    "exact_graph_verified": false,
+    "analyst_matches_exact_graph": null,
+    "response_file_oids_match": null,
+    "delta_applied": false,
+    "algo_as_of": "kcp-fixture-hash",
+    "exact_graph_note": "Exact graph tools remain the source-of-truth follow-up for current working tree source and impact."
+  },
+  "primary_evidence": [
+    {
+      "kind": "symbol",
+      "title": "dispatch_plan",
+      "file": "src/dispatch.rs",
+      "stable_symbol_id": "graph://symbol/sym-dispatch",
+      "symbol_kind": "function",
+      "score": 0.83,
+      "signal": "load-bearing wall · pr=4200.0 · churn=9",
+      "neighbor_kind": "primary",
+      "edge_bind_method": null,
+      "grounding": "bm25-code",
+      "why_relevant": "BM25 0.8, load-bearing wall · pr=4200.0 · churn=9, kind=function, grounding=bm25-code",
+      "next": [
+        {
+          "tool": "code_read_symbol"
+        },
+        {
+          "tool": "code_callers"
+        }
+      ]
+    },
+    {
+      "kind": "symbol",
+      "title": "review_approval",
+      "file": "src/review.rs",
+      "stable_symbol_id": "graph://symbol/sym-review",
+      "symbol_kind": "function",
+      "score": 0.587,
+      "signal": "stable · pr=2100.0 · churn=1",
+      "neighbor_kind": "primary",
+      "edge_bind_method": null,
+      "grounding": "bm25-code",
+      "why_relevant": "BM25 0.6, stable · pr=2100.0 · churn=1, kind=function, grounding=bm25-code",
+      "next": [
+        {
+          "tool": "code_read_symbol"
+        },
+        {
+          "tool": "code_callers"
+        }
+      ]
+    }
+  ],
+  "supporting_docs": [
+    {
+      "kind": "doc",
+      "title": "Dispatch Approval Reading Path",
+      "file": "docs/dispatch.md",
+      "stable_symbol_id": "doc-dispatch",
+      "symbol_kind": "section",
+      "score": 0.375,
+      "signal": null,
+      "neighbor_kind": null,
+      "edge_bind_method": null,
+      "grounding": "bm25-doc",
+      "why_relevant": "BM25 0.4, kind=section, grounding=bm25-doc",
+      "next": [
+        {
+          "tool": "doc_navigate",
+          "root": "doc-dispatch"
+        }
+      ]
+    }
+  ],
+  "impact": {
+    "summary": "impact counts are deferred to exact graph follow-up tools",
+    "callers_count": null,
+    "callees_count": null,
+    "popular_sink": null
+  },
+  "recommended_next_tools": [
+    {
+      "tool": "code_read_symbol",
+      "selector": "graph://symbol/sym-dispatch",
+      "reason": "Read exact current symbol body for review."
+    },
+    {
+      "tool": "code_callers",
+      "selector": "graph://symbol/sym-dispatch",
+      "reason": "Verify behavioral impact from direct callers."
+    }
+  ],
+  "candidates": {
+    "total": 3,
+    "returned_primary": 2,
+    "returned_supporting_docs": 1,
+    "total_code": 2,
+    "total_docs": 1
+  },
+  "graph_paths": [
+    {
+      "source_stable_id": "sym-dispatch",
+      "target_stable_id": "sym-review",
+      "graph_content_hash": "kcp-fixture-hash",
+      "max_hops": 2,
+      "max_paths": 1,
+      "engine": "recursive_sql",
+      "status": "path_found",
+      "caveat": null,
+      "rows": [
+        {
+          "path_index": 0,
+          "hop_index": 0,
+          "source_stable_id": "sym-dispatch",
+          "target_stable_id": "sym-review",
+          "relation": "calls",
+          "edge_kind": "calls",
+          "confidence": "syntax_exact",
+          "bind_method": "singleton",
+          "direction": "forward",
+          "engine": "recursive_sql",
+          "status": "path_found",
+          "caveat": null
+        }
+      ]
+    }
+  ],
+  "risk_scorecard": [
+    {
+      "input_index": 0,
+      "stable_symbol_id": "sym-dispatch",
+      "status": "available",
+      "entity_name": "dispatch_plan",
+      "qualified_name": "fixture::dispatch_plan",
+      "symbol_kind": "function",
+      "file_path": "src/dispatch.rs",
+      "pagerank": 0.42,
+      "in_degree": 7,
+      "out_degree": 3,
+      "callers": 11,
+      "importers": 2,
+      "inbound_total": 13,
+      "churn_90d": 9,
+      "last_touched": "2026-06-17 12:00:00",
+      "blast_radius_score": 0.91,
+      "posture": "load-bearing wall",
+      "caveats": []
+    },
+    {
+      "input_index": 1,
+      "stable_symbol_id": "sym-review",
+      "status": "available",
+      "entity_name": "review_approval",
+      "qualified_name": "fixture::review_approval",
+      "symbol_kind": "function",
+      "file_path": "src/review.rs",
+      "pagerank": 0.21,
+      "in_degree": 2,
+      "out_degree": 1,
+      "callers": 3,
+      "importers": 0,
+      "inbound_total": 3,
+      "churn_90d": 1,
+      "last_touched": "2026-06-16 09:30:00",
+      "blast_radius_score": 0.33,
+      "posture": "stable",
+      "caveats": []
+    }
+  ],
+  "community_context": [
+    {
+      "input_index": 0,
+      "stable_symbol_id": "sym-dispatch",
+      "status": "available",
+      "component_id": 10,
+      "component_size": 2,
+      "community_id": 20,
+      "caveats": []
+    },
+    {
+      "input_index": 1,
+      "stable_symbol_id": "sym-review",
+      "status": "available",
+      "component_id": 10,
+      "component_size": 2,
+      "community_id": 20,
+      "caveats": []
+    }
+  ],
+  "temporal_context": [
+    {
+      "input_index": 0,
+      "stable_symbol_id": "sym-dispatch",
+      "file_path": "src/dispatch.rs",
+      "churn_90d": 9,
+      "last_touched": "2026-06-17 12:00:00",
+      "posture": "load-bearing wall"
+    },
+    {
+      "input_index": 1,
+      "stable_symbol_id": "sym-review",
+      "file_path": "src/review.rs",
+      "churn_90d": 1,
+      "last_touched": "2026-06-16 09:30:00",
+      "posture": "stable"
+    }
+  ],
+  "caveats": []
+}
