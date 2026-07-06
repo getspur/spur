@@ -88,6 +88,7 @@ pub enum RetrievalAccept {
         text: String,
         uri: String,
         name: String,
+        unconsumed_suffix: Option<String>,
         /// If `Some(p)`, the view clears bytes `[p..cursor]` before
         /// inserting the atom at position `p`. Used by `@mention` accept
         /// to drop the `@query` prefix that drove the popup. MUST be on
@@ -584,6 +585,7 @@ impl QuerySource for MentionQuerySource {
             text,
             uri: hit.uri.clone(),
             name,
+            unconsumed_suffix: hit.unconsumed_suffix.clone(),
             replace_from: Some(self.prefix_start),
         })
     }
@@ -1125,6 +1127,7 @@ mod tests {
                 uri,
                 name,
                 replace_from,
+                ..
             } => {
                 assert_eq!(replace_from, Some(1));
                 assert!(text.starts_with('@'));
@@ -1198,11 +1201,55 @@ mod tests {
                 uri,
                 name,
                 replace_from,
+                ..
             } => {
                 assert_eq!(text, "@bd-1");
                 assert_eq!(uri, "issue://beads/bd-1");
                 assert_eq!(name, "bd-1");
                 assert_eq!(replace_from, Some(3));
+            }
+            other => panic!("expected InsertAtom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mention_source_accept_preserves_worker_unconsumed_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = Rc::new(RefCell::new(MentionRegistry::for_brain_session(vec![
+            crate::mentions::WorkerMentionDescriptor {
+                name: "codex".into(),
+                kind: spur_acp::AgentKind::CodexAcp,
+                cli_identity: "codex".into(),
+                description: None,
+                tier: None,
+            },
+        ])));
+        let mut src = MentionQuerySource::new(
+            Rc::clone(&registry),
+            crate::mentions::CompletionScope::PreSession,
+            tmp.path().to_path_buf(),
+            0,
+        );
+
+        let _rows = src.refresh("codex no-such-agent keep this");
+        let accept = src.accept(0).expect("row 0 exists");
+
+        match accept {
+            RetrievalAccept::InsertAtom {
+                text,
+                uri,
+                name,
+                replace_from,
+                unconsumed_suffix,
+            } => {
+                assert_eq!(text, "@worker:codex");
+                assert_eq!(uri, "worker://codex");
+                assert_eq!(name, "worker:codex");
+                assert_eq!(replace_from, Some(0));
+                assert_eq!(
+                    unconsumed_suffix.as_deref(),
+                    Some(" no-such-agent keep this")
+                );
             }
             other => panic!("expected InsertAtom, got {other:?}"),
         }
@@ -1215,6 +1262,8 @@ mod tests {
         let registry = Rc::new(RefCell::new(MentionRegistry::for_brain_session(vec![
             crate::mentions::WorkerMentionDescriptor {
                 name: "codex".to_string(),
+                kind: spur_acp::AgentKind::CodexAcp,
+                cli_identity: "codex".to_string(),
                 description: Some("Writes patches".to_string()),
                 tier: Some("generalist".to_string()),
             },
