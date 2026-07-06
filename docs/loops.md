@@ -26,6 +26,7 @@ in-flight delegations are not cancelled and still persist their outcomes.
 | Tool | Locked description |
 |---|---|
 | `submit_loop` | Create a durable loop issue with a `[[spur-loop v1]]` spec sentinel. Validates cadence_secs >= 60, defaults omitted autonomy to l1, requires at least one template task marked spur:loop-triage-task, rejects non-positive governor caps, mints a compact loop_id, and labels the loop spur:loop-id:<id>, spur:autonomy:<level>, and spur:loop-next-run:<now> so it fires immediately. |
+| `spur_loop_doctor` | Required validation gate for `/spur-loop` natural-language drafts. Validates and normalizes a brain-authored `LoopDoctorDraft`, returns a friendly preview, canonical `submit_loop` params, approval fingerprint, and idempotency key when valid, and never creates durable loops. |
 | `get_loop_status` | Return loop status as JSON for a loop_id: parsed LoopSpec, last recent_runs LoopRun audit records, effective backoff interval, consecutive failure count, paused flag, and next_run timestamp. |
 | `pause_loop` | Pause a loop by adding spur:loop-paused to the loop issue identified by loop_id. Existing in-flight generations are not cancelled. |
 | `resume_loop` | Resume a paused loop by removing spur:loop-paused and replacing any spur:loop-next-run:* label with spur:loop-next-run:<now>, clearing failure backoff so the scheduler may run it immediately. |
@@ -34,6 +35,36 @@ in-flight delegations are not cancelled and still persist their outcomes.
 
 The phases 4-5 control surface is MCP-only for `kill_loop` and
 `set_loop_autonomy`; TUI actions for those controls are intentionally deferred.
+
+## `/spur-loop` Preview Flow
+
+`/spur-loop` is a preview-first authoring command over the existing loop
+substrate. The brain interprets the natural-language request into a structured
+`LoopDoctorDraft`, including any worker mentions, resource links, context paths,
+dependencies, cadence, autonomy, governor hints, escalation hints, and
+assumptions it had to make. That draft is not trusted and must not be submitted
+directly.
+
+The approved authoring flow is:
+
+| Step | Behavior |
+|---|---|
+| Draft | The brain builds `spur_loop_doctor` params with `original_command` and `draft`. |
+| Doctor | `spur_loop_doctor` validates and normalizes the draft, then returns `status`, `friendly_preview`, `warnings`, `errors`, and, only when valid, `canonical_submit_loop_params`, `approval_fingerprint`, and `client_idempotency_key`. It never creates a loop issue. |
+| Preview | If status is `error`, the brain reports the errors and stops. If status is `ok` or `warnings`, the brain shows the doctor-produced preview and surfaces any warnings. |
+| Approval | Only after explicit user approval does the brain call `submit_loop` with the doctor-approved canonical params and idempotency key. If the user revises anything after preview, the brain must run `spur_loop_doctor` again and discard the previous fingerprint and idempotency key. |
+| Creation | `submit_loop` remains the only durable creation path. It creates the loop issue and arms the first generation immediately by labeling `spur:loop-next-run:<now>`. |
+
+V1 scheduling is cadence-based, not wall-clock based. Phrases such as `daily at
+9AM` or `every weekday at 09:00` are normalized to a cadence, and the preview
+must warn that exact local-time execution is not represented in v1. The user may
+approve that cadence normalization, but the loop should not be described as
+honoring the exact wall-clock time.
+
+The `/spur-loop` command does not replace the MCP lifecycle surface:
+`submit_loop` remains the durable creation tool after approval, `get_loop_status`
+inspects loop state, `set_loop_autonomy` adjusts autonomy, `pause_loop` and
+`resume_loop` stop or restart dispatch, and `kill_loop` retires the loop.
 
 ## Autonomy
 
