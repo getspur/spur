@@ -1280,6 +1280,46 @@ impl McpCallbackServer {
         )
     }
 
+    pub(crate) async fn handle_spur_loop_doctor(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let input: crate::tool_schemas::SpurLoopDoctorParams = match serde_json::from_value(args) {
+            Ok(input) => input,
+            Err(error) => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("spur_loop_doctor: invalid parameters: {error}"),
+                )
+            }
+        };
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+        let Some(pm) = self.submit_plan_substrate_pm() else {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                "spur_loop_doctor: requires a beads PM backend (configured backend: none)",
+            );
+        };
+        if pm.source_str() != "beads" {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                format!(
+                    "spur_loop_doctor: requires a beads PM backend (configured backend: {})",
+                    pm.source_str()
+                ),
+            );
+        }
+
+        JsonRpcResponse::success(
+            id,
+            serde_json::to_value(crate::plan::loops::doctor::run(input))
+                .expect("SpurLoopDoctorOutput serializes"),
+        )
+    }
+
     pub(crate) async fn handle_pause_loop(&self, id: Value, args: Value) -> JsonRpcResponse {
         let input: crate::tool_schemas::LoopIdParams = match serde_json::from_value(args) {
             Ok(input) => input,
