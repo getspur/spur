@@ -35,5 +35,5 @@ pub use response::{JsonRpcError, JsonRpcResponse};
 // `ToolModule::call`; `ErrorCode` lets domain modules map their local error
 // kinds onto JSON-RPC codes.
 pub use rmcp::model::{ErrorCode, ErrorData as McpError};
-pub use server::{serve_stdio_server, RegistryServerHandler};
+pub use server::{json_rpc_to_call_tool_result, serve_stdio_server, RegistryServerHandler};
 pub use tools::{tools_list, McpHandlerError, ToolDefinition};
