@@ -17,6 +17,30 @@ fn loop_issue_title(goal: &str) -> String {
     }
 }
 
+fn submit_loop_success_response(
+    id: Value,
+    loop_id: &str,
+    issue_id: &str,
+    next_run: i64,
+    paused: bool,
+) -> JsonRpcResponse {
+    let output = json!({
+        "loop_id": loop_id,
+        "issue_id": issue_id,
+        "next_run": next_run,
+        "paused": paused,
+    });
+    let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "loop_id": output["loop_id"],
+            "issue_id": output["issue_id"],
+            "content": [{ "type": "text", "text": text }]
+        }),
+    )
+}
+
 fn autonomy_label(level: crate::plan::labels::AutonomyLevel) -> String {
     format!("{}{}", crate::plan::labels::AUTONOMY_PREFIX, level.as_str())
 }
@@ -101,63 +125,6 @@ async fn load_persisted_plan_task_map(
     }
 
     Ok(task_map)
-}
-
-fn validate_loop_spec_for_submit(spec: &crate::plan::loops::spec::LoopSpec) -> Result<(), String> {
-    if spec.goal.trim().is_empty() {
-        return Err("goal must be non-empty".to_string());
-    }
-    if spec.cadence_secs < 60 {
-        return Err("cadence_secs must be at least 60".to_string());
-    }
-    if !template_has_triage_task(&spec.template) {
-        return Err(format!(
-            "template must contain at least one triage task labeled {}",
-            crate::plan::labels::LOOP_TRIAGE_TASK
-        ));
-    }
-    if matches!(spec.governors.max_cost_micros_per_generation, Some(0)) {
-        return Err("max_cost_micros_per_generation must be greater than 0".to_string());
-    }
-    if matches!(spec.governors.max_generations_per_day, Some(0)) {
-        return Err("max_generations_per_day must be greater than 0".to_string());
-    }
-    if matches!(spec.governors.max_tasks_per_generation, Some(0)) {
-        return Err("max_tasks_per_generation must be greater than 0".to_string());
-    }
-    if let Some(backoff) = spec.governors.consecutive_failure_backoff.as_ref() {
-        if backoff.k == 0 {
-            return Err("consecutive_failure_backoff.k must be greater than 0".to_string());
-        }
-        if backoff.factor == 0 {
-            return Err("consecutive_failure_backoff.factor must be greater than 0".to_string());
-        }
-        if backoff.auto_pause_after == 0 {
-            return Err(
-                "consecutive_failure_backoff.auto_pause_after must be greater than 0".to_string(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn template_has_triage_task(template: &Value) -> bool {
-    template
-        .get("tasks")
-        .and_then(Value::as_array)
-        .is_some_and(|tasks| tasks.iter().any(task_has_triage_label))
-}
-
-fn task_has_triage_label(task: &Value) -> bool {
-    ["labels", "issue_labels"].iter().any(|key| {
-        task.get(*key)
-            .and_then(Value::as_array)
-            .is_some_and(|labels| {
-                labels
-                    .iter()
-                    .any(|label| label.as_str() == Some(crate::plan::labels::LOOP_TRIAGE_TASK))
-            })
-    })
 }
 
 fn validate_loop_id_param(loop_id: &str) -> Result<(), String> {
@@ -1262,6 +1229,19 @@ impl McpCallbackServer {
                 )
             }
         };
+        let client_idempotency_key = match input.client_idempotency_key.as_deref() {
+            Some(key) => {
+                let key = key.trim();
+                if key.is_empty() {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        "submit_loop: client_idempotency_key must be non-empty",
+                    );
+                }
+                Some(key.to_string())
+            }
+            None => None,
+        };
         if let Some(response) =
             self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
         {
@@ -1285,7 +1265,38 @@ impl McpCallbackServer {
             );
         }
 
-        if let Err(message) = validate_loop_spec_for_submit(&input.spec) {
+        if let Some(key) = client_idempotency_key.as_deref() {
+            match crate::submit_plan_dedup::lookup_loop(pm, key).await {
+                Ok(Some(hit)) => {
+                    info!(
+                        loop_id = %hit.loop_id,
+                        issue_id = %hit.issue_id,
+                        dedup_issue_id = %hit.dedup_issue_id,
+                        "submit_loop: client idempotency key hit"
+                    );
+                    return submit_loop_success_response(
+                        id,
+                        &hit.loop_id,
+                        &hit.issue_id,
+                        hit.next_run,
+                        hit.paused,
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    error!("submit_loop: failed to resolve client idempotency key: {error}");
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!("submit_loop: failed to resolve client idempotency key: {error}"),
+                    );
+                }
+            }
+        }
+
+        if let Err(message) =
+            crate::plan::loops::validation::validate_loop_spec_for_submit(&input.spec)
+        {
             return JsonRpcResponse::invalid_params(id, format!("submit_loop: {message}"));
         }
 
@@ -1316,22 +1327,65 @@ impl McpCallbackServer {
                 )
             }
         };
+        if let Some(key) = client_idempotency_key.as_deref() {
+            if let Err(error) =
+                crate::submit_plan_dedup::record_loop(pm, key, &loop_id, &issue_id, now, false)
+                    .await
+            {
+                error!(
+                    loop_id = %loop_id,
+                    issue_id = %issue_id,
+                    "submit_loop: failed to record client idempotency key: {error}"
+                );
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("submit_loop: failed to record client idempotency key: {error}"),
+                );
+            }
+        }
         self.fast_forward_reconciler();
 
-        let output = json!({
-            "loop_id": loop_id,
-            "issue_id": issue_id,
-            "next_run": now,
-            "paused": false,
-        });
-        let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+        submit_loop_success_response(id, &loop_id, &issue_id, now, false)
+    }
+
+    pub(crate) async fn handle_spur_loop_doctor(&self, id: Value, args: Value) -> JsonRpcResponse {
+        let input: crate::tool_schemas::SpurLoopDoctorParams = match serde_json::from_value(args) {
+            Ok(input) => input,
+            Err(error) => {
+                return JsonRpcResponse::invalid_params(
+                    id,
+                    format!("spur_loop_doctor: invalid parameters: {error}"),
+                )
+            }
+        };
+        if let Some(response) =
+            self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
+        {
+            return response;
+        }
+        let Some(pm) = self.submit_plan_substrate_pm() else {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                "spur_loop_doctor: requires a beads PM backend (configured backend: none)",
+            );
+        };
+        if pm.source_str() != "beads" {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                format!(
+                    "spur_loop_doctor: requires a beads PM backend (configured backend: {})",
+                    pm.source_str()
+                ),
+            );
+        }
+
         JsonRpcResponse::success(
             id,
-            json!({
-                "loop_id": output["loop_id"],
-                "issue_id": output["issue_id"],
-                "content": [{ "type": "text", "text": text }]
-            }),
+            serde_json::to_value(crate::plan::loops::doctor::run(input))
+                .expect("SpurLoopDoctorOutput serializes"),
         )
     }
 
