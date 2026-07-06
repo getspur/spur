@@ -28,10 +28,6 @@ impl EmbeddingRuntime {
     }
 
     #[cfg(feature = "embed")]
-    #[expect(
-        clippy::unused_self,
-        reason = "EmbeddingRuntime is a facade; warm stays method-shaped with embed_query"
-    )]
     pub fn warm(&self) {
         match AnalystEmbedMode::current() {
             AnalystEmbedMode::Off => {}
@@ -47,10 +43,6 @@ impl EmbeddingRuntime {
     }
 
     #[cfg(not(feature = "embed"))]
-    #[expect(
-        clippy::unused_self,
-        reason = "EmbeddingRuntime is a facade; warm stays method-shaped with embed_query"
-    )]
     pub fn warm(&self) {}
 
     pub async fn embed_query(&self, query: &str) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
