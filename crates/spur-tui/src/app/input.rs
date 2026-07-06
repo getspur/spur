@@ -314,6 +314,7 @@ impl App {
                 } else if let Some(action) = action {
                     self.process_action(action);
                 }
+                self.schedule_pending_agent_model_catalog_probes();
                 self.dirty = true;
             }
             Event::Mouse(mouse) => {

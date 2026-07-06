@@ -294,6 +294,11 @@ pub enum Action {
     NotebookCommand {
         arg: String,
     },
+    /// Background agent model/effort catalog probe completed. The probe task
+    /// owns cache writes; App uses this to clear in-flight bookkeeping.
+    AgentModelCatalogProbeCompleted {
+        worker_name: String,
+    },
 }
 
 /// Which permission option the user selected.
