@@ -23,6 +23,7 @@ fn public_api_types_remain_exported() {
         exported_type::<KnowledgePathOptions>(),
         exported_type::<KnowledgePathRow>(),
         exported_type::<KnowledgePathResult>(),
+        // mcp::ToolDefinition is a re-export of spur_mcp::tools::ToolDefinition.
         exported_type::<mcp::ToolDefinition>(),
         exported_type::<mcp::McpHandlerError>(),
         exported_type::<mcp::AnalystMcpModule>(),
