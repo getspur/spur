@@ -1377,3 +1377,285 @@ pub fn short_button_label(label: &str, max_chars: usize) -> String {
         .last()
         .unwrap_or_else(|| first_word.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn markdown_options() -> Options {
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+        options.insert(Options::ENABLE_TABLES);
+        options.insert(Options::ENABLE_TASKLISTS);
+        options
+    }
+
+    fn render_with_budget(input: &str, max_units: usize) -> Vec<Chunk> {
+        let parser = Parser::new_ext(input, markdown_options());
+        ChunkedHtmlRenderer::new(
+            parser,
+            ChunkBudget {
+                max_units,
+                min_safety_floor: 0,
+                max_nesting_depth: 8,
+            },
+        )
+        .into_chunks()
+    }
+
+    fn first_table_row_events(markdown: &str, want_header: bool) -> Vec<Event<'_>> {
+        let mut parser = Parser::new_ext(markdown, markdown_options());
+        while let Some(event) = parser.next() {
+            let is_target = matches!(
+                (&event, want_header),
+                (Event::Start(Tag::TableHead), true) | (Event::Start(Tag::TableRow), false)
+            );
+            if !is_target {
+                continue;
+            }
+
+            let mut events = vec![event];
+            for event in parser.by_ref() {
+                let is_end = matches!(
+                    (&event, want_header),
+                    (Event::End(TagEnd::TableHead), true) | (Event::End(TagEnd::TableRow), false)
+                );
+                events.push(event);
+                if is_end {
+                    return events;
+                }
+            }
+        }
+
+        panic!("missing requested table row");
+    }
+
+    #[test]
+    fn render_table_row_preserves_inline_html_and_plain_link_projection() {
+        let markdown = concat!(
+            "| **Key & More** | [docs](https://example.test/?a=1&b=2) | `a < b` |\n",
+            "| --- | --- | --- |\n",
+            "| *ok* | ~~gone~~ | text<br>line |\n",
+        );
+
+        let header_events = first_table_row_events(markdown, true);
+        let header = render_table_row(&header_events);
+        assert_eq!(
+            header.html,
+            "| <b>Key &amp; More</b> | <a href=\"https://example.test/?a=1&amp;b=2\">docs</a> | <code>a &lt; b</code> |\n"
+        );
+        assert_eq!(
+            header.plain,
+            "| Key & More | docs (https://example.test/?a=1&b=2) | a < b |\n"
+        );
+        assert_eq!(header.column_count, 3);
+        assert!(header.is_header);
+
+        let body_events = first_table_row_events(markdown, false);
+        let body = render_table_row(&body_events);
+        assert_eq!(
+            body.html,
+            "| <i>ok</i> | <s>gone</s> | text&lt;br&gt;line |\n"
+        );
+        assert_eq!(body.plain, "| ok | gone | text<br>line |\n");
+        assert_eq!(body.column_count, 3);
+        assert!(!body.is_header);
+    }
+
+    #[test]
+    fn start_and_end_tags_render_blocks_lists_images_and_suppressed_depth() {
+        let chunks = markdown_to_telegram_chunks(concat!(
+            "# Title & <One>\n\n",
+            "> quoted **bold**\n\n",
+            "1. first\n",
+            "2. second with ![alt <x>](https://img.test/a&b)\n\n",
+            "~~kept without strike tags~~",
+        ));
+
+        assert_eq!(
+            chunks,
+            vec![Chunk {
+                html: concat!(
+                    "Title &amp; &lt;One&gt;\n\n",
+                    "<blockquote>quoted <b>bold</b>\n\n</blockquote>\n\n",
+                    "1. first\n",
+                    "2. second with [image: alt &lt;x&gt;] (https://img.test/a&amp;b)\n\n",
+                    "<s>kept without strike tags</s>",
+                )
+                .to_string(),
+                plain: concat!(
+                    "Title & <One>\n\n",
+                    "quoted bold\n\n\n\n",
+                    "1. first\n",
+                    "2. second with [image: alt <x>] (https://img.test/a&b)\n\n",
+                    "kept without strike tags",
+                )
+                .to_string(),
+            }]
+        );
+
+        let suppressed = ChunkedHtmlRenderer::new(
+            Parser::new_ext("**outer _inner_**", markdown_options()),
+            ChunkBudget {
+                max_units: TELEGRAM_TEXT_MAX_UTF16_UNITS,
+                min_safety_floor: 0,
+                max_nesting_depth: 1,
+            },
+        )
+        .into_chunks();
+        assert_eq!(
+            suppressed,
+            vec![Chunk {
+                html: "<b>outer inner</b>".to_string(),
+                plain: "outer inner".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn escaped_text_is_split_on_budget_without_splitting_entities() {
+        assert_eq!(
+            render_with_budget("alpha beta gamma delta", 32),
+            vec![
+                Chunk {
+                    html: "alpha beta ".to_string(),
+                    plain: "alpha beta ".to_string(),
+                },
+                Chunk {
+                    html: "gamma delta".to_string(),
+                    plain: "gamma delta".to_string(),
+                },
+            ]
+        );
+
+        assert_eq!(
+            render_with_budget("a < b & c > d", 32),
+            vec![
+                Chunk {
+                    html: "a &lt;".to_string(),
+                    plain: "a <".to_string(),
+                },
+                Chunk {
+                    html: " b &amp; c &gt; ".to_string(),
+                    plain: " b & c > ".to_string(),
+                },
+                Chunk {
+                    html: "d".to_string(),
+                    plain: "d".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn flush_chunk_closes_and_reopens_block_contexts() {
+        // BUG: flushing an open blockquote emits empty reopened blockquote chunks.
+        assert_eq!(
+            render_with_budget("> alpha beta gamma delta", 56),
+            vec![
+                Chunk {
+                    html: "<blockquote></blockquote>".to_string(),
+                    plain: String::new(),
+                },
+                Chunk {
+                    html: "<blockquote>alpha beta </blockquote>".to_string(),
+                    plain: "alpha beta ".to_string(),
+                },
+                Chunk {
+                    html: "<blockquote>gamma delta</blockquote>".to_string(),
+                    plain: "gamma delta".to_string(),
+                },
+                Chunk {
+                    html: "<blockquote>\n\n</blockquote>".to_string(),
+                    plain: String::new(),
+                },
+                Chunk {
+                    html: "<blockquote></blockquote>".to_string(),
+                    plain: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_code_uses_tags_when_affordable_and_plain_fallback_when_not() {
+        assert_eq!(
+            markdown_to_telegram_chunks("`**x < y**` and **bold**"),
+            vec![Chunk {
+                html: "<code>**x &lt; y**</code> and <b>bold</b>".to_string(),
+                plain: "**x < y** and bold".to_string(),
+            }]
+        );
+
+        assert_eq!(
+            render_with_budget("`a < b`", 24),
+            vec![Chunk {
+                html: "a &lt; b".to_string(),
+                plain: "a < b".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn dynamic_reserve_accounts_for_open_contexts_and_safety_floor() {
+        let mut renderer = ChunkedHtmlRenderer::new(
+            std::iter::empty::<Event<'static>>(),
+            ChunkBudget {
+                max_units: 128,
+                min_safety_floor: 0,
+                max_nesting_depth: 8,
+            },
+        );
+        assert_eq!(renderer.dynamic_reserve(), 16);
+
+        renderer.state.open_inlines.push(InlineContext::Bold {
+            html_start: 0,
+            plain_start: 0,
+        });
+        assert_eq!(renderer.dynamic_reserve(), 20);
+
+        renderer.state.open_blocks.push(BlockContext::BlockQuote);
+        renderer.state.list_stack.push(ListContext {
+            kind: ListKind::Bullet,
+            next_number: 1,
+            current_number: None,
+            item_continuation: true,
+        });
+        renderer.state.table_state = Some(TableState {
+            in_header: false,
+            column_count: 0,
+            current_cell_index: 0,
+            in_row: true,
+        });
+        assert_eq!(renderer.dynamic_reserve(), 53);
+
+        let floor_renderer = ChunkedHtmlRenderer::new(
+            std::iter::empty::<Event<'static>>(),
+            ChunkBudget {
+                max_units: 128,
+                min_safety_floor: 64,
+                max_nesting_depth: 8,
+            },
+        );
+        assert_eq!(floor_renderer.dynamic_reserve(), 64);
+    }
+
+    #[test]
+    fn table_rows_render_as_html_until_row_budget_forces_plain_fallback() {
+        assert_eq!(
+            render_with_budget("| `x` |\n| - |\n", 128),
+            vec![Chunk {
+                html: "| <code>x</code> |".to_string(),
+                plain: "| x |".to_string(),
+            }]
+        );
+
+        assert_eq!(
+            render_with_budget("| `x` |\n| - |\n", 26),
+            vec![Chunk {
+                html: "| x |".to_string(),
+                plain: "| x |".to_string(),
+            }]
+        );
+    }
+}
