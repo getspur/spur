@@ -1877,7 +1877,7 @@ mod loop_lifecycle_mcp_tests {
         let issues = mock_pm.issues().await;
         let issue = find_loop_issue(&issues, &loop_id);
 
-        assert_eq!(issue.issue_type.as_deref(), Some("task"));
+        assert_eq!(issue.issue_type.as_deref(), Some("loop"));
         assert!(issue.body.contains("[[spur-loop v1]]"));
         assert!(issue.labels.contains(&crate::plan::labels::loop_id_label(&loop_id)));
         assert!(issue.labels.contains(&format!(
