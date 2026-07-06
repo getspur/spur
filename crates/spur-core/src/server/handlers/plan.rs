@@ -17,6 +17,30 @@ fn loop_issue_title(goal: &str) -> String {
     }
 }
 
+fn submit_loop_success_response(
+    id: Value,
+    loop_id: &str,
+    issue_id: &str,
+    next_run: i64,
+    paused: bool,
+) -> JsonRpcResponse {
+    let output = json!({
+        "loop_id": loop_id,
+        "issue_id": issue_id,
+        "next_run": next_run,
+        "paused": paused,
+    });
+    let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "loop_id": output["loop_id"],
+            "issue_id": output["issue_id"],
+            "content": [{ "type": "text", "text": text }]
+        }),
+    )
+}
+
 fn autonomy_label(level: crate::plan::labels::AutonomyLevel) -> String {
     format!("{}{}", crate::plan::labels::AUTONOMY_PREFIX, level.as_str())
 }
@@ -1205,6 +1229,19 @@ impl McpCallbackServer {
                 )
             }
         };
+        let client_idempotency_key = match input.client_idempotency_key.as_deref() {
+            Some(key) => {
+                let key = key.trim();
+                if key.is_empty() {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        "submit_loop: client_idempotency_key must be non-empty",
+                    );
+                }
+                Some(key.to_string())
+            }
+            None => None,
+        };
         if let Some(response) =
             self.require_feature_response(id.clone(), FeatureKey::PM_PRO_BEADS_ADVANCED)
         {
@@ -1226,6 +1263,35 @@ impl McpCallbackServer {
                     pm.source_str()
                 ),
             );
+        }
+
+        if let Some(key) = client_idempotency_key.as_deref() {
+            match crate::submit_plan_dedup::lookup_loop(pm, key).await {
+                Ok(Some(hit)) => {
+                    info!(
+                        loop_id = %hit.loop_id,
+                        issue_id = %hit.issue_id,
+                        dedup_issue_id = %hit.dedup_issue_id,
+                        "submit_loop: client idempotency key hit"
+                    );
+                    return submit_loop_success_response(
+                        id,
+                        &hit.loop_id,
+                        &hit.issue_id,
+                        hit.next_run,
+                        hit.paused,
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    error!("submit_loop: failed to resolve client idempotency key: {error}");
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!("submit_loop: failed to resolve client idempotency key: {error}"),
+                    );
+                }
+            }
         }
 
         if let Err(message) =
@@ -1261,23 +1327,26 @@ impl McpCallbackServer {
                 )
             }
         };
+        if let Some(key) = client_idempotency_key.as_deref() {
+            if let Err(error) =
+                crate::submit_plan_dedup::record_loop(pm, key, &loop_id, &issue_id, now, false)
+                    .await
+            {
+                error!(
+                    loop_id = %loop_id,
+                    issue_id = %issue_id,
+                    "submit_loop: failed to record client idempotency key: {error}"
+                );
+                return JsonRpcResponse::error(
+                    id,
+                    -32000,
+                    format!("submit_loop: failed to record client idempotency key: {error}"),
+                );
+            }
+        }
         self.fast_forward_reconciler();
 
-        let output = json!({
-            "loop_id": loop_id,
-            "issue_id": issue_id,
-            "next_run": now,
-            "paused": false,
-        });
-        let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "loop_id": output["loop_id"],
-                "issue_id": output["issue_id"],
-                "content": [{ "type": "text", "text": text }]
-            }),
-        )
+        submit_loop_success_response(id, &loop_id, &issue_id, now, false)
     }
 
     pub(crate) async fn handle_spur_loop_doctor(&self, id: Value, args: Value) -> JsonRpcResponse {
