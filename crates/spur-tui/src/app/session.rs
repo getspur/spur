@@ -150,6 +150,7 @@ impl App {
             user_input_tx,
             background_action_tx,
             background_action_rx,
+            agent_model_catalog_probes_in_flight: std::collections::HashSet::new(),
             #[cfg(any(test, debug_assertions))]
             user_input_rx_for_test: None,
             brain_status: BrainStatus::Idle,
