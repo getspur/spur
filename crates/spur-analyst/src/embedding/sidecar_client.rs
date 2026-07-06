@@ -1,39 +1,17 @@
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use serde::Deserialize;
 use serde_json::{json, Value};
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 
-const PROTOCOL_VERSION: u8 = 1;
+use super::protocol::{self, EmbedResponse, PingResponse, PROTOCOL_VERSION};
 
-#[derive(Debug, Deserialize)]
-struct EmbedResponse {
-    #[serde(default)]
-    v: Option<u8>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    vectors: Option<Vec<Vec<f32>>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PingResponse {
-    #[serde(default)]
-    v: Option<u8>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    ok: Option<bool>,
-}
-
-pub(crate) async fn embed_query(
+pub(super) async fn embed_query(
     query: &str,
     timeout_duration: Duration,
 ) -> Option<[f32; EMBEDDING_VECTOR_DIMENSIONS]> {
-    let started = Instant::now();
     let response = sidecar_round_trip(
         json!({
             "v": PROTOCOL_VERSION,
@@ -44,24 +22,15 @@ pub(crate) async fn embed_query(
         timeout_duration,
     )
     .await;
-    let elapsed = started.elapsed();
-    let elapsed_ms = duration_millis(elapsed);
-    let timeout_ms = duration_millis(timeout_duration);
 
     match response.and_then(parse_embed_response) {
         Ok(vector) => {
-            tracing::debug!(
-                elapsed_ms,
-                timeout_ms,
-                "knowledge_context_pack sidecar embed completed"
-            );
+            tracing::debug!("knowledge_context_pack sidecar embed completed");
             Some(vector)
         }
         Err(error) => {
             tracing::debug!(
                 %error,
-                elapsed_ms,
-                timeout_ms,
                 "knowledge_context_pack sidecar embed failed; degrading to BM25-only search"
             );
             None
@@ -69,8 +38,7 @@ pub(crate) async fn embed_query(
     }
 }
 
-pub(crate) async fn ping(timeout_duration: Duration) -> bool {
-    let started = Instant::now();
+pub(super) async fn ping(timeout_duration: Duration) -> bool {
     let response = sidecar_round_trip(
         json!({
             "v": PROTOCOL_VERSION,
@@ -80,24 +48,15 @@ pub(crate) async fn ping(timeout_duration: Duration) -> bool {
         timeout_duration,
     )
     .await;
-    let elapsed = started.elapsed();
-    let elapsed_ms = duration_millis(elapsed);
-    let timeout_ms = duration_millis(timeout_duration);
 
     match response.and_then(parse_ping_response) {
         Ok(()) => {
-            tracing::debug!(
-                elapsed_ms,
-                timeout_ms,
-                "knowledge_context_pack sidecar ping completed"
-            );
+            tracing::debug!("knowledge_context_pack sidecar ping completed");
             true
         }
         Err(error) => {
             tracing::debug!(
                 %error,
-                elapsed_ms,
-                timeout_ms,
                 "knowledge_context_pack sidecar ping failed"
             );
             false
@@ -112,7 +71,7 @@ async fn sidecar_round_trip(request: Value, timeout_duration: Duration) -> Resul
 }
 
 async fn sidecar_round_trip_inner(request: Value) -> Result<Value, String> {
-    let socket_path = crate::embed_service::resolve_socket_path(None)
+    let socket_path = protocol::resolve_socket_path(None)
         .map_err(|error| format!("failed to resolve sidecar socket path: {error}"))?;
     let stream = UnixStream::connect(&socket_path)
         .await
@@ -204,8 +163,4 @@ fn format_socket_error(action: &str, socket_path: &Path, error: std::io::Error) 
         "failed to {action} sidecar socket {}: {error}",
         socket_path.display()
     )
-}
-
-fn duration_millis(duration: Duration) -> u64 {
-    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
