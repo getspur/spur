@@ -36,4 +36,4 @@ pub use response::{JsonRpcError, JsonRpcResponse};
 // kinds onto JSON-RPC codes.
 pub use rmcp::model::{ErrorCode, ErrorData as McpError};
 pub use server::{serve_stdio_server, RegistryServerHandler};
-pub use tools::{tools_list, ToolDefinition};
+pub use tools::{tools_list, McpHandlerError, ToolDefinition};

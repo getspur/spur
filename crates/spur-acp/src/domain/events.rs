@@ -381,6 +381,16 @@ pub enum PlanLifecycleEvent {
     Unknown,
 }
 
+/// Issue comment carried in `IssueDetailFetched`.
+/// Mirrors `spur_pm::Comment` without taking a direct dependency on spur-pm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueCommentEvent {
+    pub id: String,
+    pub body: String,
+    pub actor: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Full issue detail carried in the `IssueDetailFetched` event.
 /// Mirrors `spur_pm::Issue` plus associated comments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -403,7 +413,7 @@ pub struct IssueDetailEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub comments: Vec<spur_pm::Comment>,
+    pub comments: Vec<IssueCommentEvent>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
