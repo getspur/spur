@@ -7,6 +7,7 @@ fn pack_modules_stay_small_and_helper_oriented() {
     let modules = [
         "caveats.rs",
         "evidence.rs",
+        "graph_paths.rs",
         "graph_reasoning.rs",
         "impact.rs",
         "mod.rs",
