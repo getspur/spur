@@ -22,7 +22,7 @@ pub use events::{run_tui, run_tui_with_config, run_tui_with_license};
 use overlays::render_mermaid_overlay;
 use overlays::render_user_warning;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -351,6 +351,7 @@ pub struct App {
     user_input_tx: Option<mpsc::Sender<UserInput>>,
     background_action_tx: mpsc::UnboundedSender<Action>,
     background_action_rx: mpsc::UnboundedReceiver<Action>,
+    agent_model_catalog_probes_in_flight: HashSet<String>,
     #[cfg(any(test, debug_assertions))]
     user_input_rx_for_test: Option<mpsc::Receiver<UserInput>>,
     brain_status: BrainStatus,
@@ -595,6 +596,8 @@ impl App {
                 }
             }
         }
+
+        self.schedule_pending_agent_model_catalog_probes();
 
         // Advance spinner frames on all per-executor traces every tick,
         // regardless of which view is focused.  Keeps traces ready when the

@@ -265,6 +265,12 @@ impl DashboardView {
         self.refresh_mention_issues();
     }
 
+    pub(crate) fn drain_agent_model_catalog_probe_requests(&mut self) -> Vec<String> {
+        self.mention_registry
+            .borrow_mut()
+            .drain_agent_model_catalog_probe_requests()
+    }
+
     pub fn set_issue_snapshot(&mut self, issues: Vec<spur_pm::IssueSummary>) {
         self.tracked_issues = issues;
         self.refresh_mention_issues();
