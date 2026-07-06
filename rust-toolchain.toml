@@ -8,4 +8,4 @@
 # is the *dev/CI* toolchain, deliberately ahead of the floor. Bump explicitly.
 [toolchain]
 channel = "1.94.1"
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "llvm-tools"]
