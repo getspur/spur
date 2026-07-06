@@ -279,6 +279,9 @@ impl StatusBar {
                 ViewId::Dashboard => {
                     " [i]nput [Enter]focus [r]eview [s]essions [Alt-g]session [Esc]back [Ctrl+C]quit [?]help"
                 }
+                ViewId::AgentConfigBrowser { .. } => {
+                    " [Tab]pane [j/k]move [Enter]edit/toggle [s]save [Esc]back"
+                }
                 ViewId::IssueBrowser => {
                     " [j/k]navigate [Enter]detail [o/w/b/x]status [W]work [Esc]back [?]help"
                 }

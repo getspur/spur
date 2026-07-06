@@ -340,6 +340,7 @@ async fn read_notebook_daemon_frame(stream: &mut UnixStream) -> io::Result<Vec<u
 pub struct Orchestrator {
     pub registry: AgentRegistry,
     pub config: SpurConfig,
+    pub(crate) agent_configs: Arc<parking_lot::RwLock<Vec<spur_acp::config::AgentConfig>>>,
     pub worktree_authority: Arc<crate::WorktreeAuthority>,
     pub self_held: spur_acp::session_liveness::SelfHeldSet,
     pub cost_tracker: Option<CostTracker>,
@@ -412,6 +413,7 @@ impl Orchestrator {
         feature_gate: Option<std::sync::Arc<spur_license::FeatureGate>>,
     ) -> Result<Self> {
         let registry = AgentRegistry::load(config.agents.entries.clone());
+        let agent_configs = Arc::new(parking_lot::RwLock::new(config.agents.entries.clone()));
         let outcome_store: Arc<dyn OutcomeStore> = Arc::new(MeasuredOutcomeStore::new(
             GitBlobOutcomeStore::new(repo_root.clone()),
         ));
@@ -468,6 +470,7 @@ impl Orchestrator {
         let mut orchestrator = Self {
             registry,
             config,
+            agent_configs,
             worktree_authority: worktree_authority.clone(),
             self_held,
             cost_tracker,
