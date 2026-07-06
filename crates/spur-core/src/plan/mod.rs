@@ -5427,7 +5427,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fn task(id: &str, deps: &[&str]) -> PlanTask {
         PlanTask {
@@ -5480,6 +5480,33 @@ mod tests {
         Arc::new(spur_license::FeatureGate::new(
             spur_license::policy::PolicyResolver::embedded(),
         ))
+    }
+
+    fn test_entry(id: &str, deps: &[&str], status: PlanTaskStatus) -> PlanTaskEntry {
+        let mut spec = task(id, deps);
+        spec.task = format!("Do {id}");
+        PlanTaskEntry {
+            spec,
+            status,
+            result: None,
+            worker_branch: None,
+            attempt: 1,
+            history: vec![],
+            last_delegation_id: None,
+            dispatched_base_oid: None,
+        }
+    }
+
+    fn test_state(plan_id: &str, tasks: Vec<PlanTaskEntry>) -> PlanState {
+        PlanState {
+            plan_id: plan_id.into(),
+            tasks,
+            brain_session_id: BrainSessionId::new(spur_acp::SessionId("test-brain".into())),
+            base_snapshot_branch: None,
+            base_snapshot_oid: None,
+            merge_state: PlanMergeState::NotStarted,
+            epic_id: None,
+        }
     }
 
     #[test]
@@ -7356,6 +7383,544 @@ mod tests {
         assert_eq!(calls[1].1.remove_labels, vec!["label-c"]);
     }
 
+    struct ReviewWritePm {
+        advanced_enabled: bool,
+        comments: Mutex<std::collections::HashMap<String, Vec<String>>>,
+        updates: Mutex<Vec<(String, spur_pm::IssueUpdate)>>,
+        fail_updates_for: Mutex<Vec<String>>,
+    }
+
+    impl ReviewWritePm {
+        fn with_advanced() -> Self {
+            Self {
+                advanced_enabled: true,
+                comments: Mutex::new(std::collections::HashMap::new()),
+                updates: Mutex::new(Vec::new()),
+                fail_updates_for: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn without_advanced() -> Self {
+            Self {
+                advanced_enabled: false,
+                ..Self::with_advanced()
+            }
+        }
+
+        fn fail_next_update_for(&self, issue_id: &str) {
+            self.fail_updates_for
+                .lock()
+                .expect("fail updates lock")
+                .push(issue_id.to_string());
+        }
+
+        fn comments_for(&self, issue_id: &str) -> Vec<String> {
+            self.comments
+                .lock()
+                .expect("comments lock")
+                .get(issue_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl spur_pm::BeadsAdvanced for ReviewWritePm {
+        async fn list_ready(
+            &self,
+            _filter: spur_pm::ReadyFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            Ok(vec![])
+        }
+
+        async fn list_comments(&self, issue_id: &str) -> anyhow::Result<Vec<spur_pm::Comment>> {
+            Ok(self
+                .comments_for(issue_id)
+                .into_iter()
+                .enumerate()
+                .map(|(index, body)| spur_pm::Comment {
+                    id: format!("c{}", index + 1),
+                    body,
+                    actor: "test".to_string(),
+                    created_at: chrono::Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn add_comment(&self, issue_id: &str, body: &str) -> anyhow::Result<String> {
+            let mut comments = self.comments.lock().expect("comments lock");
+            let issue_comments = comments.entry(issue_id.to_string()).or_default();
+            issue_comments.push(body.to_string());
+            Ok(format!("c{}", issue_comments.len()))
+        }
+
+        async fn remove_dependency(
+            &self,
+            _issue_id: &str,
+            _depends_on_id: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn dep_cycles(&self) -> anyhow::Result<Vec<spur_pm::DependencyCycle>> {
+            Ok(vec![])
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PmLike for ReviewWritePm {
+        async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+            self.updates
+                .lock()
+                .expect("updates lock")
+                .push((id.to_string(), update.clone()));
+
+            {
+                let mut failures = self.fail_updates_for.lock().expect("fail updates lock");
+                if let Some(pos) = failures.iter().position(|issue| issue == id) {
+                    failures.remove(pos);
+                    anyhow::bail!("planned update failure for {id}");
+                }
+            }
+
+            if let Some(comment) = update.comment {
+                self.comments
+                    .lock()
+                    .expect("comments lock")
+                    .entry(id.to_string())
+                    .or_default()
+                    .push(comment);
+            }
+            Ok(())
+        }
+
+        fn closed_status(&self) -> &str {
+            "closed"
+        }
+
+        fn advanced(&self) -> Option<&dyn spur_pm::BeadsAdvanced> {
+            self.advanced_enabled
+                .then_some(self as &dyn spur_pm::BeadsAdvanced)
+        }
+    }
+
+    #[test]
+    fn apply_decision_approve_stages_beads_audit_and_promotes_dependents() {
+        let mut reviewed = test_entry(
+            "T1",
+            &[],
+            PlanTaskStatus::AwaitingReview {
+                summary: Some("worker summary".into()),
+            },
+        );
+        reviewed.spec.issue_id = Some("bd-1".into());
+        reviewed.worker_branch = Some("spur/worker-t1".into());
+        reviewed.last_delegation_id = Some("del-1".into());
+        reviewed.dispatched_base_oid = Some("base-1".into());
+        let dependent = test_entry("T2", &["T1"], PlanTaskStatus::Pending);
+        let mut state = test_state("plan-review", vec![reviewed, dependent]);
+        state.merge_state = PlanMergeState::Succeeded {
+            merge_branch: "spur/plan-merge-old".into(),
+            merged_task_ids: vec!["T1".into()],
+        };
+
+        let outcome = apply_decision_and_extract(
+            "plan-review",
+            "T1",
+            "approve",
+            Some("ship it"),
+            false,
+            &mut state,
+            Some("done"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("approve decision should apply");
+
+        assert!(matches!(
+            state.tasks[0].status,
+            PlanTaskStatus::Approved { .. }
+        ));
+        assert!(matches!(state.tasks[1].status, PlanTaskStatus::Ready));
+        assert!(matches!(state.merge_state, PlanMergeState::NotStarted));
+        assert_eq!(outcome.beads_ops.len(), 1);
+        assert_eq!(outcome.beads_ops[0].issue_id, "bd-1");
+        assert_eq!(outcome.beads_ops[0].update.status.as_deref(), Some("done"));
+        assert_eq!(
+            outcome.beads_ops[0].update.comment.as_deref(),
+            Some("Brain approved: ship it")
+        );
+        assert!(outcome.beads_ops[0]
+            .update
+            .remove_labels
+            .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()));
+        assert!(matches!(
+            outcome.audit_emits.as_slice(),
+            [PendingAuditEmit::Approval {
+                issue_id: Some(issue_id),
+                delegation_id,
+                ..
+            }] if issue_id == "bd-1" && delegation_id == "del-1"
+        ));
+        assert!(matches!(
+            outcome.events.as_slice(),
+            [PendingEvent::TaskReviewed {
+                decision,
+                attempt: 1,
+                ..
+            }] if decision == "approve"
+        ));
+        assert_eq!(outcome.resp["decision"], "approve");
+        assert_eq!(outcome.resp["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn review_task_reject_cascades_ready_descendants_skips_terminal_and_emits_event() {
+        let reviewed = test_entry(
+            "A",
+            &[],
+            PlanTaskStatus::AwaitingReview {
+                summary: Some("not enough".into()),
+            },
+        );
+        let ready_child = test_entry("B", &["A"], PlanTaskStatus::Ready);
+        let pending_grandchild = test_entry("C", &["B"], PlanTaskStatus::Pending);
+        let approved_child = test_entry(
+            "D",
+            &["A"],
+            PlanTaskStatus::Approved {
+                summary: Some("already accepted".into()),
+            },
+        );
+        let mut state = test_state(
+            "plan-reject",
+            vec![reviewed, ready_child, pending_grandchild, approved_child],
+        );
+        let sink = RecordingPlanEventSink::default();
+
+        let resp = review_task(
+            "plan-reject",
+            "A",
+            "reject",
+            Some("needs redesign"),
+            false,
+            &mut state,
+            None,
+            Some(&sink),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("reject decision should apply");
+
+        assert!(matches!(
+            state.tasks[0].status,
+            PlanTaskStatus::Rejected { .. }
+        ));
+        assert!(matches!(
+            state.tasks[1].status,
+            PlanTaskStatus::Failed { .. }
+        ));
+        assert!(matches!(
+            state.tasks[2].status,
+            PlanTaskStatus::Failed { .. }
+        ));
+        assert!(matches!(
+            state.tasks[3].status,
+            PlanTaskStatus::Approved { .. }
+        ));
+        let warnings = resp["warnings"].as_array().expect("warnings array");
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("descendant 'D' not cascaded"))),
+            "terminal descendant warning should be surfaced, got {warnings:?}"
+        );
+
+        let events = sink.events.lock().expect("events lock");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            spur_acp::SpurEventBody::PlanTaskReviewed {
+                plan_id,
+                task_id,
+                decision,
+                feedback,
+                attempt,
+                ..
+            } => {
+                assert_eq!(plan_id, "plan-reject");
+                assert_eq!(task_id, "A");
+                assert_eq!(decision, "reject");
+                assert_eq!(feedback.as_deref(), Some("needs redesign"));
+                assert_eq!(*attempt, 1);
+            }
+            other => panic!("expected PlanTaskReviewed event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_audit_emit_into_beads_ops_writes_task_and_epic_sentinels() {
+        use crate::plan::audit_sentinel::AuditSentinelKind;
+
+        let approval_ops = PendingAuditEmit::Approval {
+            issue_id: Some("bd-task".into()),
+            plan_id: "plan-audit".into(),
+            task_id: "T1".into(),
+            delegation_id: "del-approve".into(),
+        }
+        .into_beads_ops(Some("bd-epic"));
+        assert_eq!(approval_ops.len(), 2);
+        assert_eq!(approval_ops[0].issue_id, "bd-task");
+        assert_eq!(approval_ops[1].issue_id, "bd-epic");
+        let approval = crate::plan::audit_sentinel::parse_comment(
+            approval_ops[0].update.comment.as_deref().unwrap(),
+        )
+        .expect("approval sentinel")
+        .expect("approval parse");
+        assert!(matches!(
+            approval,
+            AuditSentinelKind::Approval { delegation_id } if delegation_id == "del-approve"
+        ));
+        let transition = crate::plan::audit_sentinel::parse_comment(
+            approval_ops[1].update.comment.as_deref().unwrap(),
+        )
+        .expect("transition sentinel")
+        .expect("transition parse");
+        assert!(matches!(
+            transition,
+            AuditSentinelKind::TaskTransition {
+                plan_id,
+                task_id,
+                from_status,
+                to_status,
+            } if plan_id == "plan-audit"
+                && task_id == "T1"
+                && from_status == "awaiting_review"
+                && to_status == "approved"
+        ));
+
+        let rejection_ops = PendingAuditEmit::Rejection {
+            issue_id: Some("bd-task".into()),
+            plan_id: "plan-audit".into(),
+            task_id: "T1".into(),
+            delegation_id: "del-reject".into(),
+            feedback: "too risky".into(),
+        }
+        .into_beads_ops(Some("bd-epic"));
+        assert_eq!(rejection_ops.len(), 2);
+        let rejection = crate::plan::audit_sentinel::parse_comment(
+            rejection_ops[0].update.comment.as_deref().unwrap(),
+        )
+        .expect("rejection sentinel")
+        .expect("rejection parse");
+        assert!(matches!(
+            rejection,
+            AuditSentinelKind::Rejection {
+                delegation_id,
+                feedback,
+            } if delegation_id == "del-reject" && feedback == "too risky"
+        ));
+
+        let feedback_ops = PendingAuditEmit::ReviewFeedback {
+            issue_id: None,
+            plan_id: "plan-audit".into(),
+            task_id: "T1".into(),
+            delegation_id: "del-feedback".into(),
+            attempt: 2,
+            feedback: "retry with tests".into(),
+            worker_branch: Some("spur/worker-old".into()),
+            summary: Some("partial".into()),
+            reuse_prior_worktree: Some(true),
+        }
+        .into_beads_ops(Some("bd-epic"));
+        assert_eq!(
+            feedback_ops.len(),
+            1,
+            "missing task issue should still write the epic transition"
+        );
+        let transition = crate::plan::audit_sentinel::parse_comment(
+            feedback_ops[0].update.comment.as_deref().unwrap(),
+        )
+        .expect("feedback transition sentinel")
+        .expect("feedback transition parse");
+        assert!(matches!(
+            transition,
+            AuditSentinelKind::TaskTransition { to_status, .. } if to_status == "pending"
+        ));
+
+        let no_target_ops = PendingAuditEmit::Approval {
+            issue_id: None,
+            plan_id: "plan-audit".into(),
+            task_id: "T2".into(),
+            delegation_id: "del-none".into(),
+        }
+        .into_beads_ops(None);
+        assert!(no_target_ops.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn apply_review_ops_nonadvisory_retries_failed_suffix_without_duplicate_comments() {
+        let pm = ReviewWritePm::with_advanced();
+        pm.fail_next_update_for("bd-2");
+        let ops = vec![
+            PendingBeadsOp {
+                issue_id: "bd-1".into(),
+                update: spur_pm::IssueUpdate {
+                    comment: Some("first audit".into()),
+                    ..Default::default()
+                },
+            },
+            PendingBeadsOp {
+                issue_id: "bd-2".into(),
+                update: spur_pm::IssueUpdate {
+                    comment: Some("second audit".into()),
+                    ..Default::default()
+                },
+            },
+        ];
+
+        apply_review_ops_nonadvisory(&pm, pro_feature_gate().as_ref(), ops)
+            .await
+            .expect("retry should succeed after read-back advances");
+
+        assert_eq!(pm.comments_for("bd-1"), vec!["first audit".to_string()]);
+        assert_eq!(pm.comments_for("bd-2"), vec!["second audit".to_string()]);
+        let updates = pm.updates.lock().expect("updates lock");
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|(issue_id, _)| issue_id == "bd-1")
+                .count(),
+            1,
+            "successful prefix op must not be duplicated on retry"
+        );
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|(issue_id, _)| issue_id == "bd-2")
+                .count(),
+            2,
+            "failed suffix op should be retried once"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_review_task_advisory_commits_state_despite_beads_failure() {
+        let mut entry = test_entry(
+            "T1",
+            &[],
+            PlanTaskStatus::AwaitingReview {
+                summary: Some("done".into()),
+            },
+        );
+        entry.spec.issue_id = Some("bd-1".into());
+        entry.last_delegation_id = Some("del-1".into());
+        let plan_arc = Arc::new(tokio::sync::Mutex::new(test_state(
+            "plan-advisory",
+            vec![entry],
+        )));
+        let pm_impl = Arc::new(ReviewWritePm::with_advanced());
+        pm_impl.fail_next_update_for("bd-1");
+        let pm: Arc<dyn PmLike> = pm_impl.clone();
+        let sink = RecordingPlanEventSink::default();
+
+        let resp = handle_review_task_with_write_mode(
+            plan_arc.clone(),
+            "plan-advisory",
+            "T1",
+            "approve",
+            Some("looks good"),
+            false,
+            Some(pm),
+            Some(&sink),
+            None,
+            None,
+            pro_feature_gate(),
+            ReviewWriteMode::Advisory,
+        )
+        .await
+        .expect("advisory write failures should not fail review");
+
+        assert_eq!(resp["decision"], "approve");
+        let state = plan_arc.lock().await;
+        assert!(matches!(
+            state.tasks[0].status,
+            PlanTaskStatus::Approved { .. }
+        ));
+        drop(state);
+
+        let comments = pm_impl.comments_for("bd-1");
+        assert_eq!(
+            comments.len(),
+            1,
+            "advisory audit flush should still emit approval sentinel"
+        );
+        let parsed = crate::plan::audit_sentinel::parse_comment(&comments[0])
+            .expect("approval sentinel")
+            .expect("approval parse");
+        assert!(matches!(
+            parsed,
+            crate::plan::audit_sentinel::AuditSentinelKind::Approval { delegation_id }
+                if delegation_id == "del-1"
+        ));
+        assert_eq!(sink.events.lock().expect("events lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_review_task_nonadvisory_keeps_cache_unchanged_on_readback_error() {
+        let mut entry = test_entry(
+            "T1",
+            &[],
+            PlanTaskStatus::AwaitingReview {
+                summary: Some("done".into()),
+            },
+        );
+        entry.spec.issue_id = Some("bd-1".into());
+        entry.last_delegation_id = Some("del-1".into());
+        let mut state = test_state("plan-nonadvisory", vec![entry]);
+        state.merge_state = PlanMergeState::Succeeded {
+            merge_branch: "spur/plan-merge-old".into(),
+            merged_task_ids: vec!["T1".into()],
+        };
+        let plan_arc = Arc::new(tokio::sync::Mutex::new(state));
+        let pm: Arc<dyn PmLike> = Arc::new(ReviewWritePm::without_advanced());
+
+        let err = handle_review_task_with_write_mode(
+            plan_arc.clone(),
+            "plan-nonadvisory",
+            "T1",
+            "approve",
+            Some("looks good"),
+            false,
+            Some(pm),
+            None,
+            None,
+            None,
+            pro_feature_gate(),
+            ReviewWriteMode::NonAdvisory,
+        )
+        .await
+        .expect_err("non-advisory write must fail without advanced read-back");
+
+        assert!(
+            err.contains("beads advanced read-back"),
+            "unexpected error: {err}"
+        );
+        let state = plan_arc.lock().await;
+        assert!(matches!(
+            state.tasks[0].status,
+            PlanTaskStatus::AwaitingReview { .. }
+        ));
+        assert!(matches!(
+            state.merge_state,
+            PlanMergeState::Succeeded { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn request_changes_reuse_prior_worktree_round_trips_attempt_record_and_sentinel() {
         use crate::plan::audit_sentinel::AuditSentinelKind;
@@ -7919,6 +8484,216 @@ mod tests {
         assert_eq!(status["merge"]["merge_branch"], "spur/plan-merge-1");
     }
 
+    #[test]
+    fn build_plan_status_renders_mixed_task_edge_fields() {
+        use spur_acp::{ArtifactKind, WorkerArtifact};
+
+        let mut approved = test_entry(
+            "approved",
+            &[],
+            PlanTaskStatus::Approved {
+                summary: Some("accepted".into()),
+            },
+        );
+        approved.worker_branch = Some("spur/worker-approved".into());
+        approved.result = Some(DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: Some(spur_acp::DiffSummary {
+                files_changed: 1,
+                insertions: 2,
+                deletions: 0,
+                files: vec![std::path::PathBuf::from("src/lib.rs")],
+            }),
+            summary: Some("accepted".into()),
+            estimated_cost_usd: 0.0,
+            worker_branch: Some("spur/worker-approved".into()),
+            artifact: Some(WorkerArtifact {
+                object_ref: "refs/spur/artifacts/abc".into(),
+                blob_sha: "a".repeat(40),
+                size_bytes: 42,
+                kind: ArtifactKind::Output,
+            }),
+        });
+        let cancelled = test_entry(
+            "cancelled",
+            &[],
+            PlanTaskStatus::Cancelled {
+                reason: "not needed".into(),
+            },
+        );
+        let pending = test_entry(
+            "pending",
+            &["approved", "cancelled", "failed"],
+            PlanTaskStatus::Pending,
+        );
+        let failed = test_entry(
+            "failed",
+            &[],
+            PlanTaskStatus::Failed {
+                error: "worker failed".into(),
+            },
+        );
+        let blocked = test_entry(
+            "blocked",
+            &[],
+            PlanTaskStatus::BlockedOnSetupConflict {
+                dep_task_id: "approved".into(),
+                files: vec!["src/conflict.rs".into()],
+            },
+        );
+        let mut escalated = test_entry(
+            "escalated",
+            &[],
+            PlanTaskStatus::EscalatedToBrain {
+                last_error: "retry budget exhausted".into(),
+            },
+        );
+        escalated.worker_branch = Some("spur/worker-escalated".into());
+        let superseded = test_entry(
+            "superseded",
+            &[],
+            PlanTaskStatus::Superseded {
+                mutation_id: "mut-1".into(),
+                by: vec!["replacement-a".into(), "replacement-b".into()],
+            },
+        );
+        let state = test_state(
+            "plan-status",
+            vec![
+                approved, cancelled, pending, failed, blocked, escalated, superseded,
+            ],
+        );
+
+        let status = build_plan_status("plan-status", &state);
+
+        assert_eq!(status["status"], "blocked_on_setup_conflict");
+        assert_eq!(status["counts"]["total"], 7);
+        assert_eq!(status["counts"]["blocked_on_setup_conflict"], 1);
+        assert_eq!(status["counts"]["escalated"], 1);
+        assert_eq!(status["all_workers_done"], false);
+        assert_eq!(status["ready_to_merge"], false);
+        assert!(status["next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("setup overlay conflict"));
+
+        let tasks = status["tasks"].as_array().expect("tasks array");
+        let approved_json = tasks
+            .iter()
+            .find(|task| task["task_id"] == "approved")
+            .expect("approved task");
+        assert_eq!(approved_json["status"], "approved");
+        assert_eq!(approved_json["summary"], "accepted");
+        assert_eq!(approved_json["worker_branch"], "spur/worker-approved");
+        assert_eq!(approved_json["diff_summary"]["files_changed"], 1);
+        assert_eq!(
+            approved_json["artifact"]["retrieval_hint"],
+            "git cat-file -p refs/spur/artifacts/abc"
+        );
+
+        let pending_json = tasks
+            .iter()
+            .find(|task| task["task_id"] == "pending")
+            .expect("pending task");
+        assert_eq!(
+            pending_json["blocked_by"],
+            serde_json::json!(["failed"]),
+            "approved and cancelled deps should not block pending tasks"
+        );
+
+        let blocked_json = tasks
+            .iter()
+            .find(|task| task["task_id"] == "blocked")
+            .expect("blocked task");
+        assert_eq!(blocked_json["dep_task_id"], "approved");
+        assert_eq!(
+            blocked_json["files"],
+            serde_json::json!(["src/conflict.rs"])
+        );
+
+        let escalated_json = tasks
+            .iter()
+            .find(|task| task["task_id"] == "escalated")
+            .expect("escalated task");
+        assert_eq!(escalated_json["status"], "escalated_to_brain");
+        assert_eq!(escalated_json["last_error"], "retry budget exhausted");
+        assert_eq!(escalated_json["worker_branch"], "spur/worker-escalated");
+
+        let superseded_json = tasks
+            .iter()
+            .find(|task| task["task_id"] == "superseded")
+            .expect("superseded task");
+        assert_eq!(superseded_json["mutation_id"], "mut-1");
+        assert_eq!(
+            superseded_json["superseded_by"],
+            serde_json::json!(["replacement-a", "replacement-b"])
+        );
+    }
+
+    #[tokio::test]
+    async fn derive_epic_plan_fetches_direct_children_from_pm() {
+        let repo = tempfile::TempDir::new().expect("temp repo");
+        let beads_dir = repo.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create .beads");
+        let mut workspace = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let epic_id = workspace.create_epic("Epic");
+        workspace.add_label(&epic_id, "spur:agent:codex");
+        let child_id = workspace.create_issue("Child task");
+        workspace.add_dep(&child_id, &epic_id);
+        workspace.copy_db_to(&beads_dir);
+
+        let pm = spur_pm::PmService::try_new(None, true, false, repo.path(), None)
+            .await
+            .expect("PmService::try_new")
+            .expect("beads pm");
+        let derived =
+            derive_epic_plan(&pm, pro_feature_gate().as_ref(), &epic_id, None, &["codex"])
+                .await
+                .expect("derive epic plan");
+
+        assert_eq!(derived.plan_tasks.len(), 1);
+        let task = &derived.plan_tasks[0];
+        assert_eq!(task.task_id, child_id);
+        assert_eq!(task.issue_id.as_deref(), Some(child_id.as_str()));
+        assert_eq!(task.issue_title.as_deref(), Some("Child task"));
+        assert_eq!(task.agent, "codex");
+        assert!(
+            task.depends_on.is_empty(),
+            "the structural epic parent edge should not become an execution edge"
+        );
+        assert!(derived.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn derive_epic_plan_rejects_closed_external_dep_from_pm() {
+        let repo = tempfile::TempDir::new().expect("temp repo");
+        let beads_dir = repo.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create .beads");
+        let mut workspace = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let epic_id = workspace.create_epic("Epic");
+        workspace.add_label(&epic_id, "spur:agent:codex");
+        let child_id = workspace.create_issue("Child task");
+        let external_id = workspace.create_issue("External closed dep");
+        workspace.close_issue(&external_id);
+        workspace.add_dep(&child_id, &epic_id);
+        workspace.add_dep(&child_id, &external_id);
+        workspace.copy_db_to(&beads_dir);
+
+        let pm = spur_pm::PmService::try_new(None, true, false, repo.path(), None)
+            .await
+            .expect("PmService::try_new")
+            .expect("beads pm");
+        let err = derive_epic_plan(&pm, pro_feature_gate().as_ref(), &epic_id, None, &["codex"])
+            .await
+            .expect_err("closed external deps should not satisfy derive_epic_plan");
+
+        assert!(
+            err.contains(&external_id) && err.contains("status=closed"),
+            "unexpected error: {err}"
+        );
+    }
+
     // ─── emit_epic_completion_audit durable-state contract ───────────────
 
     struct FailingAddCommentAdvanced;
@@ -8157,6 +8932,79 @@ mod tests {
             "expected exactly one completion audit comment, got {completions:?}"
         );
         completions.into_iter().next().unwrap()
+    }
+
+    #[tokio::test]
+    async fn persist_completion_inner_superseded_emits_audit_without_deferred_push() {
+        let pm = CompletionWritebackPm::new(vec![]);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let waiter = tokio::spawn({
+            let notify = Arc::clone(&notify);
+            async move { notify.notified().await }
+        });
+        let result = DelegationResult {
+            status: DelegationStatus::Success,
+            diff: None,
+            diff_summary: None,
+            summary: Some("superseded output".into()),
+            estimated_cost_usd: 0.5,
+            worker_branch: Some("spur/worker-superseded".into()),
+            artifact: None,
+        };
+
+        let deferred = super::persist_completion_inner(
+            &pm,
+            "bd-1",
+            pro_feature_gate().as_ref(),
+            "plan-1",
+            "del-S",
+            crate::plan::audit_sentinel::CompletionState::Superseded,
+            false,
+            &Some(Arc::clone(&notify)),
+            &result,
+            &spur_acp::BrainSessionId::new(spur_acp::SessionId("brain".into())),
+            2,
+            test_materializer().as_ref(),
+            Some("base-oid".into()),
+            None,
+            Some("task-1"),
+        )
+        .await
+        .expect("persist superseded completion");
+
+        assert!(
+            deferred.is_none(),
+            "superseded completions should not push continuations or events"
+        );
+        tokio::time::timeout(std::time::Duration::from_millis(50), waiter)
+            .await
+            .expect("superseded completion must fast-forward waiters")
+            .expect("waiter task must not panic");
+
+        match single_completion_comment(&pm) {
+            crate::plan::audit_sentinel::AuditSentinelKind::Completion {
+                delegation_id,
+                completion_state,
+                superseded,
+                worker_branch,
+                result_summary,
+                dispatched_base_oid,
+                estimated_cost_micros,
+                ..
+            } => {
+                assert_eq!(delegation_id, "del-S");
+                assert_eq!(
+                    completion_state,
+                    crate::plan::audit_sentinel::CompletionState::Superseded
+                );
+                assert!(superseded);
+                assert_eq!(worker_branch.as_deref(), Some("spur/worker-superseded"));
+                assert_eq!(result_summary.as_deref(), Some("superseded output"));
+                assert_eq!(dispatched_base_oid.as_deref(), Some("base-oid"));
+                assert_eq!(estimated_cost_micros, Some(500_000));
+            }
+            other => panic!("expected completion audit, got {other:?}"),
+        }
     }
 
     fn run_git(repo: &Path, args: &[&str]) -> String {
