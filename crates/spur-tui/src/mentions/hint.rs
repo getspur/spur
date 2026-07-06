@@ -11,10 +11,80 @@ use spur_acp::{ContentBlock, TextContent};
 
 use crate::components::input_bar::ProtectedRange;
 
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct WorkerHint {
+    name: String,
+    agent: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+impl WorkerHint {
+    fn from_uri(uri: &str, known_workers: &HashSet<String>) -> Option<Self> {
+        let remainder = uri.strip_prefix("worker://")?;
+        let (name, query) = match remainder.split_once('?') {
+            Some((name, query)) => (name, Some(query)),
+            None => (remainder, None),
+        };
+        if !known_workers.contains(name) {
+            return None;
+        }
+
+        let mut hint = Self {
+            name: name.to_string(),
+            agent: None,
+            model: None,
+            effort: None,
+        };
+        if let Some(query) = query {
+            for param in query.split('&') {
+                let Some((key, value)) = param.split_once('=') else {
+                    continue;
+                };
+                if value.is_empty() {
+                    continue;
+                }
+                match key {
+                    "agent" => hint.agent = Some(value.to_string()),
+                    "model" => hint.model = Some(value.to_string()),
+                    "effort" => hint.effort = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        Some(hint)
+    }
+
+    fn is_enriched(&self) -> bool {
+        self.agent.is_some() || self.model.is_some() || self.effort.is_some()
+    }
+
+    fn render(&self) -> String {
+        let mut rendered = self.name.clone();
+        let mut params = Vec::new();
+        if let Some(agent) = &self.agent {
+            params.push(format!("agent={agent}"));
+        }
+        if let Some(model) = &self.model {
+            params.push(format!("model={model}"));
+        }
+        if let Some(effort) = &self.effort {
+            params.push(format!("effort={effort}"));
+        }
+        if !params.is_empty() {
+            rendered.push_str(" (");
+            rendered.push_str(&params.join(", "));
+            rendered.push(')');
+        }
+        rendered
+    }
+}
+
 /// Builds the hint by collecting `worker://<name>` URIs from `ranges`,
-/// keeping only those present in `known_workers`, then sorting and
-/// deduplicating (sort-then-dedup is required because `Vec::dedup`
-/// only removes *consecutive* duplicates).
+/// keeping only names present in `known_workers`, then sorting and
+/// deduplicating exact worker/agent/model/effort tuples (sort-then-dedup
+/// is required because `Vec::dedup` only removes *consecutive*
+/// duplicates).
 ///
 /// Returns `true` if a hint was prepended; otherwise leaves
 /// `blocks` unchanged and returns `false`.
@@ -23,22 +93,32 @@ pub fn prepend_worker_hint(
     ranges: &[ProtectedRange],
     known_workers: &HashSet<String>,
 ) -> bool {
-    let mut names: Vec<String> = ranges
+    let mut hints: Vec<WorkerHint> = ranges
         .iter()
-        .filter_map(|r| r.uri.strip_prefix("worker://"))
-        .filter(|n| known_workers.contains(*n))
-        .map(str::to_string)
+        .filter_map(|r| WorkerHint::from_uri(&r.uri, known_workers))
         .collect();
-    names.sort();
-    names.dedup();
-    if names.is_empty() {
+    hints.sort();
+    hints.dedup();
+    if hints.is_empty() {
         return false;
     }
-    let hint = format!(
-        "[UI hint] User-suggested workers for delegation this turn: {} \
-         (preference, not override; honor unless `delegation.avoid_for` clearly matches).",
-        names.join(", ")
-    );
+    let mentions = hints
+        .iter()
+        .map(WorkerHint::render)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let hint = if hints.iter().any(WorkerHint::is_enriched) {
+        format!(
+            "[UI hint] User-suggested workers for delegation this turn: {mentions} \
+             (preference, not override; honor unless delegation.avoid_for clearly matches, \
+             or the task needs a different combination)."
+        )
+    } else {
+        format!(
+            "[UI hint] User-suggested workers for delegation this turn: {mentions} \
+             (preference, not override; honor unless `delegation.avoid_for` clearly matches)."
+        )
+    };
     blocks.insert(0, ContentBlock::Text(TextContent::new(hint)));
     true
 }
@@ -135,6 +215,73 @@ mod tests {
         assert!(!prepended);
         assert_eq!(blocks.len(), 1);
         assert_eq!(hint_text(&blocks), Some("user text"));
+    }
+
+    #[test]
+    fn enriched_worker_tuple_includes_selected_agent_model_and_effort() {
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
+        let ranges = vec![range(
+            "worker://codex?agent=spur-narrow-implementer&model=gpt-5.5&effort=low",
+        )];
+        let known = known(&["codex"]);
+        let prepended = prepend_worker_hint(&mut blocks, &ranges, &known);
+        assert!(prepended);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            hint_text(&blocks),
+            Some(
+                "[UI hint] User-suggested workers for delegation this turn: codex \
+                 (agent=spur-narrow-implementer, model=gpt-5.5, effort=low) \
+                 (preference, not override; honor unless delegation.avoid_for clearly matches, \
+                 or the task needs a different combination)."
+            )
+        );
+    }
+
+    #[test]
+    fn multiple_enriched_worker_tuples_are_preserved() {
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
+        let ranges = vec![
+            range("worker://opencode?model=claude-sonnet-4&effort=high"),
+            range("worker://codex?agent=spur-narrow-implementer"),
+        ];
+        let known = known(&["codex", "opencode"]);
+        let prepended = prepend_worker_hint(&mut blocks, &ranges, &known);
+        assert!(prepended);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            hint_text(&blocks),
+            Some(
+                "[UI hint] User-suggested workers for delegation this turn: codex \
+                 (agent=spur-narrow-implementer), opencode \
+                 (model=claude-sonnet-4, effort=high) \
+                 (preference, not override; honor unless delegation.avoid_for clearly matches, \
+                 or the task needs a different combination)."
+            )
+        );
+    }
+
+    #[test]
+    fn same_worker_with_different_enriched_tuples_both_survive() {
+        let mut blocks: Vec<ContentBlock> = vec![ContentBlock::Text(TextContent::new("user text"))];
+        let ranges = vec![
+            range("worker://codex?model=gpt-5.5&effort=low"),
+            range("worker://codex?model=gpt-5.5&effort=high"),
+            range("worker://codex?model=gpt-5.5&effort=low"),
+        ];
+        let known = known(&["codex"]);
+        let prepended = prepend_worker_hint(&mut blocks, &ranges, &known);
+        assert!(prepended);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            hint_text(&blocks),
+            Some(
+                "[UI hint] User-suggested workers for delegation this turn: codex \
+                 (model=gpt-5.5, effort=high), codex (model=gpt-5.5, effort=low) \
+                 (preference, not override; honor unless delegation.avoid_for clearly matches, \
+                 or the task needs a different combination)."
+            )
+        );
     }
 
     #[test]
