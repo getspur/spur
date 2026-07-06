@@ -134,6 +134,7 @@ impl App {
             dashboard,
             session_detail: None,
             session_picker,
+            agent_config_browser: None,
             loop_browser: None,
             plan_browser: None,
             plan_inspector: None,
