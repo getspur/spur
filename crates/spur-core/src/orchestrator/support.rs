@@ -1,5 +1,20 @@
 use super::*;
 
+fn with_editable_agent_config_fields(
+    existing: &spur_acp::config::AgentConfig,
+    updated: &spur_acp::config::AgentConfig,
+) -> spur_acp::config::AgentConfig {
+    let mut replacement = existing.clone();
+    replacement.args = updated.args.clone();
+    replacement.additional_directories = updated.additional_directories.clone();
+    replacement.capabilities = updated.capabilities.clone();
+    replacement.skip_permissions = updated.skip_permissions;
+    replacement.skip_permissions_args = updated.skip_permissions_args.clone();
+    replacement.skip_permissions_session_mode = updated.skip_permissions_session_mode.clone();
+    replacement.profile = updated.profile.clone();
+    replacement
+}
+
 impl Orchestrator {
     /// Phase 5 / Task 25/26 — return the existing per-`BrainSession`
     /// [`WorkerMcpServer`], booting one on first call. Concurrent callers
@@ -268,6 +283,59 @@ impl Orchestrator {
     /// `self.emit(SpurEvent::now(body))` callers compile transparently.
     pub(in crate::orchestrator) fn emit(&self, event: SpurEvent) {
         self.funnel.emit(event.body);
+    }
+
+    pub fn update_agent_config(
+        &mut self,
+        name: String,
+        updated_entry: spur_acp::config::AgentConfig,
+    ) -> Result<()> {
+        if updated_entry.name != name {
+            anyhow::bail!(
+                "agent config update name mismatch: requested '{name}', payload '{}'",
+                updated_entry.name
+            );
+        }
+        spur_acp::config::validate_agent_additional_directories_absolute(
+            &name,
+            &updated_entry.additional_directories,
+        )?;
+
+        let current_entries = self.agent_configs.read().clone();
+        let existing = current_entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| anyhow!("agent '{name}' is not configured"))?;
+        let replacement = with_editable_agent_config_fields(existing, &updated_entry);
+        let mut next_entries = current_entries;
+        let Some(slot) = next_entries.iter_mut().find(|entry| entry.name == name) else {
+            anyhow::bail!("agent '{name}' is not configured");
+        };
+        *slot = replacement.clone();
+
+        let config_path = self.repo_root.join(".spur/config.toml");
+        let mut persisted_replacement = false;
+        spur_acp::config::update_config(&config_path, |config| {
+            if let Some(slot) = config
+                .agents
+                .entries
+                .iter_mut()
+                .find(|entry| entry.name == name)
+            {
+                *slot = replacement;
+                persisted_replacement = true;
+            }
+        })?;
+        if !persisted_replacement {
+            anyhow::bail!(
+                "agent '{name}' is not configured in {}",
+                config_path.display()
+            );
+        }
+
+        self.config.agents.entries = next_entries.clone();
+        *self.agent_configs.write() = next_entries;
+        Ok(())
     }
 
     /// Read the cached `config_options` for the active brain session.
