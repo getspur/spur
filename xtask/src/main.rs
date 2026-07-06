@@ -219,13 +219,20 @@ fn coverage_cmd(extra: Vec<String>) -> ExitCode {
         }
     }
 
+    let lcov_path = workspace_root.join(&options.output_path);
+    if let Some(parent) = lcov_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!("xtask: failed to create {}: {err}", parent.display());
+            return ExitCode::FAILURE;
+        }
+    }
+
     let mut measure = coverage::llvm_cov_measure_command(&workspace_root, &options.output_path);
     if let Err(err) = run_status(&mut measure, "cargo llvm-cov --workspace --lib --lcov") {
         eprintln!("xtask: {err}");
         return ExitCode::FAILURE;
     }
 
-    let lcov_path = workspace_root.join(&options.output_path);
     let lcov_text = match fs::read_to_string(&lcov_path) {
         Ok(text) => text,
         Err(err) => {
