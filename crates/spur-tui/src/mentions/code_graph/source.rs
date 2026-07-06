@@ -212,11 +212,13 @@ fn entries_and_payloads(
             agent: None,
             model: None,
             effort: None,
+            worker_kind: None,
             code_path: Some(file.file_path.clone()),
             code_scope: None,
             tag: Some("file".to_string()),
             search_text: Some(file.file_path),
             atom_text: None,
+            unconsumed_suffix: None,
             issue_preview: None,
         });
     }
@@ -248,11 +250,13 @@ fn entries_and_payloads(
             agent: None,
             model: None,
             effort: None,
+            worker_kind: None,
             code_path: Some(symbol.file_path.clone()),
             code_scope,
             tag: Some(format!("symbol:{}", symbol.symbol_kind)),
             search_text: Some(symbol_search_text(&symbol)),
             atom_text,
+            unconsumed_suffix: None,
             issue_preview: None,
         });
     }

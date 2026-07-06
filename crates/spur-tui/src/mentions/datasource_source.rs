@@ -45,11 +45,13 @@ impl MentionSource for DatasourceMentionSource {
                     agent: None,
                     model: None,
                     effort: None,
+                    worker_kind: None,
                     code_path: None,
                     code_scope: None,
                     tag: Some(datasource_kind_label(entry.kind).to_string()),
                     search_text: Some(datasource_search_text(entry)),
                     atom_text: Some(format!("@{}", entry.name)),
+                    unconsumed_suffix: None,
                     issue_preview: None,
                 }
             })

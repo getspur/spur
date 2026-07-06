@@ -145,6 +145,7 @@ fn dashboard_pre_session_worker_mention_prepends_hint_and_resource_link() {
     let mut dashboard = DashboardView::new();
     dashboard.set_worker_snapshot(vec![WorkerMentionDescriptor {
         name: "codex".into(),
+        kind: spur_acp::AgentKind::CodexAcp,
         description: Some("Writes Rust".into()),
         tier: Some("generalist".into()),
     }]);
