@@ -9,7 +9,6 @@ mod value {
     pub(crate) mod arrow;
 }
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -17,18 +16,10 @@ use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 
 pub use crate::embedding::warm_embed_model;
 pub use crate::overlay::open_worktree_overlay;
+pub use spur_mcp::tools::ToolDefinition;
 pub use tools::doc_navigate::doc_navigate;
 pub use tools::knowledge_context::{knowledge_context_pack, knowledge_context_pack_2};
 pub use tools::query::query;
-
-/// Metadata for a single analyst-owned MCP tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    #[serde(rename = "inputSchema")]
-    pub input_schema: Value,
-}
 
 #[derive(Debug, Error)]
 pub enum McpHandlerError {
@@ -115,13 +106,6 @@ impl AnalystMcpModule {
 impl spur_mcp::ToolModule for AnalystMcpModule {
     fn tools(&self) -> Vec<spur_mcp::ToolDefinition> {
         tool_definitions()
-            .into_iter()
-            .map(|definition| spur_mcp::ToolDefinition {
-                name: definition.name,
-                description: definition.description,
-                input_schema: definition.input_schema,
-            })
-            .collect()
     }
 
     async fn call(
