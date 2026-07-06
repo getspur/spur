@@ -275,6 +275,14 @@ async fn apply_session_overrides(
                 }
             }
             spur_acp::SelectStrategy::SessionMode => {
+                let mode_snapshot = connection.session_mode_snapshot(&session_id);
+                let advertised_modes = mode_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.available_modes.clone());
+                let acp_current_mode = mode_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.current_mode_id.as_ref())
+                    .map(|mode| mode.0.to_string());
                 let request =
                     spur_acp::SetSessionModeRequest::new(session_id.clone(), profile.to_string());
                 if let Err(error) = connection.set_session_mode(request).await {
@@ -282,8 +290,21 @@ async fn apply_session_overrides(
                         target: "spur::worker::profile",
                         session_id = %session_id_for_log,
                         value = %profile,
+                        requested_mode = %profile,
+                        advertised_modes = ?advertised_modes,
+                        acp_current_mode = ?acp_current_mode,
                         error = %error,
                         "profile set_mode failed; default persona"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "spur::worker::profile",
+                        session_id = %session_id_for_log,
+                        value = %profile,
+                        requested_mode = %profile,
+                        advertised_modes = ?advertised_modes,
+                        acp_current_mode = ?acp_current_mode,
+                        "profile set_mode applied"
                     );
                 }
             }
