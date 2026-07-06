@@ -42,6 +42,7 @@ fn brain_send_prepends_worker_hint_block() {
     let mut v = brain_view_with_workers(vec![WorkerMentionDescriptor {
         name: "claude-code".into(),
         kind: spur_acp::AgentKind::ClaudeCodeAcp,
+        cli_identity: "claude-code".into(),
         description: Some("Refactors Rust".into()),
         tier: Some("specialist".into()),
     }]);
@@ -81,6 +82,7 @@ fn brain_send_without_worker_atom_has_no_hint() {
     let mut v = brain_view_with_workers(vec![WorkerMentionDescriptor {
         name: "claude-code".into(),
         kind: spur_acp::AgentKind::ClaudeCodeAcp,
+        cli_identity: "claude-code".into(),
         description: None,
         tier: None,
     }]);
@@ -117,6 +119,7 @@ fn direct_session_skips_hint_even_with_worker_atom_pasted() {
         vec![WorkerMentionDescriptor {
             name: "claude-code".into(),
             kind: spur_acp::AgentKind::ClaudeCodeAcp,
+            cli_identity: "claude-code".into(),
             description: None,
             tier: None,
         }],

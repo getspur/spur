@@ -14,6 +14,8 @@ pub struct WorkerMentionDescriptor {
     pub name: String,
     /// Registered agent kind used to filter compatible `.spur/agents` profiles.
     pub kind: AgentKind,
+    /// Command + effective args stamped into the model catalog cache.
+    pub cli_identity: String,
     /// `delegation.description` from the agent config; shown as the
     /// row's `secondary` label in the picker.
     pub description: Option<String>,
@@ -50,6 +52,7 @@ impl MentionSource for WorkerMentionSource {
                 model: None,
                 effort: None,
                 worker_kind: Some(d.kind),
+                worker_cli_identity: Some(d.cli_identity.clone()),
                 code_path: None,
                 code_scope: None,
                 tag: d.tier.clone(),
@@ -70,6 +73,7 @@ mod tests {
         WorkerMentionDescriptor {
             name: name.into(),
             kind: AgentKind::from_name(name),
+            cli_identity: name.into(),
             description: desc.map(str::to_string),
             tier: tier.map(str::to_string),
         }
