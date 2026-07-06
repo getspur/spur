@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::Value;
 use spur_pm::PmService;
 use tokio::sync::Mutex;
 
@@ -10,59 +9,14 @@ use crate::outcome_materializer::OutcomeMaterializer;
 use crate::plan::outcomes::OutcomeStore;
 use crate::plan::PlanState;
 
+pub use spur_mcp::tools::McpHandlerError;
+
 const PLAN_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct WorkerCallContext {
     pub delegation_id: String,
     pub brain_session_id: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum McpHandlerError {
-    #[error("invalid params: {0}")]
-    InvalidParams(String),
-    #[error("not found: {0}")]
-    NotFound(String),
-    #[error("unauthorized: {0}")]
-    Unauthorized(String),
-    #[error("upstream PM failure: {0}")]
-    UpstreamPm(String),
-    #[error("internal: {0}")]
-    Internal(String),
-}
-
-impl McpHandlerError {
-    pub fn json_rpc_code(&self) -> i32 {
-        match self {
-            Self::InvalidParams(_) => -32602,
-            Self::NotFound(_) => -32004,
-            Self::Unauthorized(_) => -32001,
-            Self::UpstreamPm(_) => -32603,
-            Self::Internal(_) => -32603,
-        }
-    }
-
-    pub fn to_jsonrpc_response(&self, id: Value) -> Value {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": self.json_rpc_code(),
-                "message": self.to_string(),
-            }
-        })
-    }
-}
-
-impl From<McpHandlerError> for rmcp::ErrorData {
-    fn from(value: McpHandlerError) -> Self {
-        rmcp::ErrorData::new(
-            rmcp::model::ErrorCode(value.json_rpc_code()),
-            value.to_string(),
-            None,
-        )
-    }
 }
 
 /// Abstracts `McpCallbackServer::load_or_project_plan` so freestanding

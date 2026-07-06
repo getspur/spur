@@ -162,6 +162,16 @@ pub(super) fn issue_to_detail_event(
     issue: &spur_pm::Issue,
     comments: Vec<spur_pm::Comment>,
 ) -> spur_acp::IssueDetailEvent {
+    let comments = comments
+        .into_iter()
+        .map(|comment| spur_acp::IssueCommentEvent {
+            id: comment.id,
+            body: comment.body,
+            actor: comment.actor,
+            created_at: comment.created_at,
+        })
+        .collect();
+
     spur_acp::IssueDetailEvent {
         id: issue.id.clone(),
         source: issue.source.to_string(),
