@@ -28,6 +28,7 @@ beads_rust = { git = "https://github.com/getspur/beads_rust", rev = "6c1ba4861dc
 petgraph = { workspace = true }
 regex = { workspace = true }
 semver = "1"
+spur-mcp = { workspace = true }
 tempfile = "3"
 # GitHub adapter (Phase 1 ingest). Pinned exact per docs/architecture/spur-pm-github-ingest.md.
 octocrab = { version = "=0.50.0", features = ["rustls-webpki-tokio"] }
