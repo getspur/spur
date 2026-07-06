@@ -45,6 +45,7 @@ In local mode (fallback, or when remote is disabled) the wrapper also keeps scca
 - `scripts/spur-cargo clippy --workspace -- -D warnings`: enforce lint-clean code (local-first; prefix `SPUR_REMOTE=1` to force remote from a sandboxed agent)
 - `scripts/spur-cargo fmt --all`: apply workspace formatting
 - `scripts/spur-cargo run -p spur-cli -- --help`: run a binary (compiles + executes on the VM, outputs synced back); prefix `SPUR_REMOTE=0` to keep a quick interactive run local
+- `scripts/spur-cargo coverage`: measure workspace line coverage and diff-vs-`main` coverage via `cargo-llvm-cov` (remote by default, like `run`); fails if workspace coverage drops below 75% or changed-line coverage drops below 85%. Run this locally before merging a branch into local `main`. Supports `--base <ref>`, `--floor <pct>`, `--diff-floor <pct>`, and `--dry-run` (prints the resolved plan without executing).
 - `scripts/sccache-worktree.sh`: sccache rustc-wrapper that dynamically normalizes paths per worktree
 - `scripts/sccache-sync-basedirs.sh`: legacy sync script (superseded by `sccache-worktree.sh`)
 
