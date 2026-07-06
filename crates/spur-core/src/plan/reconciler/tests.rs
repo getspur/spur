@@ -1337,7 +1337,7 @@ async fn create_mock_loop_issue(
     pm.create_issue(spur_pm::IssueCreate {
         title: format!("Loop {loop_id}"),
         description: Some(spec.to_sentinel_body()),
-        issue_type: Some("task".into()),
+        issue_type: Some(crate::plan::loops::LOOP_ISSUE_TYPE.to_string()),
         labels: vec![
             crate::plan::labels::loop_id_label(loop_id),
             format!(
@@ -1362,7 +1362,7 @@ async fn terminal_loop_epic_appends_one_loop_run_to_loop_issue() {
         .create_issue(spur_pm::IssueCreate {
             title: "Loop controller".into(),
             description: Some("loop issue".into()),
-            issue_type: Some("task".into()),
+            issue_type: Some(crate::plan::loops::LOOP_ISSUE_TYPE.to_string()),
             labels: vec![crate::plan::labels::loop_id_label(loop_id)],
             ..Default::default()
         })
