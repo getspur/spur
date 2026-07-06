@@ -1078,6 +1078,12 @@ impl SessionDetailView {
         self.completion.dispatch(event, &mut self.input_bar, &env);
     }
 
+    pub(crate) fn drain_agent_model_catalog_probe_requests(&mut self) -> Vec<String> {
+        self.mention_registry
+            .borrow_mut()
+            .drain_agent_model_catalog_probe_requests()
+    }
+
     /// Build (error_ids, pending_ids) sets from the mermaid registry for use
     /// in constructing a `StateLookup`.
     #[cfg(feature = "markdown")]

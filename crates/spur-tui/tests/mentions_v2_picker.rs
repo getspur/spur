@@ -126,6 +126,7 @@ fn empty_at_shows_sectioned_picker() {
         .map(|i| WorkerMentionDescriptor {
             name: format!("worker-{i}"),
             kind: spur_acp::AgentKind::Generic,
+            cli_identity: format!("worker-{i}"),
             description: Some("fixture".into()),
             tier: Some("generalist".into()),
         })
@@ -266,6 +267,7 @@ fn typed_query_prefers_files_within_window() {
     let workers = vec![WorkerMentionDescriptor {
         name: "food".into(),
         kind: spur_acp::AgentKind::Generic,
+        cli_identity: "food".into(),
         description: Some("fixture worker".into()),
         tier: Some("generalist".into()),
     }];

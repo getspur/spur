@@ -146,6 +146,7 @@ fn dashboard_pre_session_worker_mention_prepends_hint_and_resource_link() {
     dashboard.set_worker_snapshot(vec![WorkerMentionDescriptor {
         name: "codex".into(),
         kind: spur_acp::AgentKind::CodexAcp,
+        cli_identity: "codex".into(),
         description: Some("Writes Rust".into()),
         tier: Some("generalist".into()),
     }]);

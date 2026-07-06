@@ -41,6 +41,7 @@ fn brain_session_includes_workers_in_empty_query() {
     let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
         name: "claude-code".into(),
         kind: spur_acp::AgentKind::ClaudeCodeAcp,
+        cli_identity: "claude-code".into(),
         description: Some("Refactors Rust".into()),
         tier: Some("specialist".into()),
     }]);
@@ -213,6 +214,7 @@ fn empty_query_pins_workers_first() {
         .map(|i| WorkerMentionDescriptor {
             name: format!("worker-{}", i),
             kind: spur_acp::AgentKind::Generic,
+            cli_identity: format!("worker-{}", i),
             description: None,
             tier: None,
         })
@@ -254,6 +256,7 @@ fn empty_query_caps_workers_at_pin_cap() {
         .map(|i| WorkerMentionDescriptor {
             name: format!("w{:02}", i),
             kind: spur_acp::AgentKind::Generic,
+            cli_identity: format!("w{:02}", i),
             description: None,
             tier: None,
         })
@@ -294,6 +297,7 @@ fn typed_query_boosts_worker_in_ambiguous_match() {
     let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
         name: "claude-code".into(),
         kind: spur_acp::AgentKind::ClaudeCodeAcp,
+        cli_identity: "claude-code".into(),
         description: None,
         tier: None,
     }]);
@@ -473,6 +477,7 @@ fn worker_and_issue_rows_remain_visible_for_matching_typed_queries() {
     let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
         name: "codex".into(),
         kind: spur_acp::AgentKind::CodexAcp,
+        cli_identity: "codex".into(),
         description: Some("Writes patches".into()),
         tier: Some("generalist".into()),
     }])

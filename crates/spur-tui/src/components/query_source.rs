@@ -1219,6 +1219,7 @@ mod tests {
             crate::mentions::WorkerMentionDescriptor {
                 name: "codex".into(),
                 kind: spur_acp::AgentKind::CodexAcp,
+                cli_identity: "codex".into(),
                 description: None,
                 tier: None,
             },
@@ -1262,6 +1263,7 @@ mod tests {
             crate::mentions::WorkerMentionDescriptor {
                 name: "codex".to_string(),
                 kind: spur_acp::AgentKind::CodexAcp,
+                cli_identity: "codex".to_string(),
                 description: Some("Writes patches".to_string()),
                 tier: Some("generalist".to_string()),
             },
