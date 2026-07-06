@@ -28,6 +28,12 @@ pub struct MentionEntry {
     pub display: String,
     /// Optional one-line description (worker description; None for files).
     pub secondary: Option<String>,
+    /// Optional worker persona/profile selected by a composed worker mention.
+    pub agent: Option<String>,
+    /// Optional model selected by a composed worker mention.
+    pub model: Option<String>,
+    /// Optional effort selected by a composed worker mention.
+    pub effort: Option<String>,
     /// Optional relative path for code graph file and symbol entries.
     pub code_path: Option<String>,
     /// Optional enclosing scope for code graph symbol entries.
@@ -50,6 +56,9 @@ impl Default for MentionEntry {
             uri: String::new(),
             display: String::new(),
             secondary: None,
+            agent: None,
+            model: None,
+            effort: None,
             code_path: None,
             code_scope: None,
             tag: None,
@@ -103,6 +112,9 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
         uri,
         display,
         secondary: None,
+        agent: None,
+        model: None,
+        effort: None,
         code_path: None,
         code_scope: None,
         tag: None,
