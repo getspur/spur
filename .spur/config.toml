@@ -185,8 +185,6 @@ kind = "codex-acp"
 role = "both"
 capabilities = []
 cost_tier = "low"
-skip_permissions = true
-skip_permissions_args = []
 
 [agents.entries.review]
 review_required = false
@@ -239,7 +237,7 @@ description = "Logout of Codex"
 [agents.entries.permissions]
 skip = true
 args = []
-session_mode = "full-auto"
+session_mode = "full-access"
 
 [agents.entries.delegation]
 good_for = [
