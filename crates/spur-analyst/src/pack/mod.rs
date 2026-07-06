@@ -1,5 +1,6 @@
 mod caveats;
 mod evidence;
+mod graph_paths;
 mod graph_reasoning;
 mod impact;
 mod next_tools;
@@ -11,9 +12,9 @@ mod staleness;
 pub(crate) use caveats::{caveat_value, push_graph_path_caveat, symbol_caveat_value};
 pub(crate) use evidence::is_test_file;
 #[cfg(test)]
-pub(crate) use graph_reasoning::{
-    collect_graph_paths, graph_reasoning_sections_for_pack, path_budget_plan,
-};
+pub(crate) use graph_paths::{collect_graph_paths, path_budget_plan};
+#[cfg(test)]
+pub(crate) use graph_reasoning::graph_reasoning_sections_for_pack;
 pub(crate) use graph_reasoning::{
     graph_reasoning_sections_for_pack_with_conn, insert_v2_sections, GraphReasoningSections,
 };
