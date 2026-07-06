@@ -70,7 +70,8 @@ use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Handled, U
 use crate::config::LogConfig;
 use crate::connection::child_stderr_bridge::ChildStderrBridge;
 use crate::connection::{
-    AgentClientRequestKind, AgentClientRequestPayload, AgentConnection, ExtNotificationPayload,
+    AcpSessionModeSnapshot, AgentClientRequestKind, AgentClientRequestPayload, AgentConnection,
+    ExtNotificationPayload,
 };
 use crate::error::AcpError;
 use crate::spur_agent_caps::SpurAgentCaps;
@@ -231,10 +232,12 @@ pub struct NativeAcpConnection {
     /// `load_session`. Task 4 rewires `session_notification` onto this;
     /// today it's only plumbed.
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
-    /// Last advertised session modes keyed by ACP session id. Populated from
-    /// `NewSessionResponse` / `LoadSessionResponse` so policy code can gate
-    /// `session/set_mode` without probing unsupported modes.
-    advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
+    /// Last ACP-visible session mode state keyed by ACP session id. Populated
+    /// from `NewSessionResponse` / `LoadSessionResponse` and
+    /// `SessionUpdate::CurrentModeUpdate` so policy code can gate
+    /// `session/set_mode` without probing unsupported modes and diagnostics
+    /// can report the current ACP mode when known.
+    session_modes: Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
     /// Session lifecycle capabilities from this connection's
     /// `InitializeResponse`. `None` means initialize has not completed yet;
     /// `Some(default)` means the agent initialized but did not advertise
@@ -299,20 +302,46 @@ pub(crate) fn decide_set_session_model_dispatch(caps: &SpurAgentCaps) -> SetSess
 }
 
 fn cache_session_modes(
-    advertised_modes: &Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
+    session_modes: &Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
     session_id: &SessionId,
     modes: Option<&SessionModeState>,
 ) {
     let Some(modes) = modes else {
         return;
     };
-    let ids = modes
-        .available_modes
-        .iter()
-        .map(|mode| mode.id.clone())
-        .collect();
-    if let Ok(mut guard) = advertised_modes.lock() {
-        guard.insert(session_id.0.to_string(), ids);
+    if let Ok(mut guard) = session_modes.lock() {
+        guard.insert(
+            session_id.0.to_string(),
+            AcpSessionModeSnapshot::from_mode_state(modes),
+        );
+    }
+}
+
+fn cache_current_session_mode(
+    session_modes: &Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
+    session_id: &SessionId,
+    current_mode_id: SessionModeId,
+) {
+    if let Ok(mut guard) = session_modes.lock() {
+        guard
+            .entry(session_id.0.to_string())
+            .and_modify(|snapshot| {
+                snapshot.current_mode_id = Some(current_mode_id.clone());
+            })
+            .or_insert_with(|| AcpSessionModeSnapshot::new(Some(current_mode_id), Vec::new()));
+    }
+}
+
+fn cache_session_notification_mode_update(
+    session_modes: &Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
+    notification: &SessionNotification,
+) {
+    if let SessionUpdate::CurrentModeUpdate(update) = &notification.update {
+        cache_current_session_mode(
+            session_modes,
+            &notification.session_id,
+            update.current_mode_id.clone(),
+        );
     }
 }
 
@@ -496,7 +525,7 @@ impl NativeAcpConnection {
             agent_client_request_rx: Some(agent_client_request_rx),
             agent_client_request_tx,
             session_notif_tx,
-            advertised_modes: Arc::new(Mutex::new(HashMap::new())),
+            session_modes: Arc::new(Mutex::new(HashMap::new())),
             session_capabilities: Arc::new(Mutex::new(None)),
             last_prompt_usage: Arc::new(Mutex::new(None)),
             child_pgid: Arc::new(Mutex::new(None)),
@@ -649,7 +678,7 @@ impl AgentConnection for NativeAcpConnection {
         let ext_tx = self.ext_notification_tx.clone();
         let agent_client_request_tx = self.agent_client_request_tx.clone();
         let session_notif_tx_for_thread = self.session_notif_tx.clone();
-        let advertised_modes = self.advertised_modes.clone();
+        let session_modes = self.session_modes.clone();
         let last_prompt_usage = self.last_prompt_usage.clone();
         let child_pgid = self.child_pgid.clone();
         let repo_root = self.repo_root.clone();
@@ -667,7 +696,7 @@ impl AgentConnection for NativeAcpConnection {
                     ext_tx,
                     agent_client_request_tx,
                     session_notif_tx_for_thread,
-                    advertised_modes,
+                    session_modes,
                     last_prompt_usage,
                     child_pgid,
                     repo_root,
@@ -899,7 +928,12 @@ impl AgentConnection for NativeAcpConnection {
     }
 
     fn advertised_session_modes(&self, session_id: &SessionId) -> Option<Vec<SessionModeId>> {
-        self.advertised_modes
+        self.session_mode_snapshot(session_id)
+            .map(|snapshot| snapshot.available_modes)
+    }
+
+    fn session_mode_snapshot(&self, session_id: &SessionId) -> Option<AcpSessionModeSnapshot> {
+        self.session_modes
             .lock()
             .ok()
             .and_then(|modes| modes.get(session_id.0.as_ref()).cloned())
@@ -1273,7 +1307,7 @@ fn acp_thread_main(
     ext_notification_tx: mpsc::UnboundedSender<ExtNotificationPayload>,
     agent_client_request_tx: mpsc::UnboundedSender<AgentClientRequestPayload>,
     session_notif_tx: tokio::sync::broadcast::Sender<SessionNotification>,
-    advertised_modes: Arc<Mutex<HashMap<String, Vec<SessionModeId>>>>,
+    session_modes: Arc<Mutex<HashMap<String, AcpSessionModeSnapshot>>>,
     last_prompt_usage: Arc<Mutex<Option<Usage>>>,
     child_pgid: Arc<Mutex<Option<i32>>>,
     repo_root: PathBuf,
@@ -1518,6 +1552,7 @@ fn acp_thread_main(
             let agent_client_request_tx_h = agent_client_request_tx.clone();
             let agent_name_request_h = agent_name.clone();
             let session_event_standardizer_h = session_event_standardizer.clone();
+            let session_modes_h = session_modes.clone();
 
             let cwd_read = cwd.clone();
             let cwd_write = cwd.clone();
@@ -1862,6 +1897,7 @@ fn acp_thread_main(
                                     .lock()
                                     .unwrap()
                                     .standardize(args);
+                                cache_session_notification_mode_update(&session_modes_h, &args);
                                 let variant = session_update_variant_name(&args.update);
                                 let text_len = match &args.update {
                                     SessionUpdate::AgentMessageChunk(c)
@@ -1963,7 +1999,7 @@ fn acp_thread_main(
                                 let result = cx.send_request(request).block_task().await;
                                 if let Ok(response) = &result {
                                     cache_session_modes(
-                                        &advertised_modes,
+                                        &session_modes,
                                         &response.session_id,
                                         response.modes.as_ref(),
                                     );
@@ -2108,7 +2144,7 @@ fn acp_thread_main(
                                             match load_result {
                                                 Ok(response) => {
                                                     cache_session_modes(
-                                                        &advertised_modes,
+                                                        &session_modes,
                                                         &session_id_for_probe,
                                                         response.modes.as_ref(),
                                                     );
@@ -2143,7 +2179,7 @@ fn acp_thread_main(
                                 let result = cx.send_request(request).block_task().await;
                                 if let Ok(response) = &result {
                                     cache_session_modes(
-                                        &advertised_modes,
+                                        &session_modes,
                                         &session_id,
                                         response.modes.as_ref(),
                                     );
@@ -2622,6 +2658,138 @@ mod client_capabilities_tests {
         assert_eq!(
             cc.get("_meta").and_then(|v| v.get("terminal_output")),
             Some(&serde_json::Value::Bool(true))
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_mode_cache_tests {
+    use super::*;
+    use crate::connection::AgentConnection;
+    use agent_client_protocol::schema::v1::{CurrentModeUpdate, SessionMode};
+    use tokio::sync::mpsc;
+
+    fn mode_state(current: &str, available: &[&str]) -> SessionModeState {
+        SessionModeState::new(
+            SessionModeId::new(current),
+            available
+                .iter()
+                .map(|id| SessionMode::new(SessionModeId::new(*id), *id))
+                .collect(),
+        )
+    }
+
+    fn ids(modes: &[SessionModeId]) -> Vec<&str> {
+        modes.iter().map(|id| id.0.as_ref()).collect()
+    }
+
+    #[test]
+    fn mode_snapshot_from_session_state_retains_current_and_available_ids() {
+        let conn = NativeAcpConnection::new("test-agent", "/bin/false", vec![], None);
+        let sid = SessionId::new("codex-sid");
+
+        cache_session_modes(
+            &conn.session_modes,
+            &sid,
+            Some(&mode_state(
+                "agent-full-access",
+                &["read-only", "agent", "agent-full-access"],
+            )),
+        );
+
+        let snapshot = conn
+            .session_mode_snapshot(&sid)
+            .expect("mode snapshot should be cached");
+        assert_eq!(
+            snapshot.current_mode_id.as_ref().map(|id| id.0.as_ref()),
+            Some("agent-full-access"),
+        );
+        assert_eq!(
+            ids(&snapshot.available_modes),
+            vec!["read-only", "agent", "agent-full-access"],
+        );
+        assert_eq!(
+            ids(&conn.advertised_session_modes(&sid).unwrap()),
+            vec!["read-only", "agent", "agent-full-access"],
+            "legacy advertised-mode getter should preserve validation behavior",
+        );
+    }
+
+    #[test]
+    fn current_mode_update_replaces_current_mode_without_rewriting_available_modes() {
+        let conn = NativeAcpConnection::new("test-agent", "/bin/false", vec![], None);
+        let sid = SessionId::new("codex-sid");
+        cache_session_modes(
+            &conn.session_modes,
+            &sid,
+            Some(&mode_state("agent-full-access", &["read-only", "agent"])),
+        );
+
+        let notification = SessionNotification::new(
+            sid.clone(),
+            SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new("read-only")),
+        );
+        cache_session_notification_mode_update(&conn.session_modes, &notification);
+
+        let snapshot = conn
+            .session_mode_snapshot(&sid)
+            .expect("mode snapshot should remain cached");
+        assert_eq!(
+            snapshot.current_mode_id.as_ref().map(|id| id.0.as_ref()),
+            Some("read-only"),
+        );
+        assert_eq!(
+            ids(&snapshot.available_modes),
+            vec!["read-only", "agent"],
+            "mode updates should not discard advertised modes",
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_set_session_mode_leaves_cached_current_until_update_arrives() {
+        let mut conn = NativeAcpConnection::new("test-agent", "/bin/false", vec![], None);
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        conn.cmd_tx = Some(cmd_tx);
+        let sid = SessionId::new("codex-sid");
+        cache_session_modes(
+            &conn.session_modes,
+            &sid,
+            Some(&mode_state(
+                "agent-full-access",
+                &["read-only", "agent-full-access"],
+            )),
+        );
+
+        let request = SetSessionModeRequest::new(sid.clone(), "read-only");
+        let handle = tokio::spawn(async move {
+            let result = conn.set_session_mode(request).await;
+            (conn, result)
+        });
+
+        match cmd_rx
+            .recv()
+            .await
+            .expect("set_mode command should be sent")
+        {
+            AcpCommand::SetSessionMode { request, reply } => {
+                assert_eq!(request.session_id, sid);
+                assert_eq!(request.mode_id, SessionModeId::new("read-only"));
+                reply
+                    .send(Ok(SetSessionModeResponse::new()))
+                    .expect("test receiver must still be waiting");
+            }
+            _ => panic!("expected SetSessionMode command"),
+        }
+
+        let (conn, response) = handle.await.expect("set_mode task must not panic");
+        response.expect("set_mode should succeed");
+        let snapshot = conn
+            .session_mode_snapshot(&SessionId::new("codex-sid"))
+            .expect("mode snapshot should remain cached");
+        assert_eq!(
+            snapshot.current_mode_id.as_ref().map(|id| id.0.as_ref()),
+            Some("agent-full-access"),
+            "set_mode response alone is not ACP-visible mode state",
         );
     }
 }
