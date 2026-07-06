@@ -23,19 +23,7 @@ impl McpCallbackServer {
         response: JsonRpcResponse,
         tool_name: &str,
     ) -> Result<CallToolResult, McpError> {
-        match (response.result, response.error) {
-            (Some(result), None) => serde_json::from_value(result).map_err(|error| {
-                McpError::internal_error(
-                    format!("failed to serialize tool result for {tool_name}: {error}"),
-                    None,
-                )
-            }),
-            (None, Some(error)) => Err(error.into_mcp_error()),
-            (Some(_), Some(_)) | (None, None) => Err(McpError::internal_error(
-                format!("tool handler returned an invalid response envelope for {tool_name}"),
-                None,
-            )),
-        }
+        spur_mcp::json_rpc_to_call_tool_result(response, tool_name)
     }
 
     // ─── Tool call dispatcher ─────────────────────────────────────────
