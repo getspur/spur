@@ -6,7 +6,7 @@ use std::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::mcp::McpHandlerError;
+use crate::{db::sql::query_rows, mcp::McpHandlerError};
 
 const STALE_ANALYST_DB_MESSAGE: &str =
     "The analyst DB lags the live graph. Run `spur graph build` to refresh, or set allow_stale=true to override.";
@@ -48,27 +48,18 @@ pub(crate) fn freshness_gate(
 pub(crate) fn query_analyst_graph_hash(
     conn: &duckdb::Connection,
 ) -> Result<Option<String>, McpHandlerError> {
-    let mut stmt = conn
-        .prepare("SELECT graph_content_hash FROM _meta LIMIT 1")
-        .map_err(|error| {
-            McpHandlerError::Internal(format!(
-                "failed to prepare analyst freshness query: {error}"
-            ))
-        })?;
-    let mut rows = stmt.query([]).map_err(|error| {
-        McpHandlerError::Internal(format!("failed to query analyst freshness: {error}"))
-    })?;
-    let Some(row) = rows.next().map_err(|error| {
-        McpHandlerError::Internal(format!("failed to read analyst freshness row: {error}"))
-    })?
-    else {
+    let result = query_rows(conn, "SELECT graph_content_hash FROM _meta LIMIT 1", 1)?;
+    let Some(row) = result.rows.first().and_then(Value::as_array) else {
         return Ok(None);
     };
-    row.get(0).map(Some).map_err(|error| {
-        McpHandlerError::Internal(format!(
-            "failed to read analyst graph_content_hash: {error}"
-        ))
-    })
+    row.first()
+        .and_then(Value::as_str)
+        .map(|value| Some(value.to_owned()))
+        .ok_or_else(|| {
+            McpHandlerError::Internal(
+                "failed to read analyst graph_content_hash: expected string".into(),
+            )
+        })
 }
 
 fn read_live_graph_hash(db_path: &Path) -> Result<Option<String>, McpHandlerError> {
