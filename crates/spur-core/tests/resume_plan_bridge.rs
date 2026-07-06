@@ -144,7 +144,7 @@ async fn seed_loop_issue(pm: &spur_pm::PmService, loop_id: &str) -> String {
     pm.create_issue(spur_pm::IssueCreate {
         title: "Loop: Keep CI green".to_string(),
         description: Some(body),
-        issue_type: Some("task".to_string()),
+        issue_type: Some("loop".to_string()),
         labels: vec![spur_core::plan::labels::loop_id_label(loop_id)],
         ..Default::default()
     })

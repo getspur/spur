@@ -180,7 +180,7 @@ async fn load_loop_issue_with_closed(
     let summaries = pm
         .list_issues(spur_pm::IssueFilter {
             labels: vec![crate::plan::labels::loop_id_label(loop_id)],
-            issue_type: Some("task".to_string()),
+            issue_type: Some(crate::plan::loops::LOOP_ISSUE_TYPE.to_string()),
             include_closed,
             limit: Some(2),
             ..Default::default()
@@ -1324,7 +1324,7 @@ impl McpCallbackServer {
             .create_issue(spur_pm::IssueCreate {
                 title: loop_issue_title(&input.spec.goal),
                 description: Some(input.spec.to_sentinel_body()),
-                issue_type: Some("task".to_string()),
+                issue_type: Some(crate::plan::loops::LOOP_ISSUE_TYPE.to_string()),
                 priority: Some(2),
                 labels: vec![
                     crate::plan::labels::loop_id_label(&loop_id),
