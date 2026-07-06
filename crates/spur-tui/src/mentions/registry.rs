@@ -8,7 +8,10 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher,
 };
-use spur_acp::{DatasourceEntry, SessionId};
+use spur_acp::{
+    agent_model_catalog::{self, ConfigOptionChoice},
+    DatasourceEntry, SessionId,
+};
 
 use super::code_graph::source::CodeGraphMentionSource;
 use super::datasource_source::DatasourceMentionSource;
@@ -69,6 +72,8 @@ pub struct MentionRegistry {
     code_graph_hint: Option<&'static str>,
     code_graph_token: Option<CodeGraphToken>,
     code_graph_auto_discovery: bool,
+    agent_model_catalog_path: Option<PathBuf>,
+    pending_agent_model_catalog_probe_requests: HashSet<String>,
     matcher: Matcher,
     #[cfg(any(test, debug_assertions))]
     query_call_count: usize,
@@ -110,6 +115,8 @@ impl MentionRegistry {
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
+            agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -128,6 +135,8 @@ impl MentionRegistry {
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
+            agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -285,6 +294,15 @@ impl MentionRegistry {
                 .code_payloads
                 .retain(|uri, _| !is_graph_uri(uri) || keep.contains(uri.as_str()));
         }
+    }
+
+    pub fn drain_agent_model_catalog_probe_requests(&mut self) -> Vec<String> {
+        let mut requests: Vec<String> = self
+            .pending_agent_model_catalog_probe_requests
+            .drain()
+            .collect();
+        requests.sort();
+        requests
     }
 
     pub fn set_issue_snapshot(&mut self, issues: Vec<IssueMentionDescriptor>) {
@@ -476,6 +494,21 @@ impl MentionRegistry {
             return rows;
         }
 
+        let compose_entries: Vec<MentionEntry> =
+            entries.iter().map(|entry| (*entry).clone()).collect();
+        let compose_refs: Vec<&MentionEntry> = compose_entries.iter().collect();
+        if let Some(composed) = Self::compose_worker_mention(
+            cwd,
+            &compose_refs,
+            query,
+            &self.cache,
+            self.agent_model_catalog_path.as_ref(),
+            &mut self.pending_agent_model_catalog_probe_requests,
+            &mut self.matcher,
+        ) {
+            return vec![composed];
+        }
+
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
         let code_pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
         let mut buf = Vec::new();
@@ -509,6 +542,441 @@ impl MentionRegistry {
     pub fn query_call_count_for_test(&self) -> usize {
         self.query_call_count
     }
+
+    #[cfg(test)]
+    fn set_agent_model_catalog_path_for_test(&mut self, path: PathBuf) {
+        self.agent_model_catalog_path = Some(path);
+    }
+
+    fn compose_worker_mention(
+        cwd: &Path,
+        entries: &[&MentionEntry],
+        query: &str,
+        cache: &HashMap<&'static str, CachedSourceIndex>,
+        catalog_path: Option<&PathBuf>,
+        pending_probe_requests: &mut HashSet<String>,
+        matcher: &mut Matcher,
+    ) -> Option<MentionEntry> {
+        let tokens = query_tokens(query);
+        let first = tokens.first()?;
+        let worker_entries: Vec<&MentionEntry> = entries
+            .iter()
+            .copied()
+            .filter(|entry| entry.kind == MentionKind::Worker)
+            .collect();
+        let worker_entry = Self::high_confidence_entry_match(first.text, &worker_entries, matcher)?;
+        let worker_name = worker_entry
+            .uri
+            .strip_prefix("worker://")
+            .unwrap_or(worker_entry.display.trim_start_matches("worker:"))
+            .split('?')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if worker_name.is_empty() {
+            return None;
+        }
+        let worker_kind = Self::worker_kind(cache, &worker_name);
+        let catalog_entry = Self::worker_catalog_entry(catalog_path, &worker_name);
+        if Self::catalog_probe_needed(
+            catalog_entry.as_ref(),
+            worker_entry.worker_cli_identity.as_deref(),
+        ) {
+            pending_probe_requests.insert(worker_name.clone());
+        }
+
+        let mut token_index = 1usize;
+        let mut slot = WorkerMentionSlot::Worker;
+        let mut agent = None;
+        let mut model = None;
+        let mut effort = None;
+        let mut consumed_end = first.end;
+        let mut unconsumed_suffix = None;
+
+        loop {
+            match slot {
+                WorkerMentionSlot::Worker => slot = WorkerMentionSlot::Agent,
+                WorkerMentionSlot::Agent => {
+                    let candidates = agent_slot_candidates(cwd, worker_kind);
+                    if candidates.is_empty() {
+                        slot = WorkerMentionSlot::Model;
+                        continue;
+                    }
+                    let Some(token) = tokens.get(token_index) else {
+                        break;
+                    };
+                    match Self::high_confidence_slot_match(token.text, &candidates, matcher) {
+                        Some(candidate) => {
+                            agent = Some(candidate.value);
+                            consumed_end = token.end;
+                            token_index += 1;
+                            slot = WorkerMentionSlot::Model;
+                        }
+                        None => {
+                            unconsumed_suffix = Some(query[consumed_end..].to_string());
+                            break;
+                        }
+                    }
+                }
+                WorkerMentionSlot::Model => {
+                    let candidates = catalog_entry
+                        .as_ref()
+                        .map(|entry| config_choice_candidates(&entry.models))
+                        .unwrap_or_default();
+                    if candidates.is_empty() {
+                        slot = WorkerMentionSlot::Effort;
+                        continue;
+                    }
+                    let Some(token) = tokens.get(token_index) else {
+                        break;
+                    };
+                    match Self::high_confidence_slot_match(token.text, &candidates, matcher) {
+                        Some(candidate) => {
+                            model = Some(candidate.value);
+                            consumed_end = token.end;
+                            token_index += 1;
+                            slot = WorkerMentionSlot::Effort;
+                        }
+                        None => {
+                            unconsumed_suffix = Some(query[consumed_end..].to_string());
+                            break;
+                        }
+                    }
+                }
+                WorkerMentionSlot::Effort => {
+                    let candidates = catalog_entry
+                        .as_ref()
+                        .map(|entry| config_choice_candidates(&entry.efforts))
+                        .unwrap_or_default();
+                    if candidates.is_empty() {
+                        slot = WorkerMentionSlot::Done;
+                        continue;
+                    }
+                    let Some(token) = tokens.get(token_index) else {
+                        break;
+                    };
+                    match Self::high_confidence_slot_match(token.text, &candidates, matcher) {
+                        Some(candidate) => {
+                            effort = Some(candidate.value);
+                            consumed_end = token.end;
+                            token_index += 1;
+                            slot = WorkerMentionSlot::Done;
+                        }
+                        None => {
+                            unconsumed_suffix = Some(query[consumed_end..].to_string());
+                            break;
+                        }
+                    }
+                }
+                WorkerMentionSlot::Done => {
+                    if let Some(token) = tokens.get(token_index) {
+                        unconsumed_suffix = Some(
+                            query[consumed_end..token.start].to_string() + &query[token.start..],
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+
+        let uri = composed_worker_uri(
+            &worker_name,
+            agent.as_deref(),
+            model.as_deref(),
+            effort.as_deref(),
+        );
+        let atom_text = composed_worker_atom(
+            &worker_name,
+            agent.as_deref(),
+            model.as_deref(),
+            effort.as_deref(),
+        );
+        let mut composed = worker_entry.clone();
+        composed.uri = uri;
+        composed.atom_text = Some(atom_text);
+        composed.agent = agent;
+        composed.model = model;
+        composed.effort = effort;
+        composed.unconsumed_suffix = unconsumed_suffix.filter(|suffix| !suffix.is_empty());
+        Some(composed)
+    }
+
+    fn worker_kind(
+        cache: &HashMap<&'static str, CachedSourceIndex>,
+        worker_name: &str,
+    ) -> spur_acp::AgentKind {
+        cache
+            .get("worker")
+            .and_then(|cached| {
+                cached.entries.iter().find_map(|entry| {
+                    let name = entry
+                        .uri
+                        .strip_prefix("worker://")?
+                        .split('?')
+                        .next()
+                        .unwrap_or_default();
+                    (name == worker_name).then_some(entry.worker_kind).flatten()
+                })
+            })
+            .unwrap_or_else(|| spur_acp::AgentKind::from_name(worker_name))
+    }
+
+    fn worker_catalog_entry(
+        catalog_path: Option<&PathBuf>,
+        worker_name: &str,
+    ) -> Option<agent_model_catalog::WorkerCatalogEntry> {
+        let path = catalog_path
+            .cloned()
+            .or_else(agent_model_catalog::cache_path)?;
+        agent_model_catalog::read(&path)?
+            .entries
+            .get(worker_name)
+            .cloned()
+    }
+
+    fn catalog_probe_needed(
+        entry: Option<&agent_model_catalog::WorkerCatalogEntry>,
+        cli_identity: Option<&str>,
+    ) -> bool {
+        match entry {
+            None => true,
+            Some(entry) => cli_identity
+                .map(|identity| entry.is_stale(chrono::Utc::now(), identity))
+                .unwrap_or(false),
+        }
+    }
+
+    fn high_confidence_entry_match<'a>(
+        token: &str,
+        entries: &[&'a MentionEntry],
+        matcher: &mut Matcher,
+    ) -> Option<&'a MentionEntry> {
+        let candidates: Vec<SlotCandidate> = entries
+            .iter()
+            .map(|entry| SlotCandidate {
+                value: entry
+                    .uri
+                    .strip_prefix("worker://")
+                    .unwrap_or(entry.display.as_str())
+                    .split('?')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+                label: entry.display.clone(),
+                description: entry.secondary.clone(),
+            })
+            .collect();
+        let matched = Self::high_confidence_slot_match(token, &candidates, matcher)?;
+        entries.iter().copied().find(|entry| {
+            entry.uri == format!("worker://{}", matched.value)
+                || entry.display == format!("worker:{}", matched.value)
+        })
+    }
+
+    fn high_confidence_slot_match(
+        token: &str,
+        candidates: &[SlotCandidate],
+        matcher: &mut Matcher,
+    ) -> Option<SlotCandidate> {
+        let token = token.trim();
+        if token.is_empty() {
+            return None;
+        }
+        let pattern = Pattern::parse(token, CaseMatching::Smart, Normalization::Smart);
+        let mut buf = Vec::new();
+        candidates
+            .iter()
+            .filter_map(|candidate| {
+                let score = slot_candidate_score(candidate, token, &pattern, matcher, &mut buf)?;
+                high_confidence_score(candidate, token, score).then(|| (score, candidate.clone()))
+            })
+            .max_by(|(score_a, candidate_a), (score_b, candidate_b)| {
+                score_a
+                    .cmp(score_b)
+                    .then(candidate_b.value.cmp(&candidate_a.value))
+            })
+            .map(|(_, candidate)| candidate)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerMentionSlot {
+    Worker,
+    Agent,
+    Model,
+    Effort,
+    Done,
+}
+
+#[derive(Debug, Clone)]
+struct QueryToken<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SlotCandidate {
+    value: String,
+    label: String,
+    description: Option<String>,
+}
+
+fn query_tokens(query: &str) -> Vec<QueryToken<'_>> {
+    let mut tokens = Vec::new();
+    let mut token_start = None;
+    for (idx, ch) in query.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(start) = token_start.take() {
+                tokens.push(QueryToken {
+                    text: &query[start..idx],
+                    start,
+                    end: idx,
+                });
+            }
+        } else if token_start.is_none() {
+            token_start = Some(idx);
+        }
+    }
+    if let Some(start) = token_start {
+        tokens.push(QueryToken {
+            text: &query[start..],
+            start,
+            end: query.len(),
+        });
+    }
+    tokens
+}
+
+fn agent_slot_candidates(cwd: &Path, kind: spur_acp::AgentKind) -> Vec<SlotCandidate> {
+    let dir = cwd.join(".spur/agents");
+    let mut names: Vec<String> = match fs::read_dir(&dir) {
+        Ok(read_dir) => read_dir
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+                    .then(|| path.file_stem()?.to_str().map(str::to_string))
+                    .flatten()
+            })
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    names.sort();
+
+    names
+        .into_iter()
+        .filter_map(
+            |name| match spur_core::agent_profiles::AgentProfile::load(cwd, &name) {
+                Ok(Some(profile))
+                    if spur_core::agent_profiles::render::render_for_kind(&profile, kind)
+                        .is_some() =>
+                {
+                    Some(SlotCandidate {
+                        value: profile.name,
+                        label: name,
+                        description: Some(profile.description),
+                    })
+                }
+                Ok(_) => None,
+                Err(error) => {
+                    tracing::debug!(
+                        profile = %name,
+                        error = %error,
+                        "Skipping invalid agent profile for worker mention picker"
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+fn config_choice_candidates(choices: &[ConfigOptionChoice]) -> Vec<SlotCandidate> {
+    choices
+        .iter()
+        .map(|choice| SlotCandidate {
+            value: choice.value.clone(),
+            label: choice.name.clone(),
+            description: choice.description.clone(),
+        })
+        .collect()
+}
+
+fn slot_candidate_score(
+    candidate: &SlotCandidate,
+    token: &str,
+    pattern: &Pattern,
+    matcher: &mut Matcher,
+    buf: &mut Vec<char>,
+) -> Option<u32> {
+    let mut best = pattern_score(pattern, matcher, buf, &candidate.value);
+    if candidate.label != candidate.value {
+        best = best.max(pattern_score(pattern, matcher, buf, &candidate.label));
+    }
+    if let Some(description) = &candidate.description {
+        best = best.max(pattern_score(pattern, matcher, buf, description));
+    }
+    if candidate_text_matches(&candidate.value, token)
+        || candidate_text_matches(&candidate.label, token)
+    {
+        best = Some(best.unwrap_or(0).saturating_add(10_000));
+    }
+    best
+}
+
+fn high_confidence_score(candidate: &SlotCandidate, token: &str, score: u32) -> bool {
+    score >= 10_000
+        || score >= 60
+        || candidate_text_matches(&candidate.value, token)
+        || candidate_text_matches(&candidate.label, token)
+}
+
+fn candidate_text_matches(haystack: &str, token: &str) -> bool {
+    let haystack = haystack.to_ascii_lowercase();
+    let token = token.to_ascii_lowercase();
+    !token.is_empty()
+        && (haystack == token
+            || haystack.starts_with(&token)
+            || (token.len() >= 3 && haystack.contains(&token)))
+}
+
+fn composed_worker_uri(
+    worker_name: &str,
+    agent: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> String {
+    let mut uri = format!("worker://{worker_name}");
+    let mut sep = '?';
+    for (key, value) in [("agent", agent), ("model", model), ("effort", effort)] {
+        if let Some(value) = value {
+            uri.push(sep);
+            sep = '&';
+            uri.push_str(key);
+            uri.push('=');
+            uri.push_str(value);
+        }
+    }
+    uri
+}
+
+fn composed_worker_atom(
+    worker_name: &str,
+    agent: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> String {
+    let mut atom = format!("@worker:{worker_name}");
+    for (key, value) in [("agent", agent), ("model", model), ("effort", effort)] {
+        if let Some(value) = value {
+            atom.push(' ');
+            atom.push_str(key);
+            atom.push('=');
+            atom.push_str(value);
+        }
+    }
+    atom
 }
 
 fn is_graph_uri(uri: &str) -> bool {
@@ -682,11 +1150,17 @@ fn append_section_rows(
         uri: String::new(),
         display: format!("── {header} ──"),
         secondary: None,
+        agent: None,
+        model: None,
+        effort: None,
+        worker_kind: None,
+        worker_cli_identity: None,
         code_path: None,
         code_scope: None,
         tag: None,
         search_text: None,
         atom_text: None,
+        unconsumed_suffix: None,
         issue_preview: None,
     });
     rows.extend(section.iter().cloned());
@@ -853,7 +1327,12 @@ mod tests {
         IssueMentionDescriptor, IssueMentionSource, MentionKind, MentionSource,
         WorkerMentionDescriptor, WorkerMentionSource,
     };
+    use chrono::{Duration as ChronoDuration, Utc};
     use filetime::{set_file_mtime, FileTime};
+    use spur_acp::agent_model_catalog::{
+        self, AgentModelCatalogV1, ConfigOptionChoice, WorkerCatalogEntry,
+    };
+    use spur_acp::AgentKind;
     use spur_graph::{
         write_artifact_parquet, write_current_pointer, GraphFileArtifact, GraphFileManifestEntry,
         GraphIndexArtifact, GraphIndexHeader, GraphIndexPointer, NodeId, SourceKind, WriteOptions,
@@ -877,6 +1356,62 @@ mod tests {
         }
     }
 
+    fn worker(name: &str, kind: AgentKind) -> WorkerMentionDescriptor {
+        WorkerMentionDescriptor {
+            name: name.to_string(),
+            kind,
+            cli_identity: "test".to_string(),
+            description: None,
+            tier: None,
+        }
+    }
+
+    fn write_agent_profile(root: &Path, name: &str) {
+        let dir = root.join(".spur/agents");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("{name}.md")),
+            format!("---\nname: {name}\ndescription: {name} profile\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+
+    fn choice(value: &str, name: &str) -> ConfigOptionChoice {
+        ConfigOptionChoice {
+            value: value.to_string(),
+            name: name.to_string(),
+            description: None,
+        }
+    }
+
+    fn write_catalog(
+        root: &Path,
+        worker_name: &str,
+        models: Vec<ConfigOptionChoice>,
+        efforts: Vec<ConfigOptionChoice>,
+    ) -> PathBuf {
+        let path = root.join("agent-model-catalog.json");
+        let mut entries = HashMap::new();
+        entries.insert(
+            worker_name.to_string(),
+            WorkerCatalogEntry {
+                probed_at: Utc::now(),
+                cli_identity: "test".to_string(),
+                models,
+                efforts,
+            },
+        );
+        agent_model_catalog::write(
+            &path,
+            &AgentModelCatalogV1 {
+                version: 1,
+                entries,
+            },
+        )
+        .unwrap();
+        path
+    }
+
     #[test]
     fn query_matches_issue_search_text_not_just_display() {
         let mut registry = MentionRegistry {
@@ -889,6 +1424,8 @@ mod tests {
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
+            agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -898,6 +1435,205 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].uri, "issue://beads/bd-1");
+    }
+
+    #[test]
+    fn worker_query_composes_agent_model_and_effort_slots() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5"), choice("gpt-5-mini", "GPT-5 mini")],
+            vec![choice("high", "High"), choice("low", "Low")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "codex narrow gpt-5 high",
+            10,
+        );
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+
+        assert_eq!(
+            composed.uri,
+            "worker://codex?agent=spur-narrow-implementer&model=gpt-5&effort=high"
+        );
+        assert_eq!(composed.display, "worker:codex");
+        assert_eq!(
+            composed.atom_text.as_deref(),
+            Some("@worker:codex agent=spur-narrow-implementer model=gpt-5 effort=high")
+        );
+        assert_eq!(composed.agent.as_deref(), Some("spur-narrow-implementer"));
+        assert_eq!(composed.model.as_deref(), Some("gpt-5"));
+        assert_eq!(composed.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn worker_query_auto_skips_empty_agent_pool_to_model_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "gemini",
+            vec![choice("gemini-2.5-pro", "Gemini 2.5 Pro")],
+            Vec::new(),
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("gemini", AgentKind::Gemini)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "gemini gemini-2.5-pro",
+            10,
+        );
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+
+        assert_eq!(composed.uri, "worker://gemini?model=gemini-2.5-pro");
+        assert_eq!(composed.agent, None);
+        assert_eq!(composed.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(composed.effort, None);
+    }
+
+    #[test]
+    fn worker_query_marks_missing_catalog_entry_for_background_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+
+        let hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex", 10);
+
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+        assert_eq!(composed.uri, "worker://codex");
+        assert_eq!(
+            registry.drain_agent_model_catalog_probe_requests(),
+            vec!["codex".to_string()]
+        );
+    }
+
+    #[test]
+    fn worker_query_uses_stale_catalog_entry_and_marks_background_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agent-model-catalog.json");
+        let mut entries = HashMap::new();
+        entries.insert(
+            "codex".to_string(),
+            WorkerCatalogEntry {
+                probed_at: Utc::now() - ChronoDuration::hours(25),
+                cli_identity: "test".to_string(),
+                models: vec![choice("gpt-5", "GPT-5")],
+                efforts: vec![choice("high", "High")],
+            },
+        );
+        agent_model_catalog::write(
+            &path,
+            &AgentModelCatalogV1 {
+                version: 1,
+                entries,
+            },
+        )
+        .unwrap();
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(path);
+
+        let hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "codex gpt-5 high",
+            10,
+        );
+
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+        assert_eq!(composed.uri, "worker://codex?model=gpt-5&effort=high");
+        assert_eq!(
+            registry.drain_agent_model_catalog_probe_requests(),
+            vec!["codex".to_string()]
+        );
+    }
+
+    #[test]
+    fn worker_query_reparse_reopens_edited_slot_and_clears_after_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        write_agent_profile(tmp.path(), "reviewer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let edited = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "codex reviewer",
+            10,
+        );
+        let composed = edited
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("reparsed worker row");
+
+        assert_eq!(composed.uri, "worker://codex?agent=reviewer");
+        assert_eq!(composed.agent.as_deref(), Some("reviewer"));
+        assert_eq!(composed.model, None);
+        assert_eq!(composed.effort, None);
+    }
+
+    #[test]
+    fn worker_query_tracks_unconsumed_suffix_after_slot_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            Vec::new(),
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "codex no-such-agent should stay text",
+            10,
+        );
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("worker row with unconsumed suffix");
+
+        assert_eq!(composed.uri, "worker://codex");
+        assert_eq!(composed.agent, None);
+        assert_eq!(composed.model, None);
+        assert_eq!(composed.effort, None);
+        assert_eq!(
+            composed.unconsumed_suffix.as_deref(),
+            Some(" no-such-agent should stay text")
+        );
     }
 
     #[test]
@@ -1090,6 +1826,8 @@ mod tests {
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
+            agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -1150,6 +1888,8 @@ mod tests {
             }),
             Box::new(WorkerMentionSource::new(vec![WorkerMentionDescriptor {
                 name: "alpha".into(),
+                kind: AgentKind::Generic,
+                cli_identity: "alpha".into(),
                 description: None,
                 tier: None,
             }])),
@@ -1178,6 +1918,8 @@ mod tests {
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
+            agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -1229,11 +1971,17 @@ mod tests {
             uri: format!("test://{id}"),
             display,
             secondary: None,
+            agent: None,
+            model: None,
+            effort: None,
+            worker_kind: None,
+            worker_cli_identity: None,
             code_path,
             code_scope: None,
             tag: None,
             search_text: None,
             atom_text: None,
+            unconsumed_suffix: None,
             issue_preview: None,
         }
     }
@@ -1245,6 +1993,8 @@ mod tests {
             code_graph_hint: None,
             code_graph_token: None,
             code_graph_auto_discovery: false,
+            agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -1357,6 +2107,8 @@ mod tests {
         let workers = (0..100)
             .map(|i| WorkerMentionDescriptor {
                 name: format!("worker-{i}"),
+                kind: AgentKind::Generic,
+                cli_identity: format!("worker-{i}"),
                 description: None,
                 tier: None,
             })
@@ -1463,6 +2215,8 @@ mod tests {
         let mut registry = test_registry(vec![
             Box::new(WorkerMentionSource::new(vec![WorkerMentionDescriptor {
                 name: "alpha".into(),
+                kind: AgentKind::Generic,
+                cli_identity: "alpha".into(),
                 description: None,
                 tier: None,
             }])),
@@ -1487,6 +2241,8 @@ mod tests {
         let mut workers_only = test_registry(vec![Box::new(WorkerMentionSource::new(vec![
             WorkerMentionDescriptor {
                 name: "alpha".into(),
+                kind: AgentKind::Generic,
+                cli_identity: "alpha".into(),
                 description: None,
                 tier: None,
             },
