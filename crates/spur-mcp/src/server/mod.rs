@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 
 pub mod registry_server;
-pub use registry_server::RegistryServerHandler;
+pub use registry_server::{json_rpc_to_call_tool_result, RegistryServerHandler};
 
 /// Idle-session watchdog for SPUR's streamable-HTTP MCP transports.
 ///
