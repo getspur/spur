@@ -4,6 +4,8 @@ use std::{
     process::{Command, ExitCode},
 };
 
+mod coverage;
+
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let subcommand = args.next().unwrap_or_default();
@@ -11,6 +13,7 @@ fn main() -> ExitCode {
 
     match subcommand.as_str() {
         "install" => install(extra),
+        "coverage" => coverage_cmd(extra),
         "" | "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -48,6 +51,12 @@ fn print_help() {
         );
     }
     eprintln!("  --force    with --remote on a non-Linux host, overwrite $CARGO_HOME/bin anyway");
+    eprintln!();
+    eprintln!("  coverage [--base <ref>] [--floor <pct>] [--diff-floor <pct>]");
+    eprintln!("           [--output <path>] [--dry-run]");
+    eprintln!("      measure workspace + diff-vs-<ref> line coverage via cargo-llvm-cov");
+    eprintln!("      and fail if either drops below its floor (default: base=main,");
+    eprintln!("      floor=75, diff-floor=85, output=coverage/lcov.info)");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +164,100 @@ fn install(extra: Vec<String>) -> ExitCode {
     }
     print_green_notebook_install_guidance();
     ExitCode::SUCCESS
+}
+
+fn coverage_cmd(extra: Vec<String>) -> ExitCode {
+    let options = match coverage::parse_coverage_options(extra) {
+        Ok(options) => options,
+        Err(err) => {
+            eprintln!("xtask: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let workspace_root = workspace_root();
+
+    if options.dry_run {
+        eprintln!("==> dry run — no commands executed");
+        eprintln!(
+            "would ensure installed: cargo {}",
+            command_args(&coverage::install_llvm_cov_command()).join(" ")
+        );
+        eprintln!(
+            "would run: cargo {}",
+            command_args(&coverage::llvm_cov_measure_command(
+                &workspace_root,
+                &options.output_path
+            ))
+            .join(" ")
+        );
+        eprintln!(
+            "would run: git {}",
+            command_args(&coverage::git_diff_command(&workspace_root, &options.base)).join(" ")
+        );
+        eprintln!(
+            "floor={:.2}% diff-floor={:.2}% base={}",
+            options.floor, options.diff_floor, options.base
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let mut version_check = coverage::llvm_cov_version_command();
+    version_check
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let installed = version_check
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !installed {
+        if let Err(err) = run_status(
+            &mut coverage::install_llvm_cov_command(),
+            "cargo install cargo-llvm-cov",
+        ) {
+            eprintln!("xtask: {err}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let mut measure = coverage::llvm_cov_measure_command(&workspace_root, &options.output_path);
+    if let Err(err) = run_status(&mut measure, "cargo llvm-cov --workspace --lib --lcov") {
+        eprintln!("xtask: {err}");
+        return ExitCode::FAILURE;
+    }
+
+    let lcov_path = workspace_root.join(&options.output_path);
+    let lcov_text = match fs::read_to_string(&lcov_path) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("xtask: failed to read {}: {err}", lcov_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let coverage_data = coverage::LineCoverage::parse_lcov(&lcov_text);
+
+    let mut diff_cmd = coverage::git_diff_command(&workspace_root, &options.base);
+    let diff_text = match run_output(&mut diff_cmd, "git diff (changed .rs lines)") {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("xtask: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let changed_lines = coverage::parse_changed_lines(&diff_text);
+
+    let result = coverage::evaluate_gate(
+        &coverage_data,
+        &changed_lines,
+        options.floor,
+        options.diff_floor,
+    );
+    eprintln!("{}", result.report());
+
+    if result.overall_pass() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn install_macos_cli(workspace_root: &Path, debug: bool, extra: &[String]) -> Result<(), String> {
@@ -467,7 +570,27 @@ fn run_status(cmd: &mut Command, label: &str) -> Result<(), String> {
     }
 }
 
-fn cargo() -> PathBuf {
+fn run_output(cmd: &mut Command, label: &str) -> Result<String, String> {
+    eprintln!("==> {label}");
+    let output = cmd
+        .output()
+        .map_err(|err| format!("failed to spawn {label}: {err}"))?;
+    if !output.status.success() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        return Err(format!("{label} failed (status {})", output.status));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|err| format!("{label} produced non-UTF8 output: {err}"))
+}
+
+pub(crate) fn command_args(command: &Command) -> Vec<String> {
+    command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+pub(crate) fn cargo() -> PathBuf {
     env::var_os("CARGO")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("cargo"))
@@ -874,13 +997,6 @@ mod tests {
     fn rustc_wrapper_strip_is_macos_gated() {
         assert!(should_strip_rustc_wrapper(true));
         assert!(!should_strip_rustc_wrapper(false));
-    }
-
-    fn command_args(command: &Command) -> Vec<String> {
-        command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
     }
 
     fn temp_test_dir(label: &str) -> PathBuf {
