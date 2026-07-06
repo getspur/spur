@@ -237,7 +237,7 @@ description = "Logout of Codex"
 [agents.entries.permissions]
 skip = true
 args = []
-session_mode = "full-access"
+session_mode = "agent-full-access"
 
 [agents.entries.delegation]
 good_for = [
