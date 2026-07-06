@@ -1880,6 +1880,80 @@ mod loop_lifecycle_mcp_tests {
     }
 
     #[tokio::test]
+    async fn submit_loop_client_idempotency_key_reuses_existing_loop_issue() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let key = "submit-loop-idempotent-key";
+
+        let first = server
+            .__test_call_tool(
+                "submit_loop",
+                json!({
+                    "client_idempotency_key": key,
+                    "spec": valid_loop_spec()
+                }),
+            )
+            .await;
+        assert!(first.get("error").is_none(), "first submit_loop failed: {first}");
+        let first_loop_id = response_loop_id(&first);
+        let first_issue_id = first["result"]["issue_id"]
+            .as_str()
+            .expect("first response issue_id")
+            .to_string();
+
+        let second = server
+            .__test_call_tool(
+                "submit_loop",
+                json!({
+                    "client_idempotency_key": key,
+                    "spec": valid_loop_spec()
+                }),
+            )
+            .await;
+        assert!(
+            second.get("error").is_none(),
+            "second submit_loop should be a dedup hit: {second}"
+        );
+        assert_eq!(response_loop_id(&second), first_loop_id);
+        assert_eq!(second["result"]["issue_id"], first_issue_id);
+
+        let issues = mock_pm.issues().await;
+        let loop_issue_count = issues
+            .iter()
+            .filter(|issue| {
+                issue
+                    .labels
+                    .iter()
+                    .any(|label| crate::plan::labels::parse_loop_id(label).is_some())
+            })
+            .count();
+        assert_eq!(
+            loop_issue_count, 1,
+            "dedup hit must skip creating a second loop issue: {issues:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_loop_rejects_blank_client_idempotency_key() {
+        let (server, _mock_pm) = new_server_with_mock_pm().await;
+
+        let response = server
+            .__test_call_tool(
+                "submit_loop",
+                json!({
+                    "client_idempotency_key": "   \t\n",
+                    "spec": valid_loop_spec()
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            response["error"]["message"],
+            "submit_loop: client_idempotency_key must be non-empty",
+            "blank client_idempotency_key should be rejected: {response}"
+        );
+    }
+
+    #[tokio::test]
     async fn kill_loop_closes_issue_and_writes_retired_record() {
         let (server, mock_pm) = new_server_with_mock_pm().await;
         let (loop_id, _) = submit_valid_loop(&server).await;
@@ -1974,6 +2048,112 @@ mod loop_lifecycle_mcp_tests {
         assert!(
             message.contains("triage"),
             "error should mention triage, got {message:?}"
+        );
+    }
+
+    fn valid_loop_doctor_args() -> serde_json::Value {
+        json!({
+            "original_command": "/spur-loop daily keep CI green",
+            "draft": {
+                "goal": "Keep CI green",
+                "pattern": "ci-sweeper",
+                "cadence_secs": 86_400,
+                "schedule_description": "Runs every 24 hours.",
+                "autonomy": "l1",
+                "tasks": [{
+                    "task_id": "triage",
+                    "agent": "codex",
+                    "task": "Triage the CI state and report findings",
+                    "triage": true
+                }]
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_returns_canonical_params_without_creating_issue() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+
+        let response = server
+            .__test_call_tool("spur_loop_doctor", valid_loop_doctor_args())
+            .await;
+
+        assert!(
+            response.get("error").is_none(),
+            "doctor should return structured success payload: {response}"
+        );
+        let result = &response["result"];
+        assert_eq!(result["status"], "ok");
+        assert!(result["canonical_submit_loop_params"].is_object());
+        assert!(result["approval_fingerprint"].is_string());
+        assert!(result["client_idempotency_key"].is_string());
+        assert_eq!(
+            mock_pm.issues().await.len(),
+            0,
+            "doctor must not create durable loop issues"
+        );
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_invalid_draft_returns_structured_errors() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let mut args = valid_loop_doctor_args();
+        args["draft"]["goal"] = json!(" ");
+
+        let response = server.__test_call_tool("spur_loop_doctor", args).await;
+
+        assert!(
+            response.get("error").is_none(),
+            "invalid drafts are doctor payloads, not JSON-RPC errors: {response}"
+        );
+        assert_eq!(response["result"]["status"], "error");
+        assert!(response["result"]["canonical_submit_loop_params"].is_null());
+        assert_eq!(mock_pm.issues().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_malformed_params_are_invalid_params() {
+        let (server, _mock_pm) = new_server_with_mock_pm().await;
+
+        let response = server
+            .__test_call_tool(
+                "spur_loop_doctor",
+                json!({
+                    "original_command": "/spur-loop daily keep CI green",
+                    "draft": {
+                        "goal": "Keep CI green",
+                        "cadence_secs": 86_400,
+                        "tasks": [],
+                        "unexpected": true
+                    }
+                }),
+            )
+            .await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected invalid params response, got {response}"));
+        assert!(
+            message.contains("spur_loop_doctor: invalid parameters"),
+            "expected malformed params error, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_uses_same_advanced_feature_gate_as_submit_loop() {
+        let (server, _mock_pm) =
+            new_server_with_mock_pm_and_gate(super::unlicensed_feature_gate()).await;
+
+        let response = server
+            .__test_call_tool("spur_loop_doctor", valid_loop_doctor_args())
+            .await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected gated error response, got {response}"));
+        assert!(
+            message.contains(spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED.as_str()),
+            "expected missing advanced feature error, got {response}"
         );
     }
 

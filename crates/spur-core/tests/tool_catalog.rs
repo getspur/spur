@@ -43,6 +43,7 @@ const EXPECTED: &[&str] = &[
     "knowledge_context_pack_2",
     "query",
     "submit_plan",
+    "spur_loop_doctor",
     "submit_loop",
     "execute_epic",
     "get_plan_status",
@@ -130,6 +131,7 @@ fn plan_tools_are_owned_by_core_catalog() {
         "resume_plan",
         "force_reclaim_plan",
         "submit_plan",
+        "spur_loop_doctor",
         "submit_loop",
         "execute_epic",
         "get_plan_status",
@@ -162,6 +164,10 @@ fn loop_tools_advertise_stable_user_facing_descriptions() {
             .unwrap_or_else(|| panic!("missing loop tool {name}"))
     };
 
+    assert_eq!(
+        find("spur_loop_doctor").description,
+        "Required validation gate for /spur-loop natural-language drafts. Validates and normalizes a structured draft, returns a friendly preview, canonical submit_loop params, approval fingerprint, and idempotency key when valid, and never creates durable loops."
+    );
     assert_eq!(
         find("submit_loop").description,
         "Create a durable loop issue with a [[spur-loop v1]] spec sentinel. Validates cadence_secs >= 60, defaults omitted autonomy to l1, requires at least one template task marked spur:loop-triage-task, rejects non-positive governor caps, mints a compact loop_id, and labels the loop spur:loop-id:<id>, spur:autonomy:<level>, and spur:loop-next-run:<now> so it fires immediately."
