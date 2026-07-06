@@ -370,6 +370,7 @@ impl App {
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(session) => guard.by_session.contains_key(session),
             ViewId::SessionPicker
+            | ViewId::AgentConfigBrowser { .. }
             | ViewId::IssueBrowser
             | ViewId::LoopBrowser
             | ViewId::PlanBrowser
