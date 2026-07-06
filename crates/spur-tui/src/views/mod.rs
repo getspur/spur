@@ -1,3 +1,4 @@
+pub mod agent_config_browser;
 pub mod dashboard;
 #[cfg(feature = "analytics")]
 pub mod insights;

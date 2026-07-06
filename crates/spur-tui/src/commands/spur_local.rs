@@ -47,8 +47,10 @@ impl SpurLocalSource {
     /// - `/notebook` — owned by the TUI daemon control path. It must never
     ///   be forwarded to the brain because the brain's MCP config is fixed
     ///   for the life of the session.
+    /// - `/configure` — owned by the TUI because it mutates SPUR's own
+    ///   worker configuration rather than prompting the current brain.
     pub fn exclusive_names() -> &'static [&'static str] {
-        &["clear", "theme", "notebook"]
+        &["clear", "theme", "notebook", "configure"]
     }
 
     pub fn entries() -> Vec<CommandEntry> {
@@ -131,6 +133,16 @@ impl SpurLocalSource {
                 hint: Some("[path|new|close]".into()),
                 source: CommandSource::Spur,
                 dispatch: Dispatch::SpurLocal(Action::NotebookCommand { arg: String::new() }),
+                arg_picker_spec: None,
+            },
+            CommandEntry {
+                name: "configure".into(),
+                description: "Open agent settings browser".into(),
+                hint: Some("[agent-name]".into()),
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::NavigateTo(
+                    crate::action::ViewId::AgentConfigBrowser { preselect: None },
+                )),
                 arg_picker_spec: None,
             },
             CommandEntry {
