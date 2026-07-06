@@ -73,7 +73,7 @@ fn maybe_spawn_dispatch_lease_heartbeat(
 pub(crate) async fn handle_delegations(
     mut channel: DelegationChannel,
     repo_root: PathBuf,
-    agent_configs: Vec<spur_acp::config::AgentConfig>,
+    agent_configs: Arc<parking_lot::RwLock<Vec<spur_acp::config::AgentConfig>>>,
     max_concurrent: usize,
     worktree_config: WorktreeConfig,
     event_tx: broadcast::Sender<SpurEvent>,
@@ -132,7 +132,28 @@ pub(crate) async fn handle_delegations(
         );
 
         let repo_root = repo_root.clone();
-        let agent_configs = agent_configs.clone();
+        let agent_configs = agent_configs.read().clone();
+        #[cfg(test)]
+        {
+            if let Some(snapshots) = &fault_injection_hooks.delegation_agent_config_snapshots {
+                snapshots
+                    .lock()
+                    .expect("agent config snapshot recorder poisoned")
+                    .push(agent_configs.clone());
+            }
+            if fault_injection_hooks.short_circuit_delegations {
+                let _ = respond_to.send(DelegationResult {
+                    status: DelegationStatus::Success,
+                    diff: None,
+                    diff_summary: None,
+                    summary: None,
+                    estimated_cost_usd: 0.0,
+                    worker_branch: None,
+                    artifact: None,
+                });
+                continue;
+            }
+        }
         let semaphore = Arc::clone(&semaphore);
         let worktree_config = worktree_config.clone();
         let event_tx = event_tx.clone();
@@ -460,5 +481,174 @@ impl Drop for DelegationGuard {
                 artifact: None,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    fn agent_config(
+        name: &str,
+        args: &[&str],
+        additional_directories: Vec<PathBuf>,
+    ) -> spur_acp::config::AgentConfig {
+        let mut config = spur_acp::config::AgentConfig::with_defaults(name);
+        config.command = "test-worker".to_string();
+        config.args = args.iter().map(|arg| arg.to_string()).collect();
+        config.additional_directories = additional_directories;
+        config
+    }
+
+    fn delegation_request(
+        agent: &str,
+    ) -> (
+        DelegationRequest,
+        tokio::sync::oneshot::Receiver<DelegationResult>,
+    ) {
+        let (respond_to, result_rx) = tokio::sync::oneshot::channel();
+        (
+            DelegationRequest {
+                id: spur_acp::domain::delegation::DelegationId(uuid::Uuid::new_v4().to_string()),
+                agent: agent.to_string(),
+                profile: None,
+                model: None,
+                effort: None,
+                config_overrides: None,
+                task: "record current config".to_string(),
+                context_files: Vec::new(),
+                prior_branch_for_reuse: None,
+                respond_to,
+                brain_session_id: spur_acp::BrainSessionId::new(SessionId::new()),
+                delegation_plan: None,
+                issue_id: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                attempt_tracker: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                enable_worker_mcp: Some(false),
+            },
+            result_rx,
+        )
+    }
+
+    async fn send_and_expect_success(
+        tx: &tokio::sync::mpsc::Sender<DelegationRequest>,
+        request: DelegationRequest,
+        result_rx: tokio::sync::oneshot::Receiver<DelegationResult>,
+    ) {
+        tx.send(request).await.expect("send delegation request");
+        let result = result_rx.await.expect("delegation result");
+        assert!(
+            matches!(result.status, DelegationStatus::Success),
+            "expected test hook success, got {:?}",
+            result.status
+        );
+    }
+
+    fn test_worker_mcp_fetcher(
+        repo_root: PathBuf,
+        funnel: crate::event_funnel::FunnelHandle,
+    ) -> WorkerMcpFetcher {
+        let continuation_ctx = crate::server::DetachedContinuationCtx {
+            on_complete: Arc::new(|_cont, _worker| Box::pin(async {})),
+        };
+        let outcome_store: Arc<dyn spur_blob_store::OutcomeStore> =
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new());
+        let (mcp_server, _channel) = McpCallbackServer::new(
+            None,
+            None,
+            None,
+            continuation_ctx,
+            Arc::clone(&outcome_store),
+            crate::server::community_feature_gate(),
+        );
+
+        WorkerMcpFetcher {
+            cache: Arc::new(DashMap::new()),
+            pm_service: None,
+            feature_gate: Some(crate::server::community_feature_gate()),
+            funnel,
+            mcp_server: Arc::new(mcp_server),
+            outcome_store,
+            repo_root: Some(repo_root),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_delegations_reads_agent_config_cell_for_each_request_after_update() {
+        let repo = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(repo.path().join(".spur")).expect("create .spur dir");
+        let first_dir = repo.path().join("first-root");
+        let second_dir = repo.path().join("second-root");
+        std::fs::create_dir_all(&first_dir).expect("create first root");
+        std::fs::create_dir_all(&second_dir).expect("create second root");
+
+        let mut config = SpurConfig::default();
+        config.agents.entries = vec![agent_config(
+            "worker",
+            &["old-arg"],
+            vec![first_dir.clone()],
+        )];
+        std::fs::write(
+            repo.path().join(".spur/config.toml"),
+            toml::to_string_pretty(&config).expect("serialize config"),
+        )
+        .expect("write config");
+
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+        let snapshots = Arc::new(Mutex::new(Vec::<Vec<spur_acp::config::AgentConfig>>::new()));
+        let hooks = FaultInjectionHooks {
+            delegation_agent_config_snapshots: Some(Arc::clone(&snapshots)),
+            short_circuit_delegations: true,
+            ..Default::default()
+        };
+
+        let (tx, request_rx) = tokio::sync::mpsc::channel(4);
+        let channel = DelegationChannel { request_rx };
+        let (event_tx, _) = broadcast::channel(16);
+        let (funnel, _events) = crate::event_funnel::test_channel();
+        let worker_mcp_fetcher = test_worker_mcp_fetcher(repo.path().to_path_buf(), funnel.clone());
+        let handle = tokio::spawn(handle_delegations(
+            channel,
+            repo.path().to_path_buf(),
+            Arc::clone(&orchestrator.agent_configs),
+            1,
+            orchestrator.config.worktree.clone(),
+            event_tx,
+            funnel,
+            ReviewSink::new(),
+            None,
+            crate::server::community_feature_gate(),
+            CancellationControl::new(),
+            None,
+            hooks,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(10),
+            worker_mcp_fetcher,
+            false,
+        ));
+
+        let (first_request, first_result_rx) = delegation_request("worker");
+        send_and_expect_success(&tx, first_request, first_result_rx).await;
+
+        let updated = agent_config("worker", &["new-arg"], vec![second_dir.clone()]);
+        orchestrator
+            .update_agent_config("worker".to_string(), updated)
+            .expect("update agent config");
+
+        let (second_request, second_result_rx) = delegation_request("worker");
+        send_and_expect_success(&tx, second_request, second_result_rx).await;
+        drop(tx);
+        handle.await.expect("delegation handler exits");
+
+        let snapshots = snapshots.lock().expect("snapshot recorder poisoned");
+        assert_eq!(snapshots.len(), 2, "expected one snapshot per request");
+        assert_eq!(snapshots[0][0].args, vec!["old-arg".to_string()]);
+        assert_eq!(snapshots[0][0].additional_directories, vec![first_dir]);
+        assert_eq!(snapshots[1][0].args, vec!["new-arg".to_string()]);
+        assert_eq!(snapshots[1][0].additional_directories, vec![second_dir]);
     }
 }
