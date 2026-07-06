@@ -638,6 +638,27 @@ fn plan_command_error_roundtrips() {
 }
 
 #[test]
+fn agent_config_update_result_roundtrips() {
+    let ev = SpurEvent::now(SpurEventBody::AgentConfigUpdateResult {
+        name: "codex".into(),
+        ok: false,
+        message: "additional_directories entry is not absolute".into(),
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+
+    match round.body {
+        SpurEventBody::AgentConfigUpdateResult { name, ok, message } => {
+            assert_eq!(name, "codex");
+            assert!(!ok);
+            assert_eq!(message, "additional_directories entry is not absolute");
+        }
+        other => panic!("expected AgentConfigUpdateResult, got {other:?}"),
+    }
+}
+
+#[test]
 fn loop_observability_events_roundtrip_with_bounded_payloads() {
     let loops_loaded = SpurEvent::now(SpurEventBody::LoopsLoaded {
         loops: vec![LoopSummaryEvent {
