@@ -2467,7 +2467,7 @@ mod loop_helper_tests {
                 labels::loop_id_label(loop_id),
                 labels::loop_next_run_label(123),
             ],
-            issue_type: Some("task".to_string()),
+            issue_type: Some(crate::plan::loops::LOOP_ISSUE_TYPE.to_string()),
             ..Default::default()
         })
         .await
@@ -2592,7 +2592,7 @@ mod loop_helper_tests {
             SpurEventBody::LoopsLoaded { loops, warnings } => {
                 assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
                 assert_eq!(loops.len(), 1);
-                assert_eq!(loops[0].loop_id, "summary-loop");
+                assert_eq!(loops[0].loop_id, "summaryloop");
                 assert_eq!(loops[0].issue_id, issue_id);
                 assert_eq!(loops[0].title, "Loop: Keep CI green");
                 assert_eq!(loops[0].goal_preview.as_deref(), Some("Keep CI green"));
@@ -2657,8 +2657,8 @@ mod loop_helper_tests {
         }
     }
 
-    #[test]
-    fn missing_loop_mcp_server_error_depends_on_brain_presence() {
+    #[tokio::test]
+    async fn missing_loop_mcp_server_error_depends_on_brain_presence() {
         assert_eq!(
             Orchestrator::missing_loop_mcp_server_error(&None),
             "No active brain session - start one to claim plans"
