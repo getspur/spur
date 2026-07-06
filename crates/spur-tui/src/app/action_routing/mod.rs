@@ -79,6 +79,7 @@ impl App {
 
             action @ (Action::VendorExec { .. }
             | Action::SetSessionConfigOption { .. }
+            | Action::AgentConfigSaveRequested { .. }
             | Action::SetSessionModel { .. }
             | Action::TogglePlanMode
             | Action::ToggleVimMode
