@@ -2663,6 +2663,514 @@ mod client_capabilities_tests {
 }
 
 #[cfg(test)]
+mod native_helper_tests {
+    use super::*;
+    use agent_client_protocol::role::UntypedRole;
+    use agent_client_protocol::schema::v1::{
+        AuthMethodId, PermissionOption, TextContent, ToolCallUpdate, ToolCallUpdateFields,
+    };
+    use agent_client_protocol::schema::ProtocolVersion;
+    use agent_client_protocol::Channel;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    fn expect_busy<T>(mut rx: oneshot::Receiver<anyhow::Result<T>>) {
+        match rx.try_recv() {
+            Ok(Err(err)) => {
+                let msg = err.to_string();
+                assert!(msg.contains("NativeAcpConnection 'busy-agent': busy"));
+                assert!(msg.contains("prompt in flight"));
+            }
+            Ok(Ok(_)) => panic!("expected busy command to reply with an error"),
+            Err(err) => panic!("expected busy command to send a reply: {err:?}"),
+        }
+    }
+
+    fn raw_ext_params(value: serde_json::Value) -> Arc<serde_json::value::RawValue> {
+        let raw: Box<serde_json::value::RawValue> =
+            serde_json::value::to_raw_value(&value).expect("test JSON should serialize");
+        raw.into()
+    }
+
+    fn assert_no_more_agent_client_requests(
+        rx: &mut mpsc::UnboundedReceiver<AgentClientRequestPayload>,
+    ) {
+        match rx.try_recv() {
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+            Ok(payload) => panic!("unexpected extra agent-client request: {payload:?}"),
+        }
+    }
+
+    #[test]
+    fn reject_busy_command_replies_busy_to_all_command_variants() {
+        macro_rules! assert_busy {
+            ($cmd:expr, $rx:expr) => {{
+                reject_busy_command($cmd, "busy-agent", "prompt");
+                expect_busy($rx);
+            }};
+        }
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::Initialize {
+                request: InitializeRequest::new(ProtocolVersion::LATEST),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::NewSession {
+                request: NewSessionRequest::new(PathBuf::from("/tmp/spur-new")),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::Prompt {
+                request: PromptRequest::new(
+                    SessionId::new("sid"),
+                    vec![ContentBlock::Text(TextContent::new("hello"))],
+                ),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::Cancel {
+                session_id: "sid".to_string(),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(AcpCommand::Shutdown { reply }, rx);
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::LoadSession {
+                request: LoadSessionRequest::new(
+                    "sid".to_string(),
+                    PathBuf::from("/tmp/spur-load")
+                ),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::ResumeSession {
+                request: ResumeSessionRequest::new(
+                    SessionId::new("sid"),
+                    PathBuf::from("/tmp/spur-resume"),
+                ),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::ListSessions {
+                request: ListSessionsRequest::new(),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::DeleteSession {
+                request: DeleteSessionRequest::new(SessionId::new("sid")),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::CloseSession {
+                request: CloseSessionRequest::new(SessionId::new("sid")),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::SetSessionMode {
+                request: SetSessionModeRequest::new(SessionId::new("sid"), "plan"),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::SetSessionConfigOption {
+                request: SetSessionConfigOptionRequest::new(
+                    SessionId::new("sid"),
+                    SessionConfigId::new("model"),
+                    SessionConfigValueId::new("gpt-5-codex"),
+                ),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::Authenticate {
+                request: AuthenticateRequest::new(AuthMethodId::new("github")),
+                reply,
+            },
+            rx
+        );
+
+        let (reply, rx) = oneshot::channel();
+        assert_busy!(
+            AcpCommand::ExtMethod {
+                request: ExtRequest::new("test/method", raw_ext_params(serde_json::json!({}))),
+                reply,
+            },
+            rx
+        );
+    }
+
+    async fn run_agent_client_request(
+        method: &str,
+        params: serde_json::Value,
+    ) -> (
+        agent_client_protocol::Result<serde_json::Value>,
+        mpsc::UnboundedReceiver<AgentClientRequestPayload>,
+    ) {
+        let method = method.to_string();
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+        let local = tokio::task::LocalSet::new();
+
+        let result = local
+            .run_until(async move {
+                let (server_channel, client_channel) = Channel::duplex();
+                let signal_tx_for_handler = signal_tx.clone();
+                let server = UntypedRole
+                    .builder()
+                    .on_receive_request(
+                        async move |req: UntypedMessage, responder, _cx| {
+                            handle_agent_client_request(
+                                req,
+                                responder,
+                                &signal_tx_for_handler,
+                                "test-agent",
+                            )
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async |req: UntypedMessage, responder, _cx| {
+                            responder.respond(serde_json::json!({ "fallback": req.method() }))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    );
+
+                let server_task =
+                    tokio::task::spawn_local(
+                        async move { server.connect_to(server_channel).await },
+                    );
+                let client = UntypedRole.builder();
+                let result = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    client.connect_with(client_channel, async move |cx| {
+                        let request = UntypedMessage::new(&method, params)?;
+                        cx.send_request(request).block_task().await
+                    }),
+                )
+                .await
+                .expect("agent-client request should complete without timing out");
+                server_task.abort();
+                let _ = server_task.await;
+                result
+            })
+            .await;
+
+        (result, signal_rx)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_agent_client_request_logout_signals_and_acknowledges() {
+        let (result, mut signal_rx) =
+            run_agent_client_request("logout", serde_json::json!({})).await;
+
+        assert_eq!(
+            result.expect("logout should be acknowledged"),
+            serde_json::json!({})
+        );
+        let payload = signal_rx
+            .recv()
+            .await
+            .expect("logout should be forwarded to the bridge channel");
+        assert_eq!(payload.kind, AgentClientRequestKind::Logout);
+        assert_no_more_agent_client_requests(&mut signal_rx);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_agent_client_request_authenticate_signals_and_rejects() {
+        let params = serde_json::to_value(AuthenticateRequest::new(AuthMethodId::new("github")))
+            .expect("auth request should serialize");
+        let (result, mut signal_rx) = run_agent_client_request("authenticate", params).await;
+
+        let err = result.expect_err("authenticate should be rejected without forwarding config");
+        let reason = err
+            .data
+            .as_ref()
+            .and_then(|data| data.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .expect("auth rejection should explain why it was rejected");
+        assert!(reason.contains("credential forwarding is not configured"));
+
+        let payload = signal_rx
+            .recv()
+            .await
+            .expect("authenticate should be forwarded to the bridge channel");
+        assert_eq!(
+            payload.kind,
+            AgentClientRequestKind::Authenticate {
+                method_id: "github".to_string(),
+            }
+        );
+        assert_no_more_agent_client_requests(&mut signal_rx);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_agent_client_request_authenticate_uses_unknown_for_bad_params() {
+        let (result, mut signal_rx) =
+            run_agent_client_request("authenticate", serde_json::json!({ "bad": true })).await;
+
+        result.expect_err("authenticate should still be rejected");
+        let payload = signal_rx
+            .recv()
+            .await
+            .expect("malformed authenticate should still be signaled");
+        assert_eq!(
+            payload.kind,
+            AgentClientRequestKind::Authenticate {
+                method_id: "<unknown>".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_agent_client_request_unknown_method_falls_through() {
+        let (result, mut signal_rx) =
+            run_agent_client_request("unknown/method", serde_json::json!({ "x": 1 })).await;
+
+        assert_eq!(
+            result.expect("fallback handler should answer unknown methods"),
+            serde_json::json!({ "fallback": "unknown/method" })
+        );
+        assert_no_more_agent_client_requests(&mut signal_rx);
+    }
+
+    fn permission_option(id: &str, kind: PermissionOptionKind) -> PermissionOption {
+        PermissionOption::new(PermissionOptionId::new(id), id, kind)
+    }
+
+    fn permission_request(options: Vec<PermissionOption>) -> RequestPermissionRequest {
+        let tool_call = ToolCallUpdate::new("tool-call", ToolCallUpdateFields::new());
+        RequestPermissionRequest::new("session", tool_call, options)
+    }
+
+    fn selected_option_id(response: RequestPermissionResponse) -> String {
+        match response.outcome {
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
+                option_id.0.to_string()
+            }
+            other => panic!("expected selected permission outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_request_permission_without_channel_auto_approves_allow_option() {
+        let args = permission_request(vec![
+            permission_option("reject_once", PermissionOptionKind::RejectOnce),
+            permission_option("allow_once", PermissionOptionKind::AllowOnce),
+        ]);
+
+        let response = handle_request_permission(args, None)
+            .await
+            .expect("auto approve should succeed");
+
+        assert_eq!(selected_option_id(response), "allow_once");
+    }
+
+    #[tokio::test]
+    async fn handle_request_permission_forwards_to_channel_and_uses_reply() {
+        let (permission_tx, mut permission_rx) = mpsc::unbounded_channel();
+        let args = permission_request(vec![permission_option(
+            "allow_once",
+            PermissionOptionKind::AllowOnce,
+        )]);
+        let task = tokio::spawn(handle_request_permission(args.clone(), Some(permission_tx)));
+
+        let request = permission_rx
+            .recv()
+            .await
+            .expect("permission request should be forwarded");
+        assert_eq!(request.args, args);
+        request
+            .reply_tx
+            .send(crate::types::PermissionResponse {
+                option_id: "chosen".to_string(),
+            })
+            .expect("permission handler should still be awaiting the reply");
+
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("permission handler should finish")
+            .expect("permission task should not panic")
+            .expect("permission handler should return a response");
+        assert_eq!(selected_option_id(response), "chosen");
+    }
+
+    #[tokio::test]
+    async fn handle_request_permission_auto_approves_when_channel_closed() {
+        let (permission_tx, permission_rx) = mpsc::unbounded_channel();
+        drop(permission_rx);
+        let args = permission_request(vec![
+            permission_option("reject_once", PermissionOptionKind::RejectOnce),
+            permission_option("allow_once", PermissionOptionKind::AllowOnce),
+        ]);
+
+        let response = handle_request_permission(args, Some(permission_tx))
+            .await
+            .expect("closed channel fallback should succeed");
+
+        assert_eq!(selected_option_id(response), "allow_once");
+    }
+
+    #[tokio::test]
+    async fn handle_request_permission_auto_denies_when_reply_dropped() {
+        let (permission_tx, mut permission_rx) = mpsc::unbounded_channel();
+        let args = permission_request(vec![
+            permission_option("allow_once", PermissionOptionKind::AllowOnce),
+            permission_option("reject_once", PermissionOptionKind::RejectOnce),
+        ]);
+        let task = tokio::spawn(handle_request_permission(args, Some(permission_tx)));
+
+        let request = permission_rx
+            .recv()
+            .await
+            .expect("permission request should be forwarded");
+        drop(request.reply_tx);
+
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("permission handler should finish after reply drop")
+            .expect("permission task should not panic")
+            .expect("permission handler should return auto-deny response");
+        assert_eq!(selected_option_id(response), "reject_once");
+    }
+
+    #[test]
+    fn append_terminal_output_appends_without_limit() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let truncated = Arc::new(AtomicBool::new(false));
+
+        append_terminal_output(&output, &truncated, None, b"hello ");
+        append_terminal_output(&output, &truncated, None, b"world");
+
+        assert_eq!(&*output.lock().unwrap(), "hello world");
+        assert!(!truncated.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn append_terminal_output_truncates_on_utf8_boundary() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let truncated = Arc::new(AtomicBool::new(false));
+
+        append_terminal_output(&output, &truncated, Some(4), "abcé456".as_bytes());
+
+        assert_eq!(&*output.lock().unwrap(), "456");
+        assert!(truncated.load(Ordering::Relaxed));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_reader_captures_stdout_stderr_and_exit_code() {
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf stdout; printf stderr >&2; exit 7")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("test child should spawn");
+        let stdout = child.stdout.take().expect("stdout should be piped");
+        let stderr = child.stderr.take().expect("stderr should be piped");
+        let output = Arc::new(Mutex::new(String::new()));
+        let truncated = Arc::new(AtomicBool::new(false));
+        let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            terminal_reader(
+                stdout,
+                stderr,
+                child,
+                output.clone(),
+                truncated.clone(),
+                None,
+                exit_tx,
+            ),
+        )
+        .await
+        .expect("terminal reader should finish");
+
+        let captured = output.lock().unwrap().clone();
+        assert!(captured.contains("stdout"), "captured output: {captured:?}");
+        assert!(captured.contains("stderr"), "captured output: {captured:?}");
+        assert!(!truncated.load(Ordering::Relaxed));
+        let status = exit_rx
+            .borrow()
+            .clone()
+            .expect("terminal reader should publish exit status");
+        assert_eq!(status.exit_code, Some(7));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initialize_sets_ready_and_caches_session_capabilities() {
+        let stub = format!(
+            "{}/tests/fixtures/load_error_stub.py",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut conn = NativeAcpConnection::new("init-stub", "python3", vec![stub], None);
+
+        let response = conn
+            .initialize(InitializeRequest::new(ProtocolVersion::LATEST))
+            .await
+            .expect("initialize should succeed against the existing stub");
+
+        assert_eq!(conn.health(), AgentHealth::Ready);
+        assert!(response.agent_capabilities.load_session);
+        assert_eq!(
+            *conn.session_capabilities.lock().unwrap(),
+            Some(response.agent_capabilities.session_capabilities.clone())
+        );
+
+        conn.shutdown()
+            .await
+            .expect("initialized stub should shut down cleanly");
+    }
+}
+
+#[cfg(test)]
 mod session_mode_cache_tests {
     use super::*;
     use crate::connection::AgentConnection;

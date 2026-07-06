@@ -1875,6 +1875,53 @@ mod tests {
         gate
     }
 
+    fn inactive_feature_gate() -> Arc<spur_license::FeatureGate> {
+        let gate = Arc::new(spur_license::FeatureGate::new(
+            spur_license::policy::PolicyResolver::embedded(),
+        ));
+        gate.update_state(&spur_license::LicenseState::inactive("test inactive"));
+        gate
+    }
+
+    async fn create_task(pm: &PmService, title: &str) -> String {
+        pm.create_issue(IssueCreate {
+            title: title.to_string(),
+            description: Some(format!("{title} body")),
+            issue_type: Some("task".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("create task")
+    }
+
+    fn task_draft(title: &str, description: &str) -> TaskDraft {
+        TaskDraft {
+            title: title.to_string(),
+            description: description.to_string(),
+            assignee: None,
+            priority: None,
+        }
+    }
+
+    fn audit_sentinels(comments: &[spur_pm::Comment]) -> Vec<AuditSentinelKind> {
+        comments
+            .iter()
+            .filter_map(|comment| crate::plan::audit_sentinel::parse_comment(&comment.body))
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    async fn add_audit(adv: &dyn BeadsAdvanced, issue_id: &str, audit: AuditSentinelKind) {
+        adv.add_comment(issue_id, &audit_encode(&audit))
+            .await
+            .expect("add audit sentinel");
+    }
+
+    fn test_uuid(suffix: &str) -> uuid::Uuid {
+        uuid::Uuid::parse_str(&format!("99999999-9999-4999-8999-{suffix}"))
+            .expect("valid test uuid")
+    }
+
     #[tokio::test]
     async fn executor_iterates_executed_ops_in_reverse_for_rollback() {
         let (pm, _dir) = test_pm().await;
@@ -2147,5 +2194,725 @@ mod tests {
 
         assert_eq!(next, None);
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_retry_task_opens_issue_scrubs_review_labels_and_records_rollback() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let issue_id = create_task(pm.as_ref(), "Retry target").await;
+        pm.update_issue(
+            &issue_id,
+            IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                add_labels: vec![
+                    crate::plan::labels::READY_FOR_REVIEW.to_string(),
+                    "ready-for-review".to_string(),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed closed review-ready issue");
+        add_audit(
+            adv,
+            &issue_id,
+            AuditSentinelKind::Dispatch {
+                delegation_id: "del-prior".into(),
+                worker: "codex".into(),
+                attempt: 1,
+            },
+        )
+        .await;
+
+        let mut executed_ops = Vec::new();
+        apply_retry_task(
+            pm.as_ref(),
+            adv,
+            &issue_id,
+            &test_uuid("000000000001"),
+            &mut executed_ops,
+        )
+        .await
+        .expect("retry task applies");
+
+        let issue = pm.get_issue(&issue_id).await.expect("load issue");
+        assert_eq!(issue.status, "open");
+        assert!(!issue.labels.iter().any(|label| {
+            label == crate::plan::labels::READY_FOR_REVIEW || label == "ready-for-review"
+        }));
+        match executed_ops.as_slice() {
+            [ExecutedOp::RetryTask(retry)] => {
+                assert_eq!(retry.issue_id, issue_id);
+                assert_eq!(retry.original_status, pm.closed_status());
+                assert_eq!(
+                    retry
+                        .removed_labels
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([
+                        crate::plan::labels::READY_FOR_REVIEW.to_string(),
+                        "ready-for-review".to_string()
+                    ])
+                );
+            }
+            other => panic!("expected one RetryTask rollback record, got {other:?}"),
+        }
+
+        let sentinels = audit_sentinels(&adv.list_comments(&issue_id).await.expect("comments"));
+        assert!(sentinels.iter().any(|sentinel| matches!(
+            sentinel,
+            AuditSentinelKind::RetryRequested {
+                delegation_id,
+                attempt: 1,
+                ..
+            } if delegation_id == "del-prior"
+        )));
+    }
+
+    #[tokio::test]
+    async fn apply_retry_task_rejects_at_max_attempts_before_mutating() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let issue_id = create_task(pm.as_ref(), "Retry capped").await;
+        pm.update_issue(
+            &issue_id,
+            IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                add_labels: vec![crate::plan::labels::READY_FOR_REVIEW.to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed capped target");
+        for attempt in 1..=crate::plan::MAX_ATTEMPTS {
+            add_audit(
+                adv,
+                &issue_id,
+                AuditSentinelKind::Dispatch {
+                    delegation_id: format!("del-{attempt}"),
+                    worker: "codex".into(),
+                    attempt,
+                },
+            )
+            .await;
+        }
+
+        let mut executed_ops = Vec::new();
+        let error = apply_retry_task(
+            pm.as_ref(),
+            adv,
+            &issue_id,
+            &test_uuid("000000000002"),
+            &mut executed_ops,
+        )
+        .await
+        .expect_err("retry is capped");
+
+        assert!(format!("{error:#}").contains("MAX_ATTEMPTS"));
+        assert!(executed_ops.is_empty());
+        let issue = pm.get_issue(&issue_id).await.expect("load issue");
+        assert_eq!(issue.status, pm.closed_status());
+        assert!(issue
+            .labels
+            .iter()
+            .any(|label| label == crate::plan::labels::READY_FOR_REVIEW));
+        let retry_count = audit_sentinels(&adv.list_comments(&issue_id).await.expect("comments"))
+            .iter()
+            .filter(|sentinel| matches!(sentinel, AuditSentinelKind::RetryRequested { .. }))
+            .count();
+        assert_eq!(retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_modify_task_spec_updates_body_agent_dependencies_and_audit() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let target = create_task(pm.as_ref(), "Modify target").await;
+        let old_dep = create_task(pm.as_ref(), "Old dep").await;
+        let new_dep = create_task(pm.as_ref(), "New dep").await;
+        pm.update_issue(
+            &target,
+            IssueUpdate {
+                add_labels: vec![crate::plan::labels::agent("codex")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed agent label");
+        pm.add_dependency(&target, &old_dep)
+            .await
+            .expect("seed dependency");
+
+        let context_files = vec!["src/lib.rs".to_string()];
+        let depends_on = vec![new_dep.clone()];
+        let mut executed_ops = Vec::new();
+        apply_modify_task_spec(
+            pm.as_ref(),
+            adv,
+            ModifyTaskSpecInput {
+                issue_id: &target,
+                new_task: Some("Rewritten task body"),
+                new_agent: Some("claude-code-acp"),
+                new_profile: Some("reviewer"),
+                new_context_files: Some(&context_files),
+                new_depends_on: Some(&depends_on),
+            },
+            &mut executed_ops,
+        )
+        .await
+        .expect("modify task spec applies");
+
+        let issue = pm.get_issue(&target).await.expect("load modified issue");
+        assert_eq!(issue.body, "Rewritten task body");
+        assert!(issue
+            .labels
+            .iter()
+            .any(|label| label == &crate::plan::labels::agent("claude-code-acp")));
+        assert!(!issue
+            .labels
+            .iter()
+            .any(|label| label == &crate::plan::labels::agent("codex")));
+        assert_eq!(issue.blocked_by, vec![new_dep.clone()]);
+        match executed_ops.as_slice() {
+            [ExecutedOp::ModifyTaskSpec(modify)] => {
+                assert_eq!(modify.issue_id, target);
+                assert_eq!(modify.body_change.as_deref(), Some("Modify target body"));
+                assert_eq!(
+                    modify.original_agent_label.as_deref(),
+                    Some(crate::plan::labels::agent("codex").as_str())
+                );
+                assert_eq!(
+                    modify.new_agent_label.as_deref(),
+                    Some(crate::plan::labels::agent("claude-code-acp").as_str())
+                );
+                assert_eq!(modify.added_deps, vec![new_dep.clone()]);
+                assert_eq!(modify.removed_deps, vec![old_dep.clone()]);
+            }
+            other => panic!("expected one ModifyTaskSpec rollback record, got {other:?}"),
+        }
+
+        let audits = crate::plan::projector::collect_sorted_audits_for_issue(
+            &target,
+            adv.list_comments(&target).await.expect("comments"),
+        )
+        .expect("parse audits");
+        let (_, files, profile, _, _, _) =
+            crate::plan::projector::latest_task_spec(&audits).expect("latest task spec");
+        assert_eq!(files, context_files);
+        assert_eq!(profile.as_deref(), Some("reviewer"));
+    }
+
+    #[tokio::test]
+    async fn apply_modify_task_spec_missing_target_has_no_rollback_record() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let mut executed_ops = Vec::new();
+
+        let error = apply_modify_task_spec(
+            pm.as_ref(),
+            adv,
+            ModifyTaskSpecInput {
+                issue_id: "bd-missing",
+                new_task: Some("new"),
+                new_agent: None,
+                new_profile: None,
+                new_context_files: None,
+                new_depends_on: None,
+            },
+            &mut executed_ops,
+        )
+        .await
+        .expect_err("missing target rejects");
+
+        assert!(format!("{error:#}").contains("load modify target bd-missing"));
+        assert!(executed_ops.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_abandon_task_cascades_to_descendants_and_records_failed_audits() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let root = create_task(pm.as_ref(), "Root").await;
+        let child = create_task(pm.as_ref(), "Child").await;
+        let grandchild = create_task(pm.as_ref(), "Grandchild").await;
+        pm.add_dependency(&child, &root)
+            .await
+            .expect("child depends on root");
+        pm.add_dependency(&grandchild, &child)
+            .await
+            .expect("grandchild depends on child");
+
+        let mut executed_ops = Vec::new();
+        let affected = apply_abandon_task(
+            pm.as_ref(),
+            adv,
+            &root,
+            "cannot recover",
+            true,
+            &mut executed_ops,
+        )
+        .await
+        .expect("abandon applies");
+
+        assert_eq!(
+            affected.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([root.clone(), child.clone(), grandchild.clone()])
+        );
+        for issue_id in [&root, &child, &grandchild] {
+            let issue = pm.get_issue(issue_id).await.expect("load abandoned issue");
+            assert_eq!(issue.status, pm.closed_status());
+            let sentinels = audit_sentinels(&adv.list_comments(issue_id).await.expect("comments"));
+            assert!(sentinels.iter().any(|sentinel| matches!(
+                sentinel,
+                AuditSentinelKind::Completion {
+                    completion_state: CompletionState::Failed,
+                    result_summary,
+                    ..
+                } if result_summary.as_deref() == Some("cannot recover")
+            )));
+        }
+        match executed_ops.as_slice() {
+            [ExecutedOp::AbandonTask(abandon)] => {
+                assert_eq!(abandon.targets.len(), 3);
+                assert!(abandon.targets.iter().all(|(_, status)| status == "open"));
+            }
+            other => panic!("expected one AbandonTask rollback record, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_abandon_task_missing_target_keeps_empty_rollback_slot() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let mut executed_ops = Vec::new();
+
+        let error = apply_abandon_task(
+            pm.as_ref(),
+            adv,
+            "bd-missing",
+            "gone",
+            false,
+            &mut executed_ops,
+        )
+        .await
+        .expect_err("missing abandon target rejects");
+
+        assert!(format!("{error:#}").contains("load abandon target bd-missing"));
+        match executed_ops.as_slice() {
+            [ExecutedOp::AbandonTask(abandon)] => assert!(abandon.targets.is_empty()),
+            other => panic!("expected empty AbandonTask rollback slot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_insert_task_before_creates_scoped_child_reopens_target_and_records_retry() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let target = create_task(pm.as_ref(), "Insert target").await;
+        pm.update_issue(
+            &target,
+            IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                add_labels: vec![
+                    crate::plan::labels::plan_id("plan-a"),
+                    crate::plan::labels::agent("codex"),
+                    crate::plan::labels::READY_FOR_REVIEW.to_string(),
+                    "ready-for-review".to_string(),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed insert target");
+
+        let mutation_id = test_uuid("000000000003");
+        let mut executed_ops = Vec::new();
+        let new_id = apply_insert_task_before(
+            pm.as_ref(),
+            adv,
+            &target,
+            &task_draft("Inserted prereq", "Prepare the target"),
+            &mutation_id,
+            &mut executed_ops,
+        )
+        .await
+        .expect("insert task before applies");
+
+        let target_issue = pm.get_issue(&target).await.expect("load target");
+        assert_eq!(target_issue.status, "open");
+        assert!(target_issue.blocked_by.iter().any(|dep| dep == &new_id));
+        assert!(!target_issue.labels.iter().any(|label| {
+            label == crate::plan::labels::READY_FOR_REVIEW || label == "ready-for-review"
+        }));
+        let child = pm.get_issue(&new_id).await.expect("load inserted child");
+        assert_eq!(child.title, "Inserted prereq");
+        assert!(child
+            .labels
+            .iter()
+            .any(|label| label == &mutation_id_label(&mutation_id)));
+        assert!(child
+            .labels
+            .iter()
+            .any(|label| label == &crate::plan::labels::plan_id("plan-a")));
+        assert!(child
+            .labels
+            .iter()
+            .any(|label| label == &crate::plan::labels::plan_task_id(&new_id)));
+        assert!(child
+            .labels
+            .iter()
+            .any(|label| label == &crate::plan::labels::agent("codex")));
+        match executed_ops.as_slice() {
+            [ExecutedOp::InsertTaskBefore(insert)] => {
+                assert_eq!(insert.target_issue_id, target);
+                assert_eq!(insert.target_original_status, pm.closed_status());
+                assert_eq!(insert.new_issue_id.as_deref(), Some(new_id.as_str()));
+                assert!(insert.dep_added);
+                assert_eq!(
+                    insert
+                        .target_removed_labels
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([
+                        crate::plan::labels::READY_FOR_REVIEW.to_string(),
+                        "ready-for-review".to_string()
+                    ])
+                );
+            }
+            other => panic!("expected one InsertTaskBefore rollback record, got {other:?}"),
+        }
+        let sentinels = audit_sentinels(&adv.list_comments(&target).await.expect("comments"));
+        assert!(sentinels.iter().any(|sentinel| matches!(
+            sentinel,
+            AuditSentinelKind::RetryRequested { error, .. } if error.contains(&new_id)
+        )));
+    }
+
+    #[tokio::test]
+    async fn apply_insert_task_before_missing_target_does_not_create_child_or_slot() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let before = list_all_issue_ids(pm.as_ref()).await.expect("list before");
+        let mut executed_ops = Vec::new();
+
+        let error = apply_insert_task_before(
+            pm.as_ref(),
+            adv,
+            "bd-missing",
+            &task_draft("No child", "should not be created"),
+            &test_uuid("000000000004"),
+            &mut executed_ops,
+        )
+        .await
+        .expect_err("missing insert target rejects");
+
+        assert!(format!("{error:#}").contains("load insert_task_before target bd-missing"));
+        assert!(executed_ops.is_empty());
+        let after = list_all_issue_ids(pm.as_ref()).await.expect("list after");
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn apply_cancel_task_closes_only_target_and_emits_cancelled_completion() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let target = create_task(pm.as_ref(), "Cancel target").await;
+        let descendant = create_task(pm.as_ref(), "Cancel descendant").await;
+        pm.add_dependency(&descendant, &target)
+            .await
+            .expect("descendant depends on target");
+
+        let mut executed_ops = Vec::new();
+        apply_cancel_task(pm.as_ref(), adv, &target, "not needed", &mut executed_ops)
+            .await
+            .expect("cancel applies");
+
+        assert_eq!(
+            pm.get_issue(&target).await.expect("load target").status,
+            pm.closed_status()
+        );
+        assert_eq!(
+            pm.get_issue(&descendant)
+                .await
+                .expect("load descendant")
+                .status,
+            "open"
+        );
+        match executed_ops.as_slice() {
+            [ExecutedOp::CancelTask(cancel)] => {
+                assert_eq!(cancel.issue_id, target);
+                assert_eq!(cancel.original_status, "open");
+            }
+            other => panic!("expected one CancelTask rollback record, got {other:?}"),
+        }
+        let sentinels = audit_sentinels(&adv.list_comments(&target).await.expect("comments"));
+        assert!(sentinels.iter().any(|sentinel| matches!(
+            sentinel,
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Cancelled,
+                result_summary,
+                ..
+            } if result_summary.as_deref() == Some("not needed")
+        )));
+        assert!(!sentinels.iter().any(|sentinel| matches!(
+            sentinel,
+            AuditSentinelKind::Completion {
+                completion_state: CompletionState::Failed,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn apply_cancel_task_missing_target_has_no_side_effect_record() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let mut executed_ops = Vec::new();
+
+        let error = apply_cancel_task(
+            pm.as_ref(),
+            adv,
+            "bd-missing",
+            "not needed",
+            &mut executed_ops,
+        )
+        .await
+        .expect_err("missing cancel target rejects");
+
+        assert!(format!("{error:#}").contains("load cancel target bd-missing"));
+        assert!(executed_ops.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rollback_mutation_runs_registered_ops_when_feature_enabled() {
+        let (pm, _dir) = test_pm().await;
+        let executed_ops = vec![
+            ExecutedOp::NoOp(NoOpExecution {
+                label: "first".into(),
+            }),
+            ExecutedOp::NoOp(NoOpExecution {
+                label: "second".into(),
+            }),
+        ];
+
+        let report = rollback_mutation(pm, test_feature_gate(), &executed_ops).await;
+
+        assert!(report.failed.is_empty());
+        assert_eq!(
+            report
+                .succeeded
+                .iter()
+                .map(|op| op.issue_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second", "first"]
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_mutation_reports_setup_failure_when_feature_disabled() {
+        let (pm, _dir) = test_pm().await;
+        let executed_ops = vec![ExecutedOp::NoOp(NoOpExecution {
+            label: "blocked".into(),
+        })];
+
+        let report = rollback_mutation(pm, inactive_feature_gate(), &executed_ops).await;
+
+        assert!(report.succeeded.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0.kind, "rollback_setup");
+        assert_eq!(report.failed[0].0.issue_id, "blocked");
+    }
+
+    #[tokio::test]
+    async fn apply_mutation_commits_insert_task_before_with_audit_metadata() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let target = create_task(pm.as_ref(), "Apply mutation target").await;
+        let mutation_id = test_uuid("000000000005");
+        let batch = MutationBatch {
+            mutation_id,
+            trigger_signal_id: None,
+            trigger_task_id: target.clone(),
+            ops: vec![PlanMutationOp::InsertTaskBefore {
+                target_issue_id: target.clone(),
+                draft: task_draft("Apply child", "Inserted by apply_mutation"),
+            }],
+        };
+
+        let children = apply_mutation(pm.clone(), test_feature_gate(), &batch)
+            .await
+            .expect("apply mutation succeeds");
+
+        assert_eq!(children.len(), 1);
+        let child_id = &children[0];
+        let target_issue = pm.get_issue(&target).await.expect("load target");
+        assert!(target_issue.blocked_by.iter().any(|dep| dep == child_id));
+        let sentinels = audit_sentinels(&adv.list_comments(&target).await.expect("comments"));
+        assert!(sentinels.iter().any(|sentinel| matches!(
+            sentinel,
+            AuditSentinelKind::MutationPlan {
+                mutation_id: id,
+                op,
+                trigger_task_id,
+                ..
+            } if id == &mutation_id.to_string()
+                && op == "insert_task_before"
+                && trigger_task_id == &target
+        )));
+        assert!(sentinels.iter().any(|sentinel| matches!(
+            sentinel,
+            AuditSentinelKind::MutationCommit {
+                mutation_id: id,
+                children_created,
+                op_tags,
+                affected_task_ids,
+            } if id == &mutation_id.to_string()
+                && children_created == &vec![child_id.clone()]
+                && op_tags == &vec!["insert_task_before".to_string()]
+                && affected_task_ids == &vec![target.clone(), child_id.clone()]
+        )));
+    }
+
+    #[tokio::test]
+    async fn apply_mutation_rolls_back_prior_op_and_audits_op_failure() {
+        let (pm, _dir) = test_pm().await;
+        let adv = test_advanced(pm.as_ref());
+        let target = create_task(pm.as_ref(), "Rollback target").await;
+        let dep = create_task(pm.as_ref(), "Rollback dep").await;
+        let mutation_id = test_uuid("000000000006");
+        let batch = MutationBatch {
+            mutation_id,
+            trigger_signal_id: None,
+            trigger_task_id: target.clone(),
+            ops: vec![
+                PlanMutationOp::AddDependency {
+                    issue_id: target.clone(),
+                    depends_on: dep.clone(),
+                },
+                PlanMutationOp::AddDependency {
+                    issue_id: target.clone(),
+                    depends_on: target.clone(),
+                },
+            ],
+        };
+
+        let error = apply_mutation(pm.clone(), test_feature_gate(), &batch)
+            .await
+            .expect_err("second op fails");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("rolled back after op failure"));
+        assert!(message.contains("self-reference rejected"));
+        let issue = pm.get_issue(&target).await.expect("load target");
+        assert!(!issue.blocked_by.iter().any(|blocked_by| blocked_by == &dep));
+        let sentinels = audit_sentinels(&adv.list_comments(&target).await.expect("comments"));
+        let violation = sentinels
+            .iter()
+            .find_map(|sentinel| match sentinel {
+                AuditSentinelKind::MutationInvariantViolation {
+                    mutation_id: id,
+                    violation,
+                    rollback_status,
+                    rollback_ops_succeeded,
+                    rollback_ops_failed,
+                } => Some((
+                    id,
+                    violation,
+                    rollback_status,
+                    rollback_ops_succeeded,
+                    rollback_ops_failed,
+                )),
+                _ => None,
+            })
+            .expect("violation audit emitted");
+        assert_eq!(violation.0, &mutation_id.to_string());
+        assert!(violation.1.contains("op_failure"));
+        assert_eq!(violation.2, "completed");
+        assert!(violation.3.iter().any(|op| {
+            op.kind == "remove_added_dep"
+                && op.issue_id == target
+                && op.depends_on_id.as_deref() == Some(dep.as_str())
+        }));
+        assert!(violation.4.is_empty());
+        assert!(!sentinels
+            .iter()
+            .any(|sentinel| matches!(sentinel, AuditSentinelKind::MutationCommit { .. })));
+    }
+
+    #[tokio::test]
+    async fn submit_plan_mutation_clears_escalated_label_and_reports_child_affected_once() {
+        let (pm, _dir) = test_pm().await;
+        let target = create_task(pm.as_ref(), "Submit target").await;
+        pm.update_issue(
+            &target,
+            IssueUpdate {
+                add_labels: vec![SIGNAL_ESCALATED_LABEL.to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed escalated label");
+
+        let result = submit_plan_mutation(
+            pm.clone(),
+            test_feature_gate(),
+            test_uuid("000000000007"),
+            target.clone(),
+            vec![PlanMutationOp::InsertTaskBefore {
+                target_issue_id: target.clone(),
+                draft: task_draft("Submit child", "Inserted by submit"),
+            }],
+        )
+        .await
+        .expect("submit mutation succeeds");
+
+        assert_eq!(result.children_created.len(), 1);
+        assert_eq!(
+            result.affected_task_ids,
+            vec![target.clone(), result.children_created[0].clone()]
+        );
+        let target_issue = pm.get_issue(&target).await.expect("load target");
+        assert!(!target_issue
+            .labels
+            .iter()
+            .any(|label| label == SIGNAL_ESCALATED_LABEL));
+    }
+
+    #[tokio::test]
+    async fn submit_plan_mutation_preserves_escalated_label_when_apply_fails() {
+        let (pm, _dir) = test_pm().await;
+        let target = create_task(pm.as_ref(), "Submit failing target").await;
+        pm.update_issue(
+            &target,
+            IssueUpdate {
+                add_labels: vec![SIGNAL_ESCALATED_LABEL.to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed escalated label");
+
+        let error = submit_plan_mutation(
+            pm.clone(),
+            test_feature_gate(),
+            test_uuid("000000000008"),
+            target.clone(),
+            vec![PlanMutationOp::AddDependency {
+                issue_id: target.clone(),
+                depends_on: target.clone(),
+            }],
+        )
+        .await
+        .expect_err("submit mutation fails");
+
+        assert!(format!("{error:#}").contains("self-reference rejected"));
+        let target_issue = pm.get_issue(&target).await.expect("load target");
+        assert!(target_issue
+            .labels
+            .iter()
+            .any(|label| label == SIGNAL_ESCALATED_LABEL));
     }
 }
