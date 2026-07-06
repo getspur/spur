@@ -795,6 +795,630 @@ mod plan_truncate_and_restart_tests {
 }
 
 #[cfg(test)]
+mod plan_handler_mcp_tests {
+    use super::*;
+    use serde_json::json;
+    use spur_acp::{BrainSessionId, SessionId};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn no_op_ctx() -> DetachedContinuationCtx {
+        DetachedContinuationCtx {
+            on_complete: Arc::new(|_, _| Box::pin(async {})),
+        }
+    }
+
+    async fn new_beads_server() -> (
+        TempDir,
+        spur_pm::test_workspace::TestBeadsWorkspace,
+        Arc<McpCallbackServer>,
+        Arc<spur_pm::PmService>,
+    ) {
+        let dir = TempDir::new().expect("tempdir");
+        let (workspace, pm) = super::init_beads_pm(dir.path()).await;
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&session_id),
+            Some(Arc::clone(&pm)),
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::pro_feature_gate(),
+        );
+        server.set_repo_root(dir.path().to_path_buf());
+        (dir, workspace, Arc::new(server), pm)
+    }
+
+    async fn new_mock_server() -> (
+        Arc<McpCallbackServer>,
+        Arc<crate::plan::test_util::MockPm>,
+    ) {
+        let session_id = BrainSessionId::new(SessionId("brain".into()));
+        let mock_pm = crate::plan::test_util::MockPm::new().arc();
+        let (mut server, _channel) = McpCallbackServer::new(
+            Some(&session_id),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::pro_feature_gate(),
+        );
+        server.__test_set_pm_like(mock_pm.clone() as Arc<dyn crate::plan::PmLike>);
+        (Arc::new(server), mock_pm)
+    }
+
+    async fn create_epic(
+        pm: &dyn crate::plan::PmLike,
+        plan_id: &str,
+        extra_labels: Vec<String>,
+    ) -> String {
+        let mut labels = vec![crate::plan::labels::plan_id(plan_id)];
+        labels.extend(extra_labels);
+        pm.create_issue(spur_pm::IssueCreate {
+            title: format!("Epic {plan_id}"),
+            description: Some(format!("Body for {plan_id}")),
+            issue_type: Some("epic".to_string()),
+            priority: Some(2),
+            labels,
+            ..Default::default()
+        })
+        .await
+        .expect("create epic")
+    }
+
+    async fn create_task_issue(
+        pm: &dyn crate::plan::PmLike,
+        title: &str,
+        labels: Vec<String>,
+    ) -> String {
+        pm.create_issue(spur_pm::IssueCreate {
+            title: title.to_string(),
+            description: Some(format!("Task body for {title}")),
+            issue_type: Some("task".to_string()),
+            priority: Some(2),
+            labels,
+            ..Default::default()
+        })
+        .await
+        .expect("create task issue")
+    }
+
+    fn response_text_json(response: &JsonRpcResponse) -> serde_json::Value {
+        let result = response
+            .result
+            .as_ref()
+            .unwrap_or_else(|| panic!("expected success response, got {response:?}"));
+        let text = result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected text content, got {result}"));
+        serde_json::from_str(text).expect("response text must be JSON")
+    }
+
+    fn value_response_text_json(response: &serde_json::Value) -> serde_json::Value {
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected text JSON success response, got {response}"));
+        serde_json::from_str(text).expect("response text must be JSON")
+    }
+
+    fn parse_audit_comments(
+        comments: Vec<spur_pm::Comment>,
+    ) -> Vec<crate::plan::audit_sentinel::AuditSentinelKind> {
+        comments
+            .into_iter()
+            .filter_map(|comment| {
+                crate::plan::audit_sentinel::parse_comment(&comment.body)
+                    .map(|parsed| parsed.expect("audit comment parses"))
+            })
+            .collect()
+    }
+
+    fn one_task_plan(
+        plan_id: &str,
+        issue_id: String,
+        status: crate::plan::PlanTaskStatus,
+    ) -> crate::plan::PlanState {
+        crate::plan::PlanState {
+            plan_id: plan_id.to_string(),
+            tasks: vec![crate::plan::PlanTaskEntry {
+                spec: crate::plan::PlanTask {
+                    task_id: "T1".to_string(),
+                    agent: "codex".to_string(),
+                    profile: None,
+                    model: None,
+                    effort: None,
+                    config_overrides: None,
+                    task: "Reviewable task".to_string(),
+                    depends_on: Vec::new(),
+                    issue_id: Some(issue_id),
+                    issue_title: None,
+                    context_files: Vec::new(),
+                },
+                status,
+                result: None,
+                worker_branch: Some("spur/worker/T1".to_string()),
+                attempt: 1,
+                history: Vec::new(),
+                last_delegation_id: Some("del-review".to_string()),
+                dispatched_base_oid: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            }],
+            brain_session_id: BrainSessionId::new(SessionId("brain".into())),
+            base_snapshot_branch: Some("main".to_string()),
+            base_snapshot_oid: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            merge_state: crate::plan::PlanMergeState::NotStarted,
+            epic_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn call_claim_plan_claims_unowned_epic_and_marks_pending() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        let epic_id = create_epic(pm.as_ref(), "claim-plan", Vec::new()).await;
+
+        server
+            .call_claim_plan("claim-plan")
+            .await
+            .expect("claim_plan succeeds");
+
+        let epic = pm.get_issue(&epic_id).await.expect("claimed epic");
+        assert!(
+            epic.labels
+                .contains(&crate::plan::labels::plan_owner("brain")),
+            "claim_plan must stamp current brain owner: {:?}",
+            epic.labels
+        );
+        assert!(
+            epic.labels
+                .contains(&crate::plan::labels::PLAN_PENDING.to_string()),
+            "claim_plan must leave the plan pending until resume_plan starts it: {:?}",
+            epic.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn call_claim_plan_rejects_plan_owned_by_other_brain() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        let epic_id = create_epic(
+            pm.as_ref(),
+            "claimed-by-other",
+            vec![crate::plan::labels::plan_owner("other-brain")],
+        )
+        .await;
+
+        let error = server
+            .call_claim_plan("claimed-by-other")
+            .await
+            .expect_err("other owner must block claim");
+
+        assert!(
+            error.contains("owned by otherbrain"),
+            "claim error must name the owner, got {error:?}"
+        );
+        let epic = pm.get_issue(&epic_id).await.expect("epic");
+        assert!(
+            !epic
+                .labels
+                .contains(&crate::plan::labels::plan_owner("brain")),
+            "failed claim must not stamp current owner: {:?}",
+            epic.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_resume_plan_with_claims_unowned_plan_when_allowed() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        let epic_id = create_epic(pm.as_ref(), "resume-claim", Vec::new()).await;
+
+        let response = server
+            .handle_resume_plan_with(
+                serde_json::Value::from(1),
+                json!({ "plan_id": "resume-claim" }),
+                true,
+            )
+            .await;
+
+        assert!(
+            response.error.is_none(),
+            "resume_plan should claim unowned plan when allowed: {response:?}"
+        );
+        let output = response_text_json(&response);
+        assert_eq!(output["status"], "claimed");
+        assert_eq!(output["plan_id"], "resume-claim");
+        assert_eq!(output["epic_id"], epic_id);
+        let epic = pm.get_issue(&epic_id).await.expect("epic");
+        assert!(epic
+            .labels
+            .contains(&crate::plan::labels::plan_owner("brain")));
+    }
+
+    #[tokio::test]
+    async fn call_resume_plan_rejects_unowned_plan_without_claiming() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        let epic_id = create_epic(pm.as_ref(), "resume-unowned", Vec::new()).await;
+
+        let error = server
+            .call_resume_plan("resume-unowned")
+            .await
+            .expect_err("call_resume_plan must not claim implicitly");
+
+        assert!(
+            error.contains("unowned; claim it before starting"),
+            "resume error must direct caller to claim first, got {error:?}"
+        );
+        let epic = pm.get_issue(&epic_id).await.expect("epic");
+        assert!(
+            !epic
+                .labels
+                .contains(&crate::plan::labels::plan_owner("brain")),
+            "failed resume must not mutate ownership: {:?}",
+            epic.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn force_reclaim_plan_replaces_prior_owners_and_writes_audit() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        let epic_id = create_epic(
+            pm.as_ref(),
+            "force-plan",
+            vec![
+                crate::plan::labels::plan_owner("old-a"),
+                crate::plan::labels::plan_owner("old-b"),
+            ],
+        )
+        .await;
+
+        let response = server
+            .handle_force_reclaim_plan(
+                serde_json::Value::from(1),
+                json!({
+                    "plan_id": "force-plan",
+                    "confirm": true,
+                    "reason": "stale owner"
+                }),
+            )
+            .await;
+
+        assert!(
+            response.error.is_none(),
+            "force_reclaim_plan should succeed: {response:?}"
+        );
+        let output = response_text_json(&response);
+        assert_eq!(output["prior_owner"], "olda,oldb");
+        assert_eq!(output["new_owner"], "brain");
+        assert!(output["audit_token"].as_str().is_some());
+        let epic = pm.get_issue(&epic_id).await.expect("epic");
+        assert!(epic
+            .labels
+            .contains(&crate::plan::labels::plan_owner("brain")));
+        assert!(!epic
+            .labels
+            .contains(&crate::plan::labels::plan_owner("old-a")));
+        assert!(!epic
+            .labels
+            .contains(&crate::plan::labels::plan_owner("old-b")));
+
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            super::pro_feature_gate().as_ref(),
+        )
+        .expect("pro gate");
+        let audits = parse_audit_comments(
+            pm.advanced()
+                .expect("advanced pm")
+                .list_comments(&epic_id)
+                .await
+                .expect("list comments"),
+        );
+        assert!(audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::PlanForceReclaimed {
+                plan_id,
+                prior_owner: Some(prior_owner),
+                new_owner,
+                reason: Some(reason),
+                ..
+            } if plan_id == "force-plan"
+                && prior_owner == "olda,oldb"
+                && new_owner == "brain"
+                && reason == "stale owner"
+        )));
+    }
+
+    #[tokio::test]
+    async fn force_reclaim_plan_requires_explicit_confirmation() {
+        let (_dir, _workspace, server, _pm) = new_beads_server().await;
+
+        let response = server
+            .handle_force_reclaim_plan(
+                serde_json::Value::from(1),
+                json!({ "plan_id": "force-plan" }),
+            )
+            .await;
+
+        let error = response.error.expect("missing confirm must be rejected");
+        assert_eq!(error.code, -32602);
+        assert!(
+            error.message.contains("confirm"),
+            "confirmation error should explain the guard, got {:?}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_plan_rejects_persist_as_epic_false_after_task_validation() {
+        let (_dir, _workspace, server, _pm) = new_beads_server().await;
+
+        let response = server
+            .handle_submit_plan(
+                serde_json::Value::from(1),
+                json!({
+                    "persist_as_epic": false,
+                    "tasks": [{
+                        "task_id": "A",
+                        "agent": "codex",
+                        "task": "Implement A"
+                    }]
+                }),
+            )
+            .await;
+
+        let error = response
+            .error
+            .expect("persist_as_epic=false must be rejected");
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, PERSIST_AS_EPIC_FALSE_REMOVED_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn submit_plan_rejects_blank_client_idempotency_key_before_persisting() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+
+        let response = server
+            .handle_submit_plan(
+                serde_json::Value::from(1),
+                json!({
+                    "client_idempotency_key": " \t\n ",
+                    "tasks": []
+                }),
+            )
+            .await;
+
+        let error = response
+            .error
+            .expect("blank client_idempotency_key must be rejected");
+        assert_eq!(error.code, -32602);
+        assert_eq!(
+            error.message,
+            "submit_plan: client_idempotency_key must be non-empty"
+        );
+        assert!(
+            pm.list_issues(spur_pm::IssueFilter::default())
+                .await
+                .expect("list issues")
+                .is_empty(),
+            "early validation failure must not create beads issues"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_plan_mutation_retry_reopens_issue_and_clears_escalation() {
+        let (_dir, _workspace, server, pm) = new_beads_server().await;
+        let issue_id = create_task_issue(
+            pm.as_ref(),
+            "Retry me",
+            vec![
+                crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string(),
+                crate::plan::labels::READY_FOR_REVIEW.to_string(),
+            ],
+        )
+        .await;
+        pm.update_issue(
+            &issue_id,
+            spur_pm::IssueUpdate {
+                status: Some(pm.closed_status().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("close issue before retry");
+
+        let response = server
+            .__test_call_tool(
+                "submit_plan_mutation",
+                json!({
+                    "trigger_task_id": issue_id.clone(),
+                    "mutation_id": "00000000-0000-4000-8000-000000000001",
+                    "ops": [{
+                        "op": "retry_task",
+                        "issue_id": issue_id.clone()
+                    }]
+                }),
+            )
+            .await;
+
+        assert!(
+            response.get("error").is_none(),
+            "submit_plan_mutation retry should succeed: {response}"
+        );
+        let output = value_response_text_json(&response);
+        assert_eq!(
+            output["mutation_id"],
+            "00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(output["children_created"], json!([]));
+        assert_eq!(output["affected_task_ids"], json!([issue_id.clone()]));
+        let issue = pm.get_issue(&issue_id).await.expect("mutated issue");
+        assert_eq!(issue.status, "open");
+        assert!(
+            !issue.labels.contains(
+                &crate::plan::mutation_executor::SIGNAL_ESCALATED_LABEL.to_string()
+            ),
+            "successful mutation must clear signal:escalated: {:?}",
+            issue.labels
+        );
+        assert!(
+            !issue
+                .labels
+                .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
+            "retry must remove ready-for-review labels: {:?}",
+            issue.labels
+        );
+
+        super::require_feature(
+            spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED,
+            super::pro_feature_gate().as_ref(),
+        )
+        .expect("pro gate");
+        let audits = parse_audit_comments(
+            pm.advanced()
+                .expect("advanced pm")
+                .list_comments(&issue_id)
+                .await
+                .expect("list comments"),
+        );
+        assert!(audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::MutationPlan { op, .. }
+                if op == "retry_task"
+        )));
+        assert!(audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::RetryRequested { .. }
+        )));
+        assert!(audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::MutationCommit { op_tags, .. }
+                if op_tags == &vec!["retry_task".to_string()]
+        )));
+    }
+
+    #[tokio::test]
+    async fn submit_plan_mutation_rejects_missing_ops() {
+        let (_dir, _workspace, server, _pm) = new_beads_server().await;
+
+        let response = server
+            .handle_submit_plan_mutation(
+                serde_json::Value::from(1),
+                json!({ "trigger_task_id": "bd-missing" }),
+            )
+            .await;
+
+        let error = response.error.expect("missing ops must be invalid params");
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "submit_plan_mutation: ops required");
+    }
+
+    #[tokio::test]
+    async fn review_task_approve_updates_plan_issue_and_audit() {
+        let (server, mock_pm) = new_mock_server().await;
+        let issue_id = create_task_issue(
+            mock_pm.as_ref(),
+            "Reviewable",
+            vec![
+                crate::plan::labels::plan_id("review-plan"),
+                crate::plan::labels::plan_task_id("T1"),
+                crate::plan::labels::READY_FOR_REVIEW.to_string(),
+            ],
+        )
+        .await;
+        server
+            .__test_install_plan(one_task_plan(
+                "review-plan",
+                issue_id.clone(),
+                crate::plan::PlanTaskStatus::AwaitingReview {
+                    summary: Some("done".to_string()),
+                },
+            ))
+            .await;
+
+        let text = server
+            .handle_review_task(&json!({
+                "plan_id": "review-plan",
+                "task_id": "T1",
+                "decision": "approve",
+                "feedback": "looks good"
+            }))
+            .await
+            .expect("review approve succeeds");
+        let output: serde_json::Value =
+            serde_json::from_str(&text).expect("review response JSON");
+        assert_eq!(output["task_id"], "T1");
+        assert_eq!(output["decision"], "approve");
+
+        let plan = server
+            .__test_load_or_project_plan("review-plan")
+            .await
+            .expect("cached plan");
+        let plan = plan.lock().await;
+        assert!(matches!(
+            plan.tasks[0].status,
+            crate::plan::PlanTaskStatus::Approved { .. }
+        ));
+        drop(plan);
+
+        let issue = mock_pm.issue(&issue_id).await;
+        assert_eq!(
+            issue.status,
+            crate::plan::PmLike::closed_status(mock_pm.as_ref())
+        );
+        assert!(
+            !issue
+                .labels
+                .contains(&crate::plan::labels::READY_FOR_REVIEW.to_string()),
+            "approval should remove ready-for-review labels: {:?}",
+            issue.labels
+        );
+        let audits = parse_audit_comments(mock_pm.comments(&issue_id).await);
+        assert!(audits.iter().any(|audit| matches!(
+            audit,
+            crate::plan::audit_sentinel::AuditSentinelKind::Approval { delegation_id }
+                if delegation_id == "del-review"
+        )));
+    }
+
+    #[tokio::test]
+    async fn review_task_rejects_non_awaiting_task_without_mutating_issue() {
+        let (server, mock_pm) = new_mock_server().await;
+        let issue_id = create_task_issue(
+            mock_pm.as_ref(),
+            "Pending",
+            vec![
+                crate::plan::labels::plan_id("review-error-plan"),
+                crate::plan::labels::plan_task_id("T1"),
+            ],
+        )
+        .await;
+        server
+            .__test_install_plan(one_task_plan(
+                "review-error-plan",
+                issue_id.clone(),
+                crate::plan::PlanTaskStatus::Pending,
+            ))
+            .await;
+
+        let error = server
+            .handle_review_task(&json!({
+                "plan_id": "review-error-plan",
+                "task_id": "T1",
+                "decision": "approve"
+            }))
+            .await
+            .expect_err("non-awaiting task must be rejected");
+
+        assert!(
+            error.contains("not awaiting review"),
+            "review error should explain current status, got {error:?}"
+        );
+        assert_eq!(mock_pm.issue(&issue_id).await.status, "open");
+        assert!(
+            mock_pm.comments(&issue_id).await.is_empty(),
+            "failed review must not write comments"
+        );
+    }
+}
+
+#[cfg(test)]
 mod reconciler_fast_forward_tests {
     use std::sync::Arc;
     use std::time::Duration;
