@@ -228,6 +228,14 @@ impl App {
                 }
                 return;
             }
+            SpurEventBody::AgentConfigUpdateResult { name, ok, message } => {
+                if *ok {
+                    self.flash_hint_short(format!("agent config `{name}`: {message}"));
+                } else {
+                    self.flash_hint_short(format!("agent config `{name}` failed: {message}"));
+                }
+                return;
+            }
             SpurEventBody::AuthRequired { session, message } => {
                 if let Some(ref mut detail) = self.session_detail {
                     // Apply when the event matches the focused session OR when
@@ -587,6 +595,9 @@ impl App {
         }
         if let Some(ref mut picker) = self.session_picker {
             picker.handle_spur_event(&event, &ctx);
+        }
+        if let Some(ref mut browser) = self.agent_config_browser {
+            browser.handle_spur_event(&event, &ctx);
         }
         if let Some(ref mut detail) = self.session_detail {
             detail.handle_spur_event(&event, &ctx);
