@@ -103,63 +103,6 @@ async fn load_persisted_plan_task_map(
     Ok(task_map)
 }
 
-fn validate_loop_spec_for_submit(spec: &crate::plan::loops::spec::LoopSpec) -> Result<(), String> {
-    if spec.goal.trim().is_empty() {
-        return Err("goal must be non-empty".to_string());
-    }
-    if spec.cadence_secs < 60 {
-        return Err("cadence_secs must be at least 60".to_string());
-    }
-    if !template_has_triage_task(&spec.template) {
-        return Err(format!(
-            "template must contain at least one triage task labeled {}",
-            crate::plan::labels::LOOP_TRIAGE_TASK
-        ));
-    }
-    if matches!(spec.governors.max_cost_micros_per_generation, Some(0)) {
-        return Err("max_cost_micros_per_generation must be greater than 0".to_string());
-    }
-    if matches!(spec.governors.max_generations_per_day, Some(0)) {
-        return Err("max_generations_per_day must be greater than 0".to_string());
-    }
-    if matches!(spec.governors.max_tasks_per_generation, Some(0)) {
-        return Err("max_tasks_per_generation must be greater than 0".to_string());
-    }
-    if let Some(backoff) = spec.governors.consecutive_failure_backoff.as_ref() {
-        if backoff.k == 0 {
-            return Err("consecutive_failure_backoff.k must be greater than 0".to_string());
-        }
-        if backoff.factor == 0 {
-            return Err("consecutive_failure_backoff.factor must be greater than 0".to_string());
-        }
-        if backoff.auto_pause_after == 0 {
-            return Err(
-                "consecutive_failure_backoff.auto_pause_after must be greater than 0".to_string(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn template_has_triage_task(template: &Value) -> bool {
-    template
-        .get("tasks")
-        .and_then(Value::as_array)
-        .is_some_and(|tasks| tasks.iter().any(task_has_triage_label))
-}
-
-fn task_has_triage_label(task: &Value) -> bool {
-    ["labels", "issue_labels"].iter().any(|key| {
-        task.get(*key)
-            .and_then(Value::as_array)
-            .is_some_and(|labels| {
-                labels
-                    .iter()
-                    .any(|label| label.as_str() == Some(crate::plan::labels::LOOP_TRIAGE_TASK))
-            })
-    })
-}
-
 fn validate_loop_id_param(loop_id: &str) -> Result<(), String> {
     if loop_id.is_empty()
         || !loop_id
@@ -1285,7 +1228,9 @@ impl McpCallbackServer {
             );
         }
 
-        if let Err(message) = validate_loop_spec_for_submit(&input.spec) {
+        if let Err(message) =
+            crate::plan::loops::validation::validate_loop_spec_for_submit(&input.spec)
+        {
             return JsonRpcResponse::invalid_params(id, format!("submit_loop: {message}"));
         }
 
