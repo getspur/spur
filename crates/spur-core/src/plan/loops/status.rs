@@ -113,7 +113,7 @@ pub(crate) async fn load_loop_summaries(
 ) -> anyhow::Result<LoopSummaryLoad> {
     let summaries = pm
         .list_issues(spur_pm::IssueFilter {
-            issue_type: Some("task".to_string()),
+            issue_type: Some(super::LOOP_ISSUE_TYPE.to_string()),
             include_closed: true,
             limit: Some(LOOP_SUMMARY_LIST_LIMIT),
             ..Default::default()
@@ -206,7 +206,7 @@ async fn load_loop_issue(
     let summaries = pm
         .list_issues(spur_pm::IssueFilter {
             labels: vec![labels::loop_id_label(loop_id)],
-            issue_type: Some("task".to_string()),
+            issue_type: Some(super::LOOP_ISSUE_TYPE.to_string()),
             limit: Some(2),
             ..Default::default()
         })
@@ -441,7 +441,7 @@ mod tests {
             title: format!("Loop: {}", spec.goal),
             description: Some(spec.to_sentinel_body()),
             labels,
-            issue_type: Some("task".to_string()),
+            issue_type: Some(crate::plan::loops::LOOP_ISSUE_TYPE.to_string()),
             ..Default::default()
         })
         .await
@@ -600,7 +600,7 @@ mod tests {
             title: "Not a real loop".to_string(),
             description: Some("plain task body".to_string()),
             labels: vec![labels::loop_id_label("bad-loop")],
-            issue_type: Some("task".to_string()),
+            issue_type: Some(crate::plan::loops::LOOP_ISSUE_TYPE.to_string()),
             ..Default::default()
         })
         .await
