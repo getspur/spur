@@ -143,6 +143,10 @@ case "${1:-}" in
             set -- run -p spur-cli -- graph embed "$@"
         fi
         ;;
+    coverage)
+        shift
+        set -- run -p xtask -- coverage "$@"
+        ;;
 esac
 
 # ---- routing ---------------------------------------------------------------
