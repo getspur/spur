@@ -36,7 +36,7 @@ use agent_client_protocol::schema::v1::{
     DeleteSessionRequest, DeleteSessionResponse, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
     NewSessionResponse, PromptRequest, ResumeSessionRequest, ResumeSessionResponse,
-    SessionConfigOption, SessionId, SessionModeId, SessionNotification,
+    SessionConfigOption, SessionId, SessionModeId, SessionModeState, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse, Usage,
 };
@@ -44,6 +44,40 @@ use agent_client_protocol::schema::v1::{
 use crate::error::AcpError;
 use crate::spur_agent_caps::SpurAgentCaps;
 use crate::types::AgentHealth;
+
+/// ACP-visible mode state cached for a session.
+///
+/// This intentionally captures only ACP protocol mode identifiers. It does
+/// not expose agent-specific sandbox internals such as approval policy,
+/// filesystem sandboxing, or network access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpSessionModeSnapshot {
+    pub current_mode_id: Option<SessionModeId>,
+    pub available_modes: Vec<SessionModeId>,
+}
+
+impl AcpSessionModeSnapshot {
+    pub fn new(
+        current_mode_id: Option<SessionModeId>,
+        available_modes: Vec<SessionModeId>,
+    ) -> Self {
+        Self {
+            current_mode_id,
+            available_modes,
+        }
+    }
+
+    pub fn from_mode_state(modes: &SessionModeState) -> Self {
+        Self {
+            current_mode_id: Some(modes.current_mode_id.clone()),
+            available_modes: modes
+                .available_modes
+                .iter()
+                .map(|mode| mode.id.clone())
+                .collect(),
+        }
+    }
+}
 
 /// A transport-agnostic connection to a single ACP agent.
 ///
@@ -143,6 +177,16 @@ pub trait AgentConnection: Send + Sync {
     fn advertised_session_modes(&self, session_id: &SessionId) -> Option<Vec<SessionModeId>> {
         let _ = session_id;
         None
+    }
+
+    /// Return the ACP-visible mode snapshot for `session_id`, if this
+    /// transport has seen one.
+    ///
+    /// The default implementation preserves compatibility with transports
+    /// that only override [`AgentConnection::advertised_session_modes`].
+    fn session_mode_snapshot(&self, session_id: &SessionId) -> Option<AcpSessionModeSnapshot> {
+        self.advertised_session_modes(session_id)
+            .map(|available_modes| AcpSessionModeSnapshot::new(None, available_modes))
     }
 
     /// Load an existing session by ID, returning a stream of historical notifications.
