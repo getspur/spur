@@ -6167,15 +6167,579 @@ fn escape_mermaid_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
+
+    use crate::{
+        ChangeKind, CommitArtifact, Confidence, EdgeEndpoint, RelationKind, RenamePrev,
+        SymbolSnapshotArtifact, TemporalEdgeArtifact, WalkStrategy,
+    };
 
     use super::*;
 
     const ESCALATION_THRESHOLD: usize = 3;
+    static REBUILD_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[tokio::test]
+    async fn code_search_response_adds_full_metadata_and_clamps_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(
+            root,
+            "pub fn alpha() {}\n\
+             pub fn beta() {}\n",
+        );
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index symbols"]);
+        write_current_artifact(root, &artifact);
+
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(
+                    &json!({
+                        "query": "alp",
+                        "mode": "prefix",
+                        "limit": 0,
+                    }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect("search response");
+
+        assert_eq!(body["query"], "alp");
+        assert_eq!(body["mode"], "prefix");
+        assert_eq!(body["limit"], 1);
+        assert_eq!(body["requested_limit"], 0);
+        assert_eq!(body["total_matches"], 1);
+        assert_eq!(body["candidates"][0]["entity_name"], "alpha");
+        assert_eq!(body["graph_content_hash"], artifact.graph_content_hash);
+        assert_eq!(body["rebuild_status"], "not_needed");
+        assert_eq!(body["response_file_oids_match"], true);
+    }
+
+    #[tokio::test]
+    async fn code_search_response_refreshes_dirty_empty_search() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        write_current_artifact(root, &artifact);
+
+        fs::write(root.join("src/lib.rs"), "pub fn beta() {}\n").expect("rewrite source");
+
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                code_search_response(
+                    &json!({
+                        "query": "beta",
+                        "mode": "exact",
+                    }),
+                    Arc::new(RebuildCoordinator::new()),
+                )
+                .await
+            })
+            .await
+            .expect("dirty search should refresh");
+
+        assert_eq!(body["total_matches"], 1, "{body:#?}");
+        assert_eq!(body["candidates"][0]["entity_name"], "beta");
+        assert_eq!(body["rebuild_status"], "fresh");
+        assert_eq!(body["worktree_dirty"], false);
+    }
+
+    #[test]
+    fn code_subgraph_with_client_tables_budget_and_radius_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let artifact = subgraph_artifact(root);
+        let alpha = symbol_id_for(&artifact, "alpha");
+        let client = InMemoryClient::new(Arc::new(artifact));
+
+        let body = code_subgraph_with_client(
+            &json!({
+                "start_nodes": [alpha],
+                "response_format": "table",
+                "radius": 99,
+                "include_unresolved": true,
+                "max_nodes": 0,
+                "max_edges": 0,
+            }),
+            &client,
+        )
+        .expect("table subgraph");
+
+        assert_eq!(body["response_format"], "table");
+        assert_eq!(body["include_unresolved"], true);
+        assert_eq!(body["metadata"]["radius"], MAX_MCP_CODE_SUBGRAPH_RADIUS);
+        assert_eq!(body["metadata"]["max_nodes"], 1);
+        assert_eq!(body["metadata"]["max_edges"], 1);
+        assert_eq!(body["metadata"]["requested_max_nodes"], 0);
+        assert_eq!(body["metadata"]["requested_max_edges"], 0);
+        assert_eq!(body["metadata"]["truncated"], true);
+        assert!(
+            body["metadata"]["warning"]
+                .as_str()
+                .expect("warning")
+                .contains("radius 99 exceeds max"),
+            "{body:#?}"
+        );
+        assert_eq!(body["nodes"]["cols"][0], "id");
+        assert_eq!(
+            body["nodes"]["rows"].as_array().expect("node rows").len(),
+            1
+        );
+        assert!(body["files"]
+            .as_array()
+            .expect("interned files")
+            .contains(&json!("src/lib.rs")));
+    }
+
+    #[test]
+    fn code_subgraph_with_client_returns_ambiguous_candidates_and_invalid_format_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let artifact = artifact_from_source(
+            root,
+            "pub mod left { pub fn duplicate() {} }\n\
+             pub mod right { pub fn duplicate() {} }\n",
+        );
+        let client = InMemoryClient::new(Arc::new(artifact));
+
+        let ambiguous = code_subgraph_with_client(
+            &json!({
+                "selector": "duplicate",
+            }),
+            &client,
+        )
+        .expect("ambiguous response");
+
+        assert_eq!(ambiguous["ambiguous"], true);
+        assert_eq!(
+            ambiguous["candidates"]
+                .as_array()
+                .expect("candidate rows")
+                .len(),
+            2
+        );
+
+        let error = code_subgraph_with_client(
+            &json!({
+                "selector": "left::duplicate",
+                "format": "dot",
+            }),
+            &client,
+        )
+        .expect_err("invalid format should fail")
+        .into_handler_error();
+        assert!(
+            matches!(error, McpHandlerError::InvalidParams(message) if message.contains("invalid format `dot`"))
+        );
+    }
+
+    #[test]
+    fn code_subgraph_with_artifact_json_filters_unresolved_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let artifact = subgraph_artifact(root);
+        let alpha = symbol_id_for(&artifact, "alpha");
+        let beta = symbol_id_for(&artifact, "beta");
+
+        let body = code_subgraph_with_artifact_and_temporal(
+            &json!({
+                "start_nodes": [alpha],
+                "radius": 1,
+                "edge_kinds": ["calls"],
+            }),
+            &artifact,
+            None,
+        )
+        .expect("json subgraph");
+
+        assert_eq!(body["include_unresolved"], false);
+        assert_eq!(body["metadata"]["radius"], 1);
+        assert_eq!(body["metadata"]["truncated"], false);
+        assert!(
+            body["nodes"]
+                .as_array()
+                .expect("nodes")
+                .iter()
+                .any(|node| node["entity_name"] == "beta"),
+            "{body:#?}"
+        );
+        assert_eq!(
+            body["edges"]
+                .as_array()
+                .expect("edges")
+                .iter()
+                .filter(|edge| edge["target_uri"] == symbol_uri(&beta))
+                .count(),
+            1,
+            "{body:#?}"
+        );
+        assert!(
+            body["edges"]
+                .as_array()
+                .expect("edges")
+                .iter()
+                .all(|edge| edge["resolved"] == true),
+            "unresolved edges should be filtered out: {body:#?}"
+        );
+    }
+
+    #[test]
+    fn code_subgraph_with_artifact_mermaid_includes_unresolved_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let artifact = subgraph_artifact(root);
+        let alpha = symbol_id_for(&artifact, "alpha");
+
+        let body = code_subgraph_with_artifact_and_temporal(
+            &json!({
+                "start_nodes": [alpha],
+                "format": "mermaid",
+                "radius": 1,
+                "include_unresolved": true,
+            }),
+            &artifact,
+            None,
+        )
+        .expect("mermaid subgraph");
+
+        let mermaid = body["mermaid"].as_str().expect("mermaid text");
+        assert!(mermaid.starts_with("graph TD"), "{mermaid}");
+        assert!(mermaid.contains("alpha"), "{mermaid}");
+        assert!(mermaid.contains("beta"), "{mermaid}");
+        assert_eq!(body["include_unresolved"], true);
+        assert_eq!(body["metadata"]["radius"], 1);
+    }
+
+    #[test]
+    fn code_resolve_temporal_response_reports_resolution_variants() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let (artifact, _commits, old_id, new_id, old_key, new_key) = temporal_rename_fixture(root);
+
+        let renamed = code_resolve_temporal_response(
+            &artifact,
+            &old_id,
+            "c3",
+            Resolution::Found {
+                value: new_id.clone(),
+                chain: vec![old_key.clone(), new_key.clone()],
+            },
+        )
+        .expect("renamed response");
+        assert_eq!(renamed["resolution"]["kind"], "renamed");
+        assert_eq!(renamed["resolution"]["symbol"], symbol_uri(&new_id));
+        assert_eq!(renamed["candidates"][0]["entity_name"], "new_name");
+
+        let found = code_resolve_temporal_response(
+            &artifact,
+            &new_id,
+            "c3",
+            Resolution::Found {
+                value: new_id.clone(),
+                chain: vec![new_key.clone()],
+            },
+        )
+        .expect("found response");
+        assert_eq!(found["resolution"]["kind"], "found");
+
+        let deleted = code_resolve_temporal_response(
+            &artifact,
+            &old_id,
+            "c3",
+            Resolution::Deleted {
+                last_seen: old_key.clone(),
+            },
+        )
+        .expect("deleted response");
+        assert_eq!(deleted["resolution"]["kind"], "deleted");
+        assert_eq!(deleted["candidates"], json!([]));
+
+        let ambiguous = code_resolve_temporal_response(
+            &artifact,
+            &old_id,
+            "c3",
+            Resolution::Ambiguous {
+                candidates: vec![old_id.clone(), new_id.clone()],
+            },
+        )
+        .expect("ambiguous response");
+        assert_eq!(ambiguous["resolution"]["kind"], "ambiguous");
+        assert_eq!(
+            ambiguous["candidates"]
+                .as_array()
+                .expect("candidates")
+                .len(),
+            2
+        );
+
+        let unknown = code_resolve_temporal_response(
+            &artifact,
+            &old_id,
+            "c3",
+            Resolution::Unknown {
+                reason: ResolutionFailure::SymbolNotPresentAtAnchor,
+            },
+        )
+        .expect_err("unknown temporal response should be an error");
+        let response = futures::executor::block_on(unknown.into_error_response());
+        assert_eq!(response.code, CODE_GRAPH_UNKNOWN_ERROR_CODE);
+        assert_eq!(response.data.expect("unknown data")["kind"], "unknown");
+    }
+
+    #[test]
+    fn code_resolve_temporal_response_with_client_reports_resolution_variants() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let (artifact, _commits, old_id, new_id, old_key, new_key) = temporal_rename_fixture(root);
+        let client = InMemoryClient::new(Arc::new(artifact));
+
+        let renamed = code_resolve_temporal_response_with_client(
+            &client,
+            &old_id,
+            "c3",
+            Resolution::Found {
+                value: new_id.clone(),
+                chain: vec![old_key.clone(), new_key.clone()],
+            },
+        )
+        .expect("renamed response");
+        assert_eq!(renamed["resolution"]["kind"], "renamed");
+        assert_eq!(renamed["candidates"][0]["entity_name"], "new_name");
+
+        let deleted = code_resolve_temporal_response_with_client(
+            &client,
+            &old_id,
+            "c3",
+            Resolution::Deleted {
+                last_seen: old_key.clone(),
+            },
+        )
+        .expect("deleted response");
+        assert_eq!(deleted["resolution"]["kind"], "deleted");
+
+        let ambiguous = code_resolve_temporal_response_with_client(
+            &client,
+            &old_id,
+            "c3",
+            Resolution::Ambiguous {
+                candidates: vec![old_id.clone(), new_id.clone()],
+            },
+        )
+        .expect("ambiguous response");
+        assert_eq!(ambiguous["resolution"]["kind"], "ambiguous");
+        assert_eq!(
+            ambiguous["candidates"]
+                .as_array()
+                .expect("candidates")
+                .len(),
+            2
+        );
+
+        let unknown = code_resolve_temporal_response_with_client(
+            &client,
+            &old_id,
+            "c3",
+            Resolution::Unknown {
+                reason: ResolutionFailure::IndexCorrupt("broken temporal edge".into()),
+            },
+        )
+        .expect_err("unknown temporal response should be an error");
+        let response = futures::executor::block_on(unknown.into_error_response());
+        assert_eq!(response.code, CODE_GRAPH_UNKNOWN_ERROR_CODE);
+        assert_eq!(
+            response.data.expect("unknown data")["reason"]["kind"],
+            "index_corrupt"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_graph_error_response_maps_codes_and_merges_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = artifact_from_source(root, "pub fn alpha() {}\n");
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        write_current_artifact(root, &artifact);
+
+        let invalid = CodeGraphError::from(McpHandlerError::InvalidParams("bad field".into()))
+            .into_error_response()
+            .await;
+        assert_eq!(invalid.code, -32602);
+        assert_eq!(invalid.message, "bad field");
+        assert_eq!(invalid.data, None);
+
+        let not_found = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                CodeGraphError::from(McpHandlerError::NotFound("missing symbol".into()))
+                    .with_artifact_metadata(&artifact)
+                    .into_error_response()
+                    .await
+            })
+            .await;
+        assert_eq!(not_found.code, CODE_GRAPH_NOT_FOUND_ERROR_CODE);
+        let data = not_found.data.expect("metadata data");
+        assert_eq!(data["kind"], "not_found");
+        assert_eq!(data["graph_content_hash"], artifact.graph_content_hash);
+        assert_eq!(data["rebuild_status"], "not_needed");
+
+        let temporal = deleted_resolution_error(
+            "old",
+            "c3",
+            SnapshotKey {
+                stable_symbol_id: "old".into(),
+                commit: "c2".into(),
+            },
+        )
+        .into_error_response()
+        .await;
+        assert_eq!(temporal.code, CODE_GRAPH_DELETED_ERROR_CODE);
+        assert_eq!(temporal.data.expect("temporal data")["kind"], "deleted");
+    }
+
+    #[tokio::test]
+    async fn with_graph_metadata_for_payload_refreshes_dirty_payload() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = Arc::new(artifact_from_source(root, "pub fn alpha() {}\n"));
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        write_current_artifact(root, &artifact);
+
+        fs::write(root.join("src/lib.rs"), "pub fn beta() {}\n").expect("rewrite source");
+        let payload = GraphResponsePayload::body(json!({
+            "symbol": symbol_id_for(&artifact, "alpha"),
+            "file_path": "src/lib.rs",
+        }));
+        let handler = |loaded: LoadedGraphArtifact| {
+            let beta = loaded
+                .artifact()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.entity_name == "beta")
+                .ok_or_else(|| McpHandlerError::NotFound("beta missing after rebuild".into()))?;
+            Ok(GraphResponsePayload::body(json!({
+                "symbol": beta.stable_symbol_id.clone(),
+                "entity_name": beta.entity_name.clone(),
+                "file_path": beta.file_path.clone(),
+            })))
+        };
+
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                with_graph_metadata_for_payload(
+                    Some(Arc::new(RebuildCoordinator::new())),
+                    Arc::clone(&artifact),
+                    payload,
+                    &handler,
+                )
+                .await
+            })
+            .await;
+
+        assert_eq!(body["entity_name"], "beta");
+        assert_eq!(body["rebuild_status"], "fresh");
+        assert_eq!(body["worktree_dirty"], false);
+    }
+
+    #[tokio::test]
+    async fn with_graph_metadata_for_payload_serves_stale_when_handler_rejects_fresh_artifact() {
+        let _rebuild_guard = rebuild_test_guard().await;
+        let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        init_git_repo(root);
+        let artifact = Arc::new(artifact_from_source(root, "pub fn alpha() {}\n"));
+        run_git_test(root, &["add", "src/lib.rs"]);
+        run_git_test(root, &["commit", "-q", "-m", "index alpha"]);
+        write_current_artifact(root, &artifact);
+
+        fs::write(root.join("src/lib.rs"), "pub fn beta() {}\n").expect("rewrite source");
+        let payload = GraphResponsePayload::body(json!({
+            "symbol": symbol_id_for(&artifact, "alpha"),
+            "file_path": "src/lib.rs",
+        }));
+        let handler = |_loaded: LoadedGraphArtifact| -> CodeGraphPayloadResult {
+            Err(McpHandlerError::Internal("fresh handler failed".into()).into())
+        };
+
+        let body = SCOPED_CODE_GRAPH_WORKTREE_ROOT
+            .scope(root.to_path_buf(), async {
+                with_graph_metadata_for_payload(
+                    Some(Arc::new(RebuildCoordinator::new())),
+                    Arc::clone(&artifact),
+                    payload,
+                    &handler,
+                )
+                .await
+            })
+            .await;
+
+        assert_eq!(body["symbol"], symbol_id_for(&artifact, "alpha"));
+        assert_eq!(body["rebuild_status"], "stale_rebuild_failed");
+        assert_eq!(body["worktree_dirty"], true);
+    }
+
+    #[test]
+    fn resolve_symbol_as_of_follows_renames_and_reports_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let (artifact, commits, old_id, new_id, _old_key, _new_key) = temporal_rename_fixture(root);
+        let temporal_index = Arc::new(TemporalIndex::new(Arc::new(artifact.clone())));
+
+        let resolution = resolve_symbol_as_of(
+            &artifact,
+            Some(Arc::clone(&temporal_index)),
+            &commits,
+            &old_id,
+            "c3",
+        )
+        .expect("resolve old symbol at c3");
+        assert!(matches!(
+            resolution,
+            Resolution::Found { value, .. } if value == new_id
+        ));
+
+        let invalid_commit = resolve_symbol_as_of(
+            &artifact,
+            Some(Arc::clone(&temporal_index)),
+            &commits,
+            &old_id,
+            "missing-commit",
+        )
+        .expect_err("missing as_of commit should fail")
+        .into_handler_error();
+        assert!(
+            matches!(invalid_commit, McpHandlerError::InvalidParams(message) if message.contains("as_of commit `missing-commit` is not indexed"))
+        );
+
+        let no_history_artifact = artifact_from_source(root, "pub fn orphan() {}\n");
+        let orphan_id = symbol_id_for(&no_history_artifact, "orphan");
+        let no_history =
+            resolve_symbol_as_of(&no_history_artifact, None, &commits, &orphan_id, "c3")
+                .expect_err("symbol without snapshots should fail")
+                .into_handler_error();
+        assert!(
+            matches!(no_history, McpHandlerError::NotFound(message) if message.contains("has no temporal history"))
+        );
+    }
 
     #[tokio::test]
     async fn persistent_incremental_failures_escalate_to_full_rebuild() {
+        let _rebuild_guard = rebuild_test_guard().await;
         let _budget = set_graph_rebuild_latency_budget_for_test(Duration::from_secs(30));
         let _incremental_failures = set_incremental_rebuild_failures_for_test(usize::MAX);
 
@@ -6333,6 +6897,186 @@ mod tests {
         RebuildCandidate {
             worktree: root.to_path_buf(),
             key,
+        }
+    }
+
+    async fn rebuild_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        REBUILD_TEST_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
+    fn artifact_from_source(root: &Path, source: &str) -> GraphIndexArtifact {
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/lib.rs"), source).expect("write source");
+        let facts = build_facts(root, None).expect("extract source").0;
+        artifact_from_facts(&facts, root).expect("artifact from facts")
+    }
+
+    fn subgraph_artifact(root: &Path) -> GraphIndexArtifact {
+        let mut artifact = artifact_from_source(
+            root,
+            "pub fn alpha() {\n\
+                 beta();\n\
+                 missing();\n\
+             }\n\
+             pub fn beta() {}\n\
+             pub fn gamma() {\n\
+                 alpha();\n\
+             }\n",
+        );
+        let alpha = symbol_id_for(&artifact, "alpha");
+        artifact.edges.push(GraphEdgeArtifact {
+            source_stable_symbol_id: alpha,
+            target_stable_symbol_id: None,
+            target_label: Some("missing".into()),
+            import_path: None,
+            receiver_text: None,
+            scope_text: None,
+            relation: RelationKind::Calls,
+            confidence: Confidence::Unknown,
+            confidence_score: 0.0,
+            change_kind: None,
+            edge_kind: Some(GraphEdgeKind::Calls),
+            bind_method: None,
+        });
+        artifact
+    }
+
+    fn symbol_id_for(artifact: &GraphIndexArtifact, entity_name: &str) -> String {
+        artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.entity_name == entity_name)
+            .unwrap_or_else(|| panic!("symbol {entity_name} not found"))
+            .stable_symbol_id
+            .clone()
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn temporal_rename_fixture(
+        root: &Path,
+    ) -> (
+        GraphIndexArtifact,
+        CommitIndexArtifact,
+        String,
+        String,
+        SnapshotKey,
+        SnapshotKey,
+    ) {
+        let mut artifact = artifact_from_source(
+            root,
+            "pub fn old_name() {}\n\
+             pub fn new_name() {}\n",
+        );
+        let old_id = symbol_id_for(&artifact, "old_name");
+        let new_id = symbol_id_for(&artifact, "new_name");
+        let c1 = CommitArtifact {
+            sha: "c1".into(),
+            parents: vec![],
+            author_time: 0,
+            author_name: String::new(),
+            author_email: String::new(),
+            summary: "add old".into(),
+        };
+        let c2 = CommitArtifact {
+            sha: "c2".into(),
+            parents: vec!["c1".into()],
+            author_time: 1,
+            author_name: String::new(),
+            author_email: String::new(),
+            summary: "rename old to new".into(),
+        };
+        let c3 = CommitArtifact {
+            sha: "c3".into(),
+            parents: vec!["c2".into()],
+            author_time: 2,
+            author_name: String::new(),
+            author_email: String::new(),
+            summary: "later".into(),
+        };
+        let old_key = SnapshotKey {
+            stable_symbol_id: old_id.clone(),
+            commit: "c1".into(),
+        };
+        let new_key = SnapshotKey {
+            stable_symbol_id: new_id.clone(),
+            commit: "c2".into(),
+        };
+        let old_symbol = artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.stable_symbol_id == old_id)
+            .expect("old symbol");
+        let new_symbol = artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.stable_symbol_id == new_id)
+            .expect("new symbol");
+        let old_snapshot = snapshot_for_symbol(old_symbol, old_key.clone(), "old-anchor");
+        let new_snapshot = snapshot_for_symbol(new_symbol, new_key.clone(), "new-anchor");
+
+        artifact.commits = vec![c1.clone(), c2.clone(), c3.clone()];
+        artifact.symbol_snapshots = vec![old_snapshot, new_snapshot];
+        artifact.temporal_edges = vec![
+            TemporalEdgeArtifact {
+                source: EdgeEndpoint::Commit { sha: "c1".into() },
+                target: EdgeEndpoint::Snapshot {
+                    key: old_key.clone(),
+                },
+                relation: RelationKind::Touches,
+                parent: None,
+                change_kind: Some(ChangeKind::Added),
+            },
+            TemporalEdgeArtifact {
+                source: EdgeEndpoint::Commit { sha: "c2".into() },
+                target: EdgeEndpoint::Snapshot {
+                    key: new_key.clone(),
+                },
+                relation: RelationKind::Touches,
+                parent: Some("c1".into()),
+                change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(old_key.clone()))),
+            },
+            TemporalEdgeArtifact {
+                source: EdgeEndpoint::Snapshot {
+                    key: old_key.clone(),
+                },
+                target: EdgeEndpoint::Snapshot {
+                    key: new_key.clone(),
+                },
+                relation: RelationKind::Touches,
+                parent: Some("c1".into()),
+                change_kind: Some(ChangeKind::RenamedFrom(RenamePrev::Symbol(old_key.clone()))),
+            },
+        ];
+
+        let commits = CommitIndexArtifact {
+            schema_version: 1,
+            commits: vec![c1, c2, c3],
+            refs: [("main".into(), "c3".into())].into(),
+            indexed_at: "2026-05-20T12:00:00Z".into(),
+            walk_strategy: WalkStrategy::Reachable,
+        };
+
+        (artifact, commits, old_id, new_id, old_key, new_key)
+    }
+
+    fn snapshot_for_symbol(
+        symbol: &GraphSymbolArtifact,
+        key: SnapshotKey,
+        anchor_hash: &str,
+    ) -> SymbolSnapshotArtifact {
+        SymbolSnapshotArtifact {
+            key,
+            file_path: symbol.file_path.clone().into(),
+            entity_name: symbol.entity_name.clone(),
+            symbol_kind: symbol.symbol_kind.clone(),
+            enclosing_scope: symbol.enclosing_scope.clone(),
+            byte_range: symbol.byte_range,
+            line_range: symbol.line_range,
+            anchor_hash: anchor_hash.into(),
+            tokens: vec![],
         }
     }
 
