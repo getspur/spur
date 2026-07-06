@@ -303,9 +303,53 @@ ensure_spur_gcs_sccache_server() {
     fi
 }
 
+strip_sccache_compiler_prefix() {
+    local value="$1"
+
+    case "$value" in
+        sccache\ *)
+            printf '%s\n' "${value#sccache }" ;;
+        */sccache\ *)
+            printf '%s\n' "${value#*sccache }" ;;
+        sccache-wrapper\ *)
+            printf '%s\n' "${value#sccache-wrapper }" ;;
+        */sccache-wrapper\ *)
+            printf '%s\n' "${value#*sccache-wrapper }" ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+sanitize_codex_sandbox_sccache_env() {
+    [[ -n "${CODEX_SANDBOX:-}" ]] || return 0
+
+    case "${RUSTC_WRAPPER-}" in
+        sccache|*/sccache|sccache-wrapper|*/sccache-wrapper)
+            export RUSTC_WRAPPER="$WRAPPER" ;;
+    esac
+
+    # Worker sandboxes cannot run direct sccache clients. The Rust path is
+    # handled by scripts/sccache-worktree.sh; strip inherited C/C++ wrappers so
+    # build scripts using cc-rs invoke the real compiler instead.
+    local env_name env_value stripped
+    for env_name in \
+        CC CXX HOST_CC HOST_CXX TARGET_CC TARGET_CXX \
+        CC_aarch64_apple_darwin CXX_aarch64_apple_darwin \
+        CC_x86_64_apple_darwin CXX_x86_64_apple_darwin \
+        CC_aarch64_unknown_linux_gnu CXX_aarch64_unknown_linux_gnu \
+        CC_x86_64_unknown_linux_gnu CXX_x86_64_unknown_linux_gnu
+    do
+        [[ -n "${!env_name+x}" ]] || continue
+        env_value="${!env_name}"
+        stripped=$(strip_sccache_compiler_prefix "$env_value") || continue
+        export "$env_name=$stripped"
+    done
+}
+
 if [[ -z "${RUSTC_WRAPPER+x}" ]]; then
     export RUSTC_WRAPPER="$WRAPPER"
 fi
+sanitize_codex_sandbox_sccache_env
 # Incremental rustc invocations are non-cacheable; disable them so a remote
 # cache layer (GCS or S3) actually gets populated and hit.
 if [[ -z "${CARGO_INCREMENTAL+x}" ]]; then

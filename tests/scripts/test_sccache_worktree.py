@@ -553,6 +553,84 @@ def test_spur_cargo_disables_incremental_for_default_s3_cache(tmp_path):
     ]
 
 
+def test_spur_cargo_strips_sccache_c_compiler_wrappers_in_codex_sandbox(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    cargo_log = tmp_path / "cargo.log"
+    cargo = bin_dir / "cargo"
+    cargo.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'CC=%s\\n' \"${{CC-}}\" > {shlex.quote(str(cargo_log))}",
+                f"printf 'CXX=%s\\n' \"${{CXX-}}\" >> {shlex.quote(str(cargo_log))}",
+                f"printf 'HOST_CC=%s\\n' \"${{HOST_CC-}}\" >> {shlex.quote(str(cargo_log))}",
+                f"printf 'HOST_CXX=%s\\n' \"${{HOST_CXX-}}\" >> {shlex.quote(str(cargo_log))}",
+            ]
+        )
+        + "\n"
+    )
+    cargo.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["CODEX_SANDBOX"] = "seatbelt"
+    env["CC"] = "sccache cc"
+    env["CXX"] = "/opt/homebrew/bin/sccache c++"
+    env["HOST_CC"] = "sccache clang"
+    env["HOST_CXX"] = "/opt/homebrew/bin/sccache clang++"
+    env.pop("RUSTC_WRAPPER", None)
+
+    result = subprocess.run(
+        [str(SPUR_CARGO), "metadata", "--version"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert cargo_log.read_text().splitlines() == [
+        "CC=cc",
+        "CXX=c++",
+        "HOST_CC=clang",
+        "HOST_CXX=clang++",
+    ]
+
+
+def test_spur_cargo_replaces_direct_sccache_rustc_wrapper_in_codex_sandbox(tmp_path):
+    bin_dir = make_isolated_bin(tmp_path)
+
+    cargo_log = tmp_path / "cargo.log"
+    cargo = bin_dir / "cargo"
+    cargo.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf 'wrapper=%s\\n' \"${{RUSTC_WRAPPER-}}\" > {shlex.quote(str(cargo_log))}",
+            ]
+        )
+        + "\n"
+    )
+    cargo.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["CODEX_SANDBOX"] = "seatbelt"
+    env["RUSTC_WRAPPER"] = "sccache"
+
+    result = subprocess.run(
+        [str(SPUR_CARGO), "metadata", "--version"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert cargo_log.read_text().splitlines() == [f"wrapper={WRAPPER}"]
+
+
 def test_spur_cargo_restarts_when_s3_cache_is_not_active(tmp_path):
     bin_dir = make_isolated_bin(tmp_path)
 
