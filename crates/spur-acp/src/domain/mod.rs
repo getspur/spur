@@ -21,10 +21,10 @@ pub use delegation::{
 };
 pub use events::{
     Column, DatasourceEntry, DatasourceKind, GraphEdgeEvent, GraphNodeEvent, HistoryEntry,
-    IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan, LicenseStateEvent,
-    LicenseStatusEvent, LicenseSubjectKind, LoopDetailEvent, LoopRunRecordEvent, LoopSummaryEvent,
-    PlanLifecycleEvent, PlanLoopOriginEvent, PlanOwnerStateEvent, PlanSummaryCountsEvent,
-    PlanSummaryEvent, SpurEvent, SpurEventBody, Table,
+    IssueCommentEvent, IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan,
+    LicenseStateEvent, LicenseStatusEvent, LicenseSubjectKind, LoopDetailEvent, LoopRunRecordEvent,
+    LoopSummaryEvent, PlanLifecycleEvent, PlanLoopOriginEvent, PlanOwnerStateEvent,
+    PlanSummaryCountsEvent, PlanSummaryEvent, SpurEvent, SpurEventBody, Table,
 };
 pub use outcome::{BackendTag, OutcomeBlobKind, OutcomeKey, OutcomeRef};
 pub use peer_message::{
