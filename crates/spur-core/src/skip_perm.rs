@@ -12,7 +12,7 @@ use std::pin::Pin;
 
 use futures::Stream;
 use spur_acp::config::AgentConfig;
-use spur_acp::connection::AgentConnection;
+use spur_acp::connection::{AcpSessionModeSnapshot, AgentConnection};
 use spur_acp::{
     AcpError, AcpSessionId, LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionResponse,
     ResumeSessionRequest, ResumeSessionResponse, SessionModeId, SessionNotification,
@@ -31,7 +31,7 @@ async fn apply_bypass_session_mode(
     conn: &mut dyn AgentConnection,
     cfg: &AgentConfig,
     session_id: AcpSessionId,
-    advertised_modes: Option<Vec<SessionModeId>>,
+    mode_snapshot: Option<AcpSessionModeSnapshot>,
     phase: &'static str,
 ) {
     let perms = cfg.effective_permissions();
@@ -43,11 +43,21 @@ async fn apply_bypass_session_mode(
     };
 
     let sid_for_log = session_id.0.to_string();
+    let advertised_modes = mode_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.available_modes.clone());
+    let acp_current_mode = mode_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.current_mode_id.as_ref())
+        .map(|mode| mode.0.to_string());
     let Some(advertised_modes) = advertised_modes else {
         tracing::debug!(
             agent = %cfg.name,
             session_id = %sid_for_log,
             mode_id = %mode,
+            requested_mode = %mode,
+            advertised_modes = ?Option::<Vec<SessionModeId>>::None,
+            acp_current_mode = ?acp_current_mode,
             phase,
             "skip_permissions: set_session_mode skipped; no advertised session modes"
         );
@@ -61,8 +71,10 @@ async fn apply_bypass_session_mode(
             agent = %cfg.name,
             session_id = %sid_for_log,
             mode_id = %mode,
+            requested_mode = %mode,
             phase,
             advertised_modes = ?advertised_modes,
+            acp_current_mode = ?acp_current_mode,
             "skip_permissions: set_session_mode skipped; mode not advertised"
         );
         return;
@@ -75,7 +87,10 @@ async fn apply_bypass_session_mode(
             agent = %cfg.name,
             session_id = %sid_for_log,
             mode_id = %mode,
+            requested_mode = %mode,
             phase,
+            advertised_modes = ?advertised_modes,
+            acp_current_mode = ?acp_current_mode,
             error = %e,
             "skip_permissions: set_session_mode failed; relying on L2 auto-approve"
         );
@@ -84,7 +99,10 @@ async fn apply_bypass_session_mode(
             agent = %cfg.name,
             session_id = %sid_for_log,
             mode_id = %mode,
+            requested_mode = %mode,
             phase,
+            advertised_modes = ?advertised_modes,
+            acp_current_mode = ?acp_current_mode,
             "skip_permissions: set_session_mode applied"
         );
     }
@@ -103,8 +121,8 @@ pub async fn new_session_with_bypass(
 ) -> anyhow::Result<NewSessionResponse> {
     let resp = conn.new_session(cwd, mcp_servers).await?;
     let session_id = resp.session_id.clone();
-    let advertised_modes = conn.advertised_session_modes(&session_id);
-    apply_bypass_session_mode(conn, cfg, session_id, advertised_modes, "new_session").await;
+    let mode_snapshot = conn.session_mode_snapshot(&session_id);
+    apply_bypass_session_mode(conn, cfg, session_id, mode_snapshot, "new_session").await;
     Ok(resp)
 }
 
@@ -128,8 +146,8 @@ pub async fn load_session_with_bypass(
     let session_id = AcpSessionId::new(acp_session_id);
     let request = LoadSessionRequest::new(session_id.clone(), cwd).mcp_servers(mcp_servers);
     let (response, stream) = conn.load_session(request).await?;
-    let advertised_modes = conn.advertised_session_modes(&session_id);
-    apply_bypass_session_mode(conn, cfg, session_id, advertised_modes, "load_session").await;
+    let mode_snapshot = conn.session_mode_snapshot(&session_id);
+    apply_bypass_session_mode(conn, cfg, session_id, mode_snapshot, "load_session").await;
     Ok((response, stream))
 }
 
@@ -144,8 +162,8 @@ pub async fn resume_session_with_bypass(
     let session_id = AcpSessionId::new(acp_session_id);
     let request = ResumeSessionRequest::new(session_id.clone(), cwd);
     let response = conn.resume_session(request).await?;
-    let advertised_modes = conn.advertised_session_modes(&session_id);
-    apply_bypass_session_mode(conn, cfg, session_id, advertised_modes, "resume_session").await;
+    let mode_snapshot = conn.session_mode_snapshot(&session_id);
+    apply_bypass_session_mode(conn, cfg, session_id, mode_snapshot, "resume_session").await;
     Ok(response)
 }
 
