@@ -2540,10 +2540,22 @@ async fn emit_worker_write_audit_inner(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use rmcp::{
+        model::CallToolRequestParams,
+        transport::{
+            streamable_http_client::StreamableHttpClientTransportConfig,
+            StreamableHttpClientTransport,
+        },
+        ServiceExt,
+    };
+    use spur_acp::SpurEventBody;
+    use spur_license::policy::PolicyResolver;
     use spur_pm::{BeadsAdvanced, Comment, CommentId, DependencyCycle, IssueSummary, ReadyFilter};
+    use tempfile::TempDir;
     use tracing::field::{Field, Visit};
 
     use super::*;
@@ -2632,6 +2644,287 @@ mod tests {
         }
     }
 
+    // ─── Dispatcher fixtures ──────────────────────────────────────────────
+
+    struct NullMcpEventSink;
+
+    impl McpEventSink for NullMcpEventSink {
+        fn emit(&self, _event: SpurEventBody) {}
+    }
+
+    #[derive(Default)]
+    struct RecordingWorkerSignalSink {
+        progress: Mutex<Vec<(WorkerCallContext, Value)>>,
+    }
+
+    impl RecordingWorkerSignalSink {
+        fn progress_count(&self) -> usize {
+            self.progress.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl WorkerSignalSink for RecordingWorkerSignalSink {
+        async fn report_signal(
+            &self,
+            ctx: &WorkerCallContext,
+            args: Value,
+        ) -> Result<Value, McpHandlerError> {
+            Ok(json!({
+                "ok": true,
+                "delegation_id": ctx.delegation_id.clone(),
+                "args": args
+            }))
+        }
+
+        async fn report_progress(
+            &self,
+            ctx: &WorkerCallContext,
+            args: Value,
+        ) -> Result<Value, McpHandlerError> {
+            self.progress
+                .lock()
+                .unwrap()
+                .push((ctx.clone(), args.clone()));
+            Ok(json!({
+                "ok": true,
+                "delegation_id": ctx.delegation_id.clone(),
+                "args": args
+            }))
+        }
+    }
+
+    struct NullWorkerReadToolSink;
+
+    #[async_trait]
+    impl WorkerReadToolSink for NullWorkerReadToolSink {
+        async fn get_plan_status(
+            &self,
+            _ctx: &WorkerCallContext,
+            _args: Value,
+        ) -> Result<Value, McpHandlerError> {
+            Ok(json!({ "ok": true }))
+        }
+
+        async fn get_task_diff(
+            &self,
+            _ctx: &WorkerCallContext,
+            _args: Value,
+        ) -> Result<Value, McpHandlerError> {
+            Ok(json!({ "ok": true }))
+        }
+
+        async fn fetch_outcome_artifact(
+            &self,
+            _ctx: &WorkerCallContext,
+            _args: Value,
+        ) -> Result<Value, McpHandlerError> {
+            Ok(json!({ "ok": true }))
+        }
+    }
+
+    async fn pm_service_fixture(repo: &Path) -> Arc<spur_pm::PmService> {
+        let workspace = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let beads_dir = repo.join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
+        workspace.copy_db_to(&beads_dir);
+
+        Arc::new(
+            spur_pm::PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads-backed PmService"),
+        )
+    }
+
+    fn beads_advanced_for_test(pm: &spur_pm::PmService) -> &dyn BeadsAdvanced {
+        spur_pm::PmService::advanced(pm).expect("advanced beads backend")
+    }
+
+    fn pro_feature_gate() -> Arc<spur_license::FeatureGate> {
+        use std::collections::BTreeSet;
+
+        let gate = spur_license::FeatureGate::new(PolicyResolver::embedded());
+        let state =
+            spur_license::LicenseState::active_validated(spur_license::Plan::Pro, BTreeSet::new());
+        gate.update_state(&state);
+        Arc::new(gate)
+    }
+
+    fn dispatcher_deps_fixture(
+        pm_service: Arc<spur_pm::PmService>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+        worker_signal_sink: Arc<dyn WorkerSignalSink>,
+    ) -> Arc<DispatcherDeps> {
+        let (flush_tx, _flush_rx) = mpsc::unbounded_channel::<FlushMessage>();
+        let funnel: Arc<dyn McpEventSink> = Arc::new(NullMcpEventSink);
+        let worker_read_sink: Arc<dyn WorkerReadToolSink> = Arc::new(NullWorkerReadToolSink);
+
+        Arc::new(DispatcherDeps {
+            pm_service,
+            feature_gate,
+            funnel,
+            worker_signal_sink,
+            worker_read_sink,
+            repo_root: None,
+            delegations: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            delegation_worktree_roots: Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            graph_mcp_module: spur_graph::mcp::GraphMcpModule::new(
+                spur_graph::mcp::GraphMcpDeps::default(),
+            ),
+            read_audit_buffers: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            flush_tx,
+            active_delegations: Arc::new(AtomicU32::new(0)),
+            peak_active_delegations: Arc::new(AtomicU32::new(0)),
+            delegation_guards: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        })
+    }
+
+    fn worker_mcp_deps_fixture(
+        pm_service: Arc<spur_pm::PmService>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+        worker_signal_sink: Arc<dyn WorkerSignalSink>,
+    ) -> WorkerMcpDeps {
+        WorkerMcpDeps {
+            pm_service,
+            feature_gate,
+            funnel: Arc::new(NullMcpEventSink),
+            worker_signal_sink,
+            worker_read_sink: Arc::new(NullWorkerReadToolSink),
+            repo_root: None,
+        }
+    }
+
+    fn encode_test_worker_token(
+        hmac_key: &[u8; 32],
+        delegation_id: &str,
+        brain_session_id: &str,
+    ) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let payload = spur_mcp::token::WorkerTokenPayload {
+            d: delegation_id.to_string(),
+            b: brain_session_id.to_string(),
+            e: now + 60,
+        };
+        spur_mcp::token::encode_token(hmac_key, &payload).expect("valid test token")
+    }
+
+    struct AuthProbe {
+        url: String,
+        hmac_key: [u8; 32],
+        session_manager: Arc<LocalSessionManager>,
+        session_contexts:
+            Arc<parking_lot::Mutex<std::collections::HashMap<String, AuthenticatedWorkerContext>>>,
+        response_session_id: Arc<Mutex<Option<String>>>,
+        hit_count: Arc<AtomicU32>,
+        shutdown: CancellationToken,
+        handle: JoinHandle<()>,
+    }
+
+    impl AuthProbe {
+        async fn shutdown(self) {
+            self.shutdown.cancel();
+            self.handle.await.expect("auth probe server joins");
+        }
+    }
+
+    async fn spawn_auth_probe(brain_session_id: &str) -> AuthProbe {
+        let hmac_key = [7u8; 32];
+        let session_manager = Arc::new(LocalSessionManager::default());
+        let session_contexts = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let response_session_id = Arc::new(Mutex::new(None::<String>));
+        let hit_count = Arc::new(AtomicU32::new(0));
+        let shutdown = CancellationToken::new();
+
+        let state = WorkerAuthMiddlewareState {
+            hmac_key,
+            brain_session_id: brain_session_id.to_string(),
+            session_manager: Arc::clone(&session_manager),
+            session_contexts: Arc::clone(&session_contexts),
+        };
+        let response_session_id_for_handler = Arc::clone(&response_session_id);
+        let hit_count_for_handler = Arc::clone(&hit_count);
+        let app = Router::new()
+            .route(
+                "/",
+                axum::routing::post(move |request: Request<Body>| {
+                    let response_session_id = Arc::clone(&response_session_id_for_handler);
+                    let hit_count = Arc::clone(&hit_count_for_handler);
+                    async move {
+                        hit_count.fetch_add(1, Ordering::SeqCst);
+                        let auth_ctx = request
+                            .extensions()
+                            .get::<AuthenticatedWorkerContext>()
+                            .expect("middleware inserts authenticated context");
+                        let mut response = Response::new(Body::from(format!(
+                            "{}:{}",
+                            auth_ctx.delegation_id, auth_ctx.brain_session_id
+                        )));
+                        if let Some(session_id) = response_session_id.lock().unwrap().clone() {
+                            response.headers_mut().insert(
+                                "mcp-session-id",
+                                axum::http::HeaderValue::from_str(&session_id)
+                                    .expect("valid session id header"),
+                            );
+                        }
+                        response
+                    }
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                state,
+                worker_auth_middleware,
+            ));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind auth probe");
+        let addr = listener.local_addr().expect("local addr");
+        let serve_shutdown = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(serve_shutdown.cancelled_owned())
+                .await
+                .expect("auth probe serves");
+        });
+
+        AuthProbe {
+            url: format!("http://{addr}/"),
+            hmac_key,
+            session_manager,
+            session_contexts,
+            response_session_id,
+            hit_count,
+            shutdown,
+            handle,
+        }
+    }
+
+    async fn call_report_progress(
+        server: &WorkerMcpServer,
+        token: &str,
+        message: &str,
+    ) -> CallToolResult {
+        let config = StreamableHttpClientTransportConfig::with_uri(server.url()).auth_header(token);
+        let client =
+            ().serve(StreamableHttpClientTransport::from_config(config))
+                .await
+                .expect("rmcp client initialize");
+        let mut request = CallToolRequestParams::new("report_progress");
+        request.arguments = json!({ "message": message }).as_object().cloned();
+        let result = client
+            .call_tool(request)
+            .await
+            .expect("report_progress succeeds");
+        drop(client);
+        result
+    }
+
     // ─── Warning capture helper ───────────────────────────────────────────
 
     #[derive(Clone, Default)]
@@ -2680,6 +2973,385 @@ mod tests {
     }
 
     // ─── Tests ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn worker_auth_middleware_binds_token_context_to_minted_session() {
+        let probe = spawn_auth_probe("brain-A").await;
+        let (session_id, _transport) = probe
+            .session_manager
+            .create_session()
+            .await
+            .expect("create local session");
+        let session_id = session_id.to_string();
+        *probe.response_session_id.lock().unwrap() = Some(session_id.clone());
+
+        let token = encode_test_worker_token(&probe.hmac_key, "del-A", "brain-A");
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&probe.url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .expect("token request");
+        assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+        assert_eq!(response.text().await.expect("body"), "del-A:brain-A");
+        assert_eq!(probe.hit_count.load(Ordering::SeqCst), 1);
+
+        let cached = probe
+            .session_contexts
+            .lock()
+            .get(&session_id)
+            .cloned()
+            .expect("session context cached");
+        assert_eq!(cached.delegation_id, "del-A");
+        assert_eq!(cached.brain_session_id, "brain-A");
+
+        *probe.response_session_id.lock().unwrap() = None;
+        let response = client
+            .post(&probe.url)
+            .header("mcp-session-id", &session_id)
+            .send()
+            .await
+            .expect("session request");
+        assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+        assert_eq!(response.text().await.expect("body"), "del-A:brain-A");
+        assert_eq!(probe.hit_count.load(Ordering::SeqCst), 2);
+
+        drop(client);
+        probe.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn worker_auth_middleware_rejects_missing_or_unbound_auth() {
+        let probe = spawn_auth_probe("brain-A").await;
+        let client = reqwest::Client::new();
+
+        let missing = client
+            .post(&probe.url)
+            .send()
+            .await
+            .expect("missing token request");
+        assert_eq!(missing.status().as_u16(), StatusCode::UNAUTHORIZED.as_u16());
+
+        let wrong_brain = encode_test_worker_token(&probe.hmac_key, "del-A", "brain-B");
+        let mismatch = client
+            .post(&probe.url)
+            .bearer_auth(&wrong_brain)
+            .send()
+            .await
+            .expect("brain mismatch request");
+        assert_eq!(
+            mismatch.status().as_u16(),
+            StatusCode::UNAUTHORIZED.as_u16()
+        );
+
+        let (session_id, _transport) = probe
+            .session_manager
+            .create_session()
+            .await
+            .expect("create local session");
+        let unbound = client
+            .post(&probe.url)
+            .header("mcp-session-id", session_id.to_string())
+            .send()
+            .await
+            .expect("unbound session request");
+        assert_eq!(unbound.status().as_u16(), StatusCode::UNAUTHORIZED.as_u16());
+        assert_eq!(probe.hit_count.load(Ordering::SeqCst), 0);
+
+        drop(client);
+        probe.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn append_read_audit_entry_creates_and_reuses_delegation_buffer() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let deps = dispatcher_deps_fixture(
+            pm,
+            pro_feature_gate(),
+            Arc::new(RecordingWorkerSignalSink::default()),
+        );
+
+        append_read_audit_entry(&deps, "del-A", "get_issue", Some("bd-1".into()));
+        append_read_audit_entry(&deps, "del-A", "list_issues", None);
+        append_read_audit_entry(&deps, "del-B", "get_plan_status", Some("bd-2".into()));
+
+        let map = deps.read_audit_buffers.lock();
+        assert_eq!(map.len(), 2);
+        let del_a = map.get("del-A").expect("del-A buffer");
+        let entries = del_a.entries.lock();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].tool_name, "get_issue");
+        assert_eq!(entries[0].target_issue_id.as_deref(), Some("bd-1"));
+        assert_eq!(entries[1].tool_name, "list_issues");
+        assert_eq!(entries[1].target_issue_id, None);
+        assert_eq!(map.get("del-B").expect("del-B buffer").entry_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn emit_read_aggregate_writes_first_targeted_sentinel() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "read aggregate target".into(),
+                issue_type: Some("task".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("create issue");
+        let deps = dispatcher_deps_fixture(
+            Arc::clone(&pm),
+            pro_feature_gate(),
+            Arc::new(RecordingWorkerSignalSink::default()),
+        );
+        let shutdown = CancellationToken::new();
+
+        emit_read_aggregate(
+            &deps,
+            "del-A".into(),
+            vec![
+                ReadAuditEntry {
+                    tool_name: "list_issues".into(),
+                    target_issue_id: None,
+                    ts: 1,
+                },
+                ReadAuditEntry {
+                    tool_name: "get_issue".into(),
+                    target_issue_id: Some(issue_id.clone()),
+                    ts: 2,
+                },
+            ],
+            &shutdown,
+        )
+        .await;
+
+        let comments = beads_advanced_for_test(pm.as_ref())
+            .list_comments(&issue_id)
+            .await
+            .expect("list comments");
+        assert_eq!(comments.len(), 1);
+        let decoded = crate::plan::audit_sentinel::parse_comment(&comments[0].body)
+            .expect("parse comment")
+            .expect("audit sentinel");
+        match decoded {
+            crate::plan::audit_sentinel::AuditSentinelKind::ReadAggregate {
+                delegation_id,
+                entries,
+            } => {
+                assert_eq!(delegation_id, "del-A");
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].tool_name, "list_issues");
+                assert_eq!(entries[0].target_issue_id, None);
+                assert_eq!(entries[1].tool_name, "get_issue");
+                assert_eq!(
+                    entries[1].target_issue_id.as_deref(),
+                    Some(issue_id.as_str())
+                );
+            }
+            other => panic!("expected ReadAggregate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_read_aggregate_skips_entries_without_target_issue() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "untouched issue".into(),
+                issue_type: Some("task".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("create issue");
+        let deps = dispatcher_deps_fixture(
+            Arc::clone(&pm),
+            pro_feature_gate(),
+            Arc::new(RecordingWorkerSignalSink::default()),
+        );
+
+        emit_read_aggregate(
+            &deps,
+            "del-A".into(),
+            vec![ReadAuditEntry {
+                tool_name: "list_issues".into(),
+                target_issue_id: None,
+                ts: 1,
+            }],
+            &CancellationToken::new(),
+        )
+        .await;
+
+        let comments = beads_advanced_for_test(pm.as_ref())
+            .list_comments(&issue_id)
+            .await
+            .expect("list comments");
+        assert!(comments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_and_flush_idle_buffers_flushes_idle_and_retains_fresh() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let issue_id = pm
+            .create_issue(spur_pm::IssueCreate {
+                title: "idle aggregate target".into(),
+                issue_type: Some("task".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("create issue");
+        let deps = dispatcher_deps_fixture(
+            Arc::clone(&pm),
+            pro_feature_gate(),
+            Arc::new(RecordingWorkerSignalSink::default()),
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let stale = Arc::new(ReadAuditBuffer::new(
+            "del-stale".into(),
+            deps.flush_tx.clone(),
+        ));
+        stale.append_for_test(ReadAuditEntry {
+            tool_name: "get_issue".into(),
+            target_issue_id: Some(issue_id.clone()),
+            ts: now.saturating_sub(120),
+        });
+        let fresh = Arc::new(ReadAuditBuffer::new(
+            "del-fresh".into(),
+            deps.flush_tx.clone(),
+        ));
+        fresh.append_for_test(ReadAuditEntry {
+            tool_name: "get_issue".into(),
+            target_issue_id: Some(issue_id.clone()),
+            ts: now,
+        });
+        let empty = Arc::new(ReadAuditBuffer::new(
+            "del-empty".into(),
+            deps.flush_tx.clone(),
+        ));
+        {
+            let mut map = deps.read_audit_buffers.lock();
+            map.insert("del-stale".into(), stale);
+            map.insert("del-fresh".into(), fresh);
+            map.insert("del-empty".into(), empty);
+        }
+
+        scan_and_flush_idle_buffers(
+            &deps,
+            &WorkerMcpServerConfig {
+                idle_threshold: Duration::from_secs(30),
+                scan_interval: Duration::from_secs(1),
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+
+        {
+            let map = deps.read_audit_buffers.lock();
+            assert!(!map.contains_key("del-stale"));
+            assert!(!map.contains_key("del-empty"));
+            assert_eq!(
+                map.get("del-fresh").expect("fresh retained").entry_count(),
+                1
+            );
+        }
+        let comments = beads_advanced_for_test(pm.as_ref())
+            .list_comments(&issue_id)
+            .await
+            .expect("list comments");
+        assert_eq!(comments.len(), 1);
+        assert!(comments[0].body.contains("\"delegation_id\":\"del-stale\""));
+    }
+
+    #[tokio::test]
+    async fn invoke_code_graph_for_worker_maps_dispatch_errors() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let deps = dispatcher_deps_fixture(
+            pm,
+            pro_feature_gate(),
+            Arc::new(RecordingWorkerSignalSink::default()),
+        );
+        deps.delegation_worktree_roots
+            .lock()
+            .insert("del-A".into(), dir.path().to_path_buf());
+
+        let error = invoke_code_graph_for_worker(
+            deps,
+            WorkerCallContext {
+                delegation_id: "del-A".into(),
+                brain_session_id: "brain-A".into(),
+            },
+            "not_a_code_graph_tool",
+            json!({}),
+        )
+        .await
+        .expect_err("unknown code graph tool must error");
+        match error {
+            McpHandlerError::InvalidParams(message) => {
+                assert!(message.contains("unknown code graph MCP tool"));
+            }
+            other => panic!("expected InvalidParams, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn report_progress_tool_honors_delegation_gate_and_records_lifecycle() {
+        let dir = TempDir::new().expect("tempdir");
+        let pm = pm_service_fixture(dir.path()).await;
+        let signal_sink = Arc::new(RecordingWorkerSignalSink::default());
+        let signal_sink_trait: Arc<dyn WorkerSignalSink> = signal_sink.clone();
+        let server = WorkerMcpServer::start(
+            "brain-A".into(),
+            worker_mcp_deps_fixture(pm, pro_feature_gate(), signal_sink_trait),
+        )
+        .await
+        .expect("start worker server");
+
+        server.register_delegation(
+            "del-disabled".into(),
+            DelegationContext {
+                enable_worker_progress: false,
+            },
+        );
+        let disabled_token = server.issue_token("del-disabled", Duration::from_secs(60));
+        let disabled = call_report_progress(&server, &disabled_token, "disabled").await;
+        assert_eq!(disabled.structured_content, Some(json!({ "ok": true })));
+        assert_eq!(signal_sink.progress_count(), 0);
+
+        server.register_delegation(
+            "del-enabled".into(),
+            DelegationContext {
+                enable_worker_progress: true,
+            },
+        );
+        let enabled_token = server.issue_token("del-enabled", Duration::from_secs(60));
+        let enabled = call_report_progress(&server, &enabled_token, "enabled").await;
+        assert_eq!(signal_sink.progress_count(), 1);
+        assert_eq!(
+            enabled
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("delegation_id")),
+            Some(&json!("del-enabled"))
+        );
+
+        let guards = server.deps.delegation_guards.lock();
+        let disabled_guard = guards.get("del-disabled").expect("disabled guard");
+        let enabled_guard = guards.get("del-enabled").expect("enabled guard");
+        assert_eq!(disabled_guard.calls.lock().len(), 1);
+        assert_eq!(enabled_guard.calls.lock().len(), 1);
+        assert_eq!(enabled_guard.calls.lock()[0].tool_name, "report_progress");
+        assert_eq!(server.active_count(), 0);
+        drop(guards);
+
+        server.shutdown(Duration::from_secs(5)).await;
+    }
 
     #[tokio::test]
     async fn emit_worker_write_audit_inner_writes_sentinel_comment() {
