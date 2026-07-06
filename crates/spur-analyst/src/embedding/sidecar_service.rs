@@ -5,8 +5,7 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context as _, Result};
-use serde::Deserialize;
+use anyhow::{bail, Context as _, Result};
 use serde_json::{json, Value};
 use spur_graph::{
     embedding_query_text_for_model, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
@@ -14,11 +13,13 @@ use spur_graph::{
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-pub const SPUR_EMBED_SOCKET_ENV: &str = "SPUR_EMBED_SOCKET";
+use super::protocol::{self, EmbedRequest, PROTOCOL_VERSION};
+#[cfg(feature = "embed")]
+use super::EmbeddingRuntime;
+
+pub const SPUR_EMBED_SOCKET_ENV: &str = protocol::SPUR_EMBED_SOCKET_ENV;
 pub const MAX_EMBED_TEXTS: usize = 16;
 
-const PROTOCOL_VERSION: u8 = 1;
-const DEFAULT_SOCKET_RELATIVE_PATH: &str = ".spur/embed.sock";
 const SOCKET_PERMISSIONS: u32 = 0o600;
 
 type Embedder = dyn Fn(Vec<String>) -> Result<Vec<Vec<f32>>, String> + Send + Sync;
@@ -29,17 +30,6 @@ pub struct EmbedService {
     model_name: Arc<str>,
     ready: Arc<Ready>,
     embedder: Arc<Embedder>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EmbedRequest {
-    #[serde(default)]
-    v: Option<u8>,
-    #[serde(default)]
-    id: Option<Value>,
-    op: String,
-    #[serde(default)]
-    texts: Option<Vec<String>>,
 }
 
 impl EmbedService {
@@ -197,25 +187,13 @@ impl EmbedService {
 }
 
 pub fn resolve_socket_path(socket: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(socket) = socket {
-        return Ok(socket);
-    }
-    if let Some(socket) = std::env::var_os(SPUR_EMBED_SOCKET_ENV).filter(|value| !value.is_empty())
-    {
-        return Ok(PathBuf::from(socket));
-    }
-
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("failed to resolve default embed socket: HOME is not set"))?;
-    Ok(PathBuf::from(home).join(DEFAULT_SOCKET_RELATIVE_PATH))
+    protocol::resolve_socket_path(socket)
 }
 
 #[cfg(feature = "embed")]
 pub async fn serve(socket: Option<PathBuf>) -> Result<()> {
     let socket_path = resolve_socket_path(socket)?;
-    let embedding_model = EmbeddingModelSelection::from_env();
-    production_service(embedding_model)
+    production_service(EmbeddingRuntime::global())
         .serve_socket(socket_path)
         .await
 }
@@ -226,56 +204,12 @@ pub async fn serve(_socket: Option<PathBuf>) -> Result<()> {
 }
 
 #[cfg(feature = "embed")]
-fn production_service(embedding_model: EmbeddingModelSelection) -> EmbedService {
+fn production_service(runtime: &'static EmbeddingRuntime) -> EmbedService {
     EmbedService::new(
-        embedding_model.model_name(),
-        move || {
-            crate::mcp::embed_model_cell(embedding_model)
-                .ready()
-                .is_some()
-        },
-        move |texts| embed_with_production_model(embedding_model, texts),
+        runtime.sidecar_model_name(),
+        move || runtime.sidecar_ready(),
+        move |texts| runtime.embed_sidecar_texts(texts),
     )
-}
-
-#[cfg(feature = "embed")]
-fn embed_with_production_model(
-    embedding_model: EmbeddingModelSelection,
-    texts: Vec<String>,
-) -> Result<Vec<Vec<f32>>, String> {
-    let model = ready_or_load_model(embedding_model)?;
-    let refs = texts.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut model = model
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    model.embed(refs, None).map_err(|error| error.to_string())
-}
-
-#[cfg(feature = "embed")]
-fn ready_or_load_model(
-    embedding_model: EmbeddingModelSelection,
-) -> Result<Arc<std::sync::Mutex<fastembed::TextEmbedding>>, String> {
-    let cell = crate::mcp::embed_model_cell(embedding_model);
-    loop {
-        if let Some(model) = cell.ready() {
-            return Ok(model);
-        }
-
-        if let Some(permit) = cell.begin_load() {
-            let loaded = crate::mcp::load_embed_model(embedding_model);
-            return match loaded {
-                Ok(model) => permit
-                    .complete(Some(model))
-                    .ok_or_else(|| "embedding model loaded but was not available".to_owned()),
-                Err(error) => {
-                    let _ = permit.complete(None);
-                    Err(error)
-                }
-            };
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
 }
 
 fn bind_socket_path(path: &Path) -> Result<()> {
