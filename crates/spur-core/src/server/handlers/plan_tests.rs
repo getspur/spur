@@ -1651,6 +1651,27 @@ mod loop_lifecycle_mcp_tests {
         (Arc::new(server), mock_pm)
     }
 
+    async fn call_spur_loop_doctor_as_call_tool_result(
+        server: &McpCallbackServer,
+        args: serde_json::Value,
+    ) -> rmcp::model::CallToolResult {
+        let response = server
+            .__test_call_tool_response("spur_loop_doctor", args)
+            .await;
+        McpCallbackServer::call_tool_result_from_legacy_response(response, "spur_loop_doctor")
+            .expect("spur_loop_doctor must deserialize into CallToolResult")
+    }
+
+    fn call_tool_result_json_text(result: rmcp::model::CallToolResult) -> serde_json::Value {
+        let serialized = serde_json::to_value(result).expect("serialize CallToolResult");
+        let text = serialized["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected text content block, got {serialized}"));
+        serde_json::from_str(text).unwrap_or_else(|error| {
+            panic!("expected JSON text content, got {text:?}: {error}")
+        })
+    }
+
     struct ListIssuesFailPm;
 
     #[async_trait::async_trait]
@@ -2108,6 +2129,27 @@ mod loop_lifecycle_mcp_tests {
         );
         assert_eq!(response["result"]["status"], "error");
         assert!(response["result"]["canonical_submit_loop_params"].is_null());
+        assert_eq!(mock_pm.issues().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_call_tool_result_round_trips_valid_and_invalid_drafts() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+
+        let valid_payload = call_tool_result_json_text(
+            call_spur_loop_doctor_as_call_tool_result(&server, valid_loop_doctor_args()).await,
+        );
+        assert_eq!(valid_payload["status"], "ok");
+        assert!(valid_payload["canonical_submit_loop_params"].is_object());
+
+        let mut invalid_args = valid_loop_doctor_args();
+        invalid_args["draft"]["goal"] = json!(" ");
+        let invalid_payload = call_tool_result_json_text(
+            call_spur_loop_doctor_as_call_tool_result(&server, invalid_args).await,
+        );
+        assert_eq!(invalid_payload["status"], "error");
+        assert!(invalid_payload["errors"].is_array());
+
         assert_eq!(mock_pm.issues().await.len(), 0);
     }
 
