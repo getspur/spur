@@ -860,6 +860,33 @@ impl Orchestrator {
                         }
                     }
 
+                    // ── UpdateAgentConfig ───────────────────────────────
+                    InteractiveInput::UpdateAgentConfig {
+                        name,
+                        updated_entry,
+                    } => match self.update_agent_config(name.clone(), updated_entry) {
+                        Ok(()) => {
+                            self.funnel.emit(SpurEventBody::AgentConfigUpdateResult {
+                                name,
+                                ok: true,
+                                message: "saved - applies to next delegation".into(),
+                            });
+                        }
+                        Err(e) => {
+                            let message = format_error_chain(&e);
+                            warn!(
+                                agent = %name,
+                                error = %message,
+                                "agent config update failed"
+                            );
+                            self.funnel.emit(SpurEventBody::AgentConfigUpdateResult {
+                                name,
+                                ok: false,
+                                message,
+                            });
+                        }
+                    },
+
                     // ── SetSessionModel (M9 F-C) ──────────────────────────
                     InteractiveInput::SetSessionModel { value } => {
                         if let Some(b) = brain.as_mut() {
