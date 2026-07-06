@@ -159,6 +159,11 @@ pub enum ReconnectError {
 #[derive(Default, Debug, Clone)]
 pub struct FaultInjectionHooks {
     pub panic_after_overlay_apply: Option<String>,
+    #[cfg(test)]
+    pub delegation_agent_config_snapshots:
+        Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<spur_acp::config::AgentConfig>>>>>,
+    #[cfg(test)]
+    pub short_circuit_delegations: bool,
 }
 
 #[cfg(not(any(test, feature = "fault-injection")))]

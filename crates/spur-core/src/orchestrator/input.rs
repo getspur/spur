@@ -43,6 +43,13 @@ pub enum InteractiveInput {
         config_id: String,
         value: String,
     },
+    /// Persist and live-apply the curated editable subset of one configured
+    /// worker agent. Identity/transport fields on `updated_entry` are not
+    /// applied; the orchestrator preserves them from the existing entry.
+    UpdateAgentConfig {
+        name: String,
+        updated_entry: spur_acp::config::AgentConfig,
+    },
     /// Dedicated `session/set_model` dispatch (M9 F-C). Fired when the
     /// caps-aware submit-router routes `/model <value>` for an agent that
     /// advertises `supports_set_model()` (e.g. claude-code-acp). The
