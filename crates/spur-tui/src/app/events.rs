@@ -92,6 +92,7 @@ impl App {
             .filter(|cfg| matches!(cfg.role, AgentRole::Worker | AgentRole::Both))
             .map(|cfg| crate::mentions::WorkerMentionDescriptor {
                 name: cfg.name.clone(),
+                kind: cfg.kind,
                 description: cfg.delegation.description.clone(),
                 tier: cfg.delegation.tier.map(|t| match t {
                     Tier::Specialist => "specialist".to_string(),

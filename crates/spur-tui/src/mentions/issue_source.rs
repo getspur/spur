@@ -94,11 +94,13 @@ impl MentionSource for IssueMentionSource {
                     agent: None,
                     model: None,
                     effort: None,
+                    worker_kind: None,
                     code_path: None,
                     code_scope: None,
                     tag: descriptor.priority.map(|priority| format!("P{}", priority)),
                     search_text: Some(search_text),
                     atom_text: Some(format!("@{}", descriptor.id)),
+                    unconsumed_suffix: None,
                     issue_preview: Some(preview),
                 }
             })

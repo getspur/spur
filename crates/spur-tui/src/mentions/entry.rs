@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::issue_source::IssueMentionDescriptor;
+use spur_acp::AgentKind;
 use spur_graph::CodeMentionPayload;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,8 @@ pub struct MentionEntry {
     pub model: Option<String>,
     /// Optional effort selected by a composed worker mention.
     pub effort: Option<String>,
+    /// Registered kind for worker mention rows.
+    pub worker_kind: Option<AgentKind>,
     /// Optional relative path for code graph file and symbol entries.
     pub code_path: Option<String>,
     /// Optional enclosing scope for code graph symbol entries.
@@ -44,6 +47,9 @@ pub struct MentionEntry {
     pub search_text: Option<String>,
     /// Optional visible InputBar atom text, including the leading `@`.
     pub atom_text: Option<String>,
+    /// Plain text that followed the consumed mention slots and must remain
+    /// outside the protected atom when the picker accepts the row.
+    pub unconsumed_suffix: Option<String>,
     /// Optional issue descriptor retained for richer issue-row previews.
     pub issue_preview: Option<Arc<IssueMentionDescriptor>>,
 }
@@ -59,11 +65,13 @@ impl Default for MentionEntry {
             agent: None,
             model: None,
             effort: None,
+            worker_kind: None,
             code_path: None,
             code_scope: None,
             tag: None,
             search_text: None,
             atom_text: None,
+            unconsumed_suffix: None,
             issue_preview: None,
         }
     }
@@ -115,11 +123,13 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
         agent: None,
         model: None,
         effort: None,
+        worker_kind: None,
         code_path: None,
         code_scope: None,
         tag: None,
         search_text: None,
         atom_text: None,
+        unconsumed_suffix: None,
         issue_preview: None,
     })
 }
