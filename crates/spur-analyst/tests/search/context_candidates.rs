@@ -22,7 +22,7 @@ use spur_graph::{
     WriteOptions, EMBEDDING_VECTOR_DIMENSIONS,
 };
 
-const INIT_SEARCH_SQL: &str = include_str!("../../spur-context/analyst/init_search.sql");
+const INIT_SEARCH_SQL: &str = include_str!("../../../spur-context/analyst/init_search.sql");
 const ANALYST_EMBED_MODE_ENV: &str = "SPUR_ANALYST_EMBED_MODE";
 const SECTION_EMBED_SKIP_ENV: &str = "SPUR_GRAPH_SKIP_SECTION_EMBEDDINGS";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
