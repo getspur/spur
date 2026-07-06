@@ -40,6 +40,7 @@ The user intent is natural language, but durable execution must remain determini
 - Creating a loop without explicit approval. `/spur-loop` defaults to preview-before-create.
 - Packing worker/model/effort into the existing `agent` field. The canonical draft uses structured task fields.
 - Changing the `LoopSpec` sentinel format unless implementation discovers a narrow shared-type need.
+- Adding wall-clock or timezone scheduling in v1. Current loop execution is cadence-based and first-arms immediately; exact phrases like `9AM` are normalized with an explicit warning unless a later scheduler change adds cron/timezone fields.
 
 ## 3. Existing substrate
 
@@ -47,6 +48,7 @@ The user intent is natural language, but durable execution must remain determini
 - `LoopSpec` already carries `loop_id`, `goal`, optional `pattern`, `cadence_secs`, `autonomy`, `template`, `governors`, and optional `escalation`.
 - `loop_template_to_persist_input` converts a loop template into normal `PlanTask`s.
 - `PlanTask` already supports `agent`, `profile`, `model`, `effort`, `config_overrides`, task body, dependencies, and `context_files`.
+- Loop templates are raw JSON before generation. They may carry `labels` or `issue_labels` that are consumed by `submit_loop` validation, including `spur:loop-triage-task`; those fields are not part of `PlanTask` and are discarded when the scheduler later deserializes tasks into `PlanTask`.
 - Existing `submit_loop` validation already enforces important invariants such as cadence, triage-task presence, and governor shape.
 
 The design should reuse this substrate. `/spur-loop` is an ergonomic authoring layer over it.
@@ -61,8 +63,14 @@ The design should reuse this substrate. `/spur-loop` is an ergonomic authoring l
 | D4 | What is the default UX? | Preview before create. | Durable loops can run repeatedly and spend money; silent creation is too risky. |
 | D5 | What does the user see? | Friendly summary only. | Users should inspect the operational behavior, not schema JSON. |
 | D6 | Can the brain call `submit_loop` directly from `/spur-loop` text? | No. It must call `spur_loop_doctor` first and submit only doctor-approved canonical params. | This preserves deterministic workflow and creates an auditable contract. |
-| D7 | How is approval tied to the draft? | The doctor returns an `approval_fingerprint` over canonical params. | Any revision changes the fingerprint and forces a fresh doctor pass. |
+| D7 | How is approval tied to the draft? | The doctor returns an `approval_fingerprint` over normalized canonical params, excluding server-minted fields such as `loop_id`, `issue_id`, and `next_run`. | `submit_loop` currently mints `loop_id` and arms `next_run` itself, so those values cannot be part of pre-approval equality. Any behavioral revision still changes the fingerprint and forces a fresh doctor pass. |
 | D8 | How should unknown model/profile/effort values behave? | Warn and pass through when structurally valid. | Worker adapters evolve faster than SPUR. Unknown values may still be valid worker-side options. |
+| D9 | What is the doctor task type? | A dedicated doctor draft task type, not plain `PlanTask`. | The draft must preserve loop-only metadata such as `labels`/`issue_labels` or a `triage` marker so canonical template JSON can satisfy existing `submit_loop` validation. |
+| D10 | Where should loop validation live? | Shared loop validation under `plan::loops`, called by both `submit_loop` and `spur_loop_doctor`. | Existing validation helpers are private inside `server/handlers/plan.rs`; duplicating them would split invariants. |
+| D11 | What happens for explicit L2/L3 creation? | Allow only when the user explicitly asks for it, and surface a warning that creation starts at that autonomy directly. | `set_loop_autonomy` enforces ratcheted promotion after creation, but `submit_loop` currently accepts the submitted autonomy. The preview must make that difference visible. |
+| D12 | How are wall-clock phrases handled? | V1 canonicalizes to cadence and warns that exact local time is not honored. | `LoopSpec` has `cadence_secs`, not cron or timezone fields. A user may approve the cadence normalization, but the preview must not imply exact 9AM execution. |
+| D13 | Is the doctor gated? | Yes at the handler layer: it checks the same loop feature/backend prerequisites as `submit_loop`. | A successful preview followed by a guaranteed license/backend failure would be poor UX. The pure doctor module remains testable; the handler supplies environment checks. |
+| D14 | How is duplicate approval handled? | The doctor returns a `client_idempotency_key` derived from the fingerprint; `/spur-loop` submission must pass it through to `submit_loop`. | Approval retries after reconnect or repeated user action should not create duplicate durable loops. This requires adding idempotency support to `submit_loop`, mirroring the submit-plan pattern. |
 
 ## 5. Architecture
 
@@ -83,7 +91,9 @@ The design should reuse this substrate. `/spur-loop` is an ergonomic authoring l
 
 The brain treats messages beginning with `/spur-loop` as loop-authoring requests. It should not pass the raw text directly to `submit_loop`.
 
-The recognizer preserves the original text and asks the brain to draft:
+No TUI router change is required for the command itself: unknown slash commands already pass through to the brain as normal text. Worker mentions are not guaranteed to appear as one flat string, though. In interactive clients they may arrive as structured `ResourceLink` content blocks plus a prepended `[UI hint]` text block. The brain command recognizer must use the full message content, including resource links and UI hints, when drafting worker bundles.
+
+The recognizer preserves the original command intent and asks the brain to draft:
 
 - goal,
 - schedule/cadence,
@@ -97,7 +107,7 @@ The recognizer preserves the original text and asks the brain to draft:
 
 ### 5.2 Draft builder
 
-The draft builder is brain-side. It converts natural language hints into a structured draft that is close to `SubmitLoopParams`, but not yet trusted.
+The draft builder is brain-side. It converts natural language hints into a structured `LoopDoctorDraft`, but not yet trusted. The draft is intentionally richer than `PlanTask` because it must retain loop-authoring metadata that `PlanTask` cannot represent.
 
 Supported user hints include:
 
@@ -108,6 +118,14 @@ Supported user hints include:
 - `to @path/` or `write to @path` for output/context path intent,
 - natural language such as "escalating failure" for escalation intent.
 
+Each draft task carries the normal execution fields (`task_id`, `agent`, `profile`, `model`, `effort`, `config_overrides`, `task`, `depends_on`, `context_files`) plus loop-only fields:
+
+- `triage: bool`, or an equivalent `issue_labels`/`labels` list,
+- optional user-facing output path hints,
+- optional assumptions that must be rendered in the preview.
+
+When the doctor builds canonical `SubmitLoopParams`, it emits raw template task JSON with `labels` or `issue_labels` containing `spur:loop-triage-task` for the triage task. Only after `submit_loop` accepts the raw template does the scheduler deserialize tasks into `PlanTask`.
+
 ### 5.3 Doctor tool
 
 `spur_loop_doctor` is deterministic and testable. It accepts the original text and a structured draft, then returns one of:
@@ -116,7 +134,7 @@ Supported user hints include:
 - `warnings`: canonical params are valid but preview must display warnings,
 - `error`: canonical params are absent and no loop may be submitted.
 
-The doctor validates required fields, normalizes preview data, computes the approval fingerprint, and returns canonical `SubmitLoopParams` only when valid.
+The doctor validates required fields, normalizes preview data, computes the approval fingerprint and submit idempotency key, and returns canonical `SubmitLoopParams` only when valid.
 
 ### 5.4 Friendly preview
 
@@ -130,6 +148,7 @@ The preview is generated from the doctor output, not from the brain's unvalidate
 - output paths or context files,
 - cost/governor hints,
 - escalation behavior,
+- first-run behavior,
 - warnings,
 - a clear line that no loop has been created yet.
 
@@ -144,10 +163,11 @@ Goal
 Daily marketing research and summary generation.
 
 Schedule
-Runs every day at 9:00 AM.
+Runs every 24 hours.
+First generation will be armed immediately after approval.
 
 Autonomy
-L3.
+L3. This creates the loop directly at L3.
 
 Tasks
 1. codex / gpt-5.3 / low
@@ -160,11 +180,14 @@ Tasks
 Controls
 No loop has been created yet.
 Approve to create the durable loop and arm the first generation.
+
+Warnings
+- Exact 9:00 AM wall-clock scheduling is not represented in v1; this preview uses a 24-hour cadence.
 ```
 
 ### 5.5 Submit bridge
 
-After explicit approval, the brain submits exactly the doctor-approved canonical params. If the user revises anything after preview, the brain must call `spur_loop_doctor` again and discard the old fingerprint.
+After explicit approval, the brain submits exactly the doctor-approved canonical params plus the doctor-produced idempotency key. If the user revises anything after preview, the brain must call `spur_loop_doctor` again and discard the old fingerprint and idempotency key.
 
 ## 6. Tool contract
 
@@ -174,11 +197,12 @@ The exact Rust schema can evolve during implementation, but the logical fields a
 
 ```text
 original_command: string
-draft: LoopDraft
-confirmation_mode: preview_first
+draft: LoopDoctorDraft
 ```
 
-`LoopDraft` should include structured equivalents of:
+Preview-first behavior is the `/spur-loop` command contract, not a configurable doctor mode.
+
+`LoopDoctorDraft` should include structured equivalents of:
 
 - goal,
 - schedule intent or resolved cadence,
@@ -188,6 +212,7 @@ confirmation_mode: preview_first
 - escalation,
 - base target if present,
 - user-facing assumptions made by the brain.
+- doctor draft tasks with loop-only triage metadata.
 
 ### 6.2 Response shape
 
@@ -198,9 +223,17 @@ warnings: list
 errors: list
 canonical_submit_loop_params: present only when valid
 approval_fingerprint: present only when valid
+client_idempotency_key: present only when valid
 ```
 
-The fingerprint is calculated from canonical submit params, not from raw user text. This lets wording changes that produce identical canonical behavior keep the same fingerprint, and behavioral changes produce a new one.
+The fingerprint is calculated from normalized canonical submit params, not from raw user text. The normalization must:
+
+- exclude `spec.loop_id`, `issue_id`, `next_run`, and any other server-minted fields,
+- sort JSON object keys before hashing,
+- preserve task order and dependency lists after doctor normalization,
+- use SHA-256 and return lowercase hex.
+
+This lets wording changes that produce identical canonical behavior keep the same fingerprint, while behavioral changes produce a new one. The `client_idempotency_key` is `spur-loop:<approval_fingerprint>` and must be accepted by `submit_loop` before `/spur-loop` is exposed.
 
 ## 7. Validation rules
 
@@ -219,6 +252,7 @@ Blocking errors:
 - invalid worker bundle shape,
 - malformed base target,
 - backend or license incompatibility if detectable in the doctor layer.
+- exact wall-clock scheduling when the user refuses cadence normalization.
 
 Warnings:
 
@@ -229,6 +263,8 @@ Warnings:
 - output path mentioned only in task text rather than concrete `context_files`,
 - escalation intent approximated because it is not exactly representable,
 - worker mention normalized from display syntax to registry name.
+- explicit L2/L3 creation starts at that autonomy directly rather than using the post-create ratchet.
+- first generation will be armed immediately by `submit_loop`.
 
 ## 8. Data flow and errors
 
@@ -249,6 +285,8 @@ If the doctor returns `warnings`, the brain may show the friendly preview, but w
 
 If `submit_loop` fails after approval, the brain reports the durable MCP error and does not claim that the loop exists. The user can revise and retry from the last draft, which still requires another doctor pass if changed.
 
+If approval submission is retried with the same `client_idempotency_key`, `submit_loop` must return the existing loop result rather than creating a duplicate loop.
+
 ## 9. Components
 
 ### 9.1 `crates/spur-core/src/mcp/plan.rs`
@@ -262,13 +300,35 @@ The tool description should state that this is the required validation gate for 
 Add the handler. It should:
 
 - parse doctor params,
+- check `PM_PRO_BEADS_ADVANCED` and beads backend availability, matching `submit_loop`,
 - invoke deterministic doctor logic,
 - return JSON-RPC invalid params for malformed doctor requests,
 - return structured doctor errors for invalid drafts,
 - never create a loop issue,
 - never call `submit_loop` internally.
 
-### 9.3 `crates/spur-core/src/plan/loops/doctor.rs`
+### 9.3 `crates/spur-core/src/tool_schemas.rs`
+
+Add the public MCP schemas:
+
+- `SpurLoopDoctorParams`,
+- `LoopDoctorDraft`,
+- `LoopDoctorDraftTask`,
+- `SpurLoopDoctorOutput`,
+- optional `client_idempotency_key` on `SubmitLoopParams`.
+
+These should follow sibling loop schemas: `serde(deny_unknown_fields)`, `Serialize`/`Deserialize`, and `JsonSchema`.
+
+### 9.4 `crates/spur-core/src/plan/loops/validation.rs`
+
+Move or share existing loop submit validation out of `server/handlers/plan.rs` so both `submit_loop` and `spur_loop_doctor` call one implementation. This shared module owns:
+
+- goal/cadence/governor checks,
+- triage-task checks over raw template JSON,
+- task graph validation,
+- base-target validation helpers if needed.
+
+### 9.5 `crates/spur-core/src/plan/loops/doctor.rs`
 
 New focused module for validation and normalization. It should reuse existing loop validation functions where possible and share task normalization with `submit_plan_normalize_tasks` rather than reimplementing task graph logic ad hoc.
 
@@ -277,16 +337,22 @@ Responsibilities:
 - validate the structured draft,
 - normalize task IDs and dependency order,
 - ensure a loop triage task is present,
+- emit raw template task JSON that preserves loop labels before `PlanTask` deserialization,
 - build canonical `SubmitLoopParams`,
 - build friendly preview sections,
 - compute `approval_fingerprint`,
+- compute `client_idempotency_key`,
 - produce warnings and blocking errors.
 
-### 9.4 `crates/spur-core/src/plan/loops/spec.rs`
+### 9.6 `crates/spur-core/src/plan/loops/spec.rs`
 
 Keep `LoopSpec` stable unless implementation needs a small shared type for doctor input/output. The loop engine remains schema-driven and scheduler-owned.
 
-### 9.5 Documentation
+### 9.7 `crates/spur-core/src/server/handlers/plan.rs` submit-loop idempotency
+
+Extend `submit_loop` to accept `client_idempotency_key` and de-duplicate repeated create requests for the same key, following the existing `submit_plan` idempotency precedent. The exact storage/replay mechanism belongs in the implementation plan, but `/spur-loop` must not be exposed without a duplicate-create guard.
+
+### 9.8 Documentation
 
 Update `docs/loops.md` to explain:
 
@@ -294,6 +360,8 @@ Update `docs/loops.md` to explain:
 - the brain interprets natural language,
 - `spur_loop_doctor` validates the draft,
 - approval is required before durable loop creation,
+- exact wall-clock scheduling is not honored in v1,
+- first generation is armed immediately after approval,
 - the existing loop lifecycle tools remain the management surface.
 
 ## 10. Testing
@@ -301,11 +369,12 @@ Update `docs/loops.md` to explain:
 Unit tests:
 
 - valid daily L3 rebuild/test draft returns `ok`, friendly preview, canonical submit params, and fingerprint,
-- valid daily 9AM research-then-summary draft returns dependent tasks with distinct worker/model/effort bundles,
+- valid daily 9AM research-then-summary draft returns dependent tasks with distinct worker/model/effort bundles and a wall-clock normalization warning,
 - missing goal blocks,
 - missing cadence blocks,
 - missing tasks blocks,
 - missing triage task blocks,
+- doctor draft with `triage: true` emits canonical raw task JSON containing `spur:loop-triage-task`,
 - invalid autonomy blocks,
 - non-positive governor cap blocks,
 - missing dependency blocks,
@@ -313,14 +382,20 @@ Unit tests:
 - unknown model/profile/effort warn but do not block,
 - fingerprint changes when canonical params change,
 - fingerprint stays stable when non-behavioral raw wording changes but canonical params are identical.
+- fingerprint excludes server-minted `loop_id` and remains stable before/after `submit_loop` fills it.
+- exact `9AM` wording produces a cadence-normalization warning.
+- explicit L3 creation produces a direct-autonomy warning.
+- escalation preview shows the concrete `after_unresolved_generations` value.
 
 Handler tests:
 
 - `spur_loop_doctor` is registered as an MCP tool,
 - malformed doctor params produce JSON-RPC invalid params,
+- ungated or non-beads environments fail at doctor time the same way they fail at submit-loop time,
 - invalid drafts return doctor errors without creating an issue,
 - valid drafts return canonical params but do not create an issue,
 - `submit_loop` remains the only durable loop creation path.
+- repeated `submit_loop` calls with the same `client_idempotency_key` do not create duplicate loop issues.
 
 Documentation/example tests:
 
@@ -329,11 +404,12 @@ Documentation/example tests:
 
 ## 11. Rollout
 
-Implement in three small steps:
+Implement in five small steps:
 
 1. Add the doctor schema, module, handler, and tests.
-2. Document the `/spur-loop` brain contract and preview format.
-3. Teach the brain prompt/skill path that `/spur-loop` must call `spur_loop_doctor` before preview and must call `submit_loop` only after explicit approval.
+2. Move loop validation into a shared module and have `submit_loop` keep using that shared validation.
+3. Add `submit_loop` idempotency support keyed by `client_idempotency_key`.
+4. Document the `/spur-loop` brain contract and preview format.
+5. Teach the brain prompt/skill path that `/spur-loop` must call `spur_loop_doctor` before preview and must call `submit_loop` only after explicit approval.
 
-The durable loop engine itself does not change in step 1. That keeps the feature safe to add without changing scheduler semantics.
-
+The scheduler semantics do not change in v1. `submit_loop` does gain shared validation and idempotency support so the preview-first command can be operationally safe.
