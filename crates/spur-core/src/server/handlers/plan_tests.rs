@@ -1977,6 +1977,112 @@ mod loop_lifecycle_mcp_tests {
         );
     }
 
+    fn valid_loop_doctor_args() -> serde_json::Value {
+        json!({
+            "original_command": "/spur-loop daily keep CI green",
+            "draft": {
+                "goal": "Keep CI green",
+                "pattern": "ci-sweeper",
+                "cadence_secs": 86_400,
+                "schedule_description": "Runs every 24 hours.",
+                "autonomy": "l1",
+                "tasks": [{
+                    "task_id": "triage",
+                    "agent": "codex",
+                    "task": "Triage the CI state and report findings",
+                    "triage": true
+                }]
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_returns_canonical_params_without_creating_issue() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+
+        let response = server
+            .__test_call_tool("spur_loop_doctor", valid_loop_doctor_args())
+            .await;
+
+        assert!(
+            response.get("error").is_none(),
+            "doctor should return structured success payload: {response}"
+        );
+        let result = &response["result"];
+        assert_eq!(result["status"], "ok");
+        assert!(result["canonical_submit_loop_params"].is_object());
+        assert!(result["approval_fingerprint"].is_string());
+        assert!(result["client_idempotency_key"].is_string());
+        assert_eq!(
+            mock_pm.issues().await.len(),
+            0,
+            "doctor must not create durable loop issues"
+        );
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_invalid_draft_returns_structured_errors() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let mut args = valid_loop_doctor_args();
+        args["draft"]["goal"] = json!(" ");
+
+        let response = server.__test_call_tool("spur_loop_doctor", args).await;
+
+        assert!(
+            response.get("error").is_none(),
+            "invalid drafts are doctor payloads, not JSON-RPC errors: {response}"
+        );
+        assert_eq!(response["result"]["status"], "error");
+        assert!(response["result"]["canonical_submit_loop_params"].is_null());
+        assert_eq!(mock_pm.issues().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_malformed_params_are_invalid_params() {
+        let (server, _mock_pm) = new_server_with_mock_pm().await;
+
+        let response = server
+            .__test_call_tool(
+                "spur_loop_doctor",
+                json!({
+                    "original_command": "/spur-loop daily keep CI green",
+                    "draft": {
+                        "goal": "Keep CI green",
+                        "cadence_secs": 86_400,
+                        "tasks": [],
+                        "unexpected": true
+                    }
+                }),
+            )
+            .await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected invalid params response, got {response}"));
+        assert!(
+            message.contains("spur_loop_doctor: invalid parameters"),
+            "expected malformed params error, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spur_loop_doctor_uses_same_advanced_feature_gate_as_submit_loop() {
+        let (server, _mock_pm) =
+            new_server_with_mock_pm_and_gate(super::unlicensed_feature_gate()).await;
+
+        let response = server
+            .__test_call_tool("spur_loop_doctor", valid_loop_doctor_args())
+            .await;
+
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected gated error response, got {response}"));
+        assert!(
+            message.contains(spur_license::FeatureKey::PM_PRO_BEADS_ADVANCED.as_str()),
+            "expected missing advanced feature error, got {response}"
+        );
+    }
+
     #[tokio::test]
     async fn pause_and_resume_toggle_label_and_reset_backoff() {
         let (server, mock_pm) = new_server_with_mock_pm().await;
