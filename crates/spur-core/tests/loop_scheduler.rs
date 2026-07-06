@@ -128,7 +128,7 @@ async fn create_loop_issue(
     pm.create_issue(spur_pm::IssueCreate {
         title: format!("Loop {}", spec.loop_id),
         description: Some(spec.to_sentinel_body()),
-        issue_type: Some("task".to_string()),
+        issue_type: Some("loop".to_string()),
         priority: Some(2),
         labels,
         ..Default::default()
