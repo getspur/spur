@@ -2018,6 +2018,13 @@ fn tui_input_to_interactive(input: spur_tui::UserInput) -> spur_core::Interactiv
         spur_tui::UserInput::SetSessionConfigOption { config_id, value } => {
             spur_core::InteractiveInput::SetSessionConfigOption { config_id, value }
         }
+        spur_tui::UserInput::UpdateAgentConfig {
+            name,
+            updated_entry,
+        } => spur_core::InteractiveInput::UpdateAgentConfig {
+            name,
+            updated_entry,
+        },
         spur_tui::UserInput::SetSessionModel {
             session_id: _,
             value,

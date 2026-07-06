@@ -236,6 +236,10 @@ impl App {
                         .session_picker
                         .as_mut()
                         .and_then(|p| p.handle_key(key, &ctx)),
+                    ViewId::AgentConfigBrowser { .. } => self
+                        .agent_config_browser
+                        .as_mut()
+                        .and_then(|view| view.handle_key(key, &ctx)),
                     ViewId::PlanInspector(_) => {
                         if let Some(view) = self.plan_inspector.as_mut() {
                             view.handle_key_with_worker_streams(key, &mut self.worker_streams, &ctx)
@@ -355,6 +359,7 @@ impl App {
                             picker.handle_paste(text);
                         }
                     }
+                    ViewId::AgentConfigBrowser { .. } => {}
                     ViewId::PlanInspector(_) => {}
                     ViewId::PlanBrowser => {}
                     ViewId::LoopBrowser => {}
@@ -476,6 +481,10 @@ impl App {
                     || picker.is_search_focused()
                     || picker.is_confirm_switch_visible()
             }),
+            ViewId::AgentConfigBrowser { .. } => self
+                .agent_config_browser
+                .as_ref()
+                .is_some_and(|view| view.editing_active()),
             ViewId::IssueBrowser => self
                 .issue_browser
                 .as_ref()
@@ -544,6 +553,7 @@ impl App {
             ViewId::SessionPicker => {
                 // No mouse scroll in v1 picker.
             }
+            ViewId::AgentConfigBrowser { .. } => {}
             ViewId::PlanInspector(_) => {}
             ViewId::PlanBrowser => {}
             ViewId::LoopBrowser => {}
