@@ -1004,6 +1004,13 @@ pub enum SpurEventBody {
         id: Option<String>,
     },
 
+    /// Feedback for an agent configuration update initiated from the TUI.
+    AgentConfigUpdateResult {
+        name: String,
+        ok: bool,
+        message: String,
+    },
+
     /// Feedback for a failed plan operation initiated from TUI.
     PlanCommandError {
         operation: String,

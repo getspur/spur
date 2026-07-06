@@ -249,11 +249,30 @@ impl AgentConfig {
     }
 }
 
+fn is_valid_agent_additional_directory(path: &std::path::Path) -> bool {
+    path.is_absolute()
+}
+
+pub fn validate_agent_additional_directories_absolute(
+    agent_name: &str,
+    additional_directories: &[PathBuf],
+) -> anyhow::Result<()> {
+    for path in additional_directories {
+        if !is_valid_agent_additional_directory(path) {
+            anyhow::bail!(
+                "agent '{agent_name}' additional_directories entry is not absolute: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn sanitize_agent_additional_directories(config: &mut SpurConfig) {
     for agent in &mut config.agents.entries {
         let agent_name = agent.name.clone();
         agent.additional_directories.retain(|path| {
-            if path.is_absolute() {
+            if is_valid_agent_additional_directory(path) {
                 true
             } else {
                 tracing::warn!(

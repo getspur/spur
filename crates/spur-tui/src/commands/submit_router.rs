@@ -133,6 +133,22 @@ pub fn route_with_caps(
         };
     }
 
+    if text == "/configure" {
+        return SubmitDecision::Local {
+            action: Action::NavigateTo(crate::action::ViewId::AgentConfigBrowser {
+                preselect: None,
+            }),
+        };
+    }
+    if let Some(rest) = text.strip_prefix("/configure ") {
+        let preselect = rest.trim();
+        return SubmitDecision::Local {
+            action: Action::NavigateTo(crate::action::ViewId::AgentConfigBrowser {
+                preselect: (!preselect.is_empty()).then(|| preselect.to_string()),
+            }),
+        };
+    }
+
     // /issue show <id> → issue ViewDetail action
     if let Some(rest) = text.strip_prefix("/issue show ") {
         let id = rest.trim().to_string();
