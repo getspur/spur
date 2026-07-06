@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 
 use crate::{Issue, IssueCreate, IssueFilter, IssueUpdate, PmService, PrParams};
 
+pub use spur_mcp::tools::McpHandlerError;
+
 /// Metadata for a single PM-owned MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -29,31 +31,6 @@ pub struct PmMcpDeps {
 #[derive(Clone, Default)]
 pub struct PmMcpModule {
     deps: PmMcpDeps,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum McpHandlerError {
-    #[error("invalid params: {0}")]
-    InvalidParams(String),
-    #[error("not found: {0}")]
-    NotFound(String),
-    #[error("unauthorized: {0}")]
-    Unauthorized(String),
-    #[error("upstream PM failure: {0}")]
-    UpstreamPm(String),
-    #[error("internal: {0}")]
-    Internal(String),
-}
-
-impl McpHandlerError {
-    pub fn json_rpc_code(&self) -> i32 {
-        match self {
-            Self::InvalidParams(_) => -32602,
-            Self::NotFound(_) => -32004,
-            Self::Unauthorized(_) => -32001,
-            Self::UpstreamPm(_) | Self::Internal(_) => -32603,
-        }
-    }
 }
 
 impl PmMcpModule {
