@@ -189,6 +189,10 @@ fn coverage_cmd(extra: Vec<String>) -> ExitCode {
             );
             eprintln!(
                 "would run: cargo {}",
+                command_args(&coverage::llvm_cov_clean_command(&workspace_root)).join(" ")
+            );
+            eprintln!(
+                "would run: cargo {}",
                 command_args(&coverage::llvm_cov_measure_command(
                     &workspace_root,
                     &options.output_path
@@ -235,6 +239,12 @@ fn coverage_cmd(extra: Vec<String>) -> ExitCode {
                 eprintln!("xtask: failed to create {}: {err}", parent.display());
                 return ExitCode::FAILURE;
             }
+        }
+
+        let mut clean = coverage::llvm_cov_clean_command(&workspace_root);
+        if let Err(err) = run_status(&mut clean, "cargo llvm-cov clean --workspace") {
+            eprintln!("xtask: {err}");
+            return ExitCode::FAILURE;
         }
 
         let mut measure = coverage::llvm_cov_measure_command(&workspace_root, &options.output_path);

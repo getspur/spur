@@ -316,6 +316,18 @@ pub(crate) fn llvm_cov_measure_command(workspace_root: &Path, output_path: &Path
     cmd
 }
 
+/// cargo-llvm-cov keeps its own instrumented profiling data separate from
+/// the regular incremental target dir; a plain `cargo clean` doesn't reach
+/// it, and stale profiling data has been observed to replay a prior
+/// measurement's test results instead of the current source. Run this
+/// before every measurement rather than relying on incremental reuse here.
+pub(crate) fn llvm_cov_clean_command(workspace_root: &Path) -> Command {
+    let mut cmd = Command::new(cargo());
+    cmd.current_dir(workspace_root)
+        .args(["llvm-cov", "clean", "--workspace"]);
+    cmd
+}
+
 pub(crate) fn llvm_cov_version_command() -> Command {
     let mut cmd = Command::new(cargo());
     cmd.args(["llvm-cov", "--version"]);
@@ -658,6 +670,23 @@ end_of_record
                 "--lcov".to_owned(),
                 "--output-path".to_owned(),
                 "coverage/lcov.info".to_owned(),
+            ]
+        );
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn llvm_cov_clean_command_targets_workspace() {
+        let root = std::path::PathBuf::from("/workspace");
+
+        let command = llvm_cov_clean_command(&root);
+
+        assert_eq!(
+            crate::command_args(&command),
+            vec![
+                "llvm-cov".to_owned(),
+                "clean".to_owned(),
+                "--workspace".to_owned(),
             ]
         );
         assert_eq!(command.get_current_dir(), Some(root.as_path()));
