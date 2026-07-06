@@ -22,6 +22,7 @@ const WORKER_DENIED_TOOL_CALLS: &[&str] = &[
     "resume_plan",
     "force_reclaim_plan",
     "submit_plan",
+    "spur_loop_doctor",
     "submit_loop",
     "execute_epic",
     "get_reconciler_status",
