@@ -41,6 +41,23 @@ fn submit_loop_success_response(
     )
 }
 
+fn spur_loop_doctor_response(
+    id: Value,
+    output: crate::tool_schemas::SpurLoopDoctorOutput,
+) -> JsonRpcResponse {
+    let output = serde_json::to_value(output).expect("SpurLoopDoctorOutput serializes");
+    let text = serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+    let mut result = output
+        .as_object()
+        .cloned()
+        .expect("SpurLoopDoctorOutput serializes as a JSON object");
+    result.insert(
+        "content".to_string(),
+        json!([{ "type": "text", "text": text }]),
+    );
+    JsonRpcResponse::success(id, Value::Object(result))
+}
+
 fn autonomy_label(level: crate::plan::labels::AutonomyLevel) -> String {
     format!("{}{}", crate::plan::labels::AUTONOMY_PREFIX, level.as_str())
 }
@@ -1382,11 +1399,7 @@ impl McpCallbackServer {
             );
         }
 
-        JsonRpcResponse::success(
-            id,
-            serde_json::to_value(crate::plan::loops::doctor::run(input))
-                .expect("SpurLoopDoctorOutput serializes"),
-        )
+        spur_loop_doctor_response(id, crate::plan::loops::doctor::run(input))
     }
 
     pub(crate) async fn handle_pause_loop(&self, id: Value, args: Value) -> JsonRpcResponse {

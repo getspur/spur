@@ -77,7 +77,7 @@ fn registry_tool_to_rmcp(definition: ToolDefinition) -> Tool {
 /// A successful envelope's `result` must deserialize into a `CallToolResult`
 /// (i.e. the `{ "content": [...] }` shape that modules produce via
 /// [`crate::ToolResponse::json_text`]). Error envelopes become MCP errors.
-fn json_rpc_to_call_tool_result(
+pub fn json_rpc_to_call_tool_result(
     response: JsonRpcResponse,
     tool_name: &str,
 ) -> Result<CallToolResult, McpError> {
