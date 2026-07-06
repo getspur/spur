@@ -394,6 +394,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     use crate::plan::loops::spec::{AutonomyLevel, FailureBackoff, LoopGovernors};
     use crate::plan::{labels, PmLike};
@@ -507,6 +508,89 @@ mod tests {
         fn closed_status(&self) -> &str {
             self.inner.closed_status()
         }
+    }
+
+    #[derive(Clone)]
+    struct RecordingPm {
+        inner: crate::plan::test_util::MockPm,
+        filters: Arc<Mutex<Vec<spur_pm::IssueFilter>>>,
+    }
+
+    impl RecordingPm {
+        fn new() -> Self {
+            Self {
+                inner: crate::plan::test_util::MockPm::new(),
+                filters: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn recorded_filters(&self) -> Vec<spur_pm::IssueFilter> {
+            self.filters.lock().expect("recorded filters lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl PmLike for RecordingPm {
+        async fn get_issue(&self, id: &str) -> anyhow::Result<spur_pm::Issue> {
+            self.inner.get_issue(id).await
+        }
+
+        async fn list_issues(
+            &self,
+            filter: spur_pm::IssueFilter,
+        ) -> anyhow::Result<Vec<spur_pm::IssueSummary>> {
+            self.filters
+                .lock()
+                .expect("recorded filters lock")
+                .push(filter.clone());
+            self.inner.list_issues(filter).await
+        }
+
+        async fn create_issue(&self, params: spur_pm::IssueCreate) -> anyhow::Result<String> {
+            self.inner.create_issue(params).await
+        }
+
+        async fn update_issue(&self, id: &str, update: spur_pm::IssueUpdate) -> anyhow::Result<()> {
+            self.inner.update_issue(id, update).await
+        }
+
+        fn closed_status(&self) -> &str {
+            self.inner.closed_status()
+        }
+    }
+
+    #[tokio::test]
+    async fn load_loop_summaries_requests_loop_issue_type() {
+        let pm = RecordingPm::new();
+
+        let load = load_loop_summaries(&pm).await.expect("load summaries");
+
+        assert!(load.loops.is_empty());
+        let filters = pm.recorded_filters();
+        assert_eq!(filters.len(), 1);
+        let filter = &filters[0];
+        assert_eq!(filter.issue_type.as_deref(), Some("loop"));
+        assert!(filter.include_closed);
+        assert_eq!(filter.limit, Some(LOOP_SUMMARY_LIST_LIMIT));
+    }
+
+    #[tokio::test]
+    async fn load_loop_issue_requests_loop_issue_type() {
+        let pm = RecordingPm::new();
+        let loop_id = "missingloop";
+
+        let issue = load_loop_issue(&pm, loop_id)
+            .await
+            .expect("load loop issue");
+
+        assert!(issue.is_none());
+        let filters = pm.recorded_filters();
+        assert_eq!(filters.len(), 1);
+        let filter = &filters[0];
+        assert_eq!(filter.labels, vec![labels::loop_id_label(loop_id)]);
+        assert_eq!(filter.issue_type.as_deref(), Some("loop"));
+        assert_eq!(filter.limit, Some(2));
+        assert!(!filter.include_closed);
     }
 
     #[tokio::test]
