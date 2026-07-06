@@ -11,7 +11,6 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use thiserror::Error;
 
 use crate::git_blob_oid;
 use crate::store::cache::{emit_base_seed_stats, load_base_seed_for_worktree, BaseArtifactSeed};
@@ -28,6 +27,8 @@ use crate::{
     CODE_SYMBOL_URI_PREFIX,
 };
 
+pub use spur_mcp::tools::McpHandlerError;
+
 /// Metadata for a single graph-owned MCP tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -35,31 +36,6 @@ pub struct ToolDefinition {
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
-}
-
-#[derive(Debug, Error)]
-pub enum McpHandlerError {
-    #[error("invalid params: {0}")]
-    InvalidParams(String),
-    #[error("not found: {0}")]
-    NotFound(String),
-    #[error("unauthorized: {0}")]
-    Unauthorized(String),
-    #[error("upstream PM failure: {0}")]
-    UpstreamPm(String),
-    #[error("internal: {0}")]
-    Internal(String),
-}
-
-impl McpHandlerError {
-    pub fn json_rpc_code(&self) -> i32 {
-        match self {
-            Self::InvalidParams(_) => -32602,
-            Self::NotFound(_) => -32004,
-            Self::Unauthorized(_) => -32001,
-            Self::UpstreamPm(_) | Self::Internal(_) => -32603,
-        }
-    }
 }
 
 #[derive(Clone)]
