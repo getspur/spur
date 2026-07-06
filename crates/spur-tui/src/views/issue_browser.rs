@@ -144,6 +144,18 @@ fn detail_event_to_issue(e: &spur_acp::IssueDetailEvent) -> spur_pm::Issue {
     }
 }
 
+fn detail_event_comments(e: &spur_acp::IssueDetailEvent) -> Vec<spur_pm::Comment> {
+    e.comments
+        .iter()
+        .map(|comment| spur_pm::Comment {
+            id: comment.id.clone(),
+            body: comment.body.clone(),
+            actor: comment.actor.clone(),
+            created_at: comment.created_at,
+        })
+        .collect()
+}
+
 fn sort_issues_parent_first(issues: &mut [spur_pm::IssueSummary]) {
     issues.sort_by(compare_issue_parent_first);
 }
@@ -1491,7 +1503,7 @@ impl View for IssueBrowserView {
                         self.issue_focus = IssueFocus::Loaded {
                             id: requested_id.clone(),
                             issue: Box::new(pm_issue),
-                            comments: issue.comments.clone(),
+                            comments: detail_event_comments(issue),
                         };
                         // Inc 3 (bd-d587.3): apply the post-load mode armed
                         // by `open_external_detail(_, FocusGraph)`. Falls back
