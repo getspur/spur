@@ -70,7 +70,7 @@ The design should reuse this substrate. `/spur-loop` is an ergonomic authoring l
 | D11 | What happens for explicit L2/L3 creation? | Allow only when the user explicitly asks for it, and surface a warning that creation starts at that autonomy directly. | `set_loop_autonomy` enforces ratcheted promotion after creation, but `submit_loop` currently accepts the submitted autonomy. The preview must make that difference visible. |
 | D12 | How are wall-clock phrases handled? | V1 canonicalizes to cadence and warns that exact local time is not honored. | `LoopSpec` has `cadence_secs`, not cron or timezone fields. A user may approve the cadence normalization, but the preview must not imply exact 9AM execution. |
 | D13 | Is the doctor gated? | Yes at the handler layer: it checks the same loop feature/backend prerequisites as `submit_loop`. | A successful preview followed by a guaranteed license/backend failure would be poor UX. The pure doctor module remains testable; the handler supplies environment checks. |
-| D14 | How is duplicate approval handled? | The doctor returns a `client_idempotency_key` derived from the fingerprint; `/spur-loop` submission must pass it through to `submit_loop`. | Approval retries after reconnect or repeated user action should not create duplicate durable loops. This requires adding idempotency support to `submit_loop`, mirroring the submit-plan pattern. |
+| D14 | How is duplicate approval handled? | The doctor returns a `client_idempotency_key` derived from the fingerprint; `/spur-loop` submission must pass it through to `submit_loop`. | Approval retries after reconnect or repeated user action should not create duplicate durable loops. This requires adding idempotency support to `submit_loop`, mirroring the submit-plan TTL/dedup storage mechanism only; the typed `SubmitLoopParams.client_idempotency_key` field in section 9.3 is authoritative, not `submit_plan`'s raw-`Value` parameter parsing style. |
 
 ## 5. Architecture
 
@@ -307,6 +307,8 @@ Add the handler. It should:
 - never create a loop issue,
 - never call `submit_loop` internally.
 
+Keep the new handler code in this file as a thin dispatch shim that parses and routes only; all real doctor, normalization, and validation logic must live in `plan::loops::doctor` and `plan::loops::validation` rather than growing inline logic in `server/handlers/plan.rs`.
+
 ### 9.3 `crates/spur-core/src/tool_schemas.rs`
 
 Add the public MCP schemas:
@@ -318,6 +320,7 @@ Add the public MCP schemas:
 - optional `client_idempotency_key` on `SubmitLoopParams`.
 
 These should follow sibling loop schemas: `serde(deny_unknown_fields)`, `Serialize`/`Deserialize`, and `JsonSchema`.
+For `SubmitLoopParams.client_idempotency_key`, this typed schema field is authoritative; do not mirror `submit_plan`'s raw-`Value` argument parsing style for this parameter.
 
 ### 9.4 `crates/spur-core/src/plan/loops/validation.rs`
 
@@ -351,6 +354,7 @@ Keep `LoopSpec` stable unless implementation needs a small shared type for docto
 ### 9.7 `crates/spur-core/src/server/handlers/plan.rs` submit-loop idempotency
 
 Extend `submit_loop` to accept `client_idempotency_key` and de-duplicate repeated create requests for the same key, following the existing `submit_plan` idempotency precedent. The exact storage/replay mechanism belongs in the implementation plan, but `/spur-loop` must not be exposed without a duplicate-create guard.
+The precedent lives in `crates/spur-core/src/submit_plan_dedup.rs`, the TTL-based, beads-label-backed registry with `REGISTRY_LABEL`, `KEY_LABEL_PREFIX`, `TTL`, `key_label()`, `lookup()`, `record()`, and `registry_epic()`. Generalize or reuse that registry, such as by parameterizing it over feature/kind or extracting a shared helper, rather than forking a parallel loop-specific copy. Any `server/handlers/plan.rs` changes for this idempotency path must also follow section 9.2's thin-shim rule and delegate real logic out to `plan::loops::doctor` / `plan::loops::validation` or the shared dedup helper.
 
 ### 9.8 Documentation
 
