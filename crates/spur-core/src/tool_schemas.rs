@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spur_acp::DelegationPlan;
 
-use crate::plan::loops::spec::LoopSpec;
+use crate::plan::loops::spec::{LoopEscalation, LoopGovernors, LoopSpec};
 use crate::{BaseSpec, OverlayCommit};
 
 pub fn schema_value<T: JsonSchema>() -> Value {
@@ -207,6 +207,82 @@ pub struct RecoverOrphanedDispatchInput {
 #[serde(deny_unknown_fields)]
 pub struct SubmitLoopParams {
     pub spec: LoopSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpurLoopDoctorParams {
+    pub original_command: String,
+    pub draft: LoopDoctorDraft,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoopDoctorDraft {
+    pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cadence_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<String>,
+    pub tasks: Vec<LoopDoctorDraftTask>,
+    #[serde(default)]
+    pub governors: LoopGovernors,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<LoopEscalation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoopDoctorDraftTask {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_overrides: Option<HashMap<String, String>>,
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_files: Vec<String>,
+    #[serde(default)]
+    pub triage: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issue_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpurLoopDoctorOutput {
+    pub status: String,
+    pub friendly_preview: String,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_submit_loop_params: Option<SubmitLoopParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
