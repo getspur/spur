@@ -37,6 +37,8 @@ pub struct MentionEntry {
     pub effort: Option<String>,
     /// Registered kind for worker mention rows.
     pub worker_kind: Option<AgentKind>,
+    /// Command + effective args used to decide whether a cached catalog row is stale.
+    pub worker_cli_identity: Option<String>,
     /// Optional relative path for code graph file and symbol entries.
     pub code_path: Option<String>,
     /// Optional enclosing scope for code graph symbol entries.
@@ -66,6 +68,7 @@ impl Default for MentionEntry {
             model: None,
             effort: None,
             worker_kind: None,
+            worker_cli_identity: None,
             code_path: None,
             code_scope: None,
             tag: None,
@@ -124,6 +127,7 @@ pub fn entry_for_path(cwd: &Path, abs: &Path) -> Option<MentionEntry> {
         model: None,
         effort: None,
         worker_kind: None,
+        worker_cli_identity: None,
         code_path: None,
         code_scope: None,
         tag: None,
