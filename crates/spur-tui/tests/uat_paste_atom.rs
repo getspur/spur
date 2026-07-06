@@ -56,6 +56,7 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::GetIssueGraph { .. } => "GetIssueGraph",
         UserInput::UpdateIssue { .. } => "UpdateIssue",
         UserInput::SetSessionConfigOption { .. } => "SetSessionConfigOption",
+        UserInput::UpdateAgentConfig { .. } => "UpdateAgentConfig",
         UserInput::SetSessionModel { .. } => "SetSessionModel",
         UserInput::AddIssueComment { .. } => "AddIssueComment",
         UserInput::NewSession => "NewSession",

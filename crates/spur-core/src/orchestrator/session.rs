@@ -2078,7 +2078,7 @@ impl Orchestrator {
         let delegation_handle = tokio::spawn(delegation::handle_delegations(
             delegation_channel,
             self.repo_root.clone(),
-            self.config.agents.entries.clone(),
+            Arc::clone(&self.agent_configs),
             max_concurrent,
             self.config.worktree.clone(),
             self.event_tx.clone(),
@@ -2463,7 +2463,7 @@ impl Orchestrator {
         let delegation_handle = tokio::spawn(delegation::handle_delegations(
             delegation_channel,
             self.repo_root.clone(),
-            self.config.agents.entries.clone(),
+            Arc::clone(&self.agent_configs),
             max_concurrent,
             self.config.worktree.clone(),
             self.event_tx.clone(),

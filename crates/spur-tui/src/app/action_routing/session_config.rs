@@ -25,6 +25,57 @@ impl App {
                 None
             }
 
+            Action::AgentConfigSaveRequested {
+                name,
+                updated_entry,
+            } => {
+                let mut updated_app_config = false;
+                {
+                    let config = std::sync::Arc::make_mut(&mut self.config);
+                    if let Some(slot) = config
+                        .agents
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.name == name)
+                    {
+                        *slot = updated_entry.clone();
+                        updated_app_config = true;
+                    }
+                }
+
+                if !updated_app_config {
+                    return Some(Action::FlashHint {
+                        message: format!("agent config `{name}` is not configured"),
+                    });
+                }
+
+                if let Some(browser) = self.agent_config_browser.as_mut() {
+                    browser.replace_agent_config(&name, updated_entry.clone());
+                }
+                self.sync_dashboard_workers();
+                self.dirty = true;
+
+                let Some(tx) = self.user_input_tx.as_ref() else {
+                    return Some(Action::FlashHint {
+                        message: "agent config save failed: backend unavailable".into(),
+                    });
+                };
+
+                if tx
+                    .try_send(UserInput::UpdateAgentConfig {
+                        name,
+                        updated_entry,
+                    })
+                    .is_err()
+                {
+                    return Some(Action::FlashHint {
+                        message: "agent config save failed: backend queue full".into(),
+                    });
+                }
+
+                None
+            }
+
             Action::SetSessionModel { session_id, value } => {
                 if let Some(tx) = self.user_input_tx.as_ref() {
                     let _ = tx.try_send(UserInput::SetSessionModel { session_id, value });
