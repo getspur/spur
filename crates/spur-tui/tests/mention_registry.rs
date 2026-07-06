@@ -40,6 +40,7 @@ fn file_mentions_index_and_fuzzy_match() {
 fn brain_session_includes_workers_in_empty_query() {
     let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
         name: "claude-code".into(),
+        kind: spur_acp::AgentKind::ClaudeCodeAcp,
         description: Some("Refactors Rust".into()),
         tier: Some("specialist".into()),
     }]);
@@ -211,6 +212,7 @@ fn empty_query_pins_workers_first() {
     let workers: Vec<WorkerMentionDescriptor> = (0..6)
         .map(|i| WorkerMentionDescriptor {
             name: format!("worker-{}", i),
+            kind: spur_acp::AgentKind::Generic,
             description: None,
             tier: None,
         })
@@ -251,6 +253,7 @@ fn empty_query_caps_workers_at_pin_cap() {
     let workers: Vec<WorkerMentionDescriptor> = (0..10)
         .map(|i| WorkerMentionDescriptor {
             name: format!("w{:02}", i),
+            kind: spur_acp::AgentKind::Generic,
             description: None,
             tier: None,
         })
@@ -290,6 +293,7 @@ fn empty_query_caps_workers_at_pin_cap() {
 fn typed_query_boosts_worker_in_ambiguous_match() {
     let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
         name: "claude-code".into(),
+        kind: spur_acp::AgentKind::ClaudeCodeAcp,
         description: None,
         tier: None,
     }]);
@@ -468,6 +472,7 @@ fn worker_and_issue_rows_remain_visible_for_matching_typed_queries() {
     let graph_path = graph_fixture_path();
     let mut reg = MentionRegistry::for_brain_session(vec![WorkerMentionDescriptor {
         name: "codex".into(),
+        kind: spur_acp::AgentKind::CodexAcp,
         description: Some("Writes patches".into()),
         tier: Some("generalist".into()),
     }])
