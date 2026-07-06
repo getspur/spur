@@ -22,6 +22,17 @@ impl App {
                 self.navigate_to(ViewId::SessionPicker);
                 None
             }
+            Action::NavigateTo(ViewId::AgentConfigBrowser { preselect }) => {
+                let entries = self.config.agents.entries.clone();
+                if let Some(view) = self.agent_config_browser.as_mut() {
+                    view.set_entries(entries, preselect.clone());
+                } else {
+                    self.agent_config_browser =
+                        Some(AgentConfigBrowserView::new(entries, preselect.clone()));
+                }
+                self.navigate_to(ViewId::AgentConfigBrowser { preselect });
+                None
+            }
             Action::NavigateTo(ViewId::PlanInspector(session)) => {
                 self.plan_inspector = Some(PlanInspectorView::new(session.clone()));
                 self.navigate_to(ViewId::PlanInspector(session));

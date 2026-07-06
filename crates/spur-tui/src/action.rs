@@ -117,6 +117,12 @@ pub enum Action {
         config_id: String,
         value: String,
     },
+    /// Persist and live-apply the curated editable subset of one configured
+    /// worker agent.
+    AgentConfigSaveRequested {
+        name: String,
+        updated_entry: spur_acp::AgentConfig,
+    },
     /// Dedicated `session/set_model` dispatch (M9 F-C). Emitted by
     /// the submit-router consumer when caps advertise
     /// `supports_set_model()` so the orchestrator can route through
@@ -305,6 +311,9 @@ pub enum PermissionChoice {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ViewId {
     Dashboard,
+    AgentConfigBrowser {
+        preselect: Option<String>,
+    },
     IssueBrowser,
     PlanBrowser,
     LoopBrowser,

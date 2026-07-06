@@ -57,6 +57,7 @@ use crate::components::tombstone::{Tombstone, TombstoneKind};
 use crate::components::upgrade_modal::{self, UpgradeModalState};
 use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
+use crate::views::agent_config_browser::AgentConfigBrowserView;
 use crate::views::dashboard::{DashboardMode, DashboardView};
 use crate::views::issue_browser::IssueBrowserView;
 use crate::views::loop_browser::LoopBrowserView;
@@ -134,6 +135,12 @@ pub enum UserInput {
     SetSessionConfigOption {
         config_id: String,
         value: String,
+    },
+    /// Persist and live-apply one configured agent's editable settings.
+    /// Maps 1:1 to `spur_core::InteractiveInput::UpdateAgentConfig`.
+    UpdateAgentConfig {
+        name: String,
+        updated_entry: spur_acp::AgentConfig,
     },
     /// Dedicated `session/set_model` dispatch (M9 F-C). Maps 1:1 to
     /// `spur_core::InteractiveInput::SetSessionModel`. The orchestrator
@@ -320,6 +327,7 @@ pub struct App {
     pub(super) dashboard: DashboardView,
     session_detail: Option<SessionDetailView>,
     session_picker: Option<SessionPickerView>,
+    agent_config_browser: Option<AgentConfigBrowserView>,
     loop_browser: Option<LoopBrowserView>,
     plan_browser: Option<PlanBrowserView>,
     plan_inspector: Option<PlanInspectorView>,
@@ -540,6 +548,11 @@ impl App {
                     p.tick()
                 }
             }
+            ViewId::AgentConfigBrowser { .. } => {
+                if let Some(view) = self.agent_config_browser.as_mut() {
+                    view.tick();
+                }
+            }
             ViewId::PlanInspector(_) => {
                 if let Some(view) = self.plan_inspector.as_mut() {
                     view.tick();
@@ -639,6 +652,11 @@ impl App {
             ViewId::SessionPicker => {
                 if let Some(ref mut p) = self.session_picker {
                     p.render(frame, view_area, &ctx);
+                }
+            }
+            ViewId::AgentConfigBrowser { .. } => {
+                if let Some(ref mut view) = self.agent_config_browser {
+                    view.render(frame, view_area, &ctx);
                 }
             }
             ViewId::PlanInspector(_) => {
