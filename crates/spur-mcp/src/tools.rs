@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 /// Metadata for a single MCP tool, returned by `tools/list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,6 +9,52 @@ pub struct ToolDefinition {
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+}
+
+#[derive(Debug, Error)]
+pub enum McpHandlerError {
+    #[error("invalid params: {0}")]
+    InvalidParams(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+    #[error("upstream PM failure: {0}")]
+    UpstreamPm(String),
+    #[error("internal: {0}")]
+    Internal(String),
+}
+
+impl McpHandlerError {
+    pub fn json_rpc_code(&self) -> i32 {
+        match self {
+            Self::InvalidParams(_) => -32602,
+            Self::NotFound(_) => -32004,
+            Self::Unauthorized(_) => -32001,
+            Self::UpstreamPm(_) | Self::Internal(_) => -32603,
+        }
+    }
+
+    pub fn to_jsonrpc_response(&self, id: Value) -> Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": self.json_rpc_code(),
+                "message": self.to_string(),
+            }
+        })
+    }
+}
+
+impl From<McpHandlerError> for rmcp::ErrorData {
+    fn from(value: McpHandlerError) -> Self {
+        rmcp::ErrorData::new(
+            rmcp::model::ErrorCode(value.json_rpc_code()),
+            value.to_string(),
+            None,
+        )
+    }
 }
 
 /// Returns the infrastructure-owned `spur-mcp` brain tool definitions.
