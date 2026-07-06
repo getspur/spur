@@ -9,10 +9,9 @@ use crate::db::{
     },
     freshness::{freshness_gate, FreshnessGate},
     paths::analyst_db_path,
+    sql::{query_rows, MAX_QUERY_ROWS},
 };
-use crate::mcp::{value::arrow::arrow_value, McpHandlerError};
-
-const MAX_QUERY_ROWS: usize = 1000;
+use crate::mcp::McpHandlerError;
 
 pub async fn query(args: &Value) -> Result<Value, McpHandlerError> {
     let request = QueryRequest::parse(args)?;
@@ -110,42 +109,15 @@ fn query_read_only(db_path: &Path, sql: &str, allow_stale: bool) -> Result<Value
     load_analyst_lance_extension(&conn);
     let _ = load_analyst_duckpgq_extension(&conn);
 
-    let mut stmt = conn.prepare(sql).map_err(|error| {
-        McpHandlerError::Internal(format!("failed to prepare DuckDB query: {error}"))
-    })?;
-    let mut reader = stmt.query_arrow([]).map_err(|error| {
-        McpHandlerError::Internal(format!("failed to execute DuckDB query: {error}"))
-    })?;
-    let schema = reader.get_schema();
-    let columns = schema
-        .fields()
-        .iter()
-        .map(|field| field.name().to_owned())
-        .collect::<Vec<_>>();
-
-    let mut rows = Vec::new();
-    let mut truncated = false;
-    'batches: for batch in &mut reader {
-        for row in 0..batch.num_rows() {
-            if rows.len() == MAX_QUERY_ROWS {
-                truncated = true;
-                break 'batches;
-            }
-            let mut values = Vec::with_capacity(batch.num_columns());
-            for column in batch.columns() {
-                values.push(arrow_value(column.as_ref(), row)?);
-            }
-            rows.push(Value::Array(values));
-        }
-    }
-    let row_count = rows.len();
+    let result = query_rows(&conn, sql, MAX_QUERY_ROWS)?;
+    let row_count = result.row_count();
 
     let mut response = json!({
         "db_path": db_path.display().to_string(),
-        "columns": columns,
-        "rows": rows,
+        "columns": result.columns,
+        "rows": result.rows,
         "row_count": row_count,
-        "truncated": truncated
+        "truncated": result.truncated
     });
     if let Some(warning) = staleness_warning {
         response["staleness_warning"] = Value::String(warning);
