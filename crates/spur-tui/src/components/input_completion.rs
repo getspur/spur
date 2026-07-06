@@ -350,6 +350,7 @@ impl InputCompletionPort {
                 text,
                 uri,
                 name,
+                unconsumed_suffix,
                 replace_from,
             } => {
                 if let Some(prefix_start) = replace_from {
@@ -365,6 +366,9 @@ impl InputCompletionPort {
                     replace_trigger_token(input_bar, anchor, "");
                 }
                 input_bar.insert_atom(text, uri, name);
+                if let Some(suffix) = unconsumed_suffix.filter(|suffix| !suffix.is_empty()) {
+                    input_bar.insert_paste(&suffix);
+                }
             }
             RetrievalAccept::ReplaceTriggerToken {
                 prefix_start,
