@@ -2329,6 +2329,355 @@ mod prompt_usage_cost_update_tests {
 }
 
 #[cfg(test)]
+mod loop_helper_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use serde_json::json;
+    use spur_acp::connection::AgentConnection;
+    use spur_acp::types::AgentHealth;
+    use spur_acp::{
+        InitializeRequest, InitializeResponse, McpServer, NewSessionResponse, PromptRequest,
+        SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionConfigValueId, SessionNotification,
+    };
+    use std::path::{Path, PathBuf};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    use crate::plan::labels;
+    use crate::plan::loops::spec::{AutonomyLevel, FailureBackoff, LoopGovernors, LoopSpec};
+
+    struct NoopConnection;
+
+    #[async_trait]
+    impl AgentConnection for NoopConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<InitializeResponse> {
+            unimplemented!("not needed for loop helper tests")
+        }
+
+        async fn new_session(
+            &mut self,
+            _cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<NewSessionResponse> {
+            unimplemented!("not needed for loop helper tests")
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = SessionNotification> + Send>>> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
+        }
+    }
+
+    fn select_option(
+        id: &str,
+        current: &str,
+        category: Option<SessionConfigOptionCategory>,
+    ) -> SessionConfigOption {
+        let choices: Vec<SessionConfigSelectOption> = if current.is_empty() {
+            Vec::new()
+        } else {
+            vec![SessionConfigSelectOption::new(
+                SessionConfigValueId::new(current),
+                current,
+            )]
+        };
+        let option = SessionConfigOption::select(
+            SessionConfigId::new(id),
+            id,
+            SessionConfigValueId::new(current),
+            choices,
+        );
+        if let Some(category) = category {
+            option.category(category)
+        } else {
+            option
+        }
+    }
+
+    fn test_spec(loop_id: &str, goal: &str) -> LoopSpec {
+        LoopSpec {
+            loop_id: loop_id.to_string(),
+            goal: goal.to_string(),
+            pattern: Some("helper-test".to_string()),
+            cadence_secs: 60,
+            autonomy: AutonomyLevel::L1,
+            template: json!({
+                "tasks": [{
+                    "task_id": "triage",
+                    "agent": "codex",
+                    "task": "Triage the loop",
+                    "labels": [labels::LOOP_TRIAGE_TASK]
+                }]
+            }),
+            governors: LoopGovernors {
+                max_cost_micros_per_generation: Some(2_000_000),
+                max_generations_per_day: Some(24),
+                max_tasks_per_generation: Some(5),
+                denylist_globs: Vec::new(),
+                consecutive_failure_backoff: Some(FailureBackoff {
+                    k: 2,
+                    factor: 2,
+                    auto_pause_after: 4,
+                }),
+            },
+            escalation: None,
+        }
+    }
+
+    async fn test_pm_service(repo: &Path) -> Arc<PmService> {
+        let workspace = spur_pm::test_workspace::TestBeadsWorkspace::init();
+        let beads_dir = repo.join(".beads");
+        std::fs::create_dir_all(&beads_dir).expect("create test .beads directory");
+        workspace.copy_db_to(&beads_dir);
+        Arc::new(
+            PmService::try_new(None, true, false, repo, None)
+                .await
+                .expect("PmService::try_new failed")
+                .expect("expected beads pm"),
+        )
+    }
+
+    async fn create_loop_issue(pm: &PmService, loop_id: &str, goal: &str) -> String {
+        let spec = test_spec(loop_id, goal);
+        pm.create_issue(spur_pm::IssueCreate {
+            title: format!("Loop: {goal}"),
+            description: Some(spec.to_sentinel_body()),
+            labels: vec![
+                labels::loop_id_label(loop_id),
+                labels::loop_next_run_label(123),
+            ],
+            issue_type: Some("task".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("create loop issue")
+    }
+
+    async fn next_event(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<SpurEventBody>,
+    ) -> SpurEventBody {
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event channel closed")
+    }
+
+    fn assert_loop_error(
+        body: SpurEventBody,
+        expected_operation: &str,
+        expected_loop_id: Option<&str>,
+        expected_error: &str,
+    ) {
+        match body {
+            SpurEventBody::LoopCommandError {
+                operation,
+                loop_id,
+                error,
+            } => {
+                assert_eq!(operation, expected_operation);
+                assert_eq!(loop_id.as_deref(), expected_loop_id);
+                assert_eq!(error, expected_error);
+            }
+            other => panic!("expected LoopCommandError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn current_model_config_value_prefers_semantic_model_category() {
+        let legacy = select_option("model", "legacy-model", None);
+        let categorized = select_option(
+            "model-picker",
+            "category-model",
+            Some(SessionConfigOptionCategory::Model),
+        );
+
+        assert_eq!(
+            current_model_config_value(&[legacy, categorized]),
+            Some("category-model")
+        );
+    }
+
+    #[test]
+    fn current_model_config_value_uses_legacy_uncategorized_model_id() {
+        let effort = select_option(
+            "effort",
+            "high",
+            Some(SessionConfigOptionCategory::ThoughtLevel),
+        );
+        let legacy = select_option("model", "legacy-model", None);
+
+        assert_eq!(
+            current_model_config_value(&[effort, legacy]),
+            Some("legacy-model")
+        );
+    }
+
+    #[test]
+    fn current_model_config_value_ignores_missing_and_empty_values() {
+        let effort = select_option(
+            "effort",
+            "high",
+            Some(SessionConfigOptionCategory::ThoughtLevel),
+        );
+        assert_eq!(current_model_config_value(&[effort]), None);
+
+        let empty_model = select_option("model", "", Some(SessionConfigOptionCategory::Model));
+        assert_eq!(current_model_config_value(&[empty_model]), None);
+    }
+
+    #[tokio::test]
+    async fn emit_loop_command_error_forwards_operation_loop_and_error() {
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        Orchestrator::emit_loop_command_error(
+            &funnel,
+            "InspectLoop",
+            Some("loop-7".to_string()),
+            "boom",
+        );
+
+        assert_loop_error(
+            next_event(&mut events).await,
+            "InspectLoop",
+            Some("loop-7"),
+            "boom",
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_loop_summaries_without_pm_emits_refresh_error() {
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        Orchestrator::emit_loop_summaries(None, funnel).await;
+
+        assert_loop_error(
+            next_event(&mut events).await,
+            "RefreshLoops",
+            None,
+            "No issue tracker configured",
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_loop_summaries_emits_loaded_loops_from_pm() {
+        let repo = TempDir::new().expect("repo tempdir");
+        let pm = test_pm_service(repo.path()).await;
+        let issue_id = create_loop_issue(pm.as_ref(), "summary-loop", "Keep CI green").await;
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        Orchestrator::emit_loop_summaries(Some(pm), funnel).await;
+
+        match next_event(&mut events).await {
+            SpurEventBody::LoopsLoaded { loops, warnings } => {
+                assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+                assert_eq!(loops.len(), 1);
+                assert_eq!(loops[0].loop_id, "summary-loop");
+                assert_eq!(loops[0].issue_id, issue_id);
+                assert_eq!(loops[0].title, "Loop: Keep CI green");
+                assert_eq!(loops[0].goal_preview.as_deref(), Some("Keep CI green"));
+                assert_eq!(loops[0].next_run, Some(123));
+            }
+            other => panic!("expected LoopsLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_loop_detail_without_pm_emits_inspect_error() {
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        Orchestrator::emit_loop_detail(None, funnel, "loop-7".to_string()).await;
+
+        assert_loop_error(
+            next_event(&mut events).await,
+            "InspectLoop",
+            Some("loop-7"),
+            "No issue tracker configured",
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_loop_detail_emits_unknown_loop_error() {
+        let repo = TempDir::new().expect("repo tempdir");
+        let pm = test_pm_service(repo.path()).await;
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        Orchestrator::emit_loop_detail(Some(pm), funnel, "missing-loop".to_string()).await;
+
+        assert_loop_error(
+            next_event(&mut events).await,
+            "InspectLoop",
+            Some("missing-loop"),
+            "unknown loop_id 'missing-loop'",
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_loop_detail_emits_loaded_detail_from_pm() {
+        let repo = TempDir::new().expect("repo tempdir");
+        let pm = test_pm_service(repo.path()).await;
+        let issue_id = create_loop_issue(pm.as_ref(), "detail-loop", "Inspect loop state").await;
+        let (funnel, mut events) = crate::event_funnel::test_channel();
+
+        Orchestrator::emit_loop_detail(Some(pm), funnel, "detail-loop".to_string()).await;
+
+        match next_event(&mut events).await {
+            SpurEventBody::LoopDetailLoaded { detail } => {
+                assert_eq!(detail.loop_id, "detail-loop");
+                assert_eq!(detail.issue_id, issue_id);
+                assert_eq!(detail.title, "Loop: Inspect loop state");
+                assert_eq!(detail.goal_preview.as_deref(), Some("Inspect loop state"));
+                assert_eq!(detail.cadence_secs, 60);
+                assert_eq!(detail.effective_interval_secs, 60);
+                assert_eq!(detail.next_run, Some(123));
+                assert_eq!(detail.consecutive_failures, 0);
+                assert!(detail.recent_runs.is_empty());
+            }
+            other => panic!("expected LoopDetailLoaded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_loop_mcp_server_error_depends_on_brain_presence() {
+        assert_eq!(
+            Orchestrator::missing_loop_mcp_server_error(&None),
+            "No active brain session - start one to claim plans"
+        );
+
+        let brain = BrainSession::for_test(
+            Box::new(NoopConnection),
+            "acp-session",
+            SessionId("spur-session".to_string()),
+            "codex",
+        );
+        assert_eq!(
+            Orchestrator::missing_loop_mcp_server_error(&Some(brain)),
+            "Brain session initializing - try again in a moment"
+        );
+    }
+}
+
+#[cfg(test)]
 mod peer_mailbox_drain_tests {
     use super::delegation::peer_mailbox::drain_peer_acks_with_timeout;
     use crate::peer_mailbox::router::Acceptance;
@@ -3504,7 +3853,9 @@ mod interactive_input_tests {
 
 #[cfg(test)]
 mod phase5_orchestrator_finalization_tests {
-    use super::{commit_rendered_batch, session::retire_brain_session, TurnGuard};
+    use super::{
+        commit_rendered_batch, session::retire_brain_session, take_rendered_batch, TurnGuard,
+    };
     use crate::continuation_bridge::{new_overflow_buf, ContinuationEventSink, RenderOutcome};
     use crate::event_funnel::spawn_funnel;
     use crate::handlers::PlanResolver;
@@ -3588,6 +3939,44 @@ mod phase5_orchestrator_finalization_tests {
             ScheduledAction::ContinuationPrompt(batch) => batch,
             other => panic!("expected ContinuationPrompt, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn take_rendered_batch_returns_none_without_consuming_outcome() {
+        let mut drained_batch = None;
+        let mut render_outcome = Some(RenderOutcome {
+            blocks: vec![],
+            delivered_keys: vec![],
+            deferred_spill: vec![],
+            dropped_oversized: vec![],
+        });
+
+        assert!(take_rendered_batch(&mut drained_batch, &mut render_outcome).is_none());
+        assert!(render_outcome.is_some());
+    }
+
+    #[test]
+    fn take_rendered_batch_takes_batch_and_matching_outcome() {
+        let session = SessionId("brain-take-rendered".into());
+        let (mut scheduler, _sink) = mk_scheduler(Some(session.clone()));
+        let continuation = mk_cont("take-me", 1, &session);
+        let delivered_key = DelegationKey::from(&continuation);
+        scheduler.push_continuation(continuation);
+        let mut drained_batch = Some(continuation_batch(&mut scheduler));
+        let mut render_outcome = Some(RenderOutcome {
+            blocks: vec![],
+            delivered_keys: vec![delivered_key.clone()],
+            deferred_spill: vec![],
+            dropped_oversized: vec![],
+        });
+
+        let (batch, outcome) = take_rendered_batch(&mut drained_batch, &mut render_outcome)
+            .expect("batch and outcome should be paired");
+
+        assert!(drained_batch.is_none());
+        assert!(render_outcome.is_none());
+        assert_eq!(outcome.delivered_keys, vec![delivered_key]);
+        scheduler.rollback(batch, vec![]);
     }
 
     fn test_funnel() -> (
