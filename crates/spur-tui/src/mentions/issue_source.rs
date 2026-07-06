@@ -95,6 +95,7 @@ impl MentionSource for IssueMentionSource {
                     model: None,
                     effort: None,
                     worker_kind: None,
+                    worker_cli_identity: None,
                     code_path: None,
                     code_scope: None,
                     tag: descriptor.priority.map(|priority| format!("P{}", priority)),

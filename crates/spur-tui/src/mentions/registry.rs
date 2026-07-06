@@ -73,6 +73,7 @@ pub struct MentionRegistry {
     code_graph_token: Option<CodeGraphToken>,
     code_graph_auto_discovery: bool,
     agent_model_catalog_path: Option<PathBuf>,
+    pending_agent_model_catalog_probe_requests: HashSet<String>,
     matcher: Matcher,
     #[cfg(any(test, debug_assertions))]
     query_call_count: usize,
@@ -115,6 +116,7 @@ impl MentionRegistry {
             code_graph_token: None,
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -134,6 +136,7 @@ impl MentionRegistry {
             code_graph_token: None,
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -291,6 +294,15 @@ impl MentionRegistry {
                 .code_payloads
                 .retain(|uri, _| !is_graph_uri(uri) || keep.contains(uri.as_str()));
         }
+    }
+
+    pub fn drain_agent_model_catalog_probe_requests(&mut self) -> Vec<String> {
+        let mut requests: Vec<String> = self
+            .pending_agent_model_catalog_probe_requests
+            .drain()
+            .collect();
+        requests.sort();
+        requests
     }
 
     pub fn set_issue_snapshot(&mut self, issues: Vec<IssueMentionDescriptor>) {
@@ -491,6 +503,7 @@ impl MentionRegistry {
             query,
             &self.cache,
             self.agent_model_catalog_path.as_ref(),
+            &mut self.pending_agent_model_catalog_probe_requests,
             &mut self.matcher,
         ) {
             return vec![composed];
@@ -541,6 +554,7 @@ impl MentionRegistry {
         query: &str,
         cache: &HashMap<&'static str, CachedSourceIndex>,
         catalog_path: Option<&PathBuf>,
+        pending_probe_requests: &mut HashSet<String>,
         matcher: &mut Matcher,
     ) -> Option<MentionEntry> {
         let tokens = query_tokens(query);
@@ -564,6 +578,12 @@ impl MentionRegistry {
         }
         let worker_kind = Self::worker_kind(cache, &worker_name);
         let catalog_entry = Self::worker_catalog_entry(catalog_path, &worker_name);
+        if Self::catalog_probe_needed(
+            catalog_entry.as_ref(),
+            worker_entry.worker_cli_identity.as_deref(),
+        ) {
+            pending_probe_requests.insert(worker_name.clone());
+        }
 
         let mut token_index = 1usize;
         let mut slot = WorkerMentionSlot::Worker;
@@ -712,6 +732,18 @@ impl MentionRegistry {
             .entries
             .get(worker_name)
             .cloned()
+    }
+
+    fn catalog_probe_needed(
+        entry: Option<&agent_model_catalog::WorkerCatalogEntry>,
+        cli_identity: Option<&str>,
+    ) -> bool {
+        match entry {
+            None => true,
+            Some(entry) => cli_identity
+                .map(|identity| entry.is_stale(chrono::Utc::now(), identity))
+                .unwrap_or(false),
+        }
     }
 
     fn high_confidence_entry_match<'a>(
@@ -1122,6 +1154,7 @@ fn append_section_rows(
         model: None,
         effort: None,
         worker_kind: None,
+        worker_cli_identity: None,
         code_path: None,
         code_scope: None,
         tag: None,
@@ -1294,7 +1327,7 @@ mod tests {
         IssueMentionDescriptor, IssueMentionSource, MentionKind, MentionSource,
         WorkerMentionDescriptor, WorkerMentionSource,
     };
-    use chrono::Utc;
+    use chrono::{Duration as ChronoDuration, Utc};
     use filetime::{set_file_mtime, FileTime};
     use spur_acp::agent_model_catalog::{
         self, AgentModelCatalogV1, ConfigOptionChoice, WorkerCatalogEntry,
@@ -1327,6 +1360,7 @@ mod tests {
         WorkerMentionDescriptor {
             name: name.to_string(),
             kind,
+            cli_identity: "test".to_string(),
             description: None,
             tier: None,
         }
@@ -1391,6 +1425,7 @@ mod tests {
             code_graph_token: None,
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -1469,6 +1504,69 @@ mod tests {
         assert_eq!(composed.agent, None);
         assert_eq!(composed.model.as_deref(), Some("gemini-2.5-pro"));
         assert_eq!(composed.effort, None);
+    }
+
+    #[test]
+    fn worker_query_marks_missing_catalog_entry_for_background_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+
+        let hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex", 10);
+
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+        assert_eq!(composed.uri, "worker://codex");
+        assert_eq!(
+            registry.drain_agent_model_catalog_probe_requests(),
+            vec!["codex".to_string()]
+        );
+    }
+
+    #[test]
+    fn worker_query_uses_stale_catalog_entry_and_marks_background_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agent-model-catalog.json");
+        let mut entries = HashMap::new();
+        entries.insert(
+            "codex".to_string(),
+            WorkerCatalogEntry {
+                probed_at: Utc::now() - ChronoDuration::hours(25),
+                cli_identity: "test".to_string(),
+                models: vec![choice("gpt-5", "GPT-5")],
+                efforts: vec![choice("high", "High")],
+            },
+        );
+        agent_model_catalog::write(
+            &path,
+            &AgentModelCatalogV1 {
+                version: 1,
+                entries,
+            },
+        )
+        .unwrap();
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(path);
+
+        let hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "codex gpt-5 high",
+            10,
+        );
+
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+        assert_eq!(composed.uri, "worker://codex?model=gpt-5&effort=high");
+        assert_eq!(
+            registry.drain_agent_model_catalog_probe_requests(),
+            vec!["codex".to_string()]
+        );
     }
 
     #[test]
@@ -1729,6 +1827,7 @@ mod tests {
             code_graph_token: None,
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -1790,6 +1889,7 @@ mod tests {
             Box::new(WorkerMentionSource::new(vec![WorkerMentionDescriptor {
                 name: "alpha".into(),
                 kind: AgentKind::Generic,
+                cli_identity: "alpha".into(),
                 description: None,
                 tier: None,
             }])),
@@ -1819,6 +1919,7 @@ mod tests {
             code_graph_token: None,
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -1874,6 +1975,7 @@ mod tests {
             model: None,
             effort: None,
             worker_kind: None,
+            worker_cli_identity: None,
             code_path,
             code_scope: None,
             tag: None,
@@ -1892,6 +1994,7 @@ mod tests {
             code_graph_token: None,
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
+            pending_agent_model_catalog_probe_requests: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -2005,6 +2108,7 @@ mod tests {
             .map(|i| WorkerMentionDescriptor {
                 name: format!("worker-{i}"),
                 kind: AgentKind::Generic,
+                cli_identity: format!("worker-{i}"),
                 description: None,
                 tier: None,
             })
@@ -2112,6 +2216,7 @@ mod tests {
             Box::new(WorkerMentionSource::new(vec![WorkerMentionDescriptor {
                 name: "alpha".into(),
                 kind: AgentKind::Generic,
+                cli_identity: "alpha".into(),
                 description: None,
                 tier: None,
             }])),
@@ -2137,6 +2242,7 @@ mod tests {
             WorkerMentionDescriptor {
                 name: "alpha".into(),
                 kind: AgentKind::Generic,
+                cli_identity: "alpha".into(),
                 description: None,
                 tier: None,
             },
