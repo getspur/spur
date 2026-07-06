@@ -1880,6 +1880,80 @@ mod loop_lifecycle_mcp_tests {
     }
 
     #[tokio::test]
+    async fn submit_loop_client_idempotency_key_reuses_existing_loop_issue() {
+        let (server, mock_pm) = new_server_with_mock_pm().await;
+        let key = "submit-loop-idempotent-key";
+
+        let first = server
+            .__test_call_tool(
+                "submit_loop",
+                json!({
+                    "client_idempotency_key": key,
+                    "spec": valid_loop_spec()
+                }),
+            )
+            .await;
+        assert!(first.get("error").is_none(), "first submit_loop failed: {first}");
+        let first_loop_id = response_loop_id(&first);
+        let first_issue_id = first["result"]["issue_id"]
+            .as_str()
+            .expect("first response issue_id")
+            .to_string();
+
+        let second = server
+            .__test_call_tool(
+                "submit_loop",
+                json!({
+                    "client_idempotency_key": key,
+                    "spec": valid_loop_spec()
+                }),
+            )
+            .await;
+        assert!(
+            second.get("error").is_none(),
+            "second submit_loop should be a dedup hit: {second}"
+        );
+        assert_eq!(response_loop_id(&second), first_loop_id);
+        assert_eq!(second["result"]["issue_id"], first_issue_id);
+
+        let issues = mock_pm.issues().await;
+        let loop_issue_count = issues
+            .iter()
+            .filter(|issue| {
+                issue
+                    .labels
+                    .iter()
+                    .any(|label| crate::plan::labels::parse_loop_id(label).is_some())
+            })
+            .count();
+        assert_eq!(
+            loop_issue_count, 1,
+            "dedup hit must skip creating a second loop issue: {issues:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_loop_rejects_blank_client_idempotency_key() {
+        let (server, _mock_pm) = new_server_with_mock_pm().await;
+
+        let response = server
+            .__test_call_tool(
+                "submit_loop",
+                json!({
+                    "client_idempotency_key": "   \t\n",
+                    "spec": valid_loop_spec()
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            response["error"]["message"],
+            "submit_loop: client_idempotency_key must be non-empty",
+            "blank client_idempotency_key should be rejected: {response}"
+        );
+    }
+
+    #[tokio::test]
     async fn kill_loop_closes_issue_and_writes_retired_record() {
         let (server, mock_pm) = new_server_with_mock_pm().await;
         let (loop_id, _) = submit_valid_loop(&server).await;
