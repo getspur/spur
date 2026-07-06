@@ -144,8 +144,15 @@ case "${1:-}" in
         fi
         ;;
     coverage)
+        # Two-phase, not a plain argv rewrite: the remote build VM syncs
+        # git-tracked file *contents* only (via `git ls-files`, not a real
+        # clone), so it has no branch history to diff against. Measure
+        # (cargo-llvm-cov, heavy compile) goes through the normal `run`
+        # remote-by-default dispatch; gate (git diff + threshold check,
+        # cheap) always runs locally, where real git history exists.
         shift
-        set -- run -p xtask -- coverage "$@"
+        "$SCRIPT_DIR/spur-cargo" run -p xtask -- coverage --measure-only "$@"
+        exec cargo run -p xtask -- coverage --gate-only "$@"
         ;;
 esac
 
