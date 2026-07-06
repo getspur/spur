@@ -101,6 +101,38 @@ values; a future "add/remove agent" flow is a separate feature.
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    subgraph TUI["spur-tui — App (in-process)"]
+        A["/configure or /configure &lt;agent&gt;<br/>SpurLocalSource::entries()"]
+        B["Action::NavigateTo<br/>(ViewId::AgentConfigBrowser)"]
+        C["AgentConfigBrowser view<br/>left: agent list · right: editable fields"]
+        D["Action::AgentConfigSaveRequested<br/>{ name, updated_entry }"]
+        E["self.config.agents.entries<br/>updated in place"]
+        F["user_input_tx.try_send(<br/>UserInput::UpdateAgentConfig)"]
+
+        A --> B --> C -->|save keybind| D --> E --> F
+    end
+
+    subgraph ORCH["spur-core — Orchestrator"]
+        G{"UserInput::UpdateAgentConfig<br/>handler"}
+        H["update_config(&amp;config_path, |c| {..})<br/>persist to .spur/config.toml"]
+        I["agent_configs.write()<br/>replace Vec&lt;AgentConfig&gt;"]
+        J["emit confirmation / error event"]
+        L["handle_delegations loop<br/>(create_brain_session ·<br/>load_brain_session · run_adhoc)"]
+        M["Arc&lt;parking_lot::RwLock<br/>&lt;Vec&lt;AgentConfig&gt;&gt;&gt;"]
+
+        G -->|1. persist| H --> J
+        G -->|2. live-apply| I --> M --> J
+        L -->|reads fresh each iteration| M
+    end
+
+    F --> G
+    J -->|"saved — applies to next delegation<br/>(or error)"| C
+```
+
+**Prose walkthrough of the diagram:**
+
 ```
 SpurLocalSource::entries()          — register "configure" command
   → Action::NavigateTo(ViewId::AgentConfigBrowser { preselect })
@@ -155,7 +187,7 @@ request/response shape as existing pairs like `PauseLoop`/`ResumeLoop` and
 - **Validation before send:** `additional_directories` entries must be
   absolute paths — reuse the exact check
   `sanitize_agent_additional_directories` already applies
-  (`crates/spur-acp/src/config/mod.rs:252-266`), surfaced as an inline
+  (`crates/spur-acp/src/config/mod.rs:252-268`), surfaced as an inline
   field-level error in the view *before* dispatch, rather than silently
   dropping the bad entry the way today's static config load does.
 - **Persist failure** (disk full, permissions): `update_config`'s
