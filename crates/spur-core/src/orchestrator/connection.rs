@@ -4,6 +4,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use tracing::{debug, info, warn};
 
+use spur_acp::agent_model_catalog::{
+    cache_path as agent_model_catalog_cache_path, cli_identity as agent_model_cli_identity,
+    probe_agent_model_catalog, read as read_agent_model_catalog,
+    write as write_agent_model_catalog, AgentModelCatalogV1, WorkerCatalogEntry,
+};
 use spur_acp::connection::{
     AgentConnection, CliWrapAdapter, NativeAcpConnection, StdioAdapter, StreamJsonAdapter,
 };
@@ -61,6 +66,7 @@ impl Orchestrator {
             let health = match connection.initialize(init_request).await {
                 Ok(_) => {
                     let _ = connection.shutdown().await;
+                    self.probe_and_cache_agent_model_catalog(config).await;
                     AgentHealth::Ready
                 }
                 Err(e) => AgentHealth::Error(e.to_string()),
@@ -74,6 +80,77 @@ impl Orchestrator {
         }
 
         results
+    }
+
+    async fn probe_and_cache_agent_model_catalog(&self, config: &spur_acp::config::AgentConfig) {
+        let Some(cache_path) = agent_model_catalog_cache_path() else {
+            debug!(
+                agent = %config.name,
+                "Skipping agent model catalog probe because no home directory is available"
+            );
+            return;
+        };
+
+        // Use an empty scratch cwd for session/new so probe-only sessions do
+        // not create incidental local state in the live repository checkout.
+        let scratch = match tempfile::Builder::new()
+            .prefix("spur-agent-model-probe-")
+            .tempdir()
+        {
+            Ok(scratch) => scratch,
+            Err(error) => {
+                warn!(
+                    agent = %config.name,
+                    error = %error,
+                    "Failed to create scratch cwd for agent model catalog probe"
+                );
+                return;
+            }
+        };
+
+        let mut connection = self.create_connection(config, None);
+        let probe = match probe_agent_model_catalog(
+            connection.as_mut(),
+            config.kind,
+            scratch.path().to_path_buf(),
+        )
+        .await
+        {
+            Ok(probe) => probe,
+            Err(error) => {
+                warn!(
+                    agent = %config.name,
+                    error = %error,
+                    "Agent model catalog probe failed; preserving health-check result"
+                );
+                return;
+            }
+        };
+
+        let mut catalog =
+            read_agent_model_catalog(&cache_path).unwrap_or_else(|| AgentModelCatalogV1 {
+                version: 1,
+                entries: Default::default(),
+            });
+        let cli_identity = agent_model_cli_identity(&config.command, &config.effective_args());
+        catalog.entries.insert(
+            config.name.clone(),
+            WorkerCatalogEntry {
+                probed_at: chrono::Utc::now(),
+                cli_identity,
+                models: probe.models,
+                efforts: probe.efforts,
+            },
+        );
+
+        if let Err(error) = write_agent_model_catalog(&cache_path, &catalog) {
+            warn!(
+                agent = %config.name,
+                path = %cache_path.display(),
+                error = %error,
+                "Failed to write agent model catalog cache"
+            );
+        }
     }
 
     /// Resolve and initialize a brain agent connection without starting a full session.
@@ -829,22 +906,148 @@ pub(super) fn build_connection_from_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spur_acp::config::SpurConfig;
+    use spur_acp::types::AgentKind;
+    use std::ffi::OsString;
     use std::sync::Mutex;
 
     /// Serialize tests that mutate the global `HOME` environment variable.
     static HOME_LOCK: Mutex<()> = Mutex::new(());
 
+    struct HomeEnvGuard {
+        original: Option<OsString>,
+    }
+
+    impl HomeEnvGuard {
+        fn set(home: &Path) -> Self {
+            let original = std::env::var_os("HOME");
+            std::env::set_var("HOME", home);
+            Self { original }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            if let Some(home) = self.original.take() {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
     fn with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
         let _guard = HOME_LOCK.lock().unwrap();
-        let orig_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", home);
+        let _home = HomeEnvGuard::set(home);
         let result = f();
-        if let Some(home) = orig_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
         result
+    }
+
+    fn write_catalog_probe_agent_script(dir: &Path, session_new_response: &str) -> PathBuf {
+        let script = dir.join("catalog_probe_agent.sh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/bash
+set -u
+
+while IFS= read -r line; do
+    method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+    id_json=$(printf '%s' "$line" | sed -E -n 's/.*"id"[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+).*/\1/p')
+
+    case "$method" in
+        initialize)
+            echo '{{"jsonrpc":"2.0","id":'"$id_json"',"result":{{"protocolVersion":1,"agentCapabilities":{{"loadSession":false,"promptCapabilities":{{}}}},"authMethods":[]}}}}'
+            ;;
+        session/new)
+            echo '{{"jsonrpc":"2.0","id":'"$id_json"',{session_new_response}}}'
+            ;;
+    esac
+done
+"#
+            ),
+        )
+        .expect("write catalog probe script");
+        script
+    }
+
+    fn catalog_probe_config(name: &str, script: &Path) -> spur_acp::config::AgentConfig {
+        let mut agent = spur_acp::config::AgentConfig::with_defaults(name);
+        agent.command = "bash".to_string();
+        agent.args = vec![script.display().to_string()];
+        agent.transport = TransportKind::Acp;
+        agent.kind = AgentKind::CodexAcp;
+        agent
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn check_agents_caches_agent_model_catalog_after_ready_initialize() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = HomeEnvGuard::set(home.path());
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let script = write_catalog_probe_agent_script(
+            repo.path(),
+            r#""result":{"sessionId":"catalog-session","configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"gpt-5","options":[{"value":"gpt-5","name":"GPT-5","description":"frontier"}]},{"id":"reasoning_effort","name":"Reasoning Effort","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"high","name":"High","description":"deep"}]}]}"#,
+        );
+
+        let mut config = SpurConfig::default();
+        config.agents.entries = vec![catalog_probe_config("codex-probe", &script)];
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+
+        let results = orchestrator.check_agents().await;
+
+        assert!(
+            matches!(results.as_slice(), [(name, AgentHealth::Ready)] if name == "codex-probe")
+        );
+        let cache_path =
+            agent_model_catalog_cache_path().expect("home should produce catalog path");
+        let catalog = read_agent_model_catalog(&cache_path).expect("catalog should be written");
+        let entry = catalog
+            .entries
+            .get("codex-probe")
+            .expect("agent entry should be cached");
+        assert_eq!(
+            entry.cli_identity,
+            format!("bash {}", script.display()),
+            "cache entry should be tied to the spawned CLI identity"
+        );
+        assert_eq!(entry.models.len(), 1);
+        assert_eq!(entry.models[0].value, "gpt-5");
+        assert_eq!(entry.models[0].name, "GPT-5");
+        assert_eq!(entry.efforts.len(), 1);
+        assert_eq!(entry.efforts[0].value, "high");
+        assert_eq!(entry.efforts[0].name, "High");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn check_agents_keeps_ready_when_agent_model_catalog_probe_fails() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = HomeEnvGuard::set(home.path());
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let script = write_catalog_probe_agent_script(
+            repo.path(),
+            r#""error":{"code":-32000,"message":"session new failed"}"#,
+        );
+
+        let mut config = SpurConfig::default();
+        config.agents.entries = vec![catalog_probe_config("codex-probe", &script)];
+        let mut orchestrator =
+            Orchestrator::new(repo.path().to_path_buf(), config, None).expect("orchestrator");
+
+        let results = orchestrator.check_agents().await;
+
+        assert!(
+            matches!(results.as_slice(), [(name, AgentHealth::Ready)] if name == "codex-probe")
+        );
+        let cache_path =
+            agent_model_catalog_cache_path().expect("home should produce catalog path");
+        assert!(
+            read_agent_model_catalog(&cache_path).is_none(),
+            "failed probes must not write a catalog entry"
+        );
     }
 
     fn write_kimi_context(home: &Path, session_uuid: &str, content: &str) {
