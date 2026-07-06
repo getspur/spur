@@ -120,6 +120,22 @@ fn mode_badge_generic_returns_none() {
     assert!(adapter::mode_badge("plan", AgentKind::Generic).is_none());
 }
 
+#[test]
+fn codex_mode_badges_match_live_acp_mode_ids() {
+    let full = adapter::mode_badge("agent-full-access", AgentKind::CodexAcp)
+        .expect("full access mode has a badge");
+    assert_eq!(full.short, "FULL");
+
+    let agent = adapter::mode_badge("agent", AgentKind::CodexAcp).expect("agent mode has a badge");
+    assert_eq!(agent.short, "AGENT");
+
+    let readonly =
+        adapter::mode_badge("read-only", AgentKind::CodexAcp).expect("read-only mode has a badge");
+    assert_eq!(readonly.short, "RO");
+
+    assert!(adapter::mode_badge("full-auto", AgentKind::CodexAcp).is_none());
+}
+
 // ─── format_input ───────────────────────────────────────────────────────────
 
 #[test]
