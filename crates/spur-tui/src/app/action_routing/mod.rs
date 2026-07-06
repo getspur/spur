@@ -129,6 +129,12 @@ impl App {
 
             Action::ThemeCommand { arg } => self.process_theme_cmd(arg),
             Action::NotebookCommand { arg } => self.process_notebook_cmd(arg),
+            Action::AgentModelCatalogProbeCompleted { worker_name } => {
+                self.agent_model_catalog_probes_in_flight
+                    .remove(&worker_name);
+                self.dirty = true;
+                None
+            }
 
             action @ (Action::RefreshIssues
             | Action::RefreshPlans

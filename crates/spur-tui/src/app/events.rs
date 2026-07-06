@@ -6,6 +6,84 @@ use tokio::time::timeout;
 
 type UpgradeResult = Result<Option<spur_core::UpgradeBanner>, oneshot::error::RecvError>;
 
+async fn probe_and_cache_agent_model_catalog(
+    config: std::sync::Arc<spur_acp::AgentConfig>,
+) -> anyhow::Result<()> {
+    use spur_acp::agent_model_catalog::{
+        cache_path, cli_identity, probe_agent_model_catalog, read, write, AgentModelCatalogV1,
+        WorkerCatalogEntry,
+    };
+
+    let Some(cache_path) = cache_path() else {
+        return Ok(());
+    };
+    let scratch = tempfile::Builder::new()
+        .prefix("spur-agent-model-probe-")
+        .tempdir()?;
+    let mut connection = build_agent_model_catalog_probe_connection(&config);
+    let probe = probe_agent_model_catalog(
+        connection.as_mut(),
+        config.kind,
+        scratch.path().to_path_buf(),
+    )
+    .await?;
+
+    let mut catalog = read(&cache_path).unwrap_or_else(|| AgentModelCatalogV1 {
+        version: 1,
+        entries: Default::default(),
+    });
+    catalog.entries.insert(
+        config.name.clone(),
+        WorkerCatalogEntry {
+            probed_at: chrono::Utc::now(),
+            cli_identity: cli_identity(&config.command, &config.effective_args()),
+            models: probe.models,
+            efforts: probe.efforts,
+        },
+    );
+    write(&cache_path, &catalog)?;
+    Ok(())
+}
+
+fn build_agent_model_catalog_probe_connection(
+    config: &spur_acp::AgentConfig,
+) -> Box<dyn spur_acp::AgentConnection> {
+    let spawn_args = config.effective_args();
+    match config.transport {
+        spur_acp::TransportKind::Acp => {
+            let mut conn = spur_acp::NativeAcpConnection::new_with_kind(
+                config.name.clone(),
+                config.command.clone(),
+                spawn_args,
+                config.kind,
+                None,
+            );
+            let repo_root = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| spur_core::project_root::discover(&cwd).ok())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            conn.set_repo_root(repo_root);
+            conn.set_additional_directories(config.additional_directories.clone());
+            Box::new(conn)
+        }
+        spur_acp::TransportKind::Stdio => Box::new(spur_acp::StdioAdapter::new(
+            config.name.clone(),
+            config.command.clone(),
+            spawn_args,
+        )),
+        spur_acp::TransportKind::CliWrap => Box::new(spur_acp::CliWrapAdapter::new(
+            config.name.clone(),
+            config.command.clone(),
+            spawn_args,
+        )),
+        spur_acp::TransportKind::StreamJson => Box::new(spur_acp::StreamJsonAdapter::new(
+            config.name.clone(),
+            config.command.clone(),
+            spawn_args,
+        )),
+    }
+}
+
 pub(super) fn handle_crossterm_stream_result(
     app: &mut App,
     result: Option<std::io::Result<crossterm::event::Event>>,
@@ -79,6 +157,46 @@ impl App {
         spur_acp::AgentConfig::with_defaults(name)
     }
 
+    fn schedule_agent_model_catalog_probe(&mut self, worker_name: String) {
+        if !self
+            .agent_model_catalog_probes_in_flight
+            .insert(worker_name.clone())
+        {
+            return;
+        }
+
+        let config = self.resolve_agent_config(&worker_name);
+        let tx = self.background_action_tx.clone();
+        tokio::spawn(async move {
+            if let Err(error) = probe_and_cache_agent_model_catalog(config).await {
+                tracing::debug!(
+                    worker = %worker_name,
+                    error = %error,
+                    "agent model catalog background probe failed"
+                );
+            }
+            let _ = tx.send(Action::AgentModelCatalogProbeCompleted { worker_name });
+        });
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn schedule_agent_model_catalog_probe_for_test(&mut self, worker_name: String) {
+        self.schedule_agent_model_catalog_probe(worker_name);
+    }
+
+    pub(super) fn schedule_pending_agent_model_catalog_probes(&mut self) {
+        let mut requests = self.dashboard.drain_agent_model_catalog_probe_requests();
+        if let Some(detail) = self.session_detail.as_mut() {
+            requests.extend(detail.drain_agent_model_catalog_probe_requests());
+        }
+        requests.sort();
+        requests.dedup();
+        for worker_name in requests {
+            self.schedule_agent_model_catalog_probe(worker_name);
+        }
+    }
+
     /// Derive the `WorkerMentionDescriptor` snapshot from the loaded
     /// agent config. Filtered to roles that can serve as a worker
     /// (matches `AgentRegistry::worker_capable` semantics).
@@ -92,6 +210,11 @@ impl App {
             .filter(|cfg| matches!(cfg.role, AgentRole::Worker | AgentRole::Both))
             .map(|cfg| crate::mentions::WorkerMentionDescriptor {
                 name: cfg.name.clone(),
+                kind: cfg.kind,
+                cli_identity: spur_acp::agent_model_catalog::cli_identity(
+                    &cfg.command,
+                    &cfg.effective_args(),
+                ),
                 description: cfg.delegation.description.clone(),
                 tier: cfg.delegation.tier.map(|t| match t {
                     Tier::Specialist => "specialist".to_string(),

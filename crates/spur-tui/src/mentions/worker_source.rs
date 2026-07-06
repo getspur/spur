@@ -4,12 +4,18 @@
 
 use std::path::Path;
 
+use spur_acp::AgentKind;
+
 use super::entry::{MentionEntry, MentionKind, MentionSource};
 
 #[derive(Debug, Clone)]
 pub struct WorkerMentionDescriptor {
     /// Unique slug, e.g. `"claude-code"`.
     pub name: String,
+    /// Registered agent kind used to filter compatible `.spur/agents` profiles.
+    pub kind: AgentKind,
+    /// Command + effective args stamped into the model catalog cache.
+    pub cli_identity: String,
     /// `delegation.description` from the agent config; shown as the
     /// row's `secondary` label in the picker.
     pub description: Option<String>,
@@ -42,11 +48,17 @@ impl MentionSource for WorkerMentionSource {
                 uri: format!("worker://{}", d.name),
                 display: format!("worker:{}", d.name),
                 secondary: d.description.clone(),
+                agent: None,
+                model: None,
+                effort: None,
+                worker_kind: Some(d.kind),
+                worker_cli_identity: Some(d.cli_identity.clone()),
                 code_path: None,
                 code_scope: None,
                 tag: d.tier.clone(),
                 search_text: None,
                 atom_text: None,
+                unconsumed_suffix: None,
                 issue_preview: None,
             })
             .collect())
@@ -60,6 +72,8 @@ mod tests {
     fn descriptor(name: &str, desc: Option<&str>, tier: Option<&str>) -> WorkerMentionDescriptor {
         WorkerMentionDescriptor {
             name: name.into(),
+            kind: AgentKind::from_name(name),
+            cli_identity: name.into(),
             description: desc.map(str::to_string),
             tier: tier.map(str::to_string),
         }
