@@ -9,65 +9,17 @@ mod value {
     pub(crate) mod arrow;
 }
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use thiserror::Error;
 
 use crate::{MAX_CONTEXT_PATHS, MAX_CONTEXT_PATH_HOPS};
 
 pub use crate::embedding::warm_embed_model;
 pub use crate::overlay::open_worktree_overlay;
+pub use spur_mcp::tools::McpHandlerError;
+pub use spur_mcp::tools::ToolDefinition;
 pub use tools::doc_navigate::doc_navigate;
 pub use tools::knowledge_context::{knowledge_context_pack, knowledge_context_pack_2};
 pub use tools::query::query;
-
-/// Metadata for a single analyst-owned MCP tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    #[serde(rename = "inputSchema")]
-    pub input_schema: Value,
-}
-
-#[derive(Debug, Error)]
-pub enum McpHandlerError {
-    #[error("invalid params: {0}")]
-    InvalidParams(String),
-    #[error("not found: {0}")]
-    NotFound(String),
-    #[error("unauthorized: {0}")]
-    Unauthorized(String),
-    #[error("upstream PM failure: {0}")]
-    UpstreamPm(String),
-    #[error("internal: {0}")]
-    Internal(String),
-}
-
-impl McpHandlerError {
-    pub fn json_rpc_code(&self) -> i32 {
-        match self {
-            Self::InvalidParams(_) => -32602,
-            Self::NotFound(_) => -32004,
-            Self::Unauthorized(_) => -32001,
-            Self::UpstreamPm(_) | Self::Internal(_) => -32603,
-        }
-    }
-}
-
-impl From<spur_graph::mcp::McpHandlerError> for McpHandlerError {
-    fn from(value: spur_graph::mcp::McpHandlerError) -> Self {
-        match value {
-            spur_graph::mcp::McpHandlerError::InvalidParams(message) => {
-                Self::InvalidParams(message)
-            }
-            spur_graph::mcp::McpHandlerError::NotFound(message) => Self::NotFound(message),
-            spur_graph::mcp::McpHandlerError::Unauthorized(message) => Self::Unauthorized(message),
-            spur_graph::mcp::McpHandlerError::UpstreamPm(message) => Self::UpstreamPm(message),
-            spur_graph::mcp::McpHandlerError::Internal(message) => Self::Internal(message),
-        }
-    }
-}
 
 #[derive(Clone, Default)]
 pub struct AnalystMcpModule;
@@ -115,13 +67,6 @@ impl AnalystMcpModule {
 impl spur_mcp::ToolModule for AnalystMcpModule {
     fn tools(&self) -> Vec<spur_mcp::ToolDefinition> {
         tool_definitions()
-            .into_iter()
-            .map(|definition| spur_mcp::ToolDefinition {
-                name: definition.name,
-                description: definition.description,
-                input_schema: definition.input_schema,
-            })
-            .collect()
     }
 
     async fn call(
