@@ -111,30 +111,25 @@ pub fn try_extract_observe(raw: &Value) -> Option<ObservePayload> {
 
 /// Map Codex mode IDs to short badges.
 ///
-/// | mode_id        | badge  | color   |
-/// |----------------|--------|---------|
-/// | `"full-auto"`  | AUTO   | Green   |
-/// | `"read-only"`  | RO     | Neutral |
-/// | `"on-failure"` | ONFAIL | Amber   |
-/// | `"on-request"` | ASK    | Amber   |
-/// | anything else  | —      | (none)  |
+/// | mode_id               | badge | color   |
+/// |-----------------------|-------|---------|
+/// | `"agent-full-access"` | FULL  | Green   |
+/// | `"agent"`             | AGENT | Amber   |
+/// | `"read-only"`         | RO    | Neutral |
+/// | anything else         | —     | (none)  |
 pub fn mode_badge(mode_id: &str) -> Option<ModeBadge> {
     match mode_id {
-        "full-auto" => Some(ModeBadge {
-            short: "AUTO",
+        "agent-full-access" => Some(ModeBadge {
+            short: "FULL",
             color: BadgeColor::Green,
+        }),
+        "agent" => Some(ModeBadge {
+            short: "AGENT",
+            color: BadgeColor::Amber,
         }),
         "read-only" => Some(ModeBadge {
             short: "RO",
             color: BadgeColor::Neutral,
-        }),
-        "on-failure" => Some(ModeBadge {
-            short: "ONFAIL",
-            color: BadgeColor::Amber,
-        }),
-        "on-request" => Some(ModeBadge {
-            short: "ASK",
-            color: BadgeColor::Amber,
         }),
         _ => None,
     }
