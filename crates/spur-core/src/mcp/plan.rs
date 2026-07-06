@@ -33,6 +33,7 @@ const PLAN_MANAGEMENT_TOOL_NAMES: &[&str] = &["merge_plan", "resume_plan", "forc
 
 const PLAN_REMAINDER_TOOL_NAMES: &[&str] = &[
     "submit_plan",
+    "spur_loop_doctor",
     "submit_loop",
     "execute_epic",
     "get_plan_status",
@@ -55,6 +56,7 @@ const PLAN_TOOL_NAMES: &[&str] = &[
     "resume_plan",
     "force_reclaim_plan",
     "submit_plan",
+    "spur_loop_doctor",
     "submit_loop",
     "execute_epic",
     "get_plan_status",
@@ -126,6 +128,7 @@ impl PlanMcpModule {
             "resume_plan" => server.handle_resume_plan(id, arguments).await,
             "force_reclaim_plan" => server.handle_force_reclaim_plan(id, arguments).await,
             "submit_plan" => server.handle_submit_plan(id, arguments).await,
+            "spur_loop_doctor" => server.handle_spur_loop_doctor(id, arguments).await,
             "submit_loop" => server.handle_submit_loop(id, arguments).await,
             "execute_epic" => server.handle_execute_epic(id, arguments).await,
             "get_plan_status" => server.handle_get_plan_status(id, arguments).await,
@@ -223,6 +226,7 @@ fn plan_tool_definition(name: &str) -> ToolDefinition {
         "resume_plan" => resume_plan_def(),
         "force_reclaim_plan" => force_reclaim_plan_def(),
         "submit_plan" => submit_plan_def(),
+        "spur_loop_doctor" => spur_loop_doctor_def(),
         "submit_loop" => submit_loop_def(),
         "execute_epic" => execute_epic_def(),
         "get_plan_status" => get_plan_status_def(),
@@ -524,6 +528,14 @@ fn submit_loop_def() -> ToolDefinition {
         name: "submit_loop".into(),
         description: "Create a durable loop issue with a [[spur-loop v1]] spec sentinel. Validates cadence_secs >= 60, defaults omitted autonomy to l1, requires at least one template task marked spur:loop-triage-task, rejects non-positive governor caps, mints a compact loop_id, and labels the loop spur:loop-id:<id>, spur:autonomy:<level>, and spur:loop-next-run:<now> so it fires immediately.".into(),
         input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::SubmitLoopParams>(),
+    }
+}
+
+fn spur_loop_doctor_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "spur_loop_doctor".into(),
+        description: "Required validation gate for /spur-loop natural-language drafts. Validates and normalizes a structured draft, returns a friendly preview, canonical submit_loop params, approval fingerprint, and idempotency key when valid, and never creates durable loops.".into(),
+        input_schema: crate::tool_schemas::schema_value::<crate::tool_schemas::SpurLoopDoctorParams>(),
     }
 }
 
