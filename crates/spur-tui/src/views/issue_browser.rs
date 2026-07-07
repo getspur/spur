@@ -1236,6 +1236,7 @@ impl IssueBrowserView {
                 issue_count,
                 alert_summary: None,
                 flag_summary: None,
+                git_info: None,
                 view_hint_override: status_hint,
             },
         );

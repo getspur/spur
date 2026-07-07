@@ -780,6 +780,7 @@ impl SessionPickerView {
                 issue_count: 0,
                 alert_summary: None,
                 flag_summary,
+                git_info: None,
                 view_hint_override: view_hint_override.or(Some(HintOverride {
                     full: footer_hint(&self.state, false, false),
                     compact: Some(footer_hint_compact(&self.state, false, false)),
@@ -1403,6 +1404,7 @@ impl SessionPickerView {
                     issue_count: 0,
                     alert_summary: None,
                     flag_summary,
+                    git_info: None,
                     view_hint_override: ctx.transient_hint_override.or(Some(HintOverride {
                         full: if self.help_visible {
                             "? or Esc close"
@@ -1498,6 +1500,7 @@ impl SessionPickerView {
                 issue_count: 0,
                 alert_summary: None,
                 flag_summary,
+                git_info: None,
                 view_hint_override: view_hint_override.or(Some(HintOverride {
                     full: footer_hint(&self.state, false, false),
                     compact: Some(footer_hint_compact(&self.state, false, false)),
