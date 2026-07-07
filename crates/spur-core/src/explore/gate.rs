@@ -99,8 +99,7 @@ fn injection_regexes() -> &'static [regex::Regex] {
 }
 
 fn base64_regex() -> &'static regex::Regex {
-    BASE64_RE
-        .get_or_init(|| regex::Regex::new(r"[A-Za-z0-9+/=]{200,}").expect("static regex"))
+    BASE64_RE.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9+/=]{200,}").expect("static regex"))
 }
 
 fn network_regex() -> &'static regex::Regex {
