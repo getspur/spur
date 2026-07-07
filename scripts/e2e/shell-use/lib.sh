@@ -2,44 +2,47 @@
 set -euo pipefail
 
 e2e_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(git -C "$e2e_dir" rev-parse --show-toplevel)"
+e2e_root="$(cd "$e2e_dir/.." && pwd)"
+# shellcheck disable=SC1091
+source "$e2e_root/lib/isolate.sh"
+# shellcheck disable=SC1091
+source "$e2e_root/lib/spur-bin.sh"
 
-cols=80
-rows=24
+cols="$SPUR_E2E_COLS"
+rows="$SPUR_E2E_ROWS"
 timeout_ms="${SHELL_USE_TIMEOUT_MS:-10000}"
 shell_use_bin="${SHELL_USE_BIN:-"$("$e2e_dir/install.sh")"}"
-spur_bin="${SPUR_BIN:-"$repo_root/target/debug/spur"}"
 
 if [[ ! -x "$shell_use_bin" ]]; then
   printf 'shell-use binary is not executable: %s\n' "$shell_use_bin" >&2
   exit 2
 fi
 
-if [[ ! -x "$spur_bin" ]]; then
-  printf 'spur binary is not executable: %s\n' "$spur_bin" >&2
-  printf 'Build it with: SPUR_REMOTE=0 scripts/spur-cargo build -p spur-cli\n' >&2
-  exit 2
-fi
-
 session_name=""
-work_root=""
 
 cleanup_shell_use_session() {
   local status=$?
   if [[ -n "${session_name:-}" ]]; then
     "$shell_use_bin" --session "$session_name" close >/dev/null 2>&1 || true
   fi
-  if [[ -n "${work_root:-}" ]]; then
-    rm -rf "$work_root"
-  fi
+  spur_e2e_cleanup_isolation
   exit "$status"
 }
 
 trap cleanup_shell_use_session EXIT
 
 dump_session() {
+  local artifact_dir
+
   if [[ -z "${session_name:-}" ]]; then
     return
+  fi
+
+  if [[ -n "${SPUR_E2E_ARTIFACTS_DIR:-}" ]]; then
+    artifact_dir="$SPUR_E2E_ARTIFACTS_DIR/shell-use/$session_name"
+    mkdir -p "$artifact_dir"
+    "$shell_use_bin" --session "$session_name" state >"$artifact_dir/state.txt" 2>&1 || true
+    "$shell_use_bin" --session "$session_name" text --full >"$artifact_dir/text-full.txt" 2>&1 || true
   fi
 
   printf -- '--- shell-use state ---\n'
@@ -78,44 +81,33 @@ shell_quote() {
 
 start_spur_tui() {
   local journey="$1"
-  local workspace home xdg_config xdg_data xdg_state xdg_cache command
+  local command spur_bin
 
-  work_root="$(mktemp -d "${TMPDIR:-/tmp}/spur-shell-use.XXXXXX")"
-  workspace="$work_root/workspace"
-  home="$work_root/home"
-  xdg_config="$work_root/xdg-config"
-  xdg_data="$work_root/xdg-data"
-  xdg_state="$work_root/xdg-state"
-  xdg_cache="$work_root/xdg-cache"
+  spur_bin="$(spur_e2e_resolve_spur_bin)"
+  export SPUR_BIN="$spur_bin"
 
-  mkdir -p \
-    "$workspace/.spur" \
-    "$home/.spur" \
-    "$xdg_config" \
-    "$xdg_data" \
-    "$xdg_state" \
-    "$xdg_cache"
+  open_isolated_shell_use_session "$journey"
+  command="$(shell_quote "$spur_bin") tui"
+  run_su submit "$command"
+}
 
-  printf '%s\n' '{"version":1,"first_run_at":"2026-07-07T00:00:00Z"}' > "$home/.spur/onboarded"
+open_isolated_shell_use_session() {
+  local journey="$1"
+  local arg
+  local env_args=()
+
+  spur_e2e_isolate "spur-shell-use" >/dev/null
+  while IFS= read -r -d '' arg; do
+    env_args+=("$arg")
+  done < <(spur_e2e_shell_use_env_args)
 
   session_name="spur-shell-use-${RUN_INDEX:-1}-${journey}-$$"
   run_su open \
     --shell bash \
     --cols "$cols" \
     --rows "$rows" \
-    --cwd "$workspace" \
-    --env "HOME=$home" \
-    --env "XDG_CONFIG_HOME=$xdg_config" \
-    --env "XDG_DATA_HOME=$xdg_data" \
-    --env "XDG_STATE_HOME=$xdg_state" \
-    --env "XDG_CACHE_HOME=$xdg_cache" \
-    --env "CI=false" \
-    --env "SPUR_NO_UPGRADE_CHECK=1" \
-    --env "SPUR_TUI_MOUSE_CAPTURE=0" \
-    --env "SPUR_LICENSE_TEST_STRIP_KEYS="
-
-  command="$(shell_quote "$spur_bin") tui"
-  run_su submit "$command"
+    --cwd "$SPUR_E2E_WORKSPACE" \
+    "${env_args[@]}"
 }
 
 wait_text() {
