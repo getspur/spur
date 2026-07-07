@@ -182,6 +182,7 @@ pub use delegation_types::{
 };
 
 pub mod delegation_watchdog;
+pub mod explore;
 pub mod scheduler;
 pub use scheduler::{BrainScheduler, ScheduledAction};
 
