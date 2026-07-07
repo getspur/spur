@@ -1,6 +1,22 @@
 ## cold launch
-SPUR
 
-No agents configured
 
-Run spur init to configure an agent.
+
+
+
+                                      SPUR
+
+           Ask for anything -- SPUR breaks it into tasks and delegates
+                 to specialist agents, then reviews the results.
+
+         +-------------------------------------------------------------+
+           |  ! No agents configured. Run this in another terminal:  |
+         |                                                             |
+         |     spur init                                               |
+         |                                                             |
+         |  Then restart `spur tui` to begin.                          |
+         +-------------------------------------------------------------+
+
+                   Examples of what you can ask (after setup):
+          - Refactor the auth module to async/await and add benchmarks
+[claude-code: error]  ● INSERT ─────────────────────────────────────────────────

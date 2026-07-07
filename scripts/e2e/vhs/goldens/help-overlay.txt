@@ -1,8 +1,23 @@
 ## help overlay
-SPUR Help
 
-Keyboard environment
 
-Ctrl-C  Quit or open quit confirmation
-
-Press ? or Esc to close
+       ┌ Help ──────────────────────────────────────────────────────────┐
+       │ Dashboard — Modes                                              │
+       │  [NAV]              Navigation mode — keys control panels      │
+       │  [INSERT]           Compose mode — keys go to input bar        │
+       │  Esc                Exit Compose → Navigate                    │
+       │  i / a / I / A / o  Enter Compose (Vim Normal)                 │
+       │  Enter              Focus input bar (Emacs)                    │
+       │                                                                │
+       │ Dashboard — Navigation                                         │
+       │  j/k, Up/Down       Scroll or navigate                         │
+       │  PgUp / PgDn        Page scroll                                │
+       │  Ctrl+d / Ctrl+u    Half-page scroll                           │
+       │  g / G              Jump to top / bottom                       │
+       │  Tab / Shift+Tab    Cycle panel focus (Agents ↔ Log)           │
+       │  1                  Jump to Agents panel                       │
+       │  3                  Jump to Log panel                          │
+       │  z                  Zoom / restore panels                      │
+       │  v                  Toggle verbose mode                        │
+[claude│  s                  Open session picker                        │───────
+       └────────────────────────────────────────────────────────────────┘

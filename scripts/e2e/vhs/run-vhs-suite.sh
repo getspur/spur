@@ -104,7 +104,7 @@ normalize_output() {
       extract_screen "$raw" "No agents configured" "cold launch" >>"$tmp"
       ;;
     help-overlay)
-      extract_screen "$raw" "Keyboard environment" "help overlay" >>"$tmp"
+      extract_screen "$raw" "Dashboard — Modes" "help overlay" >>"$tmp"
       ;;
     clean-quit)
       extract_screen "$raw" "Quit spur[?]" "quit confirmation" >>"$tmp"
