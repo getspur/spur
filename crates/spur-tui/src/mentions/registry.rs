@@ -74,6 +74,10 @@ pub struct MentionRegistry {
     code_graph_auto_discovery: bool,
     agent_model_catalog_path: Option<PathBuf>,
     pending_agent_model_catalog_probe_requests: HashSet<String>,
+    /// Workers whose catalog probe was handed to the app (drained) and has
+    /// not reported completion yet. Surfaced to pickers as a hint so the
+    /// missing model/effort slots are explainable while the probe runs.
+    agent_model_catalog_probes_in_flight: HashSet<String>,
     /// Open cascade slot (with real candidates) captured by the most
     /// recent `query()` call, if any. Read via `take_worker_open_slot`
     /// by a picker UI right after calling `query`.
@@ -121,6 +125,7 @@ impl MentionRegistry {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            agent_model_catalog_probes_in_flight: HashSet::new(),
             last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -142,6 +147,7 @@ impl MentionRegistry {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            agent_model_catalog_probes_in_flight: HashSet::new(),
             last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -308,7 +314,36 @@ impl MentionRegistry {
             .drain()
             .collect();
         requests.sort();
+        self.agent_model_catalog_probes_in_flight
+            .extend(requests.iter().cloned());
         requests
+    }
+
+    /// Clears a worker from the in-flight probe set once its background
+    /// agent-model-catalog probe reports completion (success or failure).
+    pub fn mark_agent_model_catalog_probe_completed(&mut self, worker_name: &str) {
+        self.agent_model_catalog_probes_in_flight
+            .remove(worker_name);
+    }
+
+    /// Human-readable hint while agent-model-catalog probes are pending or
+    /// in flight, e.g. `fetching codex models…`. `None` when nothing is
+    /// being probed. Pending requests count too: the compose that marks a
+    /// request is the same pass that renders the degraded cascade, so the
+    /// hint must be visible before the app has drained the request.
+    pub fn agent_model_catalog_probe_hint(&self) -> Option<String> {
+        let mut names: Vec<&str> = self
+            .pending_agent_model_catalog_probe_requests
+            .iter()
+            .chain(self.agent_model_catalog_probes_in_flight.iter())
+            .map(String::as_str)
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        names.sort_unstable();
+        names.dedup();
+        Some(format!("fetching {} models\u{2026}", names.join(", ")))
     }
 
     /// Takes the open cascade slot (if any) captured by the most recent
@@ -926,20 +961,29 @@ impl MentionRegistry {
         if token.is_empty() {
             return None;
         }
+        // Exact text dominates: typing a candidate's full name resolves the
+        // slot even when that name prefixes a sibling candidate.
+        let mut exact = candidates.iter().filter(|candidate| {
+            candidate.value.eq_ignore_ascii_case(token)
+                || candidate.label.eq_ignore_ascii_case(token)
+        });
+        if let (Some(only), None) = (exact.next(), exact.next()) {
+            return Some(only.clone());
+        }
+        // Otherwise the match must be UNIQUE among high-confidence
+        // candidates. Auto-advancing on an ambiguous prefix would silently
+        // pick one of several matching candidates the user never saw;
+        // keeping the slot open turns the token into a visible filter.
         let pattern = Pattern::parse(token, CaseMatching::Smart, Normalization::Smart);
         let mut buf = Vec::new();
-        candidates
-            .iter()
-            .filter_map(|candidate| {
-                let score = slot_candidate_score(candidate, token, &pattern, matcher, &mut buf)?;
-                high_confidence_score(candidate, token, score).then(|| (score, candidate.clone()))
-            })
-            .max_by(|(score_a, candidate_a), (score_b, candidate_b)| {
-                score_a
-                    .cmp(score_b)
-                    .then(candidate_b.value.cmp(&candidate_a.value))
-            })
-            .map(|(_, candidate)| candidate)
+        let mut qualifying = candidates.iter().filter_map(|candidate| {
+            let score = slot_candidate_score(candidate, token, &pattern, matcher, &mut buf)?;
+            high_confidence_score(candidate, token, score).then_some(candidate)
+        });
+        match (qualifying.next(), qualifying.next()) {
+            (Some(only), None) => Some(only.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -1694,6 +1738,7 @@ mod tests {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            agent_model_catalog_probes_in_flight: HashSet::new(),
             last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -1785,6 +1830,128 @@ mod tests {
 
         assert_eq!(open_slot.kind, WorkerSlotKind::Agent);
         assert_eq!(open_slot.filter_text, "gpt-5");
+    }
+
+    #[test]
+    fn probe_hint_tracks_in_flight_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+
+        assert_eq!(registry.agent_model_catalog_probe_hint(), None);
+        let _hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex", 10);
+        assert_eq!(
+            registry.agent_model_catalog_probe_hint().as_deref(),
+            Some("fetching codex models\u{2026}"),
+            "a pending (not yet drained) probe request must already surface the hint"
+        );
+        assert_eq!(
+            registry.drain_agent_model_catalog_probe_requests(),
+            vec!["codex".to_string()]
+        );
+        assert_eq!(
+            registry.agent_model_catalog_probe_hint().as_deref(),
+            Some("fetching codex models\u{2026}"),
+            "drained probe requests must surface as an in-flight hint"
+        );
+
+        registry.mark_agent_model_catalog_probe_completed("codex");
+        assert_eq!(
+            registry.agent_model_catalog_probe_hint(),
+            None,
+            "completion must clear the hint"
+        );
+    }
+
+    #[test]
+    fn worker_query_unique_slot_prefix_still_advances() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "rust-reviewer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let _hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex,ru", 10);
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("resolved agent should advance to an open model slot");
+
+        assert_eq!(
+            open_slot.kind,
+            WorkerSlotKind::Model,
+            "a unique high-confidence prefix must resolve the agent slot"
+        );
+    }
+
+    #[test]
+    fn worker_query_ambiguous_slot_prefix_stays_open_with_all_candidates() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "rust-reviewer");
+        write_agent_profile(tmp.path(), "rust-tester");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let _hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex,rust", 10);
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("ambiguous prefix must keep the agent slot open");
+
+        assert_eq!(open_slot.kind, WorkerSlotKind::Agent);
+        assert_eq!(open_slot.filter_text, "rust");
+        let labels: Vec<&str> = open_slot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.label.as_str())
+            .collect();
+        assert!(
+            labels.contains(&"rust-reviewer") && labels.contains(&"rust-tester"),
+            "both matching agents must stay visible as filter results, got {labels:?}"
+        );
+    }
+
+    #[test]
+    fn worker_query_exact_slot_text_advances_even_with_prefix_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "rust-reviewer");
+        write_agent_profile(tmp.path(), "rust-reviewer-strict");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let _hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "codex,rust-reviewer",
+            10,
+        );
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("exact agent text should advance to an open model slot");
+
+        assert_eq!(
+            open_slot.kind,
+            WorkerSlotKind::Model,
+            "an exact candidate name must resolve the slot even when it prefixes a sibling"
+        );
     }
 
     #[test]
@@ -2341,6 +2508,7 @@ mod tests {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            agent_model_catalog_probes_in_flight: HashSet::new(),
             last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -2434,6 +2602,7 @@ mod tests {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            agent_model_catalog_probes_in_flight: HashSet::new(),
             last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
@@ -2510,6 +2679,7 @@ mod tests {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            agent_model_catalog_probes_in_flight: HashSet::new(),
             last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
