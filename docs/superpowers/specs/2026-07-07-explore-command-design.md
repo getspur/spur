@@ -148,12 +148,15 @@ harness always loads them; nothing is injected mid-session:
 | kiro | `<wt>/.kiro/skills/<name>/SKILL.md` + steering pointer | per agent-profile mapping |
 | opencode / kimi | `<wt>/.<kind>/skills/<name>/SKILL.md` | per agent-profile mapping |
 
-Persona delivery uses whatever mechanism the agent-profile design already
-defines for that worker kind — a harness-native config file where the harness
-reads one (paths above), or ACP session parameters where that is the
-established route (see the 2026-07-05 codex model/effort/profile RCA). The
-implementation plan must verify the exact per-kind mechanism against
-agent-profile code rather than assuming config files everywhere.
+Persona delivery uses the mechanism the agent-profile system already
+implements (`agent_profiles::render::render_for_kind` +
+`materialize_profile` at dispatch — see §14): markdown for claude,
+description-only markdown for opencode (`.opencode/agent/`), JSON for kiro,
+TOML for codex, plus `append_spawn_profile_args` for spawn-time parameters.
+**Known gap:** `render_for_kind` returns `None` for Kimi, Gemini, and
+Generic kinds today — v1 either scopes pool personas to the supported kinds
+(claude / codex / kiro / opencode) or extends `render_for_kind`; the
+implementation plan must choose explicitly.
 
 Mechanics:
 
@@ -163,8 +166,10 @@ Mechanics:
   separate matching engine in v1. An explicit `skills:` param on the
   delegation overrides the subset. Bundled spurpower skills are always
   present and unaffected.
-- Rendered files carry the `SPUR-MANAGED` marker and are appended to the
-  worktree's `.git/info/exclude`, so ephemeral materialization can never
+- Rendered files carry the `SPUR-MANAGED` marker and are registered in the
+  worktree's per-worktree excludes file (the existing
+  `WorktreeManager::add_worktree_excludes` mechanism: `extensions.worktreeConfig`
+  + per-worktree `core.excludesFile`), so ephemeral materialization can never
   leak into worker commits.
 - **Loops**: subset re-evaluated between generations, never within one — a
   generation runs against a consistent skill set.
@@ -222,7 +227,67 @@ banner.
   targets worker dispatches only.
 - Palette quick-add without the full view.
 
-## 13. Relationship to prior decisions
+## 13. Verified substrate (analyst + exact-graph pass, 2026-07-07)
+
+Structural analysis via spur-analyst, precision via `code_*`. All refs
+verified against the working tree.
+
+**Skills engine (reused as-is):**
+- `SkillCatalog` / `list_active_skills` — `crates/spur-core/src/skills/mod.rs:65,485`
+- `validate_id` (id regex + length cap) — `skills/mod.rs:414`; `SkillRole` — `mod.rs:445`
+- `Adapter` enum (8 targets) + `render` + `targets_workers` — `skills/adapters.rs:17,44,69`
+- Renderers: `render_agentskills:88`, `render_codex:121`, `render_cursor:142`,
+  `render_kiro_steering_pointer:181`
+- Marker-guarded install engine: `Marker`, `decide`, `run_filtered`, `apply` —
+  `skills/installer.rs:14,233,278,338` (Decision::{Create,Update,Noop,Skip}
+  ownership semantics the pool materializer inherits)
+
+**Persona engine (reused as-is):**
+- `AgentProfile::parse` / `::load` (reads `.spur/agents/`) —
+  `crates/spur-core/src/agent_profiles/mod.rs:23,79`
+- `render_for_kind` — `agent_profiles/render.rs:21-90`: claude →
+  `.claude/agents/<name>.md`; opencode → `.opencode/agent/<name>.md`
+  (description-only frontmatter, tools dropped with log); kiro →
+  `.kiro/agents/<name>.json` (x-spur-managed marker); codex →
+  `.codex/agents/<name>.toml` (name/description/developer_instructions/
+  model/model_reasoning_effort + `[spur].managed` marker); **Kimi/Gemini/
+  Generic → `None` (the §7 gap)**
+- Ownership classification: `classify_existing` (Unchanged / ManagedDifferent /
+  NoMarker / Edited) — `render.rs:162`
+
+**Dispatch hook (the §7 insertion point):**
+- `run_one_worker_attempt` — `crates/spur-core/src/orchestrator/delegation/worker_attempt.rs:527-1227`;
+  verified call order: `WorktreeManager::create_worktree_v2`
+  (`spur-worktree/src/manager.rs:861`) → overlays/brain snapshot →
+  `apply_session_overrides:243` → `append_spawn_profile_args:409` →
+  `materialize_profile:423-516` → `build_connection_from_transport`
+  (`orchestrator/connection.rs:869`) → `AgentConnection::initialize` →
+  new session. Pool-skill materialization inserts alongside
+  `materialize_profile`, which already demonstrates the full pattern:
+  render → ownership check → write → excludes → warn-and-proceed
+  ("select-only") on every failure path — the §7 failure mode verbatim.
+- Excludes mechanism: `WorktreeManager::add_worktree_excludes` —
+  `manager.rs:516-578` (`extensions.worktreeConfig` + per-worktree
+  `core.excludesFile`, deduped appends).
+
+**TUI surface:**
+- `CommandRegistry` — `crates/spur-tui/src/commands/registry.rs:15`;
+  `CommandEntry`/`CommandSource`/`Dispatch` — `commands/entry.rs:6,23,38`;
+  `SpurLocalSource` — `commands/spur_local.rs:30`; submit routing —
+  `commands/submit_router.rs:69,84`. `/explore` registers as a local
+  command following this path.
+- Palette: `PaletteState`/`PaletteKind` — `components/palette.rs:60,13`;
+  `open_palette` — `app/overlays.rs:142`.
+
+**CLI surface:**
+- `Commands` enum — `crates/spur-cli/src/main.rs:233`; precedents:
+  `SkillsCommands:444`, `AgentsCommands:744`. `ExploreCommands` follows the
+  same pattern.
+
+**Worker registry (subset targeting vocabulary):**
+- `known_agents` / `builtin_descriptor` — `crates/spur-acp/src/agents/defaults.rs:38,25`.
+
+## 14. Relationship to prior decisions
 
 - Triggers and satisfies **W5** from the alignment decision: pinned sha +
   recorded review is a blocking gate in the ingestion path.
