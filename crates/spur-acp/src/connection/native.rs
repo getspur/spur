@@ -598,9 +598,12 @@ impl NativeAcpConnection {
 ///
 /// Benign races (ESRCH on an already-reaped group, EPERM on a recycled pgid)
 /// are intentionally ignored; shutdown and Drop paths are best-effort cleanup.
-#[expect(
-    unsafe_code,
-    reason = "libc::kill FFI is required for Unix process-group signal delivery"
+#[cfg_attr(
+    unix,
+    expect(
+        unsafe_code,
+        reason = "libc::kill FFI is required for Unix process-group signal delivery"
+    )
 )]
 fn killpg(pgid: i32, signal: &str) {
     #[cfg(unix)]
