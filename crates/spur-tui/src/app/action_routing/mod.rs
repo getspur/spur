@@ -132,6 +132,11 @@ impl App {
             Action::AgentModelCatalogProbeCompleted { worker_name } => {
                 self.agent_model_catalog_probes_in_flight
                     .remove(&worker_name);
+                self.dashboard
+                    .mark_agent_model_catalog_probe_completed(&worker_name);
+                if let Some(detail) = self.session_detail.as_mut() {
+                    detail.mark_agent_model_catalog_probe_completed(&worker_name);
+                }
                 self.dirty = true;
                 None
             }
