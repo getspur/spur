@@ -225,6 +225,11 @@ nondeterminism this layer exists to catch).
   run `SPUR_REMOTE=0 scripts/spur-cargo e2e`. The local path never builds
   implicitly.
 - One behavioral journey: `scripts/e2e/shell-use/journeys/<j>.sh`.
+- Worktree placement footgun: `scripts/cloud-build` is a RELATIVE symlink into
+  the sibling `spur-notebook` checkout. A worktree created at a different
+  directory depth (e.g. under `/tmp`) dangles the symlink and `spur-cargo`
+  silently degrades to the legacy gcloud leg. Create validation worktrees as
+  siblings of the main checkout (`/Volumes/Projects/<name>`).
 - Re-record goldens after an intended visual change:
   `SPUR_VHS_UPDATE=1 scripts/e2e/vhs/run-vhs-suite.sh`, review the diff,
   commit goldens with the change that caused them.
