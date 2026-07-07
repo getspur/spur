@@ -202,6 +202,42 @@ else
     echo "WARNING: no passwordless sudo; set SDKROOT/CFLAGS_aarch64_apple_darwin manually"
 fi
 
+echo "== ld64.lld link driver =="
+# Final links go through clang + ld64.lld, not zig's Mach-O linker: with
+# libc++ linked as a system dylib (see spur-cargo's zigbuild RUSTFLAGS),
+# zig's linker fails with "relocation Overflow" on prebuilt Apple-clang
+# objects (pyke onnxruntime). zig remains the C/C++ compiler. A MODERN lld
+# is required — the same prebuilt objects reference objc_msgSend selector
+# stubs (_objc_msgSend$sel, Xcode 14+), which lld-14 does not synthesize.
+if sudo -n true 2>/dev/null; then
+    command -v ld64.lld-19 >/dev/null 2>&1 \
+        || sudo apt-get install -y -qq lld-19 >/dev/null 2>&1 \
+        || sudo apt-get install -y -qq lld-16 >/dev/null 2>&1 || true
+fi
+cat > /mnt/cargo/macsdk/ld64-link.sh <<'LD64'
+#!/usr/bin/env bash
+# Final-link driver for spur-cargo zigbuild (macOS cross): clang + ld64.lld
+# against the synced macOS SDK. zig remains the C/C++ *compiler*; its own
+# Mach-O linker fails with "relocation Overflow" on prebuilt Apple-clang
+# objects (pyke onnxruntime) once libc++ becomes a dylib import. Needs a
+# modern ld64.lld: prebuilt Apple objects reference objc_msgSend selector
+# stubs (_objc_msgSend$sel), unknown to lld-14.
+SDK=/mnt/cargo/macsdk/MacOSX.sdk
+LLD=$(command -v ld64.lld-19 || command -v ld64.lld-16 || command -v ld64.lld-14 || command -v ld64.lld)
+# -mlinker-version=705: Debian clang assumes an ancient host ld64 and emits
+# the legacy -macosx_version_min flag, which ld64.lld rejects with "must
+# specify -platform_version"; claiming a modern linker switches clang to
+# the -platform_version form.
+exec clang --target=arm64-apple-macos11 --sysroot="$SDK" \
+    -fuse-ld="$LLD" -mlinker-version=705 \
+    -F"$SDK/System/Library/Frameworks" -L"$SDK/usr/lib" \
+    "$@"
+LD64
+chmod +x /mnt/cargo/macsdk/ld64-link.sh
+command -v clang >/dev/null || echo "WARNING: clang missing on VM (apt install clang lld)"
+command -v ld64.lld-19 >/dev/null 2>&1 || command -v ld64.lld-16 >/dev/null 2>&1 \
+    || echo "WARNING: no modern ld64.lld (apt install lld-19); final spur link will fail on objc stubs"
+
 echo "== libproc darwin bindings (stable copy + plant helper) =="
 # libproc 0.14's build.rs gates bindgen behind #[cfg(target_os = "macos")] —
 # a HOST cfg, so a Linux cross build runs the no-op linux main() and the lib
