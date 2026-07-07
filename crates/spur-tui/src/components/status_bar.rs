@@ -10,10 +10,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::action::ViewId;
 use crate::components::tombstone::{Tombstone, TombstoneKind};
+use crate::git_info::GitInfo;
 use crate::theme::{resolve_token, ColorDepth, Theme};
 
 fn token(theme: &Theme, name: &str) -> Color {
     resolve_token(theme, name, ColorDepth::Truecolor)
+}
+
+fn truncate_with_ellipsis(label: &str, cap: usize) -> std::borrow::Cow<'_, str> {
+    if label.chars().count() <= cap {
+        return std::borrow::Cow::Borrowed(label);
+    }
+    let mut out: String = label.chars().take(cap.saturating_sub(1)).collect();
+    out.push('…');
+    std::borrow::Cow::Owned(out)
 }
 
 pub struct StatusBar;
@@ -133,6 +143,9 @@ pub struct StatusBarProps<'a> {
     pub alert_summary: Option<(usize, usize, usize)>,
     /// Compact flag snapshot: (active_count, total_count). None if unavailable.
     pub flag_summary: Option<(usize, usize)>,
+    /// Git identity of the working tree (repo dir name, branch, short hash).
+    /// None outside a git repo or on surfaces that don't show it.
+    pub git_info: Option<&'a GitInfo>,
     /// When `Some`, overrides the hardcoded per-view hint string.
     /// Used by `SessionPickerView` to keep the StatusBar hint in sync
     /// with `footer_hint(...)` for the current picker mode.
@@ -334,6 +347,23 @@ impl StatusBar {
         let sep = if compact { " " } else { " · " };
         let mut spans: Vec<Span<'a>> = Vec::new();
 
+        if let Some(git) = props.git_info {
+            let branch = git.branch.as_deref().unwrap_or("detached");
+            let branch = truncate_with_ellipsis(branch, if compact { 14 } else { 20 });
+            let mut label = String::new();
+            if !compact {
+                label.push_str(&git.repo_name);
+                label.push(' ');
+            }
+            label.push_str(&branch);
+            if let Some(hash) = git.short_hash.as_deref() {
+                label.push('@');
+                label.push_str(hash);
+            }
+            spans.push(Span::styled(label, Style::default().fg(sep_fg)));
+            spans.push(Span::styled(sep, Style::default().fg(sep_fg)));
+        }
+
         if props.issue_count > 0 {
             spans.push(Span::styled(
                 if compact {
@@ -523,6 +553,7 @@ mod status_bar_hint_tests {
             issue_count: 0,
             alert_summary: None,
             flag_summary: None,
+            git_info: None,
             view_hint_override: None,
         };
 
