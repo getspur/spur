@@ -1,13 +1,15 @@
 # POC: macOS (aarch64-apple-darwin) cross-compiles on the cloud-build VM via cargo-zigbuild
 
-**Status: proven end-to-end (2026-07-07).** The Linux Graviton build VM now
-cross-compiles the full `spur` binary (DuckDB, lance, ort/onnxruntime, ring,
-arboard/AppKit, native-tls/Security included) into a Mach-O arm64 executable
-that runs natively on an Apple Silicon Mac. Verified: `spur 1.7.0`
-(356,735,088 bytes, ad-hoc linker-signed by zig) executes `--version`/`--help`
-on macOS 26.1. Full Rust-graph rebuild takes ~9m on m8gd.4xlarge with C
-archives warm; the first-ever build (C cold, DuckDB amalgamation dominates)
-roughly doubles that.
+**Status: proven end-to-end, including DuckDB extension runtime
+(2026-07-07).** The Linux Graviton build VM cross-compiles the full `spur`
+binary (DuckDB, lance, ort/onnxruntime, ring, arboard/AppKit,
+native-tls/Security included) into a Mach-O arm64 executable that runs
+natively on an Apple Silicon Mac. Verified on macOS 26.1: `--version`,
+`--help`, the TUI, and — after the same-day runtime fix below — spur-analyst
+DuckDB queries with natively-built extension dylibs (duckpgq, lance, icu)
+loaded and exceptions flowing across the dlopen boundary. Full Rust-graph
+rebuild takes ~9m on m8gd.4xlarge with C archives warm; the first-ever build
+(C cold, DuckDB amalgamation dominates) roughly doubles that.
 
 ## How to use
 
@@ -85,25 +87,66 @@ on the VM and rebuild (see "libproc" below for why).
 
    ```
    AWS_RUSTFLAGS_DEFAULT=""   # provider defaults would hijack the link (see below)
-   RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML"
+   RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML \
+              -Clink-arg=$SDKROOT/usr/lib/libc++.tbd -Clinker=/mnt/cargo/macsdk/ld64-link.sh"
    ```
 
-   Why both: build.sh appends the AWS provider defaults (`-Clinker=clang
+   Why: build.sh appends the AWS provider defaults (`-Clinker=clang
    -Clink-arg=-fuse-ld=…lld -Ctarget-cpu=neoverse-v2`) to any caller
-   RUSTFLAGS — fatal for a Mach-O link that must stay in zig's hands — so
-   they are suppressed at the source; and an env RUSTFLAGS replaces the repo
-   `.cargo/config.toml` `build.rustflags`, so `force-frame-pointers` is
-   re-added for parity. With no caller RUSTFLAGS at all, provider defaults
-   ride `cargo --config`, which external subcommands like zigbuild never see
-   — harmless by construction.
+   RUSTFLAGS — fatal for a Mach-O link — so they are suppressed at the
+   source; an env RUSTFLAGS replaces the repo `.cargo/config.toml`
+   `build.rustflags`, so `force-frame-pointers` is re-added for parity. The
+   last two flags are the runtime fix (items 8–10). With no caller RUSTFLAGS
+   at all, provider defaults ride `cargo --config`, which external
+   subcommands like zigbuild never see — harmless by construction.
+
+## Runtime fix: one C++ runtime, ld64.lld link (same day)
+
+The first artifact ran the TUI but **aborted with `libc++abi: terminating`
+on any spur-analyst DuckDB query**. Root cause chain, each step verified:
+
+8. **Two C++ runtimes cannot exchange exceptions.** zig maps `-lc++` to its
+   own STATIC libc++/libc++abi, so the binary carried a private C++ runtime
+   (no `libc++.1.dylib` in `otool -L`). DuckDB extensions are separate
+   dylibs installed from the community/core repos (`INSTALL duckpgq FROM
+   community`), built by Apple clang against the SYSTEM libc++. DuckDB
+   throws C++ exceptions in normal operation; the first throw crossing the
+   dlopen boundary (crash stack: `duckpgq_bind` → `std::terminate`) finds
+   no matching handler in the foreign runtime and terminates. Minimal repro:
+   a zig-static host dlopening an Apple-clang dylib that throws → same
+   abort; relink host against the SDK's `libc++.tbd` → exception caught.
+   Fix: link the system libc++ — an explicit `.tbd` path on the link line
+   beats zig's `-lc++` substitution (`-Clink-arg=$SDK/usr/lib/libc++.tbd`),
+   restoring the exact single-runtime configuration of a native build.
+
+9. **zig's Mach-O linker can't finish that link.** With libc++ symbols now
+   dylib imports, zig 0.15.2 (and 0.14.1) fails with `relocation … Overflow`
+   on pyke's prebuilt Apple-clang onnxruntime objects. Fix: keep zig as the
+   C/C++ *compiler*, hand the final link to **clang + ld64.lld** via a tiny
+   driver (`/mnt/cargo/macsdk/ld64-link.sh`, provisioned) selected with
+   `-Clinker=…` — rustc honors the LAST `-C linker`, so it cleanly overrides
+   the wrapper cargo-zigbuild configures.
+
+10. **Two Debian toolchain quirks in that driver.** (a) Debian clang assumes
+    an ancient host ld64 and emits legacy `-macosx_version_min`, which
+    ld64.lld rejects ("must specify -platform_version") — claiming
+    `-mlinker-version=705` switches clang to the modern flag. (b) The same
+    onnxruntime objects reference objc_msgSend selector stubs
+    (`_objc_msgSend$sel`, Xcode 14+), which lld-14 cannot synthesize —
+    **lld-19** (plain `apt install lld-19` on Debian 12) links them fine.
+
+Verified after the fix: binary links `/usr/lib/libc++.1.dylib`; analyst
+queries over `spur mcp` return rows (33,582-row count against
+`.spur/analyst.duckdb`); `duckdb_extensions()` shows duckpgq/lance/icu
+loaded; DuckDB error paths (Catalog Error) surface as JSON error strings
+instead of killing the process.
 
 ## Deliberately out of scope / known limits
 
-- **Runtime coverage**: CLI startup (`--version`, `--help`) is verified, plus
-  a CoreFoundation-calling smoke binary. TUI, DuckDB queries, lance, and
-  embedding runtime paths are untested on macOS. Suggested next check:
-  `spur graph embed` + an analyst query against a scratch repo using the
-  fetched binary.
+- **Runtime coverage**: CLI startup, the TUI, and spur-analyst DuckDB
+  queries (incl. community extension dylibs) are verified on macOS.
+  Embedding (`spur graph embed` / onnxruntime inference) is linked but not
+  yet exercised end-to-end.
 - **Durability**: everything provisioned lives on instance-store
   `/mnt/cargo` — a spot preemption wipes it. Re-run
   `scripts/zigbuild-provision-vm.sh` (idempotent, ~5 min). Durable options:
@@ -130,5 +173,6 @@ on the VM and rebuild (see "libproc" below for why).
 | zig | 0.15.2 (linux-aarch64) |
 | cargo-zigbuild | 0.23.0 |
 | bindgen-cli | 0.72.1 (against system libclang-14) |
+| link driver | Debian clang-14 + ld64.lld-19 (`/mnt/cargo/macsdk/ld64-link.sh`) |
 | macOS SDK | 26.1 (CLT, Darwin 25.1 host) |
-| Artifact | `spur` 1.7.0, Mach-O arm64, 356,735,088 B, adhoc linker-signed |
+| Artifact | `spur` 1.7.0, Mach-O arm64, links system libc++, adhoc linker-signed |
