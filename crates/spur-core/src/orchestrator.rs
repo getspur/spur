@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+#[cfg(unix)]
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -9,8 +10,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
+#[cfg(unix)]
 use serde::Deserialize;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::task::JoinHandle;
@@ -162,11 +166,16 @@ const MAX_SESSION_LIST_PAGES: usize = 1000;
 /// 100k was excessive; even power users rarely exceed a few hundred
 /// sessions per agent.
 const MAX_SESSION_LIST_SESSIONS: usize = 1_000;
+#[cfg(unix)]
 const NOTEBOOK_DAEMON_FRAME_LIMIT: usize = 16 * 1024 * 1024;
+#[cfg(unix)]
 const NOTEBOOK_DAEMON_CONNECT_ATTEMPTS: usize = 5;
+#[cfg(unix)]
 const NOTEBOOK_DAEMON_CONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
+#[cfg(unix)]
 const NOTEBOOK_DAEMON_CONNECT_MAX_DELAY: Duration = Duration::from_millis(800);
 
+#[cfg(unix)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NotebookDaemonDatasourcesFrame {
@@ -177,6 +186,7 @@ struct NotebookDaemonDatasourcesFrame {
     entries: Vec<spur_acp::DatasourceEntry>,
 }
 
+#[cfg(unix)]
 fn spawn_notebook_datasource_bridge(
     socket_nonce: String,
     notebook_sockets: Arc<RwLock<HashMap<spur_acp::BrainSessionId, String>>>,
@@ -213,6 +223,23 @@ fn spawn_notebook_datasource_bridge(
     })
 }
 
+/// The notebook daemon control socket is a unix domain socket; on other
+/// platforms the datasource bridge simply never runs (no daemon to reach).
+#[cfg(not(unix))]
+fn spawn_notebook_datasource_bridge(
+    socket_nonce: String,
+    _notebook_sockets: Arc<RwLock<HashMap<spur_acp::BrainSessionId, String>>>,
+    _funnel: crate::event_funnel::FunnelHandle,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tracing::debug!(
+            %socket_nonce,
+            "notebook daemon bridge disabled: unix domain sockets are unavailable on this platform"
+        );
+    })
+}
+
+#[cfg(unix)]
 async fn connect_notebook_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
     let mut delay = NOTEBOOK_DAEMON_CONNECT_INITIAL_DELAY;
     for attempt in 0..NOTEBOOK_DAEMON_CONNECT_ATTEMPTS {
@@ -234,6 +261,7 @@ async fn connect_notebook_control_socket(socket_path: &Path) -> io::Result<UnixS
     Err(io::Error::other("notebook daemon connect retry exhausted"))
 }
 
+#[cfg(unix)]
 fn should_retry_notebook_connect_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -243,6 +271,7 @@ fn should_retry_notebook_connect_error(error: &io::Error) -> bool {
     )
 }
 
+#[cfg(unix)]
 async fn subscribe_to_notebook_daemon(stream: &mut UnixStream) -> io::Result<()> {
     let bytes = serde_json::to_vec(&serde_json::json!({
         "daemon": "notebook.v1",
@@ -252,6 +281,7 @@ async fn subscribe_to_notebook_daemon(stream: &mut UnixStream) -> io::Result<()>
     write_notebook_daemon_frame(stream, &bytes).await
 }
 
+#[cfg(unix)]
 async fn read_notebook_daemon_events(
     stream: &mut UnixStream,
     notebook_sockets: &Arc<RwLock<HashMap<spur_acp::BrainSessionId, String>>>,
@@ -285,6 +315,7 @@ async fn read_notebook_daemon_events(
     }
 }
 
+#[cfg(unix)]
 fn emit_notebook_datasources_changed(
     notebook_sockets: &Arc<RwLock<HashMap<spur_acp::BrainSessionId, String>>>,
     funnel: &crate::event_funnel::FunnelHandle,
@@ -305,6 +336,7 @@ fn emit_notebook_datasources_changed(
     }
 }
 
+#[cfg(unix)]
 async fn write_notebook_daemon_frame(stream: &mut UnixStream, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() > NOTEBOOK_DAEMON_FRAME_LIMIT {
         return Err(io::Error::new(
@@ -319,6 +351,7 @@ async fn write_notebook_daemon_frame(stream: &mut UnixStream, bytes: &[u8]) -> i
     stream.flush().await
 }
 
+#[cfg(unix)]
 async fn read_notebook_daemon_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     let mut len = [0_u8; 4];
     stream.read_exact(&mut len).await?;
