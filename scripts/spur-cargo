@@ -182,16 +182,25 @@ case "${1:-}" in
         # subcommands never see — exactly right for a darwin link driven by
         # zig. Fetch artifacts with scripts/cloud-build/fetch.sh, e.g.
         #   fetch.sh --via-s3 target/aarch64-apple-darwin/release/spur
-        HAS_TARGET=0
+        ZIG_TARGET=""
+        PREV_ARG=""
         for arg in "$@"; do
-            case "$arg" in
-                --target|--target=*) HAS_TARGET=1 ;;
+            case "$PREV_ARG" in
+                --target) ZIG_TARGET="$arg" ;;
             esac
+            case "$arg" in
+                --target=*) ZIG_TARGET="${arg#--target=}" ;;
+            esac
+            PREV_ARG="$arg"
         done
-        if [[ $HAS_TARGET -eq 0 ]]; then
+        if [[ -z "$ZIG_TARGET" ]]; then
             shift
             set -- zigbuild --target aarch64-apple-darwin "$@"
+            ZIG_TARGET="aarch64-apple-darwin"
         fi
+        # Provider aarch64-native RUSTFLAGS never belong in a cross link —
+        # suppress the build.sh append path for every zigbuild target.
+        export AWS_RUSTFLAGS_DEFAULT=""
         # The darwin link must stay in zig's hands. When the caller has no
         # RUSTFLAGS, build.sh injects the AWS provider defaults (-Clinker=clang
         # / -fuse-ld=lld / neoverse-v2) via `cargo --config`, which an external
@@ -223,10 +232,28 @@ case "${1:-}" in
         # the C/C++ compiler for all build-script compiles. Callers that set
         # RUSTFLAGS themselves own the full flag set.
         if [[ -z "${RUSTFLAGS+x}" ]]; then
-            export AWS_RUSTFLAGS_DEFAULT=""
-            ZIGBUILD_LIBCXX_TBD="${SPUR_ZIGBUILD_LIBCXX_TBD:-/mnt/cargo/macsdk/MacOSX.sdk/usr/lib/libc++.tbd}"
-            ZIGBUILD_LINKER="${SPUR_ZIGBUILD_LINKER:-/mnt/cargo/macsdk/ld64-link.sh}"
-            export RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML -Clink-arg=$ZIGBUILD_LIBCXX_TBD -Clinker=$ZIGBUILD_LINKER"
+            case "$ZIG_TARGET" in
+                *apple-darwin*)
+                    ZIGBUILD_LIBCXX_TBD="${SPUR_ZIGBUILD_LIBCXX_TBD:-/mnt/cargo/macsdk/MacOSX.sdk/usr/lib/libc++.tbd}"
+                    ZIGBUILD_LINKER="${SPUR_ZIGBUILD_LINKER:-/mnt/cargo/macsdk/ld64-link.sh}"
+                    export RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML -Clink-arg=$ZIGBUILD_LIBCXX_TBD -Clinker=$ZIGBUILD_LINKER"
+                    ;;
+                *)
+                    # Non-darwin zigbuild target (e.g. x86_64-unknown-linux-gnu
+                    # for the npm linux-x64 dist leg): zig owns the C/C++ and
+                    # the ELF link; none of the darwin CoreML/libc++/ld64 args
+                    # apply. Env RUSTFLAGS overrides the repo config merge, so
+                    # re-state force-frame-pointers explicitly.
+                    export RUSTFLAGS="-Cforce-frame-pointers=yes"
+                    # The VM profile exports CFLAGS="-mcpu=native -O2" for the
+                    # aarch64 host; -mcpu=native is wrong for an x86_64 target
+                    # compile. A caller-set (non-empty) CFLAGS is re-exported
+                    # by build.sh AFTER profile.d, so a portable value here
+                    # wins on the VM (same trick as the xwin case).
+                    if [[ -z "${CFLAGS+x}" ]]; then export CFLAGS="-O2"; fi
+                    if [[ -z "${CXXFLAGS+x}" ]]; then export CXXFLAGS="-O2"; fi
+                    ;;
+            esac
         fi
         ;;
     xwin)
