@@ -1466,7 +1466,10 @@ mod tests {
             composed.uri,
             "worker://codex?agent=spur-narrow-implementer&model=gpt-5&effort=high"
         );
-        assert_eq!(composed.display, "worker:codex");
+        assert_eq!(
+            composed.display,
+            "worker:codex agent=spur-narrow-implementer model=gpt-5 effort=high"
+        );
         assert_eq!(
             composed.atom_text.as_deref(),
             Some("@worker:codex agent=spur-narrow-implementer model=gpt-5 effort=high")
