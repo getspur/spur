@@ -76,6 +76,27 @@ Key decisions:
 | `AWS_RELEASE_ROLE_ARN` | repo **variable** | OIDC-assumable role the workflow uses for the whole VM lifecycle |
 | `SPUR_BUILDER_AMI_ID` | repo **variable** (optional) | Golden AMI from `bake-ami.sh` for ~1-2 min boots; empty → base Debian 12 arm64 + full provisioning |
 | `GH_RELEASES_TOKEN` | repo **secret** (existing) | `gh release create` on `getspur/spur-releases` (publish=true only) |
+| cloud-build S3 bundle | `s3://<sccache-bucket>/ci/cloud-build/bundle.tar.gz` | See below — the runner restores the cloud-build scripts from it |
+
+### The cloud-build S3 bundle
+
+`scripts/cloud-build` in this repo is a **git-tracked symlink** into the
+sibling private `spur-notebook` checkout, so a bare runner checkout has
+nothing behind it. Cloning `getspur/spur-notebook` in CI was rejected: the
+scripts evolve in that repo's *working tree* ahead of its origin (and the
+repo is private, needing an extra token). Instead — following the same
+pattern as the zigbuild macOS SDK bundle and the e2e toolchain provisioner —
+`scripts/cloud-build-publish-bundle.sh` snapshots the resolved working-tree
+scripts into the sccache bucket, and the workflow restores them to the
+sibling path on the runner so the tracked symlink resolves unchanged.
+
+- Refresh with `scripts/cloud-build-publish-bundle.sh` whenever cloud-build
+  scripts change (it validates and excludes `*.local.env` so CI's AMI comes
+  only from `SPUR_BUILDER_AMI_ID`).
+- The OIDC role's existing S3 read on the sccache bucket covers the download;
+  no extra credentials.
+- Skew risk: the bundle is a manual snapshot. If a release run fails with a
+  provider/VM mismatch, republish the bundle first.
 
 ### IAM shape for `AWS_RELEASE_ROLE_ARN`
 
