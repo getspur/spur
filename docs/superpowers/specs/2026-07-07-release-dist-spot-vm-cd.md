@@ -171,12 +171,21 @@ scripts (see spur-notebook history around 2026-07-07):
 |---|---|---|---|---|
 | v1.8.0 | sequential, old AMI | 15m10s | — | — |
 | v1.9.0 | sequential, baked AMI | 21m17s | ~13.5m | sum of legs |
-| v1.10.0 | parallel ×3, `-j16`, baked AMI | **17m35s** | 12m05s | linux 2m31s, macos 5m10s, **windows 10m19s** |
+| v1.10.0 | parallel ×3, `-j16`, baked AMI | 17m35s | 12m05s | linux 2m31s, macos 5m10s, **windows 10m19s** |
+| v1.11.0 | + msvc sccache (cd-19) | **14m11s** | 8m44s | **windows 2m03s**, linux 3m32s, **macos 5m55s** |
 
-The Windows leg is the critical path: cargo-xwin's clang-cl C/C++ compiles
-(DuckDB) are not routed through the sccache wrappers, so every fresh VM pays
-the full MSVC-target C++ compile. Wrapping clang-cl for sccache is the next
-worthwhile optimization if release latency matters.
+v1.10.0's Windows leg was the critical path because cargo-xwin's cl-mode
+C/C++ compiles (DuckDB) bypassed sccache: cargo-xwin resolves plain
+`clang-cl` through its own PATH-prepended cache-dir symlink (which points at
+`which clang` — clang-16 in cl mode, not the provisioned clang-cl-19) and
+stomps `CC_x86_64_pc_windows_msvc` on the inner cargo. Fix (cd-19): build.sh
+injects the **dash-variant** `CC_x86_64-pc-windows-msvc` (checked first by
+cc-rs, never set by cargo-xwin) pointing at `/usr/local/bin/sccache-clang-cl`
+(pinned to clang-cl-19). Isolated fresh-VM measurement: the full windows
+build dropped 10m19s → **3m45s** with 430/435 C/C++ cache hits; in the
+v1.11.0 release the leg ran 2m03s. The macOS universal2 leg (double
+arch compile + lipo) is now the critical path; splitting its two arches into
+parallel legs is the next lever if sub-12-min releases matter.
 
 ## Known limits
 
