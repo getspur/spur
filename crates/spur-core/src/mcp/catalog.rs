@@ -214,11 +214,7 @@ fn graph_tool_definition(definition: spur_graph::mcp::ToolDefinition) -> ToolDef
 }
 
 fn analyst_tool_definition(definition: spur_analyst::mcp::ToolDefinition) -> ToolDefinition {
-    ToolDefinition {
-        name: definition.name,
-        description: definition.description,
-        input_schema: definition.input_schema,
-    }
+    definition
 }
 
 pub(crate) fn issue_to_summary_event(
