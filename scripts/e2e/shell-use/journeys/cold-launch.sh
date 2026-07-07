@@ -2,6 +2,7 @@
 set -euo pipefail
 
 journey_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 source "$journey_dir/../lib.sh"
 
 start_spur_tui "cold-launch"

@@ -92,5 +92,6 @@ spur.log.*
 crates/spur-context-service/Cargo.lock
 
 # VHS TUI e2e generated outputs
+/scripts/e2e/.artifacts/
 /scripts/e2e/vhs/actual/
 /scripts/e2e/vhs/tmp/

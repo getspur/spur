@@ -1,47 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${SPUR_BIN:-}" ]]; then
-  echo "error: SPUR_BIN must point at the spur binary" >&2
-  exit 2
-fi
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+e2e_root="$(cd "$script_dir/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$e2e_root/lib/isolate.sh"
+# shellcheck disable=SC1091
+source "$e2e_root/lib/spur-bin.sh"
 
-workspace="$(mktemp -d "${TMPDIR:-/tmp}/spur-vhs.XXXXXX")"
+spur_bin="$(spur_e2e_resolve_spur_bin)"
+
+# shellcheck disable=SC2329
 cleanup() {
-  rm -rf "$workspace"
+  spur_e2e_cleanup_isolation
 }
 trap cleanup EXIT
 
-repo="${workspace}/repo"
-home="${workspace}/home"
-xdg_config="${workspace}/xdg-config"
-xdg_data="${workspace}/xdg-data"
-xdg_state="${workspace}/xdg-state"
-xdg_cache="${workspace}/xdg-cache"
+spur_e2e_isolate "spur-vhs" >/dev/null
 
-mkdir -p \
-  "${repo}/.spur" \
-  "${home}/.spur" \
-  "$xdg_config" \
-  "$xdg_data" \
-  "$xdg_state" \
-  "$xdg_cache"
+export HOME="$SPUR_E2E_HOME"
+export XDG_CONFIG_HOME="$SPUR_E2E_XDG_CONFIG_HOME"
+export XDG_DATA_HOME="$SPUR_E2E_XDG_DATA_HOME"
+export XDG_STATE_HOME="$SPUR_E2E_XDG_STATE_HOME"
+export XDG_CACHE_HOME="$SPUR_E2E_XDG_CACHE_HOME"
+export CI="$SPUR_E2E_CI"
+export SPUR_NO_UPGRADE_CHECK="$SPUR_E2E_NO_UPGRADE_CHECK"
+export SPUR_TUI_MOUSE_CAPTURE="$SPUR_E2E_TUI_MOUSE_CAPTURE"
+export SPUR_LICENSE_TEST_STRIP_KEYS="$SPUR_E2E_LICENSE_TEST_STRIP_KEYS"
 
-printf '%s\n' '{"version":1,"first_run_at":"2026-07-07T00:00:00Z"}' > "${home}/.spur/onboarded"
-
-export HOME="$home"
-export XDG_CONFIG_HOME="$xdg_config"
-export XDG_DATA_HOME="$xdg_data"
-export XDG_STATE_HOME="$xdg_state"
-export XDG_CACHE_HOME="$xdg_cache"
-export CI=false
-export SPUR_NO_UPGRADE_CHECK=1
-export SPUR_TUI_MOUSE_CAPTURE=0
-export SPUR_LICENSE_TEST_STRIP_KEYS=""
-
-cd "$repo"
+cd "$SPUR_E2E_WORKSPACE"
 set +e
-"$SPUR_BIN" tui
+"$spur_bin" tui
 status=$?
 set -e
 
