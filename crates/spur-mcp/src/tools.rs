@@ -49,7 +49,7 @@ impl McpHandlerError {
 
 impl From<McpHandlerError> for rmcp::ErrorData {
     fn from(value: McpHandlerError) -> Self {
-        rmcp::ErrorData::new(
+        Self::new(
             rmcp::model::ErrorCode(value.json_rpc_code()),
             value.to_string(),
             None,
