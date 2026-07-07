@@ -189,10 +189,18 @@ impl SessionDetailView {
         }
 
         let input_height = self.input_bar.required_height(content_area.width);
-        let graph_hint = (!self.fs_unsafe)
-            .then(|| self.mention_registry.borrow().code_graph_hint())
+        let mention_hint = (!self.fs_unsafe)
+            .then(|| {
+                let registry = self.mention_registry.borrow();
+                let segments: Vec<String> = registry
+                    .agent_model_catalog_probe_hint()
+                    .into_iter()
+                    .chain(registry.code_graph_hint().map(str::to_string))
+                    .collect();
+                (!segments.is_empty()).then(|| segments.join(" \u{00b7} "))
+            })
             .flatten();
-        let pre_input_banner_height = u16::from(self.fs_unsafe || graph_hint.is_some());
+        let pre_input_banner_height = u16::from(self.fs_unsafe || mention_hint.is_some());
 
         // Compute workers panel height (dynamic: 0 when no active workers).
         // Suppress on very small terminals to avoid squeezing the trace.
@@ -340,7 +348,7 @@ impl SessionDetailView {
                     .bg(token(ctx.theme, "session_detail.unsafe_fs.bg")),
             ));
             frame.render_widget(Paragraph::new(banner), chunks[3]);
-        } else if let Some(hint) = graph_hint {
+        } else if let Some(hint) = mention_hint {
             let banner = Line::from(Span::styled(
                 format!(" {hint} "),
                 Style::default().fg(Color::DarkGray),

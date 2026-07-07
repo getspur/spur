@@ -1084,6 +1084,12 @@ impl SessionDetailView {
             .drain_agent_model_catalog_probe_requests()
     }
 
+    pub(crate) fn mark_agent_model_catalog_probe_completed(&mut self, worker_name: &str) {
+        self.mention_registry
+            .borrow_mut()
+            .mark_agent_model_catalog_probe_completed(worker_name);
+    }
+
     /// Build (error_ids, pending_ids) sets from the mermaid registry for use
     /// in constructing a `StateLookup`.
     #[cfg(feature = "markdown")]
