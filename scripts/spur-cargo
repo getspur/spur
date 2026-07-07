@@ -231,30 +231,45 @@ case "${1:-}" in
         # overrides the zig wrapper cargo-zigbuild configures — zig remains
         # the C/C++ compiler for all build-script compiles. Callers that set
         # RUSTFLAGS themselves own the full flag set.
-        if [[ -z "${RUSTFLAGS+x}" ]]; then
-            case "$ZIG_TARGET" in
-                *apple-darwin*)
+        case "$ZIG_TARGET" in
+            *apple-darwin*)
+                if [[ -z "${RUSTFLAGS+x}" ]]; then
                     ZIGBUILD_LIBCXX_TBD="${SPUR_ZIGBUILD_LIBCXX_TBD:-/mnt/cargo/macsdk/MacOSX.sdk/usr/lib/libc++.tbd}"
                     ZIGBUILD_LINKER="${SPUR_ZIGBUILD_LINKER:-/mnt/cargo/macsdk/ld64-link.sh}"
                     export RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML -Clink-arg=$ZIGBUILD_LIBCXX_TBD -Clinker=$ZIGBUILD_LINKER"
-                    ;;
-                *)
-                    # Non-darwin zigbuild target (e.g. x86_64-unknown-linux-gnu
-                    # for the npm linux-x64 dist leg): zig owns the C/C++ and
-                    # the ELF link; none of the darwin CoreML/libc++/ld64 args
-                    # apply. Env RUSTFLAGS overrides the repo config merge, so
+                fi
+                ;;
+            *)
+                # Non-darwin zigbuild target (x86_64-unknown-linux-gnu for
+                # the npm linux-x64 dist leg): zig is the WRONG tool here —
+                # its bundled libc++ cannot satisfy the libstdc++ symbols in
+                # pyke's prebuilt GCC onnxruntime, and a libc++-built DuckDB
+                # could not exchange exceptions with upstream libstdc++
+                # extension .so's (the linux twin of the darwin libc++
+                # story). Rewrite to a plain cargo build: the VM profile.d
+                # exports target-scoped CC/CXX/AR/LINKER pointing at Debian's
+                # real x86_64-linux-gnu cross GCC (sccache-wrapped), keeping
+                # the whole binary on libstdc++ exactly like the old
+                # cargo-dist runner builds.
+                if [[ "${1:-}" == "zigbuild" ]]; then
+                    shift
+                    set -- build "$@"
+                fi
+                if [[ -z "${RUSTFLAGS+x}" ]]; then
+                    # Env RUSTFLAGS overrides the repo config merge, so
                     # re-state force-frame-pointers explicitly.
                     export RUSTFLAGS="-Cforce-frame-pointers=yes"
-                    # The VM profile exports CFLAGS="-mcpu=native -O2" for the
-                    # aarch64 host; -mcpu=native is wrong for an x86_64 target
-                    # compile. A caller-set (non-empty) CFLAGS is re-exported
-                    # by build.sh AFTER profile.d, so a portable value here
-                    # wins on the VM (same trick as the xwin case).
-                    if [[ -z "${CFLAGS+x}" ]]; then export CFLAGS="-O2"; fi
-                    if [[ -z "${CXXFLAGS+x}" ]]; then export CXXFLAGS="-O2"; fi
-                    ;;
-            esac
-        fi
+                fi
+                # The VM profile exports CFLAGS="-mcpu=native -O2" for the
+                # aarch64 host; -mcpu=native is wrong for an x86_64 target
+                # compile. A caller-set (non-empty) CFLAGS is re-exported by
+                # build.sh AFTER profile.d, so a portable value here wins on
+                # the VM (profile.d also sets target-scoped
+                # CFLAGS_x86_64_unknown_linux_gnu as belt-and-suspenders).
+                if [[ -z "${CFLAGS+x}" ]]; then export CFLAGS="-O2"; fi
+                if [[ -z "${CXXFLAGS+x}" ]]; then export CXXFLAGS="-O2"; fi
+                ;;
+        esac
         ;;
     xwin)
         # Windows cross-compile: cargo-xwin drives clang-cl/lld-link (LLVM 19)
