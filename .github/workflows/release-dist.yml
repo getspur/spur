@@ -80,9 +80,11 @@ env:
   # Same Graviton4 generation → same -Ctarget-cpu → shared sccache keys.
   AWS_INSTANCE_TYPE: m8gd.8xlarge
   AWS_INSTANCE_TYPE_FALLBACK: m8gd.4xlarge
-  # cargo -j on the VM. Sized for the 8xlarge primary; mildly oversubscribed
-  # on the 4xlarge fallback, which compile-bound workloads tolerate fine.
-  SPUR_BUILD_JOBS: "32"
+  # cargo -j on the VM, per platform leg. The three legs run concurrently
+  # (xtask dist --parallel), so 3×16 keeps peak C/C++ compile memory (DuckDB
+  # translation units run 1-2 GB each on a cold cache) inside the 8xlarge's
+  # 128 GB while still saturating its 32 cores.
+  SPUR_BUILD_JOBS: "16"
   # Never compile release artifacts on the runner: local fallback would emit
   # wrong-arch binaries (or burn 40 min before fetch.sh fails). Fail fast.
   SPUR_NO_LOCAL_FALLBACK: "1"
@@ -154,7 +156,10 @@ jobs:
         env:
           # Empty on tag pushes (inputs only exist for workflow_dispatch).
           PLATFORMS: ${{ inputs.platforms || 'linux,macos,windows' }}
-        run: cargo xtask dist --platforms "$PLATFORMS"
+        # --parallel runs the legs concurrently in per-platform remote
+        # namespaces; the VM is already up from the spin step, so the
+        # concurrent --auto-spin dispatches cannot race a create.
+        run: cargo xtask dist --parallel --platforms "$PLATFORMS"
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v6
