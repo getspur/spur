@@ -23,6 +23,8 @@ journeys=(
   "clean-quit"
   "worker-mention-cascade"
   "worker-mention-send"
+  "worker-mention-slots"
+  "worker-mention-probe"
 )
 
 printf 'shell-use: %s\n' "$shell_use_bin"
