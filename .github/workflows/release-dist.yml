@@ -1,0 +1,157 @@
+# Release channel that drives `cargo xtask dist` on an ephemeral AWS Spot
+# builder (scripts/cloud-build), instead of compiling on GitHub-hosted runners
+# like release.yml (cargo-dist) does.
+#
+# Flow: OIDC → AWS credentials → spin a per-run Spot VM
+# (VM_NAME=spur-release-<run_id>) → `cargo xtask dist` (linux native aarch64,
+# macOS universal2 via zigbuild, windows x86_64 via xwin — all compiled ON the
+# VM and fetched back through the sccache S3 bucket) → upload dist/ as a
+# workflow artifact (optionally publish a GitHub release on
+# getspur/spur-releases) → terminate the VM.
+#
+# VM lifecycle guarantees, in order of defense:
+#   1. the `always()` teardown step terminates the per-run instance;
+#   2. the VM self-terminates after 30 idle minutes (spur-autoshutdown timer);
+#   3. Spot InstanceInterruptionBehavior=terminate + instance-initiated
+#      shutdown = terminate — nothing outlives a reclaim or a shutdown.
+#
+# Required repository configuration (full details, incl. the IAM policy shape:
+# docs/superpowers/specs/2026-07-07-release-dist-spot-vm-cd.md):
+#   vars.AWS_RELEASE_ROLE_ARN — OIDC-assumable role: EC2 describe/run/terminate,
+#       iam:PassRole on spur-builder, SSM StartSession, S3 RW on the sccache
+#       bucket. MaxSessionDuration must cover role-duration-seconds below.
+#   vars.SPUR_BUILDER_AMI_ID  — optional golden AMI (bake-ami.sh) for ~1-2 min
+#       boots; empty falls back to the base Debian 12 arm64 AMI + full startup
+#       provisioning (8-12 min, can brush the 15-min startup-wait ceiling).
+#   secrets.GH_RELEASES_TOKEN — only for publish=true; write access to
+#       getspur/spur-releases (same secret release.yml uses).
+
+name: Release Dist (spot VM)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Platforms to build (comma-separated: linux,macos,windows)"
+        type: string
+        default: "linux,macos,windows"
+      publish:
+        description: "Publish a GitHub release on getspur/spur-releases"
+        type: boolean
+        default: false
+      tag:
+        description: "Release tag when publishing (default: v<workspace version>)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write # OIDC exchange for AWS credentials
+
+# One release-VM flow at a time: a second dispatch queues instead of racing
+# the S3 fetch prefix and the GitHub release.
+concurrency:
+  group: release-dist
+  cancel-in-progress: false
+
+env:
+  # cloud-build pins: Malaysia Graviton4 Spot only. The same-region m8gd→c8gd
+  # instance-type fallback stays inside the provider; the cross-region Tokyo
+  # fallback is disabled because its sccache L2 is cold and the OIDC role is
+  # provisioned for ap-southeast-5.
+  SPUR_CLOUD: aws-my
+  SPUR_CLOUD_FALLBACK: ""
+  # Never compile release artifacts on the runner: local fallback would emit
+  # wrong-arch binaries (or burn 40 min before fetch.sh fails). Fail fast.
+  SPUR_NO_LOCAL_FALLBACK: "1"
+  # Per-run VM identity: isolates this run from the shared dev builder
+  # (spur-builder) and from any concurrent run, and makes teardown surgical.
+  VM_NAME: spur-release-${{ github.run_id }}
+  # Optional golden AMI baked by scripts/cloud-build/bake-ami.sh. Empty
+  # resolves the latest base Debian 12 arm64 AMI at spin time.
+  AWS_AMI_ID: ${{ vars.SPUR_BUILDER_AMI_ID }}
+
+jobs:
+  dist:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ap-southeast-5
+          # The whole job talks to AWS (SSM tunnel for ssh/rsync + S3 artifact
+          # fetch); the default 1 h credentials would expire mid-build. The
+          # role's MaxSessionDuration must be >= this value.
+          role-duration-seconds: 10800
+
+      - name: Install session-manager-plugin
+        # SSH-over-SSM transport (scripts/cloud-build/_aws-ssm-ssh.sh) tunnels
+        # every remote command through `aws ssm start-session`.
+        run: |
+          curl -fsSL -o /tmp/session-manager-plugin.deb \
+            "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+          sudo dpkg -i /tmp/session-manager-plugin.deb
+          session-manager-plugin --version
+
+      - name: Generate ephemeral SSH key
+        # The public half is injected into the VM's authorized_keys via EC2
+        # user-data at launch; the private half authenticates the SSM-tunnelled
+        # ssh/rsync. Fresh per run, discarded with the runner.
+        run: |
+          mkdir -p "$HOME/.ssh"
+          ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/spur-release"
+          echo "AWS_SSH_KEY=$HOME/.ssh/spur-release" >> "$GITHUB_ENV"
+
+      - name: Spin release VM
+        # Fail fast on Spot capacity / IAM problems before paying for the
+        # xtask compile. (build.sh --auto-spin would also create the VM, but
+        # only after xtask has already started.)
+        run: scripts/cloud-build/spin.sh
+
+      - name: Build platform matrix (cargo xtask dist)
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: cargo xtask dist --platforms "$PLATFORMS"
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: spur-dist
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASES_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          tag="$INPUT_TAG"
+          if [[ -z "$tag" ]]; then
+            version="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)".*/\1/p;}' Cargo.toml | head -n1)"
+            [[ -n "$version" ]] || { echo "could not resolve workspace version" >&2; exit 1; }
+            tag="v${version}"
+          fi
+          gh release create "$tag" --repo getspur/spur-releases \
+            --title "$tag" --notes "spur $tag (xtask dist: $PLATFORMS)" \
+            dist/*
+
+      - name: Refresh AWS credentials for teardown
+        # Re-exchange OIDC so teardown works even when the job ran close to or
+        # past the original credential lifetime.
+        if: ${{ always() }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ap-southeast-5
+
+      - name: Terminate release VM
+        if: ${{ always() }}
+        run: scripts/cloud-build/teardown.sh
