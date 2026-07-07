@@ -122,14 +122,28 @@ tag pushes were **cut over to `release-dist.yml`**:
 - `release-dist.yml` triggers on `v*.*.*` tag pushes (publish implied, tag =
   `github.ref_name`) and stays manually dispatchable for dry runs
   (artifact-only unless `publish=true`).
-- `release.yml` (cargo-dist) keeps only its `pull_request` plan check. Its
-  installer artifacts and the `publish-npm` job stopped shipping at the
-  cutover — accepted intentionally. If npm distribution is wanted again, add
-  a publish job here or restore a slim cargo-dist flow.
-- Accepted artifact-set change: raw binaries + SHA256SUMS; linux is
-  **aarch64-only** (the Graviton builder's native target). An x86_64-linux
-  artifact would need an x86 builder shape or zigbuild's
-  `x86_64-unknown-linux-gnu` target on the VM.
+- `release.yml` (cargo-dist) keeps only its `pull_request` plan check; its
+  shell/powershell installers stopped shipping (accepted).
+- **npm publishing restored (v1.12.0, cd-25..cd-31).** Investigation showed
+  npm had already been stale at `@getspur/spur-cli@1.6.0` — every v1.7.0
+  cargo-dist run failed before the cutover. The new in-repo wrapper
+  (`npm/spur-cli/`) keeps the package lineage: postinstall downloads the
+  version's platform binary from `getspur/spur-releases`, verifies it
+  against SHA256SUMS, and a node bin shim execs it (lazy-installs under
+  `--ignore-scripts`). Published by the workflow after the GitHub release
+  exists; needs `secrets.NPM_TOKEN`.
+- **The platform matrix is now four legs** — npm parity forced a linux
+  x86_64 artifact back into existence. That leg compiles with Debian's real
+  cross GCC (`g++-x86-64-linux-gnu`), NOT zig: pyke's prebuilt GCC
+  onnxruntime needs libstdc++ symbols zig's bundled libc++ cannot provide
+  (the linux twin of the darwin system-libc++ story). Supporting cast, all
+  in `startup-aws.sh`: multiarch `libssl-dev:amd64` + a merged OpenSSL
+  include tree (Debian splits headers into shared + arch-only dirs), and an
+  `x64-link.sh` driver that lazily compiles lance-linalg's AVX-512
+  dist_table kernel from the registry source and appends it to every link —
+  the ELF twin of the darwin `ld64-link.sh`. The workflow smoke-tests the
+  x64 binary on the runner (the one dist platform the runner can execute)
+  before anything publishes.
 
 ## Instance sizing
 
