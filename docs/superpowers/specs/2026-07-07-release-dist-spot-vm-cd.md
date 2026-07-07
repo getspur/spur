@@ -113,22 +113,23 @@ Permissions (least-privilege sketch; region `ap-southeast-5`):
 - `ssm:StartSession` on the instances + document `AWS-StartSSHSession`, `ssm:TerminateSession`, `ssm:DescribeInstanceInformation` — the SSH-over-SSM transport
 - `s3:ListBucket` on `wiilearn-spur-sccache-apse5`; `s3:{Get,Put,Delete}Object` on its `/*` — `fetch.sh --via-s3` artifact hop (same surface the existing `AWS_SCCACHE_ROLE_ARN` grants, so that policy can be reused as a base)
 
-## Relationship to `release.yml` (cargo-dist) and rollout
+## Relationship to `release.yml` (cargo-dist) — CUTOVER DONE 2026-07-07
 
-The two flows coexist deliberately:
+After the v1.8.0 end-to-end validation (run 28859026141: all three platforms
+built on the spot VM in 15 min and published to `getspur/spur-releases`),
+tag pushes were **cut over to `release-dist.yml`**:
 
-- `release-dist.yml` is **workflow_dispatch-only**. Tag pushes still drive the
-  cargo-dist flow, so there is no race on `getspur/spur-releases` while the VM
-  flow is validated.
-- Artifact-set differences to accept before cutover: `xtask dist` emits **raw
-  binaries + SHA256SUMS** (linux is **aarch64-only** — the Graviton builder's
-  native target), no shell/msi installers, no npm package. cargo-dist's linux
-  x86_64, installers, and `publish-npm` job have no equivalent here yet.
-- Cutover plan once trusted: add a `push: tags:` trigger here (deriving the
-  tag from `github.ref_name` instead of the input), drop the same trigger
-  from `release.yml`, and decide whether npm publishing moves here or stays
-  on a slim cargo-dist flow. An x86_64-linux platform would need either an
-  x86 builder shape or zigbuild's `x86_64-unknown-linux-gnu` target on the VM.
+- `release-dist.yml` triggers on `v*.*.*` tag pushes (publish implied, tag =
+  `github.ref_name`) and stays manually dispatchable for dry runs
+  (artifact-only unless `publish=true`).
+- `release.yml` (cargo-dist) keeps only its `pull_request` plan check. Its
+  installer artifacts and the `publish-npm` job stopped shipping at the
+  cutover — accepted intentionally. If npm distribution is wanted again, add
+  a publish job here or restore a slim cargo-dist flow.
+- Accepted artifact-set change: raw binaries + SHA256SUMS; linux is
+  **aarch64-only** (the Graviton builder's native target). An x86_64-linux
+  artifact would need an x86 builder shape or zigbuild's
+  `x86_64-unknown-linux-gnu` target on the VM.
 
 ## Instance sizing
 
