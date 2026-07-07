@@ -1,33 +1,38 @@
-# POC: macOS (aarch64-apple-darwin) cross-compiles on the cloud-build VM via cargo-zigbuild
+# Standard pattern: macOS cross-compiles on the cloud-build VM via cargo-zigbuild
 
-**Status: proven end-to-end, including DuckDB extension runtime
-(2026-07-07).** The Linux Graviton build VM cross-compiles the full `spur`
-binary (DuckDB, lance, ort/onnxruntime, ring, arboard/AppKit,
-native-tls/Security included) into a Mach-O arm64 executable that runs
-natively on an Apple Silicon Mac. Verified on macOS 26.1: `--version`,
-`--help`, the TUI, and — after the same-day runtime fix below — spur-analyst
-DuckDB queries with natively-built extension dylibs (duckpgq, lance, icu)
-loaded and exceptions flowing across the dlopen boundary. Full Rust-graph
-rebuild takes ~9m on m8gd.4xlarge with C archives warm; the first-ever build
-(C cold, DuckDB amalgamation dominates) roughly doubles that.
+**Status: standard macOS build path (2026-07-07).** The AWS Graviton build
+VM cross-compiles the full `spur` binary (DuckDB, lance, ort/onnxruntime,
+ring, arboard/AppKit, native-tls/Security included) into Mach-O executables
+— `aarch64-apple-darwin`, `x86_64-apple-darwin`, or a `universal2` fat
+binary — that run natively on Macs. Verified on macOS 26.1: `--version`,
+`--help`, the TUI, and spur-analyst DuckDB queries with natively-built
+extension dylibs (duckpgq, lance, icu) loaded and exceptions flowing across
+the dlopen boundary. Full Rust-graph rebuild takes ~9m per arch on
+m8gd.4xlarge with C archives warm; a fully cold arch roughly doubles that.
 
 ## How to use
 
 ```sh
-# once per VM lifetime (and again after a spot preemption — see Durability):
-scripts/zigbuild-provision-vm.sh
+# once per VM lifetime; --publish-bundle also uploads the toolchain bundle
+# to S3 so FRESH spot VMs self-provision at boot (startup-aws.sh restores
+# it) with no Mac in the loop:
+scripts/zigbuild-provision-vm.sh --publish-bundle
 
 # build (remote by default, same dispatch contract as spur-cargo build):
-scripts/spur-cargo zigbuild --release -p spur-cli
+scripts/spur-cargo zigbuild --release -p spur-cli                                  # arm64
+scripts/spur-cargo zigbuild --release -p spur-cli --target universal2-apple-darwin # fat
 
-# fetch the artifact (340 MB — use the S3 path, SSM rsync is ~5 MB/s):
+# fetch the artifact (340 MB arm64 / 726 MB fat — use the S3 path, SSM
+# rsync is ~5 MB/s):
 <cloud-build>/fetch.sh --via-s3 --to /tmp/spur-macos-arm64 \
     target/aarch64-apple-darwin/release/spur
+<cloud-build>/fetch.sh --via-s3 --to /tmp/spur-macos-universal2 \
+    target/universal2-apple-darwin/release/spur
 ```
 
 `spur-cargo zigbuild` defaults `--target aarch64-apple-darwin` (pass an
 explicit `--target` to override) and, when the caller has no `RUSTFLAGS`,
-exports the exact flag set the POC validated (see "CoreML" below).
+exports the exact flag set this doc validates (see "CoreML" below).
 
 If the build fails with `couldn't read .../libproc-<hash>/out/
 osx_libproc_bindings.rs`, run `bash /mnt/cargo/macsdk/plant-libproc-bindings.sh`
@@ -141,6 +146,51 @@ queries over `spur mcp` return rows (33,582-row count against
 loaded; DuckDB error paths (Catalog Error) surface as JSON error strings
 instead of killing the process.
 
+## universal2 (fat arm64+x86_64) findings
+
+The same recipe extends to `--target universal2-apple-darwin`
+(cargo-zigbuild builds both slices and lipo-combines them). Three
+x86_64-specific findings:
+
+11. **cc-rs APPENDS `CFLAGS_<target>` after plain `CFLAGS` — it does not
+    replace it.** The profile's `-mcpu=native` (neoverse!) therefore reaches
+    every darwin C compile and must be overridden by a LATER `-mcpu`: the
+    arm flags already did this implicitly (`-mcpu=apple_m1`); x86_64 needs
+    an explicit `-mcpu=x86_64` baseline, otherwise zig resolves the arm host
+    CPU into an x86 compile and zstd's NEON path explodes.
+
+12. **lance-linalg's AVX-512 `dist_table` kernel cannot cross-compile via
+    its own build.rs** — the kernel uses `-march=native` (meaningless on an
+    arm host; and the appended `-mcpu=x86_64` breaks clang-20's `evex512`
+    ABI checks anyway), while the *feature-skipped* f16/bf16 probes still
+    return `Ok` and set the shared `kernel_support="avx512"` cfg (upstream
+    bug), leaving the Rust caller referencing a symbol nothing defines.
+    Fix: provisioning pre-compiles the runtime-gated kernel
+    (`zig cc -target x86_64-macos -mcpu=x86_64_v4`, zig CPU spelling) and
+    `ld64-link.sh` appends the object to every x86_64 link.
+
+13. **Per-arch libproc bindings** — the generated bindings differ by arch
+    (362 KB x86_64 vs 308 KB arm64), so provisioning generates both and the
+    plant helper installs the matching one per target dir.
+
+Verified: `Mach-O universal binary with 2 architectures` (726 MB); the
+arm64 slice runs natively (`--version` + analyst MCP query). The x86_64
+slice is statically verified (valid Mach-O, system libc++/CoreML linkage,
+AVX-512 kernel symbol defined) — live execution still needs an Intel Mac or
+a Rosetta-enabled machine (the build host Mac has no Rosetta installed).
+
+## Standardization (cloud-build, spur-notebook repo)
+
+`scripts/zigbuild-provision-vm.sh --publish-bundle` uploads the full
+toolchain state (SDK stubs, zig, cargo-zigbuild/bindgen binaries, ld64
+driver, libproc bindings, lance kernel, repo rust-pin) to
+`s3://$SCCACHE_BUCKET/macsdk/macos-cross-bundle.tar.gz`. cloud-build's
+`startup-aws.sh` restores that bundle at boot on every fresh spot VM —
+installs lld-19, adds both darwin rust-std targets to the default and
+pinned toolchains, and appends the darwin CFLAGS profile block — so macOS
+cross survives spot preemption with no Mac in the loop. A missing bundle
+changes nothing for the Linux build path.
+
 ## Deliberately out of scope / known limits
 
 - **Runtime coverage**: CLI startup, the TUI, and spur-analyst DuckDB
@@ -148,17 +198,12 @@ instead of killing the process.
   Embedding (`spur graph embed` / onnxruntime inference) is linked but not
   yet exercised end-to-end.
 - **Durability**: everything provisioned lives on instance-store
-  `/mnt/cargo` — a spot preemption wipes it. Re-run
-  `scripts/zigbuild-provision-vm.sh` (idempotent, ~5 min). Durable options:
-  fold into `startup-aws.sh`/the golden AMI and host the SDK subset in the
-  sccache S3 bucket so a fresh VM self-provisions without a Mac present.
+  `/mnt/cargo` — a spot preemption wipes it. With the S3 bundle published
+  (see Standardization above), `startup-aws.sh` restores it at boot; without
+  a bundle, re-run `scripts/zigbuild-provision-vm.sh` (idempotent, ~5 min).
 - **sccache**: darwin Rust compiles are cached (RUSTC_WRAPPER applies);
   darwin C/C++ objects are NOT (cargo-zigbuild's `CC_<target>` wrappers
   bypass sccache-cc), so DuckDB recompiles on a fresh VM.
-- **x86_64-apple-darwin / universal2**: untested. The same recipe should
-  apply (`--target x86_64-apple-darwin`, `-mcpu` swap, x86 clang_rt slice is
-  in the same CLT archive; `cargo zigbuild --target universal2-apple-darwin`
-  exists) — separate POC.
 - **Licensing**: the tbd stubs, headers, and compiler-rt archive come from
   the user's own Xcode CLT install and serve their own builds; Apple's Xcode
   license nominally ties SDK use to Apple-branded hardware. Flagged for
@@ -173,6 +218,6 @@ instead of killing the process.
 | zig | 0.15.2 (linux-aarch64) |
 | cargo-zigbuild | 0.23.0 |
 | bindgen-cli | 0.72.1 (against system libclang-14) |
-| link driver | Debian clang-14 + ld64.lld-19 (`/mnt/cargo/macsdk/ld64-link.sh`) |
+| link driver | Debian clang + ld64.lld-19 (`/mnt/cargo/macsdk/ld64-link.sh`, arch-sniffing) |
 | macOS SDK | 26.1 (CLT, Darwin 25.1 host) |
-| Artifact | `spur` 1.7.0, Mach-O arm64, links system libc++, adhoc linker-signed |
+| Artifact | `spur` 1.7.0, Mach-O arm64 (340 MB) or universal2 fat (726 MB), links system libc++, adhoc linker-signed |
