@@ -66,6 +66,17 @@ env:
   # provisioned for ap-southeast-5.
   SPUR_CLOUD: aws-my
   SPUR_CLOUD_FALLBACK: ""
+  # 32-vCPU Graviton4 primary for fast release builds (paired with
+  # SPUR_BUILD_JOBS below). Falls back to the 16-vCPU dev-builder shape when
+  # Spot capacity — or the regional Spot vCPU quota (32 as of 2026-07, shared
+  # with the dev builder) — blocks the big instance; the provider treats
+  # MaxSpotInstanceCountExceeded as retryable so the fallback actually fires.
+  # Same Graviton4 generation → same -Ctarget-cpu → shared sccache keys.
+  AWS_INSTANCE_TYPE: m8gd.8xlarge
+  AWS_INSTANCE_TYPE_FALLBACK: m8gd.4xlarge
+  # cargo -j on the VM. Sized for the 8xlarge primary; mildly oversubscribed
+  # on the 4xlarge fallback, which compile-bound workloads tolerate fine.
+  SPUR_BUILD_JOBS: "32"
   # Never compile release artifacts on the runner: local fallback would emit
   # wrong-arch binaries (or burn 40 min before fetch.sh fails). Fail fast.
   SPUR_NO_LOCAL_FALLBACK: "1"
