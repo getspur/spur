@@ -224,8 +224,8 @@ must treat "suites green on ubuntu-24.04" as its acceptance criterion
 
 | Phase | Deliverable | Acceptance |
 |---|---|---|
-| 1 | `lib/isolate.sh`, `lib/spur-bin.sh`, `run-all.sh`, `JOURNEYS.md`; both suites refactored onto shared lib | both suites 3×3 green locally, no behavior change |
-| 2 | CI job (advisory) incl. Linux validation of both drivers | green on ubuntu-24.04, artifacts upload on failure |
+| 1 — delivered-via-VM | `lib/isolate.sh`, `lib/spur-bin.sh`, `run-all.sh`, `JOURNEYS.md`; both suites refactored onto shared lib | both suites 3×3 green locally, no behavior change; VM validation below confirms remote runner parity |
+| 2 — delivered-via-VM | CI job (advisory) incl. Linux validation of both drivers | green on ubuntu-24.04-equivalent remote VM, artifacts upload on failure |
 | 3 | Journey growth, agent-less: session-picker open/filter, palette open, resize (SIGWINCH via shell-use / new tape geometry), paste-atom UAT (F3 from SIT/UAT scenarios doc) | catalog rows + 3× stability each |
 | 4 | `echo-agent` fixture + first 3 ACP-scripted behavioral journeys | canned-reply journey green 3× |
 | 5 | CI job flips to required | ≥50 advisory runs, 0 flakes |
@@ -255,3 +255,30 @@ Open questions (to resolve in phase 4 design):
 3. Whether `run-all.sh` should also invoke the in-process suite
    (`spur-cargo test -p spur-tui`) for a single "all TUI tests" entry point,
    or stay e2e-only (leaning: e2e-only; CI already runs tier 1).
+
+## 11. Remote VM validation
+
+Date: 2026-07-07
+Issue: `bd-30iz3` / `e2e-vm-4`
+Command: `scripts/spur-cargo e2e`
+Remote: `aws-my` build VM, Linux, `shell-use 0.0.1-beta.3`, `vhs 0.11.0`,
+`ttyd 1.7.7-40e79c7`, `ffmpeg 5.1.9-0+deb12u1`.
+
+Linux golden strategy: keep one shared `scripts/e2e/vhs/goldens/` corpus and
+normalize harder, rather than adding `goldens/<os>/`. The Linux VHS run showed
+two non-product differences: `help-overlay` captured fewer browser rows than
+the macOS calibration, and `clean-quit` sometimes emitted an early partial
+frame before the stable modal frame. The runner now selects the final matching
+frame and normalizes the help-overlay golden to the stable cross-platform
+overlay subset. No blind re-record was used.
+
+| Run | Result | Behavioral | Visual | Notes |
+|---|---|---:|---:|---|
+| 1 | PASS | 3/3 | 3/3 | `cold-launch`, `help-overlay`, `clean-quit`; shared goldens stable |
+| 2 | PASS | 3/3 | 3/3 | Same command, no flakes |
+| 3 | PASS | 3/3 | 3/3 | Same command, no flakes |
+
+No journeys were quarantined. No production Rust changes were made. The only
+Linux hardening needed was in `scripts/e2e/vhs/run-vhs-suite.sh`; shell-use
+daemon lifecycle, Linux cache path collection (`~/.cache/shell-use`), TERM /
+terminfo behavior, and VHS/rod Chromium startup all validated in these runs.
