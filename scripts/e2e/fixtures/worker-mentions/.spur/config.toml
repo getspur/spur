@@ -1,0 +1,30 @@
+# Worker-mention e2e fixture: one ACP agent backed by the fake-worker.sh
+# stub. `kind` is explicit because deserialization defaults to Generic,
+# which would disable `.spur/agents` profile rendering (empty agent slot
+# in the worker-mention cascade). `role = "both"` keeps the agent
+# brain-capable so pre-session sends can open a session against the stub.
+# `[brain] default` must name the stub too: the built-in default is
+# "claude-code", which is absent here and would pin the status bar in a
+# brain error state.
+[brain]
+default = "codex"
+
+# shell-use `type` delivers characters at machine speed, which the input
+# bar's fallback paste-burst detector coalesces into a paste — pastes do
+# not fire completion TypedChar intents, so the @-mention popup would
+# never open. Disable the detector for deterministic keystroke-driven
+# journeys.
+[tui]
+disable_paste_burst = true
+
+[[agents.entries]]
+name = "codex"
+command = "bash"
+args = [".spur/fake-worker.sh"]
+transport = "acp"
+kind = "codex-acp"
+role = "both"
+
+[agents.entries.delegation]
+description = "Writes Rust and tests"
+tier = "generalist"
