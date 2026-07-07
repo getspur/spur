@@ -25,6 +25,11 @@
 #       provisioning (8-12 min, can brush the 15-min startup-wait ceiling).
 #   secrets.GH_RELEASES_TOKEN — only for publish=true; write access to
 #       getspur/spur-releases (same secret release.yml uses).
+#   S3 cloud-build bundle    — scripts/cloud-build is a git-tracked symlink
+#       into the sibling spur-notebook checkout, so the runner restores the
+#       scripts from s3://<sccache-bucket>/ci/cloud-build/bundle.tar.gz.
+#       Refresh with scripts/cloud-build-publish-bundle.sh whenever the
+#       cloud-build scripts change.
 
 name: Release Dist (spot VM)
 
@@ -89,6 +94,20 @@ jobs:
           # fetch); the default 1 h credentials would expire mid-build. The
           # role's MaxSessionDuration must be >= this value.
           role-duration-seconds: 10800
+
+      - name: Restore cloud-build scripts (S3 bundle)
+        # scripts/cloud-build is a symlink to ../../spur-notebook/scripts/
+        # cloud-build — a private sibling repo that is not checked out here.
+        # Restore the published bundle to that sibling path so the tracked
+        # symlink resolves exactly like on a workstation (spin/teardown, the
+        # spur-cargo dispatch, and xtask's fetch.sh all go through it).
+        run: |
+          aws s3 cp "s3://wiilearn-spur-sccache-apse5/ci/cloud-build/bundle.tar.gz" \
+            /tmp/cloud-build-bundle.tar.gz --region ap-southeast-5
+          mkdir -p "$GITHUB_WORKSPACE/../spur-notebook/scripts"
+          tar -xzf /tmp/cloud-build-bundle.tar.gz -C "$GITHUB_WORKSPACE/../spur-notebook/scripts"
+          test -x "$GITHUB_WORKSPACE/scripts/cloud-build/spin.sh"
+          echo "cloud-build scripts restored ($(ls "$GITHUB_WORKSPACE/../spur-notebook/scripts/cloud-build" | wc -l) files)"
 
       - name: Install session-manager-plugin
         # SSH-over-SSM transport (scripts/cloud-build/_aws-ssm-ssh.sh) tunnels
