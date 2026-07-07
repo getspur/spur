@@ -423,6 +423,9 @@ enum DistPlatform {
     /// Native VM target. The AWS Graviton builder emits aarch64 Linux
     /// binaries; the artifact suffix tracks that.
     LinuxAarch64,
+    /// x86_64 ELF via `spur-cargo zigbuild` (zig cross C/C++ + ELF link).
+    /// Exists for npm parity: @getspur/spur-cli must serve linux x64.
+    LinuxX64Gnu,
     /// Fat arm64 + x86_64 Mach-O via `spur-cargo zigbuild`.
     MacUniversal2,
     /// PE32+ via `spur-cargo xwin`.
@@ -430,8 +433,9 @@ enum DistPlatform {
 }
 
 impl DistPlatform {
-    const ALL: [DistPlatform; 3] = [
+    const ALL: [DistPlatform; 4] = [
         DistPlatform::LinuxAarch64,
+        DistPlatform::LinuxX64Gnu,
         DistPlatform::MacUniversal2,
         DistPlatform::WindowsX64,
     ];
@@ -439,10 +443,11 @@ impl DistPlatform {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "linux" => Ok(Self::LinuxAarch64),
+            "linux-x64" | "linux-x86_64" => Ok(Self::LinuxX64Gnu),
             "macos" | "mac" | "darwin" => Ok(Self::MacUniversal2),
             "windows" | "win" => Ok(Self::WindowsX64),
             other => Err(format!(
-                "unknown dist platform {other:?}; expected linux, macos, or windows"
+                "unknown dist platform {other:?}; expected linux, linux-x64, macos, or windows"
             )),
         }
     }
@@ -452,6 +457,7 @@ impl DistPlatform {
     fn artifact_rel(self) -> &'static str {
         match self {
             Self::LinuxAarch64 => "target/release/spur",
+            Self::LinuxX64Gnu => "target/x86_64-unknown-linux-gnu/release/spur",
             Self::MacUniversal2 => "target/universal2-apple-darwin/release/spur",
             Self::WindowsX64 => "target/x86_64-pc-windows-msvc/release/spur.exe",
         }
@@ -461,6 +467,7 @@ impl DistPlatform {
     fn artifact_name(self, version: &str) -> String {
         match self {
             Self::LinuxAarch64 => format!("spur-{version}-aarch64-unknown-linux-gnu"),
+            Self::LinuxX64Gnu => format!("spur-{version}-x86_64-unknown-linux-gnu"),
             Self::MacUniversal2 => format!("spur-{version}-universal2-apple-darwin"),
             Self::WindowsX64 => format!("spur-{version}-x86_64-pc-windows-msvc.exe"),
         }
@@ -469,6 +476,7 @@ impl DistPlatform {
     fn build_label(self) -> &'static str {
         match self {
             Self::LinuxAarch64 => "spur-cargo build --release -p spur-cli (linux native)",
+            Self::LinuxX64Gnu => "spur-cargo zigbuild --release -p spur-cli (linux x86_64)",
             Self::MacUniversal2 => "spur-cargo zigbuild --release -p spur-cli (macOS universal2)",
             Self::WindowsX64 => "spur-cargo xwin build --release -p spur-cli (windows x86_64)",
         }
@@ -479,6 +487,7 @@ impl DistPlatform {
     fn namespace_key(self) -> &'static str {
         match self {
             Self::LinuxAarch64 => "linux",
+            Self::LinuxX64Gnu => "linux-x64",
             Self::MacUniversal2 => "macos",
             Self::WindowsX64 => "windows",
         }
@@ -747,6 +756,16 @@ fn dist_build_command(workspace_root: &Path, platform: DistPlatform) -> Command 
     match platform {
         DistPlatform::LinuxAarch64 => {
             cmd.args(["build", "--release", "-p", "spur-cli"]);
+        }
+        DistPlatform::LinuxX64Gnu => {
+            cmd.args([
+                "zigbuild",
+                "--release",
+                "-p",
+                "spur-cli",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+            ]);
         }
         DistPlatform::MacUniversal2 => {
             cmd.args([
@@ -1733,6 +1752,10 @@ mod tests {
         );
         assert_eq!(options.out_dir, Some(PathBuf::from("/tmp/spur-dist")));
 
+        let options = parse_dist_options(vec!["--platforms".to_owned(), "linux-x64".to_owned()])
+            .expect("linux-x64 parses");
+        assert_eq!(options.platforms, vec![DistPlatform::LinuxX64Gnu]);
+
         assert!(parse_dist_options(vec!["--platforms".to_owned(), "beos".to_owned()]).is_err());
         assert!(parse_dist_options(vec!["--platforms".to_owned(), ",".to_owned()]).is_err());
         assert!(parse_dist_options(vec!["--frobnicate".to_owned()]).is_err());
@@ -1746,6 +1769,17 @@ mod tests {
             (
                 DistPlatform::LinuxAarch64,
                 vec!["build", "--release", "-p", "spur-cli"],
+            ),
+            (
+                DistPlatform::LinuxX64Gnu,
+                vec![
+                    "zigbuild",
+                    "--release",
+                    "-p",
+                    "spur-cli",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                ],
             ),
             (
                 DistPlatform::MacUniversal2,
@@ -1814,6 +1848,10 @@ mod tests {
         assert_eq!(
             DistPlatform::LinuxAarch64.artifact_name("1.7.0"),
             "spur-1.7.0-aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            DistPlatform::LinuxX64Gnu.artifact_name("1.7.0"),
+            "spur-1.7.0-x86_64-unknown-linux-gnu"
         );
         assert_eq!(
             DistPlatform::MacUniversal2.artifact_name("1.7.0"),
