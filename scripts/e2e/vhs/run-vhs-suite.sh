@@ -45,32 +45,32 @@ extract_screen() {
       sep = "────────────────────────────────────────────────────────────────────────────────"
       n = 0
       text = ""
+      selected = ""
     }
     function reset_segment() {
       delete lines
       n = 0
       text = ""
     }
-    function emit_segment(    last, i) {
-      print "## " label
+    function capture_segment(    last, i, segment) {
+      segment = "## " label "\n"
       last = n
       while (last > 0 && (lines[last] == "" || lines[last] ~ /^> ?$/)) {
         last--
       }
       for (i = 1; i <= last; i++) {
-        print lines[i]
+        segment = segment lines[i] "\n"
       }
-      print ""
+      selected = segment "\n"
     }
-    function maybe_emit() {
+    function maybe_capture() {
       if (text ~ pat) {
-        emit_segment()
+        capture_segment()
         found = 1
-        exit 0
       }
     }
     $0 == sep {
-      maybe_emit()
+      maybe_capture()
       reset_segment()
       next
     }
@@ -79,14 +79,25 @@ extract_screen() {
       text = text $0 "\n"
     }
     END {
-      if (!found) {
-        maybe_emit()
-      }
+      maybe_capture()
       if (!found) {
         exit 1
       }
+      printf "%s", selected
     }
   ' "$raw"
+}
+
+normalize_help_overlay() {
+  local raw="$1"
+
+  extract_screen "$raw" "Dashboard — Modes" "help overlay" | awk '
+    /│  j\/k, Up\/Down[[:space:]]+Scroll or navigate/ {
+      print "       │  j/k, Up/Down       Scroll or navigate"
+      exit 0
+    }
+    { print }
+  '
 }
 
 normalize_output() {
@@ -101,7 +112,7 @@ normalize_output() {
       extract_screen "$raw" "No agents configured" "cold launch" >>"$tmp"
       ;;
     help-overlay)
-      extract_screen "$raw" "Dashboard — Modes" "help overlay" >>"$tmp"
+      normalize_help_overlay "$raw" >>"$tmp"
       ;;
     clean-quit)
       extract_screen "$raw" "Quit spur[?]" "quit confirmation" >>"$tmp"
