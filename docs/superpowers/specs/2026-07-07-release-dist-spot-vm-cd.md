@@ -130,6 +130,36 @@ The two flows coexist deliberately:
   on a slim cargo-dist flow. An x86_64-linux platform would need either an
   x86 builder shape or zigbuild's `x86_64-unknown-linux-gnu` target on the VM.
 
+## Instance sizing
+
+The workflow pins `AWS_INSTANCE_TYPE=m8gd.8xlarge` (32 vCPU Graviton4) with
+`SPUR_BUILD_JOBS=32` for fast release builds, falling back to `m8gd.4xlarge`
+(the dev-builder shape) when Spot capacity or the regional Spot vCPU quota
+blocks the big instance. `MaxSpotInstanceCountExceeded` is treated as a
+retryable launch error in `provider-aws.sh` specifically so this fallback
+fires — an AZ cycle cannot fix a quota squeeze, but a smaller type can fit
+under the remaining headroom. Note the `ap-southeast-5` Spot quota was 32
+vCPUs as of 2026-07 (exactly one 8xlarge OR two 4xlarges): while the dev
+builder is running, the release primary only launches after a quota bump
+(request: Service Quotas → EC2 → L-34B43A08 → 64+).
+
+## Fresh-VM boot hardening (learned from the first live runs)
+
+Four one-shot-CI failure modes were found and fixed in the cloud-build
+scripts (see spur-notebook history around 2026-07-07):
+
+1. bash 5.2 + `set -u` rejects `${#arr[@]}` on declared-but-unset arrays —
+   `_aws_candidate_azs` died on ubuntu runners (fine on macOS bash).
+2. The e2e-toolchain provisioner's exit-code bug (`[[ $RUN_SMOKE -eq 1 ]] &&
+   run_vhs_smoke` as last statement) aborted the whole startup under
+   `set -e`; provisioning is now non-fatal and the S3 provisioner is fixed.
+3. The PathCch/DirectML import-lib self-heal ran at shell init — before the
+   xwin splat exists on a fresh VM — so the first-ever PE link failed;
+   startup now warms the splat with a hello-world `cargo xwin build` (~30 s)
+   and plants the libs at boot.
+4. Quota errors (`MaxSpotInstanceCountExceeded`) were terminal instead of
+   falling back to the smaller instance type.
+
 ## Known limits
 
 - **Cold start on the base AMI** (no `SPUR_BUILDER_AMI_ID`): 8-12 min of
