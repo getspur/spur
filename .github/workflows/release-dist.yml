@@ -34,6 +34,12 @@
 name: Release Dist (spot VM)
 
 on:
+  # Tag pushes are the release trigger since the 2026-07-07 cutover from the
+  # cargo-dist release.yml (which keeps only its pull_request plan check).
+  # A tag push implies publish=true with the tag as the release name.
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
   workflow_dispatch:
     inputs:
       platforms:
@@ -146,7 +152,8 @@ jobs:
 
       - name: Build platform matrix (cargo xtask dist)
         env:
-          PLATFORMS: ${{ inputs.platforms }}
+          # Empty on tag pushes (inputs only exist for workflow_dispatch).
+          PLATFORMS: ${{ inputs.platforms || 'linux,macos,windows' }}
         run: cargo xtask dist --platforms "$PLATFORMS"
 
       - name: Upload dist artifacts
@@ -157,13 +164,17 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub release
-        if: ${{ inputs.publish }}
+        # Tag pushes always publish; manual dispatches opt in via the input.
+        if: ${{ github.ref_type == 'tag' || inputs.publish }}
         env:
           GH_TOKEN: ${{ secrets.GH_RELEASES_TOKEN }}
           INPUT_TAG: ${{ inputs.tag }}
-          PLATFORMS: ${{ inputs.platforms }}
+          PLATFORMS: ${{ inputs.platforms || 'linux,macos,windows' }}
         run: |
           tag="$INPUT_TAG"
+          if [[ -z "$tag" && "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+          fi
           if [[ -z "$tag" ]]; then
             version="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)".*/\1/p;}' Cargo.toml | head -n1)"
             [[ -n "$version" ]] || { echo "could not resolve workspace version" >&2; exit 1; }

@@ -39,11 +39,14 @@ permissions:
 #
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
+# CUTOVER 2026-07-07: tag pushes now release through release-dist.yml
+# (cargo xtask dist on the cloud-build spot VM). This cargo-dist flow keeps
+# only its pull_request plan check; installer artifacts and npm publishing
+# stopped shipping at the cutover. See
+# docs/superpowers/specs/2026-07-07-release-dist-spot-vm-cd.md. If cargo-dist
+# regenerates this file (`dist generate`), re-remove the push/tags trigger.
 on:
   pull_request:
-  push:
-    tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
