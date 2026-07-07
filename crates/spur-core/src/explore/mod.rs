@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod gate;
 pub mod pool;
 
 use anyhow::{bail, Context};
