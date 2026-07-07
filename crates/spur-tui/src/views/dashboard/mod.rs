@@ -68,6 +68,7 @@ pub struct DashboardView {
     mention_registry: std::rc::Rc<std::cell::RefCell<crate::mentions::MentionRegistry>>,
     known_worker_names: HashSet<String>,
     cwd: std::path::PathBuf,
+    git_info: crate::git_info::GitInfoCache,
     focused_panel: Panel,
     focused_node: Option<ExecutorId>,
     verbose: bool,
@@ -145,6 +146,7 @@ impl DashboardView {
     pub fn new() -> Self {
         let mut activity_log = ActivityLog::new("Activity");
         activity_log.set_focused(true);
+        let cwd = spur_graph::resolve_worktree_root();
 
         Self {
             agents_tree: AgentsTree::new(),
@@ -157,7 +159,8 @@ impl DashboardView {
                 crate::mentions::MentionRegistry::new().with_code_graph_from_env(),
             )),
             known_worker_names: HashSet::new(),
-            cwd: spur_graph::resolve_worktree_root(),
+            git_info: crate::git_info::GitInfoCache::new(cwd.clone()),
+            cwd,
             focused_panel: Panel::Log,
             focused_node: None,
             verbose: false,
@@ -656,6 +659,7 @@ impl DashboardView {
         worker_streams: &mut crate::worker_streams::WorkerStreams,
         ctx: &super::ViewContext,
     ) {
+        self.git_info.refresh_if_stale();
         let lineage = ctx.lineage;
         let flag_summary = ctx.flag_summary;
         let tombstone = ctx.tombstone;
@@ -792,6 +796,7 @@ impl DashboardView {
                 issue_count: self.tracked_issues.len(),
                 alert_summary: self.alert_summary,
                 flag_summary,
+                git_info: self.git_info.current(),
                 view_hint_override,
             },
         );
@@ -905,6 +910,7 @@ impl DashboardView {
                 issue_count: self.tracked_issues.len(),
                 alert_summary: self.alert_summary,
                 flag_summary,
+                git_info: self.git_info.current(),
                 view_hint_override,
             },
         );
@@ -1054,6 +1060,7 @@ impl DashboardView {
                 issue_count: self.tracked_issues.len(),
                 alert_summary: self.alert_summary,
                 flag_summary,
+                git_info: self.git_info.current(),
                 view_hint_override,
             },
         );
