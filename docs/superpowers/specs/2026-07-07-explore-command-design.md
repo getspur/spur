@@ -142,18 +142,27 @@ harness always loads them; nothing is injected mid-session:
 
 | Worker kind | Skills | Personas |
 |---|---|---|
-| claude | `<wt>/.claude/skills/<name>/SKILL.md` | `<wt>/.claude/agents/<name>.md` |
-| codex | `<wt>/.codex/skills/<name>/SKILL.md` | `<wt>/.codex/agents/<name>.toml` (developer_instructions, model, effort, sandbox mapping) |
-| gemini | `<wt>/.gemini/skills/<name>/SKILL.md` | `<wt>/.gemini/agents/<name>.md` |
+| claude | `<wt>/.claude/skills/<name>/SKILL.md` | e.g. `<wt>/.claude/agents/<name>.md` |
+| codex | `<wt>/.codex/skills/<name>/SKILL.md` | e.g. `<wt>/.codex/agents/<name>.toml` |
+| gemini | `<wt>/.gemini/skills/<name>/SKILL.md` | e.g. `<wt>/.gemini/agents/<name>.md` |
 | kiro | `<wt>/.kiro/skills/<name>/SKILL.md` + steering pointer | per agent-profile mapping |
 | opencode / kimi | `<wt>/.<kind>/skills/<name>/SKILL.md` | per agent-profile mapping |
 
+Persona delivery uses whatever mechanism the agent-profile design already
+defines for that worker kind — a harness-native config file where the harness
+reads one (paths above), or ACP session parameters where that is the
+established route (see the 2026-07-05 codex model/effort/profile RCA). The
+implementation plan must verify the exact per-kind mechanism against
+agent-profile code rather than assuming config files everywhere.
+
 Mechanics:
 
-- The brain picks a **task-relevant subset** of the pool per delegation
-  (description-vs-task matching), overridable with an explicit `skills:`
-  param on the delegation. Bundled spurpower skills are always present and
-  unaffected.
+- The brain picks a **task-relevant subset** of the pool per delegation.
+  The matching is the brain's own judgment at delegation time (pool item
+  descriptions are surfaced to it when composing the dispatch) — there is no
+  separate matching engine in v1. An explicit `skills:` param on the
+  delegation overrides the subset. Bundled spurpower skills are always
+  present and unaffected.
 - Rendered files carry the `SPUR-MANAGED` marker and are appended to the
   worktree's `.git/info/exclude`, so ephemeral materialization can never
   leak into worker commits.
