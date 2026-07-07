@@ -205,6 +205,45 @@ impl InputCompletionPort {
                 self.pending_mention_query = None;
                 Some(out)
             }
+            PickerAction::AcceptKeepOpen(accept) => {
+                let out = accept.clone();
+                // Deliberately bypass `apply_accept`'s ReplaceTriggerToken
+                // handling here: it always re-anchors to the trigger
+                // detector's own prefix_start (the '@' byte), which is
+                // correct for a full-region replacement like /model but
+                // wrong here -- this accept's prefix_start already points
+                // at the exact byte after the last comma (or the worker
+                // name) and must be honored as-is, not widened to '@'.
+                match &out {
+                    RetrievalAccept::ReplaceTriggerToken {
+                        prefix_start,
+                        replacement,
+                    } => {
+                        replace_trigger_token(input_bar, *prefix_start, replacement);
+                    }
+                    _ => self.apply_accept(accept, input_bar),
+                }
+                // The trigger detector never saw this out-of-band mutation
+                // (we didn't route it through `step()`, since every event
+                // kind it accepts either closes the popup or doesn't apply
+                // here), so its Composing state -- and thus prefix_start --
+                // is untouched. Recompute the query substring exactly like
+                // `advance_composing` would and push it straight to the
+                // shell instead.
+                let text = input_bar.text();
+                let cursor = input_bar.cursor();
+                let query_start = self
+                    .trigger_detector
+                    .current_prefix_start()
+                    .map(|prefix_start| prefix_start + 1)
+                    .unwrap_or(0)
+                    .min(cursor);
+                let new_query = text[query_start..cursor].to_string();
+                if let Some(shell) = self.picker_shell.as_mut() {
+                    shell.set_query_from_input_bar(&new_query);
+                }
+                Some(out)
+            }
         }
     }
 
@@ -1321,5 +1360,149 @@ mod tests {
         assert!(input_bar.text().starts_with('/'));
         assert!(input_bar.text().ends_with(' '));
         assert!(!completion.is_active());
+    }
+
+    #[test]
+    fn worker_cascade_picker_advances_through_agent_model_effort_and_commits_final_atom() {
+        // Regression test for two bugs only surfaced by driving the real
+        // TUI live: (1) ReplaceTriggerToken's prefix_start was silently
+        // re-anchored to the trigger's '@' byte by apply_accept, wiping out
+        // the already-typed "@codex," prefix; (2) the spliced replacement
+        // was missing its leading comma, producing "@codexspur-probe-echo,"
+        // instead of "@codex,spur-probe-echo,". Both are invisible to a
+        // MentionRegistry-only unit test since they live in how
+        // input_completion.rs dispatches PickerAction::AcceptKeepOpen.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".spur/agents")).unwrap();
+        std::fs::write(
+            tmp.path().join(".spur/agents/spur-probe-echo.md"),
+            "---\nname: spur-probe-echo\ndescription: probe\n---\nbody\n",
+        )
+        .unwrap();
+        let catalog_path = tmp.path().join("agent-model-catalog.json");
+        let mut entries = std::collections::HashMap::new();
+        entries.insert(
+            "codex".to_string(),
+            spur_acp::agent_model_catalog::WorkerCatalogEntry {
+                probed_at: chrono::Utc::now(),
+                cli_identity: "test".to_string(),
+                models: vec![spur_acp::agent_model_catalog::ConfigOptionChoice {
+                    value: "gpt-5.5".to_string(),
+                    name: "GPT-5.5".to_string(),
+                    description: None,
+                }],
+                efforts: vec![spur_acp::agent_model_catalog::ConfigOptionChoice {
+                    value: "high".to_string(),
+                    name: "High".to_string(),
+                    description: None,
+                }],
+            },
+        );
+        spur_acp::agent_model_catalog::write(
+            &catalog_path,
+            &spur_acp::agent_model_catalog::AgentModelCatalogV1 {
+                version: 1,
+                entries,
+            },
+        )
+        .unwrap();
+
+        let command_registry = CommandRegistry::new();
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![crate::mentions::WorkerMentionDescriptor {
+                name: "codex".to_string(),
+                kind: spur_acp::AgentKind::CodexAcp,
+                cli_identity: "test".to_string(),
+                description: None,
+                tier: None,
+            }]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+        let mention_registry = Rc::new(RefCell::new(registry));
+        let mut input_bar = InputBar::new();
+        let mut completion = InputCompletionPort::new();
+
+        input_bar.set_text("@".to_string(), 1);
+        completion.dispatch(
+            IntentEvent::TypedChar('@'),
+            &mut input_bar,
+            &env(&command_registry, &mention_registry, tmp.path()),
+        );
+        input_bar.set_text("@codex".to_string(), 6);
+        completion.dispatch(
+            IntentEvent::TypedChar('x'),
+            &mut input_bar,
+            &env(&command_registry, &mention_registry, tmp.path()),
+        );
+        // MentionQuerySource debounces InputBar-driven updates; force the
+        // flush instead of waiting on a real timer (same pattern as
+        // mention_query_updates_are_debounced_and_flush_latest_query).
+        completion.set_pending_query_age_for_test(Duration::from_millis(31));
+        completion.poll_updates();
+
+        let rows = completion.row_primaries_for_test();
+        assert!(
+            rows.iter().any(|r| r == "spur-probe-echo"),
+            "expected agent candidate row, got {rows:?}"
+        );
+
+        // Pick "spur-probe-echo" (the agent slot) -- must keep the picker
+        // open and correctly splice ",spur-probe-echo," after "@codex".
+        let idx = rows.iter().position(|r| r == "spur-probe-echo").unwrap();
+        for _ in 0..idx {
+            completion.handle_picker_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &mut input_bar,
+            );
+        }
+        let accepted = completion.handle_picker_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut input_bar,
+        );
+        assert!(matches!(
+            accepted,
+            Some(RetrievalAccept::ReplaceTriggerToken { .. })
+        ));
+        assert_eq!(input_bar.text(), "@codex,spur-probe-echo,");
+        assert!(
+            completion.is_active(),
+            "picker must stay open after agent pick"
+        );
+
+        // Model slot should now show the real catalog model.
+        let rows = completion.row_primaries_for_test();
+        assert!(
+            rows.iter().any(|r| r == "GPT-5.5"),
+            "expected model candidate row, got {rows:?}"
+        );
+        completion.handle_picker_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut input_bar,
+        );
+        assert_eq!(input_bar.text(), "@codex,spur-probe-echo,gpt-5.5,");
+        assert!(
+            completion.is_active(),
+            "picker must stay open after model pick"
+        );
+
+        // Effort slot is final: picking it must close the popup and commit
+        // the full atom, matching what blind comma-typing already produces.
+        let rows = completion.row_primaries_for_test();
+        assert!(
+            rows.iter().any(|r| r == "High"),
+            "expected effort candidate row, got {rows:?}"
+        );
+        let accepted = completion.handle_picker_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut input_bar,
+        );
+        assert!(matches!(accepted, Some(RetrievalAccept::InsertAtom { .. })));
+        assert_eq!(
+            input_bar.text(),
+            "@worker:codex agent=spur-probe-echo model=gpt-5.5 effort=high"
+        );
+        assert!(
+            !completion.is_active(),
+            "picker must close on the final pick"
+        );
     }
 }

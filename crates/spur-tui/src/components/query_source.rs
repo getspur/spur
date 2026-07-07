@@ -134,6 +134,16 @@ pub trait QuerySource {
     /// if `row_idx` is out of bounds or the source has no state to accept.
     fn accept(&self, row_idx: usize) -> Option<RetrievalAccept>;
 
+    /// Whether accepting the row at `row_idx` should leave the picker open
+    /// (applying the accept, then re-running `refresh` against the
+    /// mutated InputBar text) instead of the normal close-and-commit flow.
+    /// Used by the worker mention cascade to advance through agent/model/
+    /// effort candidate lists without a new `RetrievalAccept` variant.
+    /// Default `false` preserves today's behavior for every other source.
+    fn accept_keeps_open(&self, _row_idx: usize) -> bool {
+        false
+    }
+
     /// Optional preview for the row at row_idx. None means the picker
     /// should not render a side pane for this row. Default: None.
     fn preview_for(&self, _row_idx: usize) -> Option<RetrievalPreview> {
@@ -342,6 +352,15 @@ pub struct MentionQuerySource {
     prefix_start: usize,
     /// Entries parallel to the rows returned by the most recent `refresh`.
     last_hits: Vec<crate::mentions::MentionEntry>,
+    /// Set instead of `last_hits` when the most recent `refresh` found an
+    /// open worker cascade slot (agent/model/effort) with real candidates
+    /// -- the composed entry so far (for its resolved fields/uri) paired
+    /// with the slot (for its filtered candidate list, kind, and whether
+    /// picking one finishes the mention).
+    last_slot_pick: Option<(
+        crate::mentions::MentionEntry,
+        crate::mentions::registry::OpenWorkerSlot,
+    )>,
 }
 
 enum MentionSourceScope {
@@ -379,6 +398,7 @@ impl MentionQuerySource {
             cwd,
             prefix_start,
             last_hits: Vec::new(),
+            last_slot_pick: None,
         }
     }
 }
@@ -519,6 +539,29 @@ impl QuerySource for MentionQuerySource {
             query,
             20,
         );
+        let open_slot = self.registry.borrow_mut().take_worker_open_slot();
+        if let Some(slot) = open_slot {
+            let Some(entry) = hits.first().cloned() else {
+                self.last_slot_pick = None;
+                return Vec::new();
+            };
+            let rows: Vec<RetrievalRow> = slot
+                .candidates
+                .iter()
+                .map(|candidate| RetrievalRow {
+                    primary: candidate.label.clone(),
+                    secondary: candidate.description.clone().unwrap_or_default(),
+                    tag: String::new(),
+                    atoms: Vec::new(),
+                    selectable: true,
+                    dimmed: false,
+                })
+                .collect();
+            self.last_hits = Vec::new();
+            self.last_slot_pick = Some((entry, slot));
+            return rows;
+        }
+        self.last_slot_pick = None;
         let rows: Vec<RetrievalRow> = hits
             .iter()
             .map(|m| {
@@ -568,6 +611,38 @@ impl QuerySource for MentionQuerySource {
     fn accept(&self, row_idx: usize) -> Option<RetrievalAccept> {
         use crate::mentions::MentionKind;
 
+        if let Some((entry, slot)) = &self.last_slot_pick {
+            let candidate = slot.candidates.get(row_idx)?;
+            if slot.is_final {
+                let finalized = crate::mentions::registry::finalize_worker_slot_pick(
+                    entry,
+                    slot.kind,
+                    &candidate.value,
+                );
+                let text = finalized
+                    .atom_text
+                    .clone()
+                    .unwrap_or_else(|| format!("@{}", finalized.display));
+                return Some(RetrievalAccept::InsertAtom {
+                    text,
+                    uri: finalized.uri.clone(),
+                    name: finalized.display.clone(),
+                    unconsumed_suffix: None,
+                    replace_from: Some(self.prefix_start),
+                });
+            }
+            // `splice_at` always lands right after the previously-consumed
+            // segment with no separating comma yet (whether that's the
+            // worker name or an earlier resolved slot) -- the comma before
+            // `candidate.value` is this splice's job, not something
+            // already in the buffer.
+            let anchor = self.prefix_start + 1 + slot.splice_at;
+            return Some(RetrievalAccept::ReplaceTriggerToken {
+                prefix_start: anchor,
+                replacement: format!(",{},", candidate.value),
+            });
+        }
+
         let hit = self.last_hits.get(row_idx)?;
         let text = hit
             .atom_text
@@ -588,6 +663,12 @@ impl QuerySource for MentionQuerySource {
             unconsumed_suffix: hit.unconsumed_suffix.clone(),
             replace_from: Some(self.prefix_start),
         })
+    }
+
+    fn accept_keeps_open(&self, row_idx: usize) -> bool {
+        self.last_slot_pick
+            .as_ref()
+            .is_some_and(|(_, slot)| !slot.is_final && row_idx < slot.candidates.len())
     }
 
     fn preview_for(&self, row_idx: usize) -> Option<RetrievalPreview> {
