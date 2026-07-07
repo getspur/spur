@@ -555,7 +555,7 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
     }
 
     let sums_path = out_dir.join("SHA256SUMS");
-    write_sha256sums(&artifacts, &sums_path)?;
+    write_sha256sums(&dist_artifacts_in(&out_dir)?, &sums_path)?;
 
     eprintln!("==> dist complete: {}", out_dir.display());
     for artifact in &artifacts {
@@ -640,6 +640,30 @@ fn parse_workspace_version(manifest: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Every `spur-*` artifact currently in the dist output directory, sorted.
+/// SHA256SUMS covers the whole directory rather than just this run's
+/// platforms, so a `--platforms` subset re-run (e.g. after one platform
+/// failed) refreshes the sums without dropping the other artifacts.
+fn dist_artifacts_in(out_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = fs::read_dir(out_dir)
+        .map_err(|err| format!("failed to list {}: {err}", out_dir.display()))?;
+    let mut artifacts = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed to list {}: {err}", out_dir.display()))?;
+        let path = entry.path();
+        let is_artifact = path.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("spur-"));
+        if is_artifact {
+            artifacts.push(path);
+        }
+    }
+    artifacts.sort();
+    Ok(artifacts)
 }
 
 /// Write a coreutils-compatible SHA256SUMS file (hash, two spaces, name).
