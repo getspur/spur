@@ -14,7 +14,9 @@ use std::sync::Arc;
 #[cfg(unix)]
 use anyhow::Context as _;
 use anyhow::{bail, Result};
+#[cfg(unix)]
 use serde_json::{json, Value};
+#[cfg(unix)]
 use spur_graph::{
     embedding_query_text_for_model, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
 };
@@ -23,7 +25,9 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
-use super::protocol::{self, EmbedRequest, PROTOCOL_VERSION};
+use super::protocol;
+#[cfg(unix)]
+use super::protocol::{EmbedRequest, PROTOCOL_VERSION};
 #[cfg(feature = "embed")]
 use super::EmbeddingRuntime;
 
@@ -37,6 +41,9 @@ type Embedder = dyn Fn(Vec<String>) -> Result<Vec<Vec<f32>>, String> + Send + Sy
 type Ready = dyn Fn() -> bool + Send + Sync;
 
 #[derive(Clone)]
+// On non-unix the socket serving path is compiled out, so the fields are
+// written by `new` but never read (the connection handler is unix-only).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct EmbedService {
     model_name: Arc<str>,
     ready: Arc<Ready>,
@@ -125,6 +132,7 @@ impl EmbedService {
         Ok(())
     }
 
+    #[cfg(unix)]
     async fn handle_line(&self, line: &str) -> Value {
         let request: EmbedRequest = match serde_json::from_str(line) {
             Ok(request) => request,
@@ -147,6 +155,7 @@ impl EmbedService {
         }
     }
 
+    #[cfg(unix)]
     fn handle_ping(&self, id: Option<Value>) -> Value {
         json!({
             "v": PROTOCOL_VERSION,
@@ -157,6 +166,7 @@ impl EmbedService {
         })
     }
 
+    #[cfg(unix)]
     async fn handle_embed(&self, id: Option<Value>, texts: Option<Vec<String>>) -> Value {
         let Some(texts) = texts else {
             return error_response(id, "embed request missing texts");
@@ -276,6 +286,7 @@ fn bind_socket_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn error_response(id: Option<Value>, error: impl Into<String>) -> Value {
     json!({
         "v": PROTOCOL_VERSION,
