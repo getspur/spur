@@ -91,6 +91,9 @@ pub fn detect_local_fs(beads_dir: &Path) -> Result<(), InitError> {
             });
         }
     }
+    // Other targets (e.g. windows) have no FS-type probe: best-effort allow.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = beads_dir;
     Ok(())
 }
 

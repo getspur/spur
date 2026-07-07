@@ -1,12 +1,17 @@
+#[cfg(unix)]
 use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use spur_graph::EMBEDDING_VECTOR_DIMENSIONS;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
-use super::protocol::{self, EmbedResponse, PingResponse, PROTOCOL_VERSION};
+#[cfg(unix)]
+use super::protocol;
+use super::protocol::{EmbedResponse, PingResponse, PROTOCOL_VERSION};
 
 pub(super) async fn embed_query(
     query: &str,
@@ -70,6 +75,7 @@ async fn sidecar_round_trip(request: Value, timeout_duration: Duration) -> Resul
         .map_err(|_elapsed| "sidecar request timed out".to_owned())?
 }
 
+#[cfg(unix)]
 async fn sidecar_round_trip_inner(request: Value) -> Result<Value, String> {
     let socket_path = protocol::resolve_socket_path(None)
         .map_err(|error| format!("failed to resolve sidecar socket path: {error}"))?;
@@ -104,6 +110,14 @@ async fn sidecar_round_trip_inner(request: Value) -> Result<Value, String> {
 
     serde_json::from_str(response_line.trim_end())
         .map_err(|error| format!("decode sidecar response: {error}"))
+}
+
+/// The sidecar transport is a unix domain socket; on other platforms every
+/// round trip fails like an unreachable sidecar, so Auto mode degrades to
+/// in-process embedding and query paths degrade to BM25-only search.
+#[cfg(not(unix))]
+async fn sidecar_round_trip_inner(_request: Value) -> Result<Value, String> {
+    Err("embed sidecar requires unix domain sockets, unavailable on this platform".to_owned())
 }
 
 fn parse_embed_response(response: Value) -> Result<[f32; EMBEDDING_VECTOR_DIMENSIONS], String> {
@@ -158,6 +172,7 @@ fn validate_protocol(version: Option<u8>) -> Result<(), String> {
     }
 }
 
+#[cfg(unix)]
 fn format_socket_error(action: &str, socket_path: &Path, error: std::io::Error) -> String {
     format!(
         "failed to {action} sidecar socket {}: {error}",
