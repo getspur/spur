@@ -25,6 +25,8 @@
 #       provisioning (8-12 min, can brush the 15-min startup-wait ceiling).
 #   secrets.GH_RELEASES_TOKEN — only for publish=true; write access to
 #       getspur/spur-releases (same secret release.yml uses).
+#   secrets.NPM_TOKEN         — publish rights for @getspur/spur-cli (the
+#       wrapper package in npm/spur-cli, lineage continued from cargo-dist).
 #   S3 cloud-build bundle    — scripts/cloud-build is a git-tracked symlink
 #       into the sibling spur-notebook checkout, so the runner restores the
 #       scripts from s3://<sccache-bucket>/ci/cloud-build/bundle.tar.gz.
@@ -43,9 +45,9 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: "Platforms to build (comma-separated: linux,macos,windows)"
+        description: "Platforms to build (comma-separated: linux,linux-x64,macos,windows)"
         type: string
-        default: "linux,macos,windows"
+        default: "linux,linux-x64,macos,windows"
       publish:
         description: "Publish a GitHub release on getspur/spur-releases"
         type: boolean
@@ -155,11 +157,25 @@ jobs:
       - name: Build platform matrix (cargo xtask dist)
         env:
           # Empty on tag pushes (inputs only exist for workflow_dispatch).
-          PLATFORMS: ${{ inputs.platforms || 'linux,macos,windows' }}
+          PLATFORMS: ${{ inputs.platforms || 'linux,linux-x64,macos,windows' }}
         # --parallel runs the legs concurrently in per-platform remote
         # namespaces; the VM is already up from the spin step, so the
         # concurrent --auto-spin dispatches cannot race a create.
         run: cargo xtask dist --parallel --platforms "$PLATFORMS"
+
+      - name: Smoke-test linux x86_64 binary
+        # The runner itself is linux x86_64 — the one dist platform we can
+        # actually execute here. The zigbuild cross leg is the least battle-
+        # tested, so refuse to publish a binary that cannot even --version.
+        run: |
+          shopt -s nullglob
+          bins=(dist/spur-*-x86_64-unknown-linux-gnu)
+          if [[ ${#bins[@]} -gt 0 ]]; then
+            chmod +x "${bins[0]}"
+            "${bins[0]}" --version
+          else
+            echo "no linux-x64 artifact in dist/; skipping smoke test"
+          fi
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v6
@@ -174,7 +190,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_RELEASES_TOKEN }}
           INPUT_TAG: ${{ inputs.tag }}
-          PLATFORMS: ${{ inputs.platforms || 'linux,macos,windows' }}
+          PLATFORMS: ${{ inputs.platforms || 'linux,linux-x64,macos,windows' }}
         run: |
           tag="$INPUT_TAG"
           if [[ -z "$tag" && "$GITHUB_REF_TYPE" == "tag" ]]; then
@@ -188,6 +204,35 @@ jobs:
           gh release create "$tag" --repo getspur/spur-releases \
             --title "$tag" --notes "spur $tag (xtask dist: $PLATFORMS)" \
             dist/*
+
+      - uses: actions/setup-node@v6
+        if: ${{ github.ref_type == 'tag' || inputs.publish }}
+        with:
+          node-version: "22.x"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish npm package (@getspur/spur-cli)
+        # The npm wrapper (npm/spur-cli) downloads this release's binaries at
+        # postinstall, so it must publish AFTER the GitHub release exists.
+        # Continues the package lineage the cargo-dist flow published through
+        # 1.6.0 (npm install -g @getspur/spur-cli / npx @getspur/spur-cli).
+        if: ${{ github.ref_type == 'tag' || inputs.publish }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="$INPUT_TAG"
+          if [[ -z "$tag" && "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+          fi
+          if [[ -z "$tag" ]]; then
+            version="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)".*/\1/p;}' Cargo.toml | head -n1)"
+            tag="v${version}"
+          fi
+          version="${tag#v}"
+          cd npm/spur-cli
+          npm version "$version" --no-git-tag-version
+          npm publish --access public
 
       - name: Refresh AWS credentials for teardown
         # Re-exchange OIDC so teardown works even when the job ran close to or
