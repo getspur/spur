@@ -21,6 +21,8 @@ journeys=(
   "cold-launch"
   "help-overlay"
   "clean-quit"
+  "worker-mention-cascade"
+  "worker-mention-send"
 )
 
 printf 'shell-use: %s\n' "$shell_use_bin"
