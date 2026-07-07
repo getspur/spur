@@ -409,6 +409,7 @@ impl SessionDetailView {
                 issue_count: 0,
                 alert_summary: None,
                 flag_summary,
+                git_info: None,
                 view_hint_override,
             },
         );
