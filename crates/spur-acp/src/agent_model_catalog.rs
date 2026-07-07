@@ -51,7 +51,15 @@ pub struct AgentModelCatalogProbe {
     pub efforts: Vec<ConfigOptionChoice>,
 }
 
+/// Overrides the derived cache location. Lets tests pin the cache to a
+/// tempdir without mutating process-global HOME, which concurrent tests
+/// (e.g. DuckDB extension autoload) also read.
+pub const CACHE_PATH_ENV: &str = "SPUR_AGENT_MODEL_CATALOG_PATH";
+
 pub fn cache_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(CACHE_PATH_ENV) {
+        return Some(PathBuf::from(path));
+    }
     directories::BaseDirs::new().map(|dirs| {
         dirs.home_dir()
             .join(".spur")
@@ -158,4 +166,29 @@ fn choices_from_option(option: &crate::SessionConfigOption) -> Vec<ConfigOptionC
             description: choice.description,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_path_prefers_env_override() {
+        let previous = std::env::var_os(CACHE_PATH_ENV);
+        std::env::set_var(
+            CACHE_PATH_ENV,
+            "/tmp/spur-test-catalog/agent-model-catalog.json",
+        );
+        let path = cache_path();
+        match previous {
+            Some(value) => std::env::set_var(CACHE_PATH_ENV, value),
+            None => std::env::remove_var(CACHE_PATH_ENV),
+        }
+        assert_eq!(
+            path,
+            Some(PathBuf::from(
+                "/tmp/spur-test-catalog/agent-model-catalog.json"
+            ))
+        );
+    }
 }
