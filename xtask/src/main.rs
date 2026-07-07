@@ -634,10 +634,19 @@ pub(crate) fn cargo() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir)
-        .parent()
+    workspace_root_from_env(env::var_os("CARGO_MANIFEST_DIR"))
+}
+
+/// Resolve from the invoking cargo's runtime environment, never from
+/// compile-time env!(): the xtask binary can be a stale cache hit compiled in
+/// a different copy of the workspace (remote per-run dirs share one target
+/// dir), and a baked-in manifest path would silently point every subcommand
+/// at that older tree.
+fn workspace_root_from_env(manifest_dir: Option<std::ffi::OsString>) -> PathBuf {
+    manifest_dir
         .map(PathBuf::from)
+        .and_then(|dir| dir.parent().map(PathBuf::from))
+        .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -652,6 +661,18 @@ fn cargo_home_bin() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_root_prefers_runtime_manifest_dir() {
+        let root = workspace_root_from_env(Some("/copy-b/xtask".into()));
+        assert_eq!(root, PathBuf::from("/copy-b"));
+    }
+
+    #[test]
+    fn workspace_root_falls_back_to_current_dir_without_env() {
+        let root = workspace_root_from_env(None);
+        assert_eq!(root, env::current_dir().expect("current dir"));
+    }
 
     #[test]
     fn cargo_build_command_includes_requested_features() {
