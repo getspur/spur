@@ -1,0 +1,6 @@
+## cold launch
+SPUR
+
+No agents configured
+
+Run spur init to configure an agent.
