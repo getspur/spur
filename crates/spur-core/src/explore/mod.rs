@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod gate;
 pub mod pool;
+pub mod sync;
 
 use anyhow::{bail, Context};
 use sha2::{Digest, Sha256};
