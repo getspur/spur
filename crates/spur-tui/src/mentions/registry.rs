@@ -605,6 +605,12 @@ impl MentionRegistry {
                     let Some(token) = tokens.get(token_index) else {
                         break;
                     };
+                    if token.text.is_empty() {
+                        consumed_end = token.end;
+                        token_index += 1;
+                        slot = WorkerMentionSlot::Model;
+                        continue;
+                    }
                     match Self::high_confidence_slot_match(token.text, &candidates, matcher) {
                         Some(candidate) => {
                             agent = Some(candidate.value);
@@ -630,6 +636,12 @@ impl MentionRegistry {
                     let Some(token) = tokens.get(token_index) else {
                         break;
                     };
+                    if token.text.is_empty() {
+                        consumed_end = token.end;
+                        token_index += 1;
+                        slot = WorkerMentionSlot::Effort;
+                        continue;
+                    }
                     match Self::high_confidence_slot_match(token.text, &candidates, matcher) {
                         Some(candidate) => {
                             model = Some(candidate.value);
@@ -655,6 +667,12 @@ impl MentionRegistry {
                     let Some(token) = tokens.get(token_index) else {
                         break;
                     };
+                    if token.text.is_empty() {
+                        consumed_end = token.end;
+                        token_index += 1;
+                        slot = WorkerMentionSlot::Done;
+                        continue;
+                    }
                     match Self::high_confidence_slot_match(token.text, &candidates, matcher) {
                         Some(candidate) => {
                             effort = Some(candidate.value);
@@ -829,23 +847,29 @@ struct SlotCandidate {
 /// cascade typed live in the TUI can never contain a space. `,` was chosen
 /// over `/` because real catalog model values use `/` for provider
 /// qualification (e.g. opencode's `provider/model` ids).
+///
+/// Unlike whitespace splitting, consecutive commas are *not* collapsed:
+/// an empty segment between two commas (`codex,,gpt-5`) is preserved as
+/// an empty token, which `compose_worker_mention` reads as "explicitly
+/// skip this slot" (needed when a worker has real agent-profile
+/// candidates but the user wants to jump straight to model/effort). A
+/// single trailing comma with nothing typed after it yet does *not*
+/// produce a phantom empty token, so mid-typing state still reads as
+/// "waiting", not "skip".
 fn query_tokens(query: &str) -> Vec<QueryToken<'_>> {
     let mut tokens = Vec::new();
-    let mut token_start = None;
+    let mut start = 0;
     for (idx, ch) in query.char_indices() {
         if ch == ',' {
-            if let Some(start) = token_start.take() {
-                tokens.push(QueryToken {
-                    text: &query[start..idx],
-                    start,
-                    end: idx,
-                });
-            }
-        } else if token_start.is_none() {
-            token_start = Some(idx);
+            tokens.push(QueryToken {
+                text: &query[start..idx],
+                start,
+                end: idx,
+            });
+            start = idx + ch.len_utf8();
         }
     }
-    if let Some(start) = token_start {
+    if start < query.len() {
         tokens.push(QueryToken {
             text: &query[start..],
             start,
