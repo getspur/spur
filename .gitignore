@@ -95,3 +95,6 @@ crates/spur-context-service/Cargo.lock
 /scripts/e2e/.artifacts/
 /scripts/e2e/vhs/actual/
 /scripts/e2e/vhs/tmp/
+
+# downloaded binary in local npm wrapper test runs
+npm/spur-cli/bin/
