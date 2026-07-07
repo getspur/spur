@@ -183,10 +183,20 @@ canned agent reply renders", "Ctrl-C interrupt mid-response → quit prompt",
 
 ## 7. CI integration
 
-New job (either `e2e` in `ci.yml` or a dedicated `e2e.yml`), modeled on the
-existing `check-test` job conventions (ubuntu-24.04, bare cargo with `--locked`,
-`~/.cargo` cache only — `scripts/spur-cargo` stays local/VM, per repo policy;
-GHA runners use plain cargo exactly like `ci.yml` does today):
+Primary execution environment delivered by `e2e-vm-3`/`e2e-vm-4`:
+`scripts/spur-cargo e2e` dispatches to the cloud-build VM by default, builds
+`spur-cli` in debug mode, sources the pinned e2e toolchain, runs
+`scripts/e2e/run-all.sh` from the private run copy, and syncs
+`scripts/e2e/.artifacts/` back before preserving the suite exit code. Agents
+should use this path because sandboxed worktrees do not need to link
+`spur-cli` locally. The shipped controls are `SPUR_E2E_ONLY=behavioral|visual`
+and `SHELL_USE_RUNS=N`.
+
+Still-planned GitHub Actions job (either `e2e` in `ci.yml` or a dedicated
+`e2e.yml`), modeled on the existing `check-test` job conventions
+(ubuntu-24.04, bare cargo with `--locked`, `~/.cargo` cache only —
+`scripts/spur-cargo` stays local/VM, per repo policy; GHA runners use plain
+cargo exactly like `ci.yml` does today):
 
 1. `cargo build -p spur-cli --locked` (debug) — produces `target/debug/spur`.
 2. Install drivers, both cached: `scripts/e2e/shell-use/install.sh` (static
@@ -204,14 +214,16 @@ issue tagged `e2e-flake`; two unexplained flakes in a week demotes the job to
 advisory until root-caused (no auto-retry masking — retries hide exactly the
 nondeterminism this layer exists to catch).
 
-Linux validation note: both drivers passed only on macOS so far. First CI PR
-must treat "suites green on ubuntu-24.04" as its acceptance criterion
-(shell-use daemon lifecycle on Linux is the named unknown from the findings).
-
 ## 8. Local developer / agent workflow
 
-- Build once: `SPUR_REMOTE=0 scripts/spur-cargo build -p spur-cli`.
-- Everything: `scripts/e2e/run-all.sh`. One suite: `SPUR_E2E_ONLY=…`.
+- Primary agent path: `scripts/spur-cargo e2e` (remote by default; no local
+  binary link required). One suite:
+  `SPUR_E2E_ONLY=behavioral|visual scripts/spur-cargo e2e`. Behavioral stability loop:
+  `SHELL_USE_RUNS=N SPUR_E2E_ONLY=behavioral scripts/spur-cargo e2e`.
+- Local-only debugging: build once with
+  `SPUR_REMOTE=0 scripts/spur-cargo build -p spur-cli`, or set `SPUR_BIN`, then
+  run `SPUR_REMOTE=0 scripts/spur-cargo e2e`. The local path never builds
+  implicitly.
 - One behavioral journey: `scripts/e2e/shell-use/journeys/<j>.sh`.
 - Re-record goldens after an intended visual change:
   `SPUR_VHS_UPDATE=1 scripts/e2e/vhs/run-vhs-suite.sh`, review the diff,
@@ -240,7 +252,7 @@ Each phase is one plan-doc task group; commit convention
 | shell-use beta churn / abandonment (predecessor precedent) | pins + checksums; no goldens on it; 10-line journeys; exit trigger: no 1.0 in 12 months or two breaking upgrades → port behavioral journeys to portable-pty/vt100 fallback |
 | vhs `.txt` output format changes upstream (testing is an unofficial use) | version pinned; normalizer isolates asserted segments; goldens re-recordable in one command |
 | Golden churn from fast TUI iteration | normalizer anchors only stable regions; goldens reviewed as part of the causing PR |
-| Linux behavior differs from macOS spikes | phase-2 acceptance gate; both drivers are out-of-process so failures are diagnosable from dumps |
+| Future GHA runner differs from the validated VM path | keep the VM runner as the primary agent path; make the first GHA job advisory and compare failures against VM artifacts before requiring it |
 | CI binary build too slow on GHA | debug build of one crate with warm `~/.cargo` cache; if still slow, reuse `spur-tui-build.yml` artifact or a dedicated build job with `actions/cache` on target (explicitly deviating from ci.yml's no-target-cache stance is a follow-up decision) |
 | Fake-ACP-agent fixture complexity | start from `init_ux.rs` `stub_which` mechanics; keep transcript canned, not interactive; open question below |
 
@@ -252,9 +264,10 @@ Open questions (to resolve in phase 4 design):
 2. Whether resize journeys are expressible in vhs (tape geometry is fixed per
    tape) — likely behavioral-side-only via shell-use once it exposes resize;
    otherwise defer to the portable-pty fallback harness.
-3. Whether `run-all.sh` should also invoke the in-process suite
-   (`spur-cargo test -p spur-tui`) for a single "all TUI tests" entry point,
-   or stay e2e-only (leaning: e2e-only; CI already runs tier 1).
+
+Resolved in `e2e-vm-3`/`e2e-vm-4`: `run-all.sh` stays e2e-only, the primary
+agent entry point is `scripts/spur-cargo e2e`, and the seed journeys are
+validated on the Linux VM path in §11.
 
 ## 11. Remote VM validation
 
