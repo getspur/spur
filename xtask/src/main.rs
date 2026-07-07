@@ -30,7 +30,10 @@ fn print_help() {
     eprintln!("usage: cargo xtask <subcommand>");
     eprintln!();
     eprintln!("subcommands:");
-    eprintln!("  install [--debug] [--remote]   install spur to $CARGO_HOME/bin");
+    eprintln!("  install [--debug] [--remote] [--local]   install spur to $CARGO_HOME/bin");
+    eprintln!("             macOS default: compile on the build VM via `spur-cargo zigbuild`,");
+    eprintln!("             then download the Mach-O artifact (S3) and install it.");
+    eprintln!("             --local builds on this machine with plain cargo instead.");
     eprintln!();
     eprintln!("options:");
     eprintln!("  --debug    build/install debug artifacts for local installs");
@@ -90,6 +93,10 @@ struct InstallOptions {
     debug: bool,
     remote: bool,
     force: bool,
+    /// Build on this machine with plain cargo instead of the default
+    /// remote zigbuild + fetch flow (macOS hosts only; Linux always
+    /// builds locally).
+    local: bool,
     notebook_channel: NotebookInstallChannel,
     cargo_args: Vec<String>,
 }
@@ -99,6 +106,7 @@ fn parse_install_options(extra: Vec<String>) -> Result<InstallOptions, String> {
         debug: false,
         remote: false,
         force: false,
+        local: false,
         notebook_channel: NotebookInstallChannel::Green,
         cargo_args: Vec::new(),
     };
@@ -110,6 +118,8 @@ fn parse_install_options(extra: Vec<String>) -> Result<InstallOptions, String> {
             options.remote = true;
         } else if arg == "--force" {
             options.force = true;
+        } else if arg == "--local" {
+            options.local = true;
         } else if arg == "--notebook-channel" {
             let value = args
                 .next()
@@ -151,7 +161,12 @@ fn install(extra: Vec<String>) -> ExitCode {
     }
 
     if cfg!(target_os = "macos") {
-        if let Err(err) = install_macos_cli(&workspace_root, options.debug, &options.cargo_args) {
+        if let Err(err) = install_macos_cli(
+            &workspace_root,
+            options.debug,
+            options.local,
+            &options.cargo_args,
+        ) {
             eprintln!("xtask: {err}");
             return ExitCode::FAILURE;
         }
@@ -297,10 +312,92 @@ fn coverage_cmd(extra: Vec<String>) -> ExitCode {
     }
 }
 
-fn install_macos_cli(workspace_root: &Path, debug: bool, extra: &[String]) -> Result<(), String> {
-    let mut build = cargo_build_command(workspace_root, debug, &["spur-cli"], &[], extra);
-    run_status(&mut build, "cargo build -p spur-cli")?;
-    install_built_binary(workspace_root, debug, "spur")
+fn install_macos_cli(
+    workspace_root: &Path,
+    debug: bool,
+    local: bool,
+    extra: &[String],
+) -> Result<(), String> {
+    if local {
+        let mut build = cargo_build_command(workspace_root, debug, &["spur-cli"], &[], extra);
+        run_status(&mut build, "cargo build -p spur-cli")?;
+        return install_built_binary(workspace_root, debug, "spur");
+    }
+
+    // Default macOS flow: compile on the build VM through the standard
+    // zigbuild pattern (see docs/superpowers/specs/
+    // 2026-07-07-zigbuild-macos-cross-poc.md), then download the Mach-O
+    // artifact and install it. `--local` opts back into an on-host build.
+    let triple = darwin_triple_for_arch(std::env::consts::ARCH)?;
+    let mut build = zigbuild_install_build_command(workspace_root, debug, &triple, extra);
+    run_status(&mut build, "scripts/spur-cargo zigbuild -p spur-cli")?;
+    let mut fetch = zigbuild_install_fetch_command(workspace_root, &triple, debug);
+    run_status(&mut fetch, "scripts/cloud-build/fetch.sh --via-s3 (spur)")?;
+
+    let profile = if debug { "debug" } else { "release" };
+    let fetched = workspace_root
+        .join("target")
+        .join(&triple)
+        .join(profile)
+        .join("spur");
+    // S3 download does not preserve the executable bit.
+    mark_executable(&fetched)?;
+    install_binary_from(workspace_root, &fetched, "spur")
+}
+
+/// Map the host arch onto the darwin target triple that `spur-cargo
+/// zigbuild` should produce for `cargo xtask install`.
+fn darwin_triple_for_arch(arch: &str) -> Result<String, String> {
+    match arch {
+        "aarch64" => Ok("aarch64-apple-darwin".to_owned()),
+        "x86_64" => Ok("x86_64-apple-darwin".to_owned()),
+        other => Err(format!(
+            "no darwin install target for host arch {other:?}; use --local"
+        )),
+    }
+}
+
+fn zigbuild_install_build_command(
+    workspace_root: &Path,
+    debug: bool,
+    triple: &str,
+    extra: &[String],
+) -> Command {
+    let mut cmd = Command::new(workspace_root.join("scripts/spur-cargo"));
+    cmd.arg("zigbuild");
+    if !debug {
+        cmd.arg("--release");
+    }
+    cmd.args(["-p", "spur-cli", "--target", triple]);
+    for arg in extra.iter().filter(|arg| !is_xtask_install_flag(arg)) {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(workspace_root);
+    cmd
+}
+
+fn zigbuild_install_fetch_command(workspace_root: &Path, triple: &str, debug: bool) -> Command {
+    let profile = if debug { "debug" } else { "release" };
+    let artifact = format!("target/{triple}/{profile}/spur");
+    let mut cmd = Command::new(workspace_root.join("scripts/cloud-build/fetch.sh"));
+    cmd.arg("--via-s3")
+        .arg("--to")
+        .arg(workspace_root.join(&artifact))
+        .arg(&artifact);
+    cmd.current_dir(workspace_root);
+    cmd
+}
+
+#[cfg(unix)]
+fn mark_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .map_err(|err| format!("failed to mark {} executable: {err}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn mark_executable(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn install_linux_binaries(
@@ -459,7 +556,7 @@ fn cargo_build_command(
 }
 
 fn is_xtask_install_flag(arg: &str) -> bool {
-    matches!(arg, "--debug" | "--remote" | "--force")
+    matches!(arg, "--debug" | "--remote" | "--force" | "--local")
         || arg == "--notebook-channel"
         || arg.starts_with("--notebook-channel=")
 }
@@ -492,6 +589,14 @@ fn install_built_binary(
         .join("target")
         .join(profile)
         .join(binary_name);
+    install_binary_from(workspace_root, &built_binary, binary_name)
+}
+
+fn install_binary_from(
+    workspace_root: &Path,
+    built_binary: &Path,
+    binary_name: &str,
+) -> Result<(), String> {
     if !built_binary.is_file() {
         return Err(format!(
             "expected built binary at {}",
@@ -996,6 +1101,93 @@ mod tests {
 
         assert!(error.contains("blue notebook install source was removed"));
         assert!(error.contains("getspur/spur-notebook"));
+    }
+
+    #[test]
+    fn install_options_parser_accepts_local_flag() {
+        let parsed = parse_install_options(vec!["--local".to_owned(), "--locked".to_owned()])
+            .expect("--local should parse");
+
+        assert!(parsed.local);
+        assert_eq!(parsed.cargo_args, vec!["--locked".to_owned()]);
+
+        let parsed = parse_install_options(vec![]).expect("default options should parse");
+        assert!(!parsed.local);
+    }
+
+    #[test]
+    fn darwin_triple_maps_host_arches_and_rejects_others() {
+        assert_eq!(
+            darwin_triple_for_arch("aarch64").expect("aarch64 maps"),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            darwin_triple_for_arch("x86_64").expect("x86_64 maps"),
+            "x86_64-apple-darwin"
+        );
+        assert!(darwin_triple_for_arch("riscv64").is_err());
+    }
+
+    #[test]
+    fn zigbuild_install_build_command_dispatches_spur_cargo_zigbuild() {
+        let root = PathBuf::from("/workspace");
+        let extra = vec!["--locked".to_owned(), "--local".to_owned()];
+
+        let command = zigbuild_install_build_command(&root, false, "aarch64-apple-darwin", &extra);
+
+        assert_eq!(
+            command.get_program(),
+            root.join("scripts/spur-cargo").as_os_str()
+        );
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "zigbuild".to_owned(),
+                "--release".to_owned(),
+                "-p".to_owned(),
+                "spur-cli".to_owned(),
+                "--target".to_owned(),
+                "aarch64-apple-darwin".to_owned(),
+                "--locked".to_owned(),
+            ],
+            "xtask install flags must not leak into the zigbuild argv"
+        );
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn zigbuild_install_build_command_debug_omits_release() {
+        let root = PathBuf::from("/workspace");
+
+        let command = zigbuild_install_build_command(&root, true, "aarch64-apple-darwin", &[]);
+
+        let args = command_args(&command);
+        assert!(!args.iter().any(|arg| arg == "--release"));
+        assert_eq!(args[0], "zigbuild");
+    }
+
+    #[test]
+    fn zigbuild_install_fetch_command_pulls_macho_via_s3() {
+        let root = PathBuf::from("/workspace");
+
+        let command = zigbuild_install_fetch_command(&root, "aarch64-apple-darwin", false);
+
+        assert_eq!(
+            command.get_program(),
+            root.join("scripts/cloud-build/fetch.sh").as_os_str()
+        );
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "--via-s3".to_owned(),
+                "--to".to_owned(),
+                root.join("target/aarch64-apple-darwin/release/spur")
+                    .to_string_lossy()
+                    .into_owned(),
+                "target/aarch64-apple-darwin/release/spur".to_owned(),
+            ]
+        );
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
     }
 
     #[test]
