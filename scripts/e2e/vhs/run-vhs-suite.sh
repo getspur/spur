@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 VHS_DIR="${ROOT_DIR}/scripts/e2e/vhs"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/e2e/lib/spur-bin.sh"
 
 cd "$VHS_DIR"
 
@@ -13,22 +15,17 @@ mkdir -p actual/raw
 
 if [[ "${SPUR_VHS_STANDIN:-0}" == "1" ]]; then
   export SPUR_BIN="${VHS_DIR}/bin/standin-spur"
-elif [[ -z "${SPUR_BIN:-}" ]]; then
-  export SPUR_BIN="${ROOT_DIR}/target/debug/spur"
 fi
 
-if [[ ! -x "$SPUR_BIN" ]]; then
-  cat >&2 <<EOF
-error: SPUR_BIN is not executable: ${SPUR_BIN}
-
-Build the real binary with:
-  SPUR_REMOTE=0 scripts/spur-cargo build -p spur-cli
+if ! SPUR_BIN="$(spur_e2e_resolve_spur_bin)"; then
+  cat >&2 <<'EOF'
 
 For the VHS framework-only stand-in probe:
   SPUR_VHS_STANDIN=1 scripts/e2e/vhs/run-vhs-suite.sh
 EOF
   exit 1
 fi
+export SPUR_BIN
 
 tapes=(
   "cold-launch"

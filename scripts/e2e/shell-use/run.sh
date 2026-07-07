@@ -2,10 +2,10 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
+e2e_root="$(cd "$script_dir/.." && pwd)"
+# shellcheck disable=SC1091
+source "$e2e_root/lib/spur-bin.sh"
 
-shell_use_bin="${SHELL_USE_BIN:-"$("$script_dir/install.sh")"}"
-spur_bin="${SPUR_BIN:-"$repo_root/target/debug/spur"}"
 runs="${SHELL_USE_RUNS:-1}"
 
 if [[ ! "$runs" =~ ^[0-9]+$ || "$runs" -lt 1 ]]; then
@@ -13,11 +13,9 @@ if [[ ! "$runs" =~ ^[0-9]+$ || "$runs" -lt 1 ]]; then
   exit 2
 fi
 
-if [[ ! -x "$spur_bin" ]]; then
-  printf 'spur binary is not executable: %s\n' "$spur_bin" >&2
-  printf 'Build it with: SPUR_REMOTE=0 scripts/spur-cargo build -p spur-cli\n' >&2
-  exit 2
-fi
+spur_bin="$(spur_e2e_resolve_spur_bin)"
+export SPUR_BIN="$spur_bin"
+shell_use_bin="${SHELL_USE_BIN:-"$("$script_dir/install.sh")"}"
 
 journeys=(
   "cold-launch"
