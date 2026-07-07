@@ -25,6 +25,15 @@ journeys=(
   "worker-mention-send"
   "worker-mention-slots"
   "worker-mention-probe"
+  "agent-config-open"
+  "insights-open"
+  "interrupt-quit-prompt"
+  "issue-browser-open"
+  "palette-open"
+  "plan-browser-open"
+  "resize"
+  "session-detail-reply"
+  "session-picker-open"
 )
 
 printf 'shell-use: %s\n' "$shell_use_bin"
