@@ -1,27 +1,27 @@
 #[cfg(test)]
 mod agent_model_catalog_tests {
     use super::super::super::*;
-    use spur_acp::agent_model_catalog::{cache_path, read};
+    use spur_acp::agent_model_catalog::{cache_path, read, CACHE_PATH_ENV};
     use spur_acp::types::{AgentKind, AgentRole, TransportKind};
 
-    struct HomeEnvGuard {
+    struct CatalogCachePathGuard {
         original: Option<std::ffi::OsString>,
     }
 
-    impl HomeEnvGuard {
-        fn set(home: &std::path::Path) -> Self {
-            let original = std::env::var_os("HOME");
-            std::env::set_var("HOME", home);
+    impl CatalogCachePathGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original = std::env::var_os(CACHE_PATH_ENV);
+            std::env::set_var(CACHE_PATH_ENV, path);
             Self { original }
         }
     }
 
-    impl Drop for HomeEnvGuard {
+    impl Drop for CatalogCachePathGuard {
         fn drop(&mut self) {
-            if let Some(home) = self.original.take() {
-                std::env::set_var("HOME", home);
+            if let Some(path) = self.original.take() {
+                std::env::set_var(CACHE_PATH_ENV, path);
             } else {
-                std::env::remove_var("HOME");
+                std::env::remove_var(CACHE_PATH_ENV);
             }
         }
     }
@@ -64,8 +64,9 @@ done
 
     #[tokio::test(flavor = "current_thread")]
     async fn agent_model_catalog_probe_runs_in_background_and_reports_completion() {
-        let home = tempfile::tempdir().expect("home tempdir");
-        let _home = HomeEnvGuard::set(home.path());
+        let cache_dir = tempfile::tempdir().expect("cache tempdir");
+        let _cache_path =
+            CatalogCachePathGuard::set(&cache_dir.path().join("agent-model-catalog.json"));
         let repo = tempfile::tempdir().expect("repo tempdir");
         let script = write_catalog_probe_agent_script(repo.path());
         let mut config = spur_acp::SpurConfig::default();
