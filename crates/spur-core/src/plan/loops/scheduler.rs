@@ -57,7 +57,7 @@ impl Reconciler {
             .pm
             .list_issues(IssueFilter {
                 status: Some("open".to_string()),
-                issue_type: Some("task".to_string()),
+                issue_type: Some(super::LOOP_ISSUE_TYPE.to_string()),
                 limit: Some(10_000),
                 ..Default::default()
             })
