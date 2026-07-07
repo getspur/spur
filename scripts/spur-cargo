@@ -212,6 +212,42 @@ case "${1:-}" in
             export RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML -Clink-arg=$ZIGBUILD_LIBCXX_TBD -Clinker=$ZIGBUILD_LINKER"
         fi
         ;;
+    xwin)
+        # Windows cross-compile: cargo-xwin drives clang-cl/lld-link (LLVM 19)
+        # against the MSVC CRT + Windows SDK that xwin downloads into
+        # XWIN_CACHE_DIR (/mnt/cargo/xwin via profile.d on the build VM,
+        # XWIN_ACCEPT_LICENSE=1 set there too). Usage mirrors cargo's verbs:
+        #   spur-cargo xwin build --release -p spur-cli
+        # Defaults to --target x86_64-pc-windows-msvc (producing a PE .exe is
+        # the whole point); pass an explicit --target to override. Fetch
+        # artifacts with scripts/cloud-build/fetch.sh, e.g.
+        #   fetch.sh --via-s3 target/x86_64-pc-windows-msvc/release/spur.exe
+        # Unlike zigbuild, no custom RUSTFLAGS are needed — cargo-xwin sets up
+        # compiler/linker env itself and the workspace .cargo/config.toml
+        # (force-frame-pointers) still applies to its inner cargo. The one
+        # hazard is build.sh APPENDING the aarch64-linux provider defaults
+        # (-Ctarget-cpu=neoverse-v2 / -Clinker=clang) to a caller-set
+        # RUSTFLAGS, which would poison the PE link — suppress them at the
+        # source. (With RUSTFLAGS unset, provider defaults ride `cargo
+        # --config`, which an external subcommand's inner cargo never sees.)
+        export AWS_RUSTFLAGS_DEFAULT=""
+        # The VM profile.d exports plain CFLAGS/CXXFLAGS="-mcpu=native -O2"
+        # for native Graviton builds; cc-rs appends plain CFLAGS to every
+        # compile and clang-cl hard-errors on -mcpu= for windows targets.
+        # build.sh forwards a caller-set (non-empty) CFLAGS and re-exports it
+        # AFTER sourcing profile.d, so a cl-safe value here wins on the VM.
+        if [[ -z "${CFLAGS+x}" ]]; then export CFLAGS="-O2"; fi
+        if [[ -z "${CXXFLAGS+x}" ]]; then export CXXFLAGS="-O2"; fi
+        HAS_TARGET=0
+        for arg in "$@"; do
+            case "$arg" in
+                --target|--target=*) HAS_TARGET=1 ;;
+            esac
+        done
+        if [[ $HAS_TARGET -eq 0 ]]; then
+            set -- "$@" --target x86_64-pc-windows-msvc
+        fi
+        ;;
 esac
 
 # ---- routing ---------------------------------------------------------------
@@ -220,7 +256,7 @@ esac
 # class decides. See the header for the full contract.
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
-    build|check|test|doc|zigbuild)
+    build|check|test|doc|zigbuild|xwin)
         CLASS="heavy" ;;
     clean)
         # clean must target wherever compilation happens. In remote mode the
