@@ -74,6 +74,10 @@ pub struct MentionRegistry {
     code_graph_auto_discovery: bool,
     agent_model_catalog_path: Option<PathBuf>,
     pending_agent_model_catalog_probe_requests: HashSet<String>,
+    /// Open cascade slot (with real candidates) captured by the most
+    /// recent `query()` call, if any. Read via `take_worker_open_slot`
+    /// by a picker UI right after calling `query`.
+    last_worker_open_slot: Option<OpenWorkerSlot>,
     matcher: Matcher,
     #[cfg(any(test, debug_assertions))]
     query_call_count: usize,
@@ -117,6 +121,7 @@ impl MentionRegistry {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -137,6 +142,7 @@ impl MentionRegistry {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -305,6 +311,14 @@ impl MentionRegistry {
         requests
     }
 
+    /// Takes the open cascade slot (if any) captured by the most recent
+    /// `query()` call. A picker UI reads this immediately after calling
+    /// `query` to decide whether to render candidate rows for the current
+    /// slot instead of the single composed entry.
+    pub(crate) fn take_worker_open_slot(&mut self) -> Option<OpenWorkerSlot> {
+        self.last_worker_open_slot.take()
+    }
+
     pub fn set_issue_snapshot(&mut self, issues: Vec<IssueMentionDescriptor>) {
         // Ordering invariant: callers must pass issues newest-first.
         // Empty-query `@` preserves that order within the ISSUE_CAP slice.
@@ -355,6 +369,7 @@ impl MentionRegistry {
         query: &str,
         limit: usize,
     ) -> Vec<MentionEntry> {
+        self.last_worker_open_slot = None;
         #[cfg(any(test, debug_assertions))]
         {
             self.query_call_count += 1;
@@ -506,7 +521,8 @@ impl MentionRegistry {
             &mut self.pending_agent_model_catalog_probe_requests,
             &mut self.matcher,
         ) {
-            return vec![composed];
+            self.last_worker_open_slot = composed.open_slot;
+            return vec![composed.entry];
         }
 
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
@@ -544,7 +560,7 @@ impl MentionRegistry {
     }
 
     #[cfg(test)]
-    fn set_agent_model_catalog_path_for_test(&mut self, path: PathBuf) {
+    pub(crate) fn set_agent_model_catalog_path_for_test(&mut self, path: PathBuf) {
         self.agent_model_catalog_path = Some(path);
     }
 
@@ -556,7 +572,7 @@ impl MentionRegistry {
         catalog_path: Option<&PathBuf>,
         pending_probe_requests: &mut HashSet<String>,
         matcher: &mut Matcher,
-    ) -> Option<MentionEntry> {
+    ) -> Option<ComposedWorkerMention> {
         let tokens = query_tokens(query);
         let first = tokens.first()?;
         let worker_entries: Vec<&MentionEntry> = entries
@@ -584,6 +600,14 @@ impl MentionRegistry {
         ) {
             pending_probe_requests.insert(worker_name.clone());
         }
+        let model_candidates_empty = catalog_entry
+            .as_ref()
+            .map(|entry| entry.models.is_empty())
+            .unwrap_or(true);
+        let effort_candidates_empty = catalog_entry
+            .as_ref()
+            .map(|entry| entry.efforts.is_empty())
+            .unwrap_or(true);
 
         let mut token_index = 1usize;
         let mut slot = WorkerMentionSlot::Worker;
@@ -592,6 +616,7 @@ impl MentionRegistry {
         let mut effort = None;
         let mut consumed_end = first.end;
         let mut unconsumed_suffix = None;
+        let mut open_slot = None;
 
         loop {
             match slot {
@@ -602,7 +627,15 @@ impl MentionRegistry {
                         slot = WorkerMentionSlot::Model;
                         continue;
                     }
+                    let is_final = model_candidates_empty && effort_candidates_empty;
                     let Some(token) = tokens.get(token_index) else {
+                        open_slot = Some(OpenWorkerSlot {
+                            kind: WorkerSlotKind::Agent,
+                            splice_at: consumed_end,
+                            filter_text: String::new(),
+                            candidates,
+                            is_final,
+                        });
                         break;
                     };
                     if token.text.is_empty() {
@@ -619,6 +652,13 @@ impl MentionRegistry {
                             slot = WorkerMentionSlot::Model;
                         }
                         None => {
+                            open_slot = Some(OpenWorkerSlot {
+                                kind: WorkerSlotKind::Agent,
+                                splice_at: consumed_end,
+                                filter_text: token.text.to_string(),
+                                candidates,
+                                is_final,
+                            });
                             unconsumed_suffix = Some(query[consumed_end..].to_string());
                             break;
                         }
@@ -633,7 +673,15 @@ impl MentionRegistry {
                         slot = WorkerMentionSlot::Effort;
                         continue;
                     }
+                    let is_final = effort_candidates_empty;
                     let Some(token) = tokens.get(token_index) else {
+                        open_slot = Some(OpenWorkerSlot {
+                            kind: WorkerSlotKind::Model,
+                            splice_at: consumed_end,
+                            filter_text: String::new(),
+                            candidates,
+                            is_final,
+                        });
                         break;
                     };
                     if token.text.is_empty() {
@@ -650,6 +698,13 @@ impl MentionRegistry {
                             slot = WorkerMentionSlot::Effort;
                         }
                         None => {
+                            open_slot = Some(OpenWorkerSlot {
+                                kind: WorkerSlotKind::Model,
+                                splice_at: consumed_end,
+                                filter_text: token.text.to_string(),
+                                candidates,
+                                is_final,
+                            });
                             unconsumed_suffix = Some(query[consumed_end..].to_string());
                             break;
                         }
@@ -665,6 +720,13 @@ impl MentionRegistry {
                         continue;
                     }
                     let Some(token) = tokens.get(token_index) else {
+                        open_slot = Some(OpenWorkerSlot {
+                            kind: WorkerSlotKind::Effort,
+                            splice_at: consumed_end,
+                            filter_text: String::new(),
+                            candidates,
+                            is_final: true,
+                        });
                         break;
                     };
                     if token.text.is_empty() {
@@ -681,6 +743,13 @@ impl MentionRegistry {
                             slot = WorkerMentionSlot::Done;
                         }
                         None => {
+                            open_slot = Some(OpenWorkerSlot {
+                                kind: WorkerSlotKind::Effort,
+                                splice_at: consumed_end,
+                                filter_text: token.text.to_string(),
+                                candidates,
+                                is_final: true,
+                            });
                             unconsumed_suffix = Some(query[consumed_end..].to_string());
                             break;
                         }
@@ -717,7 +786,14 @@ impl MentionRegistry {
         composed.model = model;
         composed.effort = effort;
         composed.unconsumed_suffix = unconsumed_suffix.filter(|suffix| !suffix.is_empty());
-        Some(composed)
+        let open_slot = open_slot.map(|mut slot| {
+            slot.candidates = filter_slot_candidates(slot.candidates, &slot.filter_text, matcher);
+            slot
+        });
+        Some(ComposedWorkerMention {
+            entry: composed,
+            open_slot,
+        })
     }
 
     fn worker_kind(
@@ -827,6 +903,42 @@ enum WorkerMentionSlot {
     Done,
 }
 
+/// Which cascade slot an [`OpenWorkerSlot`] describes. Lets a picker UI
+/// know which field on the composed entry a selected candidate fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerSlotKind {
+    Agent,
+    Model,
+    Effort,
+}
+
+/// A cascade slot the user hasn't resolved past yet, with real candidates
+/// available -- surfaced so a picker UI can show them as selectable rows
+/// instead of forcing blind typing. `splice_at` is a byte offset into the
+/// same `query` string passed to `MentionRegistry::query`, marking where a
+/// picked candidate's value (plus a trailing `,` unless `is_final`) should
+/// be spliced in.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenWorkerSlot {
+    pub(crate) kind: WorkerSlotKind,
+    pub(crate) splice_at: usize,
+    pub(crate) filter_text: String,
+    pub(crate) candidates: Vec<SlotCandidate>,
+    /// `true` when no later slot has real candidates, so picking one of
+    /// `candidates` finishes the mention (closes the picker) rather than
+    /// advancing to the next slot's list.
+    pub(crate) is_final: bool,
+}
+
+/// Result of [`MentionRegistry::compose_worker_mention`]: the composed
+/// single-row entry (used for continued blind typing and as the source of
+/// already-resolved `agent`/`model`/`effort` values), plus an optional
+/// open slot for a picker UI to render as a candidate list.
+struct ComposedWorkerMention {
+    entry: MentionEntry,
+    open_slot: Option<OpenWorkerSlot>,
+}
+
 #[derive(Debug, Clone)]
 struct QueryToken<'a> {
     text: &'a str,
@@ -835,10 +947,10 @@ struct QueryToken<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct SlotCandidate {
-    value: String,
-    label: String,
-    description: Option<String>,
+pub(crate) struct SlotCandidate {
+    pub(crate) value: String,
+    pub(crate) label: String,
+    pub(crate) description: Option<String>,
 }
 
 /// Splits on `,` rather than whitespace: the InputBar's completion-trigger
@@ -956,6 +1068,33 @@ fn slot_candidate_score(
     best
 }
 
+/// Fuzzy-filters and ranks slot candidates for picker-list display, using
+/// the same underlying scoring as `high_confidence_slot_match` but without
+/// its stricter auto-accept-while-typing threshold -- a lower-scoring
+/// match is still worth *showing* even if it isn't confident enough to
+/// silently commit while the user is still typing.
+pub(crate) fn filter_slot_candidates(
+    candidates: Vec<SlotCandidate>,
+    filter_text: &str,
+    matcher: &mut Matcher,
+) -> Vec<SlotCandidate> {
+    let token = filter_text.trim();
+    if token.is_empty() {
+        return candidates;
+    }
+    let pattern = Pattern::parse(token, CaseMatching::Smart, Normalization::Smart);
+    let mut buf = Vec::new();
+    let mut scored: Vec<(u32, SlotCandidate)> = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let score = slot_candidate_score(&candidate, token, &pattern, matcher, &mut buf)?;
+            Some((score, candidate))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.value.cmp(&b.1.value)));
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
 fn high_confidence_score(candidate: &SlotCandidate, token: &str, score: u32) -> bool {
     score >= 10_000
         || score >= 60
@@ -1008,6 +1147,55 @@ fn composed_worker_atom(
         }
     }
     atom
+}
+
+/// Builds the final composed `MentionEntry` for picking `picked_value` in
+/// `slot_kind`, given the entry already resolved so far (whatever
+/// `agent`/`model`/`effort` earlier slots already filled). Used when a
+/// picker UI accepts a row from an `is_final` [`OpenWorkerSlot`]'s
+/// candidate list -- mirrors what blind-typing-through would have
+/// produced for the same combination.
+pub(crate) fn finalize_worker_slot_pick(
+    entry: &MentionEntry,
+    slot_kind: WorkerSlotKind,
+    picked_value: &str,
+) -> MentionEntry {
+    let worker_name = entry
+        .uri
+        .strip_prefix("worker://")
+        .unwrap_or(entry.display.trim_start_matches("worker:"))
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let mut agent = entry.agent.clone();
+    let mut model = entry.model.clone();
+    let mut effort = entry.effort.clone();
+    match slot_kind {
+        WorkerSlotKind::Agent => agent = Some(picked_value.to_string()),
+        WorkerSlotKind::Model => model = Some(picked_value.to_string()),
+        WorkerSlotKind::Effort => effort = Some(picked_value.to_string()),
+    }
+    let uri = composed_worker_uri(
+        &worker_name,
+        agent.as_deref(),
+        model.as_deref(),
+        effort.as_deref(),
+    );
+    let atom_text = composed_worker_atom(
+        &worker_name,
+        agent.as_deref(),
+        model.as_deref(),
+        effort.as_deref(),
+    );
+    let mut finalized = entry.clone();
+    finalized.display = atom_text.trim_start_matches('@').to_string();
+    finalized.uri = uri;
+    finalized.atom_text = Some(atom_text);
+    finalized.agent = agent;
+    finalized.model = model;
+    finalized.effort = effort;
+    finalized
 }
 
 fn is_graph_uri(uri: &str) -> bool {
@@ -1457,6 +1645,7 @@ mod tests {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -1466,6 +1655,127 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].uri, "issue://beads/bd-1");
+    }
+
+    #[test]
+    fn worker_query_bare_worker_exposes_agent_slot_candidates() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let _hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex", 10);
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("agent slot should be open");
+
+        assert_eq!(open_slot.kind, WorkerSlotKind::Agent);
+        assert_eq!(open_slot.filter_text, "");
+        assert!(!open_slot.is_final, "codex still has model/effort slots");
+        assert!(open_slot
+            .candidates
+            .iter()
+            .any(|c| c.value == "spur-narrow-implementer"));
+    }
+
+    #[test]
+    fn worker_query_partial_slot_text_is_exposed_as_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let _hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex,gpt-5", 10);
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("agent slot should still be open on a non-matching token");
+
+        assert_eq!(open_slot.kind, WorkerSlotKind::Agent);
+        assert_eq!(open_slot.filter_text, "gpt-5");
+    }
+
+    #[test]
+    fn worker_query_exposes_model_slot_after_agent_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let _hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex,narrow", 10);
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("model slot should be open");
+
+        assert_eq!(open_slot.kind, WorkerSlotKind::Model);
+        assert!(!open_slot.is_final, "codex still has an effort slot");
+        assert!(open_slot.candidates.iter().any(|c| c.value == "gpt-5"));
+    }
+
+    #[test]
+    fn worker_query_effort_slot_is_always_final() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "gemini",
+            vec![choice("gemini-2.5-pro", "Gemini 2.5 Pro")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("gemini", AgentKind::Gemini)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let _hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "gemini,gemini-2.5-pro",
+            10,
+        );
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("effort slot should be open");
+
+        assert_eq!(open_slot.kind, WorkerSlotKind::Effort);
+        assert!(open_slot.is_final);
+    }
+
+    #[test]
+    fn worker_query_no_catalog_yet_marks_agent_slot_final() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+
+        let _hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex", 10);
+        let open_slot = registry
+            .take_worker_open_slot()
+            .expect("agent slot should be open even with no catalog entry yet");
+
+        assert_eq!(open_slot.kind, WorkerSlotKind::Agent);
+        assert!(
+            open_slot.is_final,
+            "no catalog entry yet means model/effort are both empty"
+        );
     }
 
     #[test]
@@ -1952,6 +2262,7 @@ mod tests {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -2044,6 +2355,7 @@ mod tests {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
@@ -2119,6 +2431,7 @@ mod tests {
             code_graph_auto_discovery: false,
             agent_model_catalog_path: None,
             pending_agent_model_catalog_probe_requests: HashSet::new(),
+            last_worker_open_slot: None,
             matcher: Matcher::new(Config::DEFAULT),
             #[cfg(any(test, debug_assertions))]
             query_call_count: 0,
