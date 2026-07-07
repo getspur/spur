@@ -1,3 +1,4 @@
+pub mod apply;
 pub mod catalog;
 pub mod gate;
 pub mod pool;
