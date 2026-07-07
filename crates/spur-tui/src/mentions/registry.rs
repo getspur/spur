@@ -1487,6 +1487,96 @@ mod tests {
     }
 
     #[test]
+    fn worker_query_double_comma_explicitly_skips_agent_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "codex,,gpt-5,high",
+            10,
+        );
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+
+        assert_eq!(composed.uri, "worker://codex?model=gpt-5&effort=high");
+        assert_eq!(composed.agent, None);
+        assert_eq!(composed.model.as_deref(), Some("gpt-5"));
+        assert_eq!(composed.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn worker_query_double_comma_explicitly_skips_model_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let hits = registry.query(
+            CompletionScope::PreSession,
+            tmp.path(),
+            "codex,narrow,,high",
+            10,
+        );
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+
+        assert_eq!(
+            composed.uri,
+            "worker://codex?agent=spur-narrow-implementer&effort=high"
+        );
+        assert_eq!(composed.agent.as_deref(), Some("spur-narrow-implementer"));
+        assert_eq!(composed.model, None);
+        assert_eq!(composed.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn worker_query_single_trailing_comma_stays_open_not_a_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_profile(tmp.path(), "spur-narrow-implementer");
+        let catalog_path = write_catalog(
+            tmp.path(),
+            "codex",
+            vec![choice("gpt-5", "GPT-5")],
+            vec![choice("high", "High")],
+        );
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        registry.set_agent_model_catalog_path_for_test(catalog_path);
+
+        let hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex,", 10);
+        let composed = hits
+            .iter()
+            .find(|hit| hit.kind == MentionKind::Worker)
+            .expect("composed worker row");
+
+        assert_eq!(composed.uri, "worker://codex");
+        assert_eq!(composed.agent, None);
+        assert_eq!(composed.unconsumed_suffix, None);
+    }
+
+    #[test]
     fn worker_query_auto_skips_empty_agent_pool_to_model_slot() {
         let tmp = tempfile::tempdir().unwrap();
         let catalog_path = write_catalog(
