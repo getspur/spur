@@ -16,4 +16,4 @@ Wait+Screen@15s /No agents configured/
 Hide
 Type "?"
 Show
-Wait+Screen@15s /Keyboard environment/
+Wait+Screen@15s /Dashboard — Modes/

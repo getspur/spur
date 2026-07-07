@@ -1,9 +1,25 @@
 ## quit confirmation
-Quit spur?
 
-Press Ctrl+C again to force quit.
 
-[y] yes   [n] no
+
+
+
+                                      SPUR
+
+           A┌ Quit spur? ──────────────────────────────────────────┐es
+            │                                                      │
+            │  Shut down brain agent "claude-code" and quit?       │
+         +--│  The agent subprocess will be terminated.            │---+
+           |│  Press Ctrl+C again to exit immediately.             │ |
+         |  │                                                      │   |
+         |  │  [y] Yes    [n/Esc] No    [Ctrl+C] Force             │   |
+         |  │                                                      │   |
+         |  │                                                      │   |
+         +--└──────────────────────────────────────────────────────┘---+
+
+                   Examples of what you can ask (after setup):
+          - Refactor the auth module to async/await and add benchmarks
+[claude-code: error]  ● INSERT ─────────────────────────────────────────────────
 
 ## shell after exit
 VHS_SPUR_EXITED status=0

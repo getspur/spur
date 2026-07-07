@@ -2,7 +2,32 @@
 
 Date: 2026-07-07
 Scope: `scripts/e2e/vhs/**` only
-Recommendation: **No-Go for adopting VHS as SPUR's TUI golden E2E layer from this environment.**
+Recommendation: **Go candidate — validated against the real binary 9/9 (see Real-Binary Validation below).** The worker's original verdict was a conditional No-Go only because no local `spur` binary could be built inside the worker sandbox; the brain follow-up completed that validation on the same day.
+
+## Real-Binary Validation (2026-07-07, brain follow-up)
+
+The local-build blocker was environmental: the worker's fresh worktree had a
+cold target dir and linking was OOM-killed (exit 137). From the primary
+worktree with a warm incremental cache, `SPUR_REMOTE=0 scripts/spur-cargo
+build -p spur-cli` completed in 2m55s and produced `target/debug/spur`.
+
+Two content fixes were needed first (both inherited from the phantom spike's
+never-executed journey definitions, not VHS problems):
+
+- `tapes/help-overlay.tape` waited on `Keyboard environment`, which the real
+  80x24 help overlay does not show; changed to `Dashboard — Modes`.
+- The `help-overlay` normalizer pattern in `run-vhs-suite.sh` was updated to
+  match.
+
+Then, against the real binary (`SPUR_BIN=target/debug/spur`):
+
+1. `SPUR_VHS_UPDATE=1 scripts/e2e/vhs/run-vhs-suite.sh` re-recorded all three
+   goldens from the real TUI (the committed goldens are now real-binary
+   screens, replacing the stand-in ones).
+2. Three consecutive full-suite runs: **9/9 PASS, goldens byte-stable across
+   all runs, 1-2s runtime per journey.** The status-bar timer and other
+   volatile regions fall outside the normalizer's extracted screen segments,
+   so no additional masking was needed.
 
 ## Summary
 
