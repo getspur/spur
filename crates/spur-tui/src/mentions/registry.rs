@@ -1455,7 +1455,7 @@ mod tests {
         let hits = registry.query(
             CompletionScope::PreSession,
             tmp.path(),
-            "codex narrow gpt-5 high",
+            "codex,narrow,gpt-5,high",
             10,
         );
         let composed = hits
@@ -1496,7 +1496,7 @@ mod tests {
         let hits = registry.query(
             CompletionScope::PreSession,
             tmp.path(),
-            "gemini gemini-2.5-pro",
+            "gemini,gemini-2.5-pro",
             10,
         );
         let composed = hits
@@ -1558,7 +1558,7 @@ mod tests {
         let hits = registry.query(
             CompletionScope::PreSession,
             tmp.path(),
-            "codex gpt-5 high",
+            "codex,gpt-5,high",
             10,
         );
 
@@ -1591,7 +1591,7 @@ mod tests {
         let edited = registry.query(
             CompletionScope::PreSession,
             tmp.path(),
-            "codex reviewer",
+            "codex,reviewer",
             10,
         );
         let composed = edited
@@ -1622,7 +1622,7 @@ mod tests {
         let hits = registry.query(
             CompletionScope::PreSession,
             tmp.path(),
-            "codex no-such-agent should stay text",
+            "codex,no-such-agent,should,stay,text",
             10,
         );
         let composed = hits
@@ -1636,7 +1636,7 @@ mod tests {
         assert_eq!(composed.effort, None);
         assert_eq!(
             composed.unconsumed_suffix.as_deref(),
-            Some(" no-such-agent should stay text")
+            Some(",no-such-agent,should,stay,text")
         );
     }
 
