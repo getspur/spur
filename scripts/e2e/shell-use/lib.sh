@@ -119,7 +119,8 @@ expect_text() {
 }
 
 type_text() {
-  run_su type "$1"
+  # `--` keeps leading-dash text (e.g. "-rev") from parsing as a flag.
+  run_su type -- "$1"
 }
 
 press_key() {
