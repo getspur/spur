@@ -178,6 +178,12 @@ scripts (see spur-notebook history around 2026-07-07):
    rustup first-use ensure in the shared `RUSTUP_HOME` — two legs downloading
    the pinned toolchain's components collided on the `.partial` rename.
    `build.sh` now runs a `flock`-serialized `rustc --version` before cargo.
+6. `build.sh`'s client-side FIFO admission queue defaults to **3 slots per
+   VM** (`SPUR_BUILD_MAX_CONCURRENT`), so with the four-leg matrix (v1.12.0)
+   one leg always waited in `ticket waiting` behind the other three. xtask's
+   parallel runner now sizes the queue to the leg count on each leg's
+   environment (an explicit `SPUR_BUILD_MAX_CONCURRENT` override still wins),
+   so all legs are admitted immediately.
 
 ## Measured runs (2026-07-07, version-bump-cold caches)
 
