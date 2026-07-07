@@ -33,6 +33,7 @@ fn render_status_for(view: &ViewId, width: u16) -> String {
             issue_count: 0,
             alert_summary: None,
             flag_summary: None,
+            git_info: None,
             view_hint_override: None,
         };
         StatusBar::render(f, area, props);
