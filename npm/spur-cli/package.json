@@ -1,0 +1,25 @@
+{
+  "name": "@getspur/spur-cli",
+  "version": "0.0.0",
+  "description": "Spur — terminal agent orchestrator. Installs the prebuilt spur binary from getspur/spur-releases.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getspur/spur-releases.git"
+  },
+  "homepage": "https://github.com/getspur/spur-releases",
+  "license": "MIT",
+  "bin": {
+    "spur": "run-spur.js"
+  },
+  "files": [
+    "install.js",
+    "run-spur.js",
+    "platform.js"
+  ],
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
