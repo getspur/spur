@@ -48,6 +48,7 @@ fn render_status(
                     issue_count: 0,
                     alert_summary: None,
                     flag_summary: None,
+                    git_info: None,
                     view_hint_override: None,
                 },
             );
