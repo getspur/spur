@@ -274,6 +274,12 @@ impl DashboardView {
             .drain_agent_model_catalog_probe_requests()
     }
 
+    pub(crate) fn mark_agent_model_catalog_probe_completed(&mut self, worker_name: &str) {
+        self.mention_registry
+            .borrow_mut()
+            .mark_agent_model_catalog_probe_completed(worker_name);
+    }
+
     pub fn set_issue_snapshot(&mut self, issues: Vec<spur_pm::IssueSummary>) {
         self.tracked_issues = issues;
         self.refresh_mention_issues();
@@ -386,13 +392,16 @@ impl DashboardView {
                 .unwrap_or("")
                 .contains(char::is_whitespace)
         {
-            // Mention hint
-            let hint_text = self
-                .mention_registry
-                .borrow()
-                .code_graph_hint()
-                .map(|hint| format!(" Tab to select file \u{00b7} {hint} \u{00b7} Esc to dismiss"))
-                .unwrap_or_else(|| " Tab to select file \u{00b7} Esc to dismiss".to_string());
+            // Mention hint. A probe hint (agent-model catalog fetch in
+            // flight) renders first: it explains why model/effort slots
+            // may be missing from the worker cascade right now.
+            let registry = self.mention_registry.borrow();
+            let mut segments = vec![" Tab to select file".to_string()];
+            segments.extend(registry.agent_model_catalog_probe_hint());
+            segments.extend(registry.code_graph_hint().map(str::to_string));
+            drop(registry);
+            segments.push("Esc to dismiss".to_string());
+            let hint_text = segments.join(" \u{00b7} ");
             Paragraph::new(Span::styled(
                 hint_text,
                 Style::default().fg(Color::DarkGray),
