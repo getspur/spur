@@ -1,7 +1,9 @@
 use std::{
-    env, fs, io,
+    env, fs,
+    io::{self, BufRead as _, BufReader},
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::{Command, ExitCode, Stdio},
+    thread,
 };
 
 mod coverage;
@@ -56,11 +58,17 @@ fn print_help() {
     }
     eprintln!("  --force    with --remote on a non-Linux host, overwrite $CARGO_HOME/bin anyway");
     eprintln!();
-    eprintln!("  dist [--platforms linux,macos,windows] [--out <dir>]");
+    eprintln!("  dist [--platforms linux,macos,windows] [--out <dir>] [--parallel]");
     eprintln!("      build release spur binaries for every supported platform on the");
     eprintln!("      build VM (linux native, macOS universal2 via zigbuild, windows");
     eprintln!("      x86_64 via xwin), fetch them into <dir> (default dist/) with");
     eprintln!("      triple-suffixed names, and write SHA256SUMS");
+    eprintln!("      --parallel: run the platform legs concurrently, each in its own");
+    eprintln!("        remote namespace (cargo's exclusive target-dir lock would");
+    eprintln!("        serialize a shared dir; sccache still dedupes host compiles");
+    eprintln!("        across the namespaces). Assumes the VM is already up — run");
+    eprintln!("        scripts/cloud-build/spin.sh first so concurrent --auto-spin");
+    eprintln!("        dispatches cannot race each other into duplicate VMs.");
     eprintln!();
     eprintln!("  coverage [--base <ref>] [--floor <pct>] [--diff-floor <pct>]");
     eprintln!("           [--output <path>] [--dry-run] [--measure-only | --gate-only]");
@@ -465,21 +473,44 @@ impl DistPlatform {
             Self::WindowsX64 => "spur-cargo xwin build --release -p spur-cli (windows x86_64)",
         }
     }
+
+    /// Short key used as the log prefix and remote-namespace suffix for
+    /// parallel dist legs.
+    fn namespace_key(self) -> &'static str {
+        match self {
+            Self::LinuxAarch64 => "linux",
+            Self::MacUniversal2 => "macos",
+            Self::WindowsX64 => "windows",
+        }
+    }
+
+    /// Remote namespace isolating this platform's parallel leg on the VM.
+    /// Cargo takes an exclusive lock on the whole target dir, so parallel
+    /// legs sharing /mnt/cargo/targets/spur/main would serialize on it;
+    /// separate namespaces give each leg its own worktree + target dir while
+    /// sccache still dedupes the host build-script/proc-macro compiles.
+    fn remote_namespace(self) -> String {
+        format!("spur-dist-{}", self.namespace_key())
+    }
 }
 
 struct DistOptions {
     platforms: Vec<DistPlatform>,
     out_dir: Option<PathBuf>,
+    parallel: bool,
 }
 
 fn parse_dist_options(extra: Vec<String>) -> Result<DistOptions, String> {
     let mut options = DistOptions {
         platforms: DistPlatform::ALL.to_vec(),
         out_dir: None,
+        parallel: false,
     };
     let mut args = extra.into_iter();
     while let Some(arg) = args.next() {
-        if let Some(value) = arg.strip_prefix("--platforms=") {
+        if arg == "--parallel" {
+            options.parallel = true;
+        } else if let Some(value) = arg.strip_prefix("--platforms=") {
             options.platforms = parse_dist_platform_list(value)?;
         } else if arg == "--platforms" {
             let value = args
@@ -541,18 +572,22 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
     fs::create_dir_all(&out_dir)
         .map_err(|err| format!("failed to create {}: {err}", out_dir.display()))?;
 
-    let mut artifacts = Vec::new();
-    for platform in &options.platforms {
-        let mut build = dist_build_command(workspace_root, *platform);
-        run_status(&mut build, platform.build_label())?;
-
-        let dest = out_dir.join(platform.artifact_name(&version));
-        let mut fetch = dist_fetch_command(workspace_root, *platform, &dest);
-        run_status(&mut fetch, "scripts/cloud-build/fetch.sh --via-s3 (dist)")?;
-        // S3 download does not preserve the executable bit.
-        mark_executable(&dest)?;
-        artifacts.push(dest);
-    }
+    let parallel = options.parallel && options.platforms.len() > 1;
+    let artifacts = if parallel {
+        run_dist_platforms_parallel(workspace_root, &options.platforms, &version, &out_dir)?
+    } else {
+        let mut artifacts = Vec::new();
+        for platform in &options.platforms {
+            artifacts.push(run_dist_platform(
+                workspace_root,
+                *platform,
+                &version,
+                &out_dir,
+                false,
+            )?);
+        }
+        artifacts
+    };
 
     let sums_path = out_dir.join("SHA256SUMS");
     write_sha256sums(&dist_artifacts_in(&out_dir)?, &sums_path)?;
@@ -563,6 +598,148 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
     }
     eprintln!("    {}", sums_path.display());
     Ok(())
+}
+
+/// Build + fetch one platform leg. In parallel mode the build and fetch run
+/// inside the platform's own remote namespace and every output line is
+/// prefixed with the platform key so interleaved logs stay attributable.
+fn run_dist_platform(
+    workspace_root: &Path,
+    platform: DistPlatform,
+    version: &str,
+    out_dir: &Path,
+    parallel: bool,
+) -> Result<PathBuf, String> {
+    let mut build = dist_build_command(workspace_root, platform);
+    if parallel {
+        apply_dist_namespace(&mut build, platform);
+        run_status_prefixed(&mut build, platform.build_label(), platform.namespace_key())?;
+    } else {
+        run_status(&mut build, platform.build_label())?;
+    }
+
+    let dest = out_dir.join(platform.artifact_name(version));
+    let mut fetch = dist_fetch_command(workspace_root, platform, &dest);
+    if parallel {
+        apply_dist_namespace(&mut fetch, platform);
+        run_status_prefixed(
+            &mut fetch,
+            "scripts/cloud-build/fetch.sh --via-s3 (dist)",
+            platform.namespace_key(),
+        )?;
+    } else {
+        run_status(&mut fetch, "scripts/cloud-build/fetch.sh --via-s3 (dist)")?;
+    }
+    // S3 download does not preserve the executable bit.
+    mark_executable(&dest)?;
+    Ok(dest)
+}
+
+/// Run every platform leg concurrently and collect all artifacts. Any leg
+/// failure fails the whole dist, but the other legs run to completion first
+/// so their work (and the shared sccache warm-up) is not wasted.
+fn run_dist_platforms_parallel(
+    workspace_root: &Path,
+    platforms: &[DistPlatform],
+    version: &str,
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    eprintln!(
+        "==> dist: building {} platform legs in parallel",
+        platforms.len()
+    );
+    let results: Vec<(DistPlatform, Result<PathBuf, String>)> = thread::scope(|scope| {
+        let handles: Vec<_> = platforms
+            .iter()
+            .map(|platform| {
+                let platform = *platform;
+                (
+                    platform,
+                    scope.spawn(move || {
+                        run_dist_platform(workspace_root, platform, version, out_dir, true)
+                    }),
+                )
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(platform, handle)| {
+                let result = handle
+                    .join()
+                    .unwrap_or_else(|_| Err("dist leg thread panicked".to_owned()));
+                (platform, result)
+            })
+            .collect()
+    });
+
+    let mut artifacts = Vec::new();
+    let mut failures = Vec::new();
+    for (platform, result) in results {
+        match result {
+            Ok(dest) => artifacts.push(dest),
+            Err(err) => failures.push(format!("{}: {err}", platform.namespace_key())),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!("dist legs failed: {}", failures.join("; ")));
+    }
+    Ok(artifacts)
+}
+
+/// Point a dist leg's spur-cargo/fetch.sh subprocess at its per-platform
+/// remote namespace (spur-cargo forwards a caller-set SPUR_REMOTE_NAMESPACE).
+fn apply_dist_namespace(cmd: &mut Command, platform: DistPlatform) {
+    cmd.env("SPUR_REMOTE_NAMESPACE", platform.remote_namespace());
+}
+
+/// Like run_status, but pipes the child's stdout/stderr and re-emits every
+/// line prefixed with `[<prefix>]` so concurrent legs stay readable.
+fn run_status_prefixed(cmd: &mut Command, label: &str, prefix: &str) -> Result<(), String> {
+    eprintln!("[{prefix}] ==> {label}");
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("failed to spawn {label}: {err}"))?;
+    let relay = |stream: Option<Box<dyn io::Read + Send>>, prefix: String| {
+        stream.map(|stream| {
+            thread::spawn(move || {
+                for line in BufReader::new(stream).lines() {
+                    match line {
+                        Ok(line) => eprintln!("[{prefix}] {line}"),
+                        Err(_) => break,
+                    }
+                }
+            })
+        })
+    };
+    let out_thread = relay(
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn io::Read + Send>),
+        prefix.to_owned(),
+    );
+    let err_thread = relay(
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn io::Read + Send>),
+        prefix.to_owned(),
+    );
+    let status = child
+        .wait()
+        .map_err(|err| format!("failed to wait on {label}: {err}"))?;
+    if let Some(handle) = out_thread {
+        let _ = handle.join();
+    }
+    if let Some(handle) = err_thread {
+        let _ = handle.join();
+    }
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{label} failed (status {status})"))
+    }
 }
 
 fn dist_build_command(workspace_root: &Path, platform: DistPlatform) -> Command {
@@ -1500,6 +1677,46 @@ mod tests {
         let options = parse_dist_options(Vec::new()).expect("no args parse");
         assert_eq!(options.platforms, DistPlatform::ALL.to_vec());
         assert!(options.out_dir.is_none());
+        assert!(!options.parallel);
+    }
+
+    #[test]
+    fn dist_options_accept_parallel_flag() {
+        let options = parse_dist_options(vec![
+            "--parallel".to_owned(),
+            "--platforms".to_owned(),
+            "linux,windows".to_owned(),
+        ])
+        .expect("--parallel parses");
+        assert!(options.parallel);
+        assert_eq!(
+            options.platforms,
+            vec![DistPlatform::LinuxAarch64, DistPlatform::WindowsX64]
+        );
+    }
+
+    #[test]
+    fn dist_namespaces_isolate_each_platform_leg() {
+        assert_eq!(
+            DistPlatform::LinuxAarch64.remote_namespace(),
+            "spur-dist-linux"
+        );
+        assert_eq!(
+            DistPlatform::MacUniversal2.remote_namespace(),
+            "spur-dist-macos"
+        );
+        assert_eq!(
+            DistPlatform::WindowsX64.remote_namespace(),
+            "spur-dist-windows"
+        );
+
+        let mut cmd = dist_build_command(&PathBuf::from("/workspace"), DistPlatform::WindowsX64);
+        apply_dist_namespace(&mut cmd, DistPlatform::WindowsX64);
+        let namespace = cmd
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("SPUR_REMOTE_NAMESPACE"))
+            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(namespace.as_deref(), Some("spur-dist-windows"));
     }
 
     #[test]

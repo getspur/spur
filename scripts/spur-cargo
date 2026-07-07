@@ -332,7 +332,11 @@ if [[ $REMOTE_CAPABLE -eq 1 && -x "$REMOTE_BUILD_SH" ]]; then
     for cloud in "${REMOTE_CLOUDS[@]}"; do
         echo "[spur-cargo] remote ($SUBCOMMAND) → $cloud VM" >&2
         set +e
-        SPUR_REMOTE_NAMESPACE=spur SPUR_CLOUD="$cloud" "$REMOTE_BUILD_SH" --auto-spin -- "$@"
+        # Namespace defaults to "spur" (one shared warm target dir per
+        # worktree). Callers may override — `cargo xtask dist --parallel`
+        # gives each platform leg its own namespace so cargo's exclusive
+        # target-dir lock doesn't serialize the concurrent legs.
+        SPUR_REMOTE_NAMESPACE="${SPUR_REMOTE_NAMESPACE:-spur}" SPUR_CLOUD="$cloud" "$REMOTE_BUILD_SH" --auto-spin -- "$@"
         REMOTE_EXIT=$?
         set -e
         if [[ $REMOTE_EXIT -eq 0 ]]; then
