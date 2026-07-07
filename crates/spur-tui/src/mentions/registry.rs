@@ -692,6 +692,7 @@ impl MentionRegistry {
             effort.as_deref(),
         );
         let mut composed = worker_entry.clone();
+        composed.display = atom_text.trim_start_matches('@').to_string();
         composed.uri = uri;
         composed.atom_text = Some(atom_text);
         composed.agent = agent;
