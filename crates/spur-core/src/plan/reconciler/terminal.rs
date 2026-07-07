@@ -147,7 +147,7 @@ impl super::Reconciler {
             .pm
             .list_issues(IssueFilter {
                 labels: vec![crate::plan::labels::loop_id_label(&loop_id)],
-                issue_type: Some("task".into()),
+                issue_type: Some(crate::plan::loops::LOOP_ISSUE_TYPE.to_string()),
                 limit: Some(2),
                 ..Default::default()
             })
