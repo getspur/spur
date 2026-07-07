@@ -120,6 +120,9 @@ scripts/spur-cargo xwin build --release -p spur-cli   # → PE on the VM
 scripts/cloud-build/fetch.sh --via-s3 target/x86_64-pc-windows-msvc/release/spur.exe
 ```
 
+For the whole platform matrix in one go (linux native + macOS universal2 +
+windows x86_64, fetched into `dist/` with checksums): `cargo xtask dist`.
+
 ## Feature degradation on Windows
 
 The unix-domain-socket transports are cfg-gated with graceful fallbacks
