@@ -154,6 +154,45 @@ case "${1:-}" in
         "$SCRIPT_DIR/spur-cargo" run -p xtask -- coverage --measure-only "$@"
         exec cargo run -p xtask -- coverage --gate-only "$@"
         ;;
+    zigbuild)
+        # macOS cross-compile: cargo-zigbuild with the zig toolchain + macOS
+        # SDK link stubs provisioned on the build VM (SDKROOT and
+        # CFLAGS_aarch64_apple_darwin come from /etc/profile.d/spur-build.sh
+        # there). Defaults to --target aarch64-apple-darwin since producing a
+        # Mach-O binary is the whole point; pass an explicit --target to
+        # override. Provider RUSTFLAGS (-Clinker=clang / -fuse-ld=lld /
+        # neoverse-v2) are injected via `cargo --config`, which external
+        # subcommands never see — exactly right for a darwin link driven by
+        # zig. Fetch artifacts with scripts/cloud-build/fetch.sh, e.g.
+        #   fetch.sh --via-s3 target/aarch64-apple-darwin/release/spur
+        HAS_TARGET=0
+        for arg in "$@"; do
+            case "$arg" in
+                --target|--target=*) HAS_TARGET=1 ;;
+            esac
+        done
+        if [[ $HAS_TARGET -eq 0 ]]; then
+            shift
+            set -- zigbuild --target aarch64-apple-darwin "$@"
+        fi
+        # The darwin link must stay in zig's hands. When the caller has no
+        # RUSTFLAGS, build.sh injects the AWS provider defaults (-Clinker=clang
+        # / -fuse-ld=lld / neoverse-v2) via `cargo --config`, which an external
+        # subcommand never sees — harmless. But with RUSTFLAGS set, build.sh
+        # APPENDS the provider defaults to the env value and they'd hijack the
+        # Mach-O link, so suppress them at the source. RUSTFLAGS then carries
+        # (a) force-frame-pointers, normally merged from .cargo/config.toml
+        # build.rustflags, which an env RUSTFLAGS would otherwise drop, and
+        # (b) `-framework CoreML`: pyke's prebuilt onnxruntime static lib
+        # (ort-download-binaries) bundles the CoreML execution provider, but
+        # ort-sys only emits that framework link when building ON a macOS
+        # host, leaving a Linux cross link six _OBJC_CLASS_$_ML* symbols
+        # short. Callers that set RUSTFLAGS themselves own the full flag set.
+        if [[ -z "${RUSTFLAGS+x}" ]]; then
+            export AWS_RUSTFLAGS_DEFAULT=""
+            export RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML"
+        fi
+        ;;
 esac
 
 # ---- routing ---------------------------------------------------------------
@@ -162,7 +201,7 @@ esac
 # class decides. See the header for the full contract.
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
-    build|check|test|doc)
+    build|check|test|doc|zigbuild)
         CLASS="heavy" ;;
     clean)
         # clean must target wherever compilation happens. In remote mode the
