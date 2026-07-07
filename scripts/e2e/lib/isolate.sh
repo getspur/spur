@@ -31,7 +31,14 @@ spur_e2e_copy_fixture() {
     if [[ "$(basename "$entry")" == ".gitkeep" ]]; then
       continue
     fi
-    cp -a "$entry" "$workspace/"
+    # Merge into pre-created workspace dirs (e.g. .spur) instead of
+    # nesting: `cp -a fixture/.spur workspace/` would otherwise land at
+    # workspace/.spur/.spur because isolate pre-creates workspace/.spur.
+    if [[ -d "$entry" && -d "$workspace/$(basename "$entry")" ]]; then
+      cp -a "$entry"/. "$workspace/$(basename "$entry")/"
+    else
+      cp -a "$entry" "$workspace/"
+    fi
   done
 }
 
