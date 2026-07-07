@@ -1,19 +1,31 @@
-use std::{io, path::Path, process::Stdio, time::Duration};
+use std::path::Path;
+#[cfg(unix)]
+use std::{io, process::Stdio, time::Duration};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(unix)]
+use serde::Serialize;
+#[cfg(unix)]
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     time::sleep,
 };
 
+#[cfg(unix)]
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
+#[cfg(unix)]
 const CONNECT_ATTEMPTS: usize = 5;
+#[cfg(unix)]
 const CONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
+#[cfg(unix)]
 const CONNECT_MAX_DELAY: Duration = Duration::from_millis(800);
+#[cfg(unix)]
 const LAUNCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(unix)]
 const LAUNCH_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ControlRequest<'a> {
@@ -227,6 +239,20 @@ fn infer_datasource_name(path: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("could not infer datasource name from path; pass --name"))
 }
 
+/// The notebook daemon control socket is a unix domain socket; on other
+/// platforms every /notebook command fails with a clear platform error.
+#[cfg(not(unix))]
+async fn send_control(
+    _command: &str,
+    _path: Option<&str>,
+    _name: Option<&str>,
+    _group: Option<&str>,
+    _socket_path: &Path,
+) -> anyhow::Result<ControlResponse> {
+    anyhow::bail!("the notebook daemon requires unix domain sockets, unavailable on this platform")
+}
+
+#[cfg(unix)]
 async fn send_control(
     command: &str,
     path: Option<&str>,
@@ -248,6 +274,7 @@ async fn send_control(
     Ok(serde_json::from_slice(&response)?)
 }
 
+#[cfg(unix)]
 async fn connect_or_launch_control_socket(
     socket_path: &Path,
     launch: impl Fn(&Path) -> io::Result<()>,
@@ -262,6 +289,7 @@ async fn connect_or_launch_control_socket(
     wait_for_launched_control_socket(socket_path).await
 }
 
+#[cfg(unix)]
 async fn connect_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
     let mut delay = CONNECT_INITIAL_DELAY;
     for attempt in 0..CONNECT_ATTEMPTS {
@@ -278,6 +306,7 @@ async fn connect_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
     Err(io::Error::other("notebook daemon connect retry exhausted"))
 }
 
+#[cfg(unix)]
 fn should_retry_connect_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -296,6 +325,7 @@ pub fn notebook_launch_report(selection: &spur_core::notebook::NotebookLaunchSel
     )
 }
 
+#[cfg(unix)]
 fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -337,6 +367,7 @@ fn launch_notebook_app(socket_path: &Path) -> io::Result<()> {
     command.spawn().map(|_| ())
 }
 
+#[cfg(unix)]
 fn notebook_resolver_io_error(error: spur_core::notebook::NotebookResolverError) -> io::Error {
     let kind = match &error {
         spur_core::notebook::NotebookResolverError::InvalidChannel { .. } => {
@@ -349,6 +380,7 @@ fn notebook_resolver_io_error(error: spur_core::notebook::NotebookResolverError)
     io::Error::new(kind, error)
 }
 
+#[cfg(unix)]
 async fn wait_for_launched_control_socket(socket_path: &Path) -> io::Result<UnixStream> {
     let deadline = tokio::time::Instant::now() + LAUNCH_CONNECT_TIMEOUT;
     loop {
@@ -364,6 +396,7 @@ async fn wait_for_launched_control_socket(socket_path: &Path) -> io::Result<Unix
     }
 }
 
+#[cfg(unix)]
 async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
     if bytes.len() > FRAME_LIMIT {
         return Err(std::io::Error::new(
@@ -378,6 +411,7 @@ async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<(
     stream.flush().await
 }
 
+#[cfg(unix)]
 async fn read_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     let mut len = [0_u8; 4];
     stream.read_exact(&mut len).await?;
@@ -393,7 +427,7 @@ async fn read_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
