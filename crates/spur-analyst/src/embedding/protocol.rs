@@ -10,6 +10,9 @@ pub(super) const SPUR_EMBED_SOCKET_ENV: &str = "SPUR_EMBED_SOCKET";
 const DEFAULT_SOCKET_RELATIVE_PATH: &str = ".spur/embed.sock";
 
 #[derive(Debug, Deserialize)]
+// Only the sidecar service's unix-only connection handler deserializes
+// requests; on non-unix the type exists but nothing constructs it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) struct EmbedRequest {
     #[serde(default)]
     pub(super) v: Option<u8>,
