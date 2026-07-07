@@ -1,0 +1,9 @@
+## quit confirmation
+Quit spur?
+
+Press Ctrl+C again to force quit.
+
+[y] yes   [n] no
+
+## shell after exit
+VHS_SPUR_EXITED status=0

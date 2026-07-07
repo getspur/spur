@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != "tui" ]]; then
+  echo "stand-in spur only implements: spur tui" >&2
+  exit 2
+fi
+
+old_stty="$(stty -g || true)"
+restore_tty() {
+  if [[ -n "$old_stty" ]]; then
+    stty "$old_stty" 2>/dev/null || true
+  fi
+}
+trap restore_tty EXIT
+
+printf '\033[2J\033[H'
+
+render_dashboard() {
+  printf '\033[2J\033[H'
+  cat <<'SCREEN'
+SPUR
+
+No agents configured
+
+Run spur init to configure an agent.
+SCREEN
+}
+
+render_help() {
+  printf '\033[2J\033[H'
+  cat <<'SCREEN'
+SPUR Help
+
+Keyboard environment
+
+Ctrl-C  Quit or open quit confirmation
+
+Press ? or Esc to close
+SCREEN
+}
+
+render_quit() {
+  printf '\033[2J\033[H'
+  cat <<'SCREEN'
+Quit spur?
+
+Press Ctrl+C again to force quit.
+
+[y] yes   [n] no
+SCREEN
+}
+
+confirming_quit=false
+on_interrupt() {
+  confirming_quit=true
+  render_quit
+}
+trap on_interrupt INT
+
+render_dashboard
+stty -icanon -echo min 1 time 0 2>/dev/null || true
+
+while true; do
+  if ! IFS= read -r -s -n 1 key; then
+    continue
+  fi
+  case "$key" in
+    "?")
+      confirming_quit=false
+      render_help
+      ;;
+    $'\e')
+      confirming_quit=false
+      render_dashboard
+      ;;
+    $'\003')
+      confirming_quit=true
+      render_quit
+      ;;
+    y|Y)
+      if [[ "$confirming_quit" == true ]]; then
+        printf '\033[2J\033[H'
+        exit 0
+      fi
+      ;;
+    n|N)
+      confirming_quit=false
+      render_dashboard
+      ;;
+  esac
+done
