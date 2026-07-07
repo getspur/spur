@@ -940,6 +940,7 @@ impl PlanBrowserView {
                 issue_count: self.plans.len(),
                 alert_summary: None,
                 flag_summary: None,
+                git_info: None,
                 view_hint_override: Some(HintOverride {
                     full: STATUS_HINT,
                     compact: Some(STATUS_HINT_COMPACT),
