@@ -1231,7 +1231,7 @@ mod tests {
             0,
         );
 
-        let _rows = src.refresh("codex no-such-agent keep this");
+        let _rows = src.refresh("codex,no-such-agent,keep,this");
         let accept = src.accept(0).expect("row 0 exists");
 
         match accept {
@@ -1248,7 +1248,7 @@ mod tests {
                 assert_eq!(replace_from, Some(0));
                 assert_eq!(
                     unconsumed_suffix.as_deref(),
-                    Some(" no-such-agent keep this")
+                    Some(",no-such-agent,keep,this")
                 );
             }
             other => panic!("expected InsertAtom, got {other:?}"),
