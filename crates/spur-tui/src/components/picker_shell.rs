@@ -136,6 +136,11 @@ pub enum PickerAction {
     None,
     /// User accepted a row; dispatch this and close the shell.
     Accept(RetrievalAccept),
+    /// User accepted a row that advances a multi-step pick (e.g. the
+    /// worker mention cascade's agent/model/effort slots): dispatch this,
+    /// but leave the shell open and re-filter against the mutated
+    /// InputBar text instead of closing. See `QuerySource::accept_keeps_open`.
+    AcceptKeepOpen(RetrievalAccept),
     /// User cancelled (Esc); close the shell without mutation.
     Cancel,
 }
@@ -352,6 +357,7 @@ impl PickerShell {
             return PickerAction::None;
         }
         match self.source.accept(idx) {
+            Some(a) if self.source.accept_keeps_open(idx) => PickerAction::AcceptKeepOpen(a),
             Some(a) => PickerAction::Accept(a),
             None => PickerAction::Cancel,
         }
