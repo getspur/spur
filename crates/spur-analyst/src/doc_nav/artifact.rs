@@ -132,8 +132,7 @@ pub(super) async fn open_doc_artifact_for_request(
         worktree.to_path_buf(),
         spur_graph::mcp::shared_rebuild_coordinator(),
     )
-    .await
-    .map_err(McpHandlerError::from)?;
+    .await?;
     let temp_dir = OverlayDocTempDir::new()?;
     let artifact_dir = temp_dir.path().join("artifact");
     write_sections_dataset_skipping_embeddings(&artifact, worktree, &artifact_dir).map_err(
