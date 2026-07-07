@@ -1,0 +1,8 @@
+## help overlay
+SPUR Help
+
+Keyboard environment
+
+Ctrl-C  Quit or open quit confirmation
+
+Press ? or Esc to close

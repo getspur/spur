@@ -87,3 +87,7 @@ spur.log.*
 # local pnpm store (created when spur-pnpm falls back to local mode; use the VM store)
 /.pnpm-store/
 crates/spur-context-service/Cargo.lock
+
+# VHS TUI e2e generated outputs
+/scripts/e2e/vhs/actual/
+/scripts/e2e/vhs/tmp/
