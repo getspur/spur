@@ -823,11 +823,17 @@ struct SlotCandidate {
     description: Option<String>,
 }
 
+/// Splits on `,` rather than whitespace: the InputBar's completion-trigger
+/// detector closes the mention popup on the first whitespace character
+/// typed (see `completion_trigger.rs`), so a worker/agent/model/effort
+/// cascade typed live in the TUI can never contain a space. `,` was chosen
+/// over `/` because real catalog model values use `/` for provider
+/// qualification (e.g. opencode's `provider/model` ids).
 fn query_tokens(query: &str) -> Vec<QueryToken<'_>> {
     let mut tokens = Vec::new();
     let mut token_start = None;
     for (idx, ch) in query.char_indices() {
-        if ch.is_whitespace() {
+        if ch == ',' {
             if let Some(start) = token_start.take() {
                 tokens.push(QueryToken {
                     text: &query[start..idx],
