@@ -164,6 +164,7 @@ pub mod agents;
 pub mod app;
 pub mod commands;
 pub mod components;
+pub mod git_info;
 pub mod input_history;
 pub mod landing;
 pub mod mentions;
