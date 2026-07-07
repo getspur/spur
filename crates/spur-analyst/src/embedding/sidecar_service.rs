@@ -1,16 +1,26 @@
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context as _, Result};
+#[cfg(unix)]
+use anyhow::Context as _;
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use spur_graph::{
     embedding_query_text_for_model, EmbeddingModelSelection, EMBEDDING_VECTOR_DIMENSIONS,
 };
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
 use super::protocol::{self, EmbedRequest, PROTOCOL_VERSION};
@@ -20,6 +30,7 @@ use super::EmbeddingRuntime;
 pub const SPUR_EMBED_SOCKET_ENV: &str = protocol::SPUR_EMBED_SOCKET_ENV;
 pub const MAX_EMBED_TEXTS: usize = 16;
 
+#[cfg(unix)]
 const SOCKET_PERMISSIONS: u32 = 0o600;
 
 type Embedder = dyn Fn(Vec<String>) -> Result<Vec<Vec<f32>>, String> + Send + Sync;
@@ -46,6 +57,7 @@ impl EmbedService {
         }
     }
 
+    #[cfg(unix)]
     pub async fn serve_socket(self, socket_path: PathBuf) -> Result<()> {
         bind_socket_path(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)
@@ -74,6 +86,17 @@ impl EmbedService {
         }
     }
 
+    /// The sidecar transport is a unix domain socket; on other platforms an
+    /// explicit serve is rejected (clients degrade to in-process embedding).
+    #[cfg(not(unix))]
+    pub async fn serve_socket(self, socket_path: PathBuf) -> Result<()> {
+        bail!(
+            "embed sidecar socket {} unsupported: unix domain sockets are unavailable on this platform",
+            socket_path.display()
+        )
+    }
+
+    #[cfg(unix)]
     async fn handle_connection(&self, stream: UnixStream) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
@@ -212,6 +235,7 @@ fn production_service(runtime: &'static EmbeddingRuntime) -> EmbedService {
     )
 }
 
+#[cfg(unix)]
 fn bind_socket_path(path: &Path) -> Result<()> {
     if let Some(parent) = path
         .parent()
