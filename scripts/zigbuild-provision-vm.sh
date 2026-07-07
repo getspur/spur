@@ -233,6 +233,17 @@ export CXXFLAGS_x86_64_apple_darwin="-O2 -mcpu=x86_64"
 EOF
         echo "profile.d x86_64 flags added"
     fi
+    # Self-heal libproc bindings on every dispatch shell (see startup-aws.sh
+    # MACCROSS block — kept in lockstep): a fresh VM's first zigbuild fails
+    # at libproc, the failed build leaves the OUT_DIR, and the next login
+    # shell plants into it.
+    if ! grep -q 'plant-libproc-bindings.sh' /etc/profile.d/spur-build.sh; then
+        sudo tee -a /etc/profile.d/spur-build.sh >/dev/null <<'EOF'
+# Self-heal libproc's cross-generated bindings (idempotent glob+cp, ~ms).
+[ -x /mnt/cargo/macsdk/plant-libproc-bindings.sh ] && /mnt/cargo/macsdk/plant-libproc-bindings.sh >/dev/null 2>&1 || true
+EOF
+        echo "profile.d libproc self-heal added"
+    fi
 else
     echo "WARNING: no passwordless sudo; set SDKROOT/CFLAGS_aarch64_apple_darwin manually"
 fi
