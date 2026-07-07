@@ -187,10 +187,29 @@ case "${1:-}" in
         # (ort-download-binaries) bundles the CoreML execution provider, but
         # ort-sys only emits that framework link when building ON a macOS
         # host, leaving a Linux cross link six _OBJC_CLASS_$_ML* symbols
-        # short. Callers that set RUSTFLAGS themselves own the full flag set.
+        # short, and (c) the SDK's libc++.tbd as an explicit file: zig maps
+        # `-lc++` to its own STATIC libc++/libc++abi, which puts a second C++
+        # runtime in the process — natively-built DuckDB extension dylibs
+        # (duckpgq etc., Apple clang + system libc++) then abort with
+        # "libc++abi: terminating" the moment an exception crosses the
+        # dlopen boundary, because the zig-side handlers can't match the
+        # system-side exception. An explicit .tbd on the link line beats the
+        # bundled static archive, so the binary links /usr/lib/libc++.1.dylib
+        # exactly like a native build and shares one runtime with the
+        # extensions, and (d) the final link runs through the VM's
+        # clang+ld64.lld driver (provisioned by zigbuild-provision-vm.sh)
+        # instead of zig's Mach-O linker: with libc++ as a dylib import,
+        # zig's linker fails with "relocation Overflow" on the prebuilt
+        # Apple-clang onnxruntime objects; ld64.lld links them like a native
+        # toolchain would. rustc takes the LAST -C linker, so this cleanly
+        # overrides the zig wrapper cargo-zigbuild configures — zig remains
+        # the C/C++ compiler for all build-script compiles. Callers that set
+        # RUSTFLAGS themselves own the full flag set.
         if [[ -z "${RUSTFLAGS+x}" ]]; then
             export AWS_RUSTFLAGS_DEFAULT=""
-            export RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML"
+            ZIGBUILD_LIBCXX_TBD="${SPUR_ZIGBUILD_LIBCXX_TBD:-/mnt/cargo/macsdk/MacOSX.sdk/usr/lib/libc++.tbd}"
+            ZIGBUILD_LINKER="${SPUR_ZIGBUILD_LINKER:-/mnt/cargo/macsdk/ld64-link.sh}"
+            export RUSTFLAGS="-Cforce-frame-pointers=yes -Clink-arg=-framework -Clink-arg=CoreML -Clink-arg=$ZIGBUILD_LIBCXX_TBD -Clinker=$ZIGBUILD_LINKER"
         fi
         ;;
 esac
