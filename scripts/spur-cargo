@@ -26,6 +26,10 @@
 #       worktree, not an out-of-tree path like /tmp — only worktree changes are
 #       synced back. For an interactive run (TUI, a local server/port, anything
 #       needing live stdin or localhost) use SPUR_REMOTE=0 to force it local.
+#   e2e    — e2e: REMOTE by default. The VM builds `spur-cli` in debug mode,
+#       runs scripts/e2e/run-all.sh from the private run dir, and syncs
+#       scripts/e2e/.artifacts/ back before preserving the suite exit code.
+#       SPUR_REMOTE=0 runs the local runner directly; it never builds implicitly.
 #   embed  — graph-embed / embed / embedding: convenience shortcuts for
 #       `run -p spur-cli -- graph embed --workspace ...`, so existing graph
 #       artifacts are vector-filled remotely by default and synced back with
@@ -69,6 +73,9 @@ resolve_remote_build_sh() {
 
     candidate="$SCRIPT_DIR/cloud-build/build.sh"
     [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    if [[ -L "$candidate" && ! -e "$candidate" ]]; then
+        echo "[spur-cargo] WARNING: dangling cloud-build helper symlink: $candidate -> $(readlink "$candidate")" >&2
+    fi
 
     if [[ -n "${SPUR_NOTEBOOK_REPO:-}" ]]; then
         candidate="$SPUR_NOTEBOOK_REPO/scripts/cloud-build/build.sh"
@@ -283,6 +290,10 @@ case "$SUBCOMMAND" in
         # executes the binary and build.sh syncs worktree outputs back.
         # SPUR_REMOTE=0 forces local for interactive runs (TUI/servers/ports).
         CLASS="run" ;;
+    e2e)
+        # Remote by default: the VM builds spur-cli, runs the TUI e2e suites,
+        # and syncs failure artifacts back. SPUR_REMOTE=0 runs the local runner.
+        CLASS="run" ;;
     *)
         # fmt and everything else: local only (remote is meaningless).
         CLASS="local" ;;
@@ -293,11 +304,15 @@ case "${SPUR_REMOTE:-}" in
     0)
         REMOTE_CAPABLE=0 ;;                                       # force local (any cmd)
     1)
-        if [[ "$CLASS" != "local" ]]; then REMOTE_CAPABLE=1; fi ;; # force remote (not fmt/run)
+        if [[ "$CLASS" != "local" ]]; then REMOTE_CAPABLE=1; fi ;; # force remote (not fmt/local-only)
     *)
         # default: heavy compiles AND run go remote (run = compile + execute).
         if [[ "$CLASS" == "heavy" || "$CLASS" == "run" ]]; then REMOTE_CAPABLE=1; fi ;;
 esac
+
+if [[ "$SUBCOMMAND" == "e2e" ]]; then
+    rm -rf "$SCRIPT_DIR/e2e/.artifacts"
+fi
 
 # ---- remote dispatch -------------------------------------------------------
 # build.sh exits with INFRA_UNAVAILABLE (200) only when the VM itself is
@@ -355,6 +370,14 @@ elif [[ $REMOTE_CAPABLE -eq 1 && -x "$LEGACY_REMOTE_BUILD_SH" ]]; then
 fi
 
 # ---- local fallback (original behavior) ------------------------------------
+if [[ "$SUBCOMMAND" == "e2e" ]]; then
+    if [[ $# -gt 1 ]]; then
+        echo "[spur-cargo] e2e does not accept cargo arguments; use SPUR_E2E_ONLY or SHELL_USE_RUNS" >&2
+        exit 2
+    fi
+    exec "$SCRIPT_DIR/e2e/run-all.sh"
+fi
+
 use_spur_s3_sccache() {
     case "${SPUR_SCCACHE_S3-__spur_unset__}" in
         0|false|False|FALSE|no|No|NO|off|Off|OFF)
