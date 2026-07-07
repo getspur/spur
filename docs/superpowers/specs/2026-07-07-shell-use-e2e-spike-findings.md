@@ -2,7 +2,33 @@
 
 Date: 2026-07-07
 Scope: `scripts/e2e/shell-use/**`
-Recommendation: **No-Go for adopting `shell-use` as SPUR's TUI E2E layer today.**
+Recommendation: **Go candidate — validated against the real binary 9/9 (see Real-Binary Validation below).** The worker's original verdict was a conditional No-Go only because no local `spur` binary could be built inside the worker sandbox; the brain follow-up completed that validation on the same day.
+
+## Real-Binary Validation (2026-07-07, brain follow-up)
+
+The local-build blocker was environmental, not architectural: the worker's
+fresh worktree had a cold target dir and the link step was OOM-killed (exit
+137). From the primary worktree with a warm incremental cache,
+`SPUR_REMOTE=0 scripts/spur-cargo build -p spur-cli` completed in 2m55s and
+produced `target/debug/spur` (arm64, `spur 1.7.0`).
+
+Running this branch's harness unmodified against that binary
+(`SPUR_BIN=... SHELL_USE_RUNS=3 scripts/e2e/shell-use/run.sh`):
+
+- `cold-launch`: 3/3 PASS
+- `clean-quit`: 3/3 PASS (Ctrl-C → `Quit spur?` → `y` → `expect exit-code 0`)
+- `help-overlay`: 0/3 on the first pass — a test-content bug, not a framework
+  failure. The overlay opened, but the expected strings (`Keyboard
+  environment`, `Press ? or Esc to close`) came from the phantom spike's
+  never-executed journey definitions and are not visible in the real 80x24
+  overlay. shell-use's failure dump printed the full screen, which made the
+  mismatch obvious in seconds. After correcting the expectations to the real
+  overlay content (`Dashboard — Modes`, `Dashboard — Navigation`, `Toggle
+  verbose mode`): 3/3 PASS.
+
+Final tally after the fix: **9/9 journey executions passed across 3 runs,
+zero flakes, zero sleeps.** The deterministic 3/3 identical failure before the
+fix is itself evidence of stability (no timing variance).
 
 ## Summary
 
