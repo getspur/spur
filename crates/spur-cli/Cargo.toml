@@ -64,7 +64,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
-nix = { version = "0.29", features = ["resource"] }
 directories = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }
@@ -74,6 +73,11 @@ indicatif = "0.18"
 # rustls provider for octocrab's TLS handshake — see main.rs for the
 # install_default() call. `ring` keeps us off the heavier `aws-lc-rs`.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# nix does not compile for windows targets; the sole use (NOFILE rlimit
+# raise in main.rs) is already #[cfg(unix)]-gated with a no-op stub.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["resource"] }
 
 [dev-dependencies]
 tempfile = "3"
