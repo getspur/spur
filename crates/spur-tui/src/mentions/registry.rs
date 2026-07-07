@@ -1686,6 +1686,40 @@ mod tests {
     }
 
     #[test]
+    fn worker_matching_typed_query_keeps_issue_rows_without_duplicating_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut registry =
+            MentionRegistry::for_brain_session(vec![worker("codex", AgentKind::CodexAcp)]);
+        // Point at a nonexistent catalog so the cascade has no model/effort
+        // candidates regardless of the developer machine's real cache.
+        registry.set_agent_model_catalog_path_for_test(tmp.path().join("catalog.json"));
+        registry.set_issue_snapshot(vec![issue("bd-7", "Coordinate codex work", None)]);
+
+        let hits = registry.query(CompletionScope::PreSession, tmp.path(), "codex", 10);
+        let debug: Vec<_> = hits
+            .iter()
+            .map(|hit| (&hit.kind, &hit.display, &hit.uri))
+            .collect();
+
+        assert!(
+            matches!(hits.first().map(|hit| &hit.kind), Some(MentionKind::Worker)),
+            "composed worker row must stay first for the slot-picker pairing, got {debug:?}"
+        );
+        assert_eq!(
+            hits.iter()
+                .filter(|hit| hit.kind == MentionKind::Worker)
+                .count(),
+            1,
+            "composed row must replace the base worker entry, not duplicate it: {debug:?}"
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit.kind == MentionKind::Issue && hit.uri == "issue://beads/bd-7"),
+            "issue rows matching the same text must stay reachable: {debug:?}"
+        );
+    }
+
+    #[test]
     fn worker_query_partial_slot_text_is_exposed_as_filter() {
         let tmp = tempfile::tempdir().unwrap();
         write_agent_profile(tmp.path(), "spur-narrow-implementer");
