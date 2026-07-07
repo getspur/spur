@@ -13,6 +13,7 @@ pub use datasource_source::DatasourceMentionSource;
 pub use entry::{MentionEntry, MentionKind, MentionSource};
 pub use issue_source::{IssueMentionDescriptor, IssueMentionSource};
 pub use registry::{CompletionScope, MentionRegistry, CODE_GRAPH_INDEX_ENV};
+pub(crate) use registry::{OpenWorkerSlot, SlotCandidate, WorkerSlotKind};
 pub use spur_graph::{
     CodeMentionKind, CodeMentionPayload, CodeMentionValidationSpec, GraphIndexArtifact,
 };
