@@ -592,7 +592,7 @@ fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> 
                 *platform,
                 &version,
                 &out_dir,
-                false,
+                None,
             )?);
         }
         artifacts
@@ -617,11 +617,11 @@ fn run_dist_platform(
     platform: DistPlatform,
     version: &str,
     out_dir: &Path,
-    parallel: bool,
+    parallel: Option<&str>,
 ) -> Result<PathBuf, String> {
     let mut build = dist_build_command(workspace_root, platform);
-    if parallel {
-        apply_dist_namespace(&mut build, platform);
+    if let Some(queue_slots) = parallel {
+        apply_dist_namespace(&mut build, platform, queue_slots);
         run_status_prefixed(&mut build, platform.build_label(), platform.namespace_key())?;
     } else {
         run_status(&mut build, platform.build_label())?;
@@ -629,8 +629,8 @@ fn run_dist_platform(
 
     let dest = out_dir.join(platform.artifact_name(version));
     let mut fetch = dist_fetch_command(workspace_root, platform, &dest);
-    if parallel {
-        apply_dist_namespace(&mut fetch, platform);
+    if let Some(queue_slots) = parallel {
+        apply_dist_namespace(&mut fetch, platform, queue_slots);
         run_status_prefixed(
             &mut fetch,
             "scripts/cloud-build/fetch.sh --via-s3 (dist)",
@@ -657,6 +657,8 @@ fn run_dist_platforms_parallel(
         "==> dist: building {} platform legs in parallel",
         platforms.len()
     );
+    let queue_slots = dist_queue_slots(platforms.len());
+    let queue_slots = queue_slots.as_str();
     let results: Vec<(DistPlatform, Result<PathBuf, String>)> = thread::scope(|scope| {
         let handles: Vec<_> = platforms
             .iter()
@@ -665,7 +667,13 @@ fn run_dist_platforms_parallel(
                 (
                     platform,
                     scope.spawn(move || {
-                        run_dist_platform(workspace_root, platform, version, out_dir, true)
+                        run_dist_platform(
+                            workspace_root,
+                            platform,
+                            version,
+                            out_dir,
+                            Some(queue_slots),
+                        )
                     }),
                 )
             })
@@ -696,12 +704,24 @@ fn run_dist_platforms_parallel(
 }
 
 /// Point a dist leg's spur-cargo/fetch.sh subprocess at its per-platform
-/// remote namespace (spur-cargo forwards a caller-set SPUR_REMOTE_NAMESPACE).
-fn apply_dist_namespace(cmd: &mut Command, platform: DistPlatform) {
+/// remote namespace (spur-cargo forwards a caller-set `SPUR_REMOTE_NAMESPACE`)
+/// and size build.sh's per-VM admission queue so no leg waits on a slot.
+fn apply_dist_namespace(cmd: &mut Command, platform: DistPlatform, queue_slots: &str) {
     cmd.env("SPUR_REMOTE_NAMESPACE", platform.remote_namespace());
+    cmd.env("SPUR_BUILD_MAX_CONCURRENT", queue_slots);
 }
 
-/// Like run_status, but pipes the child's stdout/stderr and re-emits every
+/// build.sh admits `SPUR_BUILD_MAX_CONCURRENT` builds (default 3) per remote
+/// builder, so parallel dist must raise the cap to the leg count or the extra
+/// legs queue behind the others. An explicit caller override still wins.
+fn dist_queue_slots(leg_count: usize) -> String {
+    match env::var("SPUR_BUILD_MAX_CONCURRENT") {
+        Ok(explicit) if !explicit.trim().is_empty() => explicit,
+        _ => leg_count.to_string(),
+    }
+}
+
+/// Like `run_status`, but pipes the child's stdout/stderr and re-emits every
 /// line prefixed with `[<prefix>]` so concurrent legs stay readable.
 fn run_status_prefixed(cmd: &mut Command, label: &str, prefix: &str) -> Result<(), String> {
     eprintln!("[{prefix}] ==> {label}");
@@ -1730,12 +1750,36 @@ mod tests {
         );
 
         let mut cmd = dist_build_command(&PathBuf::from("/workspace"), DistPlatform::WindowsX64);
-        apply_dist_namespace(&mut cmd, DistPlatform::WindowsX64);
-        let namespace = cmd
-            .get_envs()
-            .find(|(key, _)| *key == std::ffi::OsStr::new("SPUR_REMOTE_NAMESPACE"))
-            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()));
-        assert_eq!(namespace.as_deref(), Some("spur-dist-windows"));
+        apply_dist_namespace(&mut cmd, DistPlatform::WindowsX64, "4");
+        let env_of = |key: &str| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+                .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(
+            env_of("SPUR_REMOTE_NAMESPACE").as_deref(),
+            Some("spur-dist-windows")
+        );
+        assert_eq!(env_of("SPUR_BUILD_MAX_CONCURRENT").as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn dist_queue_slots_match_leg_count_unless_overridden() {
+        let saved = env::var("SPUR_BUILD_MAX_CONCURRENT").ok();
+
+        env::remove_var("SPUR_BUILD_MAX_CONCURRENT");
+        assert_eq!(dist_queue_slots(4), "4");
+
+        env::set_var("SPUR_BUILD_MAX_CONCURRENT", "2");
+        assert_eq!(dist_queue_slots(4), "2");
+
+        env::set_var("SPUR_BUILD_MAX_CONCURRENT", "");
+        assert_eq!(dist_queue_slots(3), "3");
+
+        match saved {
+            Some(value) => env::set_var("SPUR_BUILD_MAX_CONCURRENT", value),
+            None => env::remove_var("SPUR_BUILD_MAX_CONCURRENT"),
+        }
     }
 
     #[test]
