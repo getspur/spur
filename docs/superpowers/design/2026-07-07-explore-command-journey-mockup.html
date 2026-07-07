@@ -1,0 +1,509 @@
+<!-- Brainstorm artifact for docs/superpowers/specs/2026-07-07-explore-command-design.md.
+     NOTE: stage 6 "Orchestrate" below was CUT from the final design after review —
+     on-the-fly materialization has no dedicated window; its only UI surface is the
+     Manage view lenses. Kept here as the validated journey walkthrough. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SPUR /explore — full user journey simulation (v2)</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#10161f; --border:#2d3646; --fg:#c9d1d9; --dim:#8b949e;
+    --accent:#58a6ff; --green:#3fb950; --yellow:#d29922; --red:#f85149; --purple:#bc8cff;
+    --selbg:rgba(31,111,235,.22); --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#070a0f;color:var(--fg);font-family:var(--mono);font-size:13px;line-height:1.45}
+  header{display:flex;align-items:center;gap:16px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--panel);position:sticky;top:0;z-index:5}
+  header h1{font-size:14px;margin:0;color:var(--accent);font-weight:600;white-space:nowrap}
+  .stepper{display:flex;gap:6px;flex-wrap:wrap}
+  .step{padding:3px 10px;border:1px solid var(--border);border-radius:12px;color:var(--dim);cursor:pointer;user-select:none}
+  .step.active{border-color:var(--accent);color:var(--accent);background:var(--selbg)}
+  .step.done{color:var(--green)}
+  main{display:grid;grid-template-columns:minmax(640px,1.7fr) minmax(300px,1fr);gap:14px;padding:14px 18px;max-width:1400px;margin:0 auto}
+  .term{background:var(--bg);border:1px solid var(--border);border-radius:6px;overflow:hidden;min-height:560px;display:flex;flex-direction:column}
+  .termbar{display:flex;gap:8px;align-items:center;padding:6px 12px;border-bottom:1px solid var(--border);color:var(--dim);font-size:12px}
+  .dot{width:10px;height:10px;border-radius:50%;background:#30363d}
+  .screen{flex:1;padding:10px;display:none;flex-direction:column;gap:8px}
+  .screen.on{display:flex}
+  .pane{border:1px solid var(--border);border-radius:4px;position:relative;padding:10px;background:var(--panel)}
+  .pane>.ptitle{position:absolute;top:-9px;left:10px;background:var(--panel);padding:0 6px;color:var(--dim);font-size:11px}
+  .row{display:flex;gap:8px;padding:2px 6px;border-radius:3px;cursor:pointer;white-space:nowrap;overflow:hidden}
+  .row:hover{background:rgba(255,255,255,.04)}
+  .row.cur{background:var(--selbg)}
+  .row .star{width:16px;color:var(--yellow)}
+  .row .nm{flex:0 0 250px;overflow:hidden;text-overflow:ellipsis}
+  .row .src{flex:0 0 150px;color:var(--dim)}
+  .badge{font-size:11px;padding:0 6px;border-radius:8px;border:1px solid var(--border);color:var(--dim)}
+  .badge.inst{color:var(--green);border-color:var(--green)}
+  .badge.conf{color:var(--yellow);border-color:var(--yellow)}
+  .badge.risk{color:var(--red);border-color:var(--red)}
+  .badge.newb{color:var(--accent);border-color:var(--accent)}
+  .statusbar{padding:4px 10px;border-top:1px solid var(--border);color:var(--dim);font-size:12px;display:flex;gap:18px}
+  .statusbar b{color:var(--fg);font-weight:600}
+  .kbd{border:1px solid var(--border);border-bottom-width:2px;border-radius:3px;padding:0 5px;font-size:11px;color:var(--fg)}
+  aside{display:flex;flex-direction:column;gap:12px}
+  .note{border:1px solid var(--border);border-radius:6px;background:var(--panel);padding:12px 14px;display:none}
+  .note.on{display:block}
+  .note h3{margin:0 0 6px;font-size:13px;color:var(--accent)}
+  .note h4{margin:12px 0 6px;font-size:12px;color:var(--purple);text-transform:uppercase;letter-spacing:.4px}
+  .note p,.note li{color:var(--dim);font-size:12.5px;margin:4px 0}
+  .note ul{margin:4px 0;padding-left:18px}
+  .chips{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+  .chip{border:1px solid var(--border);border-radius:6px;padding:7px 10px;cursor:pointer;font-size:12.5px;color:var(--fg)}
+  .chip:hover{border-color:var(--accent)}
+  .chip.picked{border-color:var(--green);background:rgba(63,185,80,.12)}
+  .chip .lt{display:inline-block;width:18px;color:var(--accent);font-weight:700}
+  .chip.picked .lt{color:var(--green)}
+  .rec{color:var(--green);font-size:11px;margin-left:6px}
+  footer{padding:10px 18px;color:var(--dim);font-size:12px;border-top:1px solid var(--border);margin-top:8px}
+  .chatinput{border:1px solid var(--accent);border-radius:4px;padding:8px 10px;background:var(--bg)}
+  .popup{border:1px solid var(--border);background:var(--panel);border-radius:4px;padding:6px 10px;margin-bottom:4px;width:70%}
+  .cursorblink{display:inline-block;width:8px;height:15px;background:var(--fg);vertical-align:text-bottom;animation:bl 1s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+  .hintbtn{display:inline-block;margin-top:10px;border:1px solid var(--green);color:var(--green);border-radius:4px;padding:6px 14px;cursor:pointer}
+  .hintbtn:hover{background:rgba(63,185,80,.12)}
+  .kv{display:grid;grid-template-columns:110px 1fr;gap:2px 10px;font-size:12px}
+  .kv .k{color:var(--dim)}
+  .fm{border-left:3px solid var(--accent);padding:6px 10px;background:var(--bg);margin:8px 0;color:var(--dim);font-size:12px;white-space:pre-wrap}
+  .gcard{border:1px solid var(--border);border-radius:5px;padding:10px 12px;margin-bottom:8px;background:var(--bg)}
+  .gcard.flag{border-color:var(--red)}
+  .gcard.confl{border-color:var(--yellow)}
+  .gcard h5{margin:0 0 4px;font-size:13px}
+  .gbtn{border:1px solid var(--border);border-radius:4px;padding:2px 10px;cursor:pointer;font-size:12px;margin-right:6px;display:inline-block;margin-top:6px}
+  .gbtn.red{border-color:var(--red);color:var(--red)}
+  .gbtn.yel{border-color:var(--yellow);color:var(--yellow)}
+  .gbtn.grn{border-color:var(--green);color:var(--green)}
+  .gbtn.chosen{background:rgba(255,255,255,.08)}
+  .log{background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:10px;height:300px;overflow:auto;font-size:12.5px}
+  .log div{white-space:pre-wrap}
+  .lg{color:var(--green)} .lb{color:var(--accent)} .ly{color:var(--yellow)} .ld{color:var(--dim)} .lr{color:var(--red)} .lp{color:var(--purple)}
+  table.mg{border-collapse:collapse;width:100%;font-size:12px}
+  table.mg th,table.mg td{border-bottom:1px solid var(--border);padding:5px 8px;text-align:left}
+  table.mg th{color:var(--dim)}
+  .lens{margin-bottom:8px}
+  .lens span{border:1px solid var(--border);padding:3px 12px;cursor:pointer;color:var(--dim)}
+  .lens span.on{color:var(--accent);border-color:var(--accent);background:var(--selbg)}
+  .lens span:first-child{border-radius:4px 0 0 4px}
+  .lens span:last-child{border-radius:0 4px 4px 0}
+  .tabs{display:flex;gap:2px;margin-bottom:6px}
+  .tab{padding:3px 14px;border:1px solid var(--border);border-bottom:none;border-radius:4px 4px 0 0;cursor:pointer;color:var(--dim)}
+  .tab.on{color:var(--accent);border-color:var(--accent);background:var(--selbg)}
+  .flowbtns{display:flex;gap:8px;margin-bottom:8px}
+  .fbtn{border:1px solid var(--accent);color:var(--accent);border-radius:4px;padding:4px 14px;cursor:pointer}
+  .fbtn:hover{background:var(--selbg)}
+  .fbtn.on{background:var(--selbg)}
+</style>
+</head>
+<body>
+<header>
+  <h1>SPUR /explore — user journey simulation · v2</h1>
+  <div class="stepper" id="stepper"></div>
+</header>
+<main>
+  <div class="term">
+    <div class="termbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp; spur tui — 80×24 — <span id="crumb"></span></div>
+
+    <!-- STAGE 1: ENTRY -->
+    <div class="screen" id="s1">
+      <div class="pane" style="flex:1"><span class="ptitle">Dashboard — Sessions</span>
+        <div class="row"><span>▸ session 41 · fix(spur-tui): mention picker debounce · <span style="color:var(--green)">reviewing</span></span></div>
+        <div class="row"><span>▸ session 40 · e2e layer plan · <span style="color:var(--dim)">merged</span></span></div>
+        <div class="row"><span>▸ session 39 · zigbuild macOS cross PoC · <span style="color:var(--dim)">done</span></span></div>
+        <div style="margin-top:14px;color:var(--dim)">…</div>
+      </div>
+      <div>
+        <div class="popup">/explore — <span style="color:var(--dim)">browse &amp; adopt ecosystem skills / agent personas into the polyglot pool</span></div>
+        <div class="popup" style="opacity:.55">/init — initialize project &nbsp;·&nbsp; /help — keys &amp; modes</div>
+        <div class="chatinput">› /explore<span class="cursorblink"></span></div>
+        <div class="hintbtn" onclick="go(2)">Press Enter ↵ — open Explore view</div>
+      </div>
+      <div class="statusbar"><span><span class="kbd">Ctrl+K</span> palette also lists “Explore: skills &amp; agents”</span></div>
+    </div>
+
+    <!-- STAGE 2: BROWSE -->
+    <div class="screen" id="s2">
+      <div class="tabs">
+        <div class="tab on" id="tabSkills" onclick="setTab('skill')">Skills</div>
+        <div class="tab" id="tabAgents" onclick="setTab('agent')">Agent personas</div>
+        <div style="margin-left:auto;color:var(--dim)">/ search: <span style="border-bottom:1px solid var(--border)">&nbsp;&nbsp;rust&nbsp;&nbsp;</span></div>
+      </div>
+      <div style="display:flex;gap:8px;flex:1;min-height:0">
+        <div class="pane" style="flex:0 0 190px"><span class="ptitle">Sources (synced 2h ago)</span>
+          <div class="row cur"><span>● all sources</span></div>
+          <div class="row"><span style="color:var(--dim)">anthropics/skills</span></div>
+          <div class="row"><span style="color:var(--dim)">obra/superpowers</span></div>
+          <div class="row"><span style="color:var(--dim)">wshobson/agents</span></div>
+          <div class="row"><span style="color:var(--dim)">VoltAgent/subagents</span></div>
+          <div class="row"><span style="color:var(--dim)">awesome-claude-code ↗</span></div>
+          <div style="margin-top:10px;color:var(--dim);font-size:11px">indexes are pinned snapshots — <span class="ly">sync</span> to refresh</div>
+        </div>
+        <div class="pane" style="flex:1;min-width:0"><span class="ptitle" id="listTitle">Catalog — Skills</span>
+          <div id="list"></div>
+        </div>
+        <div class="pane" style="flex:0 0 270px"><span class="ptitle">Preview</span><div id="preview"></div></div>
+      </div>
+      <div class="statusbar"><span><span class="kbd">j/k</span> move</span><span><span class="kbd">tab</span> skills/agents</span><span><span class="kbd">space</span> select</span><span><span class="kbd">enter</span> continue → selection</span></div>
+    </div>
+
+    <!-- STAGE 3: SELECT -->
+    <div class="screen" id="s3">
+      <div class="pane" style="flex:1"><span class="ptitle">Select favourites — the project's polyglot pool</span>
+        <div id="selList"></div>
+        <p style="color:var(--dim);font-size:12px;margin-top:10px">No target assignment here — SPUR decides who loads what, per dispatch, through delegate / plan / loop.</p>
+      </div>
+      <div class="statusbar"><span><b id="selCount"></b></span><span><span class="kbd">space</span> toggle ★</span><span><span class="kbd">enter</span> review → security gate</span></div>
+    </div>
+
+    <!-- STAGE 4: GATE -->
+    <div class="screen" id="s4">
+      <div class="pane" style="flex:1;overflow:auto"><span class="ptitle">Review gate — pins, licenses, scans (policy W5)</span>
+        <div id="gate"></div>
+      </div>
+      <div class="statusbar"><span id="gateStatus"></span><span><span class="kbd">enter</span> apply →</span></div>
+    </div>
+
+    <!-- STAGE 5: APPLY -->
+    <div class="screen" id="s5">
+      <div class="pane" style="flex:1"><span class="ptitle">Apply — vendor into the pool (no fanout yet)</span>
+        <div class="hintbtn" id="runBtn" onclick="runInstall()">▶ Add to pool</div>
+        <div class="log" id="log" style="margin-top:10px"></div>
+      </div>
+      <div class="statusbar"><span>pool is the single source of truth · materialization is deferred to dispatch</span></div>
+    </div>
+
+    <!-- STAGE 6: ORCHESTRATE -->
+    <div class="screen" id="s6">
+      <div class="pane" style="flex:1"><span class="ptitle">On-the-fly management — delegate / plan / loop</span>
+        <div class="flowbtns">
+          <div class="fbtn" id="fb-delegate" onclick="runFlow('delegate')">▶ delegate</div>
+          <div class="fbtn" id="fb-plan" onclick="runFlow('plan')">▶ plan</div>
+          <div class="fbtn" id="fb-loop" onclick="runFlow('loop')">▶ loop</div>
+        </div>
+        <div class="log" id="flowlog"></div>
+      </div>
+      <div class="statusbar"><span>polyglot: one pool, harness-native rendering per worker kind at dispatch</span></div>
+    </div>
+
+    <!-- STAGE 7: MANAGE -->
+    <div class="screen" id="s7">
+      <div class="pane" style="flex:1;overflow:auto"><span class="ptitle">Managed pool</span>
+        <div class="lens"><span class="on" id="lensItem" onclick="setLens('item')">Pool</span><span id="lensAgent" onclick="setLens('agent')">Last materialization</span></div>
+        <div id="manage"></div>
+      </div>
+      <div class="statusbar"><span><span class="kbd">u</span> update (re-runs gate)</span><span><span class="kbd">d</span> diff vs upstream</span><span><span class="kbd">x</span> remove from pool</span></div>
+    </div>
+  </div>
+
+  <aside id="notes">
+    <div class="note" id="n1">
+      <h3>1 · Entry</h3>
+      <p>User types <b>/explore</b> in the chat input (or via the Ctrl+K universal palette). Opens the full-screen Explore view.</p>
+      <h4>Open question — entry surface</h4>
+      <div class="chips" data-q="entry">
+        <div class="chip" data-choice="entry-a" onclick="vote(this)"><span class="lt">A</span>/explore + palette both open the full view<span class="rec">← recommended</span></div>
+        <div class="chip" data-choice="entry-b" onclick="vote(this)"><span class="lt">B</span>Palette-only quick-add (no dedicated view)</div>
+        <div class="chip" data-choice="entry-c" onclick="vote(this)"><span class="lt">C</span>CLI only: <b>spur explore</b> subcommand, no TUI</div>
+      </div>
+    </div>
+    <div class="note" id="n2">
+      <h3>2 · Browse</h3>
+      <p>Three panes: sources / catalog list / preview. Preview shows the item's real frontmatter, pinned commit sha, license, and body excerpt <i>before</i> anything enters the pool.</p>
+      <p>Badges: <span class="badge inst">in pool</span> <span class="badge conf">conflict</span> <span class="badge risk">scan ⚠</span> <span class="badge newb">new</span></p>
+      <h4>Open question — catalog freshness</h4>
+      <div class="chips" data-q="freshness">
+        <div class="chip" data-choice="fresh-a" onclick="vote(this)"><span class="lt">A</span>Live GitHub fetch when the view opens</div>
+        <div class="chip" data-choice="fresh-b" onclick="vote(this)"><span class="lt">B</span>Offline pinned index; explicit <b>sync</b> refreshes<span class="rec">← recommended (sandbox/VM-safe, deterministic)</span></div>
+        <div class="chip" data-choice="fresh-c" onclick="vote(this)"><span class="lt">C</span>Cache with TTL, auto-refresh in background</div>
+      </div>
+    </div>
+    <div class="note" id="n3">
+      <h3>3 · Select</h3>
+      <p>Space toggles ★. The selection is the project's <b>polyglot pool</b> — harness-agnostic assets SPUR will adapt to whichever worker it dispatches. It should outlive the session so teammates share the same pool.</p>
+      <h4>Open question — where does the pool manifest live?</h4>
+      <div class="chips" data-q="manifest">
+        <div class="chip" data-choice="mani-a" onclick="vote(this)"><span class="lt">A</span>Committed manifest, e.g. <b>.spur/explore.toml</b> (source, item, pin, gate decisions)<span class="rec">← recommended</span></div>
+        <div class="chip" data-choice="mani-b" onclick="vote(this)"><span class="lt">B</span>Local-only state (per developer)</div>
+        <div class="chip" data-choice="mani-c" onclick="vote(this)"><span class="lt">C</span>No manifest — pool lives only as installed files</div>
+      </div>
+    </div>
+    <div class="note" id="n4">
+      <h3>4 · Security gate</h3>
+      <p>This feature <i>is</i> the third-party ingestion path the alignment decision gated (policy W5): every item shows its pinned sha + license + scan verdict. In-the-wild research found prompt injection in ~36% of sampled public skills — the gate is not optional.</p>
+      <p>The sim shows one flagged skill and one duplicate-conflict (an ecosystem TDD skill colliding with the bundled spurpower one).</p>
+      <h4>Open question — gate strictness</h4>
+      <div class="chips" data-q="gate">
+        <div class="chip" data-choice="gate-a" onclick="vote(this)"><span class="lt">A</span>Hard-block flagged items, no override</div>
+        <div class="chip" data-choice="gate-b" onclick="vote(this)"><span class="lt">B</span>Warn + explicit override, recorded in the manifest<span class="rec">← recommended</span></div>
+        <div class="chip" data-choice="gate-c" onclick="vote(this)"><span class="lt">C</span>Warn only, install proceeds</div>
+      </div>
+    </div>
+    <div class="note" id="n5">
+      <h3>5 · Apply</h3>
+      <p>Apply only <b>vendors the pinned bodies into the pool</b> and writes the manifest. No harness fanout happens here — that's the point of the polyglot model: materialization is owned by orchestration, not by install.</p>
+      <h4>Open question — how are bodies stored?</h4>
+      <div class="chips" data-q="vendoring">
+        <div class="chip" data-choice="vend-a" onclick="vote(this)"><span class="lt">A</span>Vendor full bodies into the repo (reviewable diffs, reproducible, offline dispatch)<span class="rec">← recommended</span></div>
+        <div class="chip" data-choice="vend-b" onclick="vote(this)"><span class="lt">B</span>Manifest-only; fetch at dispatch time</div>
+        <div class="chip" data-choice="vend-c" onclick="vote(this)"><span class="lt">C</span>Git submodules per source repo</div>
+      </div>
+    </div>
+    <div class="note" id="n6">
+      <h3>6 · Orchestrate (the core)</h3>
+      <p>Skills/personas are managed <b>on the fly</b>: when the brain delegates, plans, or loops, SPUR renders the relevant pool subset into the worker's harness-native location (worktree-scoped), and personas become dispatchable targets.</p>
+      <h4>Open question — where does materialization land?</h4>
+      <div class="chips" data-q="placement">
+        <div class="chip" data-choice="place-a" onclick="vote(this)"><span class="lt">A</span>Ephemeral: rendered into the worker's worktree at dispatch, never committed<span class="rec">← recommended (pure on-the-fly)</span></div>
+        <div class="chip" data-choice="place-b" onclick="vote(this)"><span class="lt">B</span>Committed repo fanout (like bundled spurpower skills)</div>
+        <div class="chip" data-choice="place-c" onclick="vote(this)"><span class="lt">C</span>Hybrid: bundled spurpower committed, explored pool ephemeral</div>
+      </div>
+      <h4>Open question — which pool subset per dispatch?</h4>
+      <div class="chips" data-q="subset">
+        <div class="chip" data-choice="sub-a" onclick="vote(this)"><span class="lt">A</span>Everything in the pool, every dispatch</div>
+        <div class="chip" data-choice="sub-b" onclick="vote(this)"><span class="lt">B</span>Brain picks a task-relevant subset per delegation (context economy)<span class="rec">← recommended</span></div>
+        <div class="chip" data-choice="sub-c" onclick="vote(this)"><span class="lt">C</span>Worker pulls on demand mid-run (needs harness support)</div>
+      </div>
+    </div>
+    <div class="note" id="n7">
+      <h3>7 · Manage</h3>
+      <p>Pool lifecycle: drift vs upstream, updates re-enter the gate, removal cleans vendored bodies. The “Last materialization” lens answers “what did my codex worker actually load on the last dispatch?”.</p>
+      <h4>Open question — drift checking</h4>
+      <div class="chips" data-q="drift">
+        <div class="chip" data-choice="drift-a" onclick="vote(this)"><span class="lt">A</span>Manual <b>sync</b> + badge in the TUI<span class="rec">← recommended</span></div>
+        <div class="chip" data-choice="drift-b" onclick="vote(this)"><span class="lt">B</span>Auto-check on TUI start</div>
+        <div class="chip" data-choice="drift-c" onclick="vote(this)"><span class="lt">C</span>Scheduled job opens an update PR</div>
+      </div>
+    </div>
+  </aside>
+</main>
+<footer>
+  Keys: <span class="kbd">←</span><span class="kbd">→</span> or <span class="kbd">1</span>–<span class="kbd">7</span> stages · <span class="kbd">j/k</span> move · <span class="kbd">space</span> toggle · <span class="kbd">enter</span> advance — everything is also clickable. Click the A/B/C chips on the right to record your preference per stage.
+</footer>
+
+<script>
+/* ---------- data ---------- */
+const CATALOG = [
+ {id:'pdf',  kind:'skill', name:'pdf',                    src:'anthropics/skills',   stars:'159k', lic:'source-available', sha:'9f31c02', desc:'Fill, generate and inspect PDF files with bundled scripts.', body:'## When to use\n- generating or editing PDF output\n- form filling via scripts/fill_form.py', risk:null, conflict:null, sel:true},
+ {id:'api',  kind:'skill', name:'api-design-principles',  src:'wshobson/agents',     stars:'37.6k',lic:'MIT',    sha:'c41aa90', desc:'REST/gRPC API design heuristics: resource naming, pagination, versioning, error contracts.', body:'## Checklist\n- nouns not verbs in routes\n- cursor pagination default\n- error body = problem+detail', risk:null, conflict:null, sel:true},
+ {id:'tdd',  kind:'skill', name:'test-driven-development',src:'obra/superpowers',    stars:'248k', lic:'MIT',    sha:'b7e2d11', desc:'RED→GREEN→REFACTOR discipline with pressure-scenario hardening.', body:'## Rule\nNo production code without a failing test first.', risk:null, conflict:'duplicates bundled spurpower-test-driven-development', sel:false},
+ {id:'seo',  kind:'skill', name:'seo-audit',              src:'awesome-claude-code', stars:'36.8k',lic:'unknown',sha:'044d9ce', desc:'Site SEO audit workflow with crawler script.', body:'## Steps\n1. run scripts/crawl.sh <url>\n2. …', risk:'bundled crawl.sh curls an unpinned URL; body contains an “ignore previous constraints” imperative', conflict:null, sel:true},
+ {id:'sec',  kind:'agent', name:'security-auditor',       src:'wshobson/agents',     stars:'37.6k',lic:'MIT',    sha:'11c9f77', desc:'Read-only security review persona: authz, injection, secrets, supply chain. tools: Read, Grep, Glob.', body:'---\nname: security-auditor\ntools: Read, Grep, Glob\nmodel: opus\n---', risk:null, conflict:null, sel:true},
+ {id:'rust', kind:'agent', name:'rust-pro',               src:'wshobson/agents',     stars:'37.6k',lic:'MIT',    sha:'5ab00e3', desc:'Rust specialist persona: ownership, lifetimes, zero-cost abstractions, tokio.', body:'---\nname: rust-pro\ntools: Read, Grep, Edit, Bash\n---', risk:null, conflict:null, sel:true},
+ {id:'docs', kind:'agent', name:'docs-architect',         src:'VoltAgent/subagents', stars:'23k',  lic:'MIT',    sha:'e0d4b12', desc:'Long-form technical documentation persona.', body:'---\nname: docs-architect\ntools: Read, Grep, Write\n---', risk:null, conflict:null, sel:false},
+];
+let tab='skill', cursor=0, stageN=1, gateChoices={}, lens='item', installed=false;
+
+/* ---------- stepper / navigation ---------- */
+const STAGES=['Entry','Browse','Select','Gate','Apply','Orchestrate','Manage'];
+function buildStepper(){
+  const el=document.getElementById('stepper'); el.innerHTML='';
+  STAGES.forEach((s,i)=>{
+    const d=document.createElement('div'); d.className='step'+(i+1===stageN?' active':(i+1<stageN?' done':''));
+    d.textContent=(i+1)+' '+s; d.onclick=()=>go(i+1); el.appendChild(d);
+  });
+}
+function go(n){
+  stageN=Math.max(1,Math.min(7,n));
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('on'));
+  document.querySelectorAll('.note').forEach(s=>s.classList.remove('on'));
+  document.getElementById('s'+stageN).classList.add('on');
+  document.getElementById('n'+stageN).classList.add('on');
+  document.getElementById('crumb').textContent='Explore › '+STAGES[stageN-1];
+  buildStepper();
+  if(stageN===2)renderList();
+  if(stageN===3)renderSel();
+  if(stageN===4)renderGate();
+  if(stageN===7)renderManage();
+}
+
+/* ---------- stage 2 ---------- */
+function setTab(t){tab=t;cursor=0;
+  document.getElementById('tabSkills').classList.toggle('on',t==='skill');
+  document.getElementById('tabAgents').classList.toggle('on',t==='agent');
+  document.getElementById('listTitle').textContent='Catalog — '+(t==='skill'?'Skills':'Agent personas');
+  renderList();
+}
+function items(){return CATALOG.filter(c=>c.kind===tab);}
+function renderList(){
+  const el=document.getElementById('list'); el.innerHTML='';
+  items().forEach((it,i)=>{
+    const r=document.createElement('div'); r.className='row'+(i===cursor?' cur':'');
+    let badge='<span class="badge newb">new</span>';
+    if(it.conflict)badge='<span class="badge conf">conflict</span>';
+    if(it.risk)badge='<span class="badge risk">scan ⚠</span>';
+    r.innerHTML='<span class="star">'+(it.sel?'★':' ')+'</span><span class="nm">'+it.name+'</span><span class="src">'+it.src+' ☆'+it.stars+'</span>'+badge;
+    r.onclick=()=>{cursor=i;renderList();};
+    el.appendChild(r);
+  });
+  renderPreview();
+}
+function renderPreview(){
+  const it=items()[cursor]; if(!it)return;
+  document.getElementById('preview').innerHTML=
+   '<div class="kv"><span class="k">name</span><span>'+it.name+'</span>'+
+   '<span class="k">source</span><span>'+it.src+'</span>'+
+   '<span class="k">pinned sha</span><span style="color:var(--accent)">'+it.sha+'</span>'+
+   '<span class="k">license</span><span>'+it.lic+'</span>'+
+   '<span class="k">kind</span><span>'+(it.kind==='skill'?'SKILL.md':'persona (.md frontmatter)')+'</span></div>'+
+   '<div class="fm">'+it.desc+'</div>'+
+   '<div class="fm" style="border-left-color:var(--border)">'+it.body.replace(/</g,'&lt;')+'</div>'+
+   (it.risk?'<div class="fm" style="border-left-color:var(--red);color:var(--red)">scan: '+it.risk+'</div>':'')+
+   (it.conflict?'<div class="fm" style="border-left-color:var(--yellow);color:var(--yellow)">'+it.conflict+'</div>':'');
+}
+
+/* ---------- stage 3 ---------- */
+function renderSel(){
+  const el=document.getElementById('selList'); el.innerHTML='';
+  CATALOG.forEach(it=>{
+    const r=document.createElement('div'); r.className='row';
+    r.innerHTML='<span class="star">'+(it.sel?'★':'☐')+'</span><span class="nm">'+it.name+'</span><span class="src">'+(it.kind==='skill'?'skill':'agent')+' · '+it.src+'</span>'+(it.risk?'<span class="badge risk">scan ⚠</span>':'')+(it.conflict?'<span class="badge conf">conflict</span>':'');
+    r.onclick=()=>{it.sel=!it.sel;renderSel();};
+    el.appendChild(r);
+  });
+  document.getElementById('selCount').textContent=CATALOG.filter(c=>c.sel).length+' in pool';
+}
+
+/* ---------- stage 4: gate ---------- */
+function renderGate(){
+  const el=document.getElementById('gate'); el.innerHTML='';
+  CATALOG.filter(c=>c.sel).forEach(it=>{
+    const cls=it.risk?'gcard flag':(it.conflict?'gcard confl':'gcard');
+    const d=document.createElement('div'); d.className=cls;
+    let inner='<h5>'+(it.kind==='skill'?'⚙ ':'𝒜 ')+it.name+' <span style="color:var(--dim)">('+it.src+' @ '+it.sha+' · '+it.lic+')</span></h5>';
+    if(it.risk){
+      inner+='<div style="color:var(--red)">⚠ '+it.risk+'</div>'+
+        '<span class="gbtn red" onclick="gpick(this,\''+it.id+'\',\'block\')">Block</span>'+
+        '<span class="gbtn yel" onclick="gpick(this,\''+it.id+'\',\'override\')">Override (recorded in manifest)</span>';
+    }else if(it.conflict){
+      inner+='<div style="color:var(--yellow)">⚠ '+it.conflict+'</div>'+
+        '<span class="gbtn yel" onclick="gpick(this,\''+it.id+'\',\'replace\')">Replace bundled</span>'+
+        '<span class="gbtn grn" onclick="gpick(this,\''+it.id+'\',\'skip\')">Skip (keep bundled)</span>';
+    }else{
+      inner+='<div style="color:var(--green)">✓ scan clean · license ok · pin verified</div>';
+    }
+    d.innerHTML=inner; el.appendChild(d);
+  });
+  updGateStatus();
+}
+function gpick(btn,id,choice){
+  gateChoices[id]=choice;
+  btn.parentElement.querySelectorAll('.gbtn').forEach(b=>b.classList.remove('chosen'));
+  btn.classList.add('chosen'); updGateStatus();
+}
+function updGateStatus(){
+  const flagged=CATALOG.filter(c=>c.sel&&(c.risk||c.conflict));
+  const resolved=flagged.filter(c=>gateChoices[c.id]).length;
+  document.getElementById('gateStatus').innerHTML='<b>'+resolved+'/'+flagged.length+'</b> flagged items resolved — unresolved items are excluded from apply';
+}
+
+/* ---------- stage 5: apply (pool only) ---------- */
+function runInstall(){
+  if(installed)return; installed=true;
+  const lines=[];
+  lines.push(['ld','resolving pins against synced index …']);
+  CATALOG.filter(c=>c.sel).forEach(it=>{
+    if(it.risk&&gateChoices[it.id]!=='override'){lines.push(['lr','skip  '+it.name+'  (blocked at gate)']);return;}
+    if(it.conflict&&gateChoices[it.id]==='skip'){lines.push(['ly','skip  '+it.name+'  (kept bundled spurpower variant)']);return;}
+    lines.push(['lb','vendor .spur/explore/pool/'+it.src.split('/')[0]+'/'+it.name+'@'+it.sha+'  ['+(it.kind==='skill'?'SKILL.md':'persona')+']']);
+  });
+  lines.push(['ld','write .spur/explore.toml  (pins, gate decisions, provenance)']);
+  lines.push(['lp','personas registered as delegation targets: security-auditor, rust-pro']);
+  lines.push(['lg','done — pool ready · no harness files written · materialization happens at dispatch →']);
+  playLog('log',lines);
+}
+function playLog(elId,lines){
+  const log=document.getElementById(elId); log.innerHTML=''; let i=0;
+  const t=setInterval(()=>{
+    if(i>=lines.length){clearInterval(t);return;}
+    const d=document.createElement('div'); d.className=lines[i][0]; d.textContent=lines[i][1];
+    log.appendChild(d); log.scrollTop=log.scrollHeight; i++;
+  },200);
+}
+
+/* ---------- stage 6: orchestrate flows ---------- */
+function runFlow(kind){
+  document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('on'));
+  document.getElementById('fb-'+kind).classList.add('on');
+  let lines=[];
+  if(kind==='delegate'){
+    lines=[
+      ['ld','› delegate_to_worker worker://codex  "harden REST error contracts in spur-mcp"'],
+      ['lb','pool match: api-design-principles (skill) · rust-pro (persona base)'],
+      ['lp','persona rust-pro → adapts to codex TOML: developer_instructions + model/effort mapped'],
+      ['lg','materialize <worktree>/.codex/skills/api-design-principles/SKILL.md  [SPUR-MANAGED sha256 ✓]'],
+      ['lg','materialize persona → codex custom agent for this dispatch'],
+      ['ld','dispatch… worker running with pool subset (2 of 5 pool items — task-relevant only)'],
+    ];
+  }else if(kind==='plan'){
+    lines=[
+      ['ld','› submit_plan  "PDF export for session reports"  (3 tasks)'],
+      ['lb','task 1 → worker://claude + persona:docs-architect?  not in pool — brain picks security-auditor for review task instead'],
+      ['lg','task 1 (implement)  worker:claude    pool: pdf skill          → .claude/skills in task worktree'],
+      ['lg','task 2 (implement)  worker:codex     pool: pdf + api skills   → .codex/skills in task worktree'],
+      ['lp','task 3 (review)     persona:security-auditor (read-only tools) → dispatched as review gate'],
+      ['ld','each task worktree gets its own rendered subset; nothing leaks into the repo'],
+    ];
+  }else{
+    lines=[
+      ['ld','› loop  "keep flaky-test hunt running"  (generations)'],
+      ['lb','gen 1: worker:gemini · pool subset re-evaluated per generation'],
+      ['lg','gen 1 materialize .gemini/skills/{api-design-principles}  [sha ✓]'],
+      ['ly','gen 2: pool updated mid-loop (api skill bumped @e9917aa) → next generation picks up new pin after gate'],
+      ['lg','gen 2 materialize refreshed subset · loop continues'],
+      ['ld','loop skills stay consistent within a generation, refresh between generations'],
+    ];
+  }
+  playLog('flowlog',lines);
+}
+
+/* ---------- stage 7: manage ---------- */
+function setLens(l){lens=l;
+  document.getElementById('lensItem').classList.toggle('on',l==='item');
+  document.getElementById('lensAgent').classList.toggle('on',l==='agent');
+  renderManage();
+}
+function renderManage(){
+  const el=document.getElementById('manage');
+  if(lens==='item'){
+    let h='<table class="mg"><tr><th>pool item</th><th>source @ pin</th><th>gate</th><th>status</th></tr>';
+    h+='<tr><td>⚙ pdf</td><td>anthropics/skills @ 9f31c02</td><td style="color:var(--green)">clean</td><td style="color:var(--green)">ok · used in 4 dispatches</td></tr>';
+    h+='<tr><td>⚙ api-design-principles</td><td>wshobson/agents @ c41aa90</td><td style="color:var(--green)">clean</td><td style="color:var(--yellow)">update available → e9917aa</td></tr>';
+    h+='<tr><td>⚙ seo-audit</td><td>awesome-claude-code @ 044d9ce</td><td style="color:var(--red)">blocked</td><td style="color:var(--red)">not in pool</td></tr>';
+    h+='<tr><td>𝒜 security-auditor</td><td>wshobson/agents @ 11c9f77</td><td style="color:var(--green)">clean</td><td style="color:var(--green)">delegation target · 3 review dispatches</td></tr>';
+    h+='<tr><td>𝒜 rust-pro</td><td>wshobson/agents @ 5ab00e3</td><td style="color:var(--green)">clean</td><td style="color:var(--green)">delegation target</td></tr>';
+    h+='<tr><td style="color:var(--dim)">⚙ spurpower-* (18 bundled)</td><td style="color:var(--dim)">built-in</td><td style="color:var(--dim)">n/a</td><td style="color:var(--dim)">always materialized</td></tr>';
+    el.innerHTML=h+'</table>';
+  }else{
+    let h='<table class="mg"><tr><th>last dispatch</th><th>worker</th><th>materialized subset</th></tr>';
+    h+='<tr><td>del-91 · REST contracts</td><td>codex</td><td>spurpower-* + api-design-principles + persona:rust-pro</td></tr>';
+    h+='<tr><td>plan-17 task 1 · pdf export</td><td>claude</td><td>spurpower-* + pdf</td></tr>';
+    h+='<tr><td>plan-17 task 3 · review</td><td>persona:security-auditor</td><td>read-only toolset · spurpower-receiving-code-review</td></tr>';
+    h+='<tr><td>loop-6 gen 2 · flaky hunt</td><td>gemini</td><td>spurpower-* + api-design-principles@e9917aa</td></tr>';
+    el.innerHTML=h+'</table>';
+  }
+}
+
+/* ---------- feedback chips ---------- */
+function vote(el){
+  el.parentElement.querySelectorAll('.chip').forEach(c=>c.classList.remove('picked'));
+  el.classList.add('picked');
+  if(window.toggleSelect){try{window.toggleSelect(el);}catch(e){}}
+}
+
+/* ---------- keyboard ---------- */
+document.addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight'||e.key===']')go(stageN+1);
+  else if(e.key==='ArrowLeft'||e.key==='[')go(stageN-1);
+  else if(e.key>='1'&&e.key<='7')go(+e.key);
+  else if(e.key==='Enter')go(stageN+1);
+  else if(stageN===2&&(e.key==='j'||e.key==='ArrowDown')){cursor=Math.min(items().length-1,cursor+1);renderList();}
+  else if(stageN===2&&(e.key==='k'||e.key==='ArrowUp')){cursor=Math.max(0,cursor-1);renderList();}
+  else if(stageN===2&&e.key==='Tab'){e.preventDefault();setTab(tab==='skill'?'agent':'skill');}
+  else if(stageN===2&&e.key===' '){e.preventDefault();items()[cursor].sel=!items()[cursor].sel;renderList();}
+});
+
+go(1);
+</script>
+</body>
+</html>
