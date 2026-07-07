@@ -361,6 +361,11 @@ pub struct MentionQuerySource {
         crate::mentions::MentionEntry,
         crate::mentions::registry::OpenWorkerSlot,
     )>,
+    /// Popup title, rebuilt on every refresh. Carries the agent-model
+    /// probe hint ("fetching <worker> models…") because the popup box
+    /// occludes the input-bar hint line while it is open — the title is
+    /// the only mention surface guaranteed visible during a cascade.
+    title: String,
 }
 
 enum MentionSourceScope {
@@ -399,6 +404,7 @@ impl MentionQuerySource {
             prefix_start,
             last_hits: Vec::new(),
             last_slot_pick: None,
+            title: "Mentions · @".to_string(),
         }
     }
 }
@@ -520,7 +526,7 @@ fn labels_preview_line(labels: &[String]) -> Line<'static> {
 
 impl QuerySource for MentionQuerySource {
     fn title(&self) -> &str {
-        "Mentions · @"
+        &self.title
     }
 
     fn query_mode(&self) -> QueryMode {
@@ -539,6 +545,10 @@ impl QuerySource for MentionQuerySource {
             query,
             20,
         );
+        self.title = match self.registry.borrow().agent_model_catalog_probe_hint() {
+            Some(hint) => format!("Mentions · @ · {hint}"),
+            None => "Mentions · @".to_string(),
+        };
         let open_slot = self.registry.borrow_mut().take_worker_open_slot();
         if let Some(slot) = open_slot {
             let Some(entry) = hits.first().cloned() else {
