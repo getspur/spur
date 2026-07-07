@@ -377,7 +377,7 @@ install_on_vm() {
   install_vhs
   write_profile
   verify_toolchain
-  [[ $RUN_SMOKE -eq 1 ]] && run_vhs_smoke
+  if [[ $RUN_SMOKE -eq 1 ]]; then run_vhs_smoke; fi
 }
 
 resolve_cloud_build_dir() {
