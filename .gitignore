@@ -21,6 +21,9 @@ coverage/
 .env.*.local
 python/dist/
 __pycache__/
+
+# cargo xtask dist output (release binaries + SHA256SUMS)
+/dist/
 **/.spur-venv/
 
 # bv (beads viewer) local config and caches
