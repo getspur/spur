@@ -14,6 +14,7 @@ fn main() -> ExitCode {
     match subcommand.as_str() {
         "install" => install(extra),
         "coverage" => coverage_cmd(extra),
+        "dist" => dist(extra),
         "" | "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -54,6 +55,12 @@ fn print_help() {
         );
     }
     eprintln!("  --force    with --remote on a non-Linux host, overwrite $CARGO_HOME/bin anyway");
+    eprintln!();
+    eprintln!("  dist [--platforms linux,macos,windows] [--out <dir>]");
+    eprintln!("      build release spur binaries for every supported platform on the");
+    eprintln!("      build VM (linux native, macOS universal2 via zigbuild, windows");
+    eprintln!("      x86_64 via xwin), fetch them into <dir> (default dist/) with");
+    eprintln!("      triple-suffixed names, and write SHA256SUMS");
     eprintln!();
     eprintln!("  coverage [--base <ref>] [--floor <pct>] [--diff-floor <pct>]");
     eprintln!("           [--output <path>] [--dry-run] [--measure-only | --gate-only]");
@@ -398,6 +405,280 @@ fn mark_executable(path: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn mark_executable(_path: &Path) -> Result<(), String> {
     Ok(())
+}
+
+/// One platform in the `cargo xtask dist` build matrix. Every variant is
+/// compiled on the build VM (see scripts/spur-cargo) and fetched back, so
+/// dist works identically from any host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DistPlatform {
+    /// Native VM target. The AWS Graviton builder emits aarch64 Linux
+    /// binaries; the artifact suffix tracks that.
+    LinuxAarch64,
+    /// Fat arm64 + x86_64 Mach-O via `spur-cargo zigbuild`.
+    MacUniversal2,
+    /// PE32+ via `spur-cargo xwin`.
+    WindowsX64,
+}
+
+impl DistPlatform {
+    const ALL: [DistPlatform; 3] = [
+        DistPlatform::LinuxAarch64,
+        DistPlatform::MacUniversal2,
+        DistPlatform::WindowsX64,
+    ];
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "linux" => Ok(Self::LinuxAarch64),
+            "macos" | "mac" | "darwin" => Ok(Self::MacUniversal2),
+            "windows" | "win" => Ok(Self::WindowsX64),
+            other => Err(format!(
+                "unknown dist platform {other:?}; expected linux, macos, or windows"
+            )),
+        }
+    }
+
+    /// Artifact path relative to the remote target dir, as passed to
+    /// scripts/cloud-build/fetch.sh.
+    fn artifact_rel(self) -> &'static str {
+        match self {
+            Self::LinuxAarch64 => "target/release/spur",
+            Self::MacUniversal2 => "target/universal2-apple-darwin/release/spur",
+            Self::WindowsX64 => "target/x86_64-pc-windows-msvc/release/spur.exe",
+        }
+    }
+
+    /// Final artifact file name under the dist output directory.
+    fn artifact_name(self, version: &str) -> String {
+        match self {
+            Self::LinuxAarch64 => format!("spur-{version}-aarch64-unknown-linux-gnu"),
+            Self::MacUniversal2 => format!("spur-{version}-universal2-apple-darwin"),
+            Self::WindowsX64 => format!("spur-{version}-x86_64-pc-windows-msvc.exe"),
+        }
+    }
+
+    fn build_label(self) -> &'static str {
+        match self {
+            Self::LinuxAarch64 => "spur-cargo build --release -p spur-cli (linux native)",
+            Self::MacUniversal2 => "spur-cargo zigbuild --release -p spur-cli (macOS universal2)",
+            Self::WindowsX64 => "spur-cargo xwin build --release -p spur-cli (windows x86_64)",
+        }
+    }
+}
+
+struct DistOptions {
+    platforms: Vec<DistPlatform>,
+    out_dir: Option<PathBuf>,
+}
+
+fn parse_dist_options(extra: Vec<String>) -> Result<DistOptions, String> {
+    let mut options = DistOptions {
+        platforms: DistPlatform::ALL.to_vec(),
+        out_dir: None,
+    };
+    let mut args = extra.into_iter();
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--platforms=") {
+            options.platforms = parse_dist_platform_list(value)?;
+        } else if arg == "--platforms" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--platforms requires a comma-separated list".to_owned())?;
+            options.platforms = parse_dist_platform_list(&value)?;
+        } else if let Some(value) = arg.strip_prefix("--out=") {
+            options.out_dir = Some(PathBuf::from(value));
+        } else if arg == "--out" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--out requires a directory".to_owned())?;
+            options.out_dir = Some(PathBuf::from(value));
+        } else {
+            return Err(format!("unknown dist option {arg:?}"));
+        }
+    }
+    Ok(options)
+}
+
+fn parse_dist_platform_list(value: &str) -> Result<Vec<DistPlatform>, String> {
+    let mut platforms = Vec::new();
+    for token in value.split(',').filter(|token| !token.is_empty()) {
+        let platform = DistPlatform::parse(token.trim())?;
+        if !platforms.contains(&platform) {
+            platforms.push(platform);
+        }
+    }
+    if platforms.is_empty() {
+        return Err("--platforms requires at least one of linux, macos, windows".to_owned());
+    }
+    Ok(platforms)
+}
+
+fn dist(extra: Vec<String>) -> ExitCode {
+    let options = match parse_dist_options(extra) {
+        Ok(options) => options,
+        Err(err) => {
+            eprintln!("xtask: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let workspace_root = workspace_root();
+    match run_dist(&workspace_root, &options) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("xtask: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_dist(workspace_root: &Path, options: &DistOptions) -> Result<(), String> {
+    let version = workspace_version(workspace_root)?;
+    let out_dir = options
+        .out_dir
+        .clone()
+        .unwrap_or_else(|| workspace_root.join("dist"));
+    fs::create_dir_all(&out_dir)
+        .map_err(|err| format!("failed to create {}: {err}", out_dir.display()))?;
+
+    let mut artifacts = Vec::new();
+    for platform in &options.platforms {
+        let mut build = dist_build_command(workspace_root, *platform);
+        run_status(&mut build, platform.build_label())?;
+
+        let dest = out_dir.join(platform.artifact_name(&version));
+        let mut fetch = dist_fetch_command(workspace_root, *platform, &dest);
+        run_status(&mut fetch, "scripts/cloud-build/fetch.sh --via-s3 (dist)")?;
+        // S3 download does not preserve the executable bit.
+        mark_executable(&dest)?;
+        artifacts.push(dest);
+    }
+
+    let sums_path = out_dir.join("SHA256SUMS");
+    write_sha256sums(&artifacts, &sums_path)?;
+
+    eprintln!("==> dist complete: {}", out_dir.display());
+    for artifact in &artifacts {
+        eprintln!("    {}", artifact.display());
+    }
+    eprintln!("    {}", sums_path.display());
+    Ok(())
+}
+
+fn dist_build_command(workspace_root: &Path, platform: DistPlatform) -> Command {
+    let mut cmd = Command::new(workspace_root.join("scripts/spur-cargo"));
+    match platform {
+        DistPlatform::LinuxAarch64 => {
+            cmd.args(["build", "--release", "-p", "spur-cli"]);
+        }
+        DistPlatform::MacUniversal2 => {
+            cmd.args([
+                "zigbuild",
+                "--release",
+                "-p",
+                "spur-cli",
+                "--target",
+                "universal2-apple-darwin",
+            ]);
+        }
+        DistPlatform::WindowsX64 => {
+            cmd.args([
+                "xwin",
+                "build",
+                "--release",
+                "-p",
+                "spur-cli",
+                "--target",
+                "x86_64-pc-windows-msvc",
+            ]);
+        }
+    }
+    cmd.current_dir(workspace_root);
+    cmd
+}
+
+fn dist_fetch_command(workspace_root: &Path, platform: DistPlatform, dest: &Path) -> Command {
+    let mut cmd = Command::new(workspace_root.join("scripts/cloud-build/fetch.sh"));
+    cmd.arg("--via-s3")
+        .arg("--to")
+        .arg(dest)
+        .arg(platform.artifact_rel());
+    cmd.current_dir(workspace_root);
+    cmd
+}
+
+/// Read the `[workspace.package]` version from the workspace Cargo.toml.
+/// Line-based on purpose: xtask stays dependency-free.
+fn workspace_version(workspace_root: &Path) -> Result<String, String> {
+    let manifest_path = workspace_root.join("Cargo.toml");
+    let manifest = fs::read_to_string(&manifest_path)
+        .map_err(|err| format!("failed to read {}: {err}", manifest_path.display()))?;
+    parse_workspace_version(&manifest).ok_or_else(|| {
+        format!(
+            "no [workspace.package] version in {}",
+            manifest_path.display()
+        )
+    })
+}
+
+fn parse_workspace_version(manifest: &str) -> Option<String> {
+    let mut in_workspace_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_workspace_package = line == "[workspace.package]";
+            continue;
+        }
+        if !in_workspace_package {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("version") {
+            let rest = rest.trim_start();
+            if let Some(value) = rest.strip_prefix('=') {
+                return Some(value.trim().trim_matches('"').to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Write a coreutils-compatible SHA256SUMS file (hash, two spaces, name).
+/// Shells out to sha256sum (Linux) or shasum -a 256 (macOS).
+fn write_sha256sums(artifacts: &[PathBuf], sums_path: &Path) -> Result<(), String> {
+    let mut lines = String::new();
+    for artifact in artifacts {
+        let hash = sha256_file(artifact)?;
+        let name = artifact
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("unrepresentable artifact name: {}", artifact.display()))?;
+        lines.push_str(&format!("{hash}  {name}\n"));
+    }
+    fs::write(sums_path, lines)
+        .map_err(|err| format!("failed to write {}: {err}", sums_path.display()))
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let attempts: [(&str, &[&str]); 2] = [("sha256sum", &[]), ("shasum", &["-a", "256"])];
+    for (program, args) in attempts {
+        let output = Command::new(program).args(args).arg(path).output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let hash = stdout
+                    .split_whitespace()
+                    .next()
+                    .ok_or_else(|| format!("{program} produced no output for {}", path.display()))?
+                    .to_owned();
+                return Ok(hash);
+            }
+            _ => continue,
+        }
+    }
+    Err(format!(
+        "no working sha256 tool (tried sha256sum, shasum -a 256) for {}",
+        path.display()
+    ))
 }
 
 fn install_linux_binaries(
@@ -1188,6 +1469,138 @@ mod tests {
             ]
         );
         assert_eq!(command.get_current_dir(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn dist_options_default_to_all_platforms() {
+        let options = parse_dist_options(Vec::new()).expect("no args parse");
+        assert_eq!(options.platforms, DistPlatform::ALL.to_vec());
+        assert!(options.out_dir.is_none());
+    }
+
+    #[test]
+    fn dist_options_accept_platform_subset_and_out_dir() {
+        let options = parse_dist_options(vec![
+            "--platforms".to_owned(),
+            "windows,macos".to_owned(),
+            "--out=/tmp/spur-dist".to_owned(),
+        ])
+        .expect("subset parses");
+        assert_eq!(
+            options.platforms,
+            vec![DistPlatform::WindowsX64, DistPlatform::MacUniversal2]
+        );
+        assert_eq!(options.out_dir, Some(PathBuf::from("/tmp/spur-dist")));
+
+        assert!(parse_dist_options(vec!["--platforms".to_owned(), "beos".to_owned()]).is_err());
+        assert!(parse_dist_options(vec!["--platforms".to_owned(), ",".to_owned()]).is_err());
+        assert!(parse_dist_options(vec!["--frobnicate".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn dist_build_commands_dispatch_spur_cargo_per_platform() {
+        let root = PathBuf::from("/workspace");
+
+        for (platform, expected) in [
+            (
+                DistPlatform::LinuxAarch64,
+                vec!["build", "--release", "-p", "spur-cli"],
+            ),
+            (
+                DistPlatform::MacUniversal2,
+                vec![
+                    "zigbuild",
+                    "--release",
+                    "-p",
+                    "spur-cli",
+                    "--target",
+                    "universal2-apple-darwin",
+                ],
+            ),
+            (
+                DistPlatform::WindowsX64,
+                vec![
+                    "xwin",
+                    "build",
+                    "--release",
+                    "-p",
+                    "spur-cli",
+                    "--target",
+                    "x86_64-pc-windows-msvc",
+                ],
+            ),
+        ] {
+            let command = dist_build_command(&root, platform);
+            assert_eq!(
+                command.get_program(),
+                root.join("scripts/spur-cargo").as_os_str()
+            );
+            assert_eq!(
+                command_args(&command),
+                expected
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<String>>()
+            );
+            assert_eq!(command.get_current_dir(), Some(root.as_path()));
+        }
+    }
+
+    #[test]
+    fn dist_fetch_command_pulls_platform_artifact_to_dest() {
+        let root = PathBuf::from("/workspace");
+        let dest = PathBuf::from("/workspace/dist/spur-1.7.0-x86_64-pc-windows-msvc.exe");
+
+        let command = dist_fetch_command(&root, DistPlatform::WindowsX64, &dest);
+
+        assert_eq!(
+            command.get_program(),
+            root.join("scripts/cloud-build/fetch.sh").as_os_str()
+        );
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "--via-s3".to_owned(),
+                "--to".to_owned(),
+                dest.to_string_lossy().into_owned(),
+                "target/x86_64-pc-windows-msvc/release/spur.exe".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dist_artifact_names_carry_version_and_triple() {
+        assert_eq!(
+            DistPlatform::LinuxAarch64.artifact_name("1.7.0"),
+            "spur-1.7.0-aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            DistPlatform::MacUniversal2.artifact_name("1.7.0"),
+            "spur-1.7.0-universal2-apple-darwin"
+        );
+        assert_eq!(
+            DistPlatform::WindowsX64.artifact_name("1.7.0"),
+            "spur-1.7.0-x86_64-pc-windows-msvc.exe"
+        );
+    }
+
+    #[test]
+    fn workspace_version_reads_workspace_package_section_only() {
+        let manifest = r#"
+[workspace]
+members = ["crates/spur-cli"]
+
+[workspace.package]
+edition = "2021"
+version = "1.7.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+"#;
+        assert_eq!(parse_workspace_version(manifest).as_deref(), Some("1.7.0"));
+
+        let no_version = "[workspace.dependencies]\ntokio = { version = \"1\" }\n";
+        assert_eq!(parse_workspace_version(no_version), None);
     }
 
     #[test]
