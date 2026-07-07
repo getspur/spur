@@ -1,0 +1,33 @@
+{
+  "graph_index_version": "4",
+  "schema_version": "spur-graph-schema-v10",
+  "manifest_version": "486461f7bda5330850b85672f651c3f73a6315883f67f77cf1d3460137046e0f",
+  "graph_content_hash": "f136704f4878d9865e196d445bb90ab9a63ebc82f8b9f5bcba148b1c5caec450",
+  "indexed_commit_oid": null,
+  "extractor_version": "2026-06-05-import-path-capture-v1",
+  "complete": true,
+  "row_counts": {
+    "nodes": 835,
+    "edges": 2087,
+    "edges_by_dst": null,
+    "edges_unresolved": 2838,
+    "files": 31,
+    "file_manifests": 31,
+    "tombstones": 514,
+    "commits": 0,
+    "symbol_snapshots": 0,
+    "temporal_edges": 0,
+    "diagnostics": 0
+  },
+  "sidecar_complete": false,
+  "sidecar_row_counts": {
+    "section_bodies": 0,
+    "code_symbols": 0
+  },
+  "parquet_writer": {
+    "compression": "zstd-3",
+    "row_group_size": 16384
+  },
+  "edges_by_dst_present": false,
+  "temporal_shards": []
+}
