@@ -160,6 +160,23 @@ scripts (see spur-notebook history around 2026-07-07):
    and plants the libs at boot.
 4. Quota errors (`MaxSpotInstanceCountExceeded`) were terminal instead of
    falling back to the smaller instance type.
+5. Parallel dist legs (`cargo xtask dist --parallel`, v1.10.0) raced the
+   rustup first-use ensure in the shared `RUSTUP_HOME` — two legs downloading
+   the pinned toolchain's components collided on the `.partial` rename.
+   `build.sh` now runs a `flock`-serialized `rustc --version` before cargo.
+
+## Measured runs (2026-07-07, version-bump-cold caches)
+
+| Release | Mode | Total | Build step | Legs |
+|---|---|---|---|---|
+| v1.8.0 | sequential, old AMI | 15m10s | — | — |
+| v1.9.0 | sequential, baked AMI | 21m17s | ~13.5m | sum of legs |
+| v1.10.0 | parallel ×3, `-j16`, baked AMI | **17m35s** | 12m05s | linux 2m31s, macos 5m10s, **windows 10m19s** |
+
+The Windows leg is the critical path: cargo-xwin's clang-cl C/C++ compiles
+(DuckDB) are not routed through the sccache wrappers, so every fresh VM pays
+the full MSVC-target C++ compile. Wrapping clang-cl for sccache is the next
+worthwhile optimization if release latency matters.
 
 ## Known limits
 
