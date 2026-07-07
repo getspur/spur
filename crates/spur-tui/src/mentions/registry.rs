@@ -512,6 +512,16 @@ impl MentionRegistry {
         let compose_entries: Vec<MentionEntry> =
             entries.iter().map(|entry| (*entry).clone()).collect();
         let compose_refs: Vec<&MentionEntry> = compose_entries.iter().collect();
+        // The composed worker row supersedes its base worker entry, but it
+        // must not suppress issue/file/code rows matching the same text —
+        // typing a worker-colliding query like "codex" still has to reach
+        // the issue "Coordinate codex work", and files keep outranking the
+        // worker inside the score window. The composed row takes the base
+        // row's ranked position; it is pinned first only while a cascade
+        // slot is open, because the slot-picker UI pairs the open slot
+        // with `hits.first()`.
+        let mut composed_entry = None;
+        let mut composed_slot_open = false;
         if let Some(composed) = Self::compose_worker_mention(
             cwd,
             &compose_refs,
@@ -521,9 +531,18 @@ impl MentionRegistry {
             &mut self.pending_agent_model_catalog_probe_requests,
             &mut self.matcher,
         ) {
+            composed_slot_open = composed.open_slot.is_some();
             self.last_worker_open_slot = composed.open_slot;
-            return vec![composed.entry];
+            composed_entry = Some(composed.entry);
         }
+        let composed_base_uri = composed_entry.as_ref().map(|entry| {
+            entry
+                .uri
+                .split('?')
+                .next()
+                .unwrap_or(&entry.uri)
+                .to_string()
+        });
 
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
         let code_pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
@@ -546,11 +565,41 @@ impl MentionRegistry {
             .collect();
         let max_rank = scored.iter().map(|mention| mention.rank).max().unwrap_or(0);
         scored.sort_by(|a, b| typed_query_cmp(a, b, max_rank));
-        scored
-            .into_iter()
-            .take(limit)
-            .map(|ranked| ranked.entry.clone())
-            .collect()
+        let is_base_worker = |entry: &MentionEntry| {
+            composed_base_uri
+                .as_deref()
+                .is_some_and(|base| entry.kind == MentionKind::Worker && entry.uri == base)
+        };
+        let mut rows: Vec<MentionEntry> = Vec::new();
+        let mut composed_emitted = false;
+        for ranked in scored.into_iter().take(limit) {
+            if !composed_emitted && is_base_worker(ranked.entry) {
+                if let Some(entry) = composed_entry.clone() {
+                    rows.push(entry);
+                    composed_emitted = true;
+                    continue;
+                }
+            }
+            rows.push(ranked.entry.clone());
+        }
+        if let Some(entry) = composed_entry {
+            let composed_uri = entry.uri.clone();
+            if !composed_emitted {
+                // Mid-cascade queries like "codex,gpt-5" fuzzy-match nothing,
+                // so the explicitly named worker still leads the rows.
+                rows.insert(0, entry);
+                rows.truncate(limit.max(1));
+            }
+            if composed_slot_open {
+                if let Some(pos) = rows.iter().position(|row| row.uri == composed_uri) {
+                    if pos > 0 {
+                        let row = rows.remove(pos);
+                        rows.insert(0, row);
+                    }
+                }
+            }
+        }
+        rows
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1701,10 +1750,6 @@ mod tests {
             .map(|hit| (&hit.kind, &hit.display, &hit.uri))
             .collect();
 
-        assert!(
-            matches!(hits.first().map(|hit| &hit.kind), Some(MentionKind::Worker)),
-            "composed worker row must stay first for the slot-picker pairing, got {debug:?}"
-        );
         assert_eq!(
             hits.iter()
                 .filter(|hit| hit.kind == MentionKind::Worker)
