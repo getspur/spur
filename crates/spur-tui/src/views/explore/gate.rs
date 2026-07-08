@@ -370,3 +370,214 @@ fn resolution_label(resolution: Option<&Resolution>) -> String {
 fn sha7(value: &str) -> &str {
     value.get(..7).unwrap_or(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn shift_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    fn entry(name: &str, license: Option<&str>) -> CatalogEntry {
+        CatalogEntry {
+            kind: spur_core::explore::catalog::ItemKind::Skill,
+            name: name.to_string(),
+            source: "acme/repo".to_string(),
+            rel_path: format!("skills/{name}"),
+            pinned_commit: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+            description: "fixture".to_string(),
+            license: license.map(str::to_string),
+            content_sha256: "0".repeat(64),
+        }
+    }
+
+    fn card(name: &str, verdict: GateVerdict) -> GateCard {
+        GateCard {
+            entry: entry(name, Some("MIT")),
+            verdict,
+            resolution: None,
+        }
+    }
+
+    fn clean_card(name: &str) -> GateCard {
+        card(name, GateVerdict::Ready(Verdict::Clean))
+    }
+
+    fn flagged_card(name: &str) -> GateCard {
+        card(
+            name,
+            GateVerdict::Ready(Verdict::Flagged {
+                reasons: vec!["injection pattern".to_string()],
+            }),
+        )
+    }
+
+    fn conflict_card(name: &str) -> GateCard {
+        card(
+            name,
+            GateVerdict::Ready(Verdict::Conflict {
+                bundled_id: "spurpower-spur-way".to_string(),
+            }),
+        )
+    }
+
+    fn unresolved_card(name: &str) -> GateCard {
+        card(
+            name,
+            GateVerdict::Unresolved("missing cache checkout; run `spur explore sync`".to_string()),
+        )
+    }
+
+    #[test]
+    fn accept_rejects_non_clean_verdicts() {
+        for mut state in [
+            GateState::new(vec![flagged_card("a")]),
+            GateState::new(vec![conflict_card("a")]),
+            GateState::new(vec![unresolved_card("a")]),
+        ] {
+            let action = state.handle_key(key(KeyCode::Char('a')));
+            assert!(matches!(action, GateAction::Error(_)));
+            assert!(state.cards[0].resolution.is_none());
+        }
+    }
+
+    #[test]
+    fn override_rejects_non_flagged_verdicts() {
+        for mut state in [
+            GateState::new(vec![clean_card("a")]),
+            GateState::new(vec![conflict_card("a")]),
+            GateState::new(vec![unresolved_card("a")]),
+        ] {
+            let action = state.handle_key(key(KeyCode::Char('o')));
+            assert!(matches!(action, GateAction::Error(_)));
+        }
+    }
+
+    #[test]
+    fn replace_bundled_rejects_non_conflict_verdicts() {
+        for mut state in [
+            GateState::new(vec![clean_card("a")]),
+            GateState::new(vec![flagged_card("a")]),
+            GateState::new(vec![unresolved_card("a")]),
+        ] {
+            let action = state.handle_key(key(KeyCode::Char('b')));
+            assert!(matches!(action, GateAction::Error(_)));
+        }
+    }
+
+    #[test]
+    fn skip_resolves_regardless_of_verdict() {
+        let mut state = GateState::new(vec![unresolved_card("a")]);
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            GateAction::None
+        ));
+        assert_eq!(state.cards[0].resolution, Some(Resolution::Skip));
+    }
+
+    #[test]
+    fn esc_returns_back_and_shift_a_returns_apply() {
+        let mut state = GateState::new(vec![clean_card("a")]);
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Esc)),
+            GateAction::Back
+        ));
+        assert!(matches!(
+            state.handle_key(shift_key(KeyCode::Char('A'))),
+            GateAction::Apply
+        ));
+    }
+
+    #[test]
+    fn navigation_clamps_at_boundaries() {
+        let mut state = GateState::new(vec![clean_card("a"), clean_card("b"), clean_card("c")]);
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('k'))),
+            GateAction::None
+        ));
+        assert_eq!(state.selected, 0, "k at top stays clamped");
+
+        state.handle_key(key(KeyCode::Char('j')));
+        state.handle_key(key(KeyCode::Char('j')));
+        state.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(state.selected, 2, "j past the end clamps to last card");
+    }
+
+    #[test]
+    fn override_input_backspace_and_escape_cancel() {
+        let mut state = GateState::new(vec![flagged_card("a")]);
+        state.handle_key(key(KeyCode::Char('o')));
+        assert!(state.override_input.is_some());
+
+        state.handle_key(key(KeyCode::Char('x')));
+        state.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(state.override_input.as_deref(), Some("xy"));
+
+        state.handle_key(key(KeyCode::Backspace));
+        assert_eq!(state.override_input.as_deref(), Some("x"));
+
+        state.handle_key(key(KeyCode::Esc));
+        assert!(state.override_input.is_none());
+        assert!(state.cards[0].resolution.is_none());
+    }
+
+    #[test]
+    fn render_lines_cover_all_verdict_branches() {
+        for c in [
+            clean_card("clean-a"),
+            flagged_card("flagged-a"),
+            conflict_card("conflict-a"),
+            unresolved_card("unresolved-a"),
+        ] {
+            let lines = c.render_lines(true);
+            let text: String = lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert!(text.contains(&c.entry.name));
+        }
+    }
+
+    #[test]
+    fn is_evaluable_true_only_for_ready_verdicts() {
+        assert!(clean_card("a").is_evaluable());
+        assert!(flagged_card("a").is_evaluable());
+        assert!(conflict_card("a").is_evaluable());
+        assert!(!unresolved_card("a").is_evaluable());
+    }
+
+    #[test]
+    fn license_label_and_resolution_label_cover_all_branches() {
+        assert_eq!(license_label(Some("MIT")), "MIT");
+        assert_eq!(license_label(Some("  ")), "unknown ⚠");
+        assert_eq!(license_label(None), "unknown ⚠");
+
+        assert_eq!(resolution_label(None), "unresolved");
+        assert_eq!(resolution_label(Some(&Resolution::Accept)), "Accept");
+        assert_eq!(
+            resolution_label(Some(&Resolution::Override {
+                justification: "ok".to_string()
+            })),
+            "Override (ok)"
+        );
+        assert_eq!(
+            resolution_label(Some(&Resolution::ReplaceBundled)),
+            "ReplaceBundled"
+        );
+        assert_eq!(resolution_label(Some(&Resolution::Skip)), "Skip");
+    }
+
+    #[test]
+    fn render_produces_no_gate_cards_placeholder_when_empty() {
+        let state = GateState::default();
+        assert!(state.is_empty());
+        assert!(state.resolved_selections().is_empty());
+    }
+}
