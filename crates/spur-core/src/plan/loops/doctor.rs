@@ -178,6 +178,7 @@ fn normalize_tasks(
             task_id: task_id.clone(),
             agent: draft.agent.trim().to_string(),
             profile: trim_option(draft.profile.clone()),
+            skills: None,
             model: trim_option(draft.model.clone()),
             effort: trim_option(draft.effort.clone()),
             config_overrides: draft.config_overrides.clone(),

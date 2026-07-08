@@ -600,6 +600,7 @@ fn prior_branch_for_reuse_uses_last_attempt_only_when_reuse_requested() {
             task_id: "T1".into(),
             agent: "codex".into(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -1229,6 +1230,7 @@ async fn seed_mock_ready_tasks_plan(
             issue_id,
             task_id,
             "codex",
+            None,
             None,
             None,
             None,
@@ -1984,6 +1986,7 @@ async fn plan_task_profile_round_trips_to_dispatch_and_retry() {
         None,
         None,
         None,
+        None,
         &[],
     )
     .await
@@ -2415,6 +2418,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         None,
+        None,
         &["x.rs".to_string()],
     )
     .await
@@ -2428,6 +2432,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         None,
+        None,
         &["z.rs".to_string()],
     )
     .await
@@ -2437,6 +2442,7 @@ async fn seed_ready_overlay_plan(
         &ready_issue_id,
         "Y",
         "codex",
+        None,
         None,
         None,
         None,
@@ -3211,6 +3217,7 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
             task_id: "T1".to_string(),
             agent: "codex".to_string(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
