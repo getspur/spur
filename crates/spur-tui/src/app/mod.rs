@@ -88,6 +88,10 @@ pub struct TransientHint {
 type UpgradeReceiver = tokio::sync::oneshot::Receiver<Option<spur_core::UpgradeBanner>>;
 
 /// A user input message or control command sent from the TUI to the backend.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transient UI action/payload enums; instances are short-lived and never stored in bulk, boxing would churn every construction site"
+)]
 pub enum UserInput {
     Message {
         session: SessionId,
