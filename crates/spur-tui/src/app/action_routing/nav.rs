@@ -96,6 +96,15 @@ impl App {
                 self.navigate_to(ViewId::LoopBrowser);
                 just_created.then_some(Action::RefreshLoops)
             }
+            Action::NavigateTo(ViewId::ExploreBrowser) => {
+                if self.explore_browser.is_none() {
+                    self.explore_browser = Some(ExploreBrowserView::new(
+                        std::env::current_dir().unwrap_or_default(),
+                    ));
+                }
+                self.navigate_to(ViewId::ExploreBrowser);
+                None
+            }
             Action::NavigateTo(ViewId::IssueBrowser) => {
                 let just_created = self.issue_browser.is_none();
                 if just_created {
