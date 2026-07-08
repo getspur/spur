@@ -9,6 +9,45 @@ use anyhow::{bail, Context};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+pub fn validate_skill_names(repo_root: Option<&Path>, skills: &[String]) -> Result<(), String> {
+    if skills.is_empty() {
+        return Ok(());
+    }
+    let Some(repo_root) = repo_root else {
+        return Err(format!(
+            "Invalid explore skill `{}`: repository root unavailable; run `spur explore status` after opening a repository",
+            skills[0]
+        ));
+    };
+    let manifest = crate::explore::pool::Manifest::load(repo_root).map_err(|error| {
+        format!(
+            "Invalid explore skills: failed to load explore manifest: {error:#}; run `spur explore sync`"
+        )
+    })?;
+
+    for skill in skills {
+        let Some(item) = manifest.items.iter().find(|item| {
+            item.kind == crate::explore::catalog::ItemKind::Skill && item.name == *skill
+        }) else {
+            return Err(format!(
+                "Invalid explore skill `{skill}`: not found in the explore manifest; run `spur explore sync` or `spur explore add`"
+            ));
+        };
+
+        if !matches!(
+            item.gate.verdict.as_str(),
+            "clean" | "overridden" | "replaced-bundled"
+        ) {
+            return Err(format!(
+                "Invalid explore skill `{skill}`: gate verdict `{}` is not materializable; run `spur explore status`",
+                item.gate.verdict
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// sha256 hex of a single file's bytes, or of a directory as
 /// sha256 over sorted "rel_path\0file_sha\n" lines.
 pub fn content_hash(path: &Path) -> anyhow::Result<String> {
