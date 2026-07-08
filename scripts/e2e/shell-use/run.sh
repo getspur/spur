@@ -36,6 +36,7 @@ journeys=(
   "session-picker-open"
   "loop-browser-open"
   "session-picker-populated"
+  "explore-browser-open"
 )
 
 printf 'shell-use: %s\n' "$shell_use_bin"
