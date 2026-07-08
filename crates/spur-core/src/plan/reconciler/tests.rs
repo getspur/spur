@@ -600,6 +600,7 @@ fn prior_branch_for_reuse_uses_last_attempt_only_when_reuse_requested() {
             task_id: "T1".into(),
             agent: "codex".into(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -1229,6 +1230,7 @@ async fn seed_mock_ready_tasks_plan(
             issue_id,
             task_id,
             "codex",
+            None,
             None,
             None,
             None,
@@ -1984,6 +1986,7 @@ async fn plan_task_profile_round_trips_to_dispatch_and_retry() {
         None,
         None,
         None,
+        None,
         &[],
     )
     .await
@@ -2042,6 +2045,46 @@ async fn plan_task_profile_round_trips_to_dispatch_and_retry() {
     reconciler.tick_once().await.expect("retry tick");
     let retry = delegation_rx.recv().await.expect("retry dispatch");
     assert_eq!(retry.profile.as_deref(), Some("code-reviewer"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn plan_task_skills_round_trips_to_dispatch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-skills-plan".into()));
+    let issue_id = seed_mock_ready_task_plan(&pm, "P-SKILLS", "T1", &brain_session_id).await;
+    let adv =
+        crate::plan::PmLike::advanced(pm.as_ref()).expect("mock pm should expose beads advanced");
+    let skills = vec!["clean-a".to_string()];
+    crate::plan::emit_task_spec_audit(
+        adv,
+        &issue_id,
+        "T1",
+        "codex",
+        None,
+        Some(&skills),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect("skills task spec audit");
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    let request = delegation_rx.recv().await.expect("dispatch request");
+    assert_eq!(request.skills.as_deref(), Some(skills.as_slice()));
 }
 
 #[tokio::test]
@@ -2375,6 +2418,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         None,
+        None,
         &["x.rs".to_string()],
     )
     .await
@@ -2388,6 +2432,7 @@ async fn seed_ready_overlay_plan(
         None,
         None,
         None,
+        None,
         &["z.rs".to_string()],
     )
     .await
@@ -2397,6 +2442,7 @@ async fn seed_ready_overlay_plan(
         &ready_issue_id,
         "Y",
         "codex",
+        None,
         None,
         None,
         None,
@@ -3171,6 +3217,7 @@ async fn tick_once_retains_agent_and_plan_task_id_for_empty_context_files_task()
             task_id: "T1".to_string(),
             agent: "codex".to_string(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
