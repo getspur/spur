@@ -59,6 +59,7 @@ use crate::input_history::{InputHistoryEntry, HISTORY_CAP};
 use crate::session_metadata::{ReadOnlyFutureSchema, SessionMetadataStore};
 use crate::views::agent_config_browser::AgentConfigBrowserView;
 use crate::views::dashboard::{DashboardMode, DashboardView};
+use crate::views::explore::ExploreBrowserView;
 use crate::views::issue_browser::IssueBrowserView;
 use crate::views::loop_browser::LoopBrowserView;
 use crate::views::plan_browser::PlanBrowserView;
@@ -333,6 +334,7 @@ pub struct App {
     session_picker: Option<SessionPickerView>,
     agent_config_browser: Option<AgentConfigBrowserView>,
     loop_browser: Option<LoopBrowserView>,
+    explore_browser: Option<ExploreBrowserView>,
     plan_browser: Option<PlanBrowserView>,
     plan_inspector: Option<PlanInspectorView>,
     issue_browser: Option<IssueBrowserView>,
@@ -573,6 +575,11 @@ impl App {
                     view.tick();
                 }
             }
+            ViewId::ExploreBrowser => {
+                if let Some(view) = self.explore_browser.as_mut() {
+                    view.tick();
+                }
+            }
             ViewId::IssueBrowser => {
                 let pending = if let Some(view) = self.issue_browser.as_mut() {
                     view.tick();
@@ -683,6 +690,11 @@ impl App {
             }
             ViewId::LoopBrowser => {
                 if let Some(ref mut view) = self.loop_browser {
+                    view.render(frame, view_area, &ctx);
+                }
+            }
+            ViewId::ExploreBrowser => {
+                if let Some(ref mut view) = self.explore_browser {
                     view.render(frame, view_area, &ctx);
                 }
             }
