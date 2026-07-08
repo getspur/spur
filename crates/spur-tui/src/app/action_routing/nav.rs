@@ -1,6 +1,13 @@
 use super::*;
 
 impl App {
+    fn plan_browser_session(&self) -> SessionId {
+        self.session_detail
+            .as_ref()
+            .map(|detail| detail.session_id().clone())
+            .unwrap_or_else(|| SessionId(String::new()))
+    }
+
     pub(super) fn process_nav(&mut self, action: Action) -> Option<Action> {
         match action {
             Action::Quit => {
@@ -55,15 +62,7 @@ impl App {
                 None
             }
             Action::OpenPlanInBrowser { plan_id } => {
-                let Some(current_session) = self
-                    .session_detail
-                    .as_ref()
-                    .map(|detail| detail.session_id().clone())
-                else {
-                    return Some(Action::FlashHint {
-                        message: "Select a brain session first (S)".into(),
-                    });
-                };
+                let current_session = self.plan_browser_session();
                 let just_created = self.plan_browser.is_none();
                 let mut session_changed = false;
                 if self.plan_browser.is_none() {
@@ -77,15 +76,7 @@ impl App {
                 (just_created || session_changed).then_some(Action::RefreshPlans)
             }
             Action::NavigateTo(ViewId::PlanBrowser) => {
-                let Some(current_session) = self
-                    .session_detail
-                    .as_ref()
-                    .map(|detail| detail.session_id().clone())
-                else {
-                    return Some(Action::FlashHint {
-                        message: "Select a brain session first (S)".into(),
-                    });
-                };
+                let current_session = self.plan_browser_session();
                 let just_created = self.plan_browser.is_none();
                 let mut session_changed = false;
                 if self.plan_browser.is_none() {

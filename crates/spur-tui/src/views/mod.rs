@@ -46,9 +46,7 @@ pub mod insights {
         fn render(&mut self, frame: &mut Frame, area: Rect, _ctx: &ViewContext) {
             use ratatui::widgets::Paragraph;
 
-            let p = Paragraph::new(
-                "Analytics feature disabled — rebuild with --features spur-tui/analytics",
-            );
+            let p = Paragraph::new("Analytics unavailable in this build");
             frame.render_widget(p, area);
         }
 
