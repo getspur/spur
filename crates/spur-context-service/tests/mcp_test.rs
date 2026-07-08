@@ -46,6 +46,7 @@ fn tool_definitions_match_external_context_surface() {
     assert_eq!(
         names,
         [
+            "external_catalog",
             "external_code_search",
             "external_code_read",
             "external_code_callers",
@@ -55,6 +56,16 @@ fn tool_definitions_match_external_context_surface() {
             "external_index_status",
         ]
     );
+
+    let catalog_schema = schema_for(&definitions, "external_catalog");
+    assert!(catalog_schema.get("required").is_none());
+    assert_eq!(
+        catalog_schema["properties"]["source"]["default"],
+        "registry:crates-io"
+    );
+    assert_eq!(catalog_schema["properties"]["limit"]["default"], 50);
+    assert_eq!(catalog_schema["properties"]["limit"]["maximum"], 200);
+    assert_eq!(catalog_schema["additionalProperties"], false);
 
     let search_schema = schema_for(&definitions, "external_code_search");
     assert_eq!(required(search_schema), ["query", "package"]);
@@ -128,6 +139,144 @@ async fn external_code_search_resolves_latest_and_returns_candidates() -> Result
         "bbbbbbbbbbbbbbbb"
     );
     assert_eq!(response["candidates"][0]["revision"], REVISION);
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_catalog_selects_level_by_coordinates_and_pages() -> Result<()> {
+    let fixture = McpFixture::new("catalog-levels")?;
+
+    let packages = handle_tool(
+        "external_catalog",
+        &json!({ "limit": 1 }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(packages["level"], "packages");
+    assert_eq!(packages["total_matches"], 2);
+    assert_eq!(packages["truncated"], true);
+    assert!(packages["next_cursor"].is_string());
+    assert_eq!(packages["catalog_generation"], 9);
+    assert_eq!(packages["rows"][0]["package"], "demo");
+    assert_eq!(packages["rows"][0]["latest_revision"], REVISION);
+
+    let package_page_2 = handle_tool(
+        "external_catalog",
+        &json!({
+            "limit": 1,
+            "cursor": packages["next_cursor"].as_str().context("package cursor")?
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(package_page_2["truncated"], false);
+    assert_eq!(package_page_2["rows"][0]["package"], "zebra");
+
+    let revisions = handle_tool(
+        "external_catalog",
+        &json!({ "package": PACKAGE }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(revisions["level"], "revisions");
+    assert_eq!(revisions["total_matches"], 2);
+    assert!(revisions["rows"]
+        .as_array()
+        .context("revision rows")?
+        .iter()
+        .any(|row| {
+            row["revision"] == REVISION
+                && row["refs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|reference| reference["ref_name"] == "latest")
+        }));
+
+    let root_tree = handle_tool(
+        "external_catalog",
+        &json!({
+            "package": PACKAGE,
+            "ref": "latest"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(root_tree["level"], "tree");
+    assert!(root_tree["rows"]
+        .as_array()
+        .context("tree rows")?
+        .iter()
+        .any(|row| row["name"] == "src" && row["kind"] == "dir"));
+
+    let nested_tree = handle_tool(
+        "external_catalog",
+        &json!({
+            "package": PACKAGE,
+            "ref": "latest",
+            "path": "src"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(nested_tree["level"], "tree");
+    assert!(nested_tree["rows"]
+        .as_array()
+        .context("nested tree rows")?
+        .iter()
+        .any(|row| row["path"] == "src/lib.rs" && row["kind"] == "file"));
+
+    let symbols = handle_tool(
+        "external_catalog",
+        &json!({
+            "package": PACKAGE,
+            "ref": "latest",
+            "path": "src/lib.rs",
+            "name_filter": "bet"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await?;
+    assert_eq!(symbols["level"], "symbols");
+    assert_eq!(symbols["total_matches"], 1);
+    assert_eq!(symbols["rows"][0]["entity_name"], "beta");
+    assert_eq!(symbols["rows"][0]["selector"], "pkg:demo@1.0.0::demo::beta");
+    assert!(symbols["rows"][0]["next"]
+        .as_array()
+        .context("symbol next hints")?
+        .iter()
+        .any(|entry| entry["tool"] == "external_code_read"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_catalog_rejects_revision_and_ref_together() -> Result<()> {
+    let fixture = McpFixture::new("catalog-revision-ref")?;
+
+    let error = handle_tool(
+        "external_catalog",
+        &json!({
+            "package": PACKAGE,
+            "revision": REVISION,
+            "ref": "latest"
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+    )
+    .await
+    .expect_err("revision and ref must be mutually exclusive");
+
+    assert!(matches!(error, McpHandlerError::InvalidParams(_)));
+    assert!(
+        error.to_string().contains("revision") && error.to_string().contains("ref"),
+        "unexpected error: {error}"
+    );
     Ok(())
 }
 
@@ -682,6 +831,14 @@ async fn handler_reports_unknown_tool_missing_args_and_missing_package() -> Resu
 
 #[tokio::test]
 async fn missing_serving_catalog_returns_empty_read_tool_results() -> Result<()> {
+    let catalog = handle_tool_without_catalog("external_catalog", &json!({}))?;
+    assert_eq!(catalog["level"], "packages");
+    assert_eq!(catalog["total_matches"], 0);
+    assert_eq!(catalog["truncated"], false);
+    assert_eq!(catalog["rows"], json!([]));
+    assert!(catalog["next_cursor"].is_null());
+    assert!(catalog["catalog_generation"].is_null());
+
     let search = handle_tool_without_catalog(
         "external_code_search",
         &json!({
@@ -1377,6 +1534,8 @@ fn move_fixture_to_source(fixture: &McpFixture, source: &str) -> Result<()> {
         "edges",
         "edges_unresolved",
         "files",
+        "file_manifests",
+        "package_catalog",
         "section_bodies",
         "symbol_embeddings",
         "refs",
@@ -1413,6 +1572,8 @@ fn move_fixture_to_revision(
         "edges",
         "edges_unresolved",
         "files",
+        "file_manifests",
+        "package_catalog",
         "section_bodies",
         "symbol_embeddings",
     ] {
@@ -1699,6 +1860,20 @@ fn create_query_schema(conn: &Connection) -> Result<()> {
             semver_patch INTEGER
         );
 
+        CREATE TABLE file_manifests (
+            stable_file_id VARCHAR,
+            path VARCHAR,
+            content_oid VARCHAR,
+            node_ids VARCHAR[],
+            package VARCHAR,
+            source VARCHAR,
+            revision VARCHAR,
+            revision_kind VARCHAR,
+            semver_major INTEGER,
+            semver_minor INTEGER,
+            semver_patch INTEGER
+        );
+
         CREATE TABLE section_bodies (
             section_id VARCHAR,
             package VARCHAR,
@@ -1731,6 +1906,27 @@ fn create_query_schema(conn: &Connection) -> Result<()> {
             embedding FLOAT[],
             embedding_model VARCHAR,
             embedding_input_hash VARCHAR,
+            embed_text_version VARCHAR
+        );
+
+        CREATE TABLE package_catalog (
+            source VARCHAR,
+            package VARCHAR,
+            revision VARCHAR,
+            revision_kind VARCHAR,
+            semver_major INTEGER,
+            semver_minor INTEGER,
+            semver_patch INTEGER,
+            snapshot_id BIGINT,
+            indexed_at TIMESTAMP,
+            index_status VARCHAR,
+            embeddings_status VARCHAR,
+            row_counts JSON,
+            generation BIGINT,
+            bronze_content_sha256 VARCHAR,
+            silver_graph_content_hash VARCHAR,
+            builder_version VARCHAR,
+            translate_schema_version VARCHAR,
             embed_text_version VARCHAR
         );
 
@@ -1926,11 +2122,55 @@ fn seed_query_fixture(conn: &Connection) -> Result<()> {
         r"
         INSERT INTO refs VALUES
             ('registry:crates-io', 'demo', 'latest', '1.0.0',
-             TIMESTAMP '2026-06-22 00:00:00')
+             TIMESTAMP '2026-06-22 00:00:00'),
+            ('registry:crates-io', 'demo', 'stable', '1.0.0',
+             TIMESTAMP '2026-06-22 00:01:00'),
+            ('registry:crates-io', 'demo', 'old', '0.9.0',
+             TIMESTAMP '2026-06-21 00:00:00')
         ",
         [],
     )
     .context("insert latest ref")?;
+
+    conn.execute_batch(
+        r#"
+        INSERT INTO file_manifests VALUES
+            ('file-readme', 'README.md', 'oid-readme', []::VARCHAR[],
+             'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0),
+            ('file-lib', 'src/lib.rs', 'oid-lib',
+             ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb', 'cccccccccccccccc',
+              'dddddddddddddddd', 'eeeeeeeeeeeeeeee', 'ffffffffffffffff',
+              '9999999999999999', 'bufferstruct0001', 'bufferimpl000001']::VARCHAR[],
+             'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0),
+            ('file-a', 'src/a.rs', 'oid-a', []::VARCHAR[],
+             'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0),
+            ('file-b', 'src/b.rs', 'oid-b', []::VARCHAR[],
+             'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0);
+
+        INSERT INTO package_catalog (
+            source, package, revision, revision_kind,
+            semver_major, semver_minor, semver_patch,
+            snapshot_id, indexed_at, index_status, embeddings_status,
+            row_counts, generation, bronze_content_sha256,
+            silver_graph_content_hash, builder_version,
+            translate_schema_version, embed_text_version
+        )
+        VALUES
+            ('registry:crates-io', 'demo', '0.9.0', 'semver',
+             0, 9, 0, 90, TIMESTAMP '2026-06-21 00:00:00',
+             'complete', 'skipped', '{"nodes": 1}', 5,
+             'bronze-old', 'graph-old', 'builder', 'translate', 'embed'),
+            ('registry:crates-io', 'demo', '1.0.0', 'semver',
+             1, 0, 0, 100, TIMESTAMP '2026-06-22 00:00:00',
+             'complete', 'complete', '{"nodes": 9, "files": 4}', 7,
+             'bronze-current', 'graph-current', 'builder', 'translate', 'embed'),
+            ('registry:crates-io', 'zebra', '0.1.0', 'semver',
+             0, 1, 0, 10, TIMESTAMP '2026-06-23 00:00:00',
+             'complete', 'complete', '{"nodes": 0}', 9,
+             'bronze-zebra', 'graph-zebra', 'builder', 'translate', 'embed');
+        "#,
+    )
+    .context("insert catalog rows")?;
 
     insert_embedding(
         conn,

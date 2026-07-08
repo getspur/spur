@@ -1,7 +1,8 @@
 use anyhow::{Context as _, Result};
 use duckdb::{params, Connection};
 use spur_context_service::query::{
-    find_callees, find_callers, read_symbol, resolve_selector, search_symbols, SearchMode,
+    find_callees, find_callers, list_file_symbols, list_packages, list_revisions_and_refs,
+    list_tree_entries, read_symbol, resolve_selector, search_symbols, CatalogLevel, SearchMode,
     SearchOptions, SelectorResolution,
 };
 
@@ -136,6 +137,116 @@ fn resolve_selector_handles_exact_latest_ambiguous_and_missing() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn catalog_queries_list_packages_revisions_tree_and_symbols() -> Result<()> {
+    let fixture = QueryFixture::new()?;
+
+    let first_page = list_packages(&fixture.conn, SOURCE, None, 1, None)?;
+    assert_eq!(first_page.level, CatalogLevel::Packages);
+    assert_eq!(first_page.total_matches, 2);
+    assert!(first_page.truncated);
+    assert_eq!(first_page.catalog_generation, Some(9));
+    assert_eq!(first_page.rows[0].package, "demo");
+    assert_eq!(first_page.rows[0].latest_revision.as_deref(), Some("1.0.0"));
+    assert_eq!(first_page.rows[0].revision_count, 2);
+
+    let second_page = list_packages(
+        &fixture.conn,
+        SOURCE,
+        None,
+        1,
+        first_page.next_cursor.as_deref(),
+    )?;
+    assert!(!second_page.truncated);
+    assert_eq!(second_page.rows[0].package, "zebra");
+
+    let filtered = list_packages(&fixture.conn, SOURCE, Some("dem"), 50, None)?;
+    assert_eq!(filtered.total_matches, 1);
+    assert_eq!(filtered.rows[0].package, "demo");
+
+    let revisions = list_revisions_and_refs(&fixture.conn, SOURCE, PACKAGE, 50, None)?;
+    assert_eq!(revisions.level, CatalogLevel::Revisions);
+    assert_eq!(revisions.total_matches, 2);
+    let current = revisions
+        .rows
+        .iter()
+        .find(|row| row.revision == REVISION)
+        .context("current revision row")?;
+    assert_eq!(current.semver.as_deref(), Some("1.0.0"));
+    assert_eq!(current.embeddings_status.as_deref(), Some("complete"));
+    assert_eq!(current.row_counts["nodes"], 8);
+    assert_eq!(
+        current
+            .refs
+            .iter()
+            .map(|row| row.ref_name.as_str())
+            .collect::<Vec<_>>(),
+        ["latest", "stable"]
+    );
+
+    let root = list_tree_entries(&fixture.conn, SOURCE, PACKAGE, REVISION, None, 50, None)?;
+    assert_eq!(root.level, CatalogLevel::Tree);
+    assert_eq!(
+        root.rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.kind.as_str(), row.file_count))
+            .collect::<Vec<_>>(),
+        [("README.md", "file", 1), ("src", "dir", 3)]
+    );
+
+    let src = list_tree_entries(&fixture.conn, SOURCE, PACKAGE, REVISION, Some("src"), 50, None)?;
+    assert_eq!(
+        src.rows
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/a.rs", "src/b.rs", "src/lib.rs"]
+    );
+
+    let symbols = list_file_symbols(
+        &fixture.conn,
+        SOURCE,
+        PACKAGE,
+        REVISION,
+        "src/lib.rs",
+        Some("beta"),
+        50,
+        None,
+    )?;
+    assert_eq!(symbols.level, CatalogLevel::Symbols);
+    assert_eq!(symbols.total_matches, 1);
+    assert_eq!(symbols.rows[0].entity_name, "beta");
+    assert_eq!(symbols.rows[0].line_range, [6, 7]);
+    assert_eq!(symbols.rows[0].selector, "pkg:demo@1.0.0::demo::beta");
+    assert!(symbols.rows[0]
+        .next
+        .iter()
+        .any(|entry| entry.tool == "external_code_read"));
+    Ok(())
+}
+
+#[test]
+fn catalog_queries_tolerate_missing_refs_table() -> Result<()> {
+    let fixture = QueryFixture::new()?;
+    fixture
+        .conn
+        .execute("DROP TABLE refs", [])
+        .context("drop refs table")?;
+
+    let packages = list_packages(&fixture.conn, SOURCE, Some("dem"), 50, None)?;
+    assert_eq!(packages.total_matches, 1);
+    assert_eq!(packages.rows[0].latest_revision, None);
+
+    let revisions = list_revisions_and_refs(&fixture.conn, SOURCE, PACKAGE, 50, None)?;
+    let current = revisions
+        .rows
+        .iter()
+        .find(|row| row.revision == REVISION)
+        .context("current revision row")?;
+    assert!(current.refs.is_empty());
+    Ok(())
+}
+
 struct QueryFixture {
     conn: Connection,
 }
@@ -238,6 +349,41 @@ fn create_schema(conn: &Connection) -> Result<()> {
             semver_major INTEGER,
             semver_minor INTEGER,
             semver_patch INTEGER
+        );
+
+        CREATE TABLE file_manifests (
+            stable_file_id VARCHAR,
+            path VARCHAR,
+            content_oid VARCHAR,
+            node_ids VARCHAR[],
+            package VARCHAR,
+            source VARCHAR,
+            revision VARCHAR,
+            revision_kind VARCHAR,
+            semver_major INTEGER,
+            semver_minor INTEGER,
+            semver_patch INTEGER
+        );
+
+        CREATE TABLE package_catalog (
+            source VARCHAR,
+            package VARCHAR,
+            revision VARCHAR,
+            revision_kind VARCHAR,
+            semver_major INTEGER,
+            semver_minor INTEGER,
+            semver_patch INTEGER,
+            snapshot_id BIGINT,
+            indexed_at TIMESTAMP,
+            index_status VARCHAR,
+            embeddings_status VARCHAR,
+            row_counts JSON,
+            generation BIGINT,
+            bronze_content_sha256 VARCHAR,
+            silver_graph_content_hash VARCHAR,
+            builder_version VARCHAR,
+            translate_schema_version VARCHAR,
+            embed_text_version VARCHAR
         );
 
         CREATE TABLE refs (
@@ -399,11 +545,54 @@ fn seed_fixture(conn: &Connection) -> Result<()> {
         r"
         INSERT INTO refs VALUES
             ('registry:crates-io', 'demo', 'latest', '1.0.0',
-             TIMESTAMP '2026-06-22 00:00:00')
+             TIMESTAMP '2026-06-22 00:00:00'),
+            ('registry:crates-io', 'demo', 'stable', '1.0.0',
+             TIMESTAMP '2026-06-22 00:01:00'),
+            ('registry:crates-io', 'demo', 'old', '0.9.0',
+             TIMESTAMP '2026-06-21 00:00:00')
         ",
         [],
     )
     .context("insert latest ref")?;
+
+    conn.execute_batch(
+        r#"
+        INSERT INTO file_manifests VALUES
+            ('file-readme', 'README.md', 'oid-readme', []::VARCHAR[],
+             'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0),
+            ('file-lib', 'src/lib.rs', 'oid-lib',
+             ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb', 'cccccccccccccccc',
+              'dddddddddddddddd', 'eeeeeeeeeeeeeeee', 'ffffffffffffffff']::VARCHAR[],
+             'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0),
+            ('file-a', 'src/a.rs', 'oid-a', ['1111111111111111']::VARCHAR[],
+             'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0),
+            ('file-b', 'src/b.rs', 'oid-b', ['2222222222222222']::VARCHAR[],
+             'demo', 'registry:crates-io', '1.0.0', 'semver', 1, 0, 0);
+
+        INSERT INTO package_catalog (
+            source, package, revision, revision_kind,
+            semver_major, semver_minor, semver_patch,
+            snapshot_id, indexed_at, index_status, embeddings_status,
+            row_counts, generation, bronze_content_sha256,
+            silver_graph_content_hash, builder_version,
+            translate_schema_version, embed_text_version
+        )
+        VALUES
+            ('registry:crates-io', 'demo', '0.9.0', 'semver',
+             0, 9, 0, 90, TIMESTAMP '2026-06-21 00:00:00',
+             'complete', 'skipped', '{"nodes": 1}', 5,
+             'bronze-old', 'graph-old', 'builder', 'translate', 'embed'),
+            ('registry:crates-io', 'demo', '1.0.0', 'semver',
+             1, 0, 0, 100, TIMESTAMP '2026-06-22 00:00:00',
+             'complete', 'complete', '{"nodes": 8, "files": 4}', 7,
+             'bronze-current', 'graph-current', 'builder', 'translate', 'embed'),
+            ('registry:crates-io', 'zebra', '0.1.0', 'semver',
+             0, 1, 0, 10, TIMESTAMP '2026-06-23 00:00:00',
+             'complete', 'complete', '{"nodes": 0}', 9,
+             'bronze-zebra', 'graph-zebra', 'builder', 'translate', 'embed');
+        "#,
+    )
+    .context("insert catalog rows")?;
     Ok(())
 }
 

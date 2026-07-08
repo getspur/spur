@@ -4,7 +4,8 @@ use crate::catalog::readable_table;
 use anyhow::{anyhow, bail, Context as _, Result};
 use duckdb::{params, Connection, Row, ToSql};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 const DEFAULT_SOURCE: &str = "registry:crates-io";
 const PKG_SYMBOL_URI_PREFIX: &str = "pkg-symbol://";
@@ -16,6 +17,7 @@ const CALL_EDGE_KIND_HOF: &str = "references_hof";
 struct QueryTables {
     nodes: String,
     files: String,
+    file_manifests: String,
     edges: String,
     edges_unresolved: String,
     refs: String,
@@ -30,6 +32,7 @@ impl QueryTables {
         Ok(Self {
             nodes,
             files: readable_table(db, "files")?,
+            file_manifests: readable_table(db, "file_manifests")?,
             edges: readable_table(db, "edges")?,
             edges_unresolved: readable_table(db, "edges_unresolved")?,
             refs: readable_table(db, "refs")?,
@@ -96,6 +99,81 @@ pub struct CodeSearchResult {
     pub candidates: Vec<CodeCandidate>,
     pub total_matches: usize,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogLevel {
+    Packages,
+    Revisions,
+    Tree,
+    Symbols,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CatalogPage<T> {
+    pub level: CatalogLevel,
+    pub rows: Vec<T>,
+    pub total_matches: usize,
+    pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub catalog_generation: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PackageCatalogRow {
+    pub source: String,
+    pub package: String,
+    pub latest_revision: Option<String>,
+    pub revision_count: usize,
+    pub indexed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RevisionCatalogRow {
+    pub revision: String,
+    pub revision_kind: String,
+    pub semver: Option<String>,
+    pub indexed_at: String,
+    pub embeddings_status: Option<String>,
+    pub row_counts: Value,
+    pub generation: Option<i64>,
+    pub snapshot_id: i64,
+    pub refs: Vec<RevisionRefRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RevisionRefRow {
+    pub ref_name: String,
+    pub revision: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TreeCatalogEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub file_count: usize,
+    pub symbol_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymbolCatalogRow {
+    pub entity_name: String,
+    pub qualified_name: String,
+    pub symbol_kind: String,
+    pub line_range: [usize; 2],
+    pub selector: String,
+    pub next: Vec<CatalogNextTool>,
+    #[serde(skip_serializing)]
+    pub stable_symbol_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogNextTool {
+    pub tool: String,
+    pub selector: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -242,6 +320,513 @@ pub fn search_symbols(db: &Connection, opts: &SearchOptions) -> Result<CodeSearc
         total_matches,
         truncated: total_matches > limit as usize,
     })
+}
+
+pub fn list_packages(
+    db: &Connection,
+    source: &str,
+    name_filter: Option<&str>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<CatalogPage<PackageCatalogRow>> {
+    let tables = QueryTables::load(db)?;
+    let catalog_generation = catalog_generation(db, &tables)?;
+    let refs_available = refs_table_available(db, &tables)?;
+    let cursor_parts = decode_cursor(cursor, 2)?;
+
+    let mut count_params = SqlParams::default();
+    let count_source = count_params.push(source.to_owned());
+    let mut count_filters = vec![format!("pc.source = {count_source}")];
+    if let Some(name_filter) = name_filter {
+        let name_filter = count_params.push(name_filter.to_owned());
+        count_filters.push(format!("contains(pc.package, {name_filter})"));
+    }
+    let count_sql = format!(
+        r"
+        SELECT COUNT(*)
+        FROM (
+            SELECT pc.source, pc.package
+            FROM {package_catalog} pc
+            WHERE {count_where}
+            GROUP BY pc.source, pc.package
+        ) packages
+        ",
+        package_catalog = tables.package_catalog,
+        count_where = count_filters.join(" AND ")
+    );
+    let total_matches =
+        query_count(db, &count_sql, count_params).context("failed to count catalog packages")?;
+
+    let mut params = SqlParams::default();
+    let source_param = params.push(source.to_owned());
+    let mut filters = vec![format!("pc.source = {source_param}")];
+    if let Some(name_filter) = name_filter {
+        let name_filter = params.push(name_filter.to_owned());
+        filters.push(format!("contains(pc.package, {name_filter})"));
+    }
+    if let Some(parts) = cursor_parts {
+        let cursor_source = params.push(parts[0].clone());
+        let cursor_package = params.push(parts[1].clone());
+        filters.push(format!(
+            "(pc.source > {cursor_source} OR (pc.source = {cursor_source} AND pc.package > {cursor_package}))"
+        ));
+    }
+    let limit_param = params.push((clamp_catalog_limit(limit) + 1) as i64);
+    let latest_refs = if refs_available {
+        format!(
+            r",
+            latest_refs AS (
+                SELECT source, package, revision
+                FROM (
+                    SELECT
+                        source,
+                        package,
+                        revision,
+                        row_number() OVER (
+                            PARTITION BY source, package, ref_name
+                            ORDER BY updated_at DESC NULLS LAST, revision DESC
+                        ) AS rn
+                    FROM {refs}
+                    WHERE ref_name = 'latest'
+                )
+                WHERE rn = 1
+            )
+            ",
+            refs = tables.refs
+        )
+    } else {
+        String::new()
+    };
+    let latest_join = if refs_available {
+        r"
+        LEFT JOIN latest_refs lr
+          ON lr.source = p.source
+         AND lr.package = p.package
+        "
+    } else {
+        ""
+    };
+    let latest_select = if refs_available {
+        "lr.revision"
+    } else {
+        "NULL::VARCHAR"
+    };
+    let sql = format!(
+        r"
+        WITH packages AS (
+            SELECT
+                pc.source,
+                pc.package,
+                COUNT(*)::BIGINT AS revision_count,
+                CAST(MAX(pc.indexed_at) AS VARCHAR) AS indexed_at
+            FROM {package_catalog} pc
+            WHERE {where_clause}
+            GROUP BY pc.source, pc.package
+        )
+        {latest_refs}
+        SELECT
+            p.source,
+            p.package,
+            {latest_select} AS latest_revision,
+            p.revision_count,
+            p.indexed_at
+        FROM packages p
+        {latest_join}
+        ORDER BY p.source, p.package
+        LIMIT {limit_param}
+        ",
+        package_catalog = tables.package_catalog,
+        where_clause = filters.join(" AND "),
+    );
+    let mut rows = collect_rows(db, &sql, params, |row| {
+        Ok(PackageCatalogRow {
+            source: row.get(0)?,
+            package: row.get(1)?,
+            latest_revision: row.get(2)?,
+            revision_count: i64_to_usize(row.get(3)?, "revision_count")?,
+            indexed_at: row.get(4)?,
+        })
+    })
+    .context("failed to list catalog packages")?;
+    let (truncated, next_cursor) = trim_catalog_page(&mut rows, limit, |row| {
+        encode_cursor([row.source.as_str(), row.package.as_str()])
+    });
+
+    Ok(CatalogPage {
+        level: CatalogLevel::Packages,
+        rows,
+        total_matches,
+        truncated,
+        next_cursor,
+        catalog_generation,
+    })
+}
+
+pub fn list_revisions_and_refs(
+    db: &Connection,
+    source: &str,
+    package: &str,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<CatalogPage<RevisionCatalogRow>> {
+    let tables = QueryTables::load(db)?;
+    let catalog_generation = catalog_generation(db, &tables)?;
+    let refs_available = refs_table_available(db, &tables)?;
+    let cursor_parts = decode_cursor(cursor, 1)?;
+
+    let total_matches = query_count(
+        db,
+        &format!(
+            r"
+            SELECT COUNT(*)
+            FROM {package_catalog}
+            WHERE source = $1 AND package = $2
+            ",
+            package_catalog = tables.package_catalog
+        ),
+        SqlParams::from_values([source.to_owned(), package.to_owned()]),
+    )
+    .context("failed to count catalog revisions")?;
+
+    let mut params = SqlParams::default();
+    let source_param = params.push(source.to_owned());
+    let package_param = params.push(package.to_owned());
+    let mut filters = vec![
+        format!("source = {source_param}"),
+        format!("package = {package_param}"),
+    ];
+    if let Some(parts) = cursor_parts {
+        let revision_param = params.push(parts[0].clone());
+        filters.push(format!("revision > {revision_param}"));
+    }
+    let limit_param = params.push((clamp_catalog_limit(limit) + 1) as i64);
+    let sql = format!(
+        r"
+        SELECT
+            revision,
+            revision_kind,
+            semver_major,
+            semver_minor,
+            semver_patch,
+            CAST(indexed_at AS VARCHAR) AS indexed_at,
+            embeddings_status,
+            CAST(row_counts AS VARCHAR) AS row_counts,
+            generation,
+            snapshot_id
+        FROM {package_catalog}
+        WHERE {where_clause}
+        ORDER BY revision
+        LIMIT {limit_param}
+        ",
+        package_catalog = tables.package_catalog,
+        where_clause = filters.join(" AND "),
+    );
+    let mut rows = collect_rows(db, &sql, params, |row| {
+        let semver_major: Option<i64> = row.get(2)?;
+        let semver_minor: Option<i64> = row.get(3)?;
+        let semver_patch: Option<i64> = row.get(4)?;
+        let row_counts_raw: Option<String> = row.get(7)?;
+        Ok(RevisionCatalogRow {
+            revision: row.get(0)?,
+            revision_kind: row.get(1)?,
+            semver: semver_string(semver_major, semver_minor, semver_patch),
+            indexed_at: row.get(5)?,
+            embeddings_status: row.get(6)?,
+            row_counts: parse_json_column(row_counts_raw.as_deref(), "row_counts")?,
+            generation: row.get(8)?,
+            snapshot_id: row.get(9)?,
+            refs: Vec::new(),
+        })
+    })
+    .context("failed to list catalog revisions")?;
+
+    if refs_available && !rows.is_empty() {
+        let refs_by_revision = revision_refs(db, &tables, source, package)?;
+        for row in &mut rows {
+            row.refs = refs_by_revision
+                .get(&row.revision)
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
+
+    let (truncated, next_cursor) =
+        trim_catalog_page(&mut rows, limit, |row| encode_cursor([row.revision.as_str()]));
+
+    Ok(CatalogPage {
+        level: CatalogLevel::Revisions,
+        rows,
+        total_matches,
+        truncated,
+        next_cursor,
+        catalog_generation,
+    })
+}
+
+pub fn list_tree_entries(
+    db: &Connection,
+    source: &str,
+    package: &str,
+    revision: &str,
+    path: Option<&str>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<CatalogPage<TreeCatalogEntry>> {
+    let tables = QueryTables::load(db)?;
+    let catalog_generation = catalog_generation(db, &tables)?;
+    let prefix = normalize_catalog_path(path);
+    let cursor_parts = decode_cursor(cursor, 1)?;
+    let sql = format!(
+        r"
+        WITH scoped AS (
+            SELECT
+                fm.path,
+                fm.node_ids,
+                CASE
+                    WHEN $4 = '' THEN fm.path
+                    WHEN fm.path = $4 THEN ''
+                    ELSE substr(fm.path, length($4) + 2)
+                END AS remainder
+            FROM {file_manifests} fm
+            WHERE fm.source = $1
+              AND fm.package = $2
+              AND fm.revision = $3
+              AND ($4 = '' OR fm.path = $4 OR starts_with(fm.path, $4 || '/'))
+              {published_filter}
+        ),
+        mapped AS (
+            SELECT
+                CASE
+                    WHEN contains(remainder, '/') THEN split_part(remainder, '/', 1)
+                    ELSE remainder
+                END AS name,
+                CASE
+                    WHEN contains(remainder, '/') THEN 'dir'
+                    ELSE 'file'
+                END AS kind,
+                COALESCE(array_length(node_ids), 0)::BIGINT AS symbol_count
+            FROM scoped
+            WHERE remainder <> ''
+        )
+        SELECT
+            name,
+            kind,
+            COUNT(*)::BIGINT AS file_count,
+            SUM(symbol_count)::BIGINT AS symbol_count
+        FROM mapped
+        GROUP BY name, kind
+        ORDER BY name, kind
+        ",
+        file_manifests = tables.file_manifests,
+        published_filter = tables.published_filter("fm")
+    );
+    let mut rows = collect_rows(
+        db,
+        &sql,
+        SqlParams::from_values([
+            source.to_owned(),
+            package.to_owned(),
+            revision.to_owned(),
+            prefix.clone(),
+        ]),
+        |row| {
+            let name: String = row.get(0)?;
+            let kind: String = row.get(1)?;
+            Ok(TreeCatalogEntry {
+                path: child_catalog_path(&prefix, &name),
+                name,
+                kind,
+                file_count: i64_to_usize(row.get(2)?, "file_count")?,
+                symbol_count: Some(i64_to_usize(row.get(3)?, "symbol_count")?),
+            })
+        },
+    )
+    .context("failed to list catalog tree entries")?;
+    let total_matches = rows.len();
+    if let Some(parts) = cursor_parts {
+        rows.retain(|row| row.name.as_str() > parts[0].as_str());
+    }
+    let (truncated, next_cursor) =
+        trim_catalog_page(&mut rows, limit, |row| encode_cursor([row.name.as_str()]));
+
+    Ok(CatalogPage {
+        level: CatalogLevel::Tree,
+        rows,
+        total_matches,
+        truncated,
+        next_cursor,
+        catalog_generation,
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "catalog list functions keep source/package/revision coordinates explicit"
+)]
+pub fn list_file_symbols(
+    db: &Connection,
+    source: &str,
+    package: &str,
+    revision: &str,
+    path: &str,
+    name_filter: Option<&str>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<CatalogPage<SymbolCatalogRow>> {
+    let tables = QueryTables::load(db)?;
+    let catalog_generation = catalog_generation(db, &tables)?;
+    let cursor_parts = decode_cursor(cursor, 2)?;
+    let path = normalize_catalog_path(Some(path));
+
+    let mut count_params = SqlParams::default();
+    let source_param = count_params.push(source.to_owned());
+    let package_param = count_params.push(package.to_owned());
+    let revision_param = count_params.push(revision.to_owned());
+    let path_param = count_params.push(path.clone());
+    let mut count_filters = vec![
+        format!("n.source = {source_param}"),
+        format!("n.package = {package_param}"),
+        format!("n.revision = {revision_param}"),
+        format!("n.file_path = {path_param}"),
+    ];
+    if let Some(name_filter) = name_filter {
+        let name_param = count_params.push(name_filter.to_owned());
+        count_filters.push(format!(
+            "(contains(n.entity_name, {name_param}) OR contains(n.qualified_name, {name_param}))"
+        ));
+    }
+    let count_sql = format!(
+        r"
+        SELECT COUNT(*)
+        FROM {nodes} n
+        WHERE {where_clause}
+        {published_filter}
+        ",
+        nodes = tables.nodes,
+        where_clause = count_filters.join(" AND "),
+        published_filter = tables.published_filter("n")
+    );
+    let total_matches =
+        query_count(db, &count_sql, count_params).context("failed to count catalog symbols")?;
+
+    let mut params = SqlParams::default();
+    let source_param = params.push(source.to_owned());
+    let package_param = params.push(package.to_owned());
+    let revision_param = params.push(revision.to_owned());
+    let path_param = params.push(path);
+    let mut filters = vec![
+        format!("n.source = {source_param}"),
+        format!("n.package = {package_param}"),
+        format!("n.revision = {revision_param}"),
+        format!("n.file_path = {path_param}"),
+    ];
+    if let Some(name_filter) = name_filter {
+        let name_param = params.push(name_filter.to_owned());
+        filters.push(format!(
+            "(contains(n.entity_name, {name_param}) OR contains(n.qualified_name, {name_param}))"
+        ));
+    }
+    if let Some(parts) = cursor_parts {
+        let line_start: i64 = parts[0]
+            .parse()
+            .with_context(|| format!("invalid catalog cursor line: {}", parts[0]))?;
+        let line_param = params.push(line_start);
+        let id_param = params.push(parts[1].clone());
+        filters.push(format!(
+            "(n.line_start > {line_param} OR (n.line_start = {line_param} AND n.stable_symbol_id > {id_param}))"
+        ));
+    }
+    let limit_param = params.push((clamp_catalog_limit(limit) + 1) as i64);
+    let sql = format!(
+        r"
+        SELECT
+            n.entity_name,
+            n.qualified_name,
+            n.symbol_kind,
+            n.line_start,
+            n.line_end,
+            n.package,
+            n.revision,
+            n.stable_symbol_id
+        FROM {nodes} n
+        WHERE {where_clause}
+        {published_filter}
+        ORDER BY n.line_start, n.stable_symbol_id
+        LIMIT {limit_param}
+        ",
+        nodes = tables.nodes,
+        where_clause = filters.join(" AND "),
+        published_filter = tables.published_filter("n")
+    );
+    let mut rows = collect_rows(db, &sql, params, |row| {
+        let qualified_name: String = row.get(1)?;
+        let entity_name: String = row.get(0)?;
+        let selector_name = if qualified_name.is_empty() {
+            entity_name.as_str()
+        } else {
+            qualified_name.as_str()
+        };
+        let package: String = row.get(5)?;
+        let revision: String = row.get(6)?;
+        let selector = format!("pkg:{package}@{revision}::{selector_name}");
+        Ok(SymbolCatalogRow {
+            entity_name,
+            qualified_name,
+            symbol_kind: row.get(2)?,
+            line_range: [
+                i64_to_usize(row.get(3)?, "line_start")?,
+                i64_to_usize(row.get(4)?, "line_end")?,
+            ],
+            next: catalog_symbol_next_tools(&selector),
+            selector,
+            stable_symbol_id: row.get(7)?,
+        })
+    })
+    .context("failed to list catalog file symbols")?;
+    let (truncated, next_cursor) = trim_catalog_page(&mut rows, limit, |row| {
+        let line_start = row.line_range[0].to_string();
+        encode_cursor([line_start.as_str(), row.stable_symbol_id.as_str()])
+    });
+
+    Ok(CatalogPage {
+        level: CatalogLevel::Symbols,
+        rows,
+        total_matches,
+        truncated,
+        next_cursor,
+        catalog_generation,
+    })
+}
+
+pub(crate) fn catalog_file_exists(
+    db: &Connection,
+    source: &str,
+    package: &str,
+    revision: &str,
+    path: &str,
+) -> Result<bool> {
+    let tables = QueryTables::load(db)?;
+    let path = normalize_catalog_path(Some(path));
+    let exists: i64 = db
+        .query_row(
+            &format!(
+                r"
+                SELECT COUNT(*)
+                FROM {file_manifests} fm
+                WHERE fm.source = $1
+                  AND fm.package = $2
+                  AND fm.revision = $3
+                  AND fm.path = $4
+                  {published_filter}
+                ",
+                file_manifests = tables.file_manifests,
+                published_filter = tables.published_filter("fm")
+            ),
+            params![source, package, revision, path],
+            |row| row.get(0),
+        )
+        .context("failed to inspect catalog file manifest")?;
+    Ok(exists > 0)
 }
 
 pub fn read_symbol(
@@ -1183,6 +1768,148 @@ fn line_starts(source_text: &str) -> Vec<usize> {
     starts
 }
 
+fn clamp_catalog_limit(limit: usize) -> usize {
+    limit.clamp(1, 200)
+}
+
+fn catalog_generation(db: &Connection, tables: &QueryTables) -> Result<Option<i64>> {
+    optional_no_rows(
+        db.query_row(
+            &format!("SELECT MAX(generation) FROM {}", tables.package_catalog),
+            [],
+            |row| row.get(0),
+        ),
+        "failed to read catalog generation",
+    )
+    .map(Option::flatten)
+}
+
+fn refs_table_available(db: &Connection, tables: &QueryTables) -> Result<bool> {
+    if tables.refs == "refs" && !table_exists(db, "refs")? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn normalize_catalog_path(path: Option<&str>) -> String {
+    path.unwrap_or("")
+        .trim()
+        .trim_matches('/')
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn child_catalog_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
+fn semver_string(major: Option<i64>, minor: Option<i64>, patch: Option<i64>) -> Option<String> {
+    Some(format!("{}.{}.{}", major?, minor?, patch?))
+}
+
+fn parse_json_column(raw: Option<&str>, field: &'static str) -> duckdb::Result<Value> {
+    let Some(raw) = raw else {
+        return Ok(Value::Null);
+    };
+    serde_json::from_str(raw).map_err(|error| conversion_error(field, error))
+}
+
+fn catalog_symbol_next_tools(selector: &str) -> Vec<CatalogNextTool> {
+    [
+        "external_code_read",
+        "external_code_callers",
+        "external_code_callees",
+    ]
+    .into_iter()
+    .map(|tool| CatalogNextTool {
+        tool: tool.to_owned(),
+        selector: selector.to_owned(),
+    })
+    .collect()
+}
+
+fn revision_refs(
+    db: &Connection,
+    tables: &QueryTables,
+    source: &str,
+    package: &str,
+) -> Result<BTreeMap<String, Vec<RevisionRefRow>>> {
+    let sql = format!(
+        r"
+        SELECT ref_name, revision, CAST(updated_at AS VARCHAR) AS updated_at
+        FROM {refs}
+        WHERE source = $1 AND package = $2
+        ORDER BY revision, ref_name
+        ",
+        refs = tables.refs
+    );
+    let refs = collect_rows(
+        db,
+        &sql,
+        SqlParams::from_values([source.to_owned(), package.to_owned()]),
+        |row| {
+            Ok(RevisionRefRow {
+                ref_name: row.get(0)?,
+                revision: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        },
+    )
+    .context("failed to list catalog refs")?;
+
+    let mut refs_by_revision = BTreeMap::<String, Vec<RevisionRefRow>>::new();
+    for reference in refs {
+        refs_by_revision
+            .entry(reference.revision.clone())
+            .or_default()
+            .push(reference);
+    }
+    Ok(refs_by_revision)
+}
+
+fn encode_cursor<const N: usize>(parts: [&str; N]) -> String {
+    parts
+        .into_iter()
+        .map(encode_uri_component)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn decode_cursor(cursor: Option<&str>, expected_parts: usize) -> Result<Option<Vec<String>>> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    let parts = cursor
+        .split('/')
+        .map(decode_uri_component)
+        .collect::<Vec<_>>();
+    if parts.len() != expected_parts || parts.iter().any(|part| part.is_empty()) {
+        bail!("invalid catalog cursor");
+    }
+    Ok(Some(parts))
+}
+
+fn trim_catalog_page<T, F>(rows: &mut Vec<T>, limit: usize, cursor_for: F) -> (bool, Option<String>)
+where
+    F: FnOnce(&T) -> String,
+{
+    let limit = clamp_catalog_limit(limit);
+    let truncated = rows.len() > limit;
+    if truncated {
+        rows.truncate(limit);
+    }
+    let next_cursor = if truncated {
+        rows.last().map(cursor_for)
+    } else {
+        None
+    };
+    (truncated, next_cursor)
+}
+
 fn query_count(db: &Connection, sql: &str, params: SqlParams) -> Result<usize> {
     let mut stmt = db.prepare(sql).context("failed to prepare count query")?;
     let param_refs = params.refs();
@@ -1214,16 +1941,21 @@ fn optional_no_rows<T>(result: duckdb::Result<T>, context: &'static str) -> Resu
 }
 
 fn i64_to_usize(value: i64, field: &'static str) -> duckdb::Result<usize> {
-    usize::try_from(value).map_err(|error| {
-        duckdb::Error::FromSqlConversionFailure(
-            0,
-            duckdb::types::Type::BigInt,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{field} value {value} did not fit usize: {error}"),
-            )),
-        )
-    })
+    usize::try_from(value).map_err(|error| conversion_error(field, error))
+}
+
+fn conversion_error(
+    field: &'static str,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> duckdb::Error {
+    duckdb::Error::FromSqlConversionFailure(
+        0,
+        duckdb::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{field} value could not be converted: {error}"),
+        )),
+    )
 }
 
 impl From<&CodeCandidate> for ResolvedNode {
