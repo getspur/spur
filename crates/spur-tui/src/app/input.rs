@@ -255,6 +255,10 @@ impl App {
                         .loop_browser
                         .as_mut()
                         .and_then(|view| view.handle_key(key, &ctx)),
+                    ViewId::ExploreBrowser => self
+                        .explore_browser
+                        .as_mut()
+                        .and_then(|view| view.handle_key(key)),
                     ViewId::IssueBrowser => self
                         .issue_browser
                         .as_mut()
@@ -364,6 +368,7 @@ impl App {
                     ViewId::PlanInspector(_) => {}
                     ViewId::PlanBrowser => {}
                     ViewId::LoopBrowser => {}
+                    ViewId::ExploreBrowser => {}
                     ViewId::IssueBrowser => {}
                     ViewId::Insights => {}
                     #[cfg(feature = "markdown")]
@@ -558,6 +563,7 @@ impl App {
             ViewId::PlanInspector(_) => {}
             ViewId::PlanBrowser => {}
             ViewId::LoopBrowser => {}
+            ViewId::ExploreBrowser => {}
             ViewId::IssueBrowser => {
                 if let Some(ref mut browser) = self.issue_browser {
                     if browser.issue_detail_visible() {

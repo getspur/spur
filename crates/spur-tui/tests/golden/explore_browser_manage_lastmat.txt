@@ -1,0 +1,30 @@
+Explore  [Skills]  Agents   Manage
+never synced
+┌Manage · Last materialization─────────────────────────────────────────────────────────────────────┐
+│Pool   [Last materialization]                                                                     │
+│newest first · last 20 dispatches                                                                 │
+│                                                                                                  │
+│> 22:14 · codex · delegation-new · 2 skills: review-helper, deploy-helper                         │
+│22:13 · claude · delegation-old · 1 skill: older-helper                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+j/k move  l lens  x remove  m browse  r reload  Esc back
