@@ -10979,6 +10979,7 @@ dependencies = [
  "spur-license",
  "spur-mcp",
  "spur-pm",
+ "spur-telemetry",
  "spur-test-madsim",
  "spur-worktree",
  "tempfile",
