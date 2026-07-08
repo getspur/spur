@@ -408,6 +408,11 @@ impl Orchestrator {
         brain: &mut BrainSession,
         opts: Vec<spur_acp::SessionConfigOption>,
     ) {
+        if let Some(server) = brain.mcp_server.as_ref() {
+            server.set_brain_model(
+                crate::telemetry::current_model_config_value(&opts).map(str::to_string),
+            );
+        }
         brain.config_options = opts.clone();
         self.emit(SpurEvent::now(SpurEventBody::CommandRegistryDirty {
             session: brain.spur_session_id.clone(),
