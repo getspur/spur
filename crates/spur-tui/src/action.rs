@@ -28,6 +28,10 @@ pub enum IssueAction {
 
 /// Actions that flow between components and the app controller.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transient UI action/payload enums; instances are short-lived and never stored in bulk, boxing would churn every construction site"
+)]
 pub enum Action {
     Quit,
     NavigateTo(ViewId),
@@ -322,6 +326,7 @@ pub enum ViewId {
     IssueBrowser,
     PlanBrowser,
     LoopBrowser,
+    ExploreBrowser,
     SessionDetail(SessionId),
     SessionPicker,
     PlanInspector(SessionId),
