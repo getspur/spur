@@ -24,6 +24,7 @@ fn sample_tasks() -> Vec<PlanTask> {
         task_id: "task-1".into(),
         agent: "codex".into(),
         profile: None,
+        skills: None,
         model: None,
         effort: None,
         config_overrides: None,

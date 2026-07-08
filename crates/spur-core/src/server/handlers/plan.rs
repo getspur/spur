@@ -1080,6 +1080,19 @@ impl McpCallbackServer {
             }
         };
 
+        for task in &tasks {
+            if let Some(skills) = task.skills.as_deref() {
+                if let Err(error) =
+                    crate::explore::validate_skill_names(self.repo_root.as_deref(), skills)
+                {
+                    return JsonRpcResponse::invalid_params(
+                        id,
+                        format!("task '{}': {error}", task.task_id),
+                    );
+                }
+            }
+        }
+
         let auto_serialized = match crate::plan::submit_plan_normalize_tasks(&mut tasks) {
             Ok(overlaps) => overlaps,
             Err(e) => return JsonRpcResponse::invalid_params(id, e),
