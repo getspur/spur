@@ -140,7 +140,7 @@ fn yaml_escape_scalar(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn render_markdown_profile(
+pub(crate) fn render_markdown_profile(
     rel_path: String,
     mut unmarked_contents: String,
     profile_name: &str,
@@ -191,7 +191,7 @@ fn extract_marker_and_unmarked(
     }
 }
 
-fn extract_markdown_marker(existing: &str) -> Option<(Marker, String)> {
+pub(crate) fn extract_markdown_marker(existing: &str) -> Option<(Marker, String)> {
     let mut line_start = 0usize;
     for line in existing.split_inclusive('\n') {
         let line_end = line_start + line.len();
