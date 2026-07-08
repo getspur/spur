@@ -102,6 +102,7 @@ pub(crate) async fn handle_delegations(
             id: request_id,
             agent,
             profile,
+            skills,
             model,
             effort,
             config_overrides,
@@ -341,6 +342,7 @@ pub(crate) async fn handle_delegations(
                 r = execute_delegation(
                     agent,
                     profile,
+                    skills,
                     model,
                     effort,
                     config_overrides,
@@ -514,6 +516,7 @@ mod tests {
                 id: spur_acp::domain::delegation::DelegationId(uuid::Uuid::new_v4().to_string()),
                 agent: agent.to_string(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
