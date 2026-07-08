@@ -5455,6 +5455,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn plan_task_skills_roundtrip_and_default() {
+        let task: PlanTask = serde_json::from_str(
+            r#"{"task_id":"t1","agent":"codex","task":"do","skills":["clean-a"]}"#,
+        )
+        .unwrap();
+        assert_eq!(task.skills, Some(vec!["clean-a".to_string()]));
+
+        let none: PlanTask =
+            serde_json::from_str(r#"{"task_id":"t1","agent":"codex","task":"do"}"#).unwrap();
+        assert!(none.skills.is_none());
+        assert!(!serde_json::to_string(&none).unwrap().contains("skills"));
+    }
+
     fn test_materializer() -> Arc<crate::outcome_materializer::OutcomeMaterializer> {
         Arc::new(crate::outcome_materializer::OutcomeMaterializer::new(
             Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
