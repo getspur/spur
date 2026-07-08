@@ -80,9 +80,36 @@ branch. Mitigations tracked in the follow-up issue (local-fallback opt-in /
 `SPUR_NO_LOCAL_FALLBACK=1` in worker env, disk preflight, dead-worktree
 `target/` reaping).
 
+## Addendum 2 (same day): exp2-8 `preview_task_base` / real-dispatch discrepancy
+
+**Plan:** same run, task `exp2-8` (docs/superpowers/plans/2026-07-08-explore-phase2.md, plan_id `89864ab9-1d75-44cb-b534-cd935214fdb8`). Final recorded state: `status: failed`, `attempt: 1/3`, `history_count: 2`.
+
+### Observed
+
+- `exp2-8` depends on `exp2-6` and `exp2-7`, two parallel sibling tasks that both edited the same region of `crates/spur-tui/src/views/explore/{mod,gate,manage}.rs`. This was resolved brain-side by neutralizing `exp2-6`'s overlay — pointing its worker branch back at its own base commit (an empty, zero-diff no-op) — so the cumulative overlay chain feeding `exp2-8` wouldn't double-apply conflicting hunks (see main body above re: overlay assembly being a sequential cherry-pick chain over *all approved predecessors*, not just declared `depends_on`).
+- Even after that fix, `retry_task` dispatch for `exp2-8` synchronously hit `blocked_on_setup_conflict` on its first two attempts.
+- Before spending the third and final attempt, `preview_task_base` was called three separate times to sanity-check the task. All three returned `conflict: null` with a valid `predicted_base_oid` — i.e., predicted clean.
+- Each time, immediately issuing the real `retry_task` dispatch re-hit an *identical* `blocked_on_setup_conflict`, not a new or different one.
+- Timing/staleness was ruled out as the explanation: `history_count` incremented *within* the `retry_task` call itself on each attempt, confirming the dispatch was evaluated synchronously against current state, not a stale snapshot a later reconciler tick would have caught up to. A pure timing-lag theory would predict the *next* `preview_task_base` call (issued after the failed dispatch, against now-current state) would start reflecting the conflict — it never did, across three rounds.
+
+### Resolution taken
+
+With 2 of 3 attempts already burned on the identical failure and `preview_task_base` demonstrated unreliable for this task, retrying blind risked burning the last attempt on a fourth repeat. Per explicit instruction, automatic dispatch was abandoned instead: `submit_plan_mutation` with op `abandon_task` (required fields `issue_id`, `reason`, `cascade_descendants` — discovered iteratively via "missing field" error responses, not documented up front). The brain then authored the task's deliverable directly — three small e2e artifact files (`scripts/e2e/shell-use/journeys/explore-browser-open.sh`, `scripts/e2e/vhs/tapes/explore-browser-open.tape`, plus registration entries) — verified beforehand not to touch any of the files in the `exp2-6`/`exp2-7` conflict region, and landed it through the same manual integration-branch process as the rest of the plan.
+
+### Root-cause status
+
+Not traced to code — flagging as hypothesis only, consistent with Defect 1 above. Given the independently-confirmed fact that real overlay assembly at dispatch time applies *all approved predecessor tasks*, not just those in the task's declared `depends_on` list (confirmed earlier in this same plan run: rewriting a task's `depends_on` via `modify_task_spec` had zero effect on `preview_task_base`'s conflict result for a related task), the leading hypothesis is that `preview_task_base`'s conflict-prediction walks only the *declared* `depends_on` graph, while the real dispatch/setup path replays the true cumulative *approved-predecessor* overlay chain. If so, any task whose real conflict originates from an approved-but-undeclared predecessor — exactly `exp2-8`'s relationship to `exp2-6`/`exp2-7` — would predict clean via preview while failing identically at real dispatch, matching the observed symptom exactly. Follow-up: compare the graph walk in `preview_task_base`'s implementation against the overlay extractor used at real dispatch/setup time.
+
+### Why this matters
+
+`preview_task_base` is the only tool available to the brain for sanity-checking a task *before* spending a retry attempt. If it can disagree with the real path specifically for the conflict class most likely to appear late in a plan (siblings resolved via empty-overlay tricks, i.e. approved-but-undeclared predecessors), it is actively unsafe to trust for that pattern and will silently burn attempts that could otherwise be preserved.
+
 ## Lessons / follow-ups
 
 - [ ] Trace and fix the branch-ref update gap (Defect 1) in the completion/teardown path.
 - [ ] Add a clean-tree guard or HEAD-based snapshot to `submit_plan` (Defect 2).
 - [ ] `merge_plan` should treat an empty overlay (tip == snapshot) as "nothing to pick, continue" rather than a conflict, and populate `files` in conflict payloads.
 - [ ] Reviewer habit worth keeping: verify each task's branch tip against the artifact diff before approving; repair refs *before* approval so the reconciler dispatches dependents with correct overlays.
+- [ ] Trace `preview_task_base`'s conflict-prediction graph walk vs. the real dispatch/setup overlay extractor (Addendum 2) and confirm whether the former is scoped to declared `depends_on` while the latter uses full approved-predecessor history; align them so preview is trustworthy for empty-overlay-resolved siblings.
+- [ ] Surface `abandon_task`'s required fields (`issue_id`, `reason`, `cascade_descendants`) in tool schema/docs rather than requiring iterative trial-and-error to discover them.
+- [ ] Consider warning brain-side when a task's `history_count` is within one of `max_attempts` and recent failures are identical — nudge toward manual intervention instead of a blind retry.
