@@ -65,6 +65,10 @@ pub struct DelegateToWorkerInput {
     #[schemars(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Explore pool skill names to materialize into the worker worktree before the session starts.
+    #[schemars(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
     /// Override the worker's model (config-option value id, e.g. "gpt-5-codex"). Fail-soft if the agent rejects it.
     #[schemars(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
