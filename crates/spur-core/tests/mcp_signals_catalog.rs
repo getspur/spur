@@ -62,6 +62,7 @@ const EXPECTED_BRAIN_TOOLS: &[&str] = &[
     "submit_plan_mutation",
     "report_signal",
     "report_progress",
+    "external_catalog",
     "external_code_search",
     "external_code_read",
     "external_code_callers",
