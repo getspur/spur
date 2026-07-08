@@ -457,6 +457,80 @@ mod agent_profile_validation_tests {
         }
     }
 
+    fn manifest_item(name: &str, verdict: &str) -> crate::explore::pool::ManifestItem {
+        crate::explore::pool::ManifestItem {
+            name: name.to_string(),
+            kind: crate::explore::catalog::ItemKind::Skill,
+            source: "acme/skills".to_string(),
+            rel_path: format!("skills/{name}"),
+            pinned_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            content_sha256: "0".repeat(64),
+            license: None,
+            gate: crate::explore::pool::GateRecord {
+                verdict: verdict.to_string(),
+                justification: None,
+                decided_at_epoch: None,
+            },
+        }
+    }
+
+    fn write_manifest(root: &std::path::Path) {
+        crate::explore::pool::Manifest {
+            sources: vec![],
+            items: vec![manifest_item("blocked-skill", "blocked")],
+        }
+        .save(root)
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delegate_to_worker_rejects_unknown_or_ungated_skill() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(tmp.path());
+
+        let brain_session = BrainSessionId::new(SessionId("brain".into()));
+        let (mut server, mut channel) = super::McpCallbackServer::new(
+            Some(&brain_session),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
+        );
+        server.set_repo_root(tmp.path().to_path_buf());
+        super::install_core_delegation_registry(&mut server);
+
+        for skill in ["not-in-pool", "blocked-skill"] {
+            let response = server
+                .__test_call_tool(
+                    "delegate_to_worker",
+                    json!({
+                        "agent": "claude-code-acp",
+                        "skills": [skill],
+                        "task": "review this"
+                    }),
+                )
+                .await;
+
+            assert_eq!(response["error"]["code"], -32602);
+            let message = response["error"]["message"]
+                .as_str()
+                .expect("error message");
+            assert!(
+                message.contains(skill),
+                "error should name the skill {skill}: {message}"
+            );
+            assert!(
+                message.contains("spur explore"),
+                "error should suggest spur explore: {message}"
+            );
+            assert!(
+                channel.request_rx.try_recv().is_err(),
+                "invalid skill must not dispatch"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn delegate_to_worker_rejects_malformed_managed_profile() {
         let tmp = tempfile::TempDir::new().unwrap();
