@@ -30,6 +30,10 @@ use super::registry::CommandRegistry;
 
 /// What the controller should do with an Enter-submitted InputBar.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transient UI action/payload enums; instances are short-lived and never stored in bulk, boxing would churn every construction site"
+)]
 pub enum SubmitDecision {
     Send {
         blocks: Vec<ContentBlock>,
