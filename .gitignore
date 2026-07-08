@@ -41,6 +41,8 @@ __pycache__/
 .spur/session_metadata.json
 **/.spur/session_metadata.json
 **/.spur/session_metadata.json.tmp
+**/.spur/analyst*/**
+**/.spur/analyst-overlays/**
 .spur/bot/
 .spur/keys/
 # Ephemeral build/install scratch (cargo target dirs from ext harnesses, etc.)
