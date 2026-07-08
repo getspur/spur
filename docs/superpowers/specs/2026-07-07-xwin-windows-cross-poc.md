@@ -158,10 +158,12 @@ an alternative — both deliberately out of POC scope):
 - **Concurrent-dispatch sync races** (cloud-build-wide, observed during the
   first `cargo xtask dist` validation): all dispatches for a given
   namespace/worktree sync into ONE shared remote tree, last sync wins. The
-  build queue serializes cargo invocations but not the content syncs, so a
-  concurrent session (or CI) dispatching from an older tree state can
-  regress the remote tree between your sync and your build — the dist
-  windows stage once compiled pre-gate sources this way. Re-running the
-  failed platform (`cargo xtask dist --platforms windows`) re-syncs and
-  recovers; a real fix would scope syncs like `run` does (per-invocation
+  pool queue now spreads excess callers across builders after each builder's
+  three slots are full, which reduces queue waits but does not by itself make
+  the shared sync tree per-invocation. A concurrent session (or CI) dispatching
+  from an older tree state can still regress a given builder's remote tree
+  between your sync and your build — the dist windows stage once compiled
+  pre-gate sources this way. Re-running the failed platform
+  (`cargo xtask dist --platforms windows`) re-syncs and recovers; a real fix
+  would scope syncs like `run` does (per-invocation
   private copies).
