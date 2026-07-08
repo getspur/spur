@@ -1014,6 +1014,15 @@ impl Reconciler {
             agent_fallback,
             now,
         );
+        tracing::debug!(
+            agent,
+            "telemetry worker_dispatched uses fixed worker model label"
+        );
+        spur_telemetry::emit!(spur_telemetry::tier2_events::WorkerDispatched {
+            worker_model: spur_telemetry::tier1_events::ModelName::Other("worker"),
+            skill_used: spur_telemetry::tier2_events::SkillName::Other,
+            attempt_num: 0,
+        });
     }
 
     async fn record_skipped(&self, plan_id: Option<&str>, task_id: &str, reason: SkipReason) {
