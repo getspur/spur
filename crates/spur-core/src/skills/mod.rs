@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-mod frontmatter;
+pub(crate) mod frontmatter;
 
 pub mod adapters;
 pub mod installer;
