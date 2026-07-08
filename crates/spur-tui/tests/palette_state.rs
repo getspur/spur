@@ -62,6 +62,37 @@ fn set_query_reranks_by_fuzzy_score_and_drops_unmatched() {
 }
 
 #[test]
+fn set_query_matches_small_label_typos() {
+    let mut s = PaletteState::new();
+    s.push_raw(vec![
+        mk(PaletteKind::View, "Plans"),
+        mk(PaletteKind::View, "Sessions"),
+        mk(PaletteKind::Command, "/reset"),
+    ]);
+
+    s.set_query("sesions");
+    assert_eq!(s.ranked_len(), 1);
+    assert_eq!(s.nth_ranked(0).unwrap().label, "Sessions");
+
+    s.set_query("seesions");
+    assert_eq!(s.ranked_len(), 1);
+    assert_eq!(s.nth_ranked(0).unwrap().label, "Sessions");
+}
+
+#[test]
+fn exact_label_match_ranks_above_typo_tolerant_match() {
+    let mut s = PaletteState::new();
+    s.push_raw(vec![
+        mk(PaletteKind::View, "Plnas"),
+        mk(PaletteKind::View, "Plans"),
+    ]);
+
+    s.set_query("plans");
+    let labels: Vec<&str> = s.iter_ranked().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, vec!["Plans", "Plnas"]);
+}
+
+#[test]
 fn cursor_up_down_stay_in_bounds_and_wrap_disabled() {
     let mut s = PaletteState::new();
     s.push_raw(vec![
