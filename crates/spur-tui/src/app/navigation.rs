@@ -15,6 +15,7 @@ impl App {
             self.push_history(self.current_view.clone());
         }
         self.current_view = view;
+        self.emit_view_opened();
         self.dirty = true;
     }
 
@@ -49,7 +50,11 @@ impl App {
         let Some(next) = next else {
             return;
         };
+        let changed = self.current_view != next;
         self.current_view = next;
+        if changed {
+            self.emit_view_opened();
+        }
         match leaving {
             #[cfg(feature = "markdown")]
             ViewId::MermaidOverlay(_) => {
@@ -65,5 +70,32 @@ impl App {
 
     pub fn current_view(&self) -> &ViewId {
         &self.current_view
+    }
+
+    pub(super) fn telemetry_view_name_for(view: &ViewId) -> spur_telemetry::tier2_events::ViewName {
+        use spur_telemetry::tier2_events::ViewName;
+
+        match view {
+            ViewId::Dashboard => ViewName::Dashboard,
+            ViewId::IssueBrowser => ViewName::IssueBrowser,
+            ViewId::PlanBrowser => ViewName::PlanBrowser,
+            ViewId::SessionDetail(_) => ViewName::SessionDetail,
+            ViewId::PlanInspector(_) => ViewName::PlanInspector,
+            ViewId::AgentConfigBrowser { .. }
+            | ViewId::LoopBrowser
+            | ViewId::ExploreBrowser
+            | ViewId::SessionPicker
+            | ViewId::Insights => ViewName::Other,
+            #[cfg(feature = "markdown")]
+            ViewId::MermaidOverlay(_) => ViewName::Other,
+        }
+    }
+
+    fn emit_view_opened(&self) {
+        let event = spur_telemetry::tier2_events::TuiViewOpened {
+            view_name: Self::telemetry_view_name_for(&self.current_view),
+        };
+        let _ = &event;
+        spur_telemetry::emit!(event);
     }
 }
