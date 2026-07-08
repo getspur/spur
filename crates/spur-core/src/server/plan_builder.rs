@@ -170,6 +170,11 @@ pub async fn emit_plan_submit_audit(
             "PlanSubmit audit comment emission failed (graph is persisted; audit missing): {e}"
         );
     }
+    spur_telemetry::emit!(spur_telemetry::tier2_events::PlanCreated {
+        task_count: sg.task_map.len() as u32,
+        brain_model: spur_telemetry::tier1_events::ModelName::Other("unknown"),
+        duration_ms: 0,
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
