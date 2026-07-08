@@ -299,6 +299,20 @@ mod tests {
     }
 
     #[test]
+    fn render_with_empty_prefix_uses_bare_id() {
+        let skill = sample_skill();
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let rf = Adapter::Codex.render_with_prefix(&skill, &root, "");
+        assert_eq!(
+            rf.path,
+            std::path::PathBuf::from("/tmp/repo/.codex/skills/tdd/SKILL.md"),
+        );
+        let s = std::str::from_utf8(&rf.bytes).unwrap();
+        assert!(s.starts_with("---\nname: tdd\ndescription: \"Use for TDD\"\n---\n"));
+        assert!(s.contains("<!-- SPUR-MANAGED v=1 skill=tdd sha256="));
+    }
+
+    #[test]
     fn kiro_steering_pointer_renders_once() {
         let root = std::path::PathBuf::from("/tmp/repo");
         let rf = render_kiro_steering_pointer(&root);

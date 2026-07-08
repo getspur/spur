@@ -1,6 +1,8 @@
 pub mod apply;
 pub mod catalog;
 pub mod gate;
+#[cfg(test)]
+pub mod materialize;
 pub mod pool;
 pub mod sync;
 
