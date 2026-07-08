@@ -264,6 +264,7 @@ pub struct PersistPlanAsEpicInput {
     pub epic_body: Option<String>,
     pub epic_labels: Vec<String>,
     pub brain_session_id: BrainSessionId,
+    pub brain_model: Option<String>,
     pub execution_mode: String,
     pub precomputed_auto_serialized: Option<Vec<SiblingOverlap>>,
     pub repo_root: Option<std::path::PathBuf>,
@@ -414,6 +415,7 @@ pub async fn persist_plan_as_epic(
                 execution_mode: Some(input.execution_mode.as_str()),
                 brain_session_id: Some(input.brain_session_id.as_session_id()),
                 explicit_base: input.base.as_ref(),
+                brain_model: input.brain_model.as_deref(),
             },
         )
         .await;
