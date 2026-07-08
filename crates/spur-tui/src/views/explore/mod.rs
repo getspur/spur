@@ -13,7 +13,8 @@ use spur_acp::SpurEvent;
 use spur_core::explore::{
     apply::{self, ApplyOutcome},
     catalog::{Catalog, CatalogEntry, ItemKind},
-    pool::{pool_dir, Manifest},
+    materialize::MaterializationRecord,
+    pool::{pool_dir, Manifest, StatusReport},
 };
 
 use crate::action::{Action, ViewId};
@@ -51,12 +52,14 @@ pub struct ExploreBrowserView {
     pub(crate) load_error: Option<String>,
     pub(crate) gate: gate::GateState,
     pub(crate) apply_log: Option<ApplyOutcome>,
+    pub(crate) cached_status: Option<StatusReport>,
+    pub(crate) cached_materializations: Option<Vec<MaterializationRecord>>,
 }
 
 impl ExploreBrowserView {
     pub fn new(repo_root: PathBuf) -> Self {
         let (catalog, manifest, load_error) = load_state(&repo_root);
-        Self {
+        let mut view = Self {
             repo_root,
             tab: ExploreTab::Skills,
             stage: ExploreStage::Browse,
@@ -69,7 +72,11 @@ impl ExploreBrowserView {
             load_error,
             gate: gate::GateState::default(),
             apply_log: None,
-        }
+            cached_status: None,
+            cached_materializations: None,
+        };
+        view.refresh_manage_cache();
+        view
     }
 
     pub fn visible_entries(&self) -> Vec<&CatalogEntry> {
@@ -136,10 +143,12 @@ impl ExploreBrowserView {
     }
 
     fn reload(&mut self) {
+        self.invalidate_manage_cache();
         let (catalog, manifest, load_error) = load_state(&self.repo_root);
         self.catalog = catalog;
         self.manifest = manifest;
         self.load_error = load_error;
+        self.refresh_manage_cache();
         self.clamp_selection();
         self.clamp_manage_selection();
     }
@@ -202,6 +211,7 @@ impl ExploreBrowserView {
             Ok(outcome) => {
                 self.apply_log = Some(outcome);
                 self.manifest = Manifest::load(&self.repo_root).unwrap_or_default();
+                self.invalidate_manage_cache();
                 self.stage = ExploreStage::Browse;
                 self.gate = gate::GateState::default();
                 self.starred.clear();
