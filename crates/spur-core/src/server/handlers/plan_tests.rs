@@ -847,6 +847,32 @@ mod plan_handler_mcp_tests {
         (Arc::new(server), mock_pm)
     }
 
+    fn manifest_item(name: &str, verdict: &str) -> crate::explore::pool::ManifestItem {
+        crate::explore::pool::ManifestItem {
+            name: name.to_string(),
+            kind: crate::explore::catalog::ItemKind::Skill,
+            source: "acme/skills".to_string(),
+            rel_path: format!("skills/{name}"),
+            pinned_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            content_sha256: "0".repeat(64),
+            license: None,
+            gate: crate::explore::pool::GateRecord {
+                verdict: verdict.to_string(),
+                justification: None,
+                decided_at_epoch: None,
+            },
+        }
+    }
+
+    fn write_manifest(root: &std::path::Path) {
+        crate::explore::pool::Manifest {
+            sources: vec![],
+            items: vec![manifest_item("blocked-skill", "blocked")],
+        }
+        .save(root)
+        .unwrap();
+    }
+
     async fn create_epic(
         pm: &dyn crate::plan::PmLike,
         plan_id: &str,
@@ -1168,6 +1194,49 @@ mod plan_handler_mcp_tests {
             .expect("persist_as_epic=false must be rejected");
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, PERSIST_AS_EPIC_FALSE_REMOVED_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn submit_plan_rejects_unknown_or_ungated_task_skill() {
+        let (dir, _workspace, server, pm) = new_beads_server().await;
+        write_manifest(dir.path());
+
+        for skill in ["not-in-pool", "blocked-skill"] {
+            let response = server
+                .handle_submit_plan(
+                    serde_json::Value::from(1),
+                    json!({
+                        "epic_title": "Skill plan",
+                        "tasks": [{
+                            "task_id": "A",
+                            "agent": "codex",
+                            "task": "Implement A",
+                            "skills": [skill]
+                        }]
+                    }),
+                )
+                .await;
+
+            let error = response.error.expect("invalid skill must be rejected");
+            assert_eq!(error.code, -32602);
+            assert!(
+                error.message.contains("task 'A'"),
+                "error must identify the task_id, got {:?}",
+                error.message
+            );
+            assert!(
+                error.message.contains(skill),
+                "error must identify the offending skill, got {:?}",
+                error.message
+            );
+        }
+        assert!(
+            pm.list_issues(spur_pm::IssueFilter::default())
+                .await
+                .expect("list issues")
+                .is_empty(),
+            "skill validation failure must not create beads issues"
+        );
     }
 
     #[tokio::test]
