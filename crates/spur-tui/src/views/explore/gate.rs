@@ -11,7 +11,7 @@ use spur_core::explore::apply::{Resolution, Selection};
 use spur_core::explore::catalog::CatalogEntry;
 use spur_core::explore::gate::{self, Verdict};
 
-use super::{scroll_offset_for_selected_line, selected_marker_line};
+use super::{scroll_offset_for_selected_line, selected_marker_line, StarKey};
 
 pub(crate) struct GateState {
     pub(crate) cards: Vec<GateCard>,
@@ -50,12 +50,12 @@ impl GateState {
     pub(crate) fn from_starred(
         repo_root: &Path,
         entries: &[CatalogEntry],
-        starred: &BTreeSet<String>,
+        starred: &BTreeSet<StarKey>,
         bundled_ids: &[String],
     ) -> Self {
         let cards = entries
             .iter()
-            .filter(|entry| starred.contains(entry.name.as_str()))
+            .filter(|entry| starred.contains(&StarKey::from_entry(entry)))
             .cloned()
             .map(|entry| GateCard::new(repo_root, entry, bundled_ids))
             .collect();
