@@ -373,6 +373,7 @@ impl App {
             | ViewId::AgentConfigBrowser { .. }
             | ViewId::IssueBrowser
             | ViewId::LoopBrowser
+            | ViewId::ExploreBrowser
             | ViewId::PlanBrowser
             | ViewId::Insights => false,
         }
