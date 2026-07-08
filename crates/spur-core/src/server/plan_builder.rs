@@ -16,6 +16,7 @@ pub struct PlanSubmitAuditContext<'a> {
     pub execution_mode: Option<&'a str>,
     pub brain_session_id: Option<&'a SessionId>,
     pub explicit_base: Option<&'a crate::BaseTarget>,
+    pub brain_model: Option<&'a str>,
 }
 
 /// Compose a beads epic + child issues + dependency edges from a
@@ -173,7 +174,7 @@ pub async fn emit_plan_submit_audit(
     }
     spur_telemetry::emit!(spur_telemetry::tier2_events::PlanCreated {
         task_count: sg.task_map.len() as u32,
-        brain_model: spur_telemetry::tier1_events::ModelName::Other("unknown"),
+        brain_model: crate::telemetry::model_name_from_config_value(context.brain_model, "unknown"),
         duration_ms: 0,
     });
 }
@@ -607,6 +608,7 @@ pub(crate) struct SubmitPlanAsEpicInput {
     pub(crate) epic_title: Option<String>,
     pub(crate) epic_body: Option<String>,
     pub(crate) brain_session_id: BrainSessionId,
+    pub(crate) brain_model: Option<String>,
     pub(crate) execution_mode: &'static str,
     pub(crate) precomputed_auto_serialized: Option<Vec<crate::plan::SiblingOverlap>>,
 }

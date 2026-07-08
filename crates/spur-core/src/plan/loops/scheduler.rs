@@ -478,6 +478,7 @@ pub(crate) fn loop_template_to_persist_input(
             "loop-{}",
             spec.loop_id
         ))),
+        brain_model: None,
         execution_mode: "loop_l3_generation".to_string(),
         precomputed_auto_serialized: Some(auto_serialized),
         repo_root: None,
