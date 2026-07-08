@@ -41,6 +41,7 @@ use std::time::Duration;
 use tracing_subscriber::prelude::*;
 
 use commands::auth::AuthCommands;
+use commands::explore::ExploreCommands;
 use commands::flags::FlagsCommands;
 use commands::telemetry::TelemetryCommands;
 use spur_acp::config::{ContextServiceConfig, SpurConfig};
@@ -256,6 +257,11 @@ enum Commands {
     Skills {
         #[command(subcommand)]
         command: SkillsCommands,
+    },
+    /// Browse, gate, and manage ecosystem skills/agents (the /explore pool)
+    Explore {
+        #[command(subcommand)]
+        cmd: ExploreCommands,
     },
     /// List and manage registered agents
     Agents {
@@ -1165,6 +1171,7 @@ async fn run() -> Result<()> {
         Commands::Skills { command } => match command {
             SkillsCommands::Init => commands::init::run_skills_init(&repo_root),
         },
+        Commands::Explore { cmd } => commands::explore::run(cmd, &repo_root),
         Commands::Agents { command } => {
             require_cli_gate(spur_license::FeatureKey::CLI_CORE_AGENTS)?;
             cmd_agents(repo_root, command).await
