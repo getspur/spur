@@ -11241,6 +11241,7 @@ dependencies = [
  "spur-graph",
  "spur-license",
  "spur-pm",
+ "spur-telemetry",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
