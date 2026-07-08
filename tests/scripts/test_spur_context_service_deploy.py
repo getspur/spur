@@ -380,7 +380,14 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
         in release
     )
     assert "aws lambda update-function-code" in release
-    assert "--zip-file fileb://target/lambda/spur-context-service.zip" in release
+    # The zip exceeds UpdateFunctionCode's ~70 MB inline payload cap, so the
+    # rollout stages it in S3 first, reusing terraform's content-addressed
+    # key shape (aws_s3_object.lambda_zip in main.tf).
+    assert "--zip-file" not in release
+    assert "aws s3 cp target/lambda/spur-context-service.zip" in release
+    assert "lambda/spur-context-service-" in release
+    assert "--s3-bucket" in release
+    assert "--s3-key" in release
     assert "aws lambda wait function-updated-v2" in release
     assert "CONTEXT_SERVICE_STAGING_LAMBDA" in release
 

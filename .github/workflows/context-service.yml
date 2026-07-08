@@ -264,10 +264,18 @@ jobs:
       - name: Package serving Lambda artifact
         run: infra/spur-context-service/deploy.sh --skip-worker --package-only
       - name: Release serving Lambda code
+        # The zip exceeds UpdateFunctionCode's ~70 MB inline payload limit, so
+        # stage it in S3 first, reusing the content-addressed key shape of the
+        # Terraform deploy path (aws_s3_object.lambda_zip in main.tf).
         run: |
+          zip_path=target/lambda/spur-context-service.zip
+          zip_md5=$(md5sum "$zip_path" | cut -d' ' -f1)
+          s3_key="lambda/spur-context-service-${zip_md5}.zip"
+          aws s3 cp target/lambda/spur-context-service.zip "s3://$SPUR_CONTEXT_SMOKE_DATA_BUCKET/$s3_key"
           aws lambda update-function-code \
             --function-name "$SPUR_CONTEXT_SMOKE_LAMBDA" \
-            --zip-file fileb://target/lambda/spur-context-service.zip \
+            --s3-bucket "$SPUR_CONTEXT_SMOKE_DATA_BUCKET" \
+            --s3-key "$s3_key" \
             --publish > /tmp/update-function-code.json
           aws lambda wait function-updated-v2 \
             --function-name "$SPUR_CONTEXT_SMOKE_LAMBDA"
