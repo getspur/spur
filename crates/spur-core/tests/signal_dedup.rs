@@ -88,6 +88,7 @@ async fn build_single_task_plan(pm: &PmService, plan_id: &str) -> String {
         task_id: "t1".into(),
         agent: "codex".into(),
         profile: None,
+        skills: None,
         model: None,
         effort: None,
         config_overrides: None,

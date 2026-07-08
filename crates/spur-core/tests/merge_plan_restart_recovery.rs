@@ -123,6 +123,7 @@ async fn t_v0d_3_merge_plan_works_after_restart_on_persisted_plan() {
         task_id: "task-a".into(),
         agent: "codex".into(),
         profile: None,
+        skills: None,
         model: None,
         effort: None,
         config_overrides: None,
