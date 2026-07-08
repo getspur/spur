@@ -330,6 +330,15 @@ impl DelegationMcpModule {
             Err(e) => return JsonRpcResponse::invalid_params(id, e),
         };
 
+        for skeleton in &skeletons {
+            if let Some(skills) = skeleton.skills.as_deref() {
+                if let Err(error) = validate_explore_skills(self.deps.repo_root.as_deref(), skills)
+                {
+                    return JsonRpcResponse::mcp_error(id, error);
+                }
+            }
+        }
+
         let inline_wait = self.deps.inline_wait;
         let task_count = skeletons.len();
         let mut dispatched = Vec::with_capacity(task_count);
