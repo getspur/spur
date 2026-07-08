@@ -35,6 +35,10 @@ pub enum CommandSource {
 
 /// How a selected `CommandEntry` should be executed.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transient UI action/payload enums; instances are short-lived and never stored in bulk, boxing would churn every construction site"
+)]
 pub enum Dispatch {
     /// Fire an `Action` directly, close the popup, do not send a message.
     SpurLocal(Action),

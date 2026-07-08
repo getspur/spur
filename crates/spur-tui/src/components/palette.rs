@@ -26,6 +26,10 @@ pub enum PaletteKind {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transient UI action/payload enums; instances are short-lived and never stored in bulk, boxing would churn every construction site"
+)]
 pub enum PalettePayload {
     View { action: crate::action::Action },
     Command { name: String },
@@ -363,6 +367,10 @@ impl Default for PaletteState {
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transient UI action/payload enums; instances are short-lived and never stored in bulk, boxing would churn every construction site"
+)]
 pub enum PaletteIntent {
     Accept(PaletteResult),
     SubmitQuery(String),
