@@ -79,6 +79,13 @@ impl GateState {
             .collect()
     }
 
+    pub(crate) fn unresolved_count(&self) -> usize {
+        self.cards
+            .iter()
+            .filter(|card| !card.is_evaluable())
+            .count()
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> GateAction {
         if self.override_input.is_some() {
             return self.handle_override_input(key);
@@ -86,7 +93,6 @@ impl GateState {
 
         match key.code {
             KeyCode::Char('A') => GateAction::Apply,
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::SHIFT) => GateAction::Apply,
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_selection(1);
                 GateAction::None

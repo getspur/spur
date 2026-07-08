@@ -90,6 +90,7 @@ pub struct ExploreBrowserView {
     pub(crate) load_error: Option<String>,
     pub(crate) gate: gate::GateState,
     pub(crate) apply_log: Option<ApplyOutcome>,
+    pub(crate) apply_summary: Option<String>,
     pub(crate) cached_status: Option<StatusReport>,
     pub(crate) cached_materializations: Option<Vec<MaterializationRecord>>,
 }
@@ -111,6 +112,7 @@ impl ExploreBrowserView {
             load_error,
             gate: gate::GateState::default(),
             apply_log: None,
+            apply_summary: None,
             cached_status: None,
             cached_materializations: None,
         };
@@ -195,6 +197,7 @@ impl ExploreBrowserView {
 
     fn open_gate(&mut self) {
         if self.starred.is_empty() {
+            self.load_error = Some("star items with space to review them in the gate".to_string());
             return;
         }
         let entries = self.catalog.entries.clone();
@@ -205,6 +208,7 @@ impl ExploreBrowserView {
             &self.cached_bundled_ids,
         );
         if gate.is_empty() {
+            self.load_error = Some("no starred items are available for gate review".to_string());
             return;
         }
         self.gate = gate;
@@ -227,6 +231,8 @@ impl ExploreBrowserView {
     }
 
     fn apply_gate_cards(&mut self) {
+        let total_cards = self.gate.cards.len();
+        let unresolved_skipped = self.gate.unresolved_count();
         let selections = self.gate.resolved_selections();
         if selections.is_empty() {
             self.load_error = Some("no resolved gate cards to apply".to_string());
@@ -239,6 +245,12 @@ impl ExploreBrowserView {
             &self.cached_bundled_ids,
         ) {
             Ok(outcome) => {
+                self.apply_summary = Some(format!(
+                    "applied {} of {} cards / {} unresolved skipped",
+                    selections.len(),
+                    total_cards,
+                    unresolved_skipped
+                ));
                 self.apply_log = Some(outcome);
                 self.manifest = Manifest::load(&self.repo_root).unwrap_or_default();
                 self.invalidate_manage_cache();
@@ -370,6 +382,9 @@ impl ExploreBrowserView {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )));
+            if let Some(summary) = &self.apply_summary {
+                lines.push(Line::from(summary.clone()));
+            }
             for name in &outcome.installed {
                 lines.push(Line::from(format!("installed {name}")));
             }
@@ -494,7 +509,7 @@ impl ExploreBrowserView {
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let text = match self.stage {
             ExploreStage::Gate => {
-                "j/k cards  a accept  o override  b replace  s skip  Shift+A apply  Esc browse"
+                "j/k cards  a accept selected  o override  b replace  s skip  Shift+A apply all resolved  Esc browse"
             }
             ExploreStage::Manage => "j/k move  l lens  x remove  m browse  r reload  Esc back",
             ExploreStage::Browse => {
@@ -1043,6 +1058,49 @@ mod tests {
     }
 
     #[test]
+    fn shifted_lowercase_a_does_not_apply_gate() {
+        let repo = tempfile::tempdir().unwrap();
+        let clean = write_skill(repo.path(), "clean-skill", "Normal skill body.");
+        let second = write_skill(repo.path(), "second-skill", "Another normal body.");
+        save_catalog(repo.path(), vec![clean, second]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        star_selected(&mut view);
+        view.selected = 1;
+        star_selected(&mut view);
+        open_gate(&mut view);
+
+        assert!(view.handle_key(key(KeyCode::Char('a'))).is_none());
+        assert_eq!(view.stage, ExploreStage::Gate);
+        assert!(view.apply_log.is_none());
+        let resolved_before_shift: Vec<_> = view
+            .gate
+            .resolved_selections()
+            .into_iter()
+            .map(|selection| (selection.entry.name, selection.resolution))
+            .collect();
+        assert_eq!(
+            resolved_before_shift,
+            vec![("clean-skill".to_string(), Resolution::Accept)]
+        );
+
+        assert!(view.handle_key(shift_key(KeyCode::Char('a'))).is_none());
+        assert_eq!(view.stage, ExploreStage::Gate);
+        assert!(view.apply_log.is_none());
+        let resolved_after_shift: Vec<_> = view
+            .gate
+            .resolved_selections()
+            .into_iter()
+            .map(|selection| (selection.entry.name, selection.resolution))
+            .collect();
+        assert_eq!(resolved_after_shift, resolved_before_shift);
+
+        assert!(view.handle_key(shift_key(KeyCode::Char('A'))).is_none());
+        assert_eq!(view.stage, ExploreStage::Browse);
+        assert!(view.apply_log.is_some());
+    }
+
+    #[test]
     fn shift_a_excludes_unresolved_cards_from_apply() {
         let repo = tempfile::tempdir().unwrap();
         let clean = write_skill(repo.path(), "clean-skill", "Normal skill body.");
@@ -1065,6 +1123,15 @@ mod tests {
         assert_eq!(
             Manifest::load(repo.path()).unwrap().items[0].name,
             "clean-skill"
+        );
+        let text = render_to_string(&mut view);
+        assert!(
+            text.contains("applied 1 of 2 cards"),
+            "render text:\n{text}"
+        );
+        assert!(
+            text.contains("1 unresolved skipped"),
+            "render text:\n{text}"
         );
     }
 
@@ -1178,6 +1245,11 @@ mod tests {
         let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
         assert!(view.handle_key(key(KeyCode::Enter)).is_none());
         assert_eq!(view.stage, ExploreStage::Browse);
+        let text = render_to_string(&mut view);
+        assert!(
+            text.contains("star items with space to review them in the gate"),
+            "render text:\n{text}"
+        );
     }
 
     #[test]
@@ -1423,6 +1495,11 @@ mod tests {
         open_gate(&mut view);
         let text = render_to_string(&mut view);
         assert!(text.contains("Gate Cards"));
+        assert!(text.contains("a accept selected"), "footer text:\n{text}");
+        assert!(
+            text.contains("Shift+A apply all resolved"),
+            "footer text:\n{text}"
+        );
 
         assert!(view.handle_key(key(KeyCode::Esc)).is_none());
         assert!(view.handle_key(key(KeyCode::Char('m'))).is_none());
