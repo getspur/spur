@@ -149,6 +149,7 @@ impl McpHandlerError {
 
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
+        external_catalog_def(),
         external_code_search_def(),
         external_code_read_def(),
         external_code_callers_def(),
@@ -180,6 +181,7 @@ pub fn handle_tool_sync(
     catalog: &CatalogResolver,
 ) -> Result<Value, McpHandlerError> {
     match name {
+        "external_catalog" => handle_catalog(args, db, catalog),
         "external_code_search" => handle_code_search(args, db, catalog),
         "external_code_read" => handle_code_read(args, db, catalog),
         "external_code_callers" => handle_code_callers(args, db, catalog),
@@ -195,6 +197,7 @@ pub fn handle_tool_sync(
 
 pub fn handle_tool_without_catalog(name: &str, args: &Value) -> Result<Value, McpHandlerError> {
     match name {
+        "external_catalog" => handle_catalog_without_catalog(args),
         "external_code_search" => handle_code_search_without_catalog(args),
         "external_code_read" => handle_code_read_without_catalog(args),
         "external_code_callers" => handle_code_callers_without_catalog(args),
@@ -206,6 +209,95 @@ pub fn handle_tool_without_catalog(name: &str, args: &Value) -> Result<Value, Mc
             "unknown context-service MCP tool: {other}"
         ))),
     }
+}
+
+fn handle_catalog(
+    args: &Value,
+    db: &Connection,
+    catalog: &CatalogResolver,
+) -> Result<Value, McpHandlerError> {
+    let args: CatalogArgs = parse_args(args)?;
+    args.validate()?;
+    let source = args.source();
+    let limit = args.limit();
+    let cursor = args.cursor.as_deref();
+
+    let Some(package) = args.package.as_deref() else {
+        if args.revision.is_some() || args.ref_name.is_some() || args.path.is_some() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'package' is required when using revision, ref, or path".to_owned(),
+            ));
+        }
+        return json_value(
+            query::list_packages(db, source, args.name_filter.as_deref(), limit, cursor)
+                .map_err(internal_error("external_catalog packages failed"))?,
+        );
+    };
+
+    if args.revision_ref().is_none() {
+        if args.path.is_some() {
+            return Err(McpHandlerError::InvalidParams(
+                "field 'path' requires revision or ref".to_owned(),
+            ));
+        }
+        return json_value(
+            query::list_revisions_and_refs(db, source, package, limit, cursor)
+                .map_err(internal_error("external_catalog revisions failed"))?,
+        );
+    }
+
+    let resolved = resolve_revision(catalog, source, package, args.revision_ref())?;
+    if let Some(path) = args.path.as_deref() {
+        if query::catalog_file_exists(
+            db,
+            &resolved.source,
+            &resolved.package,
+            &resolved.revision,
+            path,
+        )
+        .map_err(internal_error("external_catalog file lookup failed"))?
+        {
+            return json_value(
+                query::list_file_symbols(
+                    db,
+                    &resolved.source,
+                    &resolved.package,
+                    &resolved.revision,
+                    path,
+                    args.name_filter.as_deref(),
+                    limit,
+                    cursor,
+                )
+                .map_err(internal_error("external_catalog symbols failed"))?,
+            );
+        }
+    }
+
+    json_value(
+        query::list_tree_entries(
+            db,
+            &resolved.source,
+            &resolved.package,
+            &resolved.revision,
+            args.path.as_deref(),
+            limit,
+            cursor,
+        )
+        .map_err(internal_error("external_catalog tree failed"))?,
+    )
+}
+
+fn handle_catalog_without_catalog(args: &Value) -> Result<Value, McpHandlerError> {
+    let args: CatalogArgs = parse_args(args)?;
+    args.validate()?;
+    json_value(query::CatalogPage::<query::PackageCatalogRow> {
+        level: query::CatalogLevel::Packages,
+        rows: Vec::new(),
+        total_matches: 0,
+        truncated: false,
+        next_cursor: None,
+        catalog_generation: None,
+    })
 }
 
 fn handle_code_search(
@@ -574,6 +666,50 @@ async fn route_index_status_inner(
 
     let record = update_stale_job(record, jobs, checker).await?;
     Ok(index_status_response(&record))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogArgs {
+    source: Option<String>,
+    package: Option<String>,
+    revision: Option<String>,
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
+    path: Option<String>,
+    name_filter: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+impl CatalogArgs {
+    fn validate(&self) -> Result<(), McpHandlerError> {
+        if let Some(source) = &self.source {
+            validate_non_empty("source", source)?;
+        }
+        if let Some(package) = &self.package {
+            validate_non_empty("package", package)?;
+        }
+        if let Some(revision) = &self.revision {
+            validate_non_empty("revision", revision)?;
+        }
+        if let Some(ref_name) = &self.ref_name {
+            validate_non_empty("ref", ref_name)?;
+        }
+        validate_revision_choice(self.revision.as_deref(), self.ref_name.as_deref())
+    }
+
+    fn source(&self) -> &str {
+        self.source.as_deref().unwrap_or(DEFAULT_SOURCE)
+    }
+
+    fn revision_ref(&self) -> Option<&str> {
+        self.revision.as_deref().or(self.ref_name.as_deref())
+    }
+
+    fn limit(&self) -> usize {
+        self.limit.unwrap_or(50).clamp(1, 200)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1250,6 +1386,56 @@ fn job_error_response(code: &str, detail: &str) -> Value {
         "detail": detail,
         "retriable": matches!(code, "fetch" | "commit" | "spot_interrupted" | "timeout")
     })
+}
+
+fn external_catalog_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "external_catalog".to_owned(),
+        description:
+            "Browse indexed external packages, revisions, file tree entries, and file symbols."
+                .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "default": DEFAULT_SOURCE,
+                    "description": "Package source, for example registry:crates-io or git:github.com/..."
+                },
+                "package": {
+                    "type": "string",
+                    "description": "Optional package name. Omit to list indexed packages."
+                },
+                "revision": {
+                    "type": "string",
+                    "description": "Exact version or SHA for file tree or symbol descent."
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Branch or tag name. Alternative to revision."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory prefix or exact file path inside the package revision."
+                },
+                "name_filter": {
+                    "type": "string",
+                    "description": "Optional substring filter for package names or file symbols."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor returned by a previous external_catalog response."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
 }
 
 fn external_code_search_def() -> ToolDefinition {
