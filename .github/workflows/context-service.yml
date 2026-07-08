@@ -279,7 +279,7 @@ jobs:
             --publish > /tmp/update-function-code.json
           aws lambda wait function-updated-v2 \
             --function-name "$SPUR_CONTEXT_SMOKE_LAMBDA"
-          python3 -c 'import json; r = json.load(open("/tmp/update-function-code.json")); print(f"released {r[\"FunctionName\"]} version {r[\"Version\"]} sha256 {r[\"CodeSha256\"]}")'
+          python3 -c 'import json; r = json.load(open("/tmp/update-function-code.json")); print("released", r["FunctionName"], "version", r["Version"], "sha256", r["CodeSha256"])'
       - name: Upload released Lambda zip
         uses: actions/upload-artifact@v4
         with:
