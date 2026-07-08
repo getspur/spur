@@ -237,6 +237,7 @@ pub async fn run_worker_attempt_with_connection_for_test<'a>(
             effort: effort.as_deref(),
             profile: profile.as_deref(),
             profile_def: profile_def.as_ref(),
+            skills: None,
             config_overrides: None,
             task: task.as_str(),
             request_id: "test-delegation",

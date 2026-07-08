@@ -115,6 +115,7 @@ pub struct DelegationRequest {
     pub id: DelegationId,
     pub agent: String,
     pub profile: Option<String>,
+    pub skills: Option<Vec<String>>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub config_overrides: Option<HashMap<String, String>>,

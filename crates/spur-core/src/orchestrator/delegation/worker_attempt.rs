@@ -126,6 +126,7 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     /// Loaded+validated by `execute_delegation` when the profile is managed;
     /// `None` means select-only pass-through.
     pub(crate) profile_def: Option<&'a crate::agent_profiles::AgentProfile>,
+    pub(crate) skills: Option<Vec<String>>,
     #[allow(dead_code)]
     pub(crate) config_overrides: Option<&'a std::collections::HashMap<String, String>>,
     pub(crate) task: &'a str,
@@ -690,6 +691,14 @@ pub(crate) async fn run_one_worker_attempt(
         )
         .await;
     }
+    crate::explore::materialize::materialize_pool_skills(
+        worktrees,
+        &worktree_info.path,
+        ctx.agent_config.kind,
+        &worktrees.repo_root,
+        ctx.skills.as_deref(),
+    )
+    .await;
 
     // 2. Spawn worker agent in worktree via AgentConnection.
     // Workers never receive a permission_tx, so L2 auto-approve is
@@ -2033,6 +2042,7 @@ mod model_effort_override_tests {
                 effort: None,
                 profile: None,
                 profile_def: None,
+                skills: None,
                 config_overrides: None,
                 task: "do the task",
                 request_id: "delegation-1",
@@ -2181,6 +2191,69 @@ mod profile_override_tests {
                 return Err(anyhow::anyhow!("rejected {}", request.mode_id.0));
             }
             Ok(spur_acp::SetSessionModeResponse::new())
+        }
+    }
+
+    struct SkillMaterializationConnection {
+        checked: Arc<Mutex<bool>>,
+        skill_rel_path: String,
+        session_response: spur_acp::NewSessionResponse,
+    }
+
+    #[async_trait]
+    impl AgentConnection for SkillMaterializationConnection {
+        async fn initialize(
+            &mut self,
+            _request: InitializeRequest,
+        ) -> anyhow::Result<spur_acp::InitializeResponse> {
+            Ok(spur_acp::InitializeResponse::new(
+                spur_acp::ProtocolVersion::LATEST,
+            ))
+        }
+
+        async fn new_session(
+            &mut self,
+            cwd: PathBuf,
+            _mcp_servers: Vec<McpServer>,
+        ) -> anyhow::Result<spur_acp::NewSessionResponse> {
+            let skill_path = cwd.join(&self.skill_rel_path);
+            assert!(
+                skill_path.exists(),
+                "pool skill should exist before session starts: {}",
+                skill_path.display()
+            );
+            let ignored = Command::new("git")
+                .args(["check-ignore", &self.skill_rel_path])
+                .current_dir(&cwd)
+                .output()
+                .expect("run git check-ignore");
+            assert!(
+                ignored.status.success(),
+                "pool skill should be git-excluded: stderr={}",
+                String::from_utf8_lossy(&ignored.stderr)
+            );
+            *self.checked.lock().expect("skill check poisoned") = true;
+            Ok(self.session_response.clone())
+        }
+
+        async fn prompt(
+            &mut self,
+            _request: PromptRequest,
+        ) -> anyhow::Result<Pin<Box<dyn Stream<Item = spur_acp::SessionNotification> + Send>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> AgentHealth {
+            AgentHealth::Ready
         }
     }
 
@@ -2383,6 +2456,37 @@ mod profile_override_tests {
         .unwrap()
     }
 
+    fn write_pool_skill(repo: &Path, name: &str, verdict: &str) {
+        let source = "acme/skills";
+        let pinned_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let pool_dir = crate::explore::pool::pool_dir(repo, source, name, pinned_commit);
+        std::fs::create_dir_all(&pool_dir).expect("create pool skill dir");
+        std::fs::write(
+            pool_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Clean skill\n---\nbody for {name}\n"),
+        )
+        .expect("write pool skill");
+        crate::explore::pool::Manifest {
+            sources: vec![],
+            items: vec![crate::explore::pool::ManifestItem {
+                name: name.to_string(),
+                kind: crate::explore::catalog::ItemKind::Skill,
+                source: source.to_string(),
+                rel_path: format!("skills/{name}"),
+                pinned_commit: pinned_commit.to_string(),
+                content_sha256: "0".repeat(64),
+                license: None,
+                gate: crate::explore::pool::GateRecord {
+                    verdict: verdict.to_string(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            }],
+        }
+        .save(repo)
+        .expect("save explore manifest");
+    }
+
     #[tokio::test]
     async fn no_profile_makes_no_selection_rpc_and_preserves_model_effort_order() {
         let (calls, _) = apply_profile_with(
@@ -2520,6 +2624,7 @@ mod profile_override_tests {
                 agent: "kiro",
                 profile: Some("code-reviewer"),
                 profile_def: Some(&profile),
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -2768,6 +2873,7 @@ mod profile_override_tests {
                 agent: "claude-code",
                 profile: Some("code-reviewer"),
                 profile_def: Some(&profile),
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -2864,6 +2970,79 @@ mod profile_override_tests {
         assert!(second_contents.contains("updated managed persona"));
         assert!(second_contents
             .contains("<!-- SPUR-MANAGED v=1 skill=agent-profile:code-reviewer sha256="));
+    }
+
+    #[tokio::test]
+    async fn attempt_materializes_pool_skills_before_session() {
+        let repo = setup_repo_with_committed_agent();
+        write_pool_skill(repo.path(), "clean-a", "clean");
+        let mut worktrees = spur_worktree::manager::WorktreeManager::new(repo.path().to_path_buf());
+        let (funnel, _events_rx) = crate::event_funnel::test_channel();
+        let brain_session_id = spur_acp::BrainSessionId::new(SessionId::new());
+        let worker_session = SessionId::new();
+        let mut agent_config = spur_acp::AgentConfig::with_defaults("codex");
+        agent_config.kind = spur_acp::types::AgentKind::CodexAcp;
+        let fault_hooks = FaultInjectionHooks::default();
+        let feature_gate = spur_license::FeatureGate::new_with_install_id(
+            spur_license::policy::PolicyResolver::embedded(),
+            spur_license::InstallId::from_uuid(uuid::Uuid::nil()),
+        );
+        let checked = Arc::new(Mutex::new(false));
+        let checked_for_factory = Arc::clone(&checked);
+        let session = session_response(vec![]);
+
+        let outcome = run_one_worker_attempt(
+            worker_session.clone(),
+            WorkerAttemptCtx {
+                brain_session_id: &brain_session_id,
+                agent: "codex",
+                profile: None,
+                profile_def: None,
+                skills: Some(vec!["clean-a".to_string()]),
+                model: None,
+                effort: None,
+                config_overrides: None,
+                task: "do the task",
+                request_id: "delegation-1",
+                attempt: 1,
+                agent_config: &agent_config,
+                delegation_plan: None,
+                issue_id: None,
+                prior_branch_for_reuse: None,
+                peer_mailbox: None,
+                ack_tx: None,
+                base: None,
+                dispatched_base_oid_tx: None,
+                fault_injection_hooks: &fault_hooks,
+                worker_mcp_servers: &[],
+                worker_mcp_server: None,
+                pm_service: None,
+                feature_gate: &feature_gate,
+                connection_factory: Some(&move |_cfg, _spawn_args, _repo_root| {
+                    Box::new(SkillMaterializationConnection {
+                        checked: Arc::clone(&checked_for_factory),
+                        skill_rel_path: ".codex/skills/clean-a/SKILL.md".to_string(),
+                        session_response: session.clone(),
+                    })
+                }),
+            },
+            &mut worktrees,
+            &funnel,
+        )
+        .await
+        .expect("worker attempt succeeds");
+
+        assert_eq!(outcome.worker_session, worker_session);
+        assert!(*checked.lock().expect("skill check poisoned"));
+        let skill_rel_path = ".codex/skills/clean-a/SKILL.md";
+        let skill_path = outcome.worktree_path.join(skill_rel_path);
+        let contents = std::fs::read_to_string(skill_path).expect("rendered skill");
+        assert!(contents.contains("body for clean-a"));
+        assert_eq!(git(&outcome.worktree_path, &["status", "--short"]), "");
+        assert_eq!(
+            git(&outcome.worktree_path, &["check-ignore", skill_rel_path]),
+            skill_rel_path
+        );
     }
 }
 
