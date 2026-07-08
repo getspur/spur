@@ -44,6 +44,14 @@ impl PaletteSource for ViewSource {
             },
             PaletteResult {
                 kind: PaletteKind::View,
+                label: "Loops".into(),
+                subtitle: "view · open loop browser".into(),
+                payload: PalettePayload::View {
+                    action: Action::NavigateTo(ViewId::LoopBrowser),
+                },
+            },
+            PaletteResult {
+                kind: PaletteKind::View,
                 label: "Sessions".into(),
                 subtitle: "view · open session picker".into(),
                 payload: PalettePayload::View {
