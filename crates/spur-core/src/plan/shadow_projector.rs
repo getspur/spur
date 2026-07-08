@@ -90,6 +90,7 @@ mod tests {
             task_id: task_id.to_string(),
             agent: "codex".to_string(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
