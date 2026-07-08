@@ -532,6 +532,55 @@ mod agent_profile_validation_tests {
     }
 
     #[tokio::test]
+    async fn delegate_parallel_rejects_unknown_skill() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(tmp.path());
+
+        let brain_session = BrainSessionId::new(SessionId("brain".into()));
+        let (mut server, mut channel) = super::McpCallbackServer::new(
+            Some(&brain_session),
+            None,
+            None,
+            no_op_ctx(),
+            Arc::new(spur_blob_store::MemoryOutcomeStore::new()),
+            super::community_feature_gate(),
+        );
+        server.set_repo_root(tmp.path().to_path_buf());
+        super::install_core_delegation_registry(&mut server);
+
+        let skill = "not-in-pool";
+        let response = server
+            .__test_call_tool(
+                "delegate_parallel",
+                json!({
+                    "tasks": [{
+                        "agent": "claude-code-acp",
+                        "skills": [skill],
+                        "task": "review this"
+                    }]
+                }),
+            )
+            .await;
+
+        assert_eq!(response["error"]["code"], -32602);
+        let message = response["error"]["message"]
+            .as_str()
+            .expect("error message");
+        assert!(
+            message.contains(skill),
+            "error should name the skill {skill}: {message}"
+        );
+        assert!(
+            message.contains("spur explore"),
+            "error should suggest spur explore: {message}"
+        );
+        assert!(
+            channel.request_rx.try_recv().is_err(),
+            "invalid skill must not dispatch"
+        );
+    }
+
+    #[tokio::test]
     async fn delegate_to_worker_rejects_malformed_managed_profile() {
         let tmp = tempfile::TempDir::new().unwrap();
         let agents_dir = tmp.path().join(".spur/agents");
