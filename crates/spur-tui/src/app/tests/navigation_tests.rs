@@ -185,6 +185,23 @@ mod plan_browser_navigation_tests {
     }
 
     #[test]
+    fn navigate_to_explore_browser_and_back() {
+        let mut app = App::new_for_tests();
+
+        app.process_action(Action::NavigateTo(ViewId::ExploreBrowser));
+
+        assert_eq!(app.current_view(), &ViewId::ExploreBrowser);
+        assert!(
+            app.explore_browser.is_some(),
+            "navigation should lazily create ExploreBrowser"
+        );
+
+        app.handle_crossterm_event_for_test(key(KeyCode::Esc));
+
+        assert_eq!(app.current_view(), &ViewId::Dashboard);
+    }
+
+    #[test]
     fn loop_browser_spur_events_route_to_view() {
         let mut app = App::new_for_tests();
         app.process_action(Action::NavigateTo(ViewId::LoopBrowser));
