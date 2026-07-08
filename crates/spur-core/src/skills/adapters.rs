@@ -42,24 +42,35 @@ impl Adapter {
 
     /// Render a single skill into this adapter's target path.
     pub fn render(&self, skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
+        self.render_with_prefix(skill, repo_root, "spurpower-")
+    }
+
+    /// Render a single skill into this adapter's target path with a custom
+    /// worker-facing skill name prefix.
+    pub fn render_with_prefix(
+        &self,
+        skill: &SkillPayload,
+        repo_root: &Path,
+        name_prefix: &str,
+    ) -> RenderedFile {
         match self {
             Adapter::SpurHermetic => render_agentskills(skill, &repo_root.join(".spur/skills"), ""),
             Adapter::ClaudeCode => {
-                render_agentskills(skill, &repo_root.join(".claude/skills"), "spurpower-")
+                render_agentskills(skill, &repo_root.join(".claude/skills"), name_prefix)
             }
-            Adapter::Codex => render_codex(skill, repo_root),
+            Adapter::Codex => render_codex(skill, repo_root, name_prefix),
             Adapter::Gemini => {
-                render_agentskills(skill, &repo_root.join(".gemini/skills"), "spurpower-")
+                render_agentskills(skill, &repo_root.join(".gemini/skills"), name_prefix)
             }
             Adapter::Kiro => {
-                render_agentskills(skill, &repo_root.join(".kiro/skills"), "spurpower-")
+                render_agentskills(skill, &repo_root.join(".kiro/skills"), name_prefix)
             }
             Adapter::OpenCode => {
-                render_agentskills(skill, &repo_root.join(".opencode/skills"), "spurpower-")
+                render_agentskills(skill, &repo_root.join(".opencode/skills"), name_prefix)
             }
-            Adapter::Cursor => render_cursor(skill, repo_root),
+            Adapter::Cursor => render_cursor(skill, repo_root, name_prefix),
             Adapter::Kimi => {
-                render_agentskills(skill, &repo_root.join(".kimi/skills"), "spurpower-")
+                render_agentskills(skill, &repo_root.join(".kimi/skills"), name_prefix)
             }
         }
     }
@@ -118,9 +129,9 @@ fn render_agentskills(skill: &SkillPayload, target_root: &Path, name_prefix: &st
     RenderedFile { path, bytes }
 }
 
-fn render_codex(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
+fn render_codex(skill: &SkillPayload, repo_root: &Path, name_prefix: &str) -> RenderedFile {
     use crate::skills::installer::{sha256_hex, Marker};
-    let id = format!("spurpower-{}", skill.id);
+    let id = format!("{name_prefix}{}", skill.id);
     let path = repo_root.join(".codex/skills").join(&id).join("SKILL.md");
     let body = &skill.body;
     let marker = Marker {
@@ -139,9 +150,9 @@ fn render_codex(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
     RenderedFile { path, bytes }
 }
 
-fn render_cursor(skill: &SkillPayload, repo_root: &Path) -> RenderedFile {
+fn render_cursor(skill: &SkillPayload, repo_root: &Path, name_prefix: &str) -> RenderedFile {
     use crate::skills::installer::{sha256_hex, Marker};
-    let id = format!("spurpower-{}", skill.id);
+    let id = format!("{name_prefix}{}", skill.id);
     let path = repo_root.join(".cursor/rules").join(format!("{id}.mdc"));
     let marker = Marker {
         version: 1,
@@ -268,7 +279,7 @@ mod tests {
     fn codex_render_has_frontmatter_and_marker() {
         let skill = sample_skill();
         let root = std::path::PathBuf::from("/tmp/repo");
-        let rf = render_codex(&skill, &root);
+        let rf = render_codex(&skill, &root, "spurpower-");
         assert_eq!(
             rf.path,
             std::path::PathBuf::from("/tmp/repo/.codex/skills/spurpower-tdd/SKILL.md"),
@@ -286,7 +297,7 @@ mod tests {
     fn cursor_render_mdc_with_alwaysapply() {
         let skill = sample_skill();
         let root = std::path::PathBuf::from("/tmp/repo");
-        let rf = render_cursor(&skill, &root);
+        let rf = render_cursor(&skill, &root, "spurpower-");
         assert_eq!(
             rf.path,
             std::path::PathBuf::from("/tmp/repo/.cursor/rules/spurpower-tdd.mdc"),
