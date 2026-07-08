@@ -135,23 +135,26 @@ mod plan_browser_navigation_tests {
     }
 
     #[test]
-    fn navigate_to_plan_browser_without_session_blocks_with_hint() {
-        // Inc 1 (bd-d587.1): without an active brain session, opening PlanBrowser
-        // would yield a list where no row can ever classify as Mine. We block-with-hint
-        // instead of opening an empty browser.
-        let mut app = App::new_for_tests();
+    fn navigate_to_plan_browser_without_session_mounts_readonly() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = App::new(Some(tx), false);
 
         app.process_action(Action::NavigateTo(ViewId::PlanBrowser));
 
         assert_eq!(
             app.current_view(),
-            &ViewId::Dashboard,
-            "navigation must be refused when no session is active"
+            &ViewId::PlanBrowser,
+            "PlanBrowser should mount read-only without an active brain session"
         );
         assert!(
-            app.plan_browser.is_none(),
-            "PlanBrowser must not be created when navigation is refused"
+            app.plan_browser.is_some(),
+            "PlanBrowser should be created for read-only browsing"
         );
+        match rx.try_recv() {
+            Ok(UserInput::RefreshPlans) => {}
+            Ok(_) => panic!("expected RefreshPlans after opening PlanBrowser without a session"),
+            Err(err) => panic!("expected RefreshPlans after opening PlanBrowser, got {err}"),
+        }
     }
 
     #[test]

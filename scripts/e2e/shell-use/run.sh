@@ -34,6 +34,8 @@ journeys=(
   "resize"
   "session-detail-reply"
   "session-picker-open"
+  "loop-browser-open"
+  "session-picker-populated"
 )
 
 printf 'shell-use: %s\n' "$shell_use_bin"
