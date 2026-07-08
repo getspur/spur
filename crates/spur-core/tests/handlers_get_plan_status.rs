@@ -32,6 +32,7 @@ fn make_plan_state(plan_id: &str) -> PlanState {
                 task_id: "t-0".into(),
                 agent: "codex".into(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,

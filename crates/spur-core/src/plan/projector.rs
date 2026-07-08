@@ -555,6 +555,7 @@ pub type LatestTaskSpec = (
     String,
     Vec<String>,
     Option<String>,
+    Option<Vec<String>>,
     Option<String>,
     Option<String>,
     Option<HashMap<String, String>>,
@@ -563,6 +564,7 @@ pub type LatestTaskSpec = (
 pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> {
     let mut task_id_and_context_files = None;
     let mut latest_profile = None;
+    let mut latest_skills = None;
     let mut latest_model = None;
     let mut latest_effort = None;
     let mut latest_config_overrides = None;
@@ -571,6 +573,7 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
             task_id,
             context_files,
             profile,
+            skills,
             model,
             effort,
             config_overrides,
@@ -582,6 +585,9 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
             }
             if latest_profile.is_none() {
                 latest_profile = profile.clone();
+            }
+            if latest_skills.is_none() {
+                latest_skills = skills.clone();
             }
             if latest_model.is_none() {
                 latest_model = model.clone();
@@ -600,6 +606,7 @@ pub fn latest_task_spec(audits: &[AuditSentinelKind]) -> Option<LatestTaskSpec> 
             task_id,
             context_files,
             latest_profile,
+            latest_skills,
             latest_model,
             latest_effort,
             latest_config_overrides,
@@ -1345,6 +1352,7 @@ pub async fn project_plan_from_beads(
         task_id: String,
         context_files: Vec<String>,
         profile: Option<String>,
+        skills: Option<Vec<String>>,
         model: Option<String>,
         effort: Option<String>,
         config_overrides: Option<HashMap<String, String>>,
@@ -1357,11 +1365,12 @@ pub async fn project_plan_from_beads(
             adv.list_comments(&task_issue.id).await?,
         )?;
         let task_spec = latest_task_spec(&audits);
-        let (task_id, context_files, profile, model, effort, config_overrides) = task_spec
+        let (task_id, context_files, profile, skills, model, effort, config_overrides) = task_spec
             .unwrap_or_else(|| {
                 (
                     task_id_for_issue(&task_issue),
                     Vec::new(),
+                    None,
                     None,
                     None,
                     None,
@@ -1374,6 +1383,7 @@ pub async fn project_plan_from_beads(
             task_id,
             context_files,
             profile,
+            skills,
             model,
             effort,
             config_overrides,
@@ -1425,6 +1435,7 @@ pub async fn project_plan_from_beads(
                 task_id: projected_task.task_id.clone(),
                 agent,
                 profile: projected_task.profile.clone(),
+                skills: projected_task.skills.clone(),
                 model: projected_task.model.clone(),
                 effort: projected_task.effort.clone(),
                 config_overrides: projected_task.config_overrides.clone(),
@@ -3280,6 +3291,7 @@ mod tests {
                     task_id: "a".into(),
                     agent: "codex".into(),
                     profile: None,
+                    skills: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -3302,6 +3314,7 @@ mod tests {
                     task_id: "b".into(),
                     agent: "codex".into(),
                     profile: None,
+                    skills: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -3374,6 +3387,7 @@ mod tests {
                     task_id: "t1".into(),
                     agent: "codex".into(),
                     profile: None,
+                    skills: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
