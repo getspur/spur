@@ -67,6 +67,32 @@ fn entry(kind: ItemKind, name: &str, rel_path: &str, description: &str) -> Catal
     }
 }
 
+fn cache_skill(
+    repo: &std::path::Path,
+    name: &str,
+    body: &str,
+    license: Option<&str>,
+) -> CatalogEntry {
+    let rel_path = format!("skills/{name}");
+    let dir = spur_core::explore::sync::cache_dir(repo, "getspur/ecosystem").join(&rel_path);
+    std::fs::create_dir_all(&dir).expect("create cache skill dir");
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: Fixture skill\n---\n{body}\n"),
+    )
+    .expect("write cache skill");
+    CatalogEntry {
+        kind: ItemKind::Skill,
+        name: name.into(),
+        source: "getspur/ecosystem".into(),
+        rel_path,
+        pinned_commit: "abcdef1234567890".into(),
+        description: "Fixture skill".into(),
+        license: license.map(str::to_string),
+        content_sha256: spur_core::explore::content_hash(&dir).expect("hash cache skill"),
+    }
+}
+
 fn fixture_repo() -> tempfile::TempDir {
     let repo = tempfile::tempdir().expect("temp repo");
     let skill = entry(
@@ -204,6 +230,32 @@ fn send_key(view: &mut ExploreBrowserView, code: KeyCode) {
     view.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
 }
 
+fn gate_fixture_repo() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().expect("temp repo");
+    let clean = cache_skill(
+        repo.path(),
+        "clean-skill",
+        "Use focused risk checks before approving code.",
+        Some("MIT"),
+    );
+    let unknown = cache_skill(
+        repo.path(),
+        "unknown-license",
+        "Normal skill body with no license metadata.",
+        None,
+    );
+    Catalog {
+        synced_at_epoch: None,
+        entries: vec![clean, unknown],
+    }
+    .save(repo.path())
+    .expect("save catalog");
+    Manifest::default()
+        .save(repo.path())
+        .expect("save manifest");
+    repo
+}
+
 fn render_to_string(view: &mut ExploreBrowserView) -> String {
     let lineage = ExecutorLineage::new();
     let plans = PlanProjectionStore::default();
@@ -267,4 +319,22 @@ fn explore_browser_manage_last_materialization_renders_newest_first_golden() {
     );
     assert!(actual.contains("2 skills: review-helper, deploy-helper"));
     check_or_update(&actual, "explore_browser_manage_lastmat.txt");
+}
+
+#[test]
+fn explore_browser_gate_renders_golden() {
+    let repo = gate_fixture_repo();
+    let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+    view.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    view.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    view.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let actual = render_to_string(&mut view);
+
+    assert!(actual.contains("Gate"));
+    assert!(actual.contains("clean-skill"));
+    assert!(actual.contains("unknown-license"));
+    assert!(actual.contains("Clean"));
+    check_or_update(&actual, "explore_browser_gate.txt");
 }
