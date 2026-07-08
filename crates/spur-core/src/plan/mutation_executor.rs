@@ -153,7 +153,7 @@ pub async fn apply_mutation(
                 )
                 .with_context(|| format!("parse comments for parent issue {parent}"))?;
                 let parent_context_files = super::projector::latest_task_spec(&parent_audits)
-                    .map(|(_, context_files, _, _, _, _)| context_files)
+                    .map(|(_, context_files, _, _, _, _, _)| context_files)
                     .unwrap_or_default();
                 let original_downstreams = downstream_issue_ids(pm.as_ref(), parent).await?;
 
@@ -191,6 +191,7 @@ pub async fn apply_mutation(
                             &id,
                             &id,
                             parent_agent,
+                            None,
                             None,
                             None,
                             None,
@@ -1431,9 +1432,18 @@ async fn apply_modify_task_spec(
             .with_context(|| format!("list comments for modify target {issue_id}"))?,
     )
     .with_context(|| format!("parse comments for modify target {issue_id}"))?;
-    let (prior_task_id, prior_context_files, _, _, _, _) =
-        super::projector::latest_task_spec(&prior_audits)
-            .unwrap_or_else(|| (issue_id.to_string(), Vec::new(), None, None, None, None));
+    let (prior_task_id, prior_context_files, _, _, _, _, _) =
+        super::projector::latest_task_spec(&prior_audits).unwrap_or_else(|| {
+            (
+                issue_id.to_string(),
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        });
     let context_files: Vec<String> = match input.new_context_files {
         Some(files) => files.to_vec(),
         None => prior_context_files,
@@ -2070,6 +2080,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &[],
         )
         .await
@@ -2097,7 +2108,7 @@ mod tests {
             adv.list_comments(&issue_id).await.expect("comments"),
         )
         .expect("parse audits");
-        let (_, _, profile, _, _, _) =
+        let (_, _, profile, _, _, _, _) =
             crate::plan::projector::latest_task_spec(&audits).expect("latest task spec");
         assert_eq!(profile.as_deref(), Some("code-reviewer"));
     }
@@ -2398,7 +2409,7 @@ mod tests {
             adv.list_comments(&target).await.expect("comments"),
         )
         .expect("parse audits");
-        let (_, files, profile, _, _, _) =
+        let (_, files, profile, _, _, _, _) =
             crate::plan::projector::latest_task_spec(&audits).expect("latest task spec");
         assert_eq!(files, context_files);
         assert_eq!(profile.as_deref(), Some("reviewer"));
