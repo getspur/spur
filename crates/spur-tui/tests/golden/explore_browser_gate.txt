@@ -1,0 +1,30 @@
+Explore  [Skills]  Agents   Gate
+never synced
+┌Gate Cards────────────────────────────────────────────────────────────────────────────────────────┐
+│> clean-skill                                                                                     │
+│pin abcdef1  license MIT                                                                          │
+│verdict Clean                                                                                     │
+│resolution unresolved                                                                             │
+│path skills/clean-skill                                                                           │
+│                                                                                                  │
+│unknown-license                                                                                   │
+│pin abcdef1  license unknown ⚠                                                                    │
+│verdict Clean                                                                                     │
+│resolution unresolved                                                                             │
+│path skills/unknown-license                                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+j/k cards  a accept  o override  b replace  s skip  Shift+A apply  Esc browse
