@@ -355,6 +355,7 @@ fn legacy_taskspec_audit_round_trips_without_extended_fields() {
             agent,
             depends_on,
             profile,
+            skills,
             model,
             effort,
             config_overrides,
@@ -365,6 +366,7 @@ fn legacy_taskspec_audit_round_trips_without_extended_fields() {
             assert!(agent.is_none());
             assert!(depends_on.is_none());
             assert!(profile.is_none());
+            assert!(skills.is_none());
             assert!(model.is_none());
             assert!(effort.is_none());
             assert!(config_overrides.is_none());

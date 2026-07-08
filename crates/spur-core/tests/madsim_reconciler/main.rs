@@ -827,6 +827,7 @@ impl SimState {
                     task_id: task.task_id.to_string(),
                     context_files: Vec::new(),
                     profile: None,
+                    skills: None,
                     model: None,
                     effort: None,
                     config_overrides: None,

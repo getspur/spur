@@ -229,6 +229,7 @@ mod tests {
                 task_id: task_id.into(),
                 agent: "test-agent".into(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
