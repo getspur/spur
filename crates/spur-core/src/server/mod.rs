@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -315,6 +315,7 @@ pub struct McpCallbackServer {
     /// Optional orchestrator-owned hook for reattaching to a live worker ACP
     /// session before falling back to durable dispatch-orphan compensation.
     pub(crate) dispatch_orphan_resume_hook: Option<DispatchOrphanResumeHook>,
+    brain_model: Arc<RwLock<Option<String>>>,
 }
 
 impl McpCallbackServer {
@@ -383,6 +384,7 @@ impl McpCallbackServer {
             graph_mcp_deps: spur_graph::mcp::GraphMcpDeps::default(),
             tool_registry: Arc::new(spur_mcp::registry::ToolRegistry::new()),
             dispatch_orphan_resume_hook: None,
+            brain_model: Arc::new(RwLock::new(None)),
         };
         let tool_registry = crate::mcp::brain_tool_registry(
             crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
@@ -429,6 +431,20 @@ impl McpCallbackServer {
 
     pub(crate) fn set_dispatch_orphan_resume_hook(&mut self, hook: DispatchOrphanResumeHook) {
         self.dispatch_orphan_resume_hook = Some(hook);
+    }
+
+    pub fn set_brain_model(&self, brain_model: Option<String>) {
+        *self
+            .brain_model
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = brain_model;
+    }
+
+    pub(crate) fn brain_model(&self) -> Option<String> {
+        self.brain_model
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Returns the brain_session_id. Panics if not yet set - callers from

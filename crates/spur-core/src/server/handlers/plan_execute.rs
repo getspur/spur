@@ -380,6 +380,7 @@ impl McpCallbackServer {
             return JsonRpcResponse::mcp_error(id, error);
         }
         if let Some(adv) = pm.advanced() {
+            let brain_model = self.brain_model();
             let task_map = task_scope
                 .iter()
                 .map(|(issue_id, task_id, _)| (task_id.clone(), issue_id.clone()))
@@ -398,6 +399,7 @@ impl McpCallbackServer {
                     execution_mode: Some("execute_epic"),
                     brain_session_id: Some(self.brain_session_id().as_session_id()),
                     explicit_base: None,
+                    brain_model: brain_model.as_deref(),
                 },
             )
             .await;

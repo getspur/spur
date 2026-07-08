@@ -211,6 +211,7 @@ pub mod skills;
 pub mod skip_perm;
 pub mod spur_ext_interp;
 mod submit_plan_dedup;
+pub(crate) mod telemetry;
 pub mod tool_schemas;
 #[cfg(test)]
 pub(crate) mod tracing_test_lock;

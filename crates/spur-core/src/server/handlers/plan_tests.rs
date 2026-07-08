@@ -2159,6 +2159,7 @@ mod reconciler_fast_forward_tests {
                 execution_mode: Some("test"),
                 brain_session_id: None,
                 explicit_base: None,
+                brain_model: None,
             },
         )
         .await;
