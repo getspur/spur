@@ -48,6 +48,8 @@ pub struct PlanTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
@@ -796,6 +798,7 @@ mod approved_dep_closure_tests {
                 task_id: id.to_string(),
                 agent: "codex".to_string(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -909,6 +912,7 @@ mod scope_snapshot_integration_tests {
             task_id: task_id.into(),
             agent: agent.into(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -1218,6 +1222,7 @@ pub fn derive_epic_plan_from_issues(
             task_id: id.clone(),
             agent,
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -1354,10 +1359,11 @@ pub async fn derive_epic_plan(
                     .map_err(|e| format!("failed to list comments for task '{issue_id}': {e}"))?,
             )
             .map_err(|e| format!("failed to parse audits for task '{issue_id}': {e}"))?;
-            if let Some((_, context_files, _, _, _, _)) =
+            if let Some((_, context_files, _, skills, _, _, _)) =
                 crate::plan::projector::latest_task_spec(&audits)
             {
                 task.context_files = context_files;
+                task.skills = skills;
             }
         }
     }
@@ -1830,6 +1836,7 @@ pub(crate) async fn emit_task_spec_audit(
     task_id: &str,
     agent: &str,
     profile: Option<&str>,
+    skills: Option<&[String]>,
     model: Option<&str>,
     effort: Option<&str>,
     config_overrides: Option<&HashMap<String, String>>,
@@ -1839,6 +1846,7 @@ pub(crate) async fn emit_task_spec_audit(
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
         profile: profile.map(str::to_string),
+        skills: skills.map(<[String]>::to_vec),
         model: model.map(str::to_string),
         effort: effort.map(str::to_string),
         config_overrides: config_overrides.cloned(),
@@ -1873,6 +1881,7 @@ pub(crate) async fn emit_extended_task_spec_audit(
         task_id: task_id.to_string(),
         context_files: context_files.to_vec(),
         profile: profile.map(str::to_string),
+        skills: None,
         model: None,
         effort: None,
         config_overrides: None,
@@ -5444,6 +5453,7 @@ mod tests {
             task_id: id.into(),
             agent: "test-agent".into(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -5453,6 +5463,20 @@ mod tests {
             issue_title: None,
             context_files: vec![],
         }
+    }
+
+    #[test]
+    fn plan_task_skills_roundtrip_and_default() {
+        let task: PlanTask = serde_json::from_str(
+            r#"{"task_id":"t1","agent":"codex","task":"do","skills":["clean-a"]}"#,
+        )
+        .unwrap();
+        assert_eq!(task.skills, Some(vec!["clean-a".to_string()]));
+
+        let none: PlanTask =
+            serde_json::from_str(r#"{"task_id":"t1","agent":"codex","task":"do"}"#).unwrap();
+        assert!(none.skills.is_none());
+        assert!(!serde_json::to_string(&none).unwrap().contains("skills"));
     }
 
     fn test_materializer() -> Arc<crate::outcome_materializer::OutcomeMaterializer> {
@@ -5560,6 +5584,7 @@ mod tests {
                 task_id: "T1".into(),
                 agent: "x".into(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -5604,6 +5629,7 @@ mod tests {
             task_id: task_id.into(),
             agent: "x".into(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -5704,6 +5730,7 @@ mod tests {
             task_id: id.into(),
             agent: "test-agent".into(),
             profile: None,
+            skills: None,
             model: None,
             effort: None,
             config_overrides: None,
@@ -6092,6 +6119,7 @@ mod tests {
                 task_id: "T1".into(),
                 agent: "codex".into(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6134,6 +6162,7 @@ mod tests {
                 task_id: "T1".into(),
                 agent: "codex".into(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6174,6 +6203,7 @@ mod tests {
                 task_id: "T1".into(),
                 agent: "codex".into(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6662,6 +6692,7 @@ mod tests {
                 task_id: "A".to_string(),
                 agent: "x".to_string(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6675,6 +6706,7 @@ mod tests {
                 task_id: "B".to_string(),
                 agent: "x".to_string(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -6688,6 +6720,7 @@ mod tests {
                 task_id: "C".to_string(),
                 agent: "x".to_string(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -7127,6 +7160,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &context_files,
         )
         .await
@@ -7145,6 +7179,7 @@ mod tests {
                 model,
                 effort,
                 profile,
+                skills,
                 config_overrides,
                 task_text,
                 agent,
@@ -7154,6 +7189,7 @@ mod tests {
                 && model.is_none()
                 && effort.is_none()
                 && profile.is_none()
+                && skills.is_none()
                 && config_overrides.is_none()
                 && task_text.is_none()
                 && agent.as_deref() == Some("codex")
@@ -7176,6 +7212,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &context_files,
         )
         .await
@@ -7194,6 +7231,7 @@ mod tests {
                 model,
                 effort,
                 profile,
+                skills,
                 config_overrides,
                 task_text,
                 agent,
@@ -7203,6 +7241,7 @@ mod tests {
                 && model.is_none()
                 && effort.is_none()
                 && profile.is_none()
+                && skills.is_none()
                 && config_overrides.is_none()
                 && task_text.is_none()
                 && agent.as_deref() == Some("gemini")
@@ -7282,6 +7321,7 @@ mod tests {
                     task_id: "dep".into(),
                     agent: "a".into(),
                     profile: None,
+                    skills: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -7304,6 +7344,7 @@ mod tests {
                     task_id: "esc".into(),
                     agent: "a".into(),
                     profile: None,
+                    skills: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -8415,6 +8456,7 @@ mod tests {
                     task_id: "a".into(),
                     agent: "codex".into(),
                     profile: None,
+                    skills: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -8458,6 +8500,7 @@ mod tests {
                     task_id: "a".into(),
                     agent: "codex".into(),
                     profile: None,
+                    skills: None,
                     model: None,
                     effort: None,
                     config_overrides: None,
@@ -9173,6 +9216,7 @@ mod tests {
                 task_id: "T1".into(),
                 agent: "codex".into(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
