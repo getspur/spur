@@ -336,3 +336,242 @@ fn format_epoch_hhmm(epoch: u64) -> String {
     };
     timestamp.format("%H:%M").to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::ViewId;
+    use crate::views::explore::{ExploreBrowserView, ExploreStage};
+    use crossterm::event::KeyModifiers;
+    use spur_core::explore::catalog::{Catalog, CatalogEntry};
+    use spur_core::explore::materialize::{append_materialization_record, MaterializationRecord};
+    use spur_core::explore::pool::{item_from_entry, GateRecord, Manifest};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn manifest_entry(name: &str, license: Option<&str>) -> CatalogEntry {
+        CatalogEntry {
+            kind: ItemKind::Skill,
+            name: name.to_string(),
+            source: "acme/repo".to_string(),
+            rel_path: format!("skills/{name}"),
+            pinned_commit: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+            description: "fixture".to_string(),
+            license: license.map(str::to_string),
+            content_sha256: "0".repeat(64),
+        }
+    }
+
+    fn repo_with_manifest(items: Vec<ManifestItem>) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        Catalog {
+            synced_at_epoch: None,
+            entries: Vec::new(),
+        }
+        .save(repo.path())
+        .unwrap();
+        Manifest {
+            sources: Vec::new(),
+            items,
+        }
+        .save(repo.path())
+        .unwrap();
+        repo
+    }
+
+    fn enter_manage(view: &mut ExploreBrowserView) {
+        assert!(view.handle_key(key(KeyCode::Char('m'))).is_none());
+        assert_eq!(view.stage, ExploreStage::Manage);
+    }
+
+    #[test]
+    fn l_toggles_lens_and_resets_selection() {
+        let repo = repo_with_manifest(vec![]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        enter_manage(&mut view);
+        assert_eq!(view.manage_lens, ManageLens::Pool);
+
+        assert!(view.handle_key(key(KeyCode::Char('l'))).is_none());
+        assert_eq!(view.manage_lens, ManageLens::LastMaterialization);
+
+        assert!(view.handle_key(key(KeyCode::Char('l'))).is_none());
+        assert_eq!(view.manage_lens, ManageLens::Pool);
+    }
+
+    /// Vendors a real pool body for `entry` and returns its true content
+    /// hash, so `pool::status` reports it present with no sha mismatch
+    /// (matching against the entry's placeholder hash would otherwise
+    /// register a "sha mismatch" finding and inflate the row count).
+    fn vendor_pool_body(repo_root: &std::path::Path, entry: &CatalogEntry) -> String {
+        let dir = pool::pool_dir(repo_root, &entry.source, &entry.name, &entry.pinned_commit);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "fixture body").unwrap();
+        spur_core::explore::content_hash(&dir).unwrap()
+    }
+
+    #[test]
+    fn j_k_navigation_clamps_at_pool_boundaries() {
+        let repo = tempfile::tempdir().unwrap();
+        let item = |name: &str| {
+            let mut entry = manifest_entry(name, Some("MIT"));
+            entry.content_sha256 = vendor_pool_body(repo.path(), &entry);
+            item_from_entry(
+                &entry,
+                GateRecord {
+                    verdict: "clean".into(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            )
+        };
+        let items = vec![item("a"), item("b"), item("c")];
+        Catalog {
+            synced_at_epoch: None,
+            entries: Vec::new(),
+        }
+        .save(repo.path())
+        .unwrap();
+        Manifest {
+            sources: Vec::new(),
+            items,
+        }
+        .save(repo.path())
+        .unwrap();
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        enter_manage(&mut view);
+        assert_eq!(view.manage_selected, 0);
+
+        assert!(view.handle_key(key(KeyCode::Char('k'))).is_none());
+        assert_eq!(view.manage_selected, 0, "k at top stays clamped to 0");
+
+        assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
+        assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
+        assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
+        assert_eq!(view.manage_selected, 2, "j past the end clamps to last row");
+    }
+
+    #[test]
+    fn r_reloads_pool_and_esc_navigates_to_dashboard() {
+        let repo = repo_with_manifest(vec![]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        enter_manage(&mut view);
+
+        assert!(view.handle_key(key(KeyCode::Char('r'))).is_none());
+
+        let action = view.handle_key(key(KeyCode::Esc));
+        assert!(matches!(
+            action,
+            Some(Action::NavigateTo(ViewId::Dashboard))
+        ));
+    }
+
+    #[test]
+    fn x_is_noop_outside_pool_lens_or_out_of_range_selection() {
+        let item = item_from_entry(
+            &manifest_entry("solo", Some("MIT")),
+            GateRecord {
+                verdict: "clean".into(),
+                justification: None,
+                decided_at_epoch: None,
+            },
+        );
+        let repo = repo_with_manifest(vec![item]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        enter_manage(&mut view);
+
+        // Switch to LastMaterialization lens; x must no-op there.
+        assert!(view.handle_key(key(KeyCode::Char('l'))).is_none());
+        assert!(view.handle_key(key(KeyCode::Char('x'))).is_none());
+        assert_eq!(
+            Manifest::load(repo.path()).unwrap().items.len(),
+            1,
+            "x outside Pool lens must not remove anything"
+        );
+
+        // Back to Pool lens, but push selection out of range manually
+        // (row_count is 1, so selecting index 5 is out of range).
+        assert!(view.handle_key(key(KeyCode::Char('l'))).is_none());
+        view.manage_selected = 5;
+        assert!(view.handle_key(key(KeyCode::Char('x'))).is_none());
+        assert_eq!(
+            Manifest::load(repo.path()).unwrap().items.len(),
+            1,
+            "x with an out-of-range selection must not remove anything"
+        );
+    }
+
+    #[test]
+    fn pool_lines_empty_manifest_shows_empty_message_and_clean_status() {
+        let repo = repo_with_manifest(vec![]);
+        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let lines = view.pool_lines();
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(rendered.iter().any(|l| l.contains("pool is empty")));
+        assert!(rendered
+            .iter()
+            .any(|l| l.contains("status: all pool bodies present")));
+    }
+
+    #[test]
+    fn last_materialization_lines_empty_shows_placeholder() {
+        let repo = repo_with_manifest(vec![]);
+        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let lines = view.last_materialization_lines();
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(rendered
+            .iter()
+            .any(|l| l.contains("no materializations recorded")));
+    }
+
+    #[test]
+    fn last_materialization_lines_populated_shows_agent_and_items() {
+        let repo = repo_with_manifest(vec![]);
+        append_materialization_record(
+            repo.path(),
+            &MaterializationRecord {
+                recorded_at_epoch: 1_700_000_100,
+                delegation_id: "del-1".into(),
+                agent: "codex".into(),
+                worktree: "/tmp/wt".into(),
+                items: vec!["skill-a".into()],
+            },
+        )
+        .unwrap();
+        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let lines = view.last_materialization_lines();
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(rendered.iter().any(|l| l.contains("codex")));
+        assert!(rendered.iter().any(|l| l.contains("del-1")));
+        assert!(rendered.iter().any(|l| l.contains("1 skill: skill-a")));
+    }
+
+    #[test]
+    fn verdict_style_and_kind_label_cover_all_branches() {
+        assert_eq!(verdict_style("clean").fg, Some(Color::Green));
+        assert_eq!(verdict_style("overridden").fg, Some(Color::Yellow));
+        assert_eq!(verdict_style("replaced-bundled").fg, Some(Color::Yellow));
+        assert_eq!(verdict_style("blocked").fg, Some(Color::Red));
+        assert_eq!(kind_label(ItemKind::Skill), "skill");
+        assert_eq!(kind_label(ItemKind::Agent), "agent");
+    }
+
+    #[test]
+    fn pool_item_line_falls_back_to_unknown_license() {
+        let item = item_from_entry(
+            &manifest_entry("no-license", None),
+            GateRecord {
+                verdict: "clean".into(),
+                justification: None,
+                decided_at_epoch: None,
+            },
+        );
+        let line = pool_item_line(&item, false);
+        assert!(line_text(&line).contains("unknown"));
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+}
