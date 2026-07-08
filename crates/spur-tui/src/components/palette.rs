@@ -8,6 +8,13 @@
 /// while still allowing strong subtitle matches to dominate weak label
 /// matches. Tune in one place.
 const SUBTITLE_WEIGHT: f32 = 0.7;
+const NORMAL_MATCH_SCORE_OFFSET: u32 = 1_000_000;
+const TYPO_MIN_QUERY_LEN: usize = 3;
+const TYPO_MAX_DISTANCE: usize = 2;
+const TYPO_MAX_ASCII_LEN: usize = 64;
+const TYPO_EDIT_SCORE_BASE: u32 = 90;
+const TYPO_EDIT_DISTANCE_PENALTY: u32 = 10;
+const TYPO_SUBSEQUENCE_SCORE: u32 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteKind {
@@ -46,7 +53,8 @@ pub struct PaletteResult {
 ///   - **Exactly 2 allocations** on the non-empty-query path: one `Pattern`
 ///     parse and one scratch `Vec<(u32, u32)>` for scoring. `self.scratch`
 ///     is reused between label and subtitle scoring (one `clear()` between)
-///     so the second Utf32Str conversion does not allocate.
+///     so the second Utf32Str conversion does not allocate. The typo
+///     fallback uses fixed stack buffers and performs no heap allocation.
 ///   - **Zero clones** of `PaletteResult` fields (label/subtitle are not
 ///     copied during rerank; we rank by index into `raw`).
 ///
@@ -143,11 +151,17 @@ impl PaletteState {
             for (i, entry) in self.raw.iter().enumerate() {
                 self.scratch.clear();
                 let label_utf = Utf32Str::new(&entry.label, &mut self.scratch);
-                let label_score = pattern.score(label_utf, &mut self.matcher);
+                let label_score = pattern
+                    .score(label_utf, &mut self.matcher)
+                    .map(|score| NORMAL_MATCH_SCORE_OFFSET.saturating_add(score))
+                    .or_else(|| typo_tolerant_score(&self.query, &entry.label));
 
                 self.scratch.clear();
                 let sub_utf = Utf32Str::new(&entry.subtitle, &mut self.scratch);
-                let sub_score = pattern.score(sub_utf, &mut self.matcher);
+                let sub_score = pattern
+                    .score(sub_utf, &mut self.matcher)
+                    .map(|score| NORMAL_MATCH_SCORE_OFFSET.saturating_add(score))
+                    .or_else(|| typo_tolerant_score(&self.query, &entry.subtitle));
 
                 // Weighted max: label matches are primary; subtitle counts at 0.7x.
                 // Reusing self.scratch between the two scorings keeps the rerank
@@ -240,6 +254,104 @@ impl PaletteState {
         // reuse eliminates per-rerank heap allocation across opens.
         self.rank_scratch.clear();
     }
+}
+
+fn typo_tolerant_score(query: &str, text: &str) -> Option<u32> {
+    if query.len() < TYPO_MIN_QUERY_LEN || text.is_empty() {
+        return None;
+    }
+
+    let mut best_distance = bounded_ascii_edit_distance(query, text);
+    for token in text.split(|c: char| !c.is_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        best_distance = match (best_distance, bounded_ascii_edit_distance(query, token)) {
+            (Some(best), Some(distance)) => Some(best.min(distance)),
+            (None, Some(distance)) => Some(distance),
+            (best, None) => best,
+        };
+    }
+
+    if let Some(distance) = best_distance {
+        return Some(TYPO_EDIT_SCORE_BASE.saturating_sub(
+            u32::try_from(distance).expect("bounded distance fits u32")
+                * TYPO_EDIT_DISTANCE_PENALTY,
+        ));
+    }
+
+    ascii_subsequence(query, text).then_some(TYPO_SUBSEQUENCE_SCORE)
+}
+
+fn bounded_ascii_edit_distance(query: &str, candidate: &str) -> Option<usize> {
+    if !query.is_ascii() || !candidate.is_ascii() {
+        return None;
+    }
+
+    let query = query.as_bytes();
+    let candidate = candidate.as_bytes();
+    if query.is_empty()
+        || candidate.is_empty()
+        || query.len() > TYPO_MAX_ASCII_LEN
+        || candidate.len() > TYPO_MAX_ASCII_LEN
+        || query.len().abs_diff(candidate.len()) > TYPO_MAX_DISTANCE
+    {
+        return None;
+    }
+
+    let mut previous = [0_u8; TYPO_MAX_ASCII_LEN + 1];
+    let mut current = [0_u8; TYPO_MAX_ASCII_LEN + 1];
+    for (j, slot) in previous.iter_mut().enumerate().take(candidate.len() + 1) {
+        *slot = u8::try_from(j).expect("bounded candidate length fits u8");
+    }
+
+    for (i, query_byte) in query.iter().enumerate() {
+        current[0] = u8::try_from(i + 1).expect("bounded query length fits u8");
+        let mut row_min = current[0];
+        for (j, candidate_byte) in candidate.iter().enumerate() {
+            let deletion = previous[j + 1].saturating_add(1);
+            let insertion = current[j].saturating_add(1);
+            let substitution =
+                previous[j].saturating_add(u8::from(!ascii_eq(*query_byte, *candidate_byte)));
+            let distance = deletion.min(insertion).min(substitution);
+            current[j + 1] = distance;
+            row_min = row_min.min(distance);
+        }
+        if usize::from(row_min) > TYPO_MAX_DISTANCE {
+            return None;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    let distance = usize::from(previous[candidate.len()]);
+    (distance <= TYPO_MAX_DISTANCE).then_some(distance)
+}
+
+fn ascii_subsequence(query: &str, candidate: &str) -> bool {
+    if !query.is_ascii() || !candidate.is_ascii() || query.len() > candidate.len() {
+        return false;
+    }
+
+    let mut query = query.bytes();
+    let Some(mut needle) = query.next() else {
+        return false;
+    };
+
+    for candidate_byte in candidate.bytes() {
+        if !ascii_eq(needle, candidate_byte) {
+            continue;
+        }
+        let Some(next) = query.next() else {
+            return true;
+        };
+        needle = next;
+    }
+
+    false
+}
+
+fn ascii_eq(left: u8, right: u8) -> bool {
+    left.eq_ignore_ascii_case(&right)
 }
 
 impl Default for PaletteState {
