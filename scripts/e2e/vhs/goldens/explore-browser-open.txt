@@ -1,0 +1,25 @@
+## explore browser open
+Explore  [Skills]  Agents   Browse
+never synced
+┌Sources───────────────┐┌Catalog · Skills────────┐┌Preview─────────────────────┐
+│catalog: 0 items      ││no skills in catalog    ││select an item to preview   │
+│pool: 0 items         ││                        ││                            │
+│                      ││                        ││                            │
+│no sources synced     ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+│                      ││                        ││                            │
+└──────────────────────┘└────────────────────────┘└────────────────────────────┘
+j/k move  Tab tabs  space select  r reload  Esc back
