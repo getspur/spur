@@ -146,7 +146,7 @@ def test_worker_images_bundle_duckdb_extensions_for_offline_loads():
 
     assert 'WORKER_DUCKDB_EXTENSION_DIR="/opt/duckdb/extensions"' in script
     assert (
-        'EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "sqlite_scanner" "aws" "parquet" "json")'
+        'EXTENSIONS=("httpfs" "ducklake" "postgres_scanner" "sqlite_scanner" "aws" "parquet" "json" "lance")'
         in script
     )
     assert 'copy_worker_extensions "$worker_context"' in script
@@ -312,6 +312,58 @@ def test_context_service_workflow_runs_tests_and_gated_aws_artifacts():
     assert "CONTEXT_SERVICE_AWS_ROLE_ARN" in workflow
     assert "context-service-staging" in workflow
     assert "terraform apply" not in workflow
+
+
+def test_context_service_workflow_releases_serving_lambda_on_main_push():
+    workflow = CONTEXT_SERVICE_WORKFLOW.read_text()
+
+    # The release job exists and sits at the end of the file so this slice is
+    # the job body only.
+    assert "release-staging:" in workflow
+    release = workflow.split("release-staging:", 1)[1]
+
+    # Gating: only main pushes (already paths-filtered to the service) release,
+    # after the test and guardrail jobs, behind the staging environment.
+    assert "github.event_name == 'push'" in release
+    assert "github.ref == 'refs/heads/main'" in release
+    assert "crate-all-features" in release
+    assert "script-guards" in release
+    assert "environment: context-service-staging" in release
+    assert "id-token: write" in release
+
+    # Releases serialize instead of cancelling mid-rollout; PR runs keep
+    # cancel-in-progress.
+    assert "group: context-service-release" in release
+    assert "cancel-in-progress: false" in release
+    assert (
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
+        in workflow
+    )
+
+    # Code-only rollout through the canonical deploy path: push worker images
+    # (immutable tag + latest pointer, ECR login required for buildx --push),
+    # package the zip, then update-function-code on the serving Lambda, which
+    # API Gateway invokes unqualified ($LATEST).
+    assert 'SPUR_CONTEXT_SERVICE_BUILD_MODE: "self-contained"' in release
+    assert 'SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "1"' in release
+    assert "aws-actions/amazon-ecr-login" in release
+    assert "infra/spur-context-service/build-and-push-remote.sh" in release
+    assert (
+        "infra/spur-context-service/deploy.sh --skip-worker --package-only"
+        in release
+    )
+    assert "aws lambda update-function-code" in release
+    assert "--zip-file fileb://target/lambda/spur-context-service.zip" in release
+    assert "aws lambda wait function-updated-v2" in release
+    assert "CONTEXT_SERVICE_STAGING_LAMBDA" in release
+
+    # Worker/source-fetcher live aliases and the ECS taskdef stay pinned:
+    # no alias repoint and no terraform from the release job.
+    assert "update-alias" not in release
+    assert "terraform" not in release
+
+    # Post-release verification is the non-ingesting preflight.
+    assert "smoke-staging-e2e.py --preflight" in release
 
 
 def test_staging_smoke_codifies_e1_real_worker_and_frozen_serving():
@@ -619,12 +671,12 @@ def test_nat_free_worker_vpc_endpoints_are_declared():
 
     gateway_endpoint = endpoints_tf.split('resource "aws_vpc_endpoint" "gateway"', 1)[1]
     assert 'vpc_endpoint_type = "Gateway"' in gateway_endpoint
-    assert "route_table_ids   = var.worker_route_table_ids" in gateway_endpoint
+    assert "route_table_ids   = local.net_route_table_ids" in gateway_endpoint
 
     interface_endpoint = endpoints_tf.split('resource "aws_vpc_endpoint" "interface"', 1)[1]
     assert 'vpc_endpoint_type   = "Interface"' in interface_endpoint
     assert "subnet_ids" in interface_endpoint
-    assert "= var.worker_subnets" in interface_endpoint
+    assert "= local.net_subnet_ids" in interface_endpoint
     assert "private_dns_enabled = true" in interface_endpoint
     assert "security_group_ids  = [aws_security_group.vpc_endpoints[0].id]" in interface_endpoint
 
