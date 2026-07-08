@@ -11,7 +11,8 @@ press_key Ctrl+K
 wait_text "Go to"
 type_text "Plans"
 press_key Enter
-wait_text "Select a brain session first (S)"
+wait_text "Execution slot: empty"
+wait_text "No plans found."
 press_key Escape
 wait_text "No agents configured"
 quit_cleanly
