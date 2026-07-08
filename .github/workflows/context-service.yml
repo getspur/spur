@@ -156,18 +156,38 @@ jobs:
 
   # Auto-release channel (modeled on release-dist.yml): every main push that
   # touches the service (see the workflow paths filter) ships the serving-plane
-  # code after the test and guardrail jobs pass. Scope is deliberately
-  # code-only — no terraform runs from CI:
+  # code after the test and guardrail jobs pass.
+  #
+  # Builds run on an ephemeral AWS Spot builder, not the runner: deploy.sh's
+  # default remote mode dispatches the Graviton2-safe compiles through
+  # scripts/spur-cargo to the per-run VM, builds the worker/fetcher images
+  # natively on arm64 there, and pushes them to ECR via the VM instance
+  # profile's spur-ecr-push policy. Only the serving binary is fetched back
+  # for zip packaging. No QEMU, no runner-side docker.
+  #
+  # Scope is deliberately code-only — no terraform runs from CI:
   #   - serving Lambda: API Gateway invokes the unqualified function ($LATEST),
   #     so `aws lambda update-function-code` IS the rollout;
-  #   - worker images: built and pushed with the immutable git-SHA tag plus the
-  #     `latest` pointer, but NOT promoted — the worker/source-fetcher `live`
-  #     aliases and the ECS task definition stay pinned until an operator
-  #     promotes them together through the Terraform deploy path, avoiding
+  #   - worker images: pushed with the immutable git-SHA tag plus the `latest`
+  #     pointer, but NOT promoted — the worker/source-fetcher `live` aliases
+  #     and the ECS task definition stay pinned until an operator promotes
+  #     them together through the Terraform deploy path, avoiding
   #     Lambda/Fargate skew mid-ingest.
+  #
+  # Required configuration:
+  #   vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN — OIDC-assumable role covering the
+  #       whole job: EC2 describe/run/terminate + iam:PassRole on spur-builder
+  #       + ssm:StartSession + S3 RW on the sccache bucket (the
+  #       AWS_RELEASE_ROLE_ARN shape from release-dist.yml), plus
+  #       ecr:DescribeRepositories, lambda:UpdateFunctionCode /
+  #       GetFunctionConfiguration on the staging serving Lambda, and the
+  #       preflight's read access (data bucket + sts). MaxSessionDuration must
+  #       cover role-duration-seconds below.
+  #   vars.SPUR_BUILDER_AMI_ID — optional golden AMI for fast VM boots.
   release-staging:
     name: release serving Lambda to staging
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs:
       - crate-all-features
@@ -181,8 +201,21 @@ jobs:
       group: context-service-release
       cancel-in-progress: false
     env:
-      SPUR_CONTEXT_SERVICE_BUILD_MODE: "self-contained"
+      SPUR_CONTEXT_SERVICE_BUILD_MODE: "remote"
       SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "1"
+      # cloud-build pins (release-dist.yml): Malaysia Graviton4 Spot only, one
+      # 16-vCPU leg. Never fall back to compiling on the runner — that would
+      # emit wrong-arch artifacts. Fail fast instead.
+      SPUR_CLOUD: aws-my
+      SPUR_CLOUD_FALLBACK: ""
+      AWS_INSTANCE_TYPE: m8gd.4xlarge
+      AWS_INSTANCE_TYPE_FALLBACK: m8gd.2xlarge
+      SPUR_BUILD_JOBS: "16"
+      SPUR_NO_LOCAL_FALLBACK: "1"
+      # Per-run VM identity: isolates this release from the shared dev builder
+      # and any concurrent run, and makes teardown surgical.
+      VM_NAME: spur-ctx-release-${{ github.run_id }}
+      AWS_AMI_ID: ${{ vars.SPUR_BUILDER_AMI_ID }}
       SPUR_CONTEXT_SMOKE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_LAMBDA }}
       SPUR_CONTEXT_SMOKE_SOURCE_BUCKET: ${{ vars.CONTEXT_SERVICE_STAGING_SOURCE_BUCKET }}
       SPUR_CONTEXT_SMOKE_DATA_BUCKET: ${{ vars.CONTEXT_SERVICE_STAGING_DATA_BUCKET }}
@@ -194,21 +227,42 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zip gzip curl
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.CONTEXT_SERVICE_AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: Log in to ECR
-        # deploy.sh pushes via `docker buildx build --push` and does not
-        # authenticate itself.
-        uses: aws-actions/amazon-ecr-login@v2
-      - name: Build and push worker images (immutable tag + latest pointer)
+          # The whole job talks to AWS (SSM tunnel + ECR/Lambda mutations); a
+          # cold-cache remote build can outlive the default 1 h credentials.
+          role-duration-seconds: 7200
+      - name: Restore cloud-build scripts (S3 bundle)
+        # scripts/cloud-build is a symlink into the private sibling
+        # spur-notebook checkout; restore the published bundle so the tracked
+        # symlink resolves exactly like on a workstation.
+        run: |
+          aws s3 cp "s3://wiilearn-spur-sccache-apse5/ci/cloud-build/bundle.tar.gz" \
+            /tmp/cloud-build-bundle.tar.gz --region ap-southeast-5
+          mkdir -p "$GITHUB_WORKSPACE/../spur-notebook/scripts"
+          tar -xzf /tmp/cloud-build-bundle.tar.gz -C "$GITHUB_WORKSPACE/../spur-notebook/scripts"
+          test -x "$GITHUB_WORKSPACE/scripts/cloud-build/spin.sh"
+      - name: Install session-manager-plugin
+        run: |
+          curl -fsSL -o /tmp/session-manager-plugin.deb \
+            "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+          sudo dpkg -i /tmp/session-manager-plugin.deb
+          session-manager-plugin --version
+      - name: Generate ephemeral SSH key
+        run: |
+          mkdir -p "$HOME/.ssh"
+          ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/spur-ctx-release"
+          echo "AWS_SSH_KEY=$HOME/.ssh/spur-ctx-release" >> "$GITHUB_ENV"
+      - name: Spin release VM
+        # Fail fast on Spot capacity / IAM problems before paying for the build.
+        run: scripts/cloud-build/spin.sh
+      - name: Build and push worker images from the VM (immutable tag + latest pointer)
         run: infra/spur-context-service/build-and-push-remote.sh
       - name: Package serving Lambda artifact
-        run: infra/spur-context-service/deploy.sh --skip-worker --package-only --build-mode self-contained
+        run: infra/spur-context-service/deploy.sh --skip-worker --package-only
       - name: Release serving Lambda code
         run: |
           aws lambda update-function-code \
@@ -226,3 +280,14 @@ jobs:
           if-no-files-found: error
       - name: Verify serving plane (non-ingesting preflight)
         run: python3 infra/spur-context-service/smoke-staging-e2e.py --preflight
+      - name: Refresh AWS credentials for teardown
+        # Re-exchange OIDC so teardown works even when the job ran close to or
+        # past the original credential lifetime.
+        if: ${{ always() }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CONTEXT_SERVICE_RELEASE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Terminate release VM
+        if: ${{ always() }}
+        run: scripts/cloud-build/teardown.sh
