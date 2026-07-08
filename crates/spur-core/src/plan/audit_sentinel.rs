@@ -105,6 +105,8 @@ pub enum AuditSentinelKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        skills: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
@@ -573,6 +575,7 @@ mod tests {
                 task_id: "t1".into(),
                 context_files: vec!["docs/spec.md".into(), "src/lib.rs".into()],
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
