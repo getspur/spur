@@ -64,29 +64,13 @@ launch_spur_tui_no_catalog() {
   launch_spur_tui_worker_fixture "$1" "no-catalog"
 }
 
-# Retry the full cascade until the background-probed catalog exposes the
-# model slot. There is no UI signal for probe completion, so early
-# attempts may still see an agent-final cascade and atomize without
-# model/effort — delete the atom and try again.
+# After the probe completion hint, drive the cascade once until the
+# model slot opens.
 cascade_until_model_slot() {
-  local attempt
-
-  for attempt in 1 2 3 4 5; do
-    type_text "@worker:codex"
-    wait_text "rust-reviewer"
-    press_key Tab
-    if "$shell_use_bin" --session "$session_name" expect text "GPT-5 Codex" --no-strict --timeout 2000 >/dev/null 2>&1; then
-      return 0
-    fi
-    # Probe not landed yet: the accept atomized early. Delete the atom
-    # (protected range: one Backspace removes it whole) and retry.
-    press_key Backspace
-    wait_text "Enter to submit"
-  done
-
-  printf 'model slot never appeared after %s attempts\n' "$attempt" >&2
-  dump_session >&2
-  return 1
+  type_text "@worker:codex"
+  wait_text "rust-reviewer"
+  press_key Tab
+  wait_text "GPT-5 Codex"
 }
 
 # Drive the cascading worker → agent → model → effort picker to a fully
