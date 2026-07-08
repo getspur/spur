@@ -470,8 +470,7 @@ impl AgentConfigBrowserView {
                 let selected = index == self.selected_field;
                 let value = if selected {
                     self.edit_buffer
-                        .as_ref()
-                        .cloned()
+                        .clone()
                         .unwrap_or_else(|| draft.text(*field))
                 } else {
                     draft.text(*field)
