@@ -46,6 +46,7 @@ fn check_or_update(actual: &str, golden_name: &str) {
             path.display()
         )
     });
+    let expected = expected.strip_suffix('\n').unwrap_or(&expected);
     assert_eq!(
         actual, expected,
         "golden mismatch for {}; re-record with UPDATE_GOLDEN=1",

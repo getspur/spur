@@ -1,1 +1,30 @@
-INTENDED MANAGE POOL GOLDEN
+Explore  [Skills]  Agents   Manage
+never synced
+┌Manage · Pool─────────────────────────────────────────────────────────────────────────────────────┐
+│[Pool]   Last materialization                                                                     │
+│name  kind  sha  verdict  license                                                                 │
+│                                                                                                  │
+│> review-helper  skill  0123456  clean  MIT                                                       │
+│stale-helper  skill  0123456  clean  MIT                                                          │
+│                                                                                                  │
+│status findings                                                                                   │
+│⚠ missing body  stale-helper                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+j/k move  l lens  x remove  m browse  r reload  Esc back
