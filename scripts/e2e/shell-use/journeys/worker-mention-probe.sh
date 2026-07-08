@@ -29,8 +29,8 @@ press_key Backspace
 wait_text "Enter to submit"
 
 # Once the probe lands, the same cascade gains the model and effort
-# slots. cascade_until_model_slot retries because probe completion has
-# no UI signal to wait on.
+# slots.
+wait_text "catalog ready"
 cascade_until_model_slot
 press_key Tab
 wait_text "e2e deep reasoning"
