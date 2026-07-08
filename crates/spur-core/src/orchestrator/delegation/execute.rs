@@ -19,6 +19,7 @@ pub(crate) fn resolve_effective_model_effort(
 pub(crate) async fn execute_delegation(
     agent: String,
     profile: Option<String>,
+    skills: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
     config_overrides: Option<std::collections::HashMap<String, String>>,
@@ -209,6 +210,7 @@ pub(crate) async fn execute_delegation(
                 effort: effective_effort.as_deref(),
                 profile: profile.as_deref(),
                 profile_def: profile_def.as_ref(),
+                skills: skills.clone(),
                 config_overrides: config_overrides.as_ref(),
                 task: &current_task,
                 request_id: &request_id,
