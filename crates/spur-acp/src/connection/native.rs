@@ -39,6 +39,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::io::AsyncReadExt;
 
@@ -79,6 +80,48 @@ use crate::types::{AgentHealth, AgentKind};
 
 const NATIVE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const NATIVE_SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+type TelemetryOutcome = spur_telemetry::tier1_events::Outcome;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpRequestFailure {
+    Timeout,
+    Error,
+}
+
+fn acp_request_outcome<T>(result: Result<T, AcpRequestFailure>) -> TelemetryOutcome {
+    match result {
+        Ok(_) => TelemetryOutcome::Ok,
+        Err(AcpRequestFailure::Timeout) => TelemetryOutcome::Timeout,
+        Err(AcpRequestFailure::Error) => TelemetryOutcome::Error,
+    }
+}
+
+fn acp_request_failure_from_error(error: &impl std::fmt::Display) -> AcpRequestFailure {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("timed out") || message.contains("timeout") {
+        AcpRequestFailure::Timeout
+    } else {
+        AcpRequestFailure::Error
+    }
+}
+
+fn acp_request_duration_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn emit_acp_request_result<T, E: std::fmt::Display>(started_at: Instant, result: &Result<T, E>) {
+    let outcome = acp_request_outcome(
+        result
+            .as_ref()
+            .map(|_| ())
+            .map_err(acp_request_failure_from_error),
+    );
+    spur_telemetry::emit!(spur_telemetry::tier1_events::AcpRequestDuration {
+        duration_ms: acp_request_duration_ms(started_at),
+        outcome,
+    });
+}
 
 /// Spur's canonical `ClientCapabilities` literal advertised at every
 /// `initialize` call. Spec §6.2.
@@ -1964,7 +2007,9 @@ fn acp_thread_main(
                 .connect_with(transport, async move |cx: ConnectionTo<Agent>| -> agent_client_protocol::Result<()> {
                     // 1. Run the ACP initialize handshake and forward the
                     //    response to the caller blocked in `initialize()`.
+                    let init_started_at = Instant::now();
                     let init_outcome = cx.send_request(init_request).block_task().await;
+                    emit_acp_request_result(init_started_at, &init_outcome);
                     match init_outcome {
                         Ok(response) => {
                             if let Some(reply) =
@@ -1999,7 +2044,9 @@ fn acp_thread_main(
                             }
                             AcpCommand::NewSession { request, reply } => {
                                 *cwd_loop.lock().unwrap() = request.cwd.clone();
+                                let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 if let Ok(response) = &result {
                                     cache_session_modes(
                                         &session_modes,
@@ -2030,8 +2077,8 @@ fn acp_thread_main(
                                 // the agent is still streaming. `biased;` polls cmd_rx
                                 // first so a queued cancel cannot starve behind heavy
                                 // notification flow.
-                                let prompt_fut =
-                                    cx.send_request(request).block_task();
+                                let request_started_at = Instant::now();
+                                let prompt_fut = cx.send_request(request).block_task();
                                 tokio::pin!(prompt_fut);
                                 let mut cmd_rx_closed = false;
                                 loop {
@@ -2060,6 +2107,7 @@ fn acp_thread_main(
                                             }
                                         }
                                         prompt_result = &mut prompt_fut => {
+                                            emit_acp_request_result(request_started_at, &prompt_result);
                                             match prompt_result {
                                                 Ok(response) => {
                                                     if let Ok(mut usage) = last_prompt_usage_loop.lock() {
@@ -2110,8 +2158,8 @@ fn acp_thread_main(
                                 // Reply is sent AFTER the future resolves (load_session's
                                 // contract is reply-with-result, unlike Prompt which
                                 // hands the empty stream out up front).
-                                let load_session_fut =
-                                    cx.send_request(request).block_task();
+                                let request_started_at = Instant::now();
+                                let load_session_fut = cx.send_request(request).block_task();
                                 tokio::pin!(load_session_fut);
                                 let mut reply_holder = Some(reply);
                                 let mut cmd_rx_closed = false;
@@ -2141,6 +2189,7 @@ fn acp_thread_main(
                                             }
                                         }
                                         load_result = &mut load_session_fut => {
+                                            emit_acp_request_result(request_started_at, &load_result);
                                             let reply = reply_holder
                                                 .take()
                                                 .expect("LoadSession reply consumed only once");
@@ -2179,7 +2228,9 @@ fn acp_thread_main(
                             AcpCommand::ResumeSession { request, reply } => {
                                 *cwd_loop.lock().unwrap() = request.cwd.clone();
                                 let session_id = request.session_id.clone();
+                                let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 if let Ok(response) = &result {
                                     cache_session_modes(
                                         &session_modes,
@@ -2195,7 +2246,9 @@ fn acp_thread_main(
                                 }));
                             }
                             AcpCommand::ListSessions { request, reply } => {
+                                let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': list_sessions failed: {e}",
@@ -2204,7 +2257,9 @@ fn acp_thread_main(
                                 }));
                             }
                             AcpCommand::DeleteSession { request, reply } => {
+                                let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': delete_session failed: {e}",
@@ -2213,7 +2268,9 @@ fn acp_thread_main(
                                 }));
                             }
                             AcpCommand::CloseSession { request, reply } => {
+                                let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': close_session failed: {e}",
@@ -2222,7 +2279,9 @@ fn acp_thread_main(
                                 }));
                             }
                             AcpCommand::SetSessionMode { request, reply } => {
+                                let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': set_session_mode failed: {e}",
@@ -2231,7 +2290,9 @@ fn acp_thread_main(
                                 }));
                             }
                             AcpCommand::SetSessionConfigOption { request, reply } => {
+                                let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': set_session_config_option failed: {e}",
@@ -2240,7 +2301,9 @@ fn acp_thread_main(
                                 }));
                             }
                             AcpCommand::Authenticate { request, reply } => {
+                                let request_started_at = Instant::now();
                                 let result = cx.send_request(request).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 let _ = reply.send(result.map_err(|e| {
                                     anyhow::anyhow!(
                                         "NativeAcpConnection '{}': authenticate failed: {e}",
@@ -2259,8 +2322,9 @@ fn acp_thread_main(
                                     ClientRequest::ExtMethodRequest(
                                         request,
                                     );
-                                let result =
-                                    cx.send_request(client_req).block_task().await;
+                                let request_started_at = Instant::now();
+                                let result = cx.send_request(client_req).block_task().await;
+                                emit_acp_request_result(request_started_at, &result);
                                 let mapped: anyhow::Result<ExtResponse> = match result {
                                     Ok(json) => match serde_json::value::to_raw_value(&json)
                                     {
@@ -2703,6 +2767,19 @@ mod native_helper_tests {
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
             Ok(payload) => panic!("unexpected extra agent-client request: {payload:?}"),
         }
+    }
+
+    #[test]
+    fn acp_request_outcome_maps_ok_error_and_timeout() {
+        assert_eq!(acp_request_outcome::<()>(Ok(())), TelemetryOutcome::Ok);
+        assert_eq!(
+            acp_request_outcome::<()>(Err(AcpRequestFailure::Error)),
+            TelemetryOutcome::Error
+        );
+        assert_eq!(
+            acp_request_outcome::<()>(Err(AcpRequestFailure::Timeout)),
+            TelemetryOutcome::Timeout
+        );
     }
 
     #[test]
