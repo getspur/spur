@@ -12,6 +12,8 @@ use spur_core::explore::catalog::CatalogEntry;
 use spur_core::explore::gate::{self, Verdict};
 use spur_core::explore::pool::pool_dir;
 
+use super::{scroll_offset_for_selected_line, selected_marker_line};
+
 pub(crate) struct GateState {
     pub(crate) cards: Vec<GateCard>,
     pub(crate) selected: usize,
@@ -130,10 +132,18 @@ impl GateState {
             ]));
         }
 
+        let block = Block::default().title("Gate Cards").borders(Borders::ALL);
+        let scroll = scroll_offset_for_selected_line(
+            &lines,
+            selected_marker_line(&lines),
+            block.inner(area).width,
+            block.inner(area).height,
+        );
         frame.render_widget(
             Paragraph::new(lines)
-                .block(Block::default().title("Gate Cards").borders(Borders::ALL))
-                .wrap(Wrap { trim: true }),
+                .block(block)
+                .wrap(Wrap { trim: true })
+                .scroll((scroll, 0)),
             area,
         );
     }

@@ -17,6 +17,7 @@ use spur_core::explore::{
 };
 
 use crate::action::{Action, ViewId};
+use crate::components::line_wrap::wrap_line_to_width;
 
 use super::{View, ViewContext};
 
@@ -387,14 +388,20 @@ impl ExploreBrowserView {
             }
         }
 
+        let block = Block::default()
+            .title(catalog_title(self.tab))
+            .borders(Borders::ALL);
+        let scroll = scroll_offset_for_selected_line(
+            &lines,
+            selected_marker_line(&lines),
+            block.inner(area).width,
+            block.inner(area).height,
+        );
         frame.render_widget(
             Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(catalog_title(self.tab))
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: true }),
+                .block(block)
+                .wrap(Wrap { trim: true })
+                .scroll((scroll, 0)),
             area,
         );
     }
@@ -585,6 +592,82 @@ fn empty_catalog_message(tab: ExploreTab) -> &'static str {
         ExploreTab::Skills => "no skills in catalog",
         ExploreTab::Agents => "no agents in catalog",
     }
+}
+
+pub(crate) fn selected_marker_line(lines: &[Line<'_>]) -> usize {
+    lines
+        .iter()
+        .position(|line| {
+            line.spans
+                .first()
+                .is_some_and(|span| span.content.as_ref() == "> ")
+        })
+        .unwrap_or(0)
+}
+
+pub(crate) fn scroll_offset_for_selected_line(
+    lines: &[Line<'_>],
+    selected_line: usize,
+    width: u16,
+    viewport_height: u16,
+) -> u16 {
+    let viewport_height = usize::from(viewport_height);
+    if width == 0 || viewport_height == 0 || lines.is_empty() {
+        return 0;
+    }
+
+    let selected_line = selected_line.min(lines.len().saturating_sub(1));
+    let mut total_height = 0usize;
+    let mut selected_start = 0usize;
+    let mut selected_height = 1usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        let height = wrapped_line_height(line, width);
+        if index < selected_line {
+            selected_start += height;
+        } else if index == selected_line {
+            selected_height = height;
+        }
+        total_height += height;
+    }
+
+    if total_height <= viewport_height {
+        return 0;
+    }
+
+    let max_offset = total_height.saturating_sub(viewport_height);
+    let offset = if selected_height >= viewport_height {
+        selected_start
+    } else {
+        selected_start.saturating_sub(viewport_height - selected_height)
+    };
+    offset.min(max_offset) as u16
+}
+
+fn wrapped_line_height(line: &Line<'_>, width: u16) -> usize {
+    let trimmed = trim_line_start(line);
+    wrap_line_to_width(&trimmed, width).len().max(1)
+}
+
+fn trim_line_start(line: &Line<'_>) -> Line<'static> {
+    let mut trimming = true;
+    let mut spans = Vec::new();
+    for span in &line.spans {
+        let content = span.content.as_ref();
+        let content = if trimming {
+            let trimmed = content.trim_start();
+            if !trimmed.is_empty() {
+                trimming = false;
+            }
+            trimmed
+        } else {
+            content
+        };
+        if !content.is_empty() {
+            spans.push(Span::styled(content.to_string(), span.style));
+        }
+    }
+    Line::from(spans)
 }
 
 fn sync_banner(catalog: &Catalog) -> String {
@@ -1041,6 +1124,22 @@ mod tests {
         out
     }
 
+    fn render_catalog_to_string(view: &ExploreBrowserView, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| view.render_catalog(frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     #[test]
     fn render_browse_stage_with_entries_covers_pool_and_star_badges() {
         let repo = tempfile::tempdir().unwrap();
@@ -1083,6 +1182,53 @@ mod tests {
         assert!(view.handle_key(key(KeyCode::Tab)).is_none());
         let text = render_to_string(&mut view);
         assert!(text.contains("no agents in catalog"));
+    }
+
+    #[test]
+    fn catalog_scroll_follows_selected_row_in_short_viewport() {
+        let repo = tempfile::tempdir().unwrap();
+        let entries = (0..12)
+            .map(|index| write_skill(repo.path(), &format!("scroll-skill-{index:02}"), "body"))
+            .collect();
+        save_catalog(repo.path(), entries);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        for _ in 0..8 {
+            assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
+        }
+
+        let text = render_catalog_to_string(&view, 60, 10);
+        assert!(
+            text.contains("scroll-skill-08"),
+            "selected catalog row should stay visible:\n{text}"
+        );
+    }
+
+    #[test]
+    fn catalog_scroll_counts_wrapped_rows_in_narrow_viewport() {
+        let repo = tempfile::tempdir().unwrap();
+        let long_description = "This description deliberately wraps across several visual rows \
+            inside the narrow catalog pane so scrolling must count rendered rows.";
+        let entries = (0..12)
+            .map(|index| {
+                let mut entry =
+                    write_skill(repo.path(), &format!("wrapped-skill-{index:02}"), "body");
+                entry.description = long_description.to_string();
+                entry
+            })
+            .collect();
+        save_catalog(repo.path(), entries);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        for _ in 0..5 {
+            assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
+        }
+
+        let text = render_catalog_to_string(&view, 30, 10);
+        assert!(
+            text.contains("wrapped-skill-05"),
+            "selected catalog row should stay visible after wrapping:\n{text}"
+        );
     }
 
     #[test]
