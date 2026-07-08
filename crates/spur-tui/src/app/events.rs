@@ -6,6 +6,13 @@ use tokio::time::timeout;
 
 type UpgradeResult = Result<Option<spur_core::UpgradeBanner>, oneshot::error::RecvError>;
 
+const SLOW_FRAME_THRESHOLD_MS: u128 = 50;
+
+fn slow_frame_duration_ms(elapsed: std::time::Duration) -> Option<u64> {
+    let elapsed_ms = elapsed.as_millis();
+    (elapsed_ms >= SLOW_FRAME_THRESHOLD_MS).then(|| elapsed_ms.min(u128::from(u64::MAX)) as u64)
+}
+
 async fn probe_and_cache_agent_model_catalog(
     config: std::sync::Arc<spur_acp::AgentConfig>,
 ) -> anyhow::Result<()> {
@@ -1011,7 +1018,13 @@ pub async fn run_tui_with_license(
                     "rendering frame"
                 );
             }
+            let frame_started = std::time::Instant::now();
             terminal.draw(|f| app.render(f))?;
+            if let Some(duration_ms) = slow_frame_duration_ms(frame_started.elapsed()) {
+                let event = spur_telemetry::tier1_events::TuiFrameSlow { duration_ms };
+                let _ = &event;
+                spur_telemetry::emit!(event);
+            }
             app.dirty = false;
         }
 
@@ -1113,5 +1126,19 @@ pub(crate) fn apply_session_update(
         _ => {
             tracing::trace!("apply_session_update: unhandled variant");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn slow_frame_duration_ms_is_threshold_gated() {
+        assert_eq!(slow_frame_duration_ms(Duration::from_millis(49)), None);
+        assert_eq!(slow_frame_duration_ms(Duration::from_millis(50)), Some(50));
+        assert_eq!(slow_frame_duration_ms(Duration::from_millis(51)), Some(51));
     }
 }
