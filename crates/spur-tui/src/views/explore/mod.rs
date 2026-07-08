@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,6 +40,42 @@ pub enum ExploreStage {
     Manage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StarKey {
+    kind: ItemKind,
+    name: String,
+}
+
+impl StarKey {
+    pub(crate) fn from_entry(entry: &CatalogEntry) -> Self {
+        Self {
+            kind: entry.kind,
+            name: entry.name.clone(),
+        }
+    }
+}
+
+impl Ord for StarKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        item_kind_rank(self.kind)
+            .cmp(&item_kind_rank(other.kind))
+            .then_with(|| self.name.cmp(&other.name))
+    }
+}
+
+impl PartialOrd for StarKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn item_kind_rank(kind: ItemKind) -> u8 {
+    match kind {
+        ItemKind::Skill => 0,
+        ItemKind::Agent => 1,
+    }
+}
+
 pub struct ExploreBrowserView {
     pub(crate) repo_root: PathBuf,
     pub(crate) tab: ExploreTab,
@@ -48,7 +85,8 @@ pub struct ExploreBrowserView {
     pub(crate) catalog: Catalog,
     pub(crate) manifest: Manifest,
     pub(crate) selected: usize,
-    pub(crate) starred: BTreeSet<String>,
+    pub(crate) starred: BTreeSet<StarKey>,
+    pub(crate) cached_bundled_ids: Vec<String>,
     pub(crate) load_error: Option<String>,
     pub(crate) gate: gate::GateState,
     pub(crate) apply_log: Option<ApplyOutcome>,
@@ -58,7 +96,7 @@ pub struct ExploreBrowserView {
 
 impl ExploreBrowserView {
     pub fn new(repo_root: PathBuf) -> Self {
-        let (catalog, manifest, load_error) = load_state(&repo_root);
+        let (catalog, manifest, cached_bundled_ids, load_error) = load_state(&repo_root);
         let mut view = Self {
             repo_root,
             tab: ExploreTab::Skills,
@@ -69,6 +107,7 @@ impl ExploreBrowserView {
             manifest,
             selected: 0,
             starred: BTreeSet::new(),
+            cached_bundled_ids,
             load_error,
             gate: gate::GateState::default(),
             apply_log: None,
@@ -144,9 +183,10 @@ impl ExploreBrowserView {
 
     fn reload(&mut self) {
         self.invalidate_manage_cache();
-        let (catalog, manifest, load_error) = load_state(&self.repo_root);
+        let (catalog, manifest, cached_bundled_ids, load_error) = load_state(&self.repo_root);
         self.catalog = catalog;
         self.manifest = manifest;
+        self.cached_bundled_ids = cached_bundled_ids;
         self.load_error = load_error;
         self.refresh_manage_cache();
         self.clamp_selection();
@@ -157,16 +197,13 @@ impl ExploreBrowserView {
         if self.starred.is_empty() {
             return;
         }
-        let bundled_ids = match bundled_ids(&self.repo_root) {
-            Ok(ids) => ids,
-            Err(error) => {
-                self.load_error = Some(format!("{error:#}"));
-                return;
-            }
-        };
         let entries = self.catalog.entries.clone();
-        let gate =
-            gate::GateState::from_starred(&self.repo_root, &entries, &self.starred, &bundled_ids);
+        let gate = gate::GateState::from_starred(
+            &self.repo_root,
+            &entries,
+            &self.starred,
+            &self.cached_bundled_ids,
+        );
         if gate.is_empty() {
             return;
         }
@@ -195,18 +232,11 @@ impl ExploreBrowserView {
             self.load_error = Some("no resolved gate cards to apply".to_string());
             return;
         }
-        let bundled_ids = match bundled_ids(&self.repo_root) {
-            Ok(ids) => ids,
-            Err(error) => {
-                self.load_error = Some(format!("{error:#}"));
-                return;
-            }
-        };
         match apply::apply(
             &self.repo_root,
             &mut self.manifest,
             &selections,
-            &bundled_ids,
+            &self.cached_bundled_ids,
         ) {
             Ok(outcome) => {
                 self.apply_log = Some(outcome);
@@ -233,11 +263,11 @@ impl ExploreBrowserView {
     }
 
     fn toggle_starred(&mut self) {
-        let Some(name) = self.selected_entry().map(|entry| entry.name.clone()) else {
+        let Some(key) = self.selected_entry().map(StarKey::from_entry) else {
             return;
         };
-        if !self.starred.remove(&name) {
-            self.starred.insert(name);
+        if !self.starred.remove(&key) {
+            self.starred.insert(key);
         }
     }
 
@@ -387,7 +417,17 @@ impl ExploreBrowserView {
                 if self.is_in_pool(entry) {
                     spans.push(Span::styled("  in pool", Style::default().fg(Color::Green)));
                 }
-                if self.starred.contains(entry.name.as_str()) {
+                if self
+                    .cached_bundled_ids
+                    .iter()
+                    .any(|bundled_id| bundled_id == &entry.name)
+                {
+                    spans.push(Span::styled(
+                        "  conflict",
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
+                if self.starred.contains(&StarKey::from_entry(entry)) {
                     spans.push(Span::styled("  ★", Style::default().fg(Color::Yellow)));
                 }
                 lines.push(Line::from(spans));
@@ -457,7 +497,9 @@ impl ExploreBrowserView {
                 "j/k cards  a accept  o override  b replace  s skip  Shift+A apply  Esc browse"
             }
             ExploreStage::Manage => "j/k move  l lens  x remove  m browse  r reload  Esc back",
-            ExploreStage::Browse => "j/k move  Tab tabs  space select  r reload  Esc back",
+            ExploreStage::Browse => {
+                "j/k move  Tab tabs  space select  Enter gate  m manage  r reload  Esc dashboard"
+            }
         };
         frame.render_widget(
             Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
@@ -530,7 +572,7 @@ impl View for ExploreBrowserView {
     fn tick(&mut self) {}
 }
 
-fn load_state(repo_root: &Path) -> (Catalog, Manifest, Option<String>) {
+fn load_state(repo_root: &Path) -> (Catalog, Manifest, Vec<String>, Option<String>) {
     let mut errors = Vec::new();
     let catalog = match Catalog::load(repo_root) {
         Ok(catalog) => catalog,
@@ -548,8 +590,16 @@ fn load_state(repo_root: &Path) -> (Catalog, Manifest, Option<String>) {
             Manifest::default()
         }
     };
+    let cached_bundled_ids = match bundled_ids(repo_root) {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(%error, "explore bundled skill load failed");
+            errors.push(format!("bundled skills: {error:#}"));
+            Vec::new()
+        }
+    };
     let load_error = (!errors.is_empty()).then(|| errors.join("; "));
-    (catalog, manifest, load_error)
+    (catalog, manifest, cached_bundled_ids, load_error)
 }
 
 fn bundled_ids(repo_root: &Path) -> anyhow::Result<Vec<String>> {
@@ -775,6 +825,45 @@ mod tests {
             license: Some("MIT".to_string()),
             content_sha256: spur_core::explore::content_hash(&dir).unwrap(),
         }
+    }
+
+    fn write_agent(root: &Path, name: &str, body: &str) -> CatalogEntry {
+        let rel_path = format!("agents/{name}.md");
+        let path = spur_core::explore::sync::cache_dir(root, SOURCE).join(&rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!("---\nname: {name}\ndescription: Fixture agent\n---\n{body}\n"),
+        )
+        .unwrap();
+        CatalogEntry {
+            kind: ItemKind::Agent,
+            name: name.to_string(),
+            source: SOURCE.to_string(),
+            rel_path,
+            pinned_commit: COMMIT.to_string(),
+            description: "Fixture agent".to_string(),
+            license: Some("MIT".to_string()),
+            content_sha256: spur_core::explore::content_hash(&path).unwrap(),
+        }
+    }
+
+    fn configure_bundled_skill(root: &Path, name: &str) {
+        let bundled_root = root.join("bundled-skills");
+        let skill_dir = bundled_root.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Bundled fixture\n---\nBody\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".spur")).unwrap();
+        let bundled_root = bundled_root.display().to_string().replace('"', "\\\"");
+        std::fs::write(
+            root.join(".spur/config.toml"),
+            format!("[skills]\nbundled_dir = \"{bundled_root}\"\n"),
+        )
+        .unwrap();
     }
 
     fn missing_skill(name: &str) -> CatalogEntry {
@@ -1189,6 +1278,77 @@ mod tests {
         assert!(text.contains('★'));
         assert!(text.contains("pin"));
         assert!(text.contains("license"));
+    }
+
+    #[test]
+    fn starred_skill_and_agent_with_same_name_are_independent() {
+        let repo = tempfile::tempdir().unwrap();
+        let skill = write_skill(repo.path(), "shared-name", "Normal skill body.");
+        let agent = write_agent(repo.path(), "shared-name", "You handle Rust work.");
+        save_catalog(repo.path(), vec![skill, agent]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        star_selected(&mut view);
+        let skill_text = render_catalog_to_string(&view, 80, 8);
+        assert!(skill_text.contains('★'));
+
+        assert!(view.handle_key(key(KeyCode::Tab)).is_none());
+        let agent_before_star = render_catalog_to_string(&view, 80, 8);
+        assert!(
+            !agent_before_star.contains('★'),
+            "agent row should not inherit the skill star:\n{agent_before_star}"
+        );
+
+        star_selected(&mut view);
+        let agent_text = render_catalog_to_string(&view, 80, 8);
+        assert!(agent_text.contains('★'));
+
+        assert!(view.handle_key(key(KeyCode::Tab)).is_none());
+        let skill_text = render_catalog_to_string(&view, 80, 8);
+        assert!(skill_text.contains('★'));
+
+        open_gate(&mut view);
+        let keyed_cards: Vec<_> = view
+            .gate
+            .cards
+            .iter()
+            .map(|card| (card.entry.kind, card.entry.name.as_str()))
+            .collect();
+        assert_eq!(
+            keyed_cards,
+            vec![
+                (ItemKind::Skill, "shared-name"),
+                (ItemKind::Agent, "shared-name")
+            ]
+        );
+    }
+
+    #[test]
+    fn render_catalog_shows_conflict_badge_for_bundled_id_match() {
+        let repo = tempfile::tempdir().unwrap();
+        configure_bundled_skill(repo.path(), "bundled-match");
+        let conflict = write_skill(repo.path(), "bundled-match", "Normal skill body.");
+        save_catalog(repo.path(), vec![conflict]);
+        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        let text = render_catalog_to_string(&view, 80, 8);
+        assert!(text.contains("conflict"), "catalog text:\n{text}");
+    }
+
+    #[test]
+    fn browse_footer_advertises_gate_manage_and_dashboard_escape() {
+        let repo = tempfile::tempdir().unwrap();
+        save_catalog(
+            repo.path(),
+            vec![write_skill(repo.path(), "footer-skill", "body")],
+        );
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        let text = render_to_string(&mut view);
+        assert!(text.contains("Enter"), "footer text:\n{text}");
+        assert!(text.contains("m manage"), "footer text:\n{text}");
+        assert!(text.contains("Esc dashboard"), "footer text:\n{text}");
+        assert!(!text.contains("Esc back"), "footer text:\n{text}");
     }
 
     #[test]
