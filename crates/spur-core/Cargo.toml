@@ -39,6 +39,7 @@ spur-mcp = { workspace = true }
 spur-pm = { workspace = true }
 spur-worktree = { workspace = true }
 spur-cost = { workspace = true }
+spur-telemetry = { path = "../spur-telemetry" }
 spur-license = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
