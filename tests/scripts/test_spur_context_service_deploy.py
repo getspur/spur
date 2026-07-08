@@ -340,13 +340,31 @@ def test_context_service_workflow_releases_serving_lambda_on_main_push():
         in workflow
     )
 
-    # Code-only rollout through the canonical deploy path: push worker images
-    # (immutable tag + latest pointer, ECR login required for buildx --push),
-    # package the zip, then update-function-code on the serving Lambda, which
-    # API Gateway invokes unqualified ($LATEST).
-    assert 'SPUR_CONTEXT_SERVICE_BUILD_MODE: "self-contained"' in release
+    # Release builds run on the ephemeral AWS Spot builder (release-dist.yml
+    # pattern), not on the runner: restore the cloud-build bundle, spin a
+    # per-run VM, compile through deploy.sh's remote mode (Graviton2-safe
+    # flags, native arm64 docker builds, ECR push via the VM instance
+    # profile), and always tear the VM down.
+    assert 'SPUR_CONTEXT_SERVICE_BUILD_MODE: "remote"' in release
     assert 'SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "1"' in release
-    assert "aws-actions/amazon-ecr-login" in release
+    assert 'SPUR_NO_LOCAL_FALLBACK: "1"' in release
+    assert "VM_NAME: spur-ctx-release-${{ github.run_id }}" in release
+    assert "ci/cloud-build/bundle.tar.gz" in release
+    assert "session-manager-plugin" in release
+    assert "scripts/cloud-build/spin.sh" in release
+    assert "scripts/cloud-build/teardown.sh" in release
+    assert "if: ${{ always() }}" in release
+    assert "CONTEXT_SERVICE_RELEASE_ROLE_ARN" in release
+
+    # The runner never cross-compiles or pushes images itself.
+    assert "amazon-ecr-login" not in release
+    assert "setup-qemu-action" not in release
+    assert "setup-buildx-action" not in release
+
+    # Code-only rollout through the canonical deploy path: worker images pushed
+    # from the VM (immutable tag + latest pointer), zip packaged from the
+    # fetched serving binary, then update-function-code on the serving Lambda,
+    # which API Gateway invokes unqualified ($LATEST).
     assert "infra/spur-context-service/build-and-push-remote.sh" in release
     assert (
         "infra/spur-context-service/deploy.sh --skip-worker --package-only"
