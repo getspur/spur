@@ -5185,17 +5185,27 @@ pub async fn handle_review_task_with_write_mode(
     }
 
     // 3) Emit events.
-    if let Some(sink) = sink {
-        for event in outcome.events {
-            match event {
-                PendingEvent::TaskReviewed {
-                    plan_id,
-                    task_id,
-                    task_name,
-                    decision,
-                    feedback,
-                    attempt,
-                } => {
+    for event in outcome.events {
+        match event {
+            PendingEvent::TaskReviewed {
+                plan_id,
+                task_id,
+                task_name,
+                decision,
+                feedback,
+                attempt,
+            } => {
+                spur_telemetry::emit!(spur_telemetry::tier2_events::ReviewCompleted {
+                    outcome: match decision.as_str() {
+                        "approve" => spur_telemetry::tier2_events::ReviewOutcome::Accept,
+                        "reject" => spur_telemetry::tier2_events::ReviewOutcome::Reject,
+                        "request_changes" =>
+                            spur_telemetry::tier2_events::ReviewOutcome::RequestChanges,
+                        _ => spur_telemetry::tier2_events::ReviewOutcome::Reject,
+                    },
+                    iteration_count: attempt,
+                });
+                if let Some(sink) = sink {
                     sink.emit(spur_acp::SpurEventBody::PlanTaskReviewed {
                         plan_id,
                         task_id,
