@@ -204,7 +204,8 @@ mod tests {
         let names: std::collections::BTreeSet<_> =
             tools.iter().map(|tool| tool.name.as_str()).collect();
 
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
+        assert!(names.contains("external_catalog"));
         assert!(names.contains("external_code_search"));
         assert!(names.contains("external_code_read"));
         assert!(names.contains("external_code_callers"));
