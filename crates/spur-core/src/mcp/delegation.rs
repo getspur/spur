@@ -718,54 +718,8 @@ fn validate_explore_skills(
     repo_root: Option<&std::path::Path>,
     skills: &[String],
 ) -> Result<(), McpError> {
-    if skills.is_empty() {
-        return Ok(());
-    }
-    let Some(repo_root) = repo_root else {
-        return Err(McpError::invalid_params(
-            format!(
-                "Invalid explore skill `{}`: repository root unavailable; run `spur explore status` after opening a repository",
-                skills[0]
-            ),
-            None,
-        ));
-    };
-    let manifest = crate::explore::pool::Manifest::load(repo_root).map_err(|error| {
-        McpError::invalid_params(
-            format!(
-                "Invalid explore skills: failed to load explore manifest: {error:#}; run `spur explore sync`"
-            ),
-            None,
-        )
-    })?;
-
-    for skill in skills {
-        let Some(item) = manifest.items.iter().find(|item| {
-            item.kind == crate::explore::catalog::ItemKind::Skill && item.name == *skill
-        }) else {
-            return Err(McpError::invalid_params(
-                format!(
-                    "Invalid explore skill `{skill}`: not found in the explore manifest; run `spur explore sync` or `spur explore add`"
-                ),
-                None,
-            ));
-        };
-
-        if !matches!(
-            item.gate.verdict.as_str(),
-            "clean" | "overridden" | "replaced-bundled"
-        ) {
-            return Err(McpError::invalid_params(
-                format!(
-                    "Invalid explore skill `{skill}`: gate verdict `{}` is not materializable; run `spur explore status`",
-                    item.gate.verdict
-                ),
-                None,
-            ));
-        }
-    }
-
-    Ok(())
+    crate::explore::validate_skill_names(repo_root, skills)
+        .map_err(|message| McpError::invalid_params(message, None))
 }
 
 fn delegate_to_worker_def() -> ToolDefinition {
