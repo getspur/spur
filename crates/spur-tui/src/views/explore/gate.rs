@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -10,7 +10,6 @@ use ratatui::Frame;
 use spur_core::explore::apply::{Resolution, Selection};
 use spur_core::explore::catalog::CatalogEntry;
 use spur_core::explore::gate::{self, Verdict};
-use spur_core::explore::pool::pool_dir;
 
 use super::{scroll_offset_for_selected_line, selected_marker_line};
 
@@ -276,7 +275,7 @@ impl Default for GateState {
 
 impl GateCard {
     fn new(repo_root: &Path, entry: CatalogEntry, bundled_ids: &[String]) -> Self {
-        let source_path = gate_path(repo_root, &entry);
+        let source_path = super::explore_item_path(repo_root, &entry);
         let verdict = if source_path.exists() {
             GateVerdict::Ready(gate::evaluate(&entry.name, &source_path, bundled_ids))
         } else {
@@ -335,15 +334,6 @@ impl GateCard {
 
     fn is_evaluable(&self) -> bool {
         matches!(self.verdict, GateVerdict::Ready(_))
-    }
-}
-
-fn gate_path(repo_root: &Path, entry: &CatalogEntry) -> PathBuf {
-    let pooled = pool_dir(repo_root, &entry.source, &entry.name, &entry.pinned_commit);
-    if pooled.exists() {
-        pooled
-    } else {
-        spur_core::explore::sync::cache_dir(repo_root, &entry.source).join(&entry.rel_path)
     }
 }
 

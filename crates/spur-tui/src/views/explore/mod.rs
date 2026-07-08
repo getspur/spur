@@ -456,7 +456,7 @@ impl ExploreBrowserView {
     }
 
     fn preview_body_lines(&self, entry: &CatalogEntry) -> Vec<Line<'static>> {
-        let Some(path) = pooled_body_path(&self.repo_root, entry) else {
+        let Some(path) = explore_body_path(&self.repo_root, entry) else {
             return vec![Line::from("sync to fetch bodies — spur explore sync")];
         };
         let Ok(raw) = std::fs::read_to_string(path) else {
@@ -695,13 +695,23 @@ fn sha7(value: &str) -> &str {
     value.get(..7).unwrap_or(value)
 }
 
-fn pooled_body_path(repo_root: &Path, entry: &CatalogEntry) -> Option<PathBuf> {
-    let dir = pool_dir(repo_root, &entry.source, &entry.name, &entry.pinned_commit);
+pub(crate) fn explore_item_path(repo_root: &Path, entry: &CatalogEntry) -> PathBuf {
+    let pooled = pool_dir(repo_root, &entry.source, &entry.name, &entry.pinned_commit);
+    if pooled.exists() {
+        pooled
+    } else {
+        spur_core::explore::sync::cache_dir(repo_root, &entry.source).join(&entry.rel_path)
+    }
+}
+
+fn explore_body_path(repo_root: &Path, entry: &CatalogEntry) -> Option<PathBuf> {
+    let item_path = explore_item_path(repo_root, entry);
     match entry.kind {
-        ItemKind::Skill => Some(dir.join("SKILL.md")),
-        ItemKind::Agent => Path::new(&entry.rel_path)
+        ItemKind::Skill => Some(item_path.join("SKILL.md")),
+        ItemKind::Agent if item_path.is_dir() => Path::new(&entry.rel_path)
             .file_name()
-            .map(|file_name| dir.join(file_name)),
+            .map(|file_name| item_path.join(file_name)),
+        ItemKind::Agent => Some(item_path),
     }
 }
 
@@ -1092,18 +1102,20 @@ mod tests {
     }
 
     #[test]
-    fn preview_body_lines_reports_sync_needed_when_not_vendored() {
+    fn preview_body_lines_reads_cache_body_when_not_vendored() {
         let repo = tempfile::tempdir().unwrap();
-        let entry = write_skill(repo.path(), "skill-a", "body");
+        let entry = write_skill(repo.path(), "skill-a", "cached skill body");
         save_catalog(repo.path(), vec![entry.clone()]);
         let view = ExploreBrowserView::new(repo.path().to_path_buf());
-        let lines = view.preview_body_lines(&entry);
+        let selected_entry = view.visible_entries()[view.selected];
+        let lines = view.preview_body_lines(selected_entry);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains("sync to fetch bodies"));
+        assert!(text.contains("cached skill body"));
+        assert!(!text.contains("sync to fetch bodies"));
     }
 
     fn render_to_string(view: &mut ExploreBrowserView) -> String {
