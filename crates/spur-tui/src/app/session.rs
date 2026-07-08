@@ -136,6 +136,7 @@ impl App {
             session_picker,
             agent_config_browser: None,
             loop_browser: None,
+            explore_browser: None,
             plan_browser: None,
             plan_inspector: None,
             issue_browser: None,

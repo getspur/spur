@@ -155,6 +155,35 @@ impl SpurLocalSource {
                 )),
                 arg_picker_spec: None,
             },
+            CommandEntry {
+                name: "explore".into(),
+                description: "Browse and adopt ecosystem skills & agent personas".into(),
+                hint: None,
+                source: CommandSource::Spur,
+                dispatch: Dispatch::SpurLocal(Action::NavigateTo(
+                    crate::action::ViewId::ExploreBrowser,
+                )),
+                arg_picker_spec: None,
+            },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::ViewId;
+
+    #[test]
+    fn slash_explore_routes_to_navigate() {
+        let entry = SpurLocalSource::entries()
+            .into_iter()
+            .find(|entry| entry.name == "explore")
+            .expect("explore command entry should exist");
+
+        match entry.dispatch {
+            Dispatch::SpurLocal(Action::NavigateTo(ViewId::ExploreBrowser)) => {}
+            other => panic!("expected /explore to navigate to ExploreBrowser, got {other:?}"),
+        }
     }
 }

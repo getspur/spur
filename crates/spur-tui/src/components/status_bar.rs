@@ -304,6 +304,7 @@ impl StatusBar {
                 ViewId::LoopBrowser => {
                     " [j/k]navigate [Enter]inspect [p]pause/resume [x]retire [r]refresh [Esc]back"
                 }
+                ViewId::ExploreBrowser => "explore — Tab tabs · space select · r reload",
                 ViewId::SessionDetail(_) => {
                     hint_for_session_detail(props.stream_in_flight, props.esc_consumed_by_composer)
                 }
