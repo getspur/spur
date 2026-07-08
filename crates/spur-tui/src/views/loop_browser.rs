@@ -22,9 +22,9 @@ fn token(theme: &Theme, name: &str) -> Color {
 }
 
 const STATUS_HINT: &str =
-    " [j/k]navigate [Enter]inspect [o]issue [p]pause/resume [x]retire [S]sort [f]filter [r]refresh [Esc]back";
+    " [j/k]navigate [g/G]first/last [Enter]inspect [o]issue [p]pause/resume [x]retire [S]sort [f]filter [r]refresh [Esc]back";
 const STATUS_HINT_COMPACT: &str =
-    " [j/k]nav [Enter]inspect [o]issue [p]pause [x]retire [S]sort [f]filter [Esc]back";
+    " [j/k]nav [g/G]top/bot [Enter]inspect [o]issue [p]pause [x]retire [S]sort [f]filter [Esc]back";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SortMode {
@@ -579,7 +579,7 @@ impl LoopBrowserView {
         let lines = vec![
             Line::from("Global governed loops"),
             Line::from(
-                "Enter Inspect   o Issue   p Pause/Resume   x Retire   r Refresh   L from Plans opens this view",
+                "Enter Inspect   o Issue   g/G First/Last   p Pause/Resume   x Retire   r Refresh   L from Plans opens this view",
             ),
             Line::from(format!(
                 "Sort: {}   Filter: {}   (S sort  f filter)",
@@ -694,7 +694,7 @@ impl LoopBrowserView {
                 }
                 _ => self.render_summary_lines(row, theme, now),
             };
-            if let Some(notice) = self.notice_line(theme) {
+            for notice in self.notice_line(theme).into_iter().rev() {
                 lines.insert(0, Line::from(""));
                 lines.insert(0, notice);
             }
@@ -711,20 +711,21 @@ impl LoopBrowserView {
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
     }
 
-    fn notice_line(&self, theme: &Theme) -> Option<Line<'static>> {
+    fn notice_line(&self, theme: &Theme) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
         if let Some(hint) = self.hint.as_ref() {
-            Some(Line::from(Span::styled(
+            lines.push(Line::from(Span::styled(
                 hint.clone(),
                 Style::default().fg(token(theme, "plan_browser.notice.error.fg")),
-            )))
-        } else {
-            self.warnings.first().map(|warning| {
-                Line::from(Span::styled(
-                    format!("Warning: {warning}"),
-                    Style::default().fg(token(theme, "plan_browser.notice.warning.fg")),
-                ))
-            })
+            )));
         }
+        if let Some(warning) = self.warnings.first() {
+            lines.push(Line::from(Span::styled(
+                format!("Warning: {warning}"),
+                Style::default().fg(token(theme, "plan_browser.notice.warning.fg")),
+            )));
+        }
+        lines
     }
 
     fn detail_for_row(&self, row: &LoopRow) -> Option<&LoopDetailEvent> {
@@ -747,11 +748,6 @@ impl LoopBrowserView {
             Self::field_line("State", row.state().label(), theme),
             Self::field_line("Next run", Self::next_run_text(row, now), theme),
             Self::field_line("Cadence", Self::cadence_text(row), theme),
-            Self::field_line(
-                "Governors",
-                "budget/gen -- | day cap -- | max tasks --",
-                theme,
-            ),
             Self::field_line("Ratchet", Self::ratchet_summary(row), theme),
             Self::action_line(
                 "Enter: inspect recent runs   o: issue   p: pause/resume   x: retire",
@@ -1024,7 +1020,10 @@ impl LoopBrowserView {
             .border_set(border::ROUNDED)
             .border_style(Style::default().fg(token(theme, "plan_browser.confirm.border.fg")));
 
-        frame.render_widget(Paragraph::new(lines).block(block), popup);
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: true }).block(block),
+            popup,
+        );
     }
 }
 
@@ -1311,6 +1310,18 @@ mod tests {
         }
     }
 
+    fn rendered_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
     fn summary(loop_id: &str) -> LoopSummaryEvent {
         LoopSummaryEvent {
             loop_id: loop_id.into(),
@@ -1376,6 +1387,108 @@ mod tests {
                 autonomy: Some("l2".into()),
             }],
         }
+    }
+
+    #[test]
+    fn keybinding_hints_document_first_and_last_navigation() {
+        assert!(STATUS_HINT.contains("[g/G]first/last"));
+        assert!(STATUS_HINT_COMPACT.contains("[g/G]top/bot"));
+
+        let lineage = ExecutorLineage::new();
+        let projection = PlanProjectionStore::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let view = LoopBrowserView::new();
+        let backend = ratatui::backend::TestBackend::new(150, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| view.render_header(frame, frame.area(), &ctx.theme))
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+
+        assert!(
+            rendered.contains("g/G First/Last"),
+            "expected g/G header hint in rendered output:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn notice_area_renders_hint_and_backend_warning_together() {
+        let lineage = ExecutorLineage::new();
+        let projection = PlanProjectionStore::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = LoopBrowserView::new();
+        view.handle_spur_event(
+            &SpurEvent::now(SpurEventBody::LoopsLoaded {
+                loops: vec![summary("loop-a")],
+                warnings: vec!["scheduler degraded".into()],
+            }),
+            &ctx,
+        );
+        view.hint = Some("Loop loop-a: failed".into());
+
+        let backend = ratatui::backend::TestBackend::new(130, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, frame.area(), &ctx))
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+
+        assert!(
+            rendered.contains("Loop loop-a: failed"),
+            "expected hint in rendered output:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Warning: scheduler degraded"),
+            "expected warning in rendered output:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn summary_view_omits_placeholder_governors() {
+        let lineage = ExecutorLineage::new();
+        let projection = PlanProjectionStore::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = LoopBrowserView::new();
+        view.handle_spur_event(&loaded(vec![summary("loop-a")]), &ctx);
+
+        let backend = ratatui::backend::TestBackend::new(130, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, frame.area(), &ctx))
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+
+        assert!(
+            !rendered.contains("budget/gen -- | day cap -- | max tasks --"),
+            "summary should not render placeholder governors:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn retire_confirmation_wraps_long_warning_on_narrow_terminals() {
+        let lineage = ExecutorLineage::new();
+        let projection = PlanProjectionStore::new();
+        let synopsis = SessionSynopsisProjection::new();
+        let ctx = ctx(&lineage, &projection, &synopsis);
+        let mut view = LoopBrowserView::new();
+        view.handle_spur_event(&loaded(vec![summary("loop-a")]), &ctx);
+        view.handle_key(key(KeyCode::Char('x')), &ctx);
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, frame.area(), &ctx))
+            .unwrap();
+        let rendered = rendered_text(&terminal);
+
+        assert!(
+            rendered.contains("afterward."),
+            "expected wrapped confirmation text in rendered output:\n{rendered}"
+        );
     }
 
     #[test]
