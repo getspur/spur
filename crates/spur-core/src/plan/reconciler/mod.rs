@@ -1490,6 +1490,7 @@ impl Reconciler {
                 id: delegation_id.clone().into(),
                 agent: task.spec.agent.clone(),
                 profile: task.spec.profile.clone(),
+                skills: None,
                 model: task.spec.model.clone(),
                 effort: task.spec.effort.clone(),
                 config_overrides: task.spec.config_overrides.clone(),
