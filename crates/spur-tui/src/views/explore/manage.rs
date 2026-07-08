@@ -14,7 +14,9 @@ use spur_core::explore::{
 
 use crate::action::{Action, ViewId};
 
-use super::{sha7, ExploreBrowserView, ExploreStage};
+use super::{
+    scroll_offset_for_selected_line, selected_marker_line, sha7, ExploreBrowserView, ExploreStage,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManageLens {
@@ -66,14 +68,20 @@ impl ExploreBrowserView {
             ManageLens::Pool => self.pool_lines(),
             ManageLens::LastMaterialization => self.last_materialization_lines(),
         };
+        let block = Block::default()
+            .title(manage_title(self.manage_lens))
+            .borders(Borders::ALL);
+        let scroll = scroll_offset_for_selected_line(
+            &lines,
+            selected_marker_line(&lines),
+            block.inner(area).width,
+            block.inner(area).height,
+        );
         frame.render_widget(
             Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(manage_title(self.manage_lens))
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: true }),
+                .block(block)
+                .wrap(Wrap { trim: true })
+                .scroll((scroll, 0)),
             area,
         );
     }
