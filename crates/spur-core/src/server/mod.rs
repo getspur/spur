@@ -1188,7 +1188,12 @@ impl ServerHandler for McpCallbackServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.rmcp_tools()))
+        let started_at = Instant::now();
+        let outcome = spur_telemetry::tier1_events::Outcome::Ok;
+        let result = Ok(ListToolsResult::with_all_items(self.rmcp_tools()));
+        Self::emit_mcp_tool_called("spur-mcp", "list_tools", outcome);
+        Self::emit_mcp_request_duration(started_at.elapsed(), outcome);
+        result
     }
 
     async fn call_tool(
@@ -1196,13 +1201,25 @@ impl ServerHandler for McpCallbackServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let started_at = Instant::now();
         let tool_name = request.name.to_string();
         let params = json!({
             "name": tool_name,
             "arguments": request.arguments.map(Value::Object).unwrap_or_else(|| json!({})),
         });
-        let response = self.handle_tool_call(Value::Null, params).await;
-        Self::call_tool_result_from_legacy_response(response, &tool_name)
+        let (response, dispatch_outcome) = self
+            .handle_tool_call_with_outcome(Value::Null, params)
+            .await;
+        let result = Self::call_tool_result_from_legacy_response(response, &tool_name);
+        let outcome = match (&result, dispatch_outcome) {
+            (_, spur_telemetry::tier1_events::Outcome::Timeout) => {
+                spur_telemetry::tier1_events::Outcome::Timeout
+            }
+            (Ok(_), _) => spur_telemetry::tier1_events::Outcome::Ok,
+            (Err(_), _) => spur_telemetry::tier1_events::Outcome::Error,
+        };
+        Self::emit_mcp_request_duration(started_at.elapsed(), outcome);
+        result
     }
 }
 

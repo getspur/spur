@@ -29,9 +29,22 @@ impl McpCallbackServer {
     // ─── Tool call dispatcher ─────────────────────────────────────────
 
     pub(crate) async fn handle_tool_call(&self, id: Value, params: Value) -> JsonRpcResponse {
+        self.handle_tool_call_with_outcome(id, params).await.0
+    }
+
+    pub(crate) async fn handle_tool_call_with_outcome(
+        &self,
+        id: Value,
+        params: Value,
+    ) -> (JsonRpcResponse, spur_telemetry::tier1_events::Outcome) {
         let tool_name = match params.get("name").and_then(|v| v.as_str()) {
             Some(name) => name.to_string(),
-            None => return JsonRpcResponse::invalid_params(id, "Missing 'name' in params"),
+            None => {
+                return (
+                    JsonRpcResponse::invalid_params(id, "Missing 'name' in params"),
+                    spur_telemetry::tier1_events::Outcome::Error,
+                );
+            }
         };
 
         let arguments = params
@@ -45,7 +58,11 @@ impl McpCallbackServer {
             .await
             .is_err()
         {
-            return JsonRpcResponse::internal_error(id, "server not yet bound to brain session");
+            let outcome = spur_telemetry::tier1_events::Outcome::Timeout;
+            let response =
+                JsonRpcResponse::internal_error(id, "server not yet bound to brain session");
+            Self::emit_mcp_tool_called("spur-mcp", &tool_name, outcome);
+            return (response, outcome);
         }
 
         let ctx = spur_mcp::registry::ToolCallContext::new(
@@ -56,24 +73,29 @@ impl McpCallbackServer {
         );
         let canonical_tool_name = match self.tool_registry.canonical_name_for_call(&tool_name) {
             Ok(name) => name.to_string(),
-            Err(error) => return JsonRpcResponse::mcp_error(id, error),
+            Err(error) => {
+                let outcome = spur_telemetry::tier1_events::Outcome::Error;
+                let response = JsonRpcResponse::mcp_error(id, error);
+                Self::emit_mcp_tool_called("spur-mcp", &tool_name, outcome);
+                return (response, outcome);
+            }
         };
-        if crate::mcp::plan::is_plan_tool(&canonical_tool_name) {
-            return crate::mcp::plan::PlanMcpModule::new(
-                crate::mcp::plan::PlanMcpDeps::from_server(self),
-            )
-            .call_with_server(self, ctx, &canonical_tool_name, arguments)
-            .await;
-        }
-        if crate::mcp::catalog::is_server_owned_tool(&canonical_tool_name) {
-            return self
-                .handle_registered_tool_call(ctx, &canonical_tool_name, arguments)
-                .await;
-        }
+        let response = if crate::mcp::plan::is_plan_tool(&canonical_tool_name) {
+            crate::mcp::plan::PlanMcpModule::new(crate::mcp::plan::PlanMcpDeps::from_server(self))
+                .call_with_server(self, ctx, &canonical_tool_name, arguments)
+                .await
+        } else if crate::mcp::catalog::is_server_owned_tool(&canonical_tool_name) {
+            self.handle_registered_tool_call(ctx, &canonical_tool_name, arguments)
+                .await
+        } else {
+            self.tool_registry
+                .call_json_tool(ctx, &tool_name, arguments)
+                .await
+        };
+        let outcome = Self::telemetry_outcome_from_json_rpc_response(&response);
+        Self::emit_mcp_tool_called("spur-mcp", &canonical_tool_name, outcome);
 
-        self.tool_registry
-            .call_json_tool(ctx, &tool_name, arguments)
-            .await
+        (response, outcome)
     }
 
     pub(crate) async fn handle_registered_tool_call(
@@ -174,5 +196,71 @@ impl McpCallbackServer {
             }
             Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
         }
+    }
+
+    pub(crate) fn telemetry_mcp_server_name(
+        name: &str,
+    ) -> spur_telemetry::tier2_events::McpServerName {
+        match name {
+            "github" => spur_telemetry::tier2_events::McpServerName::Github,
+            "posthog" => spur_telemetry::tier2_events::McpServerName::Posthog,
+            "spur-mcp" => spur_telemetry::tier2_events::McpServerName::SpurMcp,
+            "stitch" => spur_telemetry::tier2_events::McpServerName::Stitch,
+            "playwright" => spur_telemetry::tier2_events::McpServerName::Playwright,
+            "context7" => spur_telemetry::tier2_events::McpServerName::Context7,
+            "firebase" => spur_telemetry::tier2_events::McpServerName::Firebase,
+            "sequential-thinking" => {
+                spur_telemetry::tier2_events::McpServerName::SequentialThinking
+            }
+            _ => spur_telemetry::tier2_events::McpServerName::Custom(
+                spur_telemetry::tier2_events::HashedShort::from_sha256_prefix(name),
+            ),
+        }
+    }
+
+    pub(crate) fn telemetry_mcp_tool_name(name: &str) -> spur_telemetry::tier2_events::McpToolName {
+        match name {
+            "submit_plan" => spur_telemetry::tier2_events::McpToolName::SubmitPlan,
+            "dispatch_task" => spur_telemetry::tier2_events::McpToolName::DispatchTask,
+            "review_task" => spur_telemetry::tier2_events::McpToolName::ReviewTask,
+            "get_task_diff" => spur_telemetry::tier2_events::McpToolName::GetTaskDiff,
+            "list_tools" => spur_telemetry::tier2_events::McpToolName::ListTools,
+            _ => spur_telemetry::tier2_events::McpToolName::Custom(
+                spur_telemetry::tier2_events::HashedShort::from_sha256_prefix(name),
+            ),
+        }
+    }
+
+    pub(crate) fn telemetry_outcome_from_json_rpc_response(
+        response: &JsonRpcResponse,
+    ) -> spur_telemetry::tier1_events::Outcome {
+        if response.error.is_some() {
+            spur_telemetry::tier1_events::Outcome::Error
+        } else {
+            spur_telemetry::tier1_events::Outcome::Ok
+        }
+    }
+
+    pub(crate) fn emit_mcp_request_duration(
+        duration: std::time::Duration,
+        outcome: spur_telemetry::tier1_events::Outcome,
+    ) {
+        let duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        spur_telemetry::emit!(spur_telemetry::tier1_events::McpRequestDuration {
+            duration_ms,
+            outcome,
+        });
+    }
+
+    pub(crate) fn emit_mcp_tool_called(
+        server_name: &str,
+        tool_name: &str,
+        outcome: spur_telemetry::tier1_events::Outcome,
+    ) {
+        spur_telemetry::emit!(spur_telemetry::tier2_events::McpToolCalled {
+            server_name: Self::telemetry_mcp_server_name(server_name),
+            tool_name: Self::telemetry_mcp_tool_name(tool_name),
+            outcome,
+        });
     }
 }
