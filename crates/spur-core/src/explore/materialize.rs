@@ -201,7 +201,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{adapter_for_kind, materialize_pool_skills};
+    use super::{
+        adapter_for_kind, append_materialization_record, materialize_pool_skills,
+        read_recent_materializations, MaterializationRecord, MaterializeMeta,
+    };
     use crate::explore::catalog::ItemKind;
     use crate::explore::pool::{pool_dir, GateRecord, Manifest, ManifestItem};
     use spur_acp::types::AgentKind;
@@ -268,6 +271,7 @@ mod tests {
             AgentKind::CodexAcp,
             repo.path(),
             None,
+            None,
         )
         .await;
 
@@ -322,6 +326,7 @@ mod tests {
             AgentKind::CodexAcp,
             repo.path(),
             Some(&requested),
+            None,
         )
         .await;
 
@@ -334,6 +339,122 @@ mod tests {
             !git_status(worktree.path()).contains(".codex/skills/clean-a/SKILL.md"),
             "committed user file should remain clean"
         );
+    }
+
+    #[tokio::test]
+    async fn materialize_appends_record_readable_by_reader() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+
+        let manifest = Manifest {
+            sources: Vec::new(),
+            items: vec![
+                write_pool_skill(repo.path(), "clean-a", "clean"),
+                write_pool_skill(repo.path(), "clean-b", "clean"),
+                write_pool_skill(repo.path(), "reviewed", "overridden"),
+                write_pool_skill(repo.path(), "blocked", "blocked"),
+            ],
+        };
+        manifest.save(repo.path()).unwrap();
+
+        let manager = WorktreeManager::new(worktree.path().to_path_buf());
+        materialize_pool_skills(
+            &manager,
+            worktree.path(),
+            AgentKind::CodexAcp,
+            repo.path(),
+            None,
+            Some(MaterializeMeta {
+                request_id: "del-42",
+                agent: "codex",
+            }),
+        )
+        .await;
+
+        let records = read_recent_materializations(repo.path(), 10);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].delegation_id, "del-42");
+        assert_eq!(records[0].agent, "codex");
+        assert_eq!(records[0].worktree, worktree.path().display().to_string());
+        assert_eq!(records[0].items, vec!["clean-a", "clean-b", "reviewed"]);
+        assert!(records[0].recorded_at_epoch > 0);
+    }
+
+    #[tokio::test]
+    async fn materialize_without_meta_or_items_writes_no_record() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+
+        let manifest = Manifest {
+            sources: Vec::new(),
+            items: vec![write_pool_skill(repo.path(), "clean-a", "clean")],
+        };
+        manifest.save(repo.path()).unwrap();
+
+        let manager = WorktreeManager::new(worktree.path().to_path_buf());
+        materialize_pool_skills(
+            &manager,
+            worktree.path(),
+            AgentKind::CodexAcp,
+            repo.path(),
+            None,
+            None,
+        )
+        .await;
+        assert!(read_recent_materializations(repo.path(), 10).is_empty());
+
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let manifest = Manifest {
+            sources: Vec::new(),
+            items: vec![write_pool_skill(repo.path(), "blocked-skill", "blocked")],
+        };
+        manifest.save(repo.path()).unwrap();
+
+        let manager = WorktreeManager::new(worktree.path().to_path_buf());
+        materialize_pool_skills(
+            &manager,
+            worktree.path(),
+            AgentKind::CodexAcp,
+            repo.path(),
+            None,
+            Some(MaterializeMeta {
+                request_id: "del-43",
+                agent: "codex",
+            }),
+        )
+        .await;
+        assert!(read_recent_materializations(repo.path(), 10).is_empty());
+    }
+
+    #[test]
+    fn read_recent_returns_newest_first_and_respects_limit() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            append_materialization_record(
+                root.path(),
+                &MaterializationRecord {
+                    recorded_at_epoch: 100 + i,
+                    delegation_id: format!("d{i}"),
+                    agent: "codex".into(),
+                    worktree: "/w".into(),
+                    items: vec!["s".into()],
+                },
+            )
+            .unwrap();
+        }
+
+        let records = read_recent_materializations(root.path(), 3);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].delegation_id, "d4");
+        assert_eq!(records[1].delegation_id, "d3");
+        assert_eq!(records[2].delegation_id, "d2");
     }
 
     fn write_pool_skill(root: &Path, name: &str, verdict: &str) -> ManifestItem {
