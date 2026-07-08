@@ -3,15 +3,18 @@ use std::path::Path;
 
 use duckdb::arrow::{
     array::{
-        Array, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
-        Int32Array, Int64Array, Int8Array, LargeStringArray, StringArray, Time32MillisecondArray,
-        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
-        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+        Decimal256Array, Decimal32Array, Decimal64Array, FixedSizeBinaryArray, FixedSizeListArray,
+        Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+        LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, MapArray, StringArray,
+        StructArray, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
+        Time64NanosecondArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array,
+        UInt8Array,
     },
     datatypes::DataType,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::mcp::McpHandlerError;
 
@@ -115,6 +118,24 @@ fn arrow_value(array: &dyn Array, row: usize) -> Result<Value, McpHandlerError> 
             primitive_value::<Float32Array, _>(array, row, |value| json!(value as f64))
         }
         DataType::Float64 => primitive_value::<Float64Array, _>(array, row, |value| json!(value)),
+        DataType::Decimal32(_, scale) => decimal_value::<Decimal32Array, _>(array, row, *scale),
+        DataType::Decimal64(_, scale) => decimal_value::<Decimal64Array, _>(array, row, *scale),
+        DataType::Decimal128(_, scale) => decimal_value::<Decimal128Array, _>(array, row, *scale),
+        DataType::Decimal256(_, scale) => decimal_value::<Decimal256Array, _>(array, row, *scale),
+        DataType::List(_) => list_value::<ListArray>(array, row),
+        DataType::LargeList(_) => list_value::<LargeListArray>(array, row),
+        DataType::FixedSizeList(_, _) => list_value::<FixedSizeListArray>(array, row),
+        DataType::Struct(_) => struct_value(array, row),
+        DataType::Map(_, _) => map_value(array, row),
+        DataType::Binary => {
+            binary_value::<BinaryArray, _>(array, row, |array, row| array.value(row))
+        }
+        DataType::LargeBinary => {
+            binary_value::<LargeBinaryArray, _>(array, row, |array, row| array.value(row))
+        }
+        DataType::FixedSizeBinary(_) => {
+            binary_value::<FixedSizeBinaryArray, _>(array, row, |array, row| array.value(row))
+        }
         DataType::Date32 => temporal_value::<Date32Array, _>(array, row, |array, row| {
             array.value_as_date(row).map(|value| value.to_string())
         }),
@@ -125,7 +146,10 @@ fn arrow_value(array: &dyn Array, row: usize) -> Result<Value, McpHandlerError> 
         DataType::Time64(_) => time64_value(array, row),
         DataType::Timestamp(_, _) => timestamp_value(array, row),
         DataType::Null => Ok(Value::Null),
-        _ => Ok(Value::String(format!("{:?}", array.slice(row, 1)))),
+        _ => Ok(Value::String(format!(
+            "<unsupported Arrow type {}>",
+            array.data_type()
+        ))),
     }
 }
 
@@ -186,6 +210,161 @@ impl_primitive_value_at!(UInt32Array, u32);
 impl_primitive_value_at!(UInt64Array, u64);
 impl_primitive_value_at!(Float32Array, f32);
 impl_primitive_value_at!(Float64Array, f64);
+
+fn decimal_value<T, V>(array: &dyn Array, row: usize, scale: i8) -> Result<Value, McpHandlerError>
+where
+    T: Array + PrimitiveValueAt<Value = V> + 'static,
+    V: ToString,
+{
+    let array = array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        McpHandlerError::Internal(format!(
+            "DuckDB Arrow column type mismatch for {:?}",
+            array.data_type()
+        ))
+    })?;
+    Ok(Value::String(format_decimal(
+        array.primitive_value(row),
+        scale,
+    )))
+}
+
+impl_primitive_value_at!(Decimal32Array, i32);
+impl_primitive_value_at!(Decimal64Array, i64);
+impl_primitive_value_at!(Decimal128Array, i128);
+impl_primitive_value_at!(Decimal256Array, duckdb::arrow::datatypes::i256);
+
+fn format_decimal<V: ToString>(value: V, scale: i8) -> String {
+    let mut digits = value.to_string();
+    let is_negative = digits.strip_prefix('-').is_some();
+    if is_negative {
+        digits.remove(0);
+    }
+
+    if scale < 0 {
+        digits.push_str(&"0".repeat(scale.unsigned_abs() as usize));
+    } else if scale > 0 {
+        let scale = scale as usize;
+        if digits.len() <= scale {
+            digits.insert_str(0, &"0".repeat(scale + 1 - digits.len()));
+        }
+        let point = digits.len() - scale;
+        digits.insert(point, '.');
+    }
+
+    if is_negative {
+        digits.insert(0, '-');
+    }
+    digits
+}
+
+trait ListValueAt {
+    fn list_value(&self, row: usize) -> duckdb::arrow::array::ArrayRef;
+}
+
+impl ListValueAt for ListArray {
+    fn list_value(&self, row: usize) -> duckdb::arrow::array::ArrayRef {
+        self.value(row)
+    }
+}
+
+impl ListValueAt for LargeListArray {
+    fn list_value(&self, row: usize) -> duckdb::arrow::array::ArrayRef {
+        self.value(row)
+    }
+}
+
+impl ListValueAt for FixedSizeListArray {
+    fn list_value(&self, row: usize) -> duckdb::arrow::array::ArrayRef {
+        self.value(row)
+    }
+}
+
+fn list_value<T>(array: &dyn Array, row: usize) -> Result<Value, McpHandlerError>
+where
+    T: Array + ListValueAt + 'static,
+{
+    let array = array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        McpHandlerError::Internal(format!(
+            "DuckDB Arrow column type mismatch for {:?}",
+            array.data_type()
+        ))
+    })?;
+    let values = array.list_value(row);
+    let mut json_values = Vec::with_capacity(values.len());
+    for value_row in 0..values.len() {
+        json_values.push(arrow_value(values.as_ref(), value_row)?);
+    }
+    Ok(Value::Array(json_values))
+}
+
+fn struct_value(array: &dyn Array, row: usize) -> Result<Value, McpHandlerError> {
+    let array = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| {
+            McpHandlerError::Internal(format!(
+                "DuckDB Arrow column type mismatch for {:?}",
+                array.data_type()
+            ))
+        })?;
+    let mut object = Map::new();
+    for (field, column) in array.fields().iter().zip(array.columns()) {
+        object.insert(field.name().to_owned(), arrow_value(column.as_ref(), row)?);
+    }
+    Ok(Value::Object(object))
+}
+
+fn map_value(array: &dyn Array, row: usize) -> Result<Value, McpHandlerError> {
+    let array = array.as_any().downcast_ref::<MapArray>().ok_or_else(|| {
+        McpHandlerError::Internal(format!(
+            "DuckDB Arrow column type mismatch for {:?}",
+            array.data_type()
+        ))
+    })?;
+    let entries = array.value(row);
+    let keys = entries.column(0);
+    let values = entries.column(1);
+    let mut object = Map::new();
+    for entry_row in 0..entries.len() {
+        let key = json_key(arrow_value(keys.as_ref(), entry_row)?);
+        object.insert(key, arrow_value(values.as_ref(), entry_row)?);
+    }
+    Ok(Value::Object(object))
+}
+
+fn json_key(value: Value) -> String {
+    match value {
+        Value::String(value) => value,
+        Value::Null => "null".to_owned(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn binary_value<T, F>(array: &dyn Array, row: usize, value: F) -> Result<Value, McpHandlerError>
+where
+    T: Array + 'static,
+    F: for<'a> FnOnce(&'a T, usize) -> &'a [u8],
+{
+    let array = array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        McpHandlerError::Internal(format!(
+            "DuckDB Arrow column type mismatch for {:?}",
+            array.data_type()
+        ))
+    })?;
+    Ok(Value::String(hex_string(value(array, row))))
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
 
 fn temporal_value<T, F>(array: &dyn Array, row: usize, map: F) -> Result<Value, McpHandlerError>
 where
@@ -307,5 +486,53 @@ mod tests {
         assert_eq!(result.rows, vec![json!([0]), json!([1])]);
         assert!(result.truncated);
         assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn query_rows_serializes_decimal_as_json_string() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory db");
+
+        let result =
+            super::query_rows(&conn, "SELECT 12.34::DECIMAL(10, 2) AS amount", 10).expect("query");
+
+        assert_eq!(result.rows, vec![json!(["12.34"])]);
+    }
+
+    #[test]
+    fn query_rows_serializes_list_as_json_array() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory db");
+
+        let result =
+            super::query_rows(&conn, "SELECT [1, 2, 3]::INTEGER[] AS node_ids", 10).expect("query");
+
+        assert_eq!(result.rows, vec![json!([[1, 2, 3]])]);
+    }
+
+    #[test]
+    fn query_rows_serializes_struct_as_json_object() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory db");
+
+        let result = super::query_rows(
+            &conn,
+            "SELECT struct_pack(name := 'alpha', count := 2) AS node",
+            10,
+        )
+        .expect("query");
+
+        assert_eq!(result.rows, vec![json!([{"name": "alpha", "count": 2}])]);
+    }
+
+    #[test]
+    fn query_rows_serializes_map_as_json_object() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory db");
+
+        let result = super::query_rows(
+            &conn,
+            "SELECT map(['alpha', 'beta'], [1, 2]) AS weights",
+            10,
+        )
+        .expect("query");
+
+        assert_eq!(result.rows, vec![json!([{"alpha": 1, "beta": 2}])]);
     }
 }
