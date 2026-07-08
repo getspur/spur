@@ -1,3 +1,204 @@
+use crate::explore::catalog::ItemKind;
+use crate::explore::pool::{pool_dir, Manifest, ManifestItem};
+use crate::skills::adapters::Adapter;
+use crate::skills::{SkillPayload, SkillRole, SkillSource};
+use anyhow::Context;
+use std::collections::HashSet;
+use std::io::Write as _;
+use std::path::Path;
+
+const WARN_TARGET: &str = "spur::worker::explore";
+const MANAGED_MARKER: &str = "SPUR-MANAGED";
+
+pub fn adapter_for_kind(kind: spur_acp::types::AgentKind) -> Option<Adapter> {
+    match kind {
+        spur_acp::types::AgentKind::ClaudeCodeAcp
+        | spur_acp::types::AgentKind::ClaudeStreamJson => Some(Adapter::ClaudeCode),
+        spur_acp::types::AgentKind::CodexAcp => Some(Adapter::Codex),
+        spur_acp::types::AgentKind::Gemini => Some(Adapter::Gemini),
+        spur_acp::types::AgentKind::Kiro => Some(Adapter::Kiro),
+        spur_acp::types::AgentKind::OpenCode => Some(Adapter::OpenCode),
+        spur_acp::types::AgentKind::Kimi => Some(Adapter::Kimi),
+        spur_acp::types::AgentKind::Generic => None,
+    }
+}
+
+/// Render the gated pool subset into a worker worktree.
+///
+/// This is harness-native materialization: failures degrade to select-only
+/// behavior for the worker and are reported through warnings instead of
+/// returning errors to delegation setup.
+pub async fn materialize_pool_skills(
+    worktrees: &spur_worktree::manager::WorktreeManager,
+    worktree_path: &Path,
+    kind: spur_acp::types::AgentKind,
+    repo_root: &Path,
+    requested: Option<&[String]>,
+) {
+    let Some(adapter) = adapter_for_kind(kind) else {
+        return;
+    };
+    let manifest = match Manifest::load(repo_root) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::warn!(
+                target: WARN_TARGET,
+                error = %error,
+                "explore manifest load failed; select-only"
+            );
+            return;
+        }
+    };
+    let requested_names =
+        requested.map(|names| names.iter().map(String::as_str).collect::<HashSet<_>>());
+    let mut excludes = Vec::new();
+    let mut written = Vec::new();
+
+    for item in &manifest.items {
+        if !should_materialize(item, requested_names.as_ref()) {
+            continue;
+        }
+
+        let payload = match load_pool_skill(repo_root, item) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(
+                    target: WARN_TARGET,
+                    skill = %item.name,
+                    error = %error,
+                    "pool skill load failed; select-only for skill"
+                );
+                continue;
+            }
+        };
+        let rendered = adapter.render_with_prefix(&payload, worktree_path, "");
+        let rel_path = match rendered.path.strip_prefix(worktree_path) {
+            Ok(path) => path.to_string_lossy().replace('\\', "/"),
+            Err(error) => {
+                tracing::warn!(
+                    target: WARN_TARGET,
+                    skill = %item.name,
+                    path = %rendered.path.display(),
+                    error = %error,
+                    "pool skill target path escaped worktree; select-only for skill"
+                );
+                continue;
+            }
+        };
+
+        if !target_is_owned_or_absent(&rendered.path, &rel_path) {
+            continue;
+        }
+
+        if let Err(error) = atomic_write(&rendered.path, &rendered.bytes) {
+            tracing::warn!(
+                target: WARN_TARGET,
+                skill = %item.name,
+                path = %rel_path,
+                error = %error,
+                "pool skill write failed; select-only for skill"
+            );
+            continue;
+        }
+
+        excludes.push(rel_path);
+        written.push(rendered.path);
+    }
+
+    if excludes.is_empty() {
+        return;
+    }
+
+    if let Err(error) = worktrees
+        .add_worktree_excludes(worktree_path, &excludes)
+        .await
+    {
+        for path in written {
+            let _ = std::fs::remove_file(path);
+        }
+        tracing::warn!(
+            target: WARN_TARGET,
+            paths = ?excludes,
+            error = %error,
+            "explore skill exclude setup failed; removed injected files, select-only"
+        );
+    }
+}
+
+fn should_materialize(item: &ManifestItem, requested_names: Option<&HashSet<&str>>) -> bool {
+    if item.kind != ItemKind::Skill {
+        return false;
+    }
+    if !matches!(
+        item.gate.verdict.as_str(),
+        "clean" | "overridden" | "replaced-bundled"
+    ) {
+        return false;
+    }
+    match requested_names {
+        Some(names) => names.contains(item.name.as_str()),
+        None => true,
+    }
+}
+
+fn load_pool_skill(repo_root: &Path, item: &ManifestItem) -> anyhow::Result<SkillPayload> {
+    let path = pool_dir(repo_root, &item.source, &item.name, &item.pinned_commit).join("SKILL.md");
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let parsed = crate::skills::frontmatter::parse_source(&raw);
+    Ok(SkillPayload {
+        id: item.name.clone(),
+        description: parsed.description.as_deref().unwrap_or("").to_string(),
+        body: parsed.body.to_string(),
+        source: SkillSource::Override,
+        role: parsed.role.unwrap_or(SkillRole::Both),
+    })
+}
+
+fn target_is_owned_or_absent(target: &Path, rel_path: &str) -> bool {
+    if !target.exists() {
+        return true;
+    }
+
+    let existing = match std::fs::read_to_string(target) {
+        Ok(existing) => existing,
+        Err(error) => {
+            tracing::warn!(
+                target: WARN_TARGET,
+                path = %rel_path,
+                error = %error,
+                "pool skill ownership check failed; select-only for skill"
+            );
+            return false;
+        }
+    };
+    if existing.contains(MANAGED_MARKER) {
+        return true;
+    }
+
+    tracing::warn!(
+        target: WARN_TARGET,
+        path = %rel_path,
+        "committed agent skill file exists; select-only against it"
+    );
+    false
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create dir {}", parent.display()))?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temp file in {}", parent.display()))?;
+    tmp.write_all(bytes)
+        .with_context(|| format!("write {}", tmp.path().display()))?;
+    tmp.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("persist {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{adapter_for_kind, materialize_pool_skills};
