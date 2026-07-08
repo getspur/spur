@@ -440,6 +440,11 @@ fn submit_plan_def() -> ToolDefinition {
                                 "description": "Named agent profile from `.spur/agents/<name>.md` (or a pass-through agent/mode name the worker binary already knows). Materialized into the worker worktree and selected on the fresh session; fail-soft on selection.",
                                 "default": null
                             },
+                            "skills": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Explore pool skill names to materialize into this task's worker worktree before its session starts. Each name must exist in the explore manifest with an accepted gate verdict."
+                            },
                             "model": {
                                 "type": "string",
                                 "description": "Override the worker's model (config-option value id, e.g. \"gpt-5-codex\"). Fail-soft if the agent rejects it.",

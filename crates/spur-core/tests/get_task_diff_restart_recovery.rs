@@ -113,6 +113,7 @@ async fn t_v0d_4_get_task_diff_works_after_restart_for_latest_attempt() {
         task_id: "task-a".into(),
         agent: "codex".into(),
         profile: None,
+        skills: None,
         model: None,
         effort: None,
         config_overrides: None,

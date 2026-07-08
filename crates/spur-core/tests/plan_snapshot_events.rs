@@ -300,6 +300,7 @@ async fn recover_persisted_plans_skips_unowned_legacy_plan() {
         task_id: "t1".into(),
         agent: "codex".into(),
         profile: None,
+        skills: None,
         model: None,
         effort: None,
         config_overrides: None,

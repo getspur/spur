@@ -29,6 +29,7 @@ async fn create_persisted_plan(
         task_id: format!("{plan_id}-task"),
         agent: "codex".into(),
         profile: None,
+        skills: None,
         model: None,
         effort: None,
         config_overrides: None,

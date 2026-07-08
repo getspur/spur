@@ -285,6 +285,7 @@ mod tests {
                 task_id: task_id.to_string(),
                 agent: "claude-code-acp".into(),
                 profile: None,
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
