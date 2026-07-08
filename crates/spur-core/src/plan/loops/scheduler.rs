@@ -621,3 +621,37 @@ fn system_time_to_unix_seconds(now: SystemTime) -> i64 {
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::loops::spec::LoopGovernors;
+
+    #[test]
+    fn loop_template_preserves_task_skills_when_collecting_plan_tasks() {
+        let template = serde_json::json!({
+            "tasks": [
+                {
+                    "task_id": "triage",
+                    "agent": "codex",
+                    "task": "Check CI and propose follow-up work.",
+                    "skills": ["clean-a"]
+                }
+            ]
+        });
+        let spec = LoopSpec {
+            loop_id: "loop-skills".to_string(),
+            goal: "Keep CI green".to_string(),
+            pattern: None,
+            cadence_secs: 60,
+            autonomy: AutonomyLevel::L3,
+            template: template.clone(),
+            governors: LoopGovernors::default(),
+            escalation: None,
+        };
+
+        let input = loop_template_to_persist_input(&template, &spec, 7).unwrap();
+
+        assert_eq!(input.tasks[0].skills, Some(vec!["clean-a".to_string()]));
+    }
+}

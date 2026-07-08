@@ -2044,6 +2044,46 @@ async fn plan_task_profile_round_trips_to_dispatch_and_retry() {
     assert_eq!(retry.profile.as_deref(), Some("code-reviewer"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn plan_task_skills_round_trips_to_dispatch() {
+    let pm = crate::plan::test_util::MockPm::new().arc();
+    let brain_session_id =
+        spur_acp::BrainSessionId::new(spur_acp::SessionId("brain-skills-plan".into()));
+    let issue_id = seed_mock_ready_task_plan(&pm, "P-SKILLS", "T1", &brain_session_id).await;
+    let adv =
+        crate::plan::PmLike::advanced(pm.as_ref()).expect("mock pm should expose beads advanced");
+    let skills = vec!["clean-a".to_string()];
+    crate::plan::emit_task_spec_audit(
+        adv,
+        &issue_id,
+        "T1",
+        "codex",
+        None,
+        Some(&skills),
+        None,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .expect("skills task spec audit");
+    let (delegation_tx, mut delegation_rx) =
+        tokio::sync::mpsc::channel::<crate::DelegationRequest>(1);
+    let reconciler = Reconciler::new_with_pm_like(
+        ReconcilerConfig::default(),
+        pm,
+        Arc::new(Notify::new()),
+        Some(test_dispatch_ctx(delegation_tx, brain_session_id).into_dispatch()),
+        None,
+        pro_feature_gate(),
+    );
+
+    reconciler.tick_once().await.expect("tick once");
+
+    let request = delegation_rx.recv().await.expect("dispatch request");
+    assert_eq!(request.skills.as_deref(), Some(skills.as_slice()));
+}
+
 #[tokio::test]
 async fn global_reconciler_records_plan_no_ready_when_list_ready_empty_for_that_plan() {
     let pm = crate::plan::test_util::MockPm::new().arc();
