@@ -532,6 +532,7 @@ pub fn parse_parallel_tasks(
             id: DelegationId::new(),
             agent: task.agent,
             profile: task.profile,
+            skills: None,
             model: task.model,
             effort: task.effort,
             config_overrides: task.config_overrides,

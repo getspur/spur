@@ -126,6 +126,7 @@ pub(crate) struct WorkerAttemptCtx<'a> {
     /// Loaded+validated by `execute_delegation` when the profile is managed;
     /// `None` means select-only pass-through.
     pub(crate) profile_def: Option<&'a crate::agent_profiles::AgentProfile>,
+    pub(crate) skills: Option<Vec<String>>,
     #[allow(dead_code)]
     pub(crate) config_overrides: Option<&'a std::collections::HashMap<String, String>>,
     pub(crate) task: &'a str,
@@ -690,6 +691,14 @@ pub(crate) async fn run_one_worker_attempt(
         )
         .await;
     }
+    crate::explore::materialize::materialize_pool_skills(
+        worktrees,
+        &worktree_info.path,
+        ctx.agent_config.kind,
+        &worktrees.repo_root,
+        ctx.skills.as_deref(),
+    )
+    .await;
 
     // 2. Spawn worker agent in worktree via AgentConnection.
     // Workers never receive a permission_tx, so L2 auto-approve is
@@ -2033,6 +2042,7 @@ mod model_effort_override_tests {
                 effort: None,
                 profile: None,
                 profile_def: None,
+                skills: None,
                 config_overrides: None,
                 task: "do the task",
                 request_id: "delegation-1",
@@ -2614,6 +2624,7 @@ mod profile_override_tests {
                 agent: "kiro",
                 profile: Some("code-reviewer"),
                 profile_def: Some(&profile),
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
@@ -2862,6 +2873,7 @@ mod profile_override_tests {
                 agent: "claude-code",
                 profile: Some("code-reviewer"),
                 profile_def: Some(&profile),
+                skills: None,
                 model: None,
                 effort: None,
                 config_overrides: None,
