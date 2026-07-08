@@ -697,6 +697,10 @@ pub(crate) async fn run_one_worker_attempt(
         ctx.agent_config.kind,
         &worktrees.repo_root,
         ctx.skills.as_deref(),
+        Some(crate::explore::materialize::MaterializeMeta {
+            request_id: ctx.request_id,
+            agent: ctx.agent,
+        }),
     )
     .await;
 
@@ -3043,6 +3047,15 @@ mod profile_override_tests {
             git(&outcome.worktree_path, &["check-ignore", skill_rel_path]),
             skill_rel_path
         );
+        let records = crate::explore::materialize::read_recent_materializations(repo.path(), 10);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].delegation_id, "delegation-1");
+        assert_eq!(records[0].agent, "codex");
+        assert_eq!(
+            records[0].worktree,
+            outcome.worktree_path.display().to_string()
+        );
+        assert_eq!(records[0].items, vec!["clean-a".to_string()]);
     }
 }
 
