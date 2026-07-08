@@ -138,7 +138,9 @@ impl App {
                     detail.mark_agent_model_catalog_probe_completed(&worker_name);
                 }
                 self.dirty = true;
-                None
+                Some(Action::FlashHint {
+                    message: format!("{} catalog ready", worker_name),
+                })
             }
 
             action @ (Action::RefreshIssues
