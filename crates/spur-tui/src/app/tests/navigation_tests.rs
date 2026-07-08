@@ -442,6 +442,7 @@ mod plan_browser_navigation_tests {
 mod view_history_tests {
     use super::super::super::*;
     use spur_acp::SessionId;
+    use spur_telemetry::tier2_events::ViewName;
 
     fn seed_session(app: &mut App, sid: &str) {
         app.handle_spur_event(SpurEvent::now(SpurEventBody::BrainSpawned {
@@ -507,6 +508,42 @@ mod view_history_tests {
         assert_eq!(
             app.view_history, history_before,
             "navigate_to(current_view) must not push or mutate history"
+        );
+    }
+
+    #[test]
+    fn telemetry_view_name_maps_supported_views_and_buckets_unknowns() {
+        assert_eq!(
+            App::telemetry_view_name_for(&ViewId::Dashboard),
+            ViewName::Dashboard
+        );
+        assert_eq!(
+            App::telemetry_view_name_for(&ViewId::SessionDetail(SessionId("brain-1".into()))),
+            ViewName::SessionDetail
+        );
+        assert_eq!(
+            App::telemetry_view_name_for(&ViewId::IssueBrowser),
+            ViewName::IssueBrowser
+        );
+        assert_eq!(
+            App::telemetry_view_name_for(&ViewId::PlanBrowser),
+            ViewName::PlanBrowser
+        );
+        assert_eq!(
+            App::telemetry_view_name_for(&ViewId::PlanInspector(SessionId("brain-1".into()))),
+            ViewName::PlanInspector
+        );
+        assert_eq!(
+            App::telemetry_view_name_for(&ViewId::LoopBrowser),
+            ViewName::Other
+        );
+        assert_eq!(
+            App::telemetry_view_name_for(&ViewId::SessionPicker),
+            ViewName::Other
+        );
+        assert_eq!(
+            App::telemetry_view_name_for(&ViewId::ExploreBrowser),
+            ViewName::Other
         );
     }
 

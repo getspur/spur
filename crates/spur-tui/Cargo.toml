@@ -21,6 +21,7 @@ spur-core = { workspace = true, default-features = false }
 spur-graph = { workspace = true, default-features = false }
 spur-pm = { workspace = true }
 spur-license = { workspace = true }
+spur-telemetry = { path = "../../crates/spur-telemetry" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 ratatui = { workspace = true }

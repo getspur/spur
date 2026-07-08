@@ -10776,6 +10776,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spur-acp",
+ "spur-telemetry",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
