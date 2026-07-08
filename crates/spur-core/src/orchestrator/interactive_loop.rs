@@ -84,6 +84,10 @@ fn prompt_cost_model_hint(brain: &BrainSession) -> &str {
     current_model_config_value(&brain.config_options).unwrap_or(&brain.brain_name)
 }
 
+fn prompt_usage_token_count_bucket(usage: &spur_acp::Usage) -> u32 {
+    usage.total_tokens.min(u32::MAX as u64) as u32
+}
+
 fn current_model_config_value(options: &[spur_acp::SessionConfigOption]) -> Option<&str> {
     let option = options
         .iter()
@@ -119,6 +123,16 @@ fn emit_prompt_usage_cost_update(
     let Some(usage) = brain.connection.take_last_prompt_usage() else {
         return;
     };
+    spur_telemetry::emit!(spur_telemetry::tier1_events::LlmRequestDuration {
+        model_name: crate::telemetry::model_name_from_config_value(
+            Some(prompt_cost_model_hint(brain)),
+            "unknown"
+        ),
+        duration_ms: duration.as_millis().min(u64::MAX as u128) as u64,
+        token_count_bucket: prompt_usage_token_count_bucket(&usage),
+        outcome: spur_telemetry::tier1_events::Outcome::Ok,
+    });
+
     let Some(agent_config) = registry.get(&brain.brain_name) else {
         warn!(
             session = %brain.spur_session_id,
@@ -2325,6 +2339,15 @@ mod prompt_usage_cost_update_tests {
             brain.connection.take_last_prompt_usage().is_none(),
             "usage must be consumed exactly once"
         );
+    }
+
+    #[test]
+    fn prompt_usage_token_count_bucket_uses_total_tokens_and_saturates() {
+        let usage = Usage::new(42, 20, 22);
+        assert_eq!(prompt_usage_token_count_bucket(&usage), 42);
+
+        let usage = Usage::new(u64::MAX, 1, 1);
+        assert_eq!(prompt_usage_token_count_bucket(&usage), u32::MAX);
     }
 }
 
