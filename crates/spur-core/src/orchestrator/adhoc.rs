@@ -126,6 +126,10 @@ impl Orchestrator {
             )
             .await
             .context("Failed to create brain session")?;
+            let config_options = session_response.config_options.clone().unwrap_or_default();
+            mcp_server.set_brain_model(
+                crate::telemetry::current_model_config_value(&config_options).map(str::to_string),
+            );
 
             let acp_session_id = spur_acp::SessionId(session_response.session_id.to_string());
             let brain_session_id = crate::plan::labels::derive_brain_session_id(&acp_session_id);

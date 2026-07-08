@@ -2133,6 +2133,9 @@ impl Orchestrator {
         });
 
         let config_options = session_response.config_options.clone().unwrap_or_default();
+        mcp_server.set_brain_model(
+            crate::telemetry::current_model_config_value(&config_options).map(str::to_string),
+        );
         // M8.A: build the frozen-per-session capability cache from both
         // the InitializeResponse (`AgentCapabilities`) and the
         // NewSessionResponse (modes/config_options). Spec §6.1.
@@ -2533,6 +2536,9 @@ impl Orchestrator {
                 ))),
             ),
         };
+        mcp_server.set_brain_model(
+            crate::telemetry::current_model_config_value(&config_options).map(str::to_string),
+        );
 
         self.emit(SpurEvent::now(SpurEventBody::AgentSessionReady {
             session: session_id.clone(),
