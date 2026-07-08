@@ -117,6 +117,7 @@ fn lambda_error_envelope(value: &Value) -> Option<McpError> {
 
 pub(crate) fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
+        external_catalog_def(),
         external_code_search_def(),
         external_code_read_def(),
         external_code_callers_def(),
@@ -125,6 +126,56 @@ pub(crate) fn tool_definitions() -> Vec<ToolDefinition> {
         external_index_def(),
         external_index_status_def(),
     ]
+}
+
+fn external_catalog_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "external_catalog".to_owned(),
+        description:
+            "Browse indexed external packages, revisions, file tree entries, and file symbols."
+                .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "default": DEFAULT_SOURCE,
+                    "description": "Package source, for example registry:crates-io or git:github.com/..."
+                },
+                "package": {
+                    "type": "string",
+                    "description": "Optional package name. Omit to list indexed packages."
+                },
+                "revision": {
+                    "type": "string",
+                    "description": "Exact version or SHA for file tree or symbol descent."
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Branch or tag name. Alternative to revision."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory prefix or exact file path inside the package revision."
+                },
+                "name_filter": {
+                    "type": "string",
+                    "description": "Optional substring filter for package names or file symbols."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor returned by a previous external_catalog response."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
 }
 
 fn external_code_search_def() -> ToolDefinition {
