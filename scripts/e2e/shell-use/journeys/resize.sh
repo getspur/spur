@@ -19,4 +19,5 @@ resize_terminal 100 30
 expect_text "No agents configured"
 resize_terminal 72 22
 expect_text "No agents configured"
+expect_text "Ctrl+K: go"
 quit_cleanly
