@@ -134,6 +134,7 @@ async fn setup_persisted_merge_ready_plan(
             execution_mode: Some("submit_plan"),
             brain_session_id: None,
             explicit_base: None,
+            brain_model: None,
         },
     )
     .await;
@@ -343,6 +344,7 @@ async fn setup_persisted_retried_plan(plan_id: &str, clear_cache: bool) -> Persi
             execution_mode: Some("submit_plan"),
             brain_session_id: None,
             explicit_base: None,
+            brain_model: None,
         },
     )
     .await;
@@ -669,6 +671,7 @@ async fn setup_cached_overlay_diff_plan(
             execution_mode: Some("submit_plan"),
             brain_session_id: None,
             explicit_base: None,
+            brain_model: None,
         },
     )
     .await;
