@@ -8,7 +8,7 @@ use ratatui::Frame;
 use spur_core::explore::{
     apply,
     catalog::ItemKind,
-    materialize::read_recent_materializations,
+    materialize::{read_recent_materializations, MaterializationRecord},
     pool::{self, ManifestItem, StatusReport},
 };
 
@@ -25,6 +25,32 @@ pub enum ManageLens {
 }
 
 impl ExploreBrowserView {
+    pub(super) fn invalidate_manage_cache(&mut self) {
+        self.cached_status = None;
+        self.cached_materializations = None;
+    }
+
+    pub(super) fn refresh_manage_cache(&mut self) {
+        self.cached_status = Some(pool::status(&self.repo_root, &self.manifest));
+        self.cached_materializations = Some(read_recent_materializations(&self.repo_root, 20));
+    }
+
+    fn cached_status(&mut self) -> &StatusReport {
+        if self.cached_status.is_none() {
+            self.cached_status = Some(pool::status(&self.repo_root, &self.manifest));
+        }
+        self.cached_status.as_ref().expect("status cache populated")
+    }
+
+    fn cached_materializations(&mut self) -> &[MaterializationRecord] {
+        if self.cached_materializations.is_none() {
+            self.cached_materializations = Some(read_recent_materializations(&self.repo_root, 20));
+        }
+        self.cached_materializations
+            .as_deref()
+            .expect("materialization cache populated")
+    }
+
     pub(super) fn handle_manage_key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
@@ -111,15 +137,14 @@ impl ExploreBrowserView {
         };
     }
 
-    fn manage_row_count(&self) -> usize {
+    fn manage_row_count(&mut self) -> usize {
         match self.manage_lens {
             ManageLens::Pool => {
-                let report = pool::status(&self.repo_root, &self.manifest);
-                self.manifest.items.len() + report.missing.len() + report.sha_mismatch.len()
+                let item_count = self.manifest.items.len();
+                let report = self.cached_status();
+                item_count + report.missing.len() + report.sha_mismatch.len()
             }
-            ManageLens::LastMaterialization => {
-                read_recent_materializations(&self.repo_root, 20).len()
-            }
+            ManageLens::LastMaterialization => self.cached_materializations().len(),
         }
     }
 
@@ -131,6 +156,7 @@ impl ExploreBrowserView {
         let name = self.manifest.items[self.manage_selected].name.clone();
         match apply::remove(&self.repo_root, &mut self.manifest, &name) {
             Ok(()) => {
+                self.invalidate_manage_cache();
                 self.reload();
             }
             Err(error) => {
@@ -139,8 +165,7 @@ impl ExploreBrowserView {
         }
     }
 
-    fn pool_lines(&self) -> Vec<Line<'static>> {
-        let report = pool::status(&self.repo_root, &self.manifest);
+    fn pool_lines(&mut self) -> Vec<Line<'static>> {
         let mut lines = vec![
             lens_tabs(self.manage_lens),
             Line::from("name  kind  sha  verdict  license"),
@@ -158,22 +183,21 @@ impl ExploreBrowserView {
             }
         }
 
-        push_status_lines(
-            &mut lines,
-            &report,
-            self.manifest.items.len(),
-            self.manage_selected,
-        );
+        let row_offset = self.manifest.items.len();
+        let selected = self.manage_selected;
+        let report = self.cached_status();
+        push_status_lines(&mut lines, report, row_offset, selected);
         lines
     }
 
-    fn last_materialization_lines(&self) -> Vec<Line<'static>> {
-        let records = read_recent_materializations(&self.repo_root, 20);
+    fn last_materialization_lines(&mut self) -> Vec<Line<'static>> {
         let mut lines = vec![
             lens_tabs(self.manage_lens),
             Line::from("newest first · last 20 dispatches"),
             Line::from(""),
         ];
+        let selected_index = self.manage_selected;
+        let records = self.cached_materializations();
 
         if records.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -184,7 +208,7 @@ impl ExploreBrowserView {
         }
 
         for (index, record) in records.iter().enumerate() {
-            let selected = index == self.manage_selected;
+            let selected = index == selected_index;
             let prefix = if selected { "> " } else { "  " };
             let item_count = record.items.len();
             let item_label = if item_count == 1 { "skill" } else { "skills" };
@@ -351,6 +375,7 @@ mod tests {
     use crate::action::ViewId;
     use crate::views::explore::{ExploreBrowserView, ExploreStage};
     use crossterm::event::KeyModifiers;
+    use ratatui::{backend::TestBackend, Terminal};
     use spur_core::explore::catalog::{Catalog, CatalogEntry};
     use spur_core::explore::materialize::{append_materialization_record, MaterializationRecord};
     use spur_core::explore::pool::{item_from_entry, GateRecord, Manifest};
@@ -419,6 +444,27 @@ mod tests {
         spur_core::explore::content_hash(&dir).unwrap()
     }
 
+    fn remove_pool_body(repo_root: &std::path::Path, entry: &CatalogEntry) {
+        let dir = pool::pool_dir(repo_root, &entry.source, &entry.name, &entry.pinned_commit);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn render_manage_to_string(view: &mut ExploreBrowserView) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| view.render_manage(frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     #[test]
     fn j_k_navigation_clamps_at_pool_boundaries() {
         let repo = tempfile::tempdir().unwrap();
@@ -458,6 +504,55 @@ mod tests {
         assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
         assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
         assert_eq!(view.manage_selected, 2, "j past the end clamps to last row");
+    }
+
+    #[test]
+    fn pool_cache_stays_stable_between_renders_and_refreshes_after_reload_or_remove() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut entry = manifest_entry("cached-skill", Some("MIT"));
+        entry.content_sha256 = vendor_pool_body(repo.path(), &entry);
+        remove_pool_body(repo.path(), &entry);
+        Catalog {
+            synced_at_epoch: None,
+            entries: Vec::new(),
+        }
+        .save(repo.path())
+        .unwrap();
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item_from_entry(
+                &entry,
+                GateRecord {
+                    verdict: "clean".into(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            )],
+        }
+        .save(repo.path())
+        .unwrap();
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        enter_manage(&mut view);
+
+        let first_render = render_manage_to_string(&mut view);
+        assert!(first_render.contains("missing body"));
+
+        vendor_pool_body(repo.path(), &entry);
+        let second_render = render_manage_to_string(&mut view);
+        assert!(
+            second_render.contains("missing body"),
+            "pool status should stay cached until explicit reload:\n{second_render}"
+        );
+
+        assert!(view.handle_key(key(KeyCode::Char('r'))).is_none());
+        let after_reload = render_manage_to_string(&mut view);
+        assert!(after_reload.contains("status: all pool bodies present"));
+        assert!(!after_reload.contains("missing body"));
+
+        assert!(view.handle_key(key(KeyCode::Char('x'))).is_none());
+        let after_remove = render_manage_to_string(&mut view);
+        assert!(after_remove.contains("pool is empty"));
+        assert!(!after_remove.contains("cached-skill"));
     }
 
     #[test]
@@ -513,7 +608,7 @@ mod tests {
     #[test]
     fn pool_lines_empty_manifest_shows_empty_message_and_clean_status() {
         let repo = repo_with_manifest(vec![]);
-        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
         let lines = view.pool_lines();
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert!(rendered.iter().any(|l| l.contains("pool is empty")));
@@ -525,7 +620,7 @@ mod tests {
     #[test]
     fn last_materialization_lines_empty_shows_placeholder() {
         let repo = repo_with_manifest(vec![]);
-        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
         let lines = view.last_materialization_lines();
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert!(rendered
@@ -547,7 +642,7 @@ mod tests {
             },
         )
         .unwrap();
-        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
         let lines = view.last_materialization_lines();
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert!(rendered.iter().any(|l| l.contains("codex")));
