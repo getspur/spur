@@ -63,6 +63,23 @@ The integration merge excised the contamination wholesale: `git checkout main --
 
 Option 1 or 2 also eliminates the silent-auto-merge regression class entirely.
 
+## Addendum (same day): phase-2 lease expiries — local-fallback disk exhaustion
+
+The phase-2 run (plan `89864ab9`) immediately hit a third failure mode: both root
+tasks reported `dispatch lease expired` twice with zero output. Reconstructed
+chain: the attempt-1 workers started, found the remote build VM congested (a
+parallel brain session plus brain-side coverage runs), fell back to local cargo
+builds of the DuckDB-heavy workspace (a 9.4 GiB `target/` was later found in the
+dead attempt worktree), exhausted the volume to 216 MiB free, and wedged without
+heartbeats — leases lapsed silently. Key calibration: successful workers renew
+leases via heartbeats for 1h50m+, so `dispatch lease expired` specifically means
+*no heartbeat* (wedged worker), never slow-but-alive work. Recovery that worked:
+`submit_plan_mutation` retry after the congestion window cleared; the attempt-3
+worker for the lint task even salvaged the verified patch from its dead sibling's
+branch. Mitigations tracked in the follow-up issue (local-fallback opt-in /
+`SPUR_NO_LOCAL_FALLBACK=1` in worker env, disk preflight, dead-worktree
+`target/` reaping).
+
 ## Lessons / follow-ups
 
 - [ ] Trace and fix the branch-ref update gap (Defect 1) in the completion/teardown path.
