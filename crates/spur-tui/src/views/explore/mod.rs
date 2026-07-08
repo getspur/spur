@@ -484,3 +484,68 @@ fn pooled_body_path(repo_root: &Path, entry: &CatalogEntry) -> Option<PathBuf> {
             .map(|file_name| dir.join(file_name)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+    use spur_core::explore::pool::{item_from_entry, GateRecord};
+
+    fn key(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+    }
+
+    fn sample_entry() -> CatalogEntry {
+        CatalogEntry {
+            kind: ItemKind::Skill,
+            name: "review-helper".into(),
+            source: "getspur/ecosystem".into(),
+            rel_path: "skills/review-helper".into(),
+            pinned_commit: "0123456789abcdef".into(),
+            description: "Tightens code review with focused risk checks.".into(),
+            license: Some("MIT".into()),
+            content_sha256: "0".repeat(64),
+        }
+    }
+
+    fn repo_with_pool_item() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let entry = sample_entry();
+        Catalog {
+            synced_at_epoch: None,
+            entries: vec![entry.clone()],
+        }
+        .save(repo.path())
+        .expect("save catalog");
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item_from_entry(
+                &entry,
+                GateRecord {
+                    verdict: "clean".into(),
+                    justification: None,
+                    decided_at_epoch: Some(1_700_000_000),
+                },
+            )],
+        }
+        .save(repo.path())
+        .expect("save manifest");
+        repo
+    }
+
+    #[test]
+    fn m_from_browse_enters_manage_and_x_removes_selected_pool_item() {
+        let repo = repo_with_pool_item();
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        view.handle_key(key('m'));
+
+        assert_eq!(view.stage, ExploreStage::Manage);
+        view.handle_key(key('x'));
+        let manifest = Manifest::load(repo.path()).expect("reload manifest");
+        assert!(
+            manifest.items.is_empty(),
+            "x should remove the selected pool item from disk"
+        );
+    }
+}
