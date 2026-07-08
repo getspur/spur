@@ -18,6 +18,9 @@ use crate::action::{Action, ViewId};
 
 use super::{View, ViewContext};
 
+mod manage;
+pub use manage::ManageLens;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExploreTab {
     Skills,
@@ -31,16 +34,12 @@ pub enum ExploreStage {
     Manage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManageLens {
-    Pool,
-    LastMaterialization,
-}
-
 pub struct ExploreBrowserView {
     pub(crate) repo_root: PathBuf,
     pub(crate) tab: ExploreTab,
     pub(crate) stage: ExploreStage,
+    pub(crate) manage_lens: ManageLens,
+    pub(crate) manage_selected: usize,
     pub(crate) catalog: Catalog,
     pub(crate) manifest: Manifest,
     pub(crate) selected: usize,
@@ -55,6 +54,8 @@ impl ExploreBrowserView {
             repo_root,
             tab: ExploreTab::Skills,
             stage: ExploreStage::Browse,
+            manage_lens: ManageLens::Pool,
+            manage_selected: 0,
             catalog,
             manifest,
             selected: 0,
@@ -77,6 +78,9 @@ impl ExploreBrowserView {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         let key = super::normalize_macos_option(key);
+        if self.stage == ExploreStage::Manage {
+            return self.handle_manage_key(key);
+        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_selection(1);
@@ -98,6 +102,13 @@ impl ExploreBrowserView {
                 self.reload();
                 None
             }
+            KeyCode::Char('m') if key.modifiers.is_empty() => {
+                self.stage = ExploreStage::Manage;
+                self.manage_lens = ManageLens::Pool;
+                self.manage_selected = 0;
+                self.clamp_manage_selection();
+                None
+            }
             KeyCode::Esc if key.modifiers.is_empty() => Some(Action::NavigateTo(ViewId::Dashboard)),
             _ => None,
         }
@@ -113,6 +124,7 @@ impl ExploreBrowserView {
         self.manifest = manifest;
         self.load_error = load_error;
         self.clamp_selection();
+        self.clamp_manage_selection();
     }
 
     fn toggle_tab(&mut self) {
@@ -323,8 +335,11 @@ impl ExploreBrowserView {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         frame.render_widget(
-            Paragraph::new("j/k move  Tab tabs  space select  r reload  Esc back")
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(match self.stage {
+                ExploreStage::Manage => "j/k move  l lens  x remove  m browse  r reload  Esc back",
+                _ => "j/k move  Tab tabs  space select  r reload  Esc back",
+            })
+            .style(Style::default().fg(Color::DarkGray)),
             area,
         );
     }
@@ -365,6 +380,12 @@ impl View for ExploreBrowserView {
             Constraint::Length(1),
         ])
         .split(area);
+        self.render_header(frame, chunks[0]);
+        if self.stage == ExploreStage::Manage {
+            self.render_manage(frame, chunks[1]);
+            self.render_footer(frame, chunks[2]);
+            return;
+        }
         let panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -374,7 +395,6 @@ impl View for ExploreBrowserView {
             ])
             .split(chunks[1]);
 
-        self.render_header(frame, chunks[0]);
         self.render_sources(frame, panes[0]);
         self.render_catalog(frame, panes[1]);
         self.render_preview(frame, panes[2]);
