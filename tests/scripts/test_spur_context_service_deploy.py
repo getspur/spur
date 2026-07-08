@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_SH = ROOT / "infra" / "spur-context-service" / "deploy.sh"
@@ -284,7 +286,14 @@ def test_remote_worker_image_script_delegates_to_canonical_deploy_path():
 
 
 def test_remote_docker_build_accepts_multiple_remote_binaries():
-    script = (ROOT / "scripts" / "cloud-build" / "docker-build.sh").read_text()
+    docker_build = ROOT / "scripts" / "cloud-build" / "docker-build.sh"
+    if not docker_build.exists():
+        # scripts/cloud-build is a symlink into the private sibling
+        # spur-notebook checkout; on a bare CI checkout it dangles. The
+        # invariant stays enforced on workstations and anywhere the
+        # cloud-build bundle is restored.
+        pytest.skip("scripts/cloud-build sibling checkout not present")
+    script = docker_build.read_text()
 
     assert "REMOTE_BINARIES=()" in script
     assert 'REMOTE_BINARIES+=("$2")' in script
