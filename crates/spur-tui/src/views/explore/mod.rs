@@ -625,9 +625,12 @@ fn pooled_body_path(repo_root: &Path, entry: &CatalogEntry) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::test_view_ctx;
     use crossterm::event::KeyModifiers;
+    use ratatui::{backend::TestBackend, Terminal};
     use spur_core::explore::apply::Resolution;
     use spur_core::explore::pool::{item_from_entry, GateRecord};
+    use spur_core::lineage::projection::ExecutorLineage;
 
     const COMMIT: &str = "abcdef1234567890abcdef1234567890abcdef12";
     const SOURCE: &str = "acme/repo";
@@ -887,5 +890,234 @@ mod tests {
             manifest.items.is_empty(),
             "x should remove the selected pool item from disk"
         );
+    }
+
+    #[test]
+    fn elapsed_label_covers_all_time_buckets() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(elapsed_label(now), "just now");
+        assert_eq!(elapsed_label(now - 90), "1m");
+        assert_eq!(elapsed_label(now - 7_200), "2h");
+        assert_eq!(elapsed_label(now - 172_800), "2d");
+    }
+
+    #[test]
+    fn sync_banner_covers_never_and_synced() {
+        let never = Catalog {
+            synced_at_epoch: None,
+            entries: Vec::new(),
+        };
+        assert_eq!(sync_banner(&never), "never synced");
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let synced = Catalog {
+            synced_at_epoch: Some(now - 90),
+            entries: Vec::new(),
+        };
+        assert!(sync_banner(&synced).starts_with("synced 1m ago"));
+    }
+
+    #[test]
+    fn tab_span_and_catalog_helpers_cover_all_branches() {
+        assert_eq!(stage_label(ExploreStage::Browse), "Browse");
+        assert_eq!(stage_label(ExploreStage::Gate), "Gate");
+        assert_eq!(stage_label(ExploreStage::Manage), "Manage");
+        assert_eq!(header_height(true), 3);
+        assert_eq!(header_height(false), 2);
+        assert_eq!(catalog_title(ExploreTab::Skills), "Catalog · Skills");
+        assert_eq!(catalog_title(ExploreTab::Agents), "Catalog · Agents");
+        assert_eq!(
+            empty_catalog_message(ExploreTab::Skills),
+            "no skills in catalog"
+        );
+        assert_eq!(
+            empty_catalog_message(ExploreTab::Agents),
+            "no agents in catalog"
+        );
+
+        let active = tab_span("Skills", true);
+        assert_eq!(active.content.as_ref(), "[Skills]");
+        let inactive = tab_span("Agents", false);
+        assert_eq!(inactive.content.as_ref(), " Agents ");
+    }
+
+    #[test]
+    fn toggle_tab_switches_and_resets_selection() {
+        let repo = tempfile::tempdir().unwrap();
+        save_catalog(
+            repo.path(),
+            vec![write_skill(repo.path(), "skill-a", "body")],
+        );
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        assert_eq!(view.tab, ExploreTab::Skills);
+
+        assert!(view.handle_key(key(KeyCode::Tab)).is_none());
+        assert_eq!(view.tab, ExploreTab::Agents);
+        assert_eq!(view.selected, 0);
+
+        assert!(view.handle_key(key(KeyCode::Tab)).is_none());
+        assert_eq!(view.tab, ExploreTab::Skills);
+    }
+
+    #[test]
+    fn is_in_pool_true_when_manifest_has_matching_item() {
+        let repo = repo_with_pool_item();
+        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let pooled_entry = sample_entry();
+        assert!(view.is_in_pool(&pooled_entry));
+
+        let other = write_skill(repo.path(), "not-pooled", "body");
+        assert!(!view.is_in_pool(&other));
+    }
+
+    #[test]
+    fn open_gate_is_noop_when_nothing_starred() {
+        let repo = tempfile::tempdir().unwrap();
+        save_catalog(
+            repo.path(),
+            vec![write_skill(repo.path(), "skill-a", "body")],
+        );
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        assert!(view.handle_key(key(KeyCode::Enter)).is_none());
+        assert_eq!(view.stage, ExploreStage::Browse);
+    }
+
+    #[test]
+    fn apply_gate_cards_with_nothing_resolved_sets_load_error() {
+        let repo = tempfile::tempdir().unwrap();
+        let skill = write_skill(repo.path(), "skill-a", "body");
+        save_catalog(repo.path(), vec![skill]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        star_selected(&mut view);
+        open_gate(&mut view);
+        assert_eq!(view.stage, ExploreStage::Gate);
+
+        // Shift+A with the sole card still unresolved: apply_gate_cards must
+        // report an error rather than silently applying nothing.
+        assert!(view.handle_key(shift_key(KeyCode::Char('A'))).is_none());
+        assert_eq!(view.stage, ExploreStage::Gate);
+        assert!(view
+            .load_error
+            .as_deref()
+            .is_some_and(|m| m.contains("no resolved gate cards")));
+    }
+
+    #[test]
+    fn preview_body_lines_reports_sync_needed_when_not_vendored() {
+        let repo = tempfile::tempdir().unwrap();
+        let entry = write_skill(repo.path(), "skill-a", "body");
+        save_catalog(repo.path(), vec![entry.clone()]);
+        let view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let lines = view.preview_body_lines(&entry);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("sync to fetch bodies"));
+    }
+
+    fn render_to_string(view: &mut ExploreBrowserView) -> String {
+        let lineage = ExecutorLineage::new();
+        let ctx = test_view_ctx(&lineage);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, frame.area(), &ctx))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn render_browse_stage_with_entries_covers_pool_and_star_badges() {
+        let repo = tempfile::tempdir().unwrap();
+        let pooled = write_skill(repo.path(), "pooled-skill", "body");
+        let plain = write_skill(repo.path(), "plain-skill", "body");
+        save_catalog(repo.path(), vec![pooled.clone(), plain]);
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item_from_entry(
+                &pooled,
+                GateRecord {
+                    verdict: "clean".into(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            )],
+        }
+        .save(repo.path())
+        .unwrap();
+
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        star_selected(&mut view); // stars pooled-skill (index 0)
+        let text = render_to_string(&mut view);
+        assert!(text.contains("in pool"));
+        assert!(text.contains('★'));
+        assert!(text.contains("pin"));
+        assert!(text.contains("license"));
+    }
+
+    #[test]
+    fn render_browse_stage_empty_catalog_and_agents_tab() {
+        let repo = tempfile::tempdir().unwrap();
+        save_catalog(repo.path(), vec![]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        let text = render_to_string(&mut view);
+        assert!(text.contains("no skills in catalog"));
+        assert!(text.contains("no sources synced"));
+        assert!(text.contains("select an item to preview"));
+
+        assert!(view.handle_key(key(KeyCode::Tab)).is_none());
+        let text = render_to_string(&mut view);
+        assert!(text.contains("no agents in catalog"));
+    }
+
+    #[test]
+    fn render_gate_and_manage_stages() {
+        let repo = tempfile::tempdir().unwrap();
+        let skill = write_skill(repo.path(), "gate-skill", "Normal body.");
+        save_catalog(repo.path(), vec![skill]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        star_selected(&mut view);
+        open_gate(&mut view);
+        let text = render_to_string(&mut view);
+        assert!(text.contains("Gate Cards"));
+
+        assert!(view.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(view.handle_key(key(KeyCode::Char('m'))).is_none());
+        let text = render_to_string(&mut view);
+        assert!(text.contains("Manage"));
+    }
+
+    #[test]
+    fn browse_stage_j_k_and_r_are_wired_through_handle_key() {
+        let repo = tempfile::tempdir().unwrap();
+        save_catalog(
+            repo.path(),
+            vec![
+                write_skill(repo.path(), "a", "body"),
+                write_skill(repo.path(), "b", "body"),
+            ],
+        );
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        assert_eq!(view.selected, 0);
+        assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
+        assert_eq!(view.selected, 1);
+        assert!(view.handle_key(key(KeyCode::Char('k'))).is_none());
+        assert_eq!(view.selected, 0);
+        assert!(view.handle_key(key(KeyCode::Char('r'))).is_none());
     }
 }
