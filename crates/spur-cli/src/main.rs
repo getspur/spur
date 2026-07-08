@@ -1133,6 +1133,15 @@ async fn run() -> Result<()> {
 
     let tui_mode = matches!(cli.command, Commands::Tui { .. });
     let _tracing_guard = init_tracing(tui_mode, &repo_root)?;
+    let _telemetry_guard = spur_telemetry::init(spur_telemetry::InitConfig {
+        spur_version: env!("CARGO_PKG_VERSION"),
+    });
+    spur_telemetry::emit!(spur_telemetry::tier1_events::SessionStarted {
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        spur_version: env!("CARGO_PKG_VERSION"),
+        is_tui: tui_mode,
+    });
     if !tui_mode && command_initializes_orchestrator(&cli.command) {
         spur_core::project_root::warn_on_nested_layout(&repo_root);
     }
