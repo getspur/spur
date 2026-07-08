@@ -27,19 +27,21 @@ GitHub OIDC ──► aws-actions/configure-aws-credentials (vars.AWS_RELEASE_RO
    │
    ├─ install session-manager-plugin        (SSH-over-SSM transport)
    ├─ ssh-keygen ephemeral key              (public half → VM authorized_keys)
-   ├─ scripts/cloud-build/spin.sh           VM_NAME=spur-release-<run_id>
+   ├─ scripts/cloud-build/spin.sh           SPUR_BUILD_POOL_NAME=spur-release-<run_id>
    ├─ cargo xtask dist --platforms …        (spur-cargo → build.sh → VM; fetch --via-s3)
    ├─ upload-artifact dist/                 (spur-<ver>-<triple>[.exe] + SHA256SUMS)
    ├─ [publish=true] gh release create      (getspur/spur-releases, GH_RELEASES_TOKEN)
-   └─ always(): re-auth OIDC → scripts/cloud-build/teardown.sh
+   └─ always(): re-auth OIDC → scripts/cloud-build/teardown.sh --all
 ```
 
 Key decisions:
 
-- **Per-run `VM_NAME=spur-release-<run_id>`.** The provider resolves instances
-  by Name tag, so a unique name isolates the release box from the shared dev
-  builder (`spur-builder`) and from concurrent runs, and makes the teardown
-  step surgical — it can only ever terminate its own instance.
+- **Per-run `SPUR_BUILD_POOL_NAME=spur-release-<run_id>`.** The provider still
+  resolves concrete instances by Name tag, but `build.sh` can derive overflow
+  names (`spur-release-<run_id>`, `spur-release-<run_id>-2`) from the pool. A
+  unique pool isolates release boxes from the shared dev builders and concurrent
+  runs, and `teardown.sh --all` stays surgical because it only walks that pool's
+  configured names.
 - **`SPUR_CLOUD=aws-my`, `SPUR_CLOUD_FALLBACK=""`.** Deterministic region:
   the m8gd→c8gd same-region Spot fallback inside `provider-aws.sh` still
   applies, but the cross-region Tokyo hop is disabled (cold L2, role is
@@ -178,12 +180,11 @@ scripts (see spur-notebook history around 2026-07-07):
    rustup first-use ensure in the shared `RUSTUP_HOME` — two legs downloading
    the pinned toolchain's components collided on the `.partial` rename.
    `build.sh` now runs a `flock`-serialized `rustc --version` before cargo.
-6. `build.sh`'s client-side FIFO admission queue defaults to **3 slots per
-   VM** (`SPUR_BUILD_MAX_CONCURRENT`), so with the four-leg matrix (v1.12.0)
-   one leg always waited in `ticket waiting` behind the other three. xtask's
-   parallel runner now sizes the queue to the leg count on each leg's
-   environment (an explicit `SPUR_BUILD_MAX_CONCURRENT` override still wins),
-   so all legs are admitted immediately.
+6. `build.sh`'s client-side FIFO admission queue now separates per-VM slots from
+   fleet width. On `aws-my`, the default pool is **2 builders × 3 slots**:
+   four-leg release matrices place the fourth leg on `spur-release-<run_id>-2`
+   instead of overloading one VM or waiting behind the first three. An explicit
+   `SPUR_BUILD_MAX_CONCURRENT` override still wins as the fleet-wide cap.
 
 ## Measured runs (2026-07-07, version-bump-cold caches)
 
