@@ -31,9 +31,11 @@ on:
         type: boolean
         default: false
 
+# PR runs supersede each other; main-push runs queue instead of cancelling so
+# a release rollout is never killed mid-flight (release-dist.yml lesson).
 concurrency:
   group: context-service-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -151,3 +153,76 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - name: Run staging E2E smoke
         run: python3 infra/spur-context-service/smoke-staging-e2e.py
+
+  # Auto-release channel (modeled on release-dist.yml): every main push that
+  # touches the service (see the workflow paths filter) ships the serving-plane
+  # code after the test and guardrail jobs pass. Scope is deliberately
+  # code-only — no terraform runs from CI:
+  #   - serving Lambda: API Gateway invokes the unqualified function ($LATEST),
+  #     so `aws lambda update-function-code` IS the rollout;
+  #   - worker images: built and pushed with the immutable git-SHA tag plus the
+  #     `latest` pointer, but NOT promoted — the worker/source-fetcher `live`
+  #     aliases and the ECS task definition stay pinned until an operator
+  #     promotes them together through the Terraform deploy path, avoiding
+  #     Lambda/Fargate skew mid-ingest.
+  release-staging:
+    name: release serving Lambda to staging
+    runs-on: ubuntu-24.04
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs:
+      - crate-all-features
+      - script-guards
+    environment: context-service-staging
+    permissions:
+      contents: read
+      id-token: write
+    # One release at a time across runs; a second main push queues.
+    concurrency:
+      group: context-service-release
+      cancel-in-progress: false
+    env:
+      SPUR_CONTEXT_SERVICE_BUILD_MODE: "self-contained"
+      SPUR_CONTEXT_SERVICE_PUSH_IMAGES: "1"
+      SPUR_CONTEXT_SMOKE_LAMBDA: ${{ vars.CONTEXT_SERVICE_STAGING_LAMBDA }}
+      SPUR_CONTEXT_SMOKE_SOURCE_BUCKET: ${{ vars.CONTEXT_SERVICE_STAGING_SOURCE_BUCKET }}
+      SPUR_CONTEXT_SMOKE_DATA_BUCKET: ${{ vars.CONTEXT_SERVICE_STAGING_DATA_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zip gzip curl
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.CONTEXT_SERVICE_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Log in to ECR
+        # deploy.sh pushes via `docker buildx build --push` and does not
+        # authenticate itself.
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push worker images (immutable tag + latest pointer)
+        run: infra/spur-context-service/build-and-push-remote.sh
+      - name: Package serving Lambda artifact
+        run: infra/spur-context-service/deploy.sh --skip-worker --package-only --build-mode self-contained
+      - name: Release serving Lambda code
+        run: |
+          aws lambda update-function-code \
+            --function-name "$SPUR_CONTEXT_SMOKE_LAMBDA" \
+            --zip-file fileb://target/lambda/spur-context-service.zip \
+            --publish > /tmp/update-function-code.json
+          aws lambda wait function-updated-v2 \
+            --function-name "$SPUR_CONTEXT_SMOKE_LAMBDA"
+          python3 -c 'import json; r = json.load(open("/tmp/update-function-code.json")); print(f"released {r[\"FunctionName\"]} version {r[\"Version\"]} sha256 {r[\"CodeSha256\"]}")'
+      - name: Upload released Lambda zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: spur-context-service-release-zip
+          path: target/lambda/spur-context-service.zip
+          if-no-files-found: error
+      - name: Verify serving plane (non-ingesting preflight)
+        run: python3 infra/spur-context-service/smoke-staging-e2e.py --preflight
