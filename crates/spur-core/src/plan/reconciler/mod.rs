@@ -1014,15 +1014,6 @@ impl Reconciler {
             agent_fallback,
             now,
         );
-        tracing::debug!(
-            agent,
-            "telemetry worker_dispatched uses fixed worker model label"
-        );
-        spur_telemetry::emit!(spur_telemetry::tier2_events::WorkerDispatched {
-            worker_model: spur_telemetry::tier1_events::ModelName::Other("worker"),
-            skill_used: spur_telemetry::tier2_events::SkillName::Other,
-            attempt_num: 0,
-        });
     }
 
     async fn record_skipped(&self, plan_id: Option<&str>, task_id: &str, reason: SkipReason) {
@@ -1571,6 +1562,14 @@ impl Reconciler {
                 agent_fallback,
             )
             .await;
+            spur_telemetry::emit!(spur_telemetry::tier2_events::WorkerDispatched {
+                worker_model: crate::telemetry::model_name_from_config_value(
+                    task.spec.model.as_deref(),
+                    "worker",
+                ),
+                skill_used: spur_telemetry::tier2_events::SkillName::Other,
+                attempt_num: task_attempt,
+            });
             self.emit_snapshot_for_plan(plan_id).await;
 
             let pm = Arc::clone(&self.pm);
