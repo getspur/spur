@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -85,6 +85,8 @@ pub struct ExploreBrowserView {
     pub(crate) catalog: Catalog,
     pub(crate) manifest: Manifest,
     pub(crate) selected: usize,
+    pub(crate) filter: Option<String>,
+    filter_input_active: bool,
     pub(crate) starred: BTreeSet<StarKey>,
     pub(crate) cached_bundled_ids: Vec<String>,
     pub(crate) load_error: Option<String>,
@@ -107,6 +109,8 @@ impl ExploreBrowserView {
             catalog,
             manifest,
             selected: 0,
+            filter: None,
+            filter_input_active: false,
             starred: BTreeSet::new(),
             cached_bundled_ids,
             load_error,
@@ -121,14 +125,16 @@ impl ExploreBrowserView {
     }
 
     pub fn visible_entries(&self) -> Vec<&CatalogEntry> {
-        let kind = match self.tab {
-            ExploreTab::Skills => ItemKind::Skill,
-            ExploreTab::Agents => ItemKind::Agent,
-        };
+        let kind = self.selected_kind();
+        let filter = self.filter.as_deref().map(str::to_lowercase);
         self.catalog
             .entries
             .iter()
             .filter(|entry| entry.kind == kind)
+            .filter(|entry| match filter.as_deref() {
+                Some(filter) => entry_matches_filter(entry, filter),
+                None => true,
+            })
             .collect()
     }
 
@@ -142,6 +148,10 @@ impl ExploreBrowserView {
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if self.filter_input_active {
+            return self.handle_filter_input(key);
+        }
+
         match key.code {
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_selection(1);
@@ -170,6 +180,10 @@ impl ExploreBrowserView {
                 self.clamp_manage_selection();
                 None
             }
+            KeyCode::Char('/') if key.modifiers.is_empty() => {
+                self.filter_input_active = true;
+                None
+            }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 self.open_gate();
                 None
@@ -193,6 +207,39 @@ impl ExploreBrowserView {
         self.refresh_manage_cache();
         self.clamp_selection();
         self.clamp_manage_selection();
+    }
+
+    fn handle_filter_input(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                self.filter_input_active = false;
+            }
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.filter_input_active = false;
+                self.set_filter_text(String::new());
+            }
+            KeyCode::Backspace if key.modifiers.is_empty() => {
+                let mut text = self.filter.clone().unwrap_or_default();
+                text.pop();
+                self.set_filter_text(text);
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut text = self.filter.clone().unwrap_or_default();
+                text.push(ch);
+                self.set_filter_text(text);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn set_filter_text(&mut self, text: String) {
+        let next = (!text.is_empty()).then_some(text);
+        if self.filter != next {
+            self.filter = next;
+            self.selected = 0;
+            self.clamp_selection();
+        }
     }
 
     fn open_gate(&mut self) {
@@ -312,6 +359,22 @@ impl ExploreBrowserView {
         self.visible_entries().get(self.selected).copied()
     }
 
+    fn selected_kind(&self) -> ItemKind {
+        match self.tab {
+            ExploreTab::Skills => ItemKind::Skill,
+            ExploreTab::Agents => ItemKind::Agent,
+        }
+    }
+
+    fn tab_entry_count(&self) -> usize {
+        let kind = self.selected_kind();
+        self.catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == kind)
+            .count()
+    }
+
     fn is_in_pool(&self, entry: &CatalogEntry) -> bool {
         self.manifest
             .items
@@ -403,7 +466,15 @@ impl ExploreBrowserView {
 
     fn render_catalog(&self, frame: &mut Frame, area: Rect) {
         let entries = self.visible_entries();
+        let total_entries = self.tab_entry_count();
         let mut lines = Vec::new();
+        if self.filter_input_active {
+            lines.push(Line::from(vec![
+                Span::styled("filter: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{}_", self.filter.as_deref().unwrap_or_default())),
+            ]));
+            lines.push(Line::from(""));
+        }
         if entries.is_empty() {
             lines.push(Line::from(Span::styled(
                 empty_catalog_message(self.tab),
@@ -454,7 +525,12 @@ impl ExploreBrowserView {
         }
 
         let block = Block::default()
-            .title(catalog_title(self.tab))
+            .title(catalog_title_with_count(
+                self.tab,
+                entries.len(),
+                total_entries,
+                self.filter_input_active || self.filter.is_some(),
+            ))
             .borders(Borders::ALL);
         let scroll = scroll_offset_for_selected_line(
             &lines,
@@ -512,6 +588,9 @@ impl ExploreBrowserView {
                 "j/k cards  a accept selected  o override  b replace  s skip  Shift+A apply all resolved  Esc browse"
             }
             ExploreStage::Manage => "j/k move  l lens  x remove  m browse  r reload  Esc back",
+            ExploreStage::Browse if self.filter_input_active => {
+                "type filter  Backspace edit  Enter keep  Esc clear"
+            }
             ExploreStage::Browse => {
                 "j/k move  Tab tabs  space select  Enter gate  m manage  r reload  Esc dashboard"
             }
@@ -660,6 +739,24 @@ fn catalog_title(tab: ExploreTab) -> &'static str {
         ExploreTab::Skills => "Catalog · Skills",
         ExploreTab::Agents => "Catalog · Agents",
     }
+}
+
+fn catalog_title_with_count(
+    tab: ExploreTab,
+    visible_count: usize,
+    total_count: usize,
+    show_count: bool,
+) -> String {
+    let title = catalog_title(tab);
+    if show_count {
+        format!("{title} ({visible_count}/{total_count})")
+    } else {
+        title.to_string()
+    }
+}
+
+fn entry_matches_filter(entry: &CatalogEntry, filter: &str) -> bool {
+    entry.name.to_lowercase().contains(filter) || entry.description.to_lowercase().contains(filter)
 }
 
 fn empty_catalog_message(tab: ExploreTab) -> &'static str {
@@ -1222,6 +1319,106 @@ mod tests {
 
         assert!(view.handle_key(key(KeyCode::Tab)).is_none());
         assert_eq!(view.tab, ExploreTab::Skills);
+    }
+
+    #[test]
+    fn browse_filter_typing_narrows_entries_and_resets_selection() {
+        let repo = tempfile::tempdir().unwrap();
+        save_catalog(
+            repo.path(),
+            vec![
+                write_skill(repo.path(), "alpha-helper", "body"),
+                write_skill(repo.path(), "quill-writer", "body"),
+                write_skill(repo.path(), "zeta-tool", "body"),
+            ],
+        );
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        view.selected = 2;
+
+        assert!(view.handle_key(key(KeyCode::Char('/'))).is_none());
+        for ch in "quill".chars() {
+            assert!(view.handle_key(key(KeyCode::Char(ch))).is_none());
+        }
+
+        let names: Vec<_> = view
+            .visible_entries()
+            .into_iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["quill-writer"]);
+        assert_eq!(view.selected, 0);
+
+        let text = render_catalog_to_string(&view, 80, 10);
+        assert!(text.contains("filter: quill_"), "catalog text:\n{text}");
+        assert!(text.contains("(1/3)"), "catalog text:\n{text}");
+    }
+
+    #[test]
+    fn browse_filter_escape_clears_filter_and_restores_full_list() {
+        let repo = tempfile::tempdir().unwrap();
+        save_catalog(
+            repo.path(),
+            vec![
+                write_skill(repo.path(), "alpha-helper", "body"),
+                write_skill(repo.path(), "quill-writer", "body"),
+            ],
+        );
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        assert!(view.handle_key(key(KeyCode::Char('/'))).is_none());
+        for ch in "quill".chars() {
+            assert!(view.handle_key(key(KeyCode::Char(ch))).is_none());
+        }
+        assert_eq!(view.visible_entries().len(), 1);
+
+        assert!(view.handle_key(key(KeyCode::Esc)).is_none());
+
+        let names: Vec<_> = view
+            .visible_entries()
+            .into_iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["alpha-helper", "quill-writer"]);
+        assert_eq!(view.selected, 0);
+    }
+
+    #[test]
+    fn browse_filter_matches_name_and_description_case_insensitively() {
+        let repo = tempfile::tempdir().unwrap();
+        let alpha = write_skill(repo.path(), "alpha-helper", "body");
+        let mut beta = write_skill(repo.path(), "beta-tool", "body");
+        beta.description = "Builds Quantum summaries".to_string();
+        let gamma = write_skill(repo.path(), "gamma-tool", "body");
+        save_catalog(repo.path(), vec![alpha, beta, gamma]);
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+
+        assert!(view.handle_key(key(KeyCode::Char('/'))).is_none());
+        for ch in "QUANTUM".chars() {
+            assert!(view.handle_key(key(KeyCode::Char(ch))).is_none());
+        }
+        assert!(view.handle_key(key(KeyCode::Enter)).is_none());
+
+        let description_names: Vec<_> = view
+            .visible_entries()
+            .into_iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(description_names, vec!["beta-tool"]);
+
+        assert!(view.handle_key(key(KeyCode::Char('/'))).is_none());
+        for _ in 0.."QUANTUM".len() {
+            assert!(view.handle_key(key(KeyCode::Backspace)).is_none());
+        }
+        for ch in "GAMMA".chars() {
+            assert!(view.handle_key(key(KeyCode::Char(ch))).is_none());
+        }
+
+        let name_names: Vec<_> = view
+            .visible_entries()
+            .into_iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(name_names, vec!["gamma-tool"]);
     }
 
     #[test]
