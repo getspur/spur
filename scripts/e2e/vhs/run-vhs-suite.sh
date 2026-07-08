@@ -31,6 +31,7 @@ tapes=(
   "cold-launch"
   "help-overlay"
   "clean-quit"
+  "explore-browser-open"
 )
 
 status=0
@@ -117,6 +118,9 @@ normalize_output() {
     clean-quit)
       extract_screen "$raw" "Quit spur[?]" "quit confirmation" >>"$tmp"
       extract_screen "$raw" "VHS_SPUR_EXITED status=0" "shell after exit" >>"$tmp"
+      ;;
+    explore-browser-open)
+      extract_screen "$raw" "Esc back" "explore browser open" >>"$tmp"
       ;;
     *)
       echo "error: no normalizer configured for ${name}" >&2
