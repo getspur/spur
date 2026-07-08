@@ -54,6 +54,38 @@ fn schema_advertises_epic_body_as_string() {
 }
 
 #[test]
+fn schema_advertises_task_skills_array() {
+    let schema = submit_plan_def();
+    let prop = schema
+        .get("properties")
+        .and_then(|p| p.get("tasks"))
+        .and_then(|tasks| tasks.get("items"))
+        .and_then(|items| items.get("properties"))
+        .and_then(|props| props.get("skills"))
+        .expect("task skills must be advertised");
+    assert_eq!(
+        prop.get("type").and_then(|v| v.as_str()),
+        Some("array"),
+        "task skills must be an array"
+    );
+    assert_eq!(
+        prop.get("items")
+            .and_then(|items| items.get("type"))
+            .and_then(|v| v.as_str()),
+        Some("string"),
+        "task skills items must be strings"
+    );
+    let description = prop
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        description.contains("Explore pool skill names"),
+        "task skills description must explain explore-pool semantics; got: {description}"
+    );
+}
+
+#[test]
 fn schema_advertises_client_idempotency_key_as_optional_string() {
     let schema = submit_plan_def();
     let prop = schema
