@@ -943,6 +943,7 @@ impl McpCallbackServer {
                 epic_body: input.epic_body,
                 epic_labels: Vec::new(),
                 brain_session_id: input.brain_session_id,
+                brain_model: input.brain_model,
                 execution_mode: input.execution_mode.to_string(),
                 precomputed_auto_serialized: input.precomputed_auto_serialized,
                 repo_root: self.repo_root.clone(),
@@ -1151,6 +1152,7 @@ impl McpCallbackServer {
                 epic_title,
                 epic_body,
                 brain_session_id: self.brain_session_id().clone(),
+                brain_model: self.brain_model(),
                 execution_mode: "submit_plan",
                 precomputed_auto_serialized: Some(auto_serialized),
             })
@@ -2232,6 +2234,7 @@ impl McpCallbackServer {
                     snapshot.plan_id, build.branch, input.blocked_task_id
                 )),
                 brain_session_id: snapshot.brain_session_id.clone(),
+                brain_model: self.brain_model(),
                 execution_mode: "plan_truncate_and_restart",
                 precomputed_auto_serialized: None,
             })
