@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -10,7 +10,8 @@ use ratatui::Frame;
 use spur_core::explore::apply::{Resolution, Selection};
 use spur_core::explore::catalog::CatalogEntry;
 use spur_core::explore::gate::{self, Verdict};
-use spur_core::explore::pool::pool_dir;
+
+use super::{scroll_offset_for_selected_line, selected_marker_line, StarKey};
 
 pub(crate) struct GateState {
     pub(crate) cards: Vec<GateCard>,
@@ -49,12 +50,12 @@ impl GateState {
     pub(crate) fn from_starred(
         repo_root: &Path,
         entries: &[CatalogEntry],
-        starred: &BTreeSet<String>,
+        starred: &BTreeSet<StarKey>,
         bundled_ids: &[String],
     ) -> Self {
         let cards = entries
             .iter()
-            .filter(|entry| starred.contains(entry.name.as_str()))
+            .filter(|entry| starred.contains(&StarKey::from_entry(entry)))
             .cloned()
             .map(|entry| GateCard::new(repo_root, entry, bundled_ids))
             .collect();
@@ -78,6 +79,13 @@ impl GateState {
             .collect()
     }
 
+    pub(crate) fn unresolved_count(&self) -> usize {
+        self.cards
+            .iter()
+            .filter(|card| !card.is_evaluable())
+            .count()
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> GateAction {
         if self.override_input.is_some() {
             return self.handle_override_input(key);
@@ -85,7 +93,6 @@ impl GateState {
 
         match key.code {
             KeyCode::Char('A') => GateAction::Apply,
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::SHIFT) => GateAction::Apply,
             KeyCode::Char('j') | KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_selection(1);
                 GateAction::None
@@ -130,10 +137,18 @@ impl GateState {
             ]));
         }
 
+        let block = Block::default().title("Gate Cards").borders(Borders::ALL);
+        let scroll = scroll_offset_for_selected_line(
+            &lines,
+            selected_marker_line(&lines),
+            block.inner(area).width,
+            block.inner(area).height,
+        );
         frame.render_widget(
             Paragraph::new(lines)
-                .block(Block::default().title("Gate Cards").borders(Borders::ALL))
-                .wrap(Wrap { trim: true }),
+                .block(block)
+                .wrap(Wrap { trim: true })
+                .scroll((scroll, 0)),
             area,
         );
     }
@@ -266,7 +281,7 @@ impl Default for GateState {
 
 impl GateCard {
     fn new(repo_root: &Path, entry: CatalogEntry, bundled_ids: &[String]) -> Self {
-        let source_path = gate_path(repo_root, &entry);
+        let source_path = super::explore_item_path(repo_root, &entry);
         let verdict = if source_path.exists() {
             GateVerdict::Ready(gate::evaluate(&entry.name, &source_path, bundled_ids))
         } else {
@@ -325,15 +340,6 @@ impl GateCard {
 
     fn is_evaluable(&self) -> bool {
         matches!(self.verdict, GateVerdict::Ready(_))
-    }
-}
-
-fn gate_path(repo_root: &Path, entry: &CatalogEntry) -> PathBuf {
-    let pooled = pool_dir(repo_root, &entry.source, &entry.name, &entry.pinned_commit);
-    if pooled.exists() {
-        pooled
-    } else {
-        spur_core::explore::sync::cache_dir(repo_root, &entry.source).join(&entry.rel_path)
     }
 }
 

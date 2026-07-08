@@ -27,4 +27,4 @@ never synced
 │                      ││                                    ││                                    │
 │                      ││                                    ││                                    │
 └──────────────────────┘└────────────────────────────────────┘└────────────────────────────────────┘
-j/k move  Tab tabs  space select  r reload  Esc back
+j/k move  Tab tabs  space select  Enter gate  m manage  r reload  Esc dashboard
