@@ -18,7 +18,7 @@ xtask = "run --package xtask --quiet --"
 [env]
 SPUR_TELEMETRY = "0"
 CI = "true"
-SPUR_POSTHOG_KEY = "loopback"
+SPUR_POSTHOG_KEY = "phc_xQgSJ34MgDJMbQdKErBT5PdMGbhTbDLtoxDvbUBNdY7n"
 # Jute's vendored Tauri config bundles a uv sidecar that is not present in
 # this repo checkout. The notebook host scaffold consumes Jute's public Rust API
 # but does not exercise venv sidecars, so workspace builds suppress that bundle
