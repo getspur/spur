@@ -3,12 +3,28 @@ use crate::explore::pool::{pool_dir, Manifest, ManifestItem};
 use crate::skills::adapters::Adapter;
 use crate::skills::{SkillPayload, SkillRole, SkillSource};
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const WARN_TARGET: &str = "spur::worker::explore";
 const MANAGED_MARKER: &str = "SPUR-MANAGED";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializationRecord {
+    pub recorded_at_epoch: u64,
+    pub delegation_id: String,
+    pub agent: String,
+    pub worktree: String,
+    pub items: Vec<String>,
+}
+
+pub struct MaterializeMeta<'a> {
+    pub request_id: &'a str,
+    pub agent: &'a str,
+}
 
 pub fn adapter_for_kind(kind: spur_acp::types::AgentKind) -> Option<Adapter> {
     match kind {
@@ -34,6 +50,7 @@ pub async fn materialize_pool_skills(
     kind: spur_acp::types::AgentKind,
     repo_root: &Path,
     requested: Option<&[String]>,
+    meta: Option<MaterializeMeta<'_>>,
 ) {
     let Some(adapter) = adapter_for_kind(kind) else {
         return;
@@ -53,6 +70,7 @@ pub async fn materialize_pool_skills(
         requested.map(|names| names.iter().map(String::as_str).collect::<HashSet<_>>());
     let mut excludes = Vec::new();
     let mut written = Vec::new();
+    let mut written_names = Vec::new();
 
     for item in &manifest.items {
         if !should_materialize(item, requested_names.as_ref()) {
@@ -103,6 +121,7 @@ pub async fn materialize_pool_skills(
 
         excludes.push(rel_path);
         written.push(rendered.path);
+        written_names.push(item.name.clone());
     }
 
     if excludes.is_empty() {
@@ -122,7 +141,58 @@ pub async fn materialize_pool_skills(
             error = %error,
             "explore skill exclude setup failed; removed injected files, select-only"
         );
+        return;
     }
+
+    if let Some(meta) = meta.filter(|_| !written_names.is_empty()) {
+        written_names.sort();
+        let record = MaterializationRecord {
+            recorded_at_epoch: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+            delegation_id: meta.request_id.to_string(),
+            agent: meta.agent.to_string(),
+            worktree: worktree_path.display().to_string(),
+            items: written_names,
+        };
+        if let Err(error) = append_materialization_record(repo_root, &record) {
+            tracing::warn!(
+                target: WARN_TARGET,
+                error = %error,
+                "materialization record write failed"
+            );
+        }
+    }
+}
+
+pub fn append_materialization_record(
+    repo_root: &Path,
+    record: &MaterializationRecord,
+) -> anyhow::Result<()> {
+    let dir = repo_root.join(".spur/explore/cache");
+    std::fs::create_dir_all(&dir)?;
+    let line = serde_json::to_string(record)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("materializations.jsonl"))?;
+    writeln!(file, "{line}")?;
+    Ok(())
+}
+
+pub fn read_recent_materializations(repo_root: &Path, limit: usize) -> Vec<MaterializationRecord> {
+    let path = repo_root.join(".spur/explore/cache/materializations.jsonl");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut records: Vec<MaterializationRecord> = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    records.reverse();
+    records.truncate(limit);
+    records
 }
 
 fn should_materialize(item: &ManifestItem, requested_names: Option<&HashSet<&str>>) -> bool {
@@ -378,7 +448,14 @@ mod tests {
         assert_eq!(records[0].delegation_id, "del-42");
         assert_eq!(records[0].agent, "codex");
         assert_eq!(records[0].worktree, worktree.path().display().to_string());
-        assert_eq!(records[0].items, vec!["clean-a", "clean-b", "reviewed"]);
+        assert_eq!(
+            records[0].items,
+            vec![
+                "clean-a".to_string(),
+                "clean-b".to_string(),
+                "reviewed".to_string()
+            ]
+        );
         assert!(records[0].recorded_at_epoch > 0);
     }
 
