@@ -69,3 +69,49 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("{digest:x}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_skill_names;
+    use crate::explore::catalog::ItemKind;
+    use crate::explore::pool::{GateRecord, Manifest, ManifestItem};
+
+    fn manifest_item(name: &str, verdict: &str) -> ManifestItem {
+        ManifestItem {
+            name: name.to_string(),
+            kind: ItemKind::Skill,
+            source: "acme/skills".to_string(),
+            rel_path: format!("skills/{name}"),
+            pinned_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            content_sha256: "0".repeat(64),
+            license: None,
+            gate: GateRecord {
+                verdict: verdict.to_string(),
+                justification: None,
+                decided_at_epoch: None,
+            },
+        }
+    }
+
+    #[test]
+    fn validate_skill_names_matches_delegation_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        Manifest {
+            sources: vec![],
+            items: vec![manifest_item("blocked-skill", "blocked")],
+        }
+        .save(root.path())
+        .unwrap();
+
+        assert!(validate_skill_names(Some(root.path()), &[]).is_ok());
+        assert!(validate_skill_names(None, &["x".into()])
+            .unwrap_err()
+            .contains("repository root unavailable"));
+
+        let error = validate_skill_names(Some(root.path()), &["not-in-pool".into()]).unwrap_err();
+        assert!(error.contains("not-in-pool") && error.contains("spur explore"));
+
+        let error = validate_skill_names(Some(root.path()), &["blocked-skill".into()]).unwrap_err();
+        assert!(error.contains("blocked-skill") && error.contains("blocked"));
+    }
+}
