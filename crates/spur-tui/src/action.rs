@@ -326,6 +326,7 @@ pub enum ViewId {
     IssueBrowser,
     PlanBrowser,
     LoopBrowser,
+    ExploreBrowser,
     SessionDetail(SessionId),
     SessionPicker,
     PlanInspector(SessionId),
