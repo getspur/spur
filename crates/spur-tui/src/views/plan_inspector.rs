@@ -601,7 +601,16 @@ impl PlanInspectorView {
         {
             let trace = worker_streams.get_mut(executor_id);
             let node = ctx.lineage.node(&ExecutorId(executor_id.clone()));
-            Self::render_peek_overlay(frame, area, executor_id, task_id, node, trace, state);
+            Self::render_peek_overlay(
+                frame,
+                area,
+                executor_id,
+                task_id,
+                node,
+                trace,
+                state,
+                ctx.theme,
+            );
         }
     }
 
@@ -664,6 +673,7 @@ impl PlanInspectorView {
         node: Option<&ExecutorNode>,
         trace: Option<&mut crate::components::react_trace::ReactTrace>,
         state: &mut crate::components::stream_pane::StreamViewState,
+        theme: &Theme,
     ) {
         let area = if parent_area.width >= 60 {
             let width =
@@ -678,6 +688,15 @@ impl PlanInspectorView {
         };
 
         frame.render_widget(Clear, area);
+        let popup_block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(token(theme, "plan_browser.confirm.border.fg")));
+        let stream_area = popup_block.inner(area);
+        frame.render_widget(popup_block, area);
+        if stream_area.width == 0 || stream_area.height == 0 {
+            return;
+        }
 
         let title_name = node
             .map(|node| node.agent.as_str())
@@ -690,7 +709,7 @@ impl PlanInspectorView {
 
         crate::components::stream_pane::render_stream(
             frame,
-            area,
+            stream_area,
             &title_left,
             title_right,
             Some(bottom_hint),
@@ -992,7 +1011,7 @@ impl View for PlanInspectorView {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &super::ViewContext) {
         let chunks = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
@@ -1022,6 +1041,7 @@ impl View for PlanInspectorView {
 
             // ── Header ──────────────────────────────────────────────────────
             let header_rows = Layout::vertical([
+                Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -1081,18 +1101,28 @@ impl View for PlanInspectorView {
                 header_cols[1],
             );
 
+            let (summary_label, summary_text) = operator_summary(plan, ctx.lineage);
+            let summary_width =
+                area.width
+                    .saturating_sub(summary_label.chars().count() as u16) as usize;
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(
-                        " next: ",
+                        summary_label,
                         Style::default().fg(token(ctx.theme, "plan_inspector.label.fg")),
                     ),
-                    Span::raw(truncate_display(
-                        &operator_summary(plan, ctx.lineage),
-                        area.width.saturating_sub(8) as usize,
-                    )),
+                    Span::styled(
+                        truncate_display(&summary_text, summary_width),
+                        Style::default()
+                            .fg(token(ctx.theme, "plan_inspector.header.next_action.fg")),
+                    ),
                 ])),
                 header_rows[1],
+            );
+
+            frame.render_widget(
+                Paragraph::new(Line::from(header_count_spans(plan, ctx.theme))),
+                header_rows[2],
             );
 
             let epic_text = plan
@@ -1118,7 +1148,7 @@ impl View for PlanInspectorView {
                     ),
                     Span::raw(owner_text),
                 ])),
-                header_rows[2],
+                header_rows[3],
             );
 
             if !self.stacked_mode {
@@ -1260,12 +1290,8 @@ impl View for PlanInspectorView {
             review_hint,
             scroll_hint,
             self.open_issue_id.is_none() && self.active_plan(ctx).is_some(),
+            self.loop_event_status.as_deref(),
         );
-        let footer = if let Some(status) = self.loop_event_status.as_ref() {
-            truncate_display(&format!("{status}  {footer}"), area.width as usize)
-        } else {
-            footer
-        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 footer,
@@ -1391,7 +1417,75 @@ fn plan_status_color(theme: &Theme, status: &str) -> Color {
     token(theme, key)
 }
 
-fn operator_summary(plan: &TrackedPlan, lineage: &spur_core::ExecutorLineage) -> String {
+fn header_count_spans(plan: &TrackedPlan, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut push_count = |count: u32, label: &'static str, token_name: &'static str| {
+        if count == 0 {
+            return;
+        }
+        if !spans.is_empty() {
+            spans.push(Span::raw(" · "));
+        }
+        spans.push(Span::styled(
+            format!("{count} {label}"),
+            Style::default().fg(token(theme, token_name)),
+        ));
+    };
+
+    push_count(
+        plan.counts.pending,
+        "pending",
+        "plan_inspector.header.count.pending.fg",
+    );
+    push_count(
+        plan.counts.ready,
+        "ready",
+        "plan_inspector.header.count.ready.fg",
+    );
+    push_count(
+        plan.counts.dispatched,
+        "dispatched",
+        "plan_inspector.header.count.dispatched.fg",
+    );
+    push_count(
+        plan.counts.awaiting_review,
+        "awaiting_review",
+        "plan_inspector.header.count.awaiting_review.fg",
+    );
+    push_count(
+        plan.counts.approved,
+        "approved",
+        "plan_inspector.header.count.approved.fg",
+    );
+    push_count(
+        plan.counts.rejected,
+        "rejected",
+        "plan_inspector.header.count.rejected.fg",
+    );
+    push_count(
+        plan.counts.failed,
+        "failed",
+        "plan_inspector.header.count.failed.fg",
+    );
+    let blocked = plan
+        .tasks
+        .iter()
+        .filter(|task| !task.blocked_by.is_empty())
+        .count() as u32;
+    push_count(blocked, "blocked", "plan_inspector.header.count.blocked.fg");
+    push_count(
+        plan.counts.cancelled,
+        "cancelled",
+        "plan_inspector.header.count.cancelled.fg",
+    );
+
+    spans
+}
+
+fn operator_summary(
+    plan: &TrackedPlan,
+    lineage: &spur_core::ExecutorLineage,
+) -> (&'static str, String) {
     let mut fragments = Vec::new();
     let task_by_id: HashMap<&str, &spur_core::TrackedTask> = plan
         .tasks
@@ -1460,9 +1554,9 @@ fn operator_summary(plan: &TrackedPlan, lineage: &spur_core::ExecutorLineage) ->
     }
 
     if fragments.is_empty() {
-        plan.next_action.clone()
+        (" next: ", plan.next_action.clone())
     } else {
-        format!("risk: {}", fragments.join(" · "))
+        (" risk: ", fragments.join(" · "))
     }
 }
 
@@ -1555,15 +1649,36 @@ fn footer_hint(
     review_hint: &str,
     scroll_hint: &str,
     show_start: bool,
+    loop_event_status: Option<&str>,
 ) -> String {
+    let tiers = footer_hint_tiers(
+        enter_hint,
+        peek_hint,
+        retry_hint,
+        review_hint,
+        scroll_hint,
+        show_start,
+    );
+    if let Some(status) = loop_event_status.filter(|status| !status.is_empty()) {
+        return footer_hint_with_status(width, status, &tiers);
+    }
+
+    footer_hint_without_status(width, &tiers)
+}
+
+fn footer_hint_tiers(
+    enter_hint: &str,
+    peek_hint: &str,
+    retry_hint: &str,
+    review_hint: &str,
+    scroll_hint: &str,
+    show_start: bool,
+) -> [String; 3] {
     let start_hint = if show_start { "  r: start/resume" } else { "" };
     let full = format!(
         " h/l: lane  j/k: task  b: blocker  {}  o: work item{}{}{}{}  g/G: ends  Alt+P/Esc: close {}",
         enter_hint, start_hint, retry_hint, review_hint, peek_hint, scroll_hint
     );
-    if full.chars().count() <= width as usize {
-        return full;
-    }
 
     let compact_peek = if peek_hint.is_empty() {
         ""
@@ -1585,17 +1700,63 @@ fn footer_hint(
         " h/l lane  j/k task  b blocker  {}  o item{}{}{}{}  Esc close",
         enter_hint, compact_start, compact_retry, compact_review, compact_peek
     );
-    if compact.chars().count() <= width as usize {
-        return compact;
+    let minimal = format!(
+        " j/k task  b blocker{}{}{}  Esc close",
+        compact_start, compact_retry, compact_review
+    );
+
+    [full, compact, minimal]
+}
+
+fn footer_hint_without_status(width: u16, tiers: &[String; 3]) -> String {
+    let width = width as usize;
+    for tier in &tiers[..2] {
+        if tier.chars().count() <= width {
+            return tier.clone();
+        }
     }
 
-    truncate_display(
-        &format!(
-            " j/k task  b blocker{}{}{}  Esc close",
-            compact_start, compact_retry, compact_review
-        ),
-        width as usize,
-    )
+    truncate_display(&tiers[2], width)
+}
+
+fn footer_hint_with_status(width: u16, status: &str, tiers: &[String; 3]) -> String {
+    let width = width as usize;
+    let separator = "  ";
+    let separator_len = separator.chars().count();
+    let status_len = status.chars().count();
+
+    for tier in tiers {
+        if status_len + separator_len + tier.chars().count() <= width {
+            return format!("{status}{separator}{tier}");
+        }
+    }
+
+    let minimal = &tiers[2];
+    let minimal_len = minimal.chars().count();
+    if minimal_len + separator_len >= width {
+        return truncate_display(minimal, width);
+    }
+
+    let status_budget = width - minimal_len - separator_len;
+    let status = truncate_footer_status(status, status_budget);
+    format!("{status}{separator}{minimal}")
+}
+
+fn truncate_footer_status(status: &str, max_chars: usize) -> String {
+    let char_count = status.chars().count();
+    if char_count <= max_chars {
+        return status.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut out = status
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
 }
 
 fn centered_rect(outer: Rect, width: u16, height: u16) -> Rect {
@@ -1698,6 +1859,36 @@ mod tests {
     ) -> ViewContext<'a> {
         let synopsis = Box::leak(Box::new(SessionSynopsisProjection::new()));
         ctx(lineage, projection, synopsis)
+    }
+
+    fn buffer_row(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut row = String::new();
+        for x in 0..buf.area.width {
+            row.push_str(buf[(x, y)].symbol());
+        }
+        row
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            if y > 0 {
+                text.push('\n');
+            }
+            text.push_str(&buffer_row(buf, y));
+        }
+        text
+    }
+
+    fn find_text_cell(buf: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0..buf.area.height {
+            let row = buffer_row(buf, y);
+            if let Some(byte_x) = row.find(needle) {
+                let x = row[..byte_x].chars().count() as u16;
+                return Some((x, y));
+            }
+        }
+        None
     }
 
     fn projection_with_epic(session_id: &SessionId) -> PlanProjectionStore {
@@ -2014,6 +2205,53 @@ mod tests {
         projection
     }
 
+    fn projection_with_header_counts(session_id: &SessionId) -> PlanProjectionStore {
+        let mut projection = PlanProjectionStore::new();
+        projection.apply(&SpurEvent::now(SpurEventBody::PlanSnapshotUpdated {
+            session_id: session_id.clone(),
+            snapshot: Box::new(PlanSnapshot {
+                plan_id: "plan-1".into(),
+                epic_id: Some("bd-epic".into()),
+                status: "running".into(),
+                progress: "0/6 done".into(),
+                next_action: "watch active work".into(),
+                ready_to_merge: false,
+                counts: PlanSnapshotCounts {
+                    dispatched: 3,
+                    awaiting_review: 2,
+                    failed: 1,
+                    ..Default::default()
+                },
+                tasks: vec![PlanSnapshotTask {
+                    task_id: "t-12".into(),
+                    task_name: "Stage A".into(),
+                    agent: "codex".into(),
+                    issue_id: Some("bd-epic.1".into()),
+                    issue_title: None,
+                    status: "dispatched".into(),
+                    attempt: 1,
+                    max_attempts: 3,
+                    depends_on: Vec::new(),
+                    blocked_by: Vec::new(),
+                    unblocks: Vec::new(),
+                    summary: None,
+                    feedback: None,
+                    error: None,
+                    worker_branch: None,
+                    delegation_id: Some("deleg-12".into()),
+                    diff_summary: None,
+                    mutation_id: None,
+                    superseded_by: Vec::new(),
+                    next_action: "watch stream".into(),
+                }],
+                owner_brain_session_id: Some(session_id.0.clone()),
+                owner_token: None,
+                owner_acquired_at: None,
+            }),
+        }));
+        projection
+    }
+
     fn lineage_with_worker_for_task(
         session_id: &SessionId,
         task_id: &str,
@@ -2296,6 +2534,34 @@ mod tests {
     }
 
     #[test]
+    fn peek_overlay_draws_rounded_popup_side_borders() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.enter_stream_peek("worker-session-1".into(), "t-12".into());
+
+        let mut ws = crate::worker_streams::WorkerStreams::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                view.render_with_worker_streams(frame, frame.area(), &mut ws, &ctx);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let popup = Rect::new(8, 5, 64, 14);
+        assert_eq!(buf[(popup.x, popup.y)].symbol(), "╭");
+        assert_eq!(buf[(popup.x + popup.width - 1, popup.y)].symbol(), "╮");
+        assert_eq!(buf[(popup.x, popup.y + 1)].symbol(), "│");
+        assert_eq!(buf[(popup.x + popup.width - 1, popup.y + 1)].symbol(), "│");
+    }
+
+    #[test]
     fn footer_advertises_peek_keys_in_browse_mode() {
         let session_id = SessionId("brain-1".into());
         let projection = projection_with_epic_and_worker(&session_id);
@@ -2330,6 +2596,91 @@ mod tests {
     }
 
     #[test]
+    fn header_renders_nonzero_status_counts_with_tokens() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_header_counts(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(buf);
+        assert!(
+            text.contains("3 dispatched"),
+            "expected header count strip to show dispatched count:\n{text}"
+        );
+        assert!(
+            text.contains("2 awaiting_review"),
+            "expected header count strip to show awaiting_review count:\n{text}"
+        );
+        assert!(
+            text.contains("1 failed"),
+            "expected header count strip to show failed count:\n{text}"
+        );
+        assert!(
+            !text.contains("0 pending"),
+            "expected header count strip to omit zero counts:\n{text}"
+        );
+
+        let (x, y) = find_text_cell(buf, "3 dispatched")
+            .expect("expected dispatched count position in rendered buffer");
+        assert_eq!(
+            buf[(x, y)].style().fg,
+            Some(token(
+                ctx.theme,
+                "plan_inspector.header.count.dispatched.fg"
+            ))
+        );
+        let (x, y) =
+            find_text_cell(buf, "1 failed").expect("expected failed count position in buffer");
+        assert_eq!(
+            buf[(x, y)].style().fg,
+            Some(token(ctx.theme, "plan_inspector.header.count.failed.fg"))
+        );
+    }
+
+    #[test]
+    fn header_labels_risk_summary_as_risk_not_next() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_blocker_cycle(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("ui".into()));
+
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("risk: lint rejected"),
+            "expected header to render the risk summary:\n{text}"
+        );
+        assert!(
+            !text.contains("next: risk:"),
+            "expected risk summary not to be mislabeled as next action:\n{text}"
+        );
+    }
+
+    #[test]
     fn footer_uses_compact_start_hint_on_narrow_terminals() {
         let hint = footer_hint(
             50,
@@ -2339,6 +2690,7 @@ mod tests {
             "",
             "",
             true,
+            None,
         );
 
         assert!(
@@ -2348,6 +2700,45 @@ mod tests {
         assert!(
             hint.chars().count() <= 50,
             "expected compact footer to fit narrow width:\n{hint}"
+        );
+    }
+
+    #[test]
+    fn footer_preserves_close_hint_when_loop_status_active() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+        <PlanInspectorView as View>::handle_spur_event(
+            &mut view,
+            &SpurEvent::now(SpurEventBody::LoopGenerationStarted {
+                loop_id: "loop-with-a-long-human-readable-id".into(),
+                generation: 42,
+                plan_id: "plan-with-a-long-human-readable-id".into(),
+            }),
+            &ctx,
+        );
+
+        let backend = ratatui::backend::TestBackend::new(72, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let footer = buffer_row(terminal.backend().buffer(), 23);
+        assert!(
+            footer.contains("loop loop-with-a-long"),
+            "expected footer to include loop status:\n{footer}"
+        );
+        assert!(
+            footer.contains("Esc close"),
+            "expected loop-prefixed footer to preserve close hint:\n{footer}"
         );
     }
 
