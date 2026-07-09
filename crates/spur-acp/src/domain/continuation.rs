@@ -157,6 +157,14 @@ pub struct ContinuationPayload {
     /// commit parentage or diff scope during conflict recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_conflict_topology: Option<SetupConflictTopology>,
+    /// NEW — the resolved `{agent, profile, model, effort}` that actually
+    /// ran, mirrored from `DelegationResult.resolved_config`. Lets the
+    /// brain see what config was applied without a follow-up
+    /// `fetch_outcome_artifact` call. `None` when the delegation never
+    /// reached a worker attempt, or on replay of pre-existing
+    /// continuations persisted before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_config: Option<crate::domain::delegation::ResolvedSessionConfig>,
 }
 
 impl ContinuationPayload {
@@ -256,6 +264,7 @@ mod tests {
     #[test]
     fn continuation_payload_builds_from_parts() {
         let p = ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: Some("done".into()),
             diff_summary: None,
@@ -289,6 +298,7 @@ mod tests {
         use crate::BrainSessionId;
 
         let payload = ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: Some("ok".into()),
             diff_summary: None,
@@ -315,6 +325,7 @@ mod tests {
     #[test]
     fn estimated_cost_usd_converts_micros_correctly() {
         let payload = ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: None,
             diff_summary: None,
@@ -333,6 +344,7 @@ mod tests {
     #[test]
     fn estimated_cost_usd_handles_none_and_zero_and_large_values() {
         let none_payload = ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: None,
             diff_summary: None,
@@ -347,6 +359,7 @@ mod tests {
         assert!(none_payload.estimated_cost_usd().is_none());
 
         let zero_payload = ContinuationPayload {
+            resolved_config: None,
             estimated_cost_micros: Some(0),
             ..none_payload.clone()
         };
@@ -356,6 +369,7 @@ mod tests {
         // finite USD value (the docstring notes this is out of practical range).
         let big = (1u64 << 53) + 1;
         let big_payload = ContinuationPayload {
+            resolved_config: None,
             estimated_cost_micros: Some(big),
             ..none_payload
         };
@@ -414,6 +428,7 @@ mod tests {
             brain_session: SessionId("brain-session-1".into()),
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
+                resolved_config: None,
                 status: DelegationStatus::Success,
                 summary: Some("done".into()),
                 diff_summary: None,
@@ -470,6 +485,7 @@ mod tests {
             brain_session: SessionId("brain-session-1".into()),
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
+                resolved_config: None,
                 status: DelegationStatus::Success,
                 summary: None,
                 diff_summary: None,

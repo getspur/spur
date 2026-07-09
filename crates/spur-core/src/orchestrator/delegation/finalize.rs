@@ -29,6 +29,7 @@ pub(crate) async fn finalize(
     worker_branch: Option<String>,
     artifact: Option<spur_acp::WorkerArtifact>,
     normalization_warning: Option<String>,
+    resolved_config: Option<spur_acp::ResolvedSessionConfig>,
 ) -> DelegationResult {
     flush_then_emit_completed(
         funnel,
@@ -48,6 +49,7 @@ pub(crate) async fn finalize(
     };
 
     DelegationResult {
+        resolved_config,
         status: final_status,
         diff,
         diff_summary,
@@ -378,6 +380,7 @@ mod flush_ordering_tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -408,6 +411,7 @@ mod flush_ordering_tests {
             Some("worker-branch".into()),
             None,
             Some("[normalize: squashed 3 worker commits into 1; please maintain a clean tree or commit exactly once]".into()),
+            None,
         )
         .await;
 

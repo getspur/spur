@@ -445,22 +445,82 @@ impl DetailPane {
     }
 
     fn render_task<'a>(&self, node: &'a ExecutorNode) -> Vec<Line<'a>> {
+        let mut out = render_session_config(node);
         if node.task_spec.is_empty() {
-            vec![Line::from(Span::styled(
+            out.push(Line::from(Span::styled(
                 "(no task spec captured)",
                 Style::default().fg(Color::DarkGray),
-            ))]
+            )));
         } else {
-            node.task_spec
-                .lines()
-                .map(|l| Line::from(l.to_string()))
-                .collect()
+            out.extend(node.task_spec.lines().map(|l| Line::from(l.to_string())));
         }
+        out
     }
 
     fn render_review(&self, node: &ExecutorNode) -> Vec<Line<'static>> {
         super::review_card::render_review(node)
     }
+}
+
+/// Renders the compact "resolved session config" receipt shown at the top
+/// of the Task tab: the `{agent, profile, model, effort}` that actually
+/// ran for this executor, sourced from `ExecutorNode::resolved_config`
+/// (projected from `SpurEventBody::WorkerSessionConfigured`).
+///
+/// Renders gracefully when the field is still `None` — e.g. a dispatch
+/// still in flight, or a lineage snapshot persisted before this field
+/// existed — by showing "—" placeholders instead of panicking or omitting
+/// the section (a missing section reads as "this feature doesn't exist";
+/// a "—" placeholder reads as "not known yet").
+fn render_session_config(node: &ExecutorNode) -> Vec<Line<'static>> {
+    let label_style = Style::default().fg(Color::DarkGray);
+    let value_style = Style::default().fg(Color::White);
+
+    let cfg = node.resolved_config.as_ref();
+    let profile = cfg.and_then(|c| c.profile.as_deref()).unwrap_or("—");
+    let model = cfg.and_then(|c| c.model.as_deref()).unwrap_or("—");
+    let effort = cfg.and_then(|c| c.effort.as_deref()).unwrap_or("—");
+
+    // Single compact line — keeps the receipt out of the way of the task
+    // text below it, even in a short viewport (see T-D4a scroll-to-top
+    // invariant covered by `cycle_tab_opens_task_at_top`).
+    let mut out = vec![Line::from(vec![
+        Span::styled("Agent: ", label_style),
+        Span::styled(node.agent.clone(), value_style),
+        Span::raw("   "),
+        Span::styled("Profile: ", label_style),
+        Span::styled(profile.to_string(), value_style),
+        Span::raw("   "),
+        Span::styled("Model: ", label_style),
+        Span::styled(model.to_string(), value_style),
+        Span::raw("   "),
+        Span::styled("Effort: ", label_style),
+        Span::styled(effort.to_string(), value_style),
+    ])];
+
+    if let Some(cfg) = cfg {
+        if !cfg.config_overrides_applied.is_empty() {
+            let joined = cfg
+                .config_overrides_applied
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Line::from(vec![
+                Span::styled("Overrides: ", label_style),
+                Span::styled(joined, value_style),
+            ]));
+        }
+        for note in &cfg.skipped {
+            out.push(Line::from(Span::styled(
+                format!("⚠ skipped: {note}"),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    }
+
+    out.push(Line::from(""));
+    out
 }
 
 #[cfg(test)]

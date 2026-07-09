@@ -61,6 +61,7 @@ pub(crate) async fn execute_delegation(
     if agent.starts_with("__") {
         return (
             DelegationResult {
+                resolved_config: None,
                 status: DelegationStatus::Failed {
                     error: format!("Unsupported internal operation: {agent}"),
                 },
@@ -82,6 +83,7 @@ pub(crate) async fn execute_delegation(
         None => {
             return (
                 DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Failed {
                         error: format!("Worker agent '{}' not found", agent),
                     },
@@ -103,6 +105,7 @@ pub(crate) async fn execute_delegation(
             Err(error) => {
                 return (
                     DelegationResult {
+                        resolved_config: None,
                         status: DelegationStatus::Failed {
                             error: format!("Failed to load worker profile '{name}': {error:#}"),
                         },
@@ -144,6 +147,7 @@ pub(crate) async fn execute_delegation(
             );
             return (
                 DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Failed {
                         error: format!("worker MCP unavailable: {e}"),
                     },
@@ -285,6 +289,7 @@ pub(crate) async fn execute_delegation(
                         None,
                         None,
                         None,
+                        None,
                     )
                     .await,
                     executor_id.clone(),
@@ -332,6 +337,7 @@ pub(crate) async fn execute_delegation(
                     cleanup.worker_branch,
                     None,
                     cleanup.normalization_warning,
+                    Some(outcome.resolved_config.clone()),
                 )
                 .await,
                 executor_id.clone(),
@@ -390,6 +396,7 @@ pub(crate) async fn execute_delegation(
                         cleanup.worker_branch,
                         None,
                         cleanup.normalization_warning,
+                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -526,6 +533,7 @@ pub(crate) async fn execute_delegation(
                         cleanup.worker_branch,
                         None,
                         cleanup.normalization_warning,
+                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -571,6 +579,7 @@ pub(crate) async fn execute_delegation(
                         cleanup.worker_branch,
                         None,
                         cleanup.normalization_warning,
+                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -615,6 +624,7 @@ pub(crate) async fn execute_delegation(
                         cleanup.worker_branch,
                         None,
                         cleanup.normalization_warning,
+                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -659,6 +669,7 @@ pub(crate) async fn execute_delegation(
                         cleanup.worker_branch,
                         None,
                         cleanup.normalization_warning,
+                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),
@@ -711,6 +722,7 @@ pub(crate) async fn execute_delegation(
                             cleanup.worker_branch,
                             None,
                             cleanup.normalization_warning,
+                            Some(outcome.resolved_config.clone()),
                         )
                         .await,
                         executor_id.clone(),
@@ -823,6 +835,7 @@ pub(crate) async fn execute_delegation(
                         cleanup.worker_branch,
                         None,
                         cleanup.normalization_warning,
+                        Some(outcome.resolved_config.clone()),
                     )
                     .await,
                     executor_id.clone(),

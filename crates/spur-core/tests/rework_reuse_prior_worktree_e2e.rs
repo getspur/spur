@@ -287,6 +287,7 @@ fn complete_worker_attempt(
     request
         .respond_to
         .send(DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: Some(diff),
             diff_summary: None,

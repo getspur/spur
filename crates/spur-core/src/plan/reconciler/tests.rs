@@ -302,6 +302,7 @@ async fn completion_collector_project_timeout_delivers_via_deferred_push() {
         spur_blob_store::MemoryOutcomeStore::new(),
     ));
     let result = spur_acp::DelegationResult {
+        resolved_config: None,
         status: spur_acp::DelegationStatus::Success,
         diff: None,
         diff_summary: None,
