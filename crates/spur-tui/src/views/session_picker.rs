@@ -1345,7 +1345,7 @@ impl SessionPickerView {
                     crate::components::session_preview::PreviewContent::default()
                 }
             };
-            SessionPreview::render(frame, chunks[1], &content);
+            SessionPreview::render(frame, chunks[1], &content, ctx.theme);
         }
 
         if let Some(ref target) = self.confirm_switch {
