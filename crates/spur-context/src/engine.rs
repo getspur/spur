@@ -639,10 +639,21 @@ impl AnalyticsEngine {
     fn find_jsonl_files(dir: &Path) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::warn!(dir = %dir.display(), error = %e, "skipping unreadable directory entry");
+                    continue;
+                }
+            };
             let path = entry.path();
             if path.is_dir() {
-                files.extend(Self::find_jsonl_files(&path)?);
+                match Self::find_jsonl_files(&path) {
+                    Ok(found) => files.extend(found),
+                    Err(e) => {
+                        tracing::warn!(dir = %path.display(), error = %e, "skipping unreadable subdirectory while scanning for jsonl files");
+                    }
+                }
             } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 files.push(path);
             }
@@ -656,10 +667,21 @@ impl AnalyticsEngine {
             return Ok(files);
         }
         for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::warn!(dir = %dir.display(), error = %e, "skipping unreadable directory entry");
+                    continue;
+                }
+            };
             let path = entry.path();
             if path.is_dir() {
-                files.extend(Self::find_files_with_ext(&path, ext)?);
+                match Self::find_files_with_ext(&path, ext) {
+                    Ok(found) => files.extend(found),
+                    Err(e) => {
+                        tracing::warn!(dir = %path.display(), error = %e, "skipping unreadable subdirectory while scanning for files");
+                    }
+                }
             } else if path.extension().and_then(|s| s.to_str()) == Some(ext) {
                 files.push(path);
             }
