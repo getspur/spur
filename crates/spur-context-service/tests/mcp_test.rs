@@ -53,6 +53,17 @@ impl EnvVarGuard {
             _guard: guard,
         }
     }
+
+    fn remove(name: &'static str) -> Self {
+        let guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let previous = std::env::var_os(name);
+        std::env::remove_var(name);
+        Self {
+            name,
+            previous,
+            _guard: guard,
+        }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -1290,8 +1301,9 @@ async fn external_index_creates_job_starts_execution_and_records_arn() -> Result
     Ok(())
 }
 
-#[tokio::test]
-async fn external_index_allows_second_active_job_by_default() -> Result<()> {
+#[test]
+fn external_index_allows_second_active_job_by_default() -> Result<()> {
+    let _env = EnvVarGuard::remove("SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER");
     let fixture = McpFixture::new("index-default-concurrent-cap")?;
     let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
@@ -1300,7 +1312,8 @@ async fn external_index_allows_second_active_job_by_default() -> Result<()> {
         record.revision = "busy".to_owned();
     });
 
-    let response = route_index(
+    let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let response = runtime.block_on(route_index(
         &json!({
             "package": PACKAGE,
             "revision": "new-work",
@@ -1312,8 +1325,7 @@ async fn external_index_allows_second_active_job_by_default() -> Result<()> {
         &jobs,
         &sfn,
         "caller-concurrent",
-    )
-    .await?;
+    ))?;
 
     assert_eq!(response["status"], "queued");
     assert_eq!(response["job_id"], "job-2");
