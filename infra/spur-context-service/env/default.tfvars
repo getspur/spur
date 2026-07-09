@@ -11,6 +11,11 @@
 
 aws_region = "ap-southeast-5"
 
+# Keep interface VPC endpoints in a single AZ/subnet for the default demo/eval
+# stack to reduce PrivateLink endpoint-hour cost. Worker Lambda/ECS placement
+# still uses the discovered default-VPC subnets.
+interface_vpc_endpoint_subnet_ids = ["subnet-0e57004af78597f73"]
+
 # The existing DuckLake catalog for this stack stores its data at
 # s3://spur-context/data/ (NOT the module default s3://<bucket>/gold/data/).
 # Must match the catalog's recorded DATA_PATH or attach fails with a mismatch.

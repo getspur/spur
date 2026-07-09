@@ -30,6 +30,12 @@ worker_subnets = [
   "subnet-staging-b",
 ]
 
+# Keep interface endpoints in one subnet by default; worker placement remains
+# controlled by worker_subnets.
+interface_vpc_endpoint_subnet_ids = [
+  "subnet-staging-a",
+]
+
 # Route tables associated with worker_subnets; required when
 # create_vpc_endpoints=true (the default NAT-free model).
 worker_route_table_ids = [
