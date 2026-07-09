@@ -46,7 +46,7 @@ pub(super) fn build_session_error_widget<'a>(message: &'a str, theme: &Theme) ->
         )
 }
 
-/// Render the centered "Cancel turn? [y]es / [n]o" confirmation modal as
+/// Render the centered "Cancel turn? [y]es / [n]o / Esc" confirmation modal as
 /// an overlay over the trace pane. Drawn last in `render_inner` so it sits
 /// on top of everything else.
 ///
@@ -63,7 +63,7 @@ pub(super) fn render_cancel_confirm_modal(frame: &mut Frame, area: Rect, theme: 
 
     const PREFERRED_WIDTH: u16 = 50;
     const PREFERRED_HEIGHT: u16 = 5;
-    const MINIMAL_PROMPT: &str = "Cancel turn? [y]es / [n]o";
+    const MINIMAL_PROMPT: &str = "Cancel turn? [y]es / [n]o / Esc";
 
     let modal_width = PREFERRED_WIDTH.min(area.width);
     let modal_height = PREFERRED_HEIGHT.min(area.height);
@@ -86,7 +86,7 @@ pub(super) fn render_cancel_confirm_modal(frame: &mut Frame, area: Rect, theme: 
     // clamped to the available width so the user is never left in an
     // invisible-modal focus trap.
     let widget = if modal_width >= 3 && modal_height >= 3 {
-        Paragraph::new("Cancel turn?\n\n[y]es / [n]o")
+        Paragraph::new("Cancel turn?\n\n[y]es / [n]o / Esc")
             .alignment(Alignment::Center)
             .style(style)
             .block(
@@ -124,10 +124,10 @@ impl SessionDetailView {
         };
 
         // Pre-ready render path: show a status label until LoadState::Ready.
-        match &self.load_state {
+        let pre_ready = match &self.load_state {
             LoadState::Retiring => {
                 render_load_label(frame, area, "Retiring previous session…");
-                return;
+                true
             }
             LoadState::Connecting { brain_name } => {
                 let label = if brain_name.is_empty() {
@@ -136,306 +136,323 @@ impl SessionDetailView {
                     format!("Connecting to {brain_name}…")
                 };
                 render_load_label(frame, area, &label);
-                return;
+                true
             }
             LoadState::Loading => {
                 render_load_label(frame, area, "Loading session history…");
-                return;
+                true
             }
             LoadState::Failed { message } => {
                 render_error_label(frame, area, message, ctx.theme);
-                return;
+                true
             }
-            LoadState::Ready => {
-                // Fall through to the full render path below.
+            LoadState::Ready => false,
+        };
+
+        let mut auth_banner_area = None;
+        if pre_ready {
+            self.workers_panel_visible = false;
+            self.workers_panel_visibility_known = true;
+        }
+
+        if !pre_ready {
+            let elapsed = self.elapsed();
+
+            // Reserve the top row for the (non-blocking) resume banner when
+            // visible. Subsequent banner/content layout operates on `area_rest`.
+            let (resume_banner_area, area_rest) = if self.banner_is_visible() {
+                let banner = Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: area.width,
+                    height: 1,
+                };
+                let rest = Rect {
+                    x: area.x,
+                    y: area.y + 1,
+                    width: area.width,
+                    height: area.height.saturating_sub(1),
+                };
+                (Some(banner), rest)
+            } else {
+                (None, area)
+            };
+
+            // If an auth error is active, split off the top 3 rows for a red
+            // banner. This preserves the rest of the layout exactly as before.
+            let (banner_area, content_area) = if self.auth_error.is_some() {
+                let [banner, content] =
+                    Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area_rest);
+                (Some(banner), content)
+            } else {
+                (None, area_rest)
+            };
+            auth_banner_area = banner_area;
+
+            let input_height = self.input_bar.required_height(content_area.width);
+            let mention_hint = (!self.fs_unsafe)
+                .then(|| {
+                    let registry = self.mention_registry.borrow();
+                    let segments: Vec<String> = registry
+                        .agent_model_catalog_probe_hint()
+                        .into_iter()
+                        .chain(registry.code_graph_hint().map(str::to_string))
+                        .collect();
+                    (!segments.is_empty()).then(|| segments.join(" \u{00b7} "))
+                })
+                .flatten();
+            let pre_input_banner_height = u16::from(self.fs_unsafe || mention_hint.is_some());
+
+            // Compute workers panel height (dynamic: 0 when no active workers).
+            // Suppress on very small terminals to avoid squeezing the trace.
+            let executor_ids = self.react_trace.active_executor_ids();
+            let workers_h = if content_area.height < 12 {
+                0
+            } else {
+                lineage
+                    .map(|lin| {
+                        crate::components::workers_panel::compute_height(
+                            lin,
+                            &executor_ids,
+                            self.workers_panel_collapsed,
+                        )
+                    })
+                    .unwrap_or(0)
+            };
+            self.workers_panel_visible = workers_h > 0;
+            self.workers_panel_visibility_known = true;
+
+            let chunks = Layout::vertical([
+                Constraint::Length(1),                       // header
+                Constraint::Min(4),                          // react trace (fills)
+                Constraint::Length(workers_h),               // workers panel
+                Constraint::Length(pre_input_banner_height), // pre-input banner
+                Constraint::Length(input_height),            // input bar
+                Constraint::Length(1),                       // status bar
+            ])
+            .split(content_area);
+
+            // ── Header: breadcrumb + elapsed + cost ─────────────────────────
+            let [header_left, header_right] =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(48)]).areas(chunks[0]);
+            let agent_reported_cost = self
+                .agent_reported_cost
+                .as_ref()
+                .map(|(amount, currency)| format_agent_reported_cost(*amount, currency));
+            let header = Line::from(vec![
+                Span::styled(
+                    " Dashboard > ",
+                    Style::default().fg(token(ctx.theme, "session_detail.breadcrumb.fg")),
+                ),
+                Span::styled(
+                    &self.agent_name,
+                    Style::default()
+                        .fg(token(ctx.theme, "session_detail.agent_name.fg"))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" ({})", self.role),
+                    Style::default().fg(token(ctx.theme, "session_detail.role.fg")),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    &elapsed,
+                    Style::default().fg(token(ctx.theme, "session_detail.elapsed.fg")),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("${:.2}", self.cost),
+                    Style::default().fg(token(ctx.theme, "session_detail.cost.fg")),
+                ),
+                Span::styled(
+                    agent_reported_cost.unwrap_or_default(),
+                    Style::default()
+                        .fg(token(ctx.theme, "session_detail.cost.fg"))
+                        .add_modifier(Modifier::DIM),
+                ),
+                if self.fs_unsafe {
+                    Span::styled(
+                        "  unsafe-fs",
+                        Style::default()
+                            .fg(token(ctx.theme, "session_detail.unsafe_fs.fg"))
+                            .bg(token(ctx.theme, "session_detail.unsafe_fs.bg"))
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw("")
+                },
+            ]);
+            frame.render_widget(Paragraph::new(header), header_left);
+            if let Some(plan) = tracked_plan {
+                let loop_origin = ctx.plan_projection.loop_origin(&plan.plan_id);
+                crate::components::plan_pulse::render(frame, header_right, plan, loop_origin);
+            }
+
+            // ── React trace ─────────────────────────────────────────────────
+            // Push the active theme onto the trace before render so token
+            // resolution honors the user's theme choice (ReactTrace caches
+            // theme as component state; see set_theme docs in mod.rs).
+            self.react_trace.set_theme(ctx.theme);
+            #[cfg(feature = "markdown")]
+            {
+                let mut rt_ctx = crate::components::react_trace::RenderContext {
+                    mermaid_registry: &self.mermaid_registry,
+                    mermaid_registry_version: self.mermaid_registry_version,
+                    picker: self.render_picker.as_ref(),
+                    image_cache: &mut self.image_cache,
+                };
+                self.react_trace.render_with_ctx_focused(
+                    frame,
+                    chunks[1],
+                    &mut rt_ctx,
+                    lineage,
+                    self.focused_panel == FocusedSessionPanel::ReactTrace,
+                );
+            }
+            #[cfg(not(feature = "markdown"))]
+            self.react_trace.render_focused(
+                frame,
+                chunks[1],
+                lineage,
+                self.focused_panel == FocusedSessionPanel::ReactTrace,
+            );
+
+            // After react_trace render — re-raster on bucket-up.
+            #[cfg(feature = "markdown")]
+            {
+                let cell_w_px = self
+                    .render_picker
+                    .as_ref()
+                    .map(|p| p.font_size().0)
+                    .unwrap_or(8);
+                self.maybe_request_rerasters(chunks[1].width, cell_w_px);
+            }
+
+            // ── Workers panel ───────────────────────────────────────────────
+            if let Some(lin) = lineage {
+                if workers_h > 0 {
+                    crate::components::workers_panel::render_focused(
+                        frame,
+                        chunks[2],
+                        lin,
+                        &executor_ids,
+                        self.workers_panel_collapsed,
+                        self.focused_panel == FocusedSessionPanel::Workers,
+                    );
+                }
+            }
+
+            // ── Input bar ───────────────────────────────────────────────────
+            if self.fs_unsafe {
+                let banner = Line::from(Span::styled(
+                    " unsafe-fs: flock unsupported on this volume - multi-window protection OFF ",
+                    Style::default()
+                        .fg(token(ctx.theme, "session_detail.unsafe_fs.fg"))
+                        .bg(token(ctx.theme, "session_detail.unsafe_fs.bg")),
+                ));
+                frame.render_widget(Paragraph::new(banner), chunks[3]);
+            } else if let Some(hint) = mention_hint {
+                let banner = Line::from(Span::styled(
+                    format!(" {hint} "),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                frame.render_widget(Paragraph::new(banner), chunks[3]);
+            }
+
+            // Render in "inert" style (dimmed border, no terminal cursor) when
+            // a PickerShell has the focus — the shell owns the cursor.
+            if self.completion.is_active() {
+                self.input_bar.render_inert(frame, chunks[4]);
+            } else {
+                self.input_bar.render(frame, chunks[4]);
+            }
+
+            // ── PickerShell overlay ─────────────────────────────────────────
+            self.completion.render(frame, chunks[4], area, ctx.theme);
+
+            // ── Status bar (with live worker counts) ────────────────────────
+            let (running, pending_review) = lineage
+                .map(|lin| {
+                    let mut r = 0usize;
+                    let mut p = 0usize;
+                    for eid in &executor_ids {
+                        if let Some(node) = lin.node(&spur_core::ExecutorId(eid.clone())) {
+                            match node.phase {
+                                spur_acp::domain::events::LifecycleState::Running
+                                | spur_acp::domain::events::LifecycleState::Spawning
+                                | spur_acp::domain::events::LifecycleState::Resuming => r += 1,
+                                spur_acp::domain::events::LifecycleState::AwaitingReview => p += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    (r, p)
+                })
+                .unwrap_or((0, 0));
+            let spur_agent_caps = self.spur_agent_caps_cloned();
+            let caps = spur_agent_caps.as_deref();
+            let model_label = self.resolved_model_label();
+            let effort_label = self.resolved_effort_label();
+            let usage_supported = caps
+                .map(spur_acp::SpurAgentCaps::usage_supported)
+                .unwrap_or(true);
+
+            StatusBar::render(
+                frame,
+                chunks[5],
+                StatusBarProps {
+                    view: &ViewId::SessionDetail(self.session_id.clone()),
+                    theme: ctx.theme,
+                    tombstone: ctx.tombstone,
+                    running,
+                    pending_review,
+                    total_cost: self.cost,
+                    elapsed: &elapsed,
+                    current_mode: self.current_mode.as_deref(),
+                    current_model_label: model_label.as_deref(),
+                    current_effort_label: effort_label.as_deref(),
+                    usage_supported,
+                    context_used: self.context_used,
+                    context_size: self.context_size,
+                    stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
+                    esc_consumed_by_composer: self.input_bar.wants_esc(),
+                    notebook_ready: ctx.notebook_ready,
+                    issue_count: 0,
+                    alert_summary: None,
+                    flag_summary,
+                    git_info: None,
+                    view_hint_override,
+                },
+            );
+
+            // ── Resume banner (top row, if visible) ─────────────────────────
+            if let (Some(banner), Some(rect)) = (self.resume_banner.as_ref(), resume_banner_area) {
+                banner.render(frame, rect);
+                if self.ready_banner.is_some() {
+                    tracing::warn!(
+                    "ready_banner and resume_banner both set — auto-resume wins (spec R3 violation)"
+                );
+                }
+            } else if let (Some(ready_text), Some(rect)) =
+                (self.ready_banner.as_ref(), resume_banner_area)
+            {
+                let styled = Paragraph::new(ready_text.as_str())
+                    .style(Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC));
+                frame.render_widget(styled, rect);
             }
         }
 
-        let elapsed = self.elapsed();
-
-        // Reserve the top row for the (non-blocking) resume banner when
-        // visible. Subsequent banner/content layout operates on `area_rest`.
-        let (resume_banner_area, area_rest) = if self.banner_is_visible() {
-            let banner = Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: 1,
-            };
-            let rest = Rect {
-                x: area.x,
-                y: area.y + 1,
-                width: area.width,
-                height: area.height.saturating_sub(1),
-            };
-            (Some(banner), rest)
+        let banner_area = if pre_ready && self.auth_error.is_some() {
+            let [banner, _] =
+                Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+            Some(banner)
         } else {
-            (None, area)
-        };
-
-        // If an auth error is active, split off the top 3 rows for a red
-        // banner. This preserves the rest of the layout exactly as before.
-        let (banner_area, content_area) = if self.auth_error.is_some() {
-            let [banner, content] =
-                Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area_rest);
-            (Some(banner), content)
-        } else {
-            (None, area_rest)
+            auth_banner_area
         };
 
         if let (Some(banner_area), Some(msg)) = (banner_area, self.auth_error.as_ref()) {
             let banner = build_auth_banner_widget(msg.as_str(), ctx.theme);
             frame.render_widget(banner, banner_area);
-        }
-
-        let input_height = self.input_bar.required_height(content_area.width);
-        let mention_hint = (!self.fs_unsafe)
-            .then(|| {
-                let registry = self.mention_registry.borrow();
-                let segments: Vec<String> = registry
-                    .agent_model_catalog_probe_hint()
-                    .into_iter()
-                    .chain(registry.code_graph_hint().map(str::to_string))
-                    .collect();
-                (!segments.is_empty()).then(|| segments.join(" \u{00b7} "))
-            })
-            .flatten();
-        let pre_input_banner_height = u16::from(self.fs_unsafe || mention_hint.is_some());
-
-        // Compute workers panel height (dynamic: 0 when no active workers).
-        // Suppress on very small terminals to avoid squeezing the trace.
-        let executor_ids = self.react_trace.active_executor_ids();
-        let workers_h = if content_area.height < 12 {
-            0
-        } else {
-            lineage
-                .map(|lin| {
-                    crate::components::workers_panel::compute_height(
-                        lin,
-                        &executor_ids,
-                        self.workers_panel_collapsed,
-                    )
-                })
-                .unwrap_or(0)
-        };
-
-        let chunks = Layout::vertical([
-            Constraint::Length(1),                       // header
-            Constraint::Min(4),                          // react trace (fills)
-            Constraint::Length(workers_h),               // workers panel
-            Constraint::Length(pre_input_banner_height), // pre-input banner
-            Constraint::Length(input_height),            // input bar
-            Constraint::Length(1),                       // status bar
-        ])
-        .split(content_area);
-
-        // ── Header: breadcrumb + elapsed + cost ─────────────────────────
-        let [header_left, header_right] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(48)]).areas(chunks[0]);
-        let agent_reported_cost = self
-            .agent_reported_cost
-            .as_ref()
-            .map(|(amount, currency)| format_agent_reported_cost(*amount, currency));
-        let header = Line::from(vec![
-            Span::styled(
-                " Dashboard > ",
-                Style::default().fg(token(ctx.theme, "session_detail.breadcrumb.fg")),
-            ),
-            Span::styled(
-                &self.agent_name,
-                Style::default()
-                    .fg(token(ctx.theme, "session_detail.agent_name.fg"))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" ({})", self.role),
-                Style::default().fg(token(ctx.theme, "session_detail.role.fg")),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                &elapsed,
-                Style::default().fg(token(ctx.theme, "session_detail.elapsed.fg")),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("${:.2}", self.cost),
-                Style::default().fg(token(ctx.theme, "session_detail.cost.fg")),
-            ),
-            Span::styled(
-                agent_reported_cost.unwrap_or_default(),
-                Style::default()
-                    .fg(token(ctx.theme, "session_detail.cost.fg"))
-                    .add_modifier(Modifier::DIM),
-            ),
-            if self.fs_unsafe {
-                Span::styled(
-                    "  unsafe-fs",
-                    Style::default()
-                        .fg(token(ctx.theme, "session_detail.unsafe_fs.fg"))
-                        .bg(token(ctx.theme, "session_detail.unsafe_fs.bg"))
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw("")
-            },
-        ]);
-        frame.render_widget(Paragraph::new(header), header_left);
-        if let Some(plan) = tracked_plan {
-            let loop_origin = ctx.plan_projection.loop_origin(&plan.plan_id);
-            crate::components::plan_pulse::render(frame, header_right, plan, loop_origin);
-        }
-
-        // ── React trace ─────────────────────────────────────────────────
-        // Push the active theme onto the trace before render so token
-        // resolution honors the user's theme choice (ReactTrace caches
-        // theme as component state; see set_theme docs in mod.rs).
-        self.react_trace.set_theme(ctx.theme);
-        #[cfg(feature = "markdown")]
-        {
-            let mut rt_ctx = crate::components::react_trace::RenderContext {
-                mermaid_registry: &self.mermaid_registry,
-                mermaid_registry_version: self.mermaid_registry_version,
-                picker: self.render_picker.as_ref(),
-                image_cache: &mut self.image_cache,
-            };
-            self.react_trace.render_with_ctx_focused(
-                frame,
-                chunks[1],
-                &mut rt_ctx,
-                lineage,
-                self.focused_panel == FocusedSessionPanel::ReactTrace,
-            );
-        }
-        #[cfg(not(feature = "markdown"))]
-        self.react_trace.render_focused(
-            frame,
-            chunks[1],
-            lineage,
-            self.focused_panel == FocusedSessionPanel::ReactTrace,
-        );
-
-        // After react_trace render — re-raster on bucket-up.
-        #[cfg(feature = "markdown")]
-        {
-            let cell_w_px = self
-                .render_picker
-                .as_ref()
-                .map(|p| p.font_size().0)
-                .unwrap_or(8);
-            self.maybe_request_rerasters(chunks[1].width, cell_w_px);
-        }
-
-        // ── Workers panel ───────────────────────────────────────────────
-        if let Some(lin) = lineage {
-            if workers_h > 0 {
-                crate::components::workers_panel::render_focused(
-                    frame,
-                    chunks[2],
-                    lin,
-                    &executor_ids,
-                    self.workers_panel_collapsed,
-                    self.focused_panel == FocusedSessionPanel::Workers,
-                );
-            }
-        }
-
-        // ── Input bar ───────────────────────────────────────────────────
-        if self.fs_unsafe {
-            let banner = Line::from(Span::styled(
-                " unsafe-fs: flock unsupported on this volume - multi-window protection OFF ",
-                Style::default()
-                    .fg(token(ctx.theme, "session_detail.unsafe_fs.fg"))
-                    .bg(token(ctx.theme, "session_detail.unsafe_fs.bg")),
-            ));
-            frame.render_widget(Paragraph::new(banner), chunks[3]);
-        } else if let Some(hint) = mention_hint {
-            let banner = Line::from(Span::styled(
-                format!(" {hint} "),
-                Style::default().fg(Color::DarkGray),
-            ));
-            frame.render_widget(Paragraph::new(banner), chunks[3]);
-        }
-
-        // Render in "inert" style (dimmed border, no terminal cursor) when
-        // a PickerShell has the focus — the shell owns the cursor.
-        if self.completion.is_active() {
-            self.input_bar.render_inert(frame, chunks[4]);
-        } else {
-            self.input_bar.render(frame, chunks[4]);
-        }
-
-        // ── PickerShell overlay ─────────────────────────────────────────
-        self.completion.render(frame, chunks[4], area, ctx.theme);
-
-        // ── Status bar (with live worker counts) ────────────────────────
-        let (running, pending_review) = lineage
-            .map(|lin| {
-                let mut r = 0usize;
-                let mut p = 0usize;
-                for eid in &executor_ids {
-                    if let Some(node) = lin.node(&spur_core::ExecutorId(eid.clone())) {
-                        match node.phase {
-                            spur_acp::domain::events::LifecycleState::Running
-                            | spur_acp::domain::events::LifecycleState::Spawning
-                            | spur_acp::domain::events::LifecycleState::Resuming => r += 1,
-                            spur_acp::domain::events::LifecycleState::AwaitingReview => p += 1,
-                            _ => {}
-                        }
-                    }
-                }
-                (r, p)
-            })
-            .unwrap_or((0, 0));
-        let spur_agent_caps = self.spur_agent_caps_cloned();
-        let caps = spur_agent_caps.as_deref();
-        let model_label = self.resolved_model_label();
-        let effort_label = self.resolved_effort_label();
-        let usage_supported = caps
-            .map(spur_acp::SpurAgentCaps::usage_supported)
-            .unwrap_or(true);
-
-        StatusBar::render(
-            frame,
-            chunks[5],
-            StatusBarProps {
-                view: &ViewId::SessionDetail(self.session_id.clone()),
-                theme: ctx.theme,
-                tombstone: ctx.tombstone,
-                running,
-                pending_review,
-                total_cost: self.cost,
-                elapsed: &elapsed,
-                current_mode: self.current_mode.as_deref(),
-                current_model_label: model_label.as_deref(),
-                current_effort_label: effort_label.as_deref(),
-                usage_supported,
-                context_used: self.context_used,
-                context_size: self.context_size,
-                stream_in_flight: self.stream_in_flight && !self.cancelling_in_flight,
-                esc_consumed_by_composer: self.input_bar.wants_esc(),
-                notebook_ready: ctx.notebook_ready,
-                issue_count: 0,
-                alert_summary: None,
-                flag_summary,
-                git_info: None,
-                view_hint_override,
-            },
-        );
-
-        // ── Resume banner (top row, if visible) ─────────────────────────
-        if let (Some(banner), Some(rect)) = (self.resume_banner.as_ref(), resume_banner_area) {
-            banner.render(frame, rect);
-            if self.ready_banner.is_some() {
-                tracing::warn!(
-                    "ready_banner and resume_banner both set — auto-resume wins (spec R3 violation)"
-                );
-            }
-        } else if let (Some(ready_text), Some(rect)) =
-            (self.ready_banner.as_ref(), resume_banner_area)
-        {
-            let styled = Paragraph::new(ready_text.as_str())
-                .style(Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC));
-            frame.render_widget(styled, rect);
         }
 
         // ── Cancel-confirm modal (drawn last so it sits on top) ─────────
