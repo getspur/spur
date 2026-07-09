@@ -6,8 +6,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn cache_dir(root: &Path, repo: &str) -> PathBuf {
-    root.join(".spur/explore/cache")
-        .join(repo.replace(['/', '\\'], "-"))
+    crate::explore::store::local_cache_dir(root, repo)
 }
 
 fn ensure_cache_checkout(root: &Path, src: &SourceSpec) -> anyhow::Result<(PathBuf, String)> {

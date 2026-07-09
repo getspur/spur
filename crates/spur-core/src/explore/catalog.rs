@@ -33,7 +33,36 @@ pub struct Catalog {
 impl Catalog {
     pub fn load(root: &Path) -> anyhow::Result<Self> {
         let path = catalog_path(root);
-        let raw = match std::fs::read_to_string(&path) {
+        Self::load_from_path(&path)
+    }
+
+    pub fn load_from_store(store_root: &Path) -> anyhow::Result<Self> {
+        let path = crate::explore::store::catalog_path_in_store(store_root);
+        Self::load_from_path(&path)
+    }
+
+    pub fn load_merged(repo_root: &Path) -> anyhow::Result<Self> {
+        let global = crate::explore::store::global_root();
+        Self::load_merged_from_roots(repo_root, global.as_deref())
+    }
+
+    pub(crate) fn load_merged_from_roots(
+        repo_root: &Path,
+        global_store_root: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let Some(global_store_root) = global_store_root.filter(|root| root.exists()) else {
+            return Self::load(repo_root);
+        };
+
+        let mut merged = Self::load_from_store(global_store_root)?;
+        let local = Self::load(repo_root)?;
+        merge_entries(&mut merged.entries, local.entries);
+        merged.synced_at_epoch = local.synced_at_epoch.or(merged.synced_at_epoch);
+        Ok(merged)
+    }
+
+    fn load_from_path(path: &Path) -> anyhow::Result<Self> {
+        let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
@@ -45,17 +74,36 @@ impl Catalog {
 
     pub fn save(&self, root: &Path) -> anyhow::Result<()> {
         let path = catalog_path(root);
+        self.save_to_path(&path)
+    }
+
+    pub fn save_to_store(&self, store_root: &Path) -> anyhow::Result<()> {
+        let path = crate::explore::store::catalog_path_in_store(store_root);
+        self.save_to_path(&path)
+    }
+
+    fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create dir {}", parent.display()))?;
         }
         let raw = serde_json::to_string_pretty(self).context("serialize explore catalog")?;
-        std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))
+        std::fs::write(path, raw).with_context(|| format!("write {}", path.display()))
     }
 }
 
 fn catalog_path(root: &Path) -> PathBuf {
-    root.join(".spur/explore/index/catalog.json")
+    crate::explore::store::local_catalog_path(root)
+}
+
+fn merge_entries(base: &mut Vec<CatalogEntry>, overrides: Vec<CatalogEntry>) {
+    for entry in overrides {
+        if let Some(existing) = base.iter_mut().find(|existing| existing.name == entry.name) {
+            *existing = entry;
+        } else {
+            base.push(entry);
+        }
+    }
 }
 
 pub fn scan_source_checkout(
