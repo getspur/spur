@@ -25,7 +25,7 @@ const RATE_LIMIT_RETRY_AFTER_SECONDS: u64 = 60;
 const DEFAULT_TARBALL_SIZE_CAP_BYTES: u64 = 500_u64 * 1024 * 1024;
 const DEFAULT_GIT_SIZE_CAP_BYTES: u64 = 2_u64 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_BUILD_SECONDS: u64 = 30 * 60;
-const DEFAULT_MAX_CONCURRENT_JOBS_PER_CALLER: u32 = 2;
+const DEFAULT_MAX_CONCURRENT_JOBS_PER_CALLER: u32 = 1;
 const DEFAULT_CALLS_PER_MINUTE: u32 = 10;
 const DESCRIBE_EXECUTION_TIMEOUT: Duration = Duration::from_secs(2);
 const STALE_JOB_REPAIR_AFTER: Duration = Duration::from_secs(60);
@@ -451,9 +451,14 @@ fn handle_index_requires_lambda(args: &Value) -> Result<Value, McpHandlerError> 
 fn handle_index_status_requires_lambda(args: &Value) -> Result<Value, McpHandlerError> {
     let args: ExternalIndexStatusArgs = parse_args(args)?;
     args.validate()?;
-    Err(McpHandlerError::Internal(
-        "external_index_status requires Lambda routing with a job store".to_owned(),
-    ))
+    Ok(json!({
+        "status": "failed",
+        "job_id": args.job_id,
+        "error": {
+            "code": "lambda_routing_required",
+            "detail": "external_index_status requires Lambda routing with a job store"
+        }
+    }))
 }
 
 #[expect(
