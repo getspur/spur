@@ -86,6 +86,7 @@ async fn test_parallel_response_length_invariant_INV_ASYNC_6() {
             let respond_now = respond_count_clone.fetch_add(1, Ordering::SeqCst) < COMPLETE_COUNT;
             if respond_now {
                 let _ = req.respond_to.send(DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Success,
                     diff: None,
                     diff_summary: None,
@@ -226,6 +227,7 @@ async fn test_parallel_preserves_input_order() {
             if should_respond {
                 respond_count.fetch_add(1, Ordering::SeqCst);
                 let _ = req.respond_to.send(DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Success,
                     diff: None,
                     diff_summary: None,
@@ -313,6 +315,7 @@ async fn test_parallel_no_serial_dispatch_regression() {
             let req = channel.request_rx.recv().await.expect("delegation request");
             tokio::time::sleep(Duration::from_secs(10)).await;
             let _ = req.respond_to.send(DelegationResult {
+                resolved_config: None,
                 status: DelegationStatus::Success,
                 diff: None,
                 diff_summary: None,

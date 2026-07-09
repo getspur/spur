@@ -258,11 +258,15 @@ pub(crate) fn project_section(
         crate::outcome_materializer::usd_to_micros_saturating(result.estimated_cost_usd);
 
     let projected = match section {
+        // `resolved_config` (the {agent, profile, model, effort} receipt) is
+        // surfaced on every non-Full section too — not just the raw Full
+        // blob — so a caller doesn't need to guess which section carries it.
         Section::StatusOnly => json!({
             "status": result.status,
             "attempt": key.attempt,
             "brain_session": &key.brain_session_id,
             "estimated_cost_micros": estimated_cost_micros,
+            "resolved_config": result.resolved_config,
         }),
         Section::Summary => json!({
             "status": result.status,
@@ -270,6 +274,7 @@ pub(crate) fn project_section(
             "brain_session": &key.brain_session_id,
             "summary": result.summary,
             "estimated_cost_micros": estimated_cost_micros,
+            "resolved_config": result.resolved_config,
         }),
         Section::DiffOnly => json!({
             "status": result.status,
@@ -376,6 +381,7 @@ pub fn spawn_result_collector(
             res = rx => match res {
                 Ok(r) => r,
                 Err(_) => DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Failed {
                         error: "Orchestrator disconnected".into(),
                     },
@@ -388,6 +394,7 @@ pub fn spawn_result_collector(
                 },
             },
             _ = cancel_token.cancelled() => DelegationResult {
+                resolved_config: None,
                 status: DelegationStatus::Cancelled {
                     reason: "Brain session retiring".into(),
                 },

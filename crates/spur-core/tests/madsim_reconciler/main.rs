@@ -447,6 +447,7 @@ impl Harness {
         request
             .respond_to
             .send(DelegationResult {
+                resolved_config: None,
                 status: DelegationStatus::Success,
                 diff: None,
                 diff_summary: None,

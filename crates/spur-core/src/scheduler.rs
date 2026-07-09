@@ -787,6 +787,7 @@ mod tests {
             brain_session: brain_session.clone(),
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
+                resolved_config: None,
                 status: DelegationStatus::Success,
                 summary: None,
                 diff_summary: None,

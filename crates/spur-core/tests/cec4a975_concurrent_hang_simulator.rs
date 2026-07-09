@@ -462,6 +462,7 @@ async fn run_completion_collector_body(
 ) -> CompletionObservation {
     let started = Instant::now();
     let result = DelegationResult {
+        resolved_config: None,
         status: DelegationStatus::Success,
         diff: Some(format!("simulated diff for {}", target.task_id)),
         diff_summary: None,

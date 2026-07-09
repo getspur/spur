@@ -29,6 +29,7 @@ fn mk_cont(id: &str, brain_session: &SessionId) -> BrainContinuation {
         brain_session: brain_session.clone(),
         source: ContinuationSource::AsyncRequested,
         payload: ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: Some("worker done".into()),
             diff_summary: None,

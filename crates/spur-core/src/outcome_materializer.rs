@@ -276,6 +276,7 @@ impl OutcomeMaterializer {
         let (base_hint, _) = clip_with_ellipsis(base_hint, self.base_hint_cap_bytes);
 
         let payload = ContinuationPayload {
+            resolved_config: result.resolved_config.clone(),
             status: clipped_status,
             summary: clipped_summary,
             diff_summary: clipped_diff,
@@ -394,6 +395,7 @@ impl OutcomeMaterializer {
         }
 
         let payload = ContinuationPayload {
+            resolved_config: result.resolved_config.clone(),
             status: clipped_status,
             summary: clipped_summary,
             diff_summary: clipped_diff,
@@ -616,6 +618,7 @@ mod tests {
 
     fn small_result() -> DelegationResult {
         DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -656,10 +659,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn materialize_carries_resolved_config_into_continuation_payload() {
+        // The resolved {agent, profile, model, effort} receipt must survive
+        // the persist-then-clip-then-build pipeline into the lean
+        // ContinuationPayload the brain sees — not just the full artifact.
+        let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
+        let mat = OutcomeMaterializer::new(store);
+        let mut result = small_result();
+        result.resolved_config = Some(spur_acp::ResolvedSessionConfig {
+            agent: "codex".into(),
+            profile: Some("rust-pro".into()),
+            model: Some("gpt-5-codex".into()),
+            effort: Some("high".into()),
+            config_overrides_applied: Default::default(),
+            skipped: vec![
+                "effort: agent exposed no thought-level option (requested 'high')".into(),
+            ],
+        });
+        let cont = mat
+            .materialize(
+                result,
+                delegation_id(),
+                1,
+                brain_session(),
+                ContinuationSource::BlockTimeout,
+                None,
+            )
+            .await;
+
+        let resolved = cont
+            .payload
+            .resolved_config
+            .expect("resolved_config populated");
+        assert_eq!(resolved.agent, "codex");
+        assert_eq!(resolved.profile.as_deref(), Some("rust-pro"));
+        assert_eq!(resolved.model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
+        assert_eq!(resolved.skipped.len(), 1);
+    }
+
+    #[tokio::test]
     async fn materialize_clips_oversized_status_error() {
         let store: Arc<dyn OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
         let mat = OutcomeMaterializer::new(store);
         let oversized = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Failed {
                 error: "x".repeat(2000),
             },
@@ -700,6 +744,7 @@ mod tests {
         let mat = OutcomeMaterializer::new(store.clone());
         let oversized_error = "z".repeat(5000);
         let oversized = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Failed {
                 error: oversized_error.clone(),
             },
@@ -750,6 +795,7 @@ mod tests {
             files: many_files,
         };
         let result = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: Some(diff),
@@ -982,6 +1028,7 @@ mod tests {
         let store = MockFailingOutcomeStore::new(FailureMode::TooLarge);
         let mat = OutcomeMaterializer::new(store);
         let failed = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Failed {
                 error: "compilation error".into(),
             },
