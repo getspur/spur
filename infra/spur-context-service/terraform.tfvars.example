@@ -34,6 +34,13 @@ interface_vpc_endpoint_subnet_ids = [
   "subnet-xxxxxxxx",
 ]
 
+# Low-cost Lambda-worker endpoint set. Add ecr_api, ecr_dkr, logs, and sts
+# when private ECS fallback tasks must pull from ECR and emit logs without NAT.
+interface_vpc_endpoint_service_keys = [
+  "states",
+  "secretsmanager",
+]
+
 # Route table IDs associated with worker_subnets. Required for the default
 # S3 and DynamoDB gateway endpoints.
 worker_route_table_ids = [
@@ -41,14 +48,26 @@ worker_route_table_ids = [
   "rtb-yyyyyyyy",
 ]
 
-# Set false only when these subnets already have NAT or equivalent shared
-# VPC endpoints for S3, DynamoDB, states, secretsmanager, ecr.api, ecr.dkr,
-# logs, and sts.
+# Set false only when these subnets already have NAT or equivalent shared VPC
+# endpoints for the AWS services selected by interface_vpc_endpoint_service_keys
+# plus S3 and DynamoDB gateway access.
 create_vpc_endpoints = true
 
 # Optional service-name region override for VPC endpoints. Defaults to
 # aws_region.
 # vpc_endpoint_region = "ap-southeast-5"
+
+# ECR cleanup for worker images. The lifecycle policy expires untagged images
+# after 7 days and keeps the newest 10 tagged images in each context-service
+# repository.
+manage_ecr_lifecycle_policies   = true
+ecr_lifecycle_repository_names = [
+  "spur-context-worker",
+  "spur-context-worker-lambda",
+  "spur-context-source-fetcher",
+]
+ecr_lifecycle_keep_tagged_images  = 10
+ecr_lifecycle_untagged_image_days = 7
 
 # ECR images for the indexing workers. Built and pushed by deploy.sh, or
 # manually:
