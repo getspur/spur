@@ -204,6 +204,20 @@ variable "interface_vpc_endpoint_subnet_ids" {
   }
 }
 
+variable "interface_vpc_endpoint_service_keys" {
+  description = "Interface VPC endpoint service keys to create. Use [\"states\", \"secretsmanager\"] for Lambda-worker-only low-cost stacks; add ecr_api/ecr_dkr/logs/sts when private ECS fallback tasks need NAT-free ECR pull, CloudWatch Logs, or STS access."
+  type        = set(string)
+  default     = ["states", "secretsmanager", "ecr_api", "ecr_dkr", "logs", "sts"]
+
+  validation {
+    condition = alltrue([
+      for service_key in var.interface_vpc_endpoint_service_keys :
+      contains(["states", "secretsmanager", "ecr_api", "ecr_dkr", "logs", "sts"], service_key)
+    ])
+    error_message = "interface_vpc_endpoint_service_keys entries must be one of states, secretsmanager, ecr_api, ecr_dkr, logs, sts."
+  }
+}
+
 variable "worker_route_table_ids" {
   description = "Route table IDs associated with worker_subnets for S3 and DynamoDB gateway endpoints. Required when create_vpc_endpoints is true."
   type        = list(string)
@@ -251,6 +265,49 @@ variable "worker_lambda_image" {
 variable "source_fetcher_lambda_image" {
   description = "ECR image URI for the non-VPC source fetcher Lambda image"
   type        = string
+}
+
+variable "manage_ecr_lifecycle_policies" {
+  description = "Manage ECR lifecycle policies for context-service worker image repositories."
+  type        = bool
+  default     = true
+}
+
+variable "ecr_lifecycle_repository_names" {
+  description = "Existing ECR repository names that should receive the context-service cleanup lifecycle policy."
+  type        = set(string)
+  default = [
+    "spur-context-worker",
+    "spur-context-worker-lambda",
+    "spur-context-source-fetcher",
+  ]
+
+  validation {
+    condition     = alltrue([for repository_name in var.ecr_lifecycle_repository_names : length(trimspace(repository_name)) > 0])
+    error_message = "ecr_lifecycle_repository_names entries must be non-empty ECR repository names."
+  }
+}
+
+variable "ecr_lifecycle_keep_tagged_images" {
+  description = "Number of tagged images to retain in each context-service ECR repository."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.ecr_lifecycle_keep_tagged_images > 0
+    error_message = "ecr_lifecycle_keep_tagged_images must be greater than zero."
+  }
+}
+
+variable "ecr_lifecycle_untagged_image_days" {
+  description = "Expire untagged ECR images older than this many days."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.ecr_lifecycle_untagged_image_days > 0
+    error_message = "ecr_lifecycle_untagged_image_days must be greater than zero."
+  }
 }
 
 variable "worker_lambda_memory_mb" {

@@ -683,6 +683,8 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
 def test_nat_free_worker_vpc_endpoints_are_declared():
     variables_tf = (INFRA_DIR / "variables.tf").read_text()
     default_tfvars = (INFRA_DIR / "env" / "default.tfvars").read_text()
+    staging_tfvars = (INFRA_DIR / "env" / "staging.tfvars").read_text()
+    prod_tfvars = (INFRA_DIR / "env" / "prod.tfvars").read_text()
     state_machine_tf = (INFRA_DIR / "state_machine.tf").read_text()
     endpoints_tf = (INFRA_DIR / "vpc_endpoints.tf").read_text()
     outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
@@ -691,6 +693,7 @@ def test_nat_free_worker_vpc_endpoints_are_declared():
     assert "default     = true" in variables_tf
     assert 'variable "worker_route_table_ids"' in variables_tf
     assert 'variable "interface_vpc_endpoint_subnet_ids"' in variables_tf
+    assert 'variable "interface_vpc_endpoint_service_keys"' in variables_tf
     assert 'variable "vpc_endpoint_region"' in variables_tf
 
     for service in (
@@ -704,6 +707,9 @@ def test_nat_free_worker_vpc_endpoints_are_declared():
         "sts",
     ):
         assert f'com.amazonaws.${{local.vpc_endpoint_region}}.{service}' in endpoints_tf
+
+    assert "all_interface_vpc_endpoint_services" in endpoints_tf
+    assert "var.interface_vpc_endpoint_service_keys" in endpoints_tf
 
     gateway_endpoint = endpoints_tf.split('resource "aws_vpc_endpoint" "gateway"', 1)[1]
     assert 'vpc_endpoint_type = "Gateway"' in gateway_endpoint
@@ -719,6 +725,13 @@ def test_nat_free_worker_vpc_endpoints_are_declared():
     default_endpoint_subnets = re.findall(r'"(subnet-[A-Za-z0-9]+)"', default_tfvars)
     assert default_endpoint_subnets == ["subnet-0e57004af78597f73"]
 
+    for tfvars in (default_tfvars, staging_tfvars, prod_tfvars):
+        endpoint_services = re.findall(
+            r'"([a-z_]+)"',
+            tfvars.split("interface_vpc_endpoint_service_keys", 1)[1].split("]", 1)[0],
+        )
+        assert endpoint_services == ["states", "secretsmanager"]
+
     endpoint_sg = state_machine_tf.split('resource "aws_security_group" "vpc_endpoints"', 1)[1]
     assert "count = var.create_vpc_endpoints ? 1 : 0" in endpoint_sg
     assert "from_port       = 443" in endpoint_sg
@@ -728,6 +741,46 @@ def test_nat_free_worker_vpc_endpoints_are_declared():
 
     assert 'output "gateway_vpc_endpoint_ids"' in outputs_tf
     assert 'output "interface_vpc_endpoint_ids"' in outputs_tf
+
+
+def test_ecr_lifecycle_policies_prune_context_service_images():
+    variables_tf = (INFRA_DIR / "variables.tf").read_text()
+    ecr_lifecycle_tf = (INFRA_DIR / "ecr_lifecycle.tf").read_text()
+    tfvars_example = (INFRA_DIR / "terraform.tfvars.example").read_text()
+
+    for variable_name in (
+        "manage_ecr_lifecycle_policies",
+        "ecr_lifecycle_repository_names",
+        "ecr_lifecycle_keep_tagged_images",
+        "ecr_lifecycle_untagged_image_days",
+    ):
+        assert f'variable "{variable_name}"' in variables_tf
+        assert variable_name in tfvars_example
+
+    for repository in (
+        "spur-context-worker",
+        "spur-context-worker-lambda",
+        "spur-context-source-fetcher",
+    ):
+        assert repository in variables_tf
+
+    assert 'resource "aws_ecr_lifecycle_policy" "context_service_images"' in ecr_lifecycle_tf
+    assert "for_each = var.manage_ecr_lifecycle_policies" in ecr_lifecycle_tf
+    assert "repository = each.value" in ecr_lifecycle_tf
+    assert re.search(r'tagStatus\s+= "untagged"', ecr_lifecycle_tf)
+    assert re.search(r'countType\s+= "sinceImagePushed"', ecr_lifecycle_tf)
+    assert re.search(r'countUnit\s+= "days"', ecr_lifecycle_tf)
+    assert re.search(
+        r"countNumber\s+= var\.ecr_lifecycle_untagged_image_days",
+        ecr_lifecycle_tf,
+    )
+    assert re.search(r'tagStatus\s+= "tagged"', ecr_lifecycle_tf)
+    assert re.search(r'tagPatternList\s+= \["\*"\]', ecr_lifecycle_tf)
+    assert re.search(r'countType\s+= "imageCountMoreThan"', ecr_lifecycle_tf)
+    assert re.search(
+        r"countNumber\s+= var\.ecr_lifecycle_keep_tagged_images",
+        ecr_lifecycle_tf,
+    )
 
 
 def test_catalog_lease_ttl_uses_worker_expiry_field():

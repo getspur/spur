@@ -6,13 +6,18 @@ locals {
     dynamodb = "com.amazonaws.${local.vpc_endpoint_region}.dynamodb"
   }
 
-  interface_vpc_endpoint_services = {
+  all_interface_vpc_endpoint_services = {
     states         = "com.amazonaws.${local.vpc_endpoint_region}.states"
     secretsmanager = "com.amazonaws.${local.vpc_endpoint_region}.secretsmanager"
     ecr_api        = "com.amazonaws.${local.vpc_endpoint_region}.ecr.api"
     ecr_dkr        = "com.amazonaws.${local.vpc_endpoint_region}.ecr.dkr"
     logs           = "com.amazonaws.${local.vpc_endpoint_region}.logs"
     sts            = "com.amazonaws.${local.vpc_endpoint_region}.sts"
+  }
+
+  interface_vpc_endpoint_services = {
+    for key, service_name in local.all_interface_vpc_endpoint_services : key => service_name
+    if contains(var.interface_vpc_endpoint_service_keys, key)
   }
 
   interface_vpc_endpoint_subnet_ids = length(var.interface_vpc_endpoint_subnet_ids) > 0 ? var.interface_vpc_endpoint_subnet_ids : local.net_subnet_ids
