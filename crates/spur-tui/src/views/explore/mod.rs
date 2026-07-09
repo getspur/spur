@@ -404,7 +404,7 @@ impl ExploreBrowserView {
         let mut lines = vec![title, Line::from(sync_banner(&self.catalog))];
         if let Some(error) = self.load_error.as_deref() {
             lines.push(Line::from(Span::styled(
-                format!("load warning: {error}"),
+                format!("notice: {error}"),
                 Style::default().fg(Color::Yellow),
             )));
         }
@@ -585,9 +585,9 @@ impl ExploreBrowserView {
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let text = match self.stage {
             ExploreStage::Gate => {
-                "j/k cards  a accept selected  o override  b replace  s skip  Shift+A apply all resolved  Esc browse"
+                "j/k cards  a accept  o override  b replace  s skip  c all-clean  Shift+A apply  Esc browse"
             }
-            ExploreStage::Manage => "j/k move  l lens  x remove  m browse  r reload  Esc back",
+            ExploreStage::Manage => "j/k move  l lens  x remove  m browse  r reload  Esc browse",
             ExploreStage::Browse if self.filter_input_active => {
                 "type filter  Backspace edit  Enter keep  Esc clear"
             }
@@ -1692,11 +1692,9 @@ mod tests {
         open_gate(&mut view);
         let text = render_to_string(&mut view);
         assert!(text.contains("Gate Cards"));
-        assert!(text.contains("a accept selected"), "footer text:\n{text}");
-        assert!(
-            text.contains("Shift+A apply all resolved"),
-            "footer text:\n{text}"
-        );
+        assert!(text.contains("a accept"), "footer text:\n{text}");
+        assert!(text.contains("c all-clean"), "footer text:\n{text}");
+        assert!(text.contains("Shift+A apply"), "footer text:\n{text}");
 
         assert!(view.handle_key(key(KeyCode::Esc)).is_none());
         assert!(view.handle_key(key(KeyCode::Char('m'))).is_none());

@@ -27,4 +27,4 @@ never synced
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-j/k move  l lens  x remove  m browse  r reload  Esc back
+j/k move  l lens  x remove  m browse  r reload  Esc browse
