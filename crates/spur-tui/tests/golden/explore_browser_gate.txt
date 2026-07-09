@@ -27,4 +27,4 @@ never synced
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-j/k cards  a accept selected  o override  b replace  s skip  Shift+A apply all resolved  Esc browse
+j/k cards  a accept  o override  b replace  s skip  c all-clean  Shift+A apply  Esc browse
