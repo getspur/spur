@@ -16,6 +16,11 @@ aws_region = "ap-southeast-5"
 # still uses the discovered default-VPC subnets.
 interface_vpc_endpoint_subnet_ids = ["subnet-0e57004af78597f73"]
 
+# Low-cost Lambda-worker mode: keep only the interface endpoints used by the
+# serving/index orchestration path. ECR/logs/STS endpoints are intentionally not
+# created here; use NAT or add those keys back before relying on ECS fallback.
+interface_vpc_endpoint_service_keys = ["states", "secretsmanager"]
+
 # The existing DuckLake catalog for this stack stores its data at
 # s3://spur-context/data/ (NOT the module default s3://<bucket>/gold/data/).
 # Must match the catalog's recorded DATA_PATH or attach fails with a mismatch.
