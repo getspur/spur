@@ -1,6 +1,7 @@
 use crate::telegram::client::TelegramClient;
 use std::{collections::HashMap, time::Duration};
 use tokio::{sync::mpsc, time::Instant};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftUpdate {
@@ -12,37 +13,49 @@ pub struct DraftUpdate {
 
 pub struct TelegramSender {
     tx: mpsc::Sender<DraftUpdate>,
+    cancellation: Option<CancellationToken>,
 }
 
 impl TelegramSender {
     pub fn new(client: crate::telegram::client::TelegramClient, rate_per_second: u32) -> Self {
         let (tx, rx) = mpsc::channel(rate_per_second as usize);
         let loop_client = client.clone();
+        let cancellation = CancellationToken::new();
+        let loop_cancellation = cancellation.clone();
         tokio::spawn(async move {
-            Self::run_draft_loop(rx, Duration::from_millis(400), loop_client, move |update| {
-                let client = client.clone();
-                tokio::spawn(async move {
-                    let draft_id = update.draft_id.clone();
-                    if let Err(err) = client
-                        .send_message_draft_to_thread(
-                            update.chat_id,
-                            update.message_thread_id,
-                            &update.draft_id,
-                            &update.text,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            error = ?err,
-                            draft_id = %draft_id,
-                            "telegram draft send failed"
-                        );
-                    }
-                });
-            })
+            Self::run_draft_loop(
+                rx,
+                Duration::from_millis(400),
+                loop_client,
+                move |update| {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        let draft_id = update.draft_id.clone();
+                        if let Err(err) = client
+                            .send_message_draft_to_thread(
+                                update.chat_id,
+                                update.message_thread_id,
+                                &update.draft_id,
+                                &update.text,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                error = ?err,
+                                draft_id = %draft_id,
+                                "telegram draft send failed"
+                            );
+                        }
+                    });
+                },
+                loop_cancellation,
+            )
             .await;
         });
-        Self { tx }
+        Self {
+            tx,
+            cancellation: Some(cancellation),
+        }
     }
 
     pub fn for_test(rate_per_second: u32) -> (Self, mpsc::Receiver<DraftUpdate>) {
@@ -55,17 +68,37 @@ impl TelegramSender {
     ) -> (Self, mpsc::Receiver<DraftUpdate>) {
         let (tx, rx) = mpsc::channel(rate_per_second as usize);
         let (out_tx, out_rx) = mpsc::channel(rate_per_second as usize);
+        let cancellation = CancellationToken::new();
+        let loop_cancellation = cancellation.clone();
         tokio::spawn(async move {
-            Self::run_draft_loop(rx, Duration::from_millis(400), client, move |update| {
-                let _ = out_tx.try_send(update);
-            })
+            Self::run_draft_loop(
+                rx,
+                Duration::from_millis(400),
+                client,
+                move |update| {
+                    let _ = out_tx.try_send(update);
+                },
+                loop_cancellation,
+            )
             .await;
         });
-        (Self { tx }, out_rx)
+        (
+            Self {
+                tx,
+                cancellation: None,
+            },
+            out_rx,
+        )
     }
 
     pub async fn queue_draft(&self, update: DraftUpdate) {
         let _ = self.tx.send(update).await;
+    }
+
+    pub fn shutdown(&self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+        }
     }
 
     async fn run_draft_loop(
@@ -73,6 +106,7 @@ impl TelegramSender {
         flush_every: Duration,
         client: TelegramClient,
         mut flush: impl FnMut(DraftUpdate) + Send + 'static,
+        cancellation: CancellationToken,
     ) {
         let mut pending: HashMap<String, DraftUpdate> = HashMap::new();
         let mut ticker =
@@ -80,6 +114,7 @@ impl TelegramSender {
 
         loop {
             tokio::select! {
+                _ = cancellation.cancelled() => break,
                 maybe = rx.recv() => match maybe {
                     Some(update) => {
                         let key = format!("{}:{}:{:?}", update.chat_id, update.draft_id, update.message_thread_id);
