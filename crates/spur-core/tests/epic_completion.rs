@@ -384,6 +384,7 @@ async fn mock_pm_reconciler_cancelled_task_does_not_cascade_fail_dependent() {
     request
         .respond_to
         .send(spur_acp::DelegationResult {
+            resolved_config: None,
             status: spur_acp::DelegationStatus::Cancelled {
                 reason: "brain cancelled root".into(),
             },
@@ -414,6 +415,7 @@ async fn mock_pm_reconciler_cancelled_task_does_not_cascade_fail_dependent() {
     dependent
         .respond_to
         .send(spur_acp::DelegationResult {
+            resolved_config: None,
             status: spur_acp::DelegationStatus::Cancelled {
                 reason: "finish test".into(),
             },
@@ -618,6 +620,7 @@ async fn mock_pm_reconciler_success_completion_fires_awaiting_review_continuatio
     spur_core::plan::test_util::mock_worker_completion(
         request,
         spur_acp::DelegationResult {
+            resolved_config: None,
             status: spur_acp::DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -717,6 +720,7 @@ async fn mock_pm_reconciler_terminal_failure_fires_escalated_task_continuation()
     request
         .respond_to
         .send(spur_acp::DelegationResult {
+            resolved_config: None,
             status: spur_acp::DelegationStatus::Failed {
                 error: "final failure".into(),
             },
@@ -869,6 +873,7 @@ async fn reconciler_pushes_plan_completed_continuation_after_worker_completion_c
     request
         .respond_to
         .send(spur_acp::DelegationResult {
+            resolved_config: None,
             status: spur_acp::DelegationStatus::Cancelled {
                 reason: "worker cancelled".into(),
             },
@@ -1182,6 +1187,7 @@ async fn three_task_plan_drops_plan_outcomes_on_epic_close_but_retains_global_ri
         spur_core::plan::test_util::mock_worker_completion(
             request,
             spur_acp::DelegationResult {
+                resolved_config: None,
                 status: spur_acp::DelegationStatus::Success,
                 diff: None,
                 diff_summary: None,

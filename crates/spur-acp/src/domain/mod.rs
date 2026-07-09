@@ -17,7 +17,7 @@ pub use continuation::{
 pub use delegation::{
     AttemptSetupError, CancelOutcome, CancellationControl, DelegationAbortHandle,
     DelegationAbortReason, DelegationDispatchError, DelegationId, DelegationPlan, DelegationResult,
-    DelegationStatus, PlanCandidate, PlanSubtask, TimeoutFallback,
+    DelegationStatus, PlanCandidate, PlanSubtask, ResolvedSessionConfig, TimeoutFallback,
 };
 pub use events::{
     Column, DatasourceEntry, DatasourceKind, GraphEdgeEvent, GraphNodeEvent, HistoryEntry,

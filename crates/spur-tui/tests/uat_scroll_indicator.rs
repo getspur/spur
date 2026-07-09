@@ -12,6 +12,7 @@ use common::{buffer_text, row_text};
 
 fn node_with_task_lines(count: usize) -> ExecutorNode {
     ExecutorNode {
+        resolved_config: None,
         id: ExecutorId::new("exec-scroll".to_string()),
         parent_id: None,
         child_ids: Vec::new(),
@@ -63,6 +64,13 @@ fn task_pane() -> DetailPane {
     pane
 }
 
+// NOTE: the expected totals below (29 rather than the raw 27 task lines)
+// account for the 2-row "resolved session config" receipt (`Agent: ...`
+// line + a blank separator) that the Task tab now prepends ahead of the
+// task spec — see `render_session_config` in `components/detail_pane.rs`.
+// The receipt renders even with `resolved_config: None` (all "—"
+// placeholders), so it counts toward every Task-tab line total.
+
 #[test]
 fn f2_u1_top_of_viewport_indicator() {
     let mut pane = task_pane();
@@ -70,7 +78,7 @@ fn f2_u1_top_of_viewport_indicator() {
     let buf = render_pane(&mut pane, 70, 8);
 
     assert!(
-        row_text(&buf, 7).contains(" · 5/27 · 18% "),
+        row_text(&buf, 7).contains(" · 5/29 · 17% "),
         "top viewport indicator missing, got:\n{}",
         buffer_text(&buf)
     );
@@ -84,7 +92,7 @@ fn f2_u2_mid_viewport_indicator() {
     let buf = render_pane(&mut pane, 70, 8);
 
     assert!(
-        row_text(&buf, 7).contains(" · 12/27 · 44% "),
+        row_text(&buf, 7).contains(" · 12/29 · 41% "),
         "middle viewport indicator missing, got:\n{}",
         buffer_text(&buf)
     );
@@ -98,7 +106,7 @@ fn f2_u3_bottom_viewport_100_percent() {
     let buf = render_pane(&mut pane, 70, 8);
 
     assert!(
-        row_text(&buf, 7).contains(" · 27/27 · 100% "),
+        row_text(&buf, 7).contains(" · 29/29 · 100% "),
         "bottom viewport indicator missing, got:\n{}",
         buffer_text(&buf)
     );
@@ -110,7 +118,7 @@ fn f2_u4_narrow_pane_compact_then_hidden() {
     compact.scroll_down_by(10);
     let compact_buf = render_pane(&mut compact, 25, 8);
     assert!(
-        row_text(&compact_buf, 7).contains(" · 55% "),
+        row_text(&compact_buf, 7).contains(" · 50% "),
         "compact percentage indicator missing, got:\n{}",
         buffer_text(&compact_buf)
     );

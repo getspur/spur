@@ -111,6 +111,7 @@ impl ExecutorLineage {
                     error: None,
                 };
                 let node = ExecutorNode {
+                    resolved_config: None,
                     id: eid.clone(),
                     parent_id: parent.clone(),
                     child_ids: Vec::new(),
@@ -349,6 +350,20 @@ impl ExecutorLineage {
                     }
                     node.latest_tool_call = Some(format!("{}", path.display()));
                     node.last_event_at = Some(event.occurred_at);
+                }
+            }
+
+            SpurEventBody::WorkerSessionConfigured {
+                executor_id,
+                config,
+                ..
+            } => {
+                let eid = ExecutorId::new(executor_id);
+                if let Some(node) = self.nodes.get_mut(&eid) {
+                    node.resolved_config = Some(config.clone());
+                    node.last_event_at = Some(event.occurred_at);
+                } else {
+                    self.buffer_orphan(eid, event.clone());
                 }
             }
 

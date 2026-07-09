@@ -20,6 +20,7 @@ pub(crate) async fn replay_awaiting_review_continuation(
     replay: AwaitingReviewReplay,
 ) {
     let result = spur_acp::DelegationResult {
+        resolved_config: None,
         status: spur_acp::DelegationStatus::Success,
         diff: None,
         diff_summary: None,
