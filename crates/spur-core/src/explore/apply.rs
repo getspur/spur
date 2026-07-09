@@ -111,7 +111,7 @@ enum PersonaWrite {
 }
 
 fn ensure_cache_checkout(root: &Path, source: &str) -> anyhow::Result<PathBuf> {
-    let checkout = crate::explore::sync::cache_dir(root, source);
+    let checkout = crate::explore::store::layered_cache_dir(root, source);
     if !checkout.exists() {
         bail!(
             "missing explore cache checkout for {}; run `spur explore sync`",
