@@ -172,6 +172,23 @@ impl TelegramClient {
         Ok(())
     }
 
+    pub async fn send_rich_message_draft_to_thread(
+        &self,
+        chat_id: i64,
+        message_thread_id: Option<i32>,
+        draft_id: &str,
+        html: String,
+    ) -> anyhow::Result<()> {
+        let params = build_send_rich_html_draft_params(chat_id, message_thread_id, draft_id, html);
+        self.wait_if_paused().await;
+        let result = self.inner.send_rich_message_draft(&params).await;
+        if let Err(err) = &result {
+            self.pause_after_telegram_retry_after(err);
+        }
+        let _ = result?;
+        Ok(())
+    }
+
     pub async fn send_text(&self, chat_id: i64, text: String) -> anyhow::Result<()> {
         self.send_text_to_thread(chat_id, None, text).await
     }
@@ -197,6 +214,57 @@ impl TelegramClient {
             "telegram sendMessage delivered"
         );
         Ok(())
+    }
+
+    pub async fn send_rich_html_to_thread(
+        &self,
+        chat_id: i64,
+        message_thread_id: Option<i32>,
+        html: String,
+        plain_fallback: String,
+    ) -> anyhow::Result<()> {
+        let params = build_send_rich_html_params(chat_id, message_thread_id, html.clone());
+
+        for attempt in 1..=HTML_SEND_MAX_429_ATTEMPTS {
+            self.wait_if_paused().await;
+            let err = match self.inner.send_rich_message(&params).await {
+                Ok(response) => {
+                    let message_id = response.result.message_id;
+                    tracing::info!(
+                        chat_id,
+                        message_thread_id = ?normalize_outbound_thread_id(message_thread_id),
+                        message_id,
+                        "telegram sendRichMessage delivered"
+                    );
+                    return Ok(());
+                }
+                Err(err) => err,
+            };
+
+            self.pause_after_telegram_retry_after(&err);
+            if is_telegram_429_error(&err) && attempt < HTML_SEND_MAX_429_ATTEMPTS {
+                self.wait_if_paused().await;
+                continue;
+            }
+
+            if is_telegram_400_error(&err) {
+                let error_description = match &err {
+                    frankenstein::Error::Api(response) => response.description.as_str(),
+                    _ => "",
+                };
+                tracing::warn!(
+                    error_description = %error_description,
+                    "telegram sendRichMessage failed; falling back to sendMessage HTML"
+                );
+                return self
+                    .send_html_to_thread(chat_id, message_thread_id, html, plain_fallback)
+                    .await;
+            }
+
+            return Err(err.into());
+        }
+
+        unreachable!("bounded rich HTML send retry loop always returns")
     }
 
     pub async fn send_html_to_thread(
@@ -407,6 +475,50 @@ pub fn build_send_html_params(
     }
 }
 
+pub fn build_input_rich_html(html: String) -> frankenstein::rich_message::InputRichMessage {
+    frankenstein::rich_message::InputRichMessage {
+        html: Some(html),
+        markdown: None,
+        is_rtl: None,
+        skip_entity_detection: None,
+    }
+}
+
+pub fn build_send_rich_html_params(
+    chat_id: i64,
+    message_thread_id: Option<i32>,
+    html: String,
+) -> frankenstein::methods::SendRichMessageParams {
+    frankenstein::methods::SendRichMessageParams {
+        business_connection_id: None,
+        chat_id: chat_id.into(),
+        message_thread_id: normalize_outbound_thread_id(message_thread_id),
+        direct_messages_topic_id: None,
+        rich_message: build_input_rich_html(html),
+        disable_notification: None,
+        protect_content: None,
+        allow_paid_broadcast: None,
+        message_effect_id: None,
+        suggested_post_parameters: None,
+        reply_parameters: None,
+        reply_markup: None,
+    }
+}
+
+pub fn build_send_rich_html_draft_params(
+    chat_id: i64,
+    message_thread_id: Option<i32>,
+    draft_id: &str,
+    html: String,
+) -> frankenstein::methods::SendRichMessageDraftParams {
+    frankenstein::methods::SendRichMessageDraftParams {
+        chat_id,
+        message_thread_id: normalize_outbound_thread_id(message_thread_id),
+        draft_id: i64::from(encode_draft_id(draft_id)),
+        rich_message: build_input_rich_html(html),
+    }
+}
+
 /// Deterministically map a local string draft id to a positive, non-zero
 /// `i32` value suitable for the Telegram `sendMessageDraft` API.
 pub fn encode_draft_id(local_id: &str) -> i32 {
@@ -420,7 +532,10 @@ pub fn encode_draft_id(local_id: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_draft_id, TelegramClient};
+    use super::{
+        build_send_rich_html_draft_params, build_send_rich_html_params, encode_draft_id,
+        TelegramClient,
+    };
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -606,6 +721,45 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_rich_html_to_thread_posts_rich_message_payload() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind telegram test listener");
+        let addr = listener.local_addr().expect("listener local addr");
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        let _server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let request = read_http_request(&mut stream).await;
+            let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
+
+            let body = r#"{"ok":true,"result":{"message_id":456,"message_thread_id":77,"date":0,"chat":{"id":42,"type":"private"}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write telegram response");
+        });
+
+        let client =
+            TelegramClient::new_with_url(format!("http://{addr}/"), Duration::from_secs(1))
+                .expect("client with custom api url should build");
+
+        client
+            .send_rich_html_to_thread(42, Some(77), "<b>hello</b>".into(), "hello".into())
+            .await
+            .expect("send_rich_html_to_thread should return ok");
+
+        let request = request_rx.await.expect("server should capture request");
+        assert!(request.contains("sendRichMessage"));
+        assert!(request.contains("\"chat_id\":42"));
+        assert!(request.contains("\"message_thread_id\":77"));
+        assert!(request.contains("\"rich_message\":{\"html\":\"<b>hello</b>\"}"));
+    }
+
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut request = Vec::new();
         let mut chunk = [0; 1024];
@@ -682,5 +836,54 @@ mod tests {
             "payload must contain a numeric draft_id"
         );
         assert_ne!(draft_id.unwrap(), 0, "draft_id must be non-zero");
+    }
+
+    #[test]
+    fn rich_html_params_put_content_in_html_field_only() {
+        let params = build_send_rich_html_params(42, Some(77), "<h1>Report</h1>".into());
+        let payload = serde_json::to_value(params).expect("rich params should serialize");
+
+        assert_eq!(payload.get("chat_id"), Some(&serde_json::json!(42)));
+        assert_eq!(
+            payload.get("message_thread_id"),
+            Some(&serde_json::json!(77))
+        );
+        assert_eq!(
+            payload
+                .get("rich_message")
+                .and_then(|rich_message| rich_message.get("html")),
+            Some(&serde_json::json!("<h1>Report</h1>"))
+        );
+        assert!(
+            payload
+                .get("rich_message")
+                .and_then(|rich_message| rich_message.get("markdown"))
+                .is_none(),
+            "rich HTML params must not set markdown too"
+        );
+    }
+
+    #[test]
+    fn rich_draft_params_use_numeric_draft_id() {
+        let params = build_send_rich_html_draft_params(42, Some(77), "stream-42-1", "hi".into());
+        let payload = serde_json::to_value(params).expect("rich draft params should serialize");
+
+        assert_eq!(payload.get("chat_id"), Some(&serde_json::json!(42)));
+        assert_eq!(
+            payload.get("message_thread_id"),
+            Some(&serde_json::json!(77))
+        );
+        assert_eq!(
+            payload.get("draft_id"),
+            Some(&serde_json::json!(i64::from(encode_draft_id(
+                "stream-42-1"
+            ))))
+        );
+        assert_eq!(
+            payload
+                .get("rich_message")
+                .and_then(|rich_message| rich_message.get("html")),
+            Some(&serde_json::json!("hi"))
+        );
     }
 }
