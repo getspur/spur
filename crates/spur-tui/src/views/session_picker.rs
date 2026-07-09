@@ -49,7 +49,7 @@ fn footer_hint(state: &PickerState, rename_active: bool, confirm_active: bool) -
             ..
         } => "j/k nav \u{00b7} Enter new session \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back",
         PickerState::Populated { .. } => {
-            "j/k nav \u{00b7} Enter resume \u{00b7} n new \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back"
+            "j/k nav \u{00b7} Enter resume \u{00b7} n new \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back \u{00b7} r refresh"
         }
     }
 }
@@ -78,7 +78,7 @@ fn footer_hint_compact(
             ..
         } => "j/k \u{00b7} \u{21b5} new \u{00b7} / \u{00b7} ? more \u{00b7} Esc",
         PickerState::Populated { .. } => {
-            "j/k \u{00b7} \u{21b5} resume \u{00b7} / \u{00b7} ? more \u{00b7} Esc"
+            "j/k \u{00b7} \u{21b5} resume \u{00b7} / \u{00b7} ? more \u{00b7} Esc \u{00b7} r refresh"
         }
     }
 }
@@ -104,7 +104,7 @@ fn render_help_overlay(frame: &mut Frame, list_area: Rect, theme: &Theme) {
     let rows: &[&str] = &[
         "R rename      \u{00b7}  p pin",
         "x archive     \u{00b7}  a show archived",
-        "d archive (legacy)",
+        "r refresh",
         "y yank id     \u{00b7}  P toggle preview",
     ];
 
@@ -327,6 +327,8 @@ pub struct SessionPickerView {
     state: PickerState,
     /// Interior-mutable so render(&self) can adjust scroll position.
     scroll_offset: Cell<usize>,
+    /// Interior-mutable so the loading view can advance on each render tick.
+    loading_frame: Cell<usize>,
     metadata: SessionMetadata,
     /// View-level toggle; when false, archived sessions are hidden.
     show_archived: bool,
@@ -368,6 +370,7 @@ impl SessionPickerView {
         Self {
             state: PickerState::Loading,
             scroll_offset: Cell::new(0),
+            loading_frame: Cell::new(0),
             metadata: SessionMetadata::default(),
             show_archived: false,
             rename_state: None,
@@ -732,6 +735,15 @@ impl SessionPickerView {
         tombstone: Option<&Tombstone>,
         view_hint_override: Option<HintOverride<'_>>,
     ) {
+        const SPINNER_FRAMES: [char; 10] = [
+            '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}',
+            '\u{2827}', '\u{2807}', '\u{280f}',
+        ];
+        let spinner_frame = self.loading_frame.get();
+        let spinner = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
+        self.loading_frame
+            .set((spinner_frame + 1) % SPINNER_FRAMES.len());
+
         let lines = vec![
             Line::from(Span::styled(
                 "Sessions",
@@ -743,7 +755,7 @@ impl SessionPickerView {
             Line::from(vec![
                 Span::raw("  Connecting to agent"),
                 Span::styled(
-                    " \u{00b7}\u{00b7}\u{00b7}",
+                    format!(" {spinner}"),
                     Style::default().fg(token(theme, "session_picker.spinner.fg")),
                 ),
             ]),
@@ -1058,6 +1070,18 @@ impl SessionPickerView {
             Style::default().fg(token(ctx.theme, "session_picker.row.separator.fg")),
         )));
 
+        if indices.is_empty() {
+            let message = if filter.is_empty() {
+                "No sessions yet — press Enter to start one".to_string()
+            } else {
+                format!("No sessions match \"{filter}\"")
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {message}"),
+                muted_style,
+            )));
+        }
+
         let show_brain = Self::brains_are_heterogeneous(sessions, &self.metadata);
         let label_budget = compute_label_budget(area.width, show_cwd, show_brain);
 
@@ -1097,6 +1121,15 @@ impl SessionPickerView {
             let pinned = entry.map(|e| e.pinned).unwrap_or(false);
             let brain = entry.and_then(|e| e.brain_name.as_deref()).unwrap_or("");
             let draft = entry.map(|e| e.draft.as_str()).unwrap_or("").to_string();
+            let selected_bg = token(ctx.theme, "session_picker.row.selected.bg");
+            let selected_style = |style: Style| {
+                if is_selected {
+                    style.bg(selected_bg)
+                } else {
+                    style
+                }
+            };
+            let row_muted_style = selected_style(muted_style);
 
             // ── Group header ──────────────────────────────────────────────
             if show_headers {
@@ -1117,7 +1150,7 @@ impl SessionPickerView {
                 }
             }
 
-            let title_style = if archived {
+            let title_style = selected_style(if archived {
                 Style::default().fg(token(ctx.theme, "session_picker.row.archived.fg"))
             } else if is_selected {
                 Style::default()
@@ -1125,14 +1158,16 @@ impl SessionPickerView {
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
-            };
+            });
 
             // ── Line 1: cursor + title + aligned metadata columns ─────────
             let mut spans: Vec<Span> = Vec::with_capacity(12);
             spans.push(Span::styled(
                 prefix,
                 if is_selected {
-                    Style::default().fg(token(ctx.theme, "session_picker.row.cursor.fg"))
+                    selected_style(
+                        Style::default().fg(token(ctx.theme, "session_picker.row.cursor.fg")),
+                    )
                 } else {
                     Style::default()
                 },
@@ -1140,7 +1175,9 @@ impl SessionPickerView {
             if pinned {
                 spans.push(Span::styled(
                     "\u{2b50} ",
-                    Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
+                    selected_style(
+                        Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
+                    ),
                 ));
             }
             // Title padded/truncated to label_budget chars
@@ -1155,22 +1192,22 @@ impl SessionPickerView {
             };
             spans.push(Span::styled(padded_title, title_style));
             if archived {
-                spans.push(Span::styled(" [archived]", muted_style));
+                spans.push(Span::styled(" [archived]", row_muted_style));
             }
             // cwd column (fixed CWD_COL_WIDTH chars, only when heterogeneous)
             if show_cwd {
                 let cwd_raw = format!("{}/", Self::cwd_basename(&session.cwd));
                 let cwd_col = format!("  {cwd_raw:<width$}", width = CWD_COL_WIDTH);
-                spans.push(Span::styled(cwd_col, muted_style));
+                spans.push(Span::styled(cwd_col, row_muted_style));
             }
             // brain column (fixed BRAIN_COL_WIDTH chars, only when heterogeneous)
             if show_brain {
                 let brain_col = format!("  {brain:<width$}", width = BRAIN_COL_WIDTH);
-                spans.push(Span::styled(brain_col, muted_style));
+                spans.push(Span::styled(brain_col, row_muted_style));
             }
             // relative time (right-anchored in fixed TIME_COL_WIDTH column)
             let time_col = format!("  {time_str:>width$}", width = TIME_COL_WIDTH);
-            spans.push(Span::styled(time_col, muted_style));
+            spans.push(Span::styled(time_col, row_muted_style));
 
             lines.push(Line::from(spans));
 
@@ -1218,7 +1255,7 @@ impl SessionPickerView {
             };
 
             let mut activity_line_spans: Vec<Span> = Vec::with_capacity(4);
-            activity_line_spans.push(Span::styled(activity_indent.to_string(), muted_style));
+            activity_line_spans.push(Span::styled(activity_indent.to_string(), row_muted_style));
 
             // " ● draft" badge is 8 display columns: space(1) + ●(1) + space(1)
             // + "draft"(5) = 8.  Reserve space BEFORE truncating the activity text
@@ -1232,13 +1269,15 @@ impl SessionPickerView {
                 content_budget.saturating_sub(DRAFT_BADGE_WIDTH)
             };
             let activity_truncated = truncate_for_row(&activity_content, text_budget);
-            activity_line_spans.push(Span::styled(activity_truncated, muted_style));
+            activity_line_spans.push(Span::styled(activity_truncated, row_muted_style));
 
             // Append draft badge only when a draft exists.
             if !draft.is_empty() {
                 activity_line_spans.push(Span::styled(
                     DRAFT_BADGE,
-                    Style::default().fg(token(ctx.theme, "session_picker.row.pinned.fg")),
+                    selected_style(
+                        Style::default().fg(token(ctx.theme, "session_picker.row.draft.fg")),
+                    ),
                 ));
             }
 
@@ -1309,13 +1348,6 @@ impl SessionPickerView {
                     ),
                 }
             } else {
-                let indices = filtered_indices(
-                    sessions,
-                    filter,
-                    &self.metadata,
-                    ctx.synopsis,
-                    self.show_archived,
-                );
                 let real_idx = indices.get(cursor - 1).copied();
                 if let Some(i) = real_idx {
                     let session = &sessions[i];
@@ -1345,7 +1377,7 @@ impl SessionPickerView {
                     crate::components::session_preview::PreviewContent::default()
                 }
             };
-            SessionPreview::render(frame, chunks[1], &content);
+            SessionPreview::render(frame, chunks[1], &content, ctx.theme);
         }
 
         if let Some(ref target) = self.confirm_switch {
@@ -1358,7 +1390,7 @@ impl SessionPickerView {
                 ConfirmSwitchTarget::NewSession => "start a new session".to_string(),
             };
             let prompt = format!(
-                "Session \"{current}\" has an unsent draft — save and {action_desc}? [y/N]"
+                "Session \"{current}\" has an unsent draft — save and {action_desc}? [y/n]"
             );
             frame.render_widget(
                 Paragraph::new(Span::styled(
