@@ -355,7 +355,16 @@ fn pad_column(value: &str, width: usize) -> String {
 }
 
 fn truncate_to_width(value: &str, width: usize) -> String {
-    value.chars().take(width).collect()
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut truncated: String = value.chars().take(width - 1).collect();
+    truncated.push('…');
+    truncated
 }
 
 fn section_header(title: &str, theme: &Theme) -> Vec<Line<'static>> {
@@ -438,4 +447,114 @@ fn kv(theme: &Theme, label: &str, value: &str) -> Line<'static> {
         ),
         Span::raw(value.to_string()),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{backend::TestBackend, widgets::Paragraph, Terminal};
+    use spur_acp::{PlanSnapshotCounts, SessionId};
+    use spur_core::{TrackedPlan, TrackedTask};
+
+    use super::dependency_strip;
+    use crate::theme::{load_built_in, Theme};
+
+    fn task(task_id: &str) -> TrackedTask {
+        TrackedTask {
+            task_id: task_id.into(),
+            task_name: format!("{task_id} task"),
+            agent: "codex".into(),
+            issue_id: Some(format!("bd-1dwm.{task_id}")),
+            issue_title: None,
+            status: "pending".into(),
+            attempt: 1,
+            max_attempts: 3,
+            depends_on: Vec::new(),
+            blocked_by: Vec::new(),
+            unblocks: Vec::new(),
+            summary: None,
+            feedback: None,
+            error: None,
+            worker_branch: None,
+            delegation_id: None,
+            diff_summary: None,
+            mutation_id: None,
+            superseded_by: Vec::new(),
+            next_action: "wait".into(),
+            stage_idx: 0,
+        }
+    }
+
+    fn plan_with_tasks(tasks: Vec<TrackedTask>) -> TrackedPlan {
+        TrackedPlan {
+            session_id: SessionId("brain-1".into()),
+            plan_id: "bd-1dwm".into(),
+            epic_id: None,
+            status: "running".into(),
+            progress: "0 reviewed".into(),
+            next_action: "inspect".into(),
+            ready_to_merge: false,
+            owner_brain_session_id: None,
+            counts: PlanSnapshotCounts::default(),
+            tasks,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn rendered_buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    fn render_dependency_strip(task: &TrackedTask, plan: &TrackedPlan, theme: &Theme) -> String {
+        let content_width = 54;
+        let backend = TestBackend::new(content_width as u16, 1);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let lines = dependency_strip(task, plan, content_width, theme);
+
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
+            .expect("render dependency strip");
+
+        rendered_buffer_text(&terminal)
+    }
+
+    #[test]
+    fn dependency_strip_marks_truncated_columns_with_ellipsis() {
+        let theme = load_built_in("dark").expect("built-in dark theme");
+
+        let mut long = task("t-main");
+        long.depends_on = vec!["t-901".into(), "t-13".into(), "t-42".into()];
+        long.blocked_by = vec!["t-777".into(), "t-888".into(), "t-999".into()];
+        let long_plan = plan_with_tasks(vec![long.clone()]);
+
+        let rendered = render_dependency_strip(&long, &long_plan, &theme);
+        assert!(
+            rendered.contains('…'),
+            "expected visible truncation indicator; rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("Children --"),
+            "short child column should render unchanged; rendered: {rendered}"
+        );
+
+        let mut short = task("t-main");
+        short.depends_on = vec!["t-1".into()];
+        short.blocked_by = vec!["t-2".into()];
+        let short_plan = plan_with_tasks(vec![short.clone()]);
+
+        let rendered = render_dependency_strip(&short, &short_plan, &theme);
+        assert!(rendered.contains("Parents ↑t-1"), "rendered: {rendered}");
+        assert!(rendered.contains("Blocked by ↑t-2"), "rendered: {rendered}");
+        assert!(
+            !rendered.contains('…'),
+            "short values should not be marked as truncated; rendered: {rendered}"
+        );
+    }
 }
