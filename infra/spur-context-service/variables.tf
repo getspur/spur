@@ -193,6 +193,17 @@ variable "worker_subnets" {
   default     = []
 }
 
+variable "interface_vpc_endpoint_subnet_ids" {
+  description = "Subnet IDs for interface VPC endpoint ENIs. Empty (default) reuses worker_subnets/all discovered worker subnets; set one subnet for low-cost dev stacks."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for subnet_id in var.interface_vpc_endpoint_subnet_ids : length(trimspace(subnet_id)) > 0])
+    error_message = "interface_vpc_endpoint_subnet_ids entries must be non-empty subnet IDs."
+  }
+}
+
 variable "worker_route_table_ids" {
   description = "Route table IDs associated with worker_subnets for S3 and DynamoDB gateway endpoints. Required when create_vpc_endpoints is true."
   type        = list(string)

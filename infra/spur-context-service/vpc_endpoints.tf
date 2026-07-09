@@ -14,6 +14,8 @@ locals {
     logs           = "com.amazonaws.${local.vpc_endpoint_region}.logs"
     sts            = "com.amazonaws.${local.vpc_endpoint_region}.sts"
   }
+
+  interface_vpc_endpoint_subnet_ids = length(var.interface_vpc_endpoint_subnet_ids) > 0 ? var.interface_vpc_endpoint_subnet_ids : local.net_subnet_ids
 }
 
 resource "aws_vpc_endpoint" "gateway" {
@@ -42,7 +44,7 @@ resource "aws_vpc_endpoint" "interface" {
   vpc_id              = local.net_vpc_id
   service_name        = each.value
   vpc_endpoint_type   = "Interface"
-  subnet_ids          = local.net_subnet_ids
+  subnet_ids          = local.interface_vpc_endpoint_subnet_ids
   security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
 

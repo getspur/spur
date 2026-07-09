@@ -682,6 +682,7 @@ def test_lambda_worker_resource_is_configured_for_fast_start_mvp():
 
 def test_nat_free_worker_vpc_endpoints_are_declared():
     variables_tf = (INFRA_DIR / "variables.tf").read_text()
+    default_tfvars = (INFRA_DIR / "env" / "default.tfvars").read_text()
     state_machine_tf = (INFRA_DIR / "state_machine.tf").read_text()
     endpoints_tf = (INFRA_DIR / "vpc_endpoints.tf").read_text()
     outputs_tf = (INFRA_DIR / "outputs.tf").read_text()
@@ -689,6 +690,7 @@ def test_nat_free_worker_vpc_endpoints_are_declared():
     assert 'variable "create_vpc_endpoints"' in variables_tf
     assert "default     = true" in variables_tf
     assert 'variable "worker_route_table_ids"' in variables_tf
+    assert 'variable "interface_vpc_endpoint_subnet_ids"' in variables_tf
     assert 'variable "vpc_endpoint_region"' in variables_tf
 
     for service in (
@@ -709,10 +711,13 @@ def test_nat_free_worker_vpc_endpoints_are_declared():
 
     interface_endpoint = endpoints_tf.split('resource "aws_vpc_endpoint" "interface"', 1)[1]
     assert 'vpc_endpoint_type   = "Interface"' in interface_endpoint
-    assert "subnet_ids" in interface_endpoint
-    assert "= local.net_subnet_ids" in interface_endpoint
+    assert "subnet_ids          = local.interface_vpc_endpoint_subnet_ids" in interface_endpoint
     assert "private_dns_enabled = true" in interface_endpoint
     assert "security_group_ids  = [aws_security_group.vpc_endpoints[0].id]" in interface_endpoint
+
+    assert "interface_vpc_endpoint_subnet_ids =" in default_tfvars
+    default_endpoint_subnets = re.findall(r'"(subnet-[A-Za-z0-9]+)"', default_tfvars)
+    assert default_endpoint_subnets == ["subnet-0e57004af78597f73"]
 
     endpoint_sg = state_machine_tf.split('resource "aws_security_group" "vpc_endpoints"', 1)[1]
     assert "count = var.create_vpc_endpoints ? 1 : 0" in endpoint_sg
