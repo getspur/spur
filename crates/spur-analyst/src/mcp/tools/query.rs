@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use serde_json::{json, Value};
 
@@ -12,6 +16,11 @@ use crate::db::{
     sql::{query_rows, MAX_QUERY_ROWS},
 };
 use crate::mcp::McpHandlerError;
+
+type PooledQueryConnection = Arc<Mutex<crate::db::connection::AnalystReadOnlyConnection>>;
+
+static QUERY_CONNECTION_POOL: OnceLock<Mutex<HashMap<PathBuf, PooledQueryConnection>>> =
+    OnceLock::new();
 
 pub async fn query(args: &Value) -> Result<Value, McpHandlerError> {
     let request = QueryRequest::parse(args)?;
@@ -97,17 +106,13 @@ fn first_token(query: &str) -> &str {
 }
 
 fn query_read_only(db_path: &Path, sql: &str, allow_stale: bool) -> Result<Value, McpHandlerError> {
-    let conn = open_analyst_connection_read_only(db_path)
-        .map_err(|error| McpHandlerError::Internal(format!("{error:#}")))?;
+    let conn = pooled_query_connection(db_path)?;
+    let conn = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let staleness_warning = match freshness_gate(&conn, db_path, allow_stale)? {
         FreshnessGate::Proceed { warning } => warning,
         FreshnessGate::Block(response) => return Ok(response),
     };
-
-    load_analyst_icu_extension(&conn);
-    load_analyst_lance_extension(&conn);
-    let _ = load_analyst_duckpgq_extension(&conn);
 
     let result = query_rows(&conn, sql, MAX_QUERY_ROWS)?;
     let row_count = result.row_count();
@@ -123,6 +128,24 @@ fn query_read_only(db_path: &Path, sql: &str, allow_stale: bool) -> Result<Value
         response["staleness_warning"] = Value::String(warning);
     }
     Ok(response)
+}
+
+fn pooled_query_connection(db_path: &Path) -> Result<PooledQueryConnection, McpHandlerError> {
+    let pool = QUERY_CONNECTION_POOL.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut pool = pool.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(conn) = pool.get(db_path) {
+        return Ok(Arc::clone(conn));
+    }
+
+    let conn = open_analyst_connection_read_only(db_path)
+        .map_err(|error| McpHandlerError::Internal(format!("{error:#}")))?;
+    load_analyst_icu_extension(&conn);
+    load_analyst_lance_extension(&conn);
+    let _ = load_analyst_duckpgq_extension(&conn);
+
+    let conn = Arc::new(Mutex::new(conn));
+    pool.insert(db_path.to_path_buf(), Arc::clone(&conn));
+    Ok(conn)
 }
 
 fn query_error(db_path: &Path, error: &McpHandlerError) -> Value {
@@ -142,5 +165,55 @@ fn query_error_code(error: &McpHandlerError) -> &'static str {
         McpHandlerError::Unauthorized(_) => "unauthorized",
         McpHandlerError::UpstreamPm(_) => "upstream_pm",
         McpHandlerError::Internal(_) => "internal",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use duckdb::Connection;
+
+    use super::*;
+
+    #[test]
+    fn query_read_only_reuses_one_connection_for_concurrent_calls_to_same_db_path() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("analyst.duckdb");
+        let conn = Connection::open(&db_path).expect("create fixture db");
+        conn.execute_batch(
+            "
+            CREATE TABLE facts (value INTEGER);
+            INSERT INTO facts VALUES (42);
+            ",
+        )
+        .expect("seed fixture db");
+        drop(conn);
+        crate::db::connection::reset_analyst_connection_open_count_for_test(&db_path);
+
+        let db_path = Arc::new(db_path);
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let db_path = Arc::clone(&db_path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let result = query_read_only(&db_path, "SELECT value FROM facts", true)
+                        .expect("query read-only");
+                    assert_eq!(result["rows"], serde_json::json!([[42]]));
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("query thread");
+        }
+
+        assert_eq!(
+            crate::db::connection::analyst_connection_open_count_for_test(&db_path),
+            1,
+            "query handler should pool one read-only connection per analyst DB path"
+        );
     }
 }
