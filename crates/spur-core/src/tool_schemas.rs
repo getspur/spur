@@ -347,4 +347,58 @@ mod tests {
         let input: DelegateToWorkerInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.enable_worker_mcp, Some(true));
     }
+
+    #[test]
+    fn submit_loop_params_schema_is_fully_inlined() {
+        // Regression: opencode's MCP client does not resolve nested `$ref`s in
+        // tool input schemas, so any `$ref` on a required object field (like
+        // `spec`) caused the client to stringify the argument. serde then
+        // rejected it with "invalid type: string, expected struct LoopSpec".
+        // The published schema must inline every `$defs` ref so clients
+        // recognize object fields without `$ref` resolution.
+        let schema = schema_value::<SubmitLoopParams>();
+        let pretty = serde_json::to_string_pretty(&schema).unwrap();
+
+        assert!(
+            !pretty.contains("$ref"),
+            "tool schema still contains a $ref after normalization:\n{pretty}"
+        );
+        assert!(
+            schema.get("$defs").is_none() && schema.get("definitions").is_none(),
+            "tool schema must drop top-level defs once refs are inlined:\n{pretty}"
+        );
+
+        let spec = &schema["properties"]["spec"];
+        assert_eq!(
+            spec["type"], "object",
+            "`spec` is not an inline object schema"
+        );
+        let spec_props = spec["properties"]
+            .as_object()
+            .expect("`spec.properties` must be an inlined object");
+        for field in [
+            "goal",
+            "pattern",
+            "cadence_secs",
+            "template",
+            "governors",
+            "escalation",
+        ] {
+            assert!(
+                spec_props.contains_key(field),
+                "`spec.{field}` was not inlined into the schema"
+            );
+        }
+
+        // Nested struct (LoopGovernors) must also be inlined, proving recursion.
+        let governors = &spec["properties"]["governors"];
+        assert_eq!(
+            governors["type"], "object",
+            "`spec.governors` is not an inline object schema"
+        );
+        assert!(
+            governors["properties"]["max_cost_micros_per_generation"].is_object(),
+            "`spec.governors.max_cost_micros_per_generation` was not inlined"
+        );
+    }
 }
