@@ -20,6 +20,7 @@ use spur_tui::components::react_trace::ReactTrace;
 /// Build a minimal `ExecutorNode` suitable for exercising `DetailPane::render`.
 fn node(task_spec: &str) -> ExecutorNode {
     ExecutorNode {
+        resolved_config: None,
         id: ExecutorId::new("exec-test".to_string()),
         parent_id: None,
         child_ids: Vec::new(),
@@ -50,6 +51,20 @@ fn node(task_spec: &str) -> ExecutorNode {
         issue_id: None,
         delegation_id: None,
         peer_edges: Vec::new(),
+    }
+}
+
+/// Build a fixture `ExecutorNode` carrying a resolved session config
+/// receipt — mirrors `node()` but with `resolved_config: Some(_)` so
+/// render tests can assert the Task tab surfaces the agent/profile/model/
+/// effort that actually ran (bd: agent/profile/model/effort observability).
+fn node_with_resolved_config(
+    task_spec: &str,
+    config: spur_acp::domain::delegation::ResolvedSessionConfig,
+) -> ExecutorNode {
+    ExecutorNode {
+        resolved_config: Some(config),
+        ..node(task_spec)
     }
 }
 
@@ -236,6 +251,103 @@ fn non_stream_scroll_reaches_wrapped_bottom() {
         buffer_contains(&buf, "ZZZZEND"),
         "after 50× scroll_down on a Task tab with a long wrapped line, the \
          tail marker `ZZZZEND` must be visible; buffer:\n{:#?}",
+        buf
+    );
+}
+
+/// The Task tab is the durable-receipt home for "what actually ran":
+/// agent/profile/model/effort, sourced from `ExecutorNode::resolved_config`
+/// (projected from `SpurEventBody::WorkerSessionConfigured`). A user
+/// selecting a delegation must be able to see this without any other
+/// navigation — this test pins that the values appear in the rendered
+/// buffer for a fixture delegation with a fully-resolved config.
+#[test]
+fn task_tab_shows_resolved_session_config() {
+    use spur_acp::domain::delegation::ResolvedSessionConfig;
+
+    let mut pane = DetailPane::new();
+    let n = node_with_resolved_config(
+        "fix the flaky test",
+        ResolvedSessionConfig {
+            agent: "codex".into(),
+            profile: Some("rust-pro".into()),
+            model: Some("gpt-5-codex".into()),
+            effort: Some("high".into()),
+            config_overrides_applied: Default::default(),
+            skipped: Vec::new(),
+        },
+    );
+
+    // Cycle Stream → Artifacts → Attempts → Task.
+    for _ in 0..3 {
+        pane.cycle_tab(true);
+    }
+    assert_eq!(pane.current_tab(), DetailTab::Task);
+
+    // Wide enough that the single-line session receipt doesn't word-wrap —
+    // wrapping could split a value (e.g. "gpt-5-codex") across rows and
+    // make the substring assertions below flaky.
+    let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
+    term.draw(|f| {
+        pane.render(f, Rect::new(0, 0, 100, 12), &n, None, None);
+    })
+    .unwrap();
+    let buf = term.backend().buffer().clone();
+
+    assert!(
+        buffer_contains(&buf, "rust-pro"),
+        "Task tab must surface the resolved profile:\n{:#?}",
+        buf
+    );
+    assert!(
+        buffer_contains(&buf, "gpt-5-codex"),
+        "Task tab must surface the resolved model:\n{:#?}",
+        buf
+    );
+    assert!(
+        buffer_contains(&buf, "high"),
+        "Task tab must surface the resolved effort:\n{:#?}",
+        buf
+    );
+    assert!(
+        buffer_contains(&buf, "fix the flaky test"),
+        "Task tab must still render the task spec below the session receipt:\n{:#?}",
+        buf
+    );
+}
+
+/// Old in-flight delegations (or replay of pre-existing lineage state from
+/// before `resolved_config` existed) must render gracefully — placeholders
+/// instead of a panic or a blank section.
+#[test]
+fn task_tab_shows_placeholders_when_resolved_config_absent() {
+    let mut pane = DetailPane::new();
+    let n = node("do the thing");
+    assert!(n.resolved_config.is_none());
+
+    for _ in 0..3 {
+        pane.cycle_tab(true);
+    }
+    assert_eq!(pane.current_tab(), DetailTab::Task);
+
+    // Wide enough that the single-line session receipt doesn't word-wrap —
+    // wrapping could split a value (e.g. "gpt-5-codex") across rows and
+    // make the substring assertions below flaky.
+    let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
+    term.draw(|f| {
+        pane.render(f, Rect::new(0, 0, 100, 12), &n, None, None);
+    })
+    .unwrap();
+    let buf = term.backend().buffer().clone();
+
+    assert!(
+        buffer_contains(&buf, "Agent:"),
+        "session receipt header must render even when resolved_config is None:\n{:#?}",
+        buf
+    );
+    assert!(
+        buffer_contains(&buf, "—"),
+        "unknown profile/model/effort must render as a placeholder, not be omitted:\n{:#?}",
         buf
     );
 }

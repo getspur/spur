@@ -144,6 +144,7 @@ pub(crate) async fn handle_delegations(
             }
             if fault_injection_hooks.short_circuit_delegations {
                 let _ = respond_to.send(DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Success,
                     diff: None,
                     diff_summary: None,
@@ -208,6 +209,7 @@ pub(crate) async fn handle_delegations(
                     .await;
                     if let Some(respond_to) = guard.respond_to.take() {
                         let _ = respond_to.send(DelegationResult {
+                            resolved_config: None,
                             status,
                             diff: None,
                             diff_summary: None,
@@ -328,6 +330,7 @@ pub(crate) async fn handle_delegations(
                     .await;
                     (
                         DelegationResult {
+                            resolved_config: None,
                             status,
                             diff: None,
                             diff_summary: None,
@@ -472,6 +475,7 @@ impl Drop for DelegationGuard {
         });
         if let Some(tx) = self.respond_to.take() {
             let _ = tx.send(DelegationResult {
+                resolved_config: None,
                 status: DelegationStatus::Failed {
                     error: "delegation aborted".into(),
                 },

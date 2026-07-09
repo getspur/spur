@@ -655,6 +655,7 @@ async fn tick_once_dispatches_ready_task_with_single_approved_dep_branch_base() 
     request
         .respond_to
         .send(DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -821,6 +822,7 @@ async fn persisted_overlay_conflict_emits_plan_task_blocked_on_setup_conflict_co
     request
         .respond_to
         .send(DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::SetupFailed {
                 error: spur_acp::AttemptSetupError::OverlayConflict {
                     source_task_id: "T1".to_string(),
@@ -2179,6 +2181,7 @@ async fn worker_success_after_orphan_clear_is_superseded() {
     .expect("add orphan audit");
 
     let result = spur_acp::DelegationResult {
+        resolved_config: None,
         status: spur_acp::DelegationStatus::Success,
         diff: None,
         diff_summary: None,

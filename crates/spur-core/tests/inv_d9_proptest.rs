@@ -144,6 +144,7 @@ prop_compose! {
         cost_micros in 0u64..1_000_000_000,
     ) -> DelegationResult {
         DelegationResult {
+            resolved_config: None,
             status,
             diff,
             diff_summary,

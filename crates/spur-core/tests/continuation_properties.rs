@@ -126,6 +126,7 @@ fn mk_cont(spec: &ArrivalSpec, brain_session: &SessionId) -> BrainContinuation {
         brain_session: brain_session.clone(),
         source: ContinuationSource::AsyncRequested,
         payload: ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: Some("x".repeat(summary_len_for_class(spec.size_class))),
             diff_summary: None,
@@ -175,6 +176,7 @@ fn classify_probe_summary_len(summary_len: usize) -> SizeClass {
         brain_session: SessionId("brain-proptest".into()),
         source: ContinuationSource::AsyncRequested,
         payload: ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: Some("x".repeat(summary_len)),
             diff_summary: None,

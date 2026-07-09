@@ -38,6 +38,7 @@ fn outcome_metadata(content: &[u8]) -> OutcomeMetadata {
 
 fn success_result(summary: &str, diff: &str) -> DelegationResult {
     DelegationResult {
+        resolved_config: None,
         status: DelegationStatus::Success,
         summary: Some(summary.into()),
         diff: Some(diff.into()),
