@@ -721,7 +721,8 @@ impl AnalyticsEngine {
                 filename = true,
                 ignore_errors = true,
                 quote = '',
-                escape = ''
+                escape = '',
+                max_line_size = 33554432
              );
 
              CREATE OR REPLACE VIEW claude_events AS
@@ -784,7 +785,8 @@ impl AnalyticsEngine {
                 filename = true,
                 ignore_errors = true,
                 quote = '',
-                escape = ''
+                escape = '',
+                max_line_size = 33554432
              );
 
              CREATE OR REPLACE VIEW codex_token_events AS
