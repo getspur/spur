@@ -369,6 +369,7 @@ mod tests {
             brain_session: SessionId("brain-session-1".into()),
             source,
             payload: ContinuationPayload {
+                resolved_config: None,
                 status: DelegationStatus::Success,
                 summary,
                 diff_summary: None,

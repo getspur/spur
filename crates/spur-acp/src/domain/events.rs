@@ -1225,6 +1225,20 @@ pub enum SpurEventBody {
         kind: FileTouchKind,
     },
 
+    /// The resolved `{agent, profile, model, effort, config_overrides}`
+    /// actually applied to a worker session, captured once at dispatch
+    /// time (`apply_session_overrides`). This is the durable, positive
+    /// confirmation counterpart to the failure-only
+    /// `spur::worker::{model,effort,config}_override` tracing logs — it
+    /// flows into the lineage projection (`ExecutorNode::resolved_config`)
+    /// so the TUI can show what actually ran, and into the replayed event
+    /// log so it is queryable post-hoc without a live TUI session.
+    WorkerSessionConfigured {
+        brain_session_id: SessionId,
+        executor_id: String,
+        config: crate::domain::delegation::ResolvedSessionConfig,
+    },
+
     /// Durable beads-backed plan state for a session.
     PlanSnapshotUpdated {
         session_id: SessionId,
