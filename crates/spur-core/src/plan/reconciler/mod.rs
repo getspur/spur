@@ -673,6 +673,7 @@ async fn emit_setup_conflict_continuation(input: SetupConflictContinuation<'_>) 
     };
 
     let payload = spur_acp::domain::continuation::ContinuationPayload {
+        resolved_config: None,
         status: spur_acp::domain::delegation::DelegationStatus::SetupFailed {
             error: spur_acp::domain::delegation::AttemptSetupError::OverlayConflict {
                 source_task_id: input.dep_task_id.to_string(),
@@ -1606,6 +1607,7 @@ impl Reconciler {
                         );
                         let error = "orchestrator disconnected".to_string();
                         spur_acp::DelegationResult {
+                            resolved_config: None,
                             status: spur_acp::DelegationStatus::Failed {
                                 error: error.clone(),
                             },

@@ -73,6 +73,7 @@ fn empty_gate() -> Arc<FeatureGate> {
 
 fn make_plan_with_cached_result(plan_id: &str) -> PlanState {
     let result = spur_acp::DelegationResult {
+        resolved_config: None,
         status: spur_acp::DelegationStatus::Success,
         diff: Some("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n".to_string()),
         diff_summary: None,

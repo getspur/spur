@@ -87,6 +87,12 @@ pub(crate) struct WorkerAttemptOutcome {
     /// `None` when the worker's stdout fit under the cap.
     #[allow(dead_code)] // Populated in Task 8 (artifact persistence wiring).
     pub(crate) artifact: Option<spur_acp::WorkerArtifact>,
+    /// Resolved `{agent, profile, model, effort, config_overrides}`
+    /// actually applied to this attempt's worker session. Captured at
+    /// `apply_session_overrides` — see `ResolvedSessionConfig` doc for the
+    /// resolution order and what "applied" means when an override RPC
+    /// fails or the agent exposes no matching option.
+    pub(crate) resolved_config: spur_acp::ResolvedSessionConfig,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -240,6 +246,14 @@ async fn preapply_prior_branch_for_reuse(
     }
 }
 
+/// Applies the resolved `{profile, model, effort, config_overrides}` to a
+/// freshly-created worker session via ACP `set_session_config_option` /
+/// `set_session_mode`, and returns a [`spur_acp::ResolvedSessionConfig`]
+/// recording what was actually applied (or attempted).
+///
+/// `agent` is not part of `ResolvedSessionConfig` here — the caller
+/// (`run_one_worker_attempt`) stamps `ctx.agent` onto the returned value,
+/// since this function only sees the agent's *kind*, not its display name.
 #[allow(clippy::too_many_arguments)]
 async fn apply_session_overrides(
     connection: &mut dyn AgentConnection,
@@ -251,12 +265,14 @@ async fn apply_session_overrides(
     model: Option<&str>,
     effort: Option<&str>,
     config_overrides: Option<&std::collections::HashMap<String, String>>,
-) {
+) -> spur_acp::ResolvedSessionConfig {
     let caps = spur_acp::SpurAgentCaps::new(initialize, session_response, agent_kind);
     let session_id = session_response.session_id.clone();
     let session_id_for_log = session_id.0.to_string();
+    let mut resolved = spur_acp::ResolvedSessionConfig::default();
 
     if let Some(profile) = profile {
+        resolved.profile = Some(profile.to_string());
         match &strategy.select {
             spur_acp::SelectStrategy::ConfigOption { id } => {
                 let request = spur_acp::SetSessionConfigOptionRequest::new(
@@ -272,6 +288,17 @@ async fn apply_session_overrides(
                         value = %profile,
                         error = %error,
                         "profile selection failed; default persona"
+                    );
+                    resolved.skipped.push(format!(
+                        "profile: set_session_config_option({id}) rejected: {error}"
+                    ));
+                } else {
+                    tracing::info!(
+                        target: "spur::worker::profile",
+                        session_id = %session_id_for_log,
+                        config_id = %id,
+                        value = %profile,
+                        "profile selection applied"
                     );
                 }
             }
@@ -297,6 +324,9 @@ async fn apply_session_overrides(
                         error = %error,
                         "profile set_mode failed; default persona"
                     );
+                    resolved
+                        .skipped
+                        .push(format!("profile: set_session_mode rejected: {error}"));
                 } else {
                     tracing::debug!(
                         target: "spur::worker::profile",
@@ -325,11 +355,15 @@ async fn apply_session_overrides(
                     value = %profile,
                     "kind has no selection surface; skipped"
                 );
+                resolved.skipped.push(
+                    "profile: agent kind exposes no ACP selection surface (spawn-time file materialization only)".to_string(),
+                );
             }
         }
     }
 
     if let Some(model) = model {
+        resolved.model = Some(model.to_string());
         let config_id = caps
             .model_option()
             .map(|option| option.id.clone())
@@ -350,10 +384,22 @@ async fn apply_session_overrides(
                 error = %error,
                 "worker model override failed"
             );
+            resolved.skipped.push(format!(
+                "model: set_session_config_option({config_id_for_log}) rejected: {error}"
+            ));
+        } else {
+            tracing::info!(
+                target: "spur::worker::model_override",
+                session_id = %session_id_for_log,
+                config_id = %config_id_for_log,
+                value = %model,
+                "worker model override applied"
+            );
         }
     }
 
     if let Some(effort) = effort {
+        resolved.effort = Some(effort.to_string());
         if let Some(option) =
             spur_acp::spur_agent_caps::thought_level_option_from(&caps.config_options)
         {
@@ -374,6 +420,17 @@ async fn apply_session_overrides(
                     error = %error,
                     "worker effort override failed"
                 );
+                resolved.skipped.push(format!(
+                    "effort: set_session_config_option({config_id_for_log}) rejected: {error}"
+                ));
+            } else {
+                tracing::info!(
+                    target: "spur::worker::effort_override",
+                    session_id = %session_id_for_log,
+                    config_id = %config_id_for_log,
+                    value = %effort,
+                    "worker effort override applied"
+                );
             }
         } else {
             tracing::debug!(
@@ -382,6 +439,9 @@ async fn apply_session_overrides(
                 value = %effort,
                 "worker effort override skipped"
             );
+            resolved.skipped.push(format!(
+                "effort: agent exposed no thought-level option (requested '{effort}')"
+            ));
         }
     }
 
@@ -402,9 +462,25 @@ async fn apply_session_overrides(
                     error = %error,
                     "worker config override failed"
                 );
+                resolved
+                    .skipped
+                    .push(format!("config_override: {config_id} rejected: {error}"));
+            } else {
+                tracing::info!(
+                    target: "spur::worker::config_override",
+                    session_id = %session_id_for_log,
+                    config_id = %config_id,
+                    value = %value,
+                    "worker config override applied"
+                );
+                resolved
+                    .config_overrides_applied
+                    .insert(config_id.clone(), value.clone());
             }
         }
     }
+
+    resolved
 }
 
 fn append_spawn_profile_args(
@@ -821,7 +897,7 @@ pub(crate) async fn run_one_worker_attempt(
         }
     };
 
-    apply_session_overrides(
+    let mut resolved_config = apply_session_overrides(
         &mut *connection,
         &init_response,
         &session_response,
@@ -833,6 +909,17 @@ pub(crate) async fn run_one_worker_attempt(
         ctx.config_overrides,
     )
     .await;
+    resolved_config.agent = ctx.agent.to_string();
+    // Durable receipt (positive confirmation): record the resolved
+    // {agent, profile, model, effort, config_overrides} on the event
+    // stream so it survives into the lineage projection (TUI) and is
+    // queryable post-hoc from the replayed event log — closing the
+    // "fire and trust" observability gap around set_session_config_option.
+    funnel.emit(SpurEventBody::WorkerSessionConfigured {
+        brain_session_id: ctx.brain_session_id.as_session_id().clone(),
+        executor_id: worker_session.0.clone(),
+        config: resolved_config.clone(),
+    });
 
     // 3. Send task to worker.
     let prompt_text = format!(
@@ -1236,6 +1323,7 @@ pub(crate) async fn run_one_worker_attempt(
         cost,
         worktree_path,
         artifact,
+        resolved_config,
     })
 }
 
@@ -1545,7 +1633,7 @@ mod model_effort_override_tests {
         model: Option<&str>,
         effort: Option<&str>,
         config_overrides: Option<&HashMap<String, String>>,
-    ) -> CapturedEvents {
+    ) -> (CapturedEvents, spur_acp::ResolvedSessionConfig) {
         let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
         let mut connection = OverrideRecordingConnection {
             calls,
@@ -1556,7 +1644,7 @@ mod model_effort_override_tests {
         let _guard = tracing::subscriber::set_default(events.clone());
 
         let strategy = spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp);
-        apply_session_overrides(
+        let resolved = apply_session_overrides(
             &mut connection,
             &init,
             session_response,
@@ -1569,7 +1657,7 @@ mod model_effort_override_tests {
         )
         .await;
 
-        events
+        (events, resolved)
     }
 
     fn git(repo: &Path, args: &[&str]) -> String {
@@ -1736,7 +1824,7 @@ mod model_effort_override_tests {
             ),
         ]);
 
-        let events = apply_with(
+        let (events, resolved) = apply_with(
             Arc::clone(&calls),
             Some("model"),
             &response,
@@ -1755,6 +1843,16 @@ mod model_effort_override_tests {
             ),
             "expected model override warning, got {:?}",
             events.events.lock().expect("event capture poisoned")
+        );
+        // The receipt records the resolved intent even when the RPC was
+        // rejected, plus a human-readable note explaining the rejection —
+        // callers must not see a silently-empty `model` on failure.
+        assert_eq!(resolved.model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
+        assert!(
+            resolved.skipped.iter().any(|s| s.starts_with("model:")),
+            "expected a skipped note for the rejected model override, got {:?}",
+            resolved.skipped
         );
     }
 
@@ -1805,7 +1903,7 @@ mod model_effort_override_tests {
             ("context_window".to_string(), "200000".to_string()),
         ]);
 
-        let events = apply_with(
+        let (events, resolved) = apply_with(
             Arc::clone(&calls),
             Some("mode"),
             &response,
@@ -1828,6 +1926,21 @@ mod model_effort_override_tests {
             ),
             "expected config override warning, got {:?}",
             events.events.lock().expect("event capture poisoned")
+        );
+        // Successful override recorded in the receipt map; the rejected
+        // one is NOT — it only appears in `skipped` with a reason.
+        assert_eq!(
+            resolved.config_overrides_applied.get("context_window"),
+            Some(&"200000".to_string())
+        );
+        assert!(!resolved.config_overrides_applied.contains_key("mode"));
+        assert!(
+            resolved
+                .skipped
+                .iter()
+                .any(|s| s.starts_with("config_override: mode")),
+            "expected a skipped note for the rejected 'mode' override, got {:?}",
+            resolved.skipped
         );
     }
 
@@ -1892,7 +2005,7 @@ mod model_effort_override_tests {
             spur_acp::SessionConfigOptionCategory::Model,
         )]);
 
-        let events = apply_with(
+        let (events, resolved) = apply_with(
             Arc::clone(&calls),
             None,
             &response,
@@ -1918,6 +2031,19 @@ mod model_effort_override_tests {
             ),
             "expected effort override debug event, got {:?}",
             events.events.lock().expect("event capture poisoned")
+        );
+        // The receipt still records the requested effort (so a caller
+        // can see "high was requested") alongside the skip note
+        // explaining why it wasn't applied.
+        assert_eq!(resolved.model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
+        assert!(
+            resolved
+                .skipped
+                .iter()
+                .any(|s| s.contains("no thought-level option")),
+            "expected a skipped note for the missing thought-level option, got {:?}",
+            resolved.skipped
         );
     }
 
@@ -2386,7 +2512,11 @@ mod profile_override_tests {
         effort: Option<&str>,
         rejected_config_id: Option<&str>,
         reject_mode: bool,
-    ) -> (Vec<OverrideCall>, CapturedEvents) {
+    ) -> (
+        Vec<OverrideCall>,
+        CapturedEvents,
+        spur_acp::ResolvedSessionConfig,
+    ) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let init = spur_acp::InitializeResponse::new(spur_acp::ProtocolVersion::LATEST);
         let response = model_and_effort_session_response();
@@ -2400,7 +2530,7 @@ mod profile_override_tests {
         let _serialize = crate::tracing_test_lock::guard();
         let _guard = tracing::subscriber::set_default(events.clone());
 
-        apply_session_overrides(
+        let resolved = apply_session_overrides(
             &mut connection,
             &init,
             &response,
@@ -2414,7 +2544,7 @@ mod profile_override_tests {
         .await;
 
         let recorded = calls.lock().expect("profile recorder poisoned").clone();
-        (recorded, events)
+        (recorded, events, resolved)
     }
 
     fn git(repo: &Path, args: &[&str]) -> String {
@@ -2493,7 +2623,7 @@ mod profile_override_tests {
 
     #[tokio::test]
     async fn no_profile_makes_no_selection_rpc_and_preserves_model_effort_order() {
-        let (calls, _) = apply_profile_with(
+        let (calls, _, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::CodexAcp,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp),
             None,
@@ -2517,11 +2647,15 @@ mod profile_override_tests {
                 },
             ]
         );
+        assert_eq!(resolved.profile, None);
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
+        assert!(resolved.skipped.is_empty());
     }
 
     #[tokio::test]
     async fn claude_profile_selects_agent_before_model_and_effort() {
-        let (calls, _) = apply_profile_with(
+        let (calls, _, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::ClaudeCodeAcp,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp),
             Some("code-reviewer"),
@@ -2549,11 +2683,15 @@ mod profile_override_tests {
                 },
             ]
         );
+        assert_eq!(resolved.profile.as_deref(), Some("code-reviewer"));
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
+        assert!(resolved.skipped.is_empty());
     }
 
     #[tokio::test]
     async fn opencode_profile_selects_mode_config_option() {
-        let (calls, _) = apply_profile_with(
+        let (calls, _, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::OpenCode,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::OpenCode),
             Some("code-reviewer"),
@@ -2571,11 +2709,14 @@ mod profile_override_tests {
                 value: "code-reviewer".to_string(),
             }]
         );
+        assert_eq!(resolved.profile.as_deref(), Some("code-reviewer"));
+        assert_eq!(resolved.model, None);
+        assert_eq!(resolved.effort, None);
     }
 
     #[tokio::test]
     async fn kiro_profile_uses_spawn_arg_not_post_spawn_rpc() {
-        let (calls, _) = apply_profile_with(
+        let (calls, _, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::Kiro,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::Kiro),
             Some("code-reviewer"),
@@ -2587,6 +2728,11 @@ mod profile_override_tests {
         .await;
 
         assert_eq!(calls, vec![]);
+        // SpawnArg strategy applies the profile at process spawn, not via
+        // post-spawn RPC — the receipt still names it (not "skipped"),
+        // since it genuinely was applied, just through a different channel.
+        assert_eq!(resolved.profile.as_deref(), Some("code-reviewer"));
+        assert!(resolved.skipped.is_empty());
     }
 
     #[test]
@@ -2683,7 +2829,7 @@ mod profile_override_tests {
 
     #[tokio::test]
     async fn codex_profile_has_no_selection_rpc_but_model_still_applies() {
-        let (calls, _) = apply_profile_with(
+        let (calls, _, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::CodexAcp,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::CodexAcp),
             Some("code-reviewer"),
@@ -2701,11 +2847,21 @@ mod profile_override_tests {
                 value: "opus".to_string(),
             }]
         );
+        // Codex has no profile selection surface — the receipt still names
+        // the requested profile, but flags it as skipped, while model is
+        // recorded as cleanly applied.
+        assert_eq!(resolved.profile.as_deref(), Some("code-reviewer"));
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+        assert!(
+            resolved.skipped.iter().any(|s| s.starts_with("profile:")),
+            "expected a skipped note for codex's missing profile selection surface, got {:?}",
+            resolved.skipped
+        );
     }
 
     #[tokio::test]
     async fn rejected_session_mode_warns_and_model_still_runs() {
-        let (calls, events) = apply_profile_with(
+        let (calls, events, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::Generic,
             spur_acp::ProfileStrategy {
                 select: spur_acp::SelectStrategy::SessionMode,
@@ -2740,11 +2896,21 @@ mod profile_override_tests {
             "expected profile set_mode warning, got {:?}",
             events.events.lock().expect("event capture poisoned")
         );
+        assert_eq!(resolved.profile.as_deref(), Some("code-reviewer"));
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+        assert!(
+            resolved
+                .skipped
+                .iter()
+                .any(|s| s.starts_with("profile: set_session_mode rejected")),
+            "expected a skipped note for the rejected set_session_mode, got {:?}",
+            resolved.skipped
+        );
     }
 
     #[tokio::test]
     async fn rejected_profile_selection_warns_and_model_still_runs() {
-        let (calls, events) = apply_profile_with(
+        let (calls, events, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::ClaudeCodeAcp,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp),
             Some("code-reviewer"),
@@ -2777,6 +2943,16 @@ mod profile_override_tests {
             "expected profile selection warning, got {:?}",
             events.events.lock().expect("event capture poisoned")
         );
+        assert_eq!(resolved.profile.as_deref(), Some("code-reviewer"));
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+        assert!(
+            resolved
+                .skipped
+                .iter()
+                .any(|s| s.starts_with("profile: set_session_config_option(agent) rejected")),
+            "expected a skipped note for the rejected profile config option, got {:?}",
+            resolved.skipped
+        );
     }
 
     #[tokio::test]
@@ -2788,7 +2964,7 @@ mod profile_override_tests {
                 None,
                 Some(&profile),
             );
-        let (calls, _) = apply_profile_with(
+        let (calls, _, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::ClaudeCodeAcp,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp),
             Some("code-reviewer"),
@@ -2815,6 +2991,9 @@ mod profile_override_tests {
                 },
             ]
         );
+        assert_eq!(resolved.profile.as_deref(), Some("code-reviewer"));
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
 
         let (model, effort) =
             crate::orchestrator::delegation::execute::resolve_effective_model_effort(
@@ -2822,7 +3001,7 @@ mod profile_override_tests {
                 None,
                 Some(&profile),
             );
-        let (calls, _) = apply_profile_with(
+        let (calls, _, resolved) = apply_profile_with(
             spur_acp::types::AgentKind::ClaudeCodeAcp,
             spur_acp::ProfileStrategy::for_kind(spur_acp::types::AgentKind::ClaudeCodeAcp),
             Some("code-reviewer"),
@@ -2849,6 +3028,10 @@ mod profile_override_tests {
                 },
             ]
         );
+        // Request-time model wins over the profile default; effort still
+        // falls back to the profile default since no request effort was given.
+        assert_eq!(resolved.model.as_deref(), Some("sonnet"));
+        assert_eq!(resolved.effort.as_deref(), Some("high"));
     }
 
     #[tokio::test]

@@ -3385,6 +3385,7 @@ pub(crate) async fn push_plan_completed_continuation(
 ) {
     let delegation_id = plan_completed_artifact_delegation_id(plan_id);
     let result = DelegationResult {
+        resolved_config: None,
         status: DelegationStatus::Success,
         diff: None,
         diff_summary: None,
@@ -3421,6 +3422,7 @@ pub(crate) async fn push_loop_due_continuation(
         format!("{{\"error\":\"template serialization failed: {error}\"}}")
     });
     let result = DelegationResult {
+        resolved_config: None,
         status: DelegationStatus::Success,
         diff: None,
         diff_summary: None,
@@ -3453,6 +3455,7 @@ pub(crate) async fn push_loop_escalation_continuation(
 ) {
     let delegation_id = loop_artifact_delegation_id("escalation", loop_id, consecutive_failures);
     let result = DelegationResult {
+        resolved_config: None,
         status: DelegationStatus::Failed {
             error: format!("loop auto-paused after {consecutive_failures} consecutive failures"),
         },
@@ -3488,6 +3491,7 @@ pub(crate) async fn push_loop_template_validation_escalation_continuation(
 ) {
     let delegation_id = loop_artifact_delegation_id("template-validation", loop_id, generation);
     let result = DelegationResult {
+        resolved_config: None,
         status: DelegationStatus::Failed {
             error: format!("loop auto-paused after template validation failed: {validation_error}"),
         },
@@ -7015,6 +7019,7 @@ mod tests {
             async move { notify.notified().await }
         });
         let result = spur_acp::DelegationResult {
+            resolved_config: None,
             status: spur_acp::DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -7259,6 +7264,7 @@ mod tests {
             },
         };
         let result = spur_acp::DelegationResult {
+            resolved_config: None,
             status: spur_acp::DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -8317,6 +8323,7 @@ mod tests {
     #[test]
     fn build_task_diff_fields_emits_marker_when_diff_none() {
         let result = spur_acp::DelegationResult {
+            resolved_config: None,
             diff: None,
             diff_summary: None,
             summary: Some("did work".to_string()),
@@ -8348,6 +8355,7 @@ mod tests {
     #[test]
     fn build_task_diff_fields_emits_diff_when_present() {
         let result = spur_acp::DelegationResult {
+            resolved_config: None,
             diff: Some("diff --git a/x b/x\n...".to_string()),
             diff_summary: None,
             summary: None,
@@ -8372,6 +8380,7 @@ mod tests {
         use spur_acp::{ArtifactKind, DelegationResult, DelegationStatus, WorkerArtifact};
 
         let result = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -8401,6 +8410,7 @@ mod tests {
         use spur_acp::{DelegationResult, DelegationStatus};
 
         let result = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -8552,6 +8562,7 @@ mod tests {
         );
         approved.worker_branch = Some("spur/worker-approved".into());
         approved.result = Some(DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: Some(spur_acp::DiffSummary {
@@ -8998,6 +9009,7 @@ mod tests {
             async move { notify.notified().await }
         });
         let result = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -9433,6 +9445,7 @@ mod tests {
         let delegation_label = crate::plan::labels::delegation_id("del-A");
         let pm = CompletionWritebackPm::new(vec![delegation_label]);
         let result = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Failed {
                 error: "worker crashed".to_string(),
             },

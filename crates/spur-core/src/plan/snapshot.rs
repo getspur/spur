@@ -409,6 +409,7 @@ mod tests {
         );
         superseded.worker_branch = Some("spur/worker-old".into());
         superseded.result = Some(DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: Some(DiffSummary {
