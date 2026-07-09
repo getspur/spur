@@ -52,6 +52,93 @@ async fn send_html_to_thread_retries_on_429_after_pause() {
 }
 
 #[tokio::test]
+async fn send_rich_html_to_thread_falls_back_to_html_send_on_400() {
+    let (result, requests, paused_now) = send_rich_response_sequence_and_capture(vec![
+        (
+            "400 Bad Request",
+            telegram_error_body(400, "Bad Request: can't parse rich message"),
+        ),
+        ("200 OK", telegram_message_body(778, "<b>hello</b>")),
+    ])
+    .await;
+
+    result.expect("rich 400 should fall back to sendMessage HTML");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].contains("sendRichMessage"));
+    assert!(requests[0].contains("\"rich_message\":{\"html\":\"<b>broken\"}"));
+    assert!(requests[1].contains("sendMessage"));
+    assert!(requests[1].contains("\"parse_mode\":\"HTML\""));
+    assert!(requests[1].contains("\"text\":\"<b>broken\""));
+    assert!(!paused_now, "plain 400 should not activate client pause");
+}
+
+#[tokio::test]
+async fn send_rich_html_to_thread_retries_on_429_after_pause() {
+    let (result, requests, _) = send_rich_response_sequence_and_capture(vec![
+        ("429 Too Many Requests", telegram_retry_after_body(0)),
+        ("200 OK", telegram_message_body(779, "<b>hello</b>")),
+    ])
+    .await;
+
+    result.expect("429 retry should resend the same rich request and succeed");
+    assert_eq!(
+        requests.len(),
+        2,
+        "429 should retry the same rich send once"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.contains("sendRichMessage")),
+        "429 retry must not switch methods: {requests:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.contains("\"rich_message\":{\"html\":\"<b>broken\"}")),
+        "429 retry must resend the rich payload: {requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn send_rich_html_to_thread_propagates_429_after_3_retries() {
+    let (result, requests, paused_now) = send_rich_response_sequence_and_capture(vec![
+        ("429 Too Many Requests", telegram_retry_after_body(0)),
+        ("429 Too Many Requests", telegram_retry_after_body(0)),
+        ("429 Too Many Requests", telegram_retry_after_body(0)),
+    ])
+    .await;
+
+    assert_api_error(result, 429, "Too Many Requests: retry after 0");
+    assert_eq!(
+        requests.len(),
+        3,
+        "429 should stop after three total rich send attempts"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.contains("sendRichMessage")),
+        "429 retry must not switch to sendMessage fallback: {requests:?}"
+    );
+    assert!(paused_now, "retry_after 429 should activate client pause");
+}
+
+#[tokio::test]
+async fn send_rich_html_to_thread_does_not_fallback_on_403() {
+    let (result, requests, paused_now) = send_rich_response_sequence_and_capture(vec![(
+        "403 Forbidden",
+        telegram_error_body(403, "Forbidden: bot was blocked by the user"),
+    )])
+    .await;
+
+    assert_api_error(result, 403, "Forbidden: bot was blocked by the user");
+    assert_eq!(requests.len(), 1, "403 must not retry as sendMessage");
+    assert!(requests[0].contains("sendRichMessage"));
+    assert!(!paused_now, "403 should not activate client pause");
+}
+
+#[tokio::test]
 async fn send_html_to_thread_propagates_429_after_3_retries() {
     let (result, requests, paused_now) = send_html_response_sequence_and_capture(vec![
         ("429 Too Many Requests", telegram_retry_after_body(0)),
@@ -319,6 +406,49 @@ async fn send_html_response_sequence_and_capture(
 
     let result = client
         .send_html_to_thread(42, None, "<b>broken".into(), "plain fallback".into())
+        .await;
+
+    let paused_now = client.is_paused(Instant::now());
+    let requests = request_rx.await.expect("server should capture requests");
+    (result, requests, paused_now)
+}
+
+async fn send_rich_response_sequence_and_capture(
+    responses: Vec<(&'static str, String)>,
+) -> (anyhow::Result<()>, Vec<String>, bool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind telegram test listener");
+    let addr = listener.local_addr().expect("listener local addr");
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let _server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+
+        for (index, (status, body)) in responses.into_iter().enumerate() {
+            let accepted = if index == 0 {
+                Some(listener.accept().await.expect("accept request"))
+            } else {
+                timeout(Duration::from_secs(1), listener.accept())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            };
+            let Some((mut stream, _)) = accepted else {
+                break;
+            };
+            requests
+                .push(String::from_utf8_lossy(&read_http_request(&mut stream).await).into_owned());
+            write_response(&mut stream, status, &body).await;
+        }
+
+        let _ = request_tx.send(requests);
+    });
+
+    let client = TelegramClient::new_with_url(format!("http://{addr}/"), Duration::from_secs(1))
+        .expect("client with custom api url should build");
+
+    let result = client
+        .send_rich_html_to_thread(42, None, "<b>broken".into(), "plain fallback".into())
         .await;
 
     let paused_now = client.is_paused(Instant::now());
