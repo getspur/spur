@@ -17,3 +17,19 @@ fn plain_text_stays_plain_text() {
         ParsedChatInput::PlainText("investigate review loop".into())
     );
 }
+
+#[test]
+fn plain_text_preserves_leading_and_trailing_whitespace() {
+    assert_eq!(
+        parse_chat_input("  hello world  "),
+        ParsedChatInput::PlainText("  hello world  ".into())
+    );
+}
+
+#[test]
+fn command_matching_tolerates_surrounding_whitespace() {
+    assert_eq!(
+        parse_chat_input("  /new  "),
+        ParsedChatInput::Command(BotCommand::New)
+    );
+}

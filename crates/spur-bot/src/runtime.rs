@@ -8,6 +8,8 @@ use crate::state::{
 };
 use crate::telegram::format::{split_for_final_answer, TELEGRAM_TEXT_MAX_UTF16_UNITS};
 
+const OUTPUT_BUFFER_MAX_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptButton {
     pub token: String,
@@ -352,8 +354,10 @@ impl BotRuntime {
         message_thread_id: Option<i32>,
         text: &str,
     ) -> anyhow::Result<Vec<RuntimeRender>> {
-        self.persisted.operator_chat_id = Some(chat_id);
-        self.state_store.save(&self.persistable_state()).await?;
+        if self.persisted.operator_chat_id != Some(chat_id) {
+            self.persisted.operator_chat_id = Some(chat_id);
+            self.state_store.save(&self.persistable_state()).await?;
+        }
 
         let key = ThreadKey {
             chat_id,
@@ -654,7 +658,18 @@ impl BotRuntime {
 
                     let full_buffered_text = {
                         let buffer = self.output_buffers.entry(session.clone()).or_default();
-                        buffer.push_str(&text);
+                        if buffer.len() < OUTPUT_BUFFER_MAX_BYTES {
+                            let remaining = OUTPUT_BUFFER_MAX_BYTES - buffer.len();
+                            if text.len() <= remaining {
+                                buffer.push_str(&text);
+                            } else {
+                                let mut cut = remaining;
+                                while !text.is_char_boundary(cut) {
+                                    cut -= 1;
+                                }
+                                buffer.push_str(&text[..cut]);
+                            }
+                        }
                         buffer.clone()
                     };
                     let turn_seq = self.turn_seqs.get(&session).copied().unwrap_or(1);
@@ -836,6 +851,35 @@ impl BotRuntime {
         self.session_threads.insert(session, key.clone());
     }
 
+    fn clear_prompt_group(&mut self, kind: &PromptKind, except_token: &str) {
+        let group = match kind {
+            PromptKind::Review {
+                executor_id,
+                attempt_n,
+                ..
+            } => PromptGroup::Review {
+                executor_id: executor_id.clone(),
+                attempt_n: *attempt_n,
+            },
+            PromptKind::Permission { prompt_id, .. } => PromptGroup::Permission {
+                prompt_id: prompt_id.clone(),
+            },
+        };
+        if let Some(siblings) = self.prompt_groups.remove(&group) {
+            for sibling in siblings {
+                if sibling != except_token {
+                    self.prompts.remove(&sibling);
+                }
+            }
+        }
+    }
+
+    fn drop_permission_reply(&mut self, kind: &PromptKind) {
+        if let PromptKind::Permission { prompt_id, .. } = kind {
+            self.permission_reply_txs.remove(prompt_id);
+        }
+    }
+
     /// Send any input that was queued while waiting for a persisted session to
     /// restore. Call this after `handle_spur_event` whenever the binding may
     /// have transitioned to `Active`.
@@ -924,6 +968,8 @@ impl BotRuntime {
         };
 
         if &prompt.thread_key != thread_key {
+            self.clear_prompt_group(&prompt.kind, token);
+            self.drop_permission_reply(&prompt.kind);
             return Ok(vec![RuntimeRender::AnswerCallback {
                 query_id: query_id.into(),
                 text: "This action expired after restart.".into(),
@@ -945,54 +991,15 @@ impl BotRuntime {
             None => (false, None),
         };
         if is_archived || prompt.live_session != current_live {
-            // Also clear prompt-group siblings so that Approve/Reject/Retry
-            // triplet doesn't leave orphan tokens behind.
-            let group = match &prompt.kind {
-                PromptKind::Review {
-                    executor_id,
-                    attempt_n,
-                    ..
-                } => PromptGroup::Review {
-                    executor_id: executor_id.clone(),
-                    attempt_n: *attempt_n,
-                },
-                PromptKind::Permission { prompt_id, .. } => PromptGroup::Permission {
-                    prompt_id: prompt_id.clone(),
-                },
-            };
-            if let Some(siblings) = self.prompt_groups.remove(&group) {
-                for sibling in siblings {
-                    if sibling != token {
-                        self.prompts.remove(&sibling);
-                    }
-                }
-            }
+            self.clear_prompt_group(&prompt.kind, token);
+            self.drop_permission_reply(&prompt.kind);
             return Ok(vec![RuntimeRender::AnswerCallback {
                 query_id: query_id.into(),
                 text: "This action expired after restart.".into(),
             }]);
         }
 
-        let group = match &prompt.kind {
-            PromptKind::Review {
-                executor_id,
-                attempt_n,
-                ..
-            } => PromptGroup::Review {
-                executor_id: executor_id.clone(),
-                attempt_n: *attempt_n,
-            },
-            PromptKind::Permission { prompt_id, .. } => PromptGroup::Permission {
-                prompt_id: prompt_id.clone(),
-            },
-        };
-        if let Some(siblings) = self.prompt_groups.remove(&group) {
-            for sibling in siblings {
-                if sibling != token {
-                    self.prompts.remove(&sibling);
-                }
-            }
-        }
+        self.clear_prompt_group(&prompt.kind, token);
 
         match prompt.kind {
             PromptKind::Review {
