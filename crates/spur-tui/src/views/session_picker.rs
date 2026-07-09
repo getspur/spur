@@ -49,7 +49,7 @@ fn footer_hint(state: &PickerState, rename_active: bool, confirm_active: bool) -
             ..
         } => "j/k nav \u{00b7} Enter new session \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back",
         PickerState::Populated { .. } => {
-            "j/k nav \u{00b7} Enter resume \u{00b7} n new \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back"
+            "j/k nav \u{00b7} Enter resume \u{00b7} n new \u{00b7} / search \u{00b7} ? more \u{00b7} Esc back \u{00b7} r refresh"
         }
     }
 }
@@ -78,7 +78,7 @@ fn footer_hint_compact(
             ..
         } => "j/k \u{00b7} \u{21b5} new \u{00b7} / \u{00b7} ? more \u{00b7} Esc",
         PickerState::Populated { .. } => {
-            "j/k \u{00b7} \u{21b5} resume \u{00b7} / \u{00b7} ? more \u{00b7} Esc"
+            "j/k \u{00b7} \u{21b5} resume \u{00b7} / \u{00b7} ? more \u{00b7} Esc \u{00b7} r refresh"
         }
     }
 }
@@ -104,7 +104,7 @@ fn render_help_overlay(frame: &mut Frame, list_area: Rect, theme: &Theme) {
     let rows: &[&str] = &[
         "R rename      \u{00b7}  p pin",
         "x archive     \u{00b7}  a show archived",
-        "d archive (legacy)",
+        "r refresh",
         "y yank id     \u{00b7}  P toggle preview",
     ];
 
@@ -1397,7 +1397,7 @@ impl SessionPickerView {
                 ConfirmSwitchTarget::NewSession => "start a new session".to_string(),
             };
             let prompt = format!(
-                "Session \"{current}\" has an unsent draft — save and {action_desc}? [y/N]"
+                "Session \"{current}\" has an unsent draft — save and {action_desc}? [y/n]"
             );
             frame.render_widget(
                 Paragraph::new(Span::styled(

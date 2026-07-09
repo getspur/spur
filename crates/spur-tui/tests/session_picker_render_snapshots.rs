@@ -135,7 +135,7 @@ fn populated_single_brain_no_filter() {
         "",
         "",
         "",
-        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc                        \u{25b6}0 R0 $0.00 0m 00s spur",
+        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc \u{b7} r refresh            \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -315,7 +315,7 @@ fn populated_multi_brain_no_filter() {
         "",
         "",
         "",
-        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc                        \u{25b6}0 R0 $0.00 0m 00s spur",
+        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc \u{b7} r refresh            \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
@@ -488,7 +488,7 @@ fn populated_with_confirm_switch() {
         "",
         "",
         "",
-        "Session \"a1\" has an unsent draft \u{2014} save and resume a2xxxxxx? [y/N]",
+        "Session \"a1\" has an unsent draft \u{2014} save and resume a2xxxxxx? [y/n]",
         "y/Enter confirm \u{b7} n/Esc cancel",
     ];
     assert_render(&mut picker, expected);
@@ -531,7 +531,7 @@ fn populated_with_preview_visible() {
         "",
         "",
         "",
-        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc                        \u{25b6}0 R0 $0.00 0m 00s spur",
+        "j/k \u{b7} \u{21b5} resume \u{b7} / \u{b7} ? more \u{b7} Esc \u{b7} r refresh            \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
 }
