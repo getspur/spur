@@ -108,9 +108,17 @@ fn strip_provider_prefix(s: &str) -> &str {
     s.split_once('/').map_or(s, |(_, rest)| rest)
 }
 
-// TODO(TDD red phase): placeholder pending the real implementation.
+/// Collapse a `.spur/worktrees/<id>` (or nested `worktrees/preview|staging/<id>`)
+/// suffix so a worker session's checkout attributes to its origin repo,
+/// matching the convention in `spur-worktree`/`spur-core::project_root`.
 #[cfg(feature = "duckdb")]
 fn strip_spur_worktree_suffix(path: &Path) -> PathBuf {
+    let components: Vec<_> = path.components().collect();
+    for i in 0..components.len().saturating_sub(1) {
+        if components[i].as_os_str() == ".spur" && components[i + 1].as_os_str() == "worktrees" {
+            return components[..i].iter().collect();
+        }
+    }
     path.to_path_buf()
 }
 
@@ -726,7 +734,13 @@ impl AnalyticsEngine {
                     json_extract_string(line, '$.sessionId') AS session_id,
                     'claude' AS agent,
                     NULLIF(json_extract_string(line, '$.message.model'), '<synthetic>') AS model,
-                    NULLIF(regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1), '') AS project,
+                    NULLIF(
+                        regexp_replace(
+                            regexp_extract(filename, '.*/projects/([^/]+)/.*[.]jsonl$', 1),
+                            '--spur-worktrees-.*$', ''
+                        ),
+                        ''
+                    ) AS project,
                     TRY_CAST(json_extract(line, '$.message.usage.input_tokens') AS BIGINT) AS input_tokens,
                     TRY_CAST(json_extract(line, '$.message.usage.output_tokens') AS BIGINT) AS output_tokens,
                     TRY_CAST(json_extract(line, '$.message.usage.cache_read_input_tokens') AS BIGINT) AS cache_read_tokens,
@@ -1350,7 +1364,7 @@ impl AnalyticsEngine {
                 .and_then(|v| v.as_str())
                 .map(|s| strip_provider_prefix(s).to_owned());
             let cost = data.get("cost").and_then(|v| v.as_f64());
-            let project = std::path::Path::new(&worktree)
+            let project = strip_spur_worktree_suffix(std::path::Path::new(&worktree))
                 .file_name()
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_owned());
