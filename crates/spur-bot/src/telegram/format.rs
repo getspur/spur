@@ -230,11 +230,10 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 escaped_text_units(text)
             }
             Event::Code(code) => 13 + escaped_text_units(code),
-            Event::InlineMath(math) | Event::DisplayMath(math) => escaped_text_units(math),
             Event::SoftBreak | Event::HardBreak => 1,
             Event::Rule => 5,
-            Event::FootnoteReference(label) => escaped_text_units(label) + 2,
             Event::TaskListMarker(_) => 4,
+            _ => 0,
         }
     }
 
@@ -284,13 +283,10 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
                 self.ensure_blank_line();
                 self.push_text_literal("───\n\n");
             }
-            Event::FootnoteReference(label) => self.push_escaped_text_budgeted(&label),
             Event::TaskListMarker(checked) => {
                 self.push_text_literal(if checked { "[x] " } else { "[ ] " });
             }
-            Event::InlineMath(math) | Event::DisplayMath(math) => {
-                self.push_escaped_text_budgeted(&math);
-            }
+            _ => {}
         }
     }
 
@@ -731,7 +727,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
         let html = chunk_text(&self.state.current_html);
         let plain = plain_chunk_text(&self.state.current_plain, &self.state.plain_code_ranges);
-        if !html.is_empty() || !plain.is_empty() {
+        if html_has_visible_text(&html) {
             self.chunks.push(Chunk { html, plain });
         }
 
@@ -798,7 +794,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
 
         let html = chunk_text(&self.state.current_html);
         let plain = plain_chunk_text(&self.state.current_plain, &self.state.plain_code_ranges);
-        if !html.is_empty() || !plain.is_empty() {
+        if html_has_visible_text(&html) {
             self.chunks.push(Chunk { html, plain });
         }
     }
@@ -809,18 +805,15 @@ impl<'a, I: Iterator<Item = Event<'a>>> ChunkedHtmlRenderer<'a, I> {
             Event::End(_) => {
                 self.state.suppressed_depth = self.state.suppressed_depth.saturating_sub(1);
             }
-            Event::Text(text)
-            | Event::Code(text)
-            | Event::Html(text)
-            | Event::InlineHtml(text)
-            | Event::InlineMath(text)
-            | Event::DisplayMath(text) => self.push_escaped_text_budgeted(&text),
+            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                self.push_escaped_text_budgeted(&text)
+            }
             Event::SoftBreak | Event::HardBreak => self.push_text_literal("\n"),
             Event::Rule => self.push_text_literal("───\n\n"),
-            Event::FootnoteReference(label) => self.push_escaped_text_budgeted(&label),
             Event::TaskListMarker(checked) => {
                 self.push_text_literal(if checked { "[x] " } else { "[ ] " });
             }
+            _ => {}
         }
     }
 
@@ -965,18 +958,13 @@ fn render_table_row(events: &[Event<'_>]) -> RenderedTableRow {
                 html.push('\n');
                 plain.push('\n');
             }
-            Event::FootnoteReference(label)
-            | Event::InlineMath(label)
-            | Event::DisplayMath(label) => {
-                push_escaped_text(&mut html, label);
-                plain.push_str(label);
-            }
             Event::TaskListMarker(checked) => {
                 let marker = if *checked { "[x] " } else { "[ ] " };
                 html.push_str(marker);
                 plain.push_str(marker);
             }
             Event::Rule | Event::Start(_) | Event::End(_) => {}
+            _ => {}
         }
     }
 
@@ -1157,6 +1145,22 @@ fn escaped_attr_units(text: &str) -> usize {
 
 fn chunk_text(text: &str) -> String {
     text.trim_end_matches('\n').to_string()
+}
+
+fn html_has_visible_text(html: &str) -> bool {
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ => {
+                if !in_tag && !c.is_whitespace() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn plain_chunk_text(text: &str, code_ranges: &[Range<usize>]) -> String {
@@ -1549,14 +1553,9 @@ mod tests {
 
     #[test]
     fn flush_chunk_closes_and_reopens_block_contexts() {
-        // BUG: flushing an open blockquote emits empty reopened blockquote chunks.
         assert_eq!(
             render_with_budget("> alpha beta gamma delta", 56),
             vec![
-                Chunk {
-                    html: "<blockquote></blockquote>".to_string(),
-                    plain: String::new(),
-                },
                 Chunk {
                     html: "<blockquote>alpha beta </blockquote>".to_string(),
                     plain: "alpha beta ".to_string(),
@@ -1564,14 +1563,6 @@ mod tests {
                 Chunk {
                     html: "<blockquote>gamma delta</blockquote>".to_string(),
                     plain: "gamma delta".to_string(),
-                },
-                Chunk {
-                    html: "<blockquote>\n\n</blockquote>".to_string(),
-                    plain: String::new(),
-                },
-                Chunk {
-                    html: "<blockquote></blockquote>".to_string(),
-                    plain: String::new(),
                 },
             ]
         );
