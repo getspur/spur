@@ -2548,6 +2548,42 @@ mod tests {
     }
 
     #[test]
+    fn create_claude_view_handles_oversized_transcript_lines() {
+        let tmp = TempDir::new().unwrap();
+        let claude_root = tmp.path().join("claude");
+        let claude_dir = claude_root.join("projects/spur");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        // Real Claude Code transcripts can embed a large tool result
+        // (e.g. a notebook dump) directly in one line. DuckDB's
+        // read_csv_auto has a hard max_line_size (default 2MB) that
+        // ignore_errors=true does NOT cover — it aborts the whole scan,
+        // which used to silently stub out claude_events entirely.
+        let padding = "x".repeat(3_000_000);
+        let jsonl_path = claude_dir.join("session.jsonl");
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","timestamp":"2026-04-23T10:00:00Z","sessionId":"sess-1","message":{{"usage":{{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}},"model":"claude-sonnet-4","id":"msg_1","padding":"{padding}"}},"requestId":"req_1"}}"#
+        )
+        .unwrap();
+
+        let engine = setup_engine();
+        engine
+            .create_claude_view(&claude_root)
+            .expect("create_claude_view should not fail on an oversized transcript line");
+
+        let count: i64 = engine
+            .conn
+            .query_row("SELECT COUNT(*) FROM claude_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "the oversized-line session should still be ingested"
+        );
+    }
+
+    #[test]
     fn test_codex_events_delta_logic() {
         let tmp = TempDir::new().unwrap();
         let codex_root = tmp.path().join("codex");
