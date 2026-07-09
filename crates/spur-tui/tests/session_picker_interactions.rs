@@ -782,6 +782,10 @@ fn populated_footer_hint_changes_on_new_row_cursor() {
         }
         row.trim_end().to_string()
     };
+    assert!(
+        before.contains("r refresh"),
+        "session-row footer hint must advertise refresh; got: {before}"
+    );
 
     let _ = picker.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &test_ctx());
     assert_eq!(picker.cursor(), 0);
@@ -803,6 +807,10 @@ fn populated_footer_hint_changes_on_new_row_cursor() {
     };
 
     assert_ne!(before, after);
+    assert!(
+        !after.contains("r refresh"),
+        "new-session-row footer hint must not use the list-mode refresh hint; got: {after}"
+    );
 }
 
 // ── Help overlay interaction tests ───────────────────────────────────────────
@@ -960,6 +968,14 @@ fn help_overlay_renders_box_over_list_area() {
     assert!(
         full_text.contains("archive"),
         "overlay must contain 'archive' binding; got:\n{full_text}"
+    );
+    assert!(
+        full_text.contains("r refresh"),
+        "overlay must contain 'r refresh' binding; got:\n{full_text}"
+    );
+    assert!(
+        !full_text.contains("d archive") && !full_text.contains("legacy"),
+        "overlay must not expose legacy d archive binding; got:\n{full_text}"
     );
     assert!(
         full_text.contains("yank id"),
