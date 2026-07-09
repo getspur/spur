@@ -198,12 +198,7 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
     let conn = Connection::open_in_memory().context("failed to open in-memory DuckDB")?;
     let phase_started = Instant::now();
     load_ducklake_extensions(&conn, &catalog_dsn, &data_path)?;
-    attach_ducklake(&conn, &catalog_dsn, &data_path)?;
-    log_translate_phase_timing("load_ducklake_extensions+attach_ducklake", phase_started);
-
-    let phase_started = Instant::now();
-    ensure_catalog_schema(&conn)?;
-    log_translate_phase_timing("ensure_catalog_schema", phase_started);
+    log_translate_phase_timing("load_ducklake_extensions", phase_started);
 
     let phase_started = Instant::now();
     let prepared_lance = prepare_lance_sidecar_extensions(&conn, opts)?;
@@ -211,15 +206,20 @@ pub fn translate_artifact_to_ducklake(opts: &TranslateOptions) -> Result<Transla
 
     let phase_started = Instant::now();
     let postgres_metadata = attach_postgres_metadata_catalog(&conn, &catalog_dsn)?;
-    log_translate_phase_timing("attach_postgres_metadata_catalog", phase_started);
+    acquire_postgres_gold_publish_lock(&conn, postgres_metadata.as_ref())?;
+    log_translate_phase_timing(
+        "attach_postgres_metadata_catalog+acquire_postgres_gold_publish_lock",
+        phase_started,
+    );
 
     let phase_started = Instant::now();
-    acquire_postgres_gold_publish_lock(&conn, postgres_metadata.as_ref())?;
+    attach_ducklake(&conn, &catalog_dsn, &data_path)?;
+    ensure_catalog_schema(&conn)?;
+    log_translate_phase_timing("attach_ducklake+ensure_catalog_schema", phase_started);
+
+    let phase_started = Instant::now();
     let generation = next_generation(&conn, &catalog_dsn, postgres_metadata.as_ref())?;
-    emit_translate_phase_timing(
-        "acquire_postgres_gold_publish_lock+next_generation",
-        phase_started.elapsed(),
-    );
+    log_translate_phase_timing("next_generation", phase_started);
 
     // Keep generation-scoped writes and the metadata publish/checkpoint/export
     // under the Postgres session advisory lock. Rows are generation-stamped, but
@@ -2331,18 +2331,21 @@ mod tests {
     }
 
     #[test]
-    fn postgres_publish_lock_boundary_excludes_schema_and_lance_prepare() {
+    fn postgres_publish_lock_boundary_includes_ducklake_attach_and_schema() {
         let body = translate_artifact_to_ducklake_source();
 
-        let attach = body
+        let attach_postgres_metadata = body
             .find("attach_postgres_metadata_catalog(&conn, &catalog_dsn)?")
             .expect("translate must attach the Postgres metadata catalog once");
-        let ensure_schema = body
-            .find("ensure_catalog_schema(&conn)?")
-            .expect("translate must ensure the catalog schema");
         let prepare_lance = body
             .find("prepare_lance_sidecar_extensions(&conn, opts)?")
             .expect("translate must prepare Lance extensions before publishing");
+        let attach_ducklake = body
+            .find("attach_ducklake(&conn, &catalog_dsn, &data_path)?")
+            .expect("translate must attach the DuckLake catalog");
+        let ensure_schema = body
+            .find("ensure_catalog_schema(&conn)?")
+            .expect("translate must ensure the catalog schema");
         let acquire_lock = body
             .find("acquire_postgres_gold_publish_lock(&conn, postgres_metadata.as_ref())?")
             .expect("translate must acquire the Postgres publish lock");
@@ -2351,16 +2354,24 @@ mod tests {
             .expect("translate must reserve a gold generation");
 
         assert!(
-            attach < acquire_lock,
+            attach_postgres_metadata < acquire_lock,
             "Postgres metadata ATTACH must happen before lock acquisition"
-        );
-        assert!(
-            ensure_schema < acquire_lock,
-            "catalog schema DDL must run outside the Postgres publish lock"
         );
         assert!(
             prepare_lance < acquire_lock,
             "Lance extension INSTALL/LOAD must run outside the Postgres publish lock"
+        );
+        assert!(
+            acquire_lock < attach_ducklake,
+            "DuckLake ATTACH must run inside the Postgres publish lock"
+        );
+        assert!(
+            attach_ducklake < ensure_schema,
+            "catalog schema DDL must run after DuckLake ATTACH"
+        );
+        assert!(
+            acquire_lock < ensure_schema,
+            "catalog schema DDL must run inside the Postgres publish lock"
         );
         assert!(
             acquire_lock < reserve_generation,
