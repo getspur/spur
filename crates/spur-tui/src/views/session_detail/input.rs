@@ -7,6 +7,13 @@ use crate::components::input_bar::ActivityKind;
 
 use super::{FocusedSessionPanel, SessionDetailView};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum KeyOwner {
+    Composer,
+    Picker,
+    View,
+}
+
 impl SessionDetailView {
     pub(super) fn handle_key_inner(&mut self, key: KeyEvent) -> Option<Action> {
         // ── macOS Option-key normalisation ─────────────────────────────
@@ -100,113 +107,7 @@ impl SessionDetailView {
         // ── Key ownership is decided from pre-key state ─────────────────
         // This replaces the former post-edit rescue block for j/k/g/G and
         // ensures picker-shell ownership runs before history prev/next.
-        enum KeyOwner {
-            Composer,
-            Picker,
-            View,
-        }
-
-        let owner = {
-            // Pending permission keys outrank even an open picker shell.
-            if self.react_trace.has_pending_permission()
-                && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'))
-            {
-                KeyOwner::View
-            } else if self.completion.is_active() {
-                let is_trigger_driven = self.completion.is_trigger_driven();
-                let shell_consumes = if is_trigger_driven {
-                    matches!(
-                        key.code,
-                        KeyCode::Up
-                            | KeyCode::Down
-                            | KeyCode::Esc
-                            | KeyCode::Tab
-                            | KeyCode::BackTab
-                            | KeyCode::Enter
-                    ) || ((key.code == KeyCode::Char('c')
-                        || key.code == KeyCode::Char('p')
-                        || key.code == KeyCode::Char('n'))
-                        && key.modifiers.contains(KeyModifiers::CONTROL))
-                } else {
-                    true
-                };
-                if shell_consumes {
-                    if self.input_bar.paste_burst_active() && matches!(key.code, KeyCode::Enter) {
-                        KeyOwner::Composer
-                    } else {
-                        KeyOwner::Picker
-                    }
-                } else {
-                    // Trigger-driven shell doesn't consume this editing key;
-                    // fall through to Composer so input_bar receives it and
-                    // dispatch_intent syncs the shell query.
-                    KeyOwner::Composer
-                }
-            } else {
-                // View-level shortcuts are never Composer-owned.
-                let is_view_shortcut = (matches!(key.code, KeyCode::Char('o' | 'r'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL))
-                    || (matches!(key.code, KeyCode::Char('v'))
-                        && key.modifiers.contains(KeyModifiers::ALT)
-                        && self.has_render_picker());
-                // Ctrl+P / Ctrl+N drive SessionDetail history when no picker owns them.
-                let is_history_nav = matches!(key.code, KeyCode::Char('p' | 'n'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL);
-                if is_view_shortcut || is_history_nav {
-                    KeyOwner::View
-                } else {
-                    // Pending permission keys are never Composer-owned.
-                    let is_permission_key = self.react_trace.has_pending_permission()
-                        && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'));
-                    let is_tab_owned_by_composer = !self.input_bar.is_empty()
-                        && matches!(key.code, KeyCode::Tab | KeyCode::BackTab);
-                    let is_composer_editing = (matches!(
-                        key.code,
-                        KeyCode::Char(_)
-                            | KeyCode::Backspace
-                            | KeyCode::Delete
-                            | KeyCode::Left
-                            | KeyCode::Right
-                            | KeyCode::Home
-                            | KeyCode::End
-                            | KeyCode::Enter
-                            | KeyCode::Up
-                            | KeyCode::Down
-                    ) || is_tab_owned_by_composer
-                        || (key.code == KeyCode::Esc && self.input_bar.wants_esc()))
-                        && !is_permission_key;
-
-                    if is_composer_editing {
-                        // Empty-bar nav chars (j/k/g/G) and Up/Down/Esc are
-                        // View-owned scroll/nav keys — no rescue block needed.
-                        if self.input_bar.is_empty()
-                            && (matches!(key.code, KeyCode::Char('j' | 'k' | 'g' | 'G'))
-                                || (matches!(key.code, KeyCode::Char('?'))
-                                    && key.modifiers.is_empty())
-                                || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Esc))
-                        {
-                            KeyOwner::View
-                        }
-                        // Vim Normal mode-entry keys (i/a/A/I/o/O) fall through
-                        // to Composer even when the bar is empty.
-                        else if self.input_bar.is_empty()
-                            && self.input_bar.is_vim_normal()
-                            && matches!(key.code, KeyCode::Char('i' | 'a' | 'A' | 'I' | 'o' | 'O'))
-                        {
-                            KeyOwner::Composer
-                        }
-                        // Unrecognized Vim Normal chars are no-ops when empty.
-                        else if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
-                            KeyOwner::View
-                        } else {
-                            KeyOwner::Composer
-                        }
-                    } else {
-                        KeyOwner::View
-                    }
-                }
-            }
-        };
+        let owner = self.key_owner(&key);
 
         match owner {
             KeyOwner::Picker => self
@@ -476,6 +377,107 @@ impl SessionDetailView {
                 }
 
                 None
+            }
+        }
+    }
+
+    fn key_owner(&self, key: &KeyEvent) -> KeyOwner {
+        // Pending permission keys outrank even an open picker shell.
+        if self.react_trace.has_pending_permission()
+            && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'))
+        {
+            KeyOwner::View
+        } else if self.completion.is_active() {
+            let is_trigger_driven = self.completion.is_trigger_driven();
+            let shell_consumes = if is_trigger_driven {
+                matches!(
+                    key.code,
+                    KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Esc
+                        | KeyCode::Tab
+                        | KeyCode::BackTab
+                        | KeyCode::Enter
+                ) || ((key.code == KeyCode::Char('c')
+                    || key.code == KeyCode::Char('p')
+                    || key.code == KeyCode::Char('n'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+            } else {
+                true
+            };
+            if shell_consumes {
+                if self.input_bar.paste_burst_active() && matches!(key.code, KeyCode::Enter) {
+                    KeyOwner::Composer
+                } else {
+                    KeyOwner::Picker
+                }
+            } else {
+                // Trigger-driven shell doesn't consume this editing key;
+                // fall through to Composer so input_bar receives it and
+                // dispatch_intent syncs the shell query.
+                KeyOwner::Composer
+            }
+        } else {
+            // View-level shortcuts are never Composer-owned.
+            let is_view_shortcut = (matches!(key.code, KeyCode::Char('o' | 'r'))
+                && key.modifiers.contains(KeyModifiers::CONTROL))
+                || (matches!(key.code, KeyCode::Char('v'))
+                    && key.modifiers.contains(KeyModifiers::ALT)
+                    && self.has_render_picker());
+            // Ctrl+P / Ctrl+N drive SessionDetail history when no picker owns them.
+            let is_history_nav = matches!(key.code, KeyCode::Char('p' | 'n'))
+                && key.modifiers.contains(KeyModifiers::CONTROL);
+            if is_view_shortcut || is_history_nav {
+                KeyOwner::View
+            } else {
+                // Pending permission keys are never Composer-owned.
+                let is_permission_key = self.react_trace.has_pending_permission()
+                    && matches!(key.code, KeyCode::Char('y' | 'n' | 'a'));
+                let is_tab_owned_by_composer = !self.input_bar.is_empty()
+                    && matches!(key.code, KeyCode::Tab | KeyCode::BackTab);
+                let is_composer_editing = (matches!(
+                    key.code,
+                    KeyCode::Char(_)
+                        | KeyCode::Backspace
+                        | KeyCode::Delete
+                        | KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::Home
+                        | KeyCode::End
+                        | KeyCode::Enter
+                        | KeyCode::Up
+                        | KeyCode::Down
+                ) || is_tab_owned_by_composer
+                    || (key.code == KeyCode::Esc && self.input_bar.wants_esc()))
+                    && !is_permission_key;
+
+                if is_composer_editing {
+                    // Empty-bar nav chars (j/k/g/G) and Up/Down/Esc are
+                    // View-owned scroll/nav keys — no rescue block needed.
+                    if self.input_bar.is_empty()
+                        && (matches!(key.code, KeyCode::Char('j' | 'k' | 'g' | 'G'))
+                            || (matches!(key.code, KeyCode::Char('?')) && key.modifiers.is_empty())
+                            || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Esc))
+                    {
+                        KeyOwner::View
+                    }
+                    // Vim Normal mode-entry keys (i/a/A/I/o/O) fall through
+                    // to Composer even when the bar is empty.
+                    else if self.input_bar.is_empty()
+                        && self.input_bar.is_vim_normal()
+                        && matches!(key.code, KeyCode::Char('i' | 'a' | 'A' | 'I' | 'o' | 'O'))
+                    {
+                        KeyOwner::Composer
+                    }
+                    // Unrecognized Vim Normal chars are no-ops when empty.
+                    else if self.input_bar.is_empty() && self.input_bar.is_vim_normal() {
+                        KeyOwner::View
+                    } else {
+                        KeyOwner::Composer
+                    }
+                } else {
+                    KeyOwner::View
+                }
             }
         }
     }
