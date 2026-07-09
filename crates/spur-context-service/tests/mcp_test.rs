@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Mutex,
+    Mutex, MutexGuard,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,6 +34,35 @@ const GIT_SOURCE: &str = "git:github.com/example/demo";
 const DIMENSIONS: usize = 768;
 const EMBEDDING_MODEL: &str = "EmbeddingGemma300M";
 const EMBED_TEXT_VERSION: &str = "v4-embeddinggemma-300m-titled";
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self {
+            name,
+            previous,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
 
 #[test]
 fn tool_definitions_match_external_context_surface() {
@@ -1262,12 +1291,12 @@ async fn external_index_creates_job_starts_execution_and_records_arn() -> Result
 }
 
 #[tokio::test]
-async fn external_index_rejects_second_active_job_by_default() -> Result<()> {
-    let fixture = McpFixture::new("index-default-sequential-cap")?;
+async fn external_index_allows_second_active_job_by_default() -> Result<()> {
+    let fixture = McpFixture::new("index-default-concurrent-cap")?;
     let jobs = FakeJobStore::default();
     let sfn = StubIndexExecutionStarter::default();
     jobs.seed_queued_job("arn:busy", |record| {
-        record.caller_id = "caller-sequential".to_owned();
+        record.caller_id = "caller-concurrent".to_owned();
         record.revision = "busy".to_owned();
     });
 
@@ -1282,9 +1311,43 @@ async fn external_index_rejects_second_active_job_by_default() -> Result<()> {
         &fixture.catalog,
         &jobs,
         &sfn,
-        "caller-sequential",
+        "caller-concurrent",
     )
     .await?;
+
+    assert_eq!(response["status"], "queued");
+    assert_eq!(response["job_id"], "job-2");
+    assert_eq!(response["execution_arn"], "arn:stub:job-2");
+    assert_eq!(sfn.started_count(), 1);
+    assert_eq!(jobs.job_count(), 2);
+    Ok(())
+}
+
+#[test]
+fn external_index_honors_concurrent_cap_override_of_one() -> Result<()> {
+    let _env = EnvVarGuard::set("SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER", "1");
+    let fixture = McpFixture::new("index-override-sequential-cap")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+    jobs.seed_queued_job("arn:busy", |record| {
+        record.caller_id = "caller-sequential".to_owned();
+        record.revision = "busy".to_owned();
+    });
+
+    let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let response = runtime.block_on(route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "new-work",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-sequential",
+    ))?;
 
     assert_eq!(response["status"], "rejected");
     assert_eq!(response["reason"], "concurrent_job_limit");
