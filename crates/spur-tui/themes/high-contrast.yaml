@@ -155,6 +155,11 @@ tokens:
   session_picker.row.muted.fg: fg_subtle
   session_picker.row.cursor.fg: accent
   session_picker.row.pinned.fg: warning
+  session_picker.row.draft.fg: highlight
+  session_picker.row.selected.bg: bg_selection
+  session_picker.preview.value.fg: fg
+  session_picker.preview.label.fg: fg_subtle
+  session_picker.preview.border.fg: fg_subtle
   session_picker.preview.draft.fg: warning
   session_picker.preview.intent.fg: fg_muted
   session_picker.preview.placeholder.fg: fg_subtle
