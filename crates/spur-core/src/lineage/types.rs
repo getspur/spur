@@ -173,6 +173,13 @@ pub struct ExecutorNode {
     /// Outbound peer-message edges projected from worker peer events.
     #[serde(default)]
     pub peer_edges: Vec<PeerEdge>,
+    /// Resolved `{agent, profile, model, effort, config_overrides}`
+    /// actually applied to this executor's worker session, projected from
+    /// `SpurEventBody::WorkerSessionConfigured`. `None` until that event
+    /// arrives (e.g. mid-dispatch), and for replay of pre-existing lineage
+    /// snapshots persisted before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_config: Option<spur_acp::domain::delegation::ResolvedSessionConfig>,
 }
 
 impl ExecutorNode {
@@ -293,6 +300,7 @@ mod attempt_elapsed_tests {
             error: None,
         };
         let node = ExecutorNode {
+            resolved_config: None,
             id: ExecutorId::new("e"),
             parent_id: None,
             child_ids: vec![],
@@ -351,6 +359,7 @@ mod attempt_elapsed_tests {
             error: None,
         };
         let node = ExecutorNode {
+            resolved_config: None,
             id: ExecutorId::new("e"),
             parent_id: None,
             child_ids: vec![],

@@ -926,3 +926,106 @@ fn plan_task_blocked_on_setup_conflict_roundtrips() {
     assert!(json.contains("PlanTaskBlockedOnSetupConflict"));
     assert!(json.contains("topology"));
 }
+
+#[test]
+fn worker_session_configured_roundtrips() {
+    use spur_acp::domain::delegation::ResolvedSessionConfig;
+    use std::collections::BTreeMap;
+
+    let mut config_overrides_applied = BTreeMap::new();
+    config_overrides_applied.insert("mode".to_string(), "plan".to_string());
+
+    let ev = SpurEvent::now(SpurEventBody::WorkerSessionConfigured {
+        brain_session_id: SessionId("brain-1".into()),
+        executor_id: "exec-1".into(),
+        config: ResolvedSessionConfig {
+            agent: "codex".into(),
+            profile: Some("rust-pro".into()),
+            model: Some("gpt-5-codex".into()),
+            effort: Some("high".into()),
+            config_overrides_applied,
+            skipped: vec![
+                "effort: agent exposed no thought-level option (requested 'high')".into(),
+            ],
+        },
+    });
+
+    let json = serde_json::to_string(&ev).unwrap();
+    let round: SpurEvent = serde_json::from_str(&json).unwrap();
+    match round.body {
+        SpurEventBody::WorkerSessionConfigured {
+            brain_session_id,
+            executor_id,
+            config,
+        } => {
+            assert_eq!(brain_session_id, SessionId("brain-1".into()));
+            assert_eq!(executor_id, "exec-1");
+            assert_eq!(config.agent, "codex");
+            assert_eq!(config.profile.as_deref(), Some("rust-pro"));
+            assert_eq!(config.model.as_deref(), Some("gpt-5-codex"));
+            assert_eq!(config.effort.as_deref(), Some("high"));
+            assert_eq!(
+                config
+                    .config_overrides_applied
+                    .get("mode")
+                    .map(String::as_str),
+                Some("plan")
+            );
+            assert_eq!(config.skipped.len(), 1);
+        }
+        other => panic!("expected WorkerSessionConfigured, got {other:?}"),
+    }
+    assert!(json.contains("WorkerSessionConfigured"));
+    assert!(json.contains("gpt-5-codex"));
+}
+
+#[test]
+fn worker_session_configured_defaults_are_compact_when_absent() {
+    // A resolved config with no profile/model/effort/overrides/skips should
+    // serialize its Option/collection fields away entirely (they're all
+    // `#[serde(default, skip_serializing_if = ...)]`), keeping the wire
+    // payload small for the common "nothing overridden" case.
+    use spur_acp::domain::delegation::ResolvedSessionConfig;
+
+    let ev = SpurEvent::now(SpurEventBody::WorkerSessionConfigured {
+        brain_session_id: SessionId("brain-1".into()),
+        executor_id: "exec-1".into(),
+        config: ResolvedSessionConfig {
+            agent: "claude-code".into(),
+            ..Default::default()
+        },
+    });
+
+    let value = serde_json::to_value(&ev).unwrap();
+    let config = &value["body"]["WorkerSessionConfigured"]["config"];
+    assert_eq!(config["agent"], serde_json::json!("claude-code"));
+    let obj = config.as_object().expect("config object");
+    assert!(!obj.contains_key("profile"));
+    assert!(!obj.contains_key("model"));
+    assert!(!obj.contains_key("effort"));
+    assert!(!obj.contains_key("config_overrides_applied"));
+    assert!(!obj.contains_key("skipped"));
+
+    let _round: SpurEvent = serde_json::from_value(value).expect("round-trip");
+}
+
+#[test]
+fn delegation_result_deserializes_without_resolved_config_for_backward_compat() {
+    // Pre-existing outcome artifacts persisted before `resolved_config`
+    // existed must still deserialize cleanly, with the field defaulting to
+    // `None` — this is the additive/optional backward-compat contract for
+    // `fetch_outcome_artifact` consumers reading older blobs.
+    use spur_acp::domain::DelegationResult;
+
+    let json = serde_json::json!({
+        "status": "Success",
+        "diff": null,
+        "summary": "done",
+        "estimated_cost_usd": 0.01,
+        "worker_branch": "spur/worker-x",
+    });
+
+    let result: DelegationResult =
+        serde_json::from_value(json).expect("pre-existing DelegationResult must deserialize");
+    assert!(result.resolved_config.is_none());
+}

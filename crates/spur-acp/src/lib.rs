@@ -118,8 +118,8 @@ pub use domain::{
     DelegationAbortReason, DelegationDispatchError, DelegationId, DelegationPlan, DelegationResult,
     DelegationStatus, GraphEdgeEvent, GraphNodeEvent, HistoryEntry, IssueCommentEvent,
     IssueDetailEvent, IssueSummaryEvent, LicenseBindingMode, LicensePlan, LicenseStateEvent,
-    LicenseStatusEvent, LicenseSubjectKind, PlanCandidate, PlanSubtask, SpurEvent, SpurEventBody,
-    TimeoutFallback, WorkerArtifact,
+    LicenseStatusEvent, LicenseSubjectKind, PlanCandidate, PlanSubtask, ResolvedSessionConfig,
+    SpurEvent, SpurEventBody, TimeoutFallback, WorkerArtifact,
 };
 
 // Re-export all remaining types for backward compatibility

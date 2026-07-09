@@ -179,6 +179,7 @@ impl Reconciler {
             }
 
             let result = spur_acp::DelegationResult {
+                resolved_config: None,
                 status: spur_acp::DelegationStatus::Failed {
                     error: "dispatch lease expired".to_string(),
                 },

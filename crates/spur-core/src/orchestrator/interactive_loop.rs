@@ -3840,6 +3840,7 @@ mod interactive_input_tests {
             brain_session: SessionId("brain-session-1".into()),
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
+                resolved_config: None,
                 status: DelegationStatus::Success,
                 summary: None,
                 diff_summary: None,
@@ -3941,6 +3942,7 @@ mod phase5_orchestrator_finalization_tests {
             brain_session: brain_session.clone(),
             source: ContinuationSource::AsyncRequested,
             payload: ContinuationPayload {
+                resolved_config: None,
                 status: DelegationStatus::Success,
                 summary: Some(format!("summary-{id}")),
                 diff_summary: None,
