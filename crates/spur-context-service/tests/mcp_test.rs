@@ -1027,6 +1027,23 @@ async fn external_index_payload_skips_prefetch_for_presigned_s3_https_tarballs()
     Ok(())
 }
 
+#[test]
+fn external_index_status_without_job_store_returns_failed_job_result() -> Result<()> {
+    let response = handle_tool_without_catalog(
+        "external_index_status",
+        &json!({ "job_id": "job-without-lambda-routing" }),
+    )?;
+
+    assert_eq!(response["status"], "failed");
+    assert_eq!(response["job_id"], "job-without-lambda-routing");
+    assert_eq!(response["error"]["code"], "lambda_routing_required");
+    assert_eq!(
+        response["error"]["detail"],
+        "external_index_status requires Lambda routing with a job store"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn external_index_status_returns_not_found_for_unknown_job() -> Result<()> {
     let jobs = FakeJobStore::default();
@@ -1241,6 +1258,38 @@ async fn external_index_creates_job_starts_execution_and_records_arn() -> Result
             "max_build_seconds": 1800_u64
         })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_index_rejects_second_active_job_by_default() -> Result<()> {
+    let fixture = McpFixture::new("index-default-sequential-cap")?;
+    let jobs = FakeJobStore::default();
+    let sfn = StubIndexExecutionStarter::default();
+    jobs.seed_queued_job("arn:busy", |record| {
+        record.caller_id = "caller-sequential".to_owned();
+        record.revision = "busy".to_owned();
+    });
+
+    let response = route_index(
+        &json!({
+            "package": PACKAGE,
+            "revision": "new-work",
+            "source_url": SOURCE_URL,
+            "source_kind": "git",
+        }),
+        &fixture.conn,
+        &fixture.catalog,
+        &jobs,
+        &sfn,
+        "caller-sequential",
+    )
+    .await?;
+
+    assert_eq!(response["status"], "rejected");
+    assert_eq!(response["reason"], "concurrent_job_limit");
+    assert_eq!(response["max_active_jobs_per_caller"], 1);
+    assert_eq!(sfn.started_count(), 0);
     Ok(())
 }
 
