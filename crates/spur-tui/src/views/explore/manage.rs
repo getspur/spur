@@ -1,15 +1,15 @@
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 use spur_core::explore::{
     apply,
     catalog::ItemKind,
     materialize::{read_recent_materializations, MaterializationRecord},
-    pool::{self, ManifestItem, StatusReport},
+    pool::{self, StatusReport},
 };
 
 use crate::action::Action;
@@ -94,26 +94,16 @@ impl ExploreBrowserView {
 
     pub(super) fn render_manage(&mut self, frame: &mut Frame, area: Rect) {
         self.clamp_manage_selection();
-        let lines = match self.manage_lens {
-            ManageLens::Pool => self.pool_lines(),
-            ManageLens::LastMaterialization => self.last_materialization_lines(),
-        };
-        let block = Block::default()
-            .title(manage_title(self.manage_lens))
-            .borders(Borders::ALL);
-        let scroll = scroll_offset_for_selected_line(
-            &lines,
-            selected_marker_line(&lines),
-            block.inner(area).width,
-            block.inner(area).height,
-        );
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(block)
-                .wrap(Wrap { trim: true })
-                .scroll((scroll, 0)),
-            area,
-        );
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        frame.render_widget(Paragraph::new(lens_tabs(self.manage_lens)), chunks[0]);
+
+        match self.manage_lens {
+            ManageLens::Pool => self.render_pool_table(frame, chunks[1]),
+            ManageLens::LastMaterialization => self.render_last_materialization(frame, chunks[1]),
+        }
     }
 
     pub(super) fn clamp_manage_selection(&mut self) {
@@ -143,11 +133,7 @@ impl ExploreBrowserView {
 
     fn manage_row_count(&mut self) -> usize {
         match self.manage_lens {
-            ManageLens::Pool => {
-                let item_count = self.manifest.items.len();
-                let report = self.cached_status();
-                item_count + report.missing.len() + report.sha_mismatch.len()
-            }
+            ManageLens::Pool => self.manifest.items.len(),
             ManageLens::LastMaterialization => self.cached_materializations().len(),
         }
     }
@@ -157,8 +143,6 @@ impl ExploreBrowserView {
             return;
         }
         if self.manage_selected >= self.manifest.items.len() {
-            self.load_error =
-                Some("status findings can't be removed here; select a pool item".into());
             return;
         }
         let name = self.manifest.items[self.manage_selected].name.clone();
@@ -173,35 +157,105 @@ impl ExploreBrowserView {
         }
     }
 
-    fn pool_lines(&mut self) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            lens_tabs(self.manage_lens),
-            Line::from("name  kind  sha  verdict  license"),
-            Line::from(""),
-        ];
-
-        if self.manifest.items.is_empty() {
-            lines.push(Line::from(Span::styled(
+    fn render_pool_table(&mut self, frame: &mut Frame, area: Rect) {
+        self.manage_table_state
+            .select(if self.manifest.items.is_empty() {
+                None
+            } else {
+                Some(self.manage_selected)
+            });
+        let rows: Vec<Row<'static>> = if self.manifest.items.is_empty() {
+            vec![Row::new(vec![Cell::from(Span::styled(
                 "pool is empty",
                 Style::default().fg(Color::DarkGray),
-            )));
+            ))])]
         } else {
-            for (index, item) in self.manifest.items.iter().enumerate() {
-                lines.push(pool_item_line(item, index == self.manage_selected));
-            }
-        }
-
-        let row_offset = self.manifest.items.len();
-        let selected = self.manage_selected;
+            self.manifest
+                .items
+                .iter()
+                .map(|item| {
+                    let verdict = item.gate.verdict.clone();
+                    Row::new(vec![
+                        Cell::from(item.name.clone()),
+                        Cell::from(kind_label(item.kind)),
+                        Cell::from(sha7(&item.pinned_commit).to_string()),
+                        Cell::from(Span::styled(verdict.clone(), verdict_style(&verdict))),
+                        Cell::from(
+                            item.license
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string()),
+                        ),
+                    ])
+                })
+                .collect()
+        };
         let report = self.cached_status();
-        push_status_lines(&mut lines, report, row_offset, selected);
-        lines
+        let footer = if report.missing.is_empty() && report.sha_mismatch.is_empty() {
+            Row::new(vec!["status: all pool bodies present"]).style(Style::new().fg(Color::Green))
+        } else {
+            Row::new(vec![format!(
+                "{} missing, {} sha mismatch",
+                report.missing.len(),
+                report.sha_mismatch.len()
+            )])
+            .style(Style::new().fg(Color::Yellow))
+        };
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Min(10),
+                Constraint::Length(6),
+                Constraint::Length(7),
+                Constraint::Length(12),
+                Constraint::Length(12),
+            ],
+        )
+        .header(
+            Row::new(vec!["name", "kind", "sha", "verdict", "license"]).style(Style::new().bold()),
+        )
+        .footer(footer)
+        .row_highlight_style(Style::new().reversed())
+        .highlight_symbol(">>")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .title(format!(
+                    "Manage · Pool ({} items)",
+                    self.manifest.items.len()
+                ))
+                .title_bottom("j/k navigate · l lens · x remove · r reload · Esc back")
+                .borders(Borders::ALL),
+        );
+        frame.render_stateful_widget(table, area, &mut self.manage_table_state);
+    }
+
+    fn render_last_materialization(&mut self, frame: &mut Frame, area: Rect) {
+        let lines = self.last_materialization_lines();
+        let block = Block::default()
+            .title(manage_title(self.manage_lens))
+            .borders(Borders::ALL);
+        let scroll = scroll_offset_for_selected_line(
+            &lines,
+            selected_marker_line(&lines),
+            block.inner(area).width,
+            block.inner(area).height,
+        );
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: true })
+                .scroll((scroll, 0)),
+            area,
+        );
     }
 
     fn last_materialization_lines(&mut self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            lens_tabs(self.manage_lens),
             Line::from("newest first · last 20 dispatches"),
+            Line::from(Span::styled(
+                "time · agent · delegation · items",
+                Style::default().fg(Color::DarkGray),
+            )),
             Line::from(""),
         ];
         let selected_index = self.manage_selected;
@@ -279,71 +333,6 @@ fn lens_span(label: &'static str, active: bool) -> Span<'static> {
     }
 }
 
-fn pool_item_line(item: &ManifestItem, selected: bool) -> Line<'static> {
-    let prefix = if selected { "> " } else { "  " };
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(Color::Cyan)),
-        Span::styled(item.name.clone(), row_style(selected)),
-        Span::raw("  "),
-        Span::styled(kind_label(item.kind), row_style(selected)),
-        Span::raw("  "),
-        Span::styled(sha7(&item.pinned_commit).to_string(), row_style(selected)),
-        Span::raw("  "),
-        Span::styled(item.gate.verdict.clone(), verdict_style(&item.gate.verdict)),
-        Span::raw("  "),
-        Span::styled(
-            item.license
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            row_style(selected),
-        ),
-    ])
-}
-
-fn push_status_lines(
-    lines: &mut Vec<Line<'static>>,
-    report: &StatusReport,
-    row_offset: usize,
-    selected: usize,
-) {
-    if report.missing.is_empty() && report.sha_mismatch.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "status: all pool bodies present",
-            Style::default().fg(Color::Green),
-        )));
-        return;
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "status findings",
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )));
-    let mut row = row_offset;
-    for name in &report.missing {
-        lines.push(status_line("missing body", name, row == selected));
-        row += 1;
-    }
-    for name in &report.sha_mismatch {
-        lines.push(status_line("sha mismatch", name, row == selected));
-        row += 1;
-    }
-}
-
-fn status_line(kind: &'static str, name: &str, selected: bool) -> Line<'static> {
-    let prefix = if selected { "> " } else { "  " };
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(Color::Cyan)),
-        Span::styled("⚠ ", Style::default().fg(Color::Yellow)),
-        Span::styled(kind, Style::default().fg(Color::Yellow)),
-        Span::raw("  "),
-        Span::styled(name.to_string(), row_style(selected)),
-    ])
-}
-
 fn row_style(selected: bool) -> Style {
     if selected {
         Style::default()
@@ -351,7 +340,7 @@ fn row_style(selected: bool) -> Style {
             .bg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(Color::Reset)
     }
 }
 
@@ -374,7 +363,7 @@ fn format_epoch_hhmm(epoch: u64) -> String {
     let Some(timestamp) = DateTime::<Utc>::from_timestamp(epoch as i64, 0) else {
         return epoch.to_string();
     };
-    timestamp.format("%H:%M").to_string()
+    timestamp.format("%m-%d %H:%M").to_string()
 }
 
 #[cfg(test)]
@@ -385,7 +374,7 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
     use spur_core::explore::catalog::{Catalog, CatalogEntry};
     use spur_core::explore::materialize::{append_materialization_record, MaterializationRecord};
-    use spur_core::explore::pool::{item_from_entry, GateRecord, Manifest};
+    use spur_core::explore::pool::{item_from_entry, GateRecord, Manifest, ManifestItem};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -542,19 +531,19 @@ mod tests {
         enter_manage(&mut view);
 
         let first_render = render_manage_to_string(&mut view);
-        assert!(first_render.contains("missing body"));
+        assert!(first_render.contains("1 missing, 0 sha mismatch"));
 
         vendor_pool_body(repo.path(), &entry);
         let second_render = render_manage_to_string(&mut view);
         assert!(
-            second_render.contains("missing body"),
+            second_render.contains("1 missing, 0 sha mismatch"),
             "pool status should stay cached until explicit reload:\n{second_render}"
         );
 
         assert!(view.handle_key(key(KeyCode::Char('r'))).is_none());
         let after_reload = render_manage_to_string(&mut view);
         assert!(after_reload.contains("status: all pool bodies present"));
-        assert!(!after_reload.contains("missing body"));
+        assert!(!after_reload.contains("1 missing, 0 sha mismatch"));
 
         assert!(view.handle_key(key(KeyCode::Char('x'))).is_none());
         let after_remove = render_manage_to_string(&mut view);
@@ -577,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn x_on_status_finding_reports_that_it_cannot_be_removed() {
+    fn status_findings_are_not_navigable_pool_rows() {
         let repo = tempfile::tempdir().unwrap();
         let mut entry = manifest_entry("missing-skill", Some("MIT"));
         entry.content_sha256 = vendor_pool_body(repo.path(), &entry);
@@ -605,12 +594,14 @@ mod tests {
         enter_manage(&mut view);
 
         assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
-        assert_eq!(view.manage_selected, 1);
-        assert!(view.handle_key(key(KeyCode::Char('x'))).is_none());
+        assert_eq!(
+            view.manage_selected, 0,
+            "status findings should not be selectable pool rows"
+        );
 
-        let message = view.load_error.as_deref().unwrap_or_default();
-        assert!(message.contains("status findings can't be removed"));
-        assert!(message.contains("select a pool item"));
+        let rendered = render_manage_to_string(&mut view);
+        assert!(rendered.contains("1 missing, 0 sha mismatch"));
+        assert!(!rendered.contains("missing body"));
     }
 
     #[test]
@@ -649,15 +640,18 @@ mod tests {
     }
 
     #[test]
-    fn pool_lines_empty_manifest_shows_empty_message_and_clean_status() {
+    fn pool_table_empty_manifest_shows_empty_message_and_clean_status() {
         let repo = repo_with_manifest(vec![]);
         let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
-        let lines = view.pool_lines();
-        let rendered: Vec<String> = lines.iter().map(line_text).collect();
-        assert!(rendered.iter().any(|l| l.contains("pool is empty")));
-        assert!(rendered
-            .iter()
-            .any(|l| l.contains("status: all pool bodies present")));
+        enter_manage(&mut view);
+        let rendered = render_manage_to_string(&mut view);
+        assert!(rendered.contains("pool is empty"));
+        assert!(rendered.contains("status: all pool bodies present"));
+        assert!(rendered.contains("name"));
+        assert!(rendered.contains("kind"));
+        assert!(rendered.contains("sha"));
+        assert!(rendered.contains("verdict"));
+        assert!(rendered.contains("license"));
     }
 
     #[test]
@@ -688,9 +682,13 @@ mod tests {
         let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
         let lines = view.last_materialization_lines();
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(rendered
+            .iter()
+            .any(|l| l.contains("time · agent · delegation · items")));
         assert!(rendered.iter().any(|l| l.contains("codex")));
         assert!(rendered.iter().any(|l| l.contains("del-1")));
         assert!(rendered.iter().any(|l| l.contains("1 skill: skill-a")));
+        assert!(rendered.iter().any(|l| l.contains("11-14 22:15")));
     }
 
     #[test]
@@ -701,20 +699,6 @@ mod tests {
         assert_eq!(verdict_style("blocked").fg, Some(Color::Red));
         assert_eq!(kind_label(ItemKind::Skill), "skill");
         assert_eq!(kind_label(ItemKind::Agent), "agent");
-    }
-
-    #[test]
-    fn pool_item_line_falls_back_to_unknown_license() {
-        let item = item_from_entry(
-            &manifest_entry("no-license", None),
-            GateRecord {
-                verdict: "clean".into(),
-                justification: None,
-                decided_at_epoch: None,
-            },
-        );
-        let line = pool_item_line(&item, false);
-        assert!(line_text(&line).contains("unknown"));
     }
 
     fn line_text(line: &Line<'_>) -> String {

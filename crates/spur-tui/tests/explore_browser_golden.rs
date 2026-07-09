@@ -294,7 +294,7 @@ fn explore_browser_manage_pool_renders_golden() {
     assert!(actual.contains("Pool"));
     assert!(actual.contains("review-helper"));
     assert!(actual.contains("stale-helper"));
-    assert!(actual.contains("missing body"));
+    assert!(actual.contains("1 missing, 0 sha mismatch"));
     check_or_update(&actual, "explore_browser_manage_pool.txt");
 }
 

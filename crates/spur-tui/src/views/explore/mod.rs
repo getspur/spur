@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, TableState, Wrap};
 use ratatui::Frame;
 use spur_acp::SpurEvent;
 use spur_core::explore::{
@@ -82,6 +82,7 @@ pub struct ExploreBrowserView {
     pub(crate) stage: ExploreStage,
     pub(crate) manage_lens: ManageLens,
     pub(crate) manage_selected: usize,
+    pub(crate) manage_table_state: TableState,
     pub(crate) catalog: Catalog,
     pub(crate) manifest: Manifest,
     pub(crate) selected: usize,
@@ -106,6 +107,7 @@ impl ExploreBrowserView {
             stage: ExploreStage::Browse,
             manage_lens: ManageLens::Pool,
             manage_selected: 0,
+            manage_table_state: TableState::default(),
             catalog,
             manifest,
             selected: 0,
