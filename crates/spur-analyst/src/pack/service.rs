@@ -99,26 +99,25 @@ pub(crate) async fn knowledge_context_pack_2(
 
     let exact_context = exact_graph_context_for_result(&request.base, &query_result).await;
     let staleness = pack_connection.staleness.clone();
-    let graph_sections = match pack_connection.overlay_conn.as_ref() {
-        Some(conn) => graph_reasoning_sections_for_pack_with_conn(
+    let graph_sections = if let Some(conn) = pack_connection.overlay_conn.as_ref() {
+        graph_reasoning_sections_for_pack_with_conn(
             &request,
             &query_result,
             &exact_context,
             &db_path,
             conn,
             &staleness,
-        ),
-        None => {
-            let conn = pack_connection.base_conn();
-            graph_reasoning_sections_for_pack_with_conn(
-                &request,
-                &query_result,
-                &exact_context,
-                &db_path,
-                &conn,
-                &staleness,
-            )
-        }
+        )
+    } else {
+        let conn = pack_connection.base_conn();
+        graph_reasoning_sections_for_pack_with_conn(
+            &request,
+            &query_result,
+            &exact_context,
+            &db_path,
+            &conn,
+            &staleness,
+        )
     };
     Ok(pack_query_result_v2_with_graph_sections_and_staleness(
         &request,
