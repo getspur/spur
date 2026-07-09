@@ -102,6 +102,7 @@ impl GateState {
                 GateAction::None
             }
             KeyCode::Char('a') if key.modifiers.is_empty() => self.accept_selected(),
+            KeyCode::Char('c') if key.modifiers.is_empty() => self.resolve_all_clean(),
             KeyCode::Char('o') if key.modifiers.is_empty() => self.begin_override(),
             KeyCode::Char('b') if key.modifiers.is_empty() => self.replace_selected(),
             KeyCode::Char('s') if key.modifiers.is_empty() => self.skip_selected(),
@@ -203,6 +204,17 @@ impl GateState {
                 GateAction::Error("unresolved gate card cannot be accepted".to_string())
             }
         }
+    }
+
+    fn resolve_all_clean(&mut self) -> GateAction {
+        for card in &mut self.cards {
+            if card.resolution.is_none()
+                && matches!(card.verdict, GateVerdict::Ready(Verdict::Clean))
+            {
+                card.resolution = Some(Resolution::Accept);
+            }
+        }
+        GateAction::None
     }
 
     fn begin_override(&mut self) -> GateAction {
@@ -485,6 +497,26 @@ mod tests {
             GateAction::None
         ));
         assert_eq!(state.cards[0].resolution, Some(Resolution::Skip));
+    }
+
+    #[test]
+    fn c_resolves_all_clean_cards_to_accept() {
+        let mut state = GateState::new(vec![
+            clean_card("clean-a"),
+            flagged_card("flagged-a"),
+            clean_card("clean-b"),
+            clean_card("clean-c"),
+        ]);
+
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('c'))),
+            GateAction::None
+        ));
+
+        assert_eq!(state.cards[0].resolution, Some(Resolution::Accept));
+        assert_eq!(state.cards[1].resolution, None);
+        assert_eq!(state.cards[2].resolution, Some(Resolution::Accept));
+        assert_eq!(state.cards[3].resolution, Some(Resolution::Accept));
     }
 
     #[test]
