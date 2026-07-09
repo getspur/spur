@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{layout::Rect, style::Color, Frame};
@@ -152,6 +152,7 @@ pub struct SessionDetailView {
     /// modal open so the user must make an explicit choice.
     pub(crate) cancel_confirm_open: bool,
     cancel_hint_until: Option<Instant>,
+    transient_status_until: Option<Instant>,
 
     /// How `AgentConnection::cancel` behaves for this session's transport.
     /// Populated from `SpurEventBody::AgentSessionReady`. Used to select
@@ -164,6 +165,8 @@ pub struct SessionDetailView {
 
     /// Whether the inline workers panel is collapsed. Toggled by Alt+D.
     workers_panel_collapsed: bool,
+    workers_panel_visible: bool,
+    workers_panel_visibility_known: bool,
     focused_panel: FocusedSessionPanel,
     /// Maps ToolCall id -> render depth for subagent nesting.
     /// Populated on each ToolCall; read on subsequent ToolCalls to resolve
@@ -249,6 +252,7 @@ impl View for SessionDetailView {
                 Some("No tracked plan for this session yet".into()),
                 ActivityKind::Idle,
             );
+            self.transient_status_until = Some(Instant::now() + Duration::from_secs(4));
             return None;
         }
         let action = self.handle_key_inner(key);
@@ -300,6 +304,13 @@ impl View for SessionDetailView {
         }
         if let Some(ref mut banner) = self.resume_banner {
             banner.tick();
+        }
+        if self
+            .transient_status_until
+            .is_some_and(|until| until < Instant::now())
+        {
+            self.transient_status_until = None;
+            self.input_bar.set_status(None, ActivityKind::Idle);
         }
         #[cfg(feature = "markdown")]
         {
@@ -355,6 +366,26 @@ mod banner_tests {
     use ratatui::style::Modifier;
     use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
 
+    fn test_ctx() -> crate::views::ViewContext<'static> {
+        static LINEAGE: std::sync::LazyLock<spur_core::lineage::projection::ExecutorLineage> =
+            std::sync::LazyLock::new(spur_core::lineage::projection::ExecutorLineage::new);
+        static PLAN_PROJECTION: std::sync::OnceLock<spur_core::PlanProjectionStore> =
+            std::sync::OnceLock::new();
+        static SYNOPSIS: std::sync::OnceLock<spur_core::SessionSynopsisProjection> =
+            std::sync::OnceLock::new();
+        crate::views::ViewContext {
+            lineage: &LINEAGE,
+            plan_projection: PLAN_PROJECTION.get_or_init(spur_core::PlanProjectionStore::new),
+            synopsis: SYNOPSIS.get_or_init(spur_core::SessionSynopsisProjection::new),
+            brain_status: &crate::app::BrainStatus::Idle,
+            flag_summary: None,
+            tombstone: None,
+            transient_hint_override: None,
+            notebook_ready: false,
+            theme: crate::theme::fallback_theme(),
+        }
+    }
+
     fn render_auth_banner(message: &str, area: Rect) -> Buffer {
         let banner = super::build_auth_banner_widget(message, crate::theme::fallback_theme());
         let backend = TestBackend::new(area.width, area.height);
@@ -384,6 +415,29 @@ mod banner_tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render_view(view: &mut SessionDetailView, area: Rect) -> Buffer {
+        let ctx = test_ctx();
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                <SessionDetailView as crate::views::View>::render(view, f, area, &ctx);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn render_cancel_modal(area: Rect) -> Buffer {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                super::render::render_cancel_confirm_modal(f, area, crate::theme::fallback_theme());
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
     }
 
     #[test]
@@ -474,6 +528,49 @@ mod banner_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn auth_banner_renders_during_connecting_load_state() {
+        let mut view = SessionDetailView::new_for_tests();
+        view.load_state = LoadState::Connecting {
+            brain_name: "test".into(),
+        };
+        view.auth_error = Some("Run spur login".into());
+
+        let buf = render_view(&mut view, Rect::new(0, 0, 80, 10));
+        let rendered = rendered_text(&buf);
+
+        assert!(
+            rendered.contains("Authentication required"),
+            "auth banner title must appear during Connecting. Rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Run spur login"),
+            "auth banner body must appear during Connecting. Rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cancel_confirm_modal_lists_esc_in_bordered_prompt() {
+        let buf = render_cancel_modal(Rect::new(0, 0, 60, 8));
+        let rendered = rendered_text(&buf);
+
+        assert!(
+            rendered.contains("Esc"),
+            "bordered cancel modal must show Esc dismissal. Rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cancel_confirm_modal_lists_esc_in_compact_prompt() {
+        let buf = render_cancel_modal(Rect::new(0, 0, 40, 2));
+        let rendered = rendered_text(&buf);
+
+        assert!(
+            rendered.contains("Esc"),
+            "compact cancel modal must show Esc dismissal. Rendered:\n{rendered}"
+        );
     }
 }
 
@@ -1769,6 +1866,55 @@ mod composer_routing_tests {
         let mut v = make_view();
         let act = press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::ALT);
         assert!(act.is_none(), "Alt+P must no-op without tracked plan");
+    }
+
+    #[test]
+    fn tab_does_not_focus_invisible_workers_panel() {
+        let mut v = SessionDetailView::new_for_tests();
+        assert_eq!(v.focused_panel, FocusedSessionPanel::ReactTrace);
+        assert!(!v.workers_panel_visible);
+
+        let act = press(&mut v, KeyCode::Tab);
+
+        assert!(act.is_none(), "Tab must no-op when workers panel is hidden");
+        assert_eq!(v.focused_panel, FocusedSessionPanel::ReactTrace);
+
+        v.workers_panel_visible = true;
+        let act = press(&mut v, KeyCode::Tab);
+
+        assert!(matches!(act, Some(Action::CycleFocus)));
+        assert_eq!(v.focused_panel, FocusedSessionPanel::Workers);
+    }
+
+    #[test]
+    fn alt_p_no_plan_hint_expires_and_real_status_supersedes_it() {
+        let mut v = make_view();
+
+        let act = press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::ALT);
+
+        assert!(act.is_none(), "Alt+P without a plan must not navigate");
+        assert!(v.input_bar.has_status(), "no-plan hint should be visible");
+        assert!(v.transient_status_until.is_some());
+
+        v.set_brain_status("idle");
+        assert!(v.transient_status_until.is_none());
+        assert!(
+            !v.input_bar.has_status(),
+            "real idle status should clear the transient no-plan hint"
+        );
+
+        let mut v = make_view();
+        let _ = press_mod(&mut v, KeyCode::Char('p'), KeyModifiers::ALT);
+        v.transient_status_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+
+        <SessionDetailView as crate::views::View>::tick(&mut v);
+
+        assert!(v.transient_status_until.is_none());
+        assert!(
+            !v.input_bar.has_status(),
+            "expired no-plan hint should clear on tick"
+        );
     }
 
     #[test]
