@@ -47,9 +47,12 @@ and DynamoDB gateway endpoints on `worker_route_table_ids`, plus private-DNS
 interface endpoints for Step Functions, Secrets Manager, ECR API, ECR Docker
 registry, CloudWatch Logs, and STS. Interface endpoint ENIs use
 `interface_vpc_endpoint_subnet_ids` when set, otherwise they fall back to the
-worker subnets. The interface endpoint security group accepts HTTPS only from
-the worker security group. Operators who already provide NAT or equivalent
-shared endpoints can set
+worker subnets. `interface_vpc_endpoint_service_keys` can reduce the interface
+service set; low-cost Lambda-worker stacks use only `states` and
+`secretsmanager`, while private ECS fallback stacks without NAT should keep
+`ecr_api`, `ecr_dkr`, `logs`, and `sts` too. The interface endpoint security
+group accepts HTTPS only from the worker security group. Operators who already
+provide NAT or equivalent shared endpoints can set
 `create_vpc_endpoints=false`.
 
 VPC endpoints do not provide arbitrary public internet egress. Presigned S3
@@ -334,11 +337,16 @@ terraform apply -var concurrent_warm_instances=1
 | `vpc_id` | n/a | VPC for ECS worker tasks |
 | `worker_subnets` | n/a | Private subnets for Lambda and ECS worker tasks |
 | `interface_vpc_endpoint_subnet_ids` | `[]` | Optional subnet IDs for interface endpoint ENIs; empty reuses worker subnets |
+| `interface_vpc_endpoint_service_keys` | all interface services | Interface endpoint service keys to create; use `states` + `secretsmanager` for low-cost Lambda-worker stacks |
 | `worker_route_table_ids` | `[]` | Route tables associated with `worker_subnets`; required when `create_vpc_endpoints=true` |
-| `create_vpc_endpoints` | `true` | Create NAT-free worker endpoints for S3, DynamoDB, Step Functions, Secrets Manager, ECR, CloudWatch Logs, and STS |
+| `create_vpc_endpoints` | `true` | Create NAT-free worker endpoints for S3, DynamoDB, and selected interface services |
 | `vpc_endpoint_region` | `null` | Optional endpoint service-name region override; defaults to `aws_region` |
 | `worker_ecr_image` | n/a | ECS fallback worker image URI built by `deploy.sh` |
 | `worker_lambda_image` | n/a | Lambda fast-path worker image URI built by `deploy.sh` |
+| `manage_ecr_lifecycle_policies` | `true` | Manage cleanup policies for context-service ECR repositories |
+| `ecr_lifecycle_repository_names` | context worker repos | ECR repositories that receive the cleanup policy |
+| `ecr_lifecycle_keep_tagged_images` | `10` | Tagged images to retain per context-service ECR repository |
+| `ecr_lifecycle_untagged_image_days` | `7` | Age in days before untagged ECR images expire |
 | `worker_lambda_memory_mb` | `3008` | Lambda worker memory for this account/region cap |
 | `worker_lambda_timeout_sec` | `900` | Lambda worker timeout |
 | `worker_lambda_ephemeral_storage_mb` | `10240` | Lambda worker `/tmp` storage |

@@ -36,6 +36,11 @@ interface_vpc_endpoint_subnet_ids = [
   "subnet-prod-a",
 ]
 
+interface_vpc_endpoint_service_keys = [
+  "states",
+  "secretsmanager",
+]
+
 # Route tables associated with worker_subnets; required when
 # create_vpc_endpoints=true (the default NAT-free model).
 worker_route_table_ids = [
