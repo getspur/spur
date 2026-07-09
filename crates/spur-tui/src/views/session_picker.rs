@@ -1348,13 +1348,6 @@ impl SessionPickerView {
                     ),
                 }
             } else {
-                let indices = filtered_indices(
-                    sessions,
-                    filter,
-                    &self.metadata,
-                    ctx.synopsis,
-                    self.show_archived,
-                );
                 let real_idx = indices.get(cursor - 1).copied();
                 if let Some(i) = real_idx {
                     let session = &sessions[i];
