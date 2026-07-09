@@ -3,7 +3,8 @@
 
 use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
 use spur_acp::SessionInfo;
-use spur_tui::session_metadata::SessionMetadata;
+use spur_tui::session_metadata::{SessionEntry, SessionMetadata};
+use spur_tui::theme::{resolve_token, ColorDepth};
 use spur_tui::views::session_picker::SessionPickerView;
 use spur_tui::views::View;
 
@@ -63,6 +64,29 @@ fn assert_render(picker: &mut SessionPickerView, expected: &[&str]) {
             "row {i} mismatch:\n  got:  {got:?}\n  want: {want:?}"
         );
     }
+}
+
+fn render_picker(picker: &mut SessionPickerView) -> Terminal<TestBackend> {
+    let backend = TestBackend::new(W, H);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| {
+        let area = Rect::new(0, 0, W, H);
+        let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
+        picker.render(f, area, &ctx);
+    })
+    .unwrap();
+    term
+}
+
+fn find_symbol(buf: &Buffer, symbol: &str) -> Option<(u16, u16)> {
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            if buf[(x, y)].symbol() == symbol {
+                return Some((x, y));
+            }
+        }
+    }
+    None
 }
 
 fn session(id: &str, title: &str, cwd: &str) -> SessionInfo {
@@ -130,7 +154,7 @@ fn populated_empty_no_filter() {
         "",
         "\u{25b8} + Start new session",
         "  ────",
-        "",
+        "  No sessions yet — press Enter to start one",
         "",
         "",
         "",
@@ -165,7 +189,7 @@ fn loading_state() {
         "",
         "Sessions",
         "",
-        "  Connecting to agent \u{b7}\u{b7}\u{b7}",
+        "  Connecting to agent \u{280b}",
         "",
         "",
         "",
@@ -183,6 +207,28 @@ fn loading_state() {
         "Esc back                                                 \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
+}
+
+#[test]
+fn loading_spinner_advances_each_render() {
+    let mut picker = SessionPickerView::new();
+    let first = render_picker(&mut picker);
+    let first_lines = buffer_to_lines(first.backend().buffer());
+    assert!(
+        first_lines
+            .iter()
+            .any(|line| line.contains("Connecting to agent \u{280b}")),
+        "first frame should use first spinner glyph; lines:\n{first_lines:#?}"
+    );
+
+    let second = render_picker(&mut picker);
+    let second_lines = buffer_to_lines(second.backend().buffer());
+    assert!(
+        second_lines
+            .iter()
+            .any(|line| line.contains("Connecting to agent \u{2819}")),
+        "second frame should advance spinner glyph; lines:\n{second_lines:#?}"
+    );
 }
 
 #[test]
@@ -321,6 +367,36 @@ fn populated_with_filter() {
         "type to filter \u{b7} Enter commit \u{b7} Esc exit search          \u{25b6}0 R0 $0.00 0m 00s spur",
     ];
     assert_render(&mut picker, expected);
+}
+
+#[test]
+fn populated_filter_with_no_matches_shows_empty_state() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(SessionMetadata::default());
+    picker.set_sessions(
+        "claude".into(),
+        vec![
+            session("a1xxxxxx", "alpha", "/tmp"),
+            session("a2xxxxxx", "beta", "/tmp"),
+        ],
+        synopsis(),
+    );
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let ctx = spur_tui::test_support::test_view_ctx(&LINEAGE);
+    let _ = picker.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &ctx);
+    for ch in "zzz".chars() {
+        let _ = picker.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &ctx);
+    }
+
+    let term = render_picker(&mut picker);
+    let lines = buffer_to_lines(term.backend().buffer());
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  No sessions match \"zzz\""),
+        "no-match empty state should render after the new-session row; lines:\n{lines:#?}"
+    );
 }
 
 #[test]
@@ -639,4 +715,75 @@ fn draft_badge_full_text_fits_within_row_width() {
         "activity line with badge must fit within {W} cols; got len={} line={badge_line:?}",
         badge_line.len()
     );
+}
+
+#[test]
+fn selected_session_applies_background_to_title_and_activity_lines() {
+    let mut picker = SessionPickerView::new();
+    picker.set_metadata(SessionMetadata::default());
+    picker.set_sessions(
+        "t".into(),
+        vec![session("a1xxxxxx", "alpha", "/tmp")],
+        synopsis(),
+    );
+
+    let term = render_picker(&mut picker);
+    let buf = term.backend().buffer();
+    let rows = buffer_to_lines(buf);
+    let title_y = rows
+        .iter()
+        .position(|row| row.contains('\u{25b8}') && row.contains("alpha"))
+        .expect("selected title row should render") as u16;
+    let activity_y = title_y + 1;
+    let selected_bg = resolve_token(
+        spur_tui::theme::fallback_theme(),
+        "session_picker.row.selected.bg",
+        ColorDepth::Truecolor,
+    );
+
+    let title_cell = buf
+        .cell((0, title_y))
+        .expect("selected title cell should be in bounds");
+    assert_eq!(title_cell.style().bg, Some(selected_bg));
+
+    let activity_cell = buf
+        .cell((6, activity_y))
+        .expect("selected activity cell should be in bounds");
+    assert_eq!(activity_cell.style().bg, Some(selected_bg));
+}
+
+#[test]
+fn draft_badge_uses_draft_token_not_pinned_token() {
+    let mut picker = SessionPickerView::new();
+    let mut meta = SessionMetadata::default();
+    meta.sessions.insert(
+        "draftyxxxxxxx".into(),
+        SessionEntry {
+            draft: "unsent message text".into(),
+            pinned: true,
+            ..SessionEntry::default()
+        },
+    );
+    picker.set_metadata(meta);
+    picker.set_sessions(
+        "t".into(),
+        vec![session("draftyxxxxxxx", "Draft session", "/tmp")],
+        synopsis(),
+    );
+
+    let term = render_picker(&mut picker);
+    let buf = term.backend().buffer();
+    let theme = spur_tui::theme::fallback_theme();
+    let pinned_fg = resolve_token(theme, "session_picker.row.pinned.fg", ColorDepth::Truecolor);
+    let draft_fg = resolve_token(theme, "session_picker.row.draft.fg", ColorDepth::Truecolor);
+
+    let star = find_symbol(buf, "\u{2b50}").expect("pinned star should render");
+    let star_cell = buf.cell(star).expect("star cell should be in bounds");
+    assert_eq!(star_cell.style().fg, Some(pinned_fg));
+
+    let badge = find_symbol(buf, "\u{25cf}").expect("draft badge should render");
+    let badge_cell = buf
+        .cell(badge)
+        .expect("draft badge cell should be in bounds");
+    assert_eq!(badge_cell.style().fg, Some(draft_fg));
 }
