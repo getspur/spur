@@ -62,6 +62,7 @@ fn mk_cont_stamped_with(brain_session: &SessionId) -> BrainContinuation {
         brain_session: brain_session.clone(),
         source: ContinuationSource::AsyncRequested,
         payload: ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: Some("worker completed".into()),
             diff_summary: None,

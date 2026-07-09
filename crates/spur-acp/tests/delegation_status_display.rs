@@ -8,6 +8,7 @@ fn render(r: &DelegationResult) -> String {
 
 fn base(status: DelegationStatus) -> DelegationResult {
     DelegationResult {
+        resolved_config: None,
         status,
         diff: None,
         diff_summary: None,

@@ -410,6 +410,7 @@ async fn reconciler_dispatch_and_completion_emit_refreshed_snapshots() {
     spur_core::plan::test_util::mock_worker_completion(
         request,
         DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,

@@ -201,6 +201,7 @@ impl DelegationMcpModule {
                 let result = match res {
                     Ok(r) => r,
                     Err(_) => DelegationResult {
+                        resolved_config: None,
                         status: DelegationStatus::Failed {
                             error: "Orchestrator disconnected".into(),
                         },
@@ -384,6 +385,7 @@ impl DelegationMcpModule {
                         let result = match res {
                             Ok(r) => r,
                             Err(_) => DelegationResult {
+                                resolved_config: None,
                                 status: DelegationStatus::Failed {
                                     error: "Orchestrator disconnected".into(),
                                 },

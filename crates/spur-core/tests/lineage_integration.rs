@@ -711,3 +711,79 @@ fn duplicate_delegation_requested_with_differing_payload_warns() {
 
     assert!(logs_contain("duplicate DelegationRequested"));
 }
+
+#[test]
+fn worker_session_configured_populates_resolved_config() {
+    use spur_acp::domain::delegation::ResolvedSessionConfig;
+
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "codex".into(),
+        session: SessionId("w1".into()),
+        worktree: PathBuf::from("/tmp"),
+    }));
+
+    let mut config_overrides_applied = std::collections::BTreeMap::new();
+    config_overrides_applied.insert("mode".to_string(), "plan".to_string());
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSessionConfigured {
+        brain_session_id: SessionId("b".into()),
+        executor_id: "w1".into(),
+        config: ResolvedSessionConfig {
+            agent: "codex".into(),
+            profile: Some("rust-pro".into()),
+            model: Some("gpt-5-codex".into()),
+            effort: Some("high".into()),
+            config_overrides_applied,
+            skipped: Vec::new(),
+        },
+    }));
+
+    let n = l.node(&ExecutorId::new("w1")).expect("w1");
+    let resolved = n
+        .resolved_config
+        .as_ref()
+        .expect("resolved_config populated by WorkerSessionConfigured");
+    assert_eq!(resolved.agent, "codex");
+    assert_eq!(resolved.profile.as_deref(), Some("rust-pro"));
+    assert_eq!(resolved.model.as_deref(), Some("gpt-5-codex"));
+    assert_eq!(resolved.effort.as_deref(), Some("high"));
+    assert_eq!(
+        resolved
+            .config_overrides_applied
+            .get("mode")
+            .map(String::as_str),
+        Some("plan")
+    );
+}
+
+#[test]
+fn worker_session_configured_before_spawn_drains_on_worker_arrival() {
+    // Adversarial event order: WorkerSessionConfigured can race ahead of
+    // WorkerSpawned in principle (both are emitted close together in
+    // `run_one_worker_attempt`). The orphan buffer must replay it onto the
+    // node once it exists, exactly like other per-executor events.
+    use spur_acp::domain::delegation::ResolvedSessionConfig;
+
+    let mut l = ExecutorLineage::new();
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSessionConfigured {
+        brain_session_id: SessionId("b".into()),
+        executor_id: "w1".into(),
+        config: ResolvedSessionConfig {
+            agent: "codex".into(),
+            model: Some("gpt-5-codex".into()),
+            ..Default::default()
+        },
+    }));
+    l.apply(&SpurEvent::now(SpurEventBody::WorkerSpawned {
+        agent: "codex".into(),
+        session: SessionId("w1".into()),
+        worktree: PathBuf::from("/tmp"),
+    }));
+
+    let n = l.node(&ExecutorId::new("w1")).expect("w1");
+    assert_eq!(
+        n.resolved_config.as_ref().map(|c| c.model.as_deref()),
+        Some(Some("gpt-5-codex")),
+        "orphan-buffered WorkerSessionConfigured must drain onto the node after spawn"
+    );
+}

@@ -72,6 +72,7 @@ async fn test_block_timeout_fires_continuation() {
     );
 
     tx.send(DelegationResult {
+        resolved_config: None,
         status: DelegationStatus::Success,
         summary: Some("Test completed".to_string()),
         diff: None,
@@ -135,6 +136,7 @@ async fn test_attempt_threaded_into_continuation() {
     attempt_tracker.store(2, Ordering::SeqCst);
 
     tx.send(DelegationResult {
+        resolved_config: None,
         status: DelegationStatus::Success,
         summary: Some("retry completed".to_string()),
         diff: None,

@@ -288,6 +288,7 @@ mod inline_completion_materialization_tests {
 
     fn result(summary: &str) -> DelegationResult {
         DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: Some(format!("diff for {summary}")),
             diff_summary: None,
@@ -724,6 +725,7 @@ mod continuation_producer_tests {
         artifact: Option<WorkerArtifact>,
     ) -> DelegationResult {
         DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary,
@@ -741,6 +743,7 @@ mod continuation_producer_tests {
         let store: Arc<dyn spur_blob_store::OutcomeStore> = Arc::new(MemoryOutcomeStore::new());
         let mat = crate::outcome_materializer::OutcomeMaterializer::new(store);
         let result = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -1020,6 +1023,7 @@ mod fetch_outcome_artifact_tests {
 
     fn success_result(summary: &str, diff: &str, cost: f64) -> DelegationResult {
         DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: Some(summary.into()),
             diff: Some(diff.into()),

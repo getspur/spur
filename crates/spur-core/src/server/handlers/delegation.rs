@@ -274,6 +274,7 @@ impl McpCallbackServer {
         let (attempt, _) = crate::plan::projector::project_attempt_facts(&audits);
 
         let result = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
