@@ -1,6 +1,8 @@
 use std::{
+    ops::Deref,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -24,7 +26,58 @@ static ANALYST_TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static ANALYST_CONNECTION_OPEN_COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
 
-pub(crate) fn open_analyst_connection_read_only(db_path: &Path) -> Result<duckdb::Connection> {
+pub(crate) struct AnalystReadOnlyConnection {
+    conn: duckdb::Connection,
+    _scratch: AnalystScratchDir,
+}
+
+impl AnalystReadOnlyConnection {
+    pub(crate) fn conn(&self) -> &duckdb::Connection {
+        &self.conn
+    }
+}
+
+impl Deref for AnalystReadOnlyConnection {
+    type Target = duckdb::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn()
+    }
+}
+
+struct AnalystScratchDir {
+    path: PathBuf,
+}
+
+impl AnalystScratchDir {
+    fn create(path: PathBuf) -> Result<Self> {
+        std::fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "failed to create analyst DuckDB temp directory {}",
+                path.display()
+            )
+        })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for AnalystScratchDir {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    temp_directory = %self.path.display(),
+                    error = %error,
+                    "failed to remove analyst DuckDB temp directory"
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn open_analyst_connection_read_only(
+    db_path: &Path,
+) -> Result<AnalystReadOnlyConnection> {
     open_analyst_connection_read_only_with_caps(db_path, AnalystDuckDbResourceCaps::from_env())
 }
 
@@ -60,7 +113,7 @@ fn record_analyst_connection_open_for_test(db_path: &Path) {
 pub(crate) fn open_analyst_connection_read_only_with_caps(
     db_path: &Path,
     caps: AnalystDuckDbResourceCaps,
-) -> Result<duckdb::Connection> {
+) -> Result<AnalystReadOnlyConnection> {
     let config = duckdb::Config::default()
         .access_mode(duckdb::AccessMode::ReadOnly)
         .context("failed to configure read-only duckdb")?;
@@ -71,17 +124,29 @@ pub(crate) fn open_analyst_connection_read_only_with_caps(
         )
     })?;
     let temp_dir = analyst_connection_temp_directory(db_path);
+    let scratch = AnalystScratchDir::create(temp_dir.clone())?;
     apply_analyst_duckdb_resource_caps(&conn, &caps, &temp_dir)?;
     #[cfg(test)]
     record_analyst_connection_open_for_test(db_path);
-    Ok(conn)
+    Ok(AnalystReadOnlyConnection {
+        conn,
+        _scratch: scratch,
+    })
 }
 
 fn analyst_connection_temp_directory(db_path: &Path) -> PathBuf {
     // DuckDB spill file names are not safe to share across independent
     // processes; keep every analyst connection on private temp storage.
     let counter = ANALYST_TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-    analyst_temp_directory_parent(db_path).join(format!("ro-{}-{counter}", std::process::id()))
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    analyst_temp_directory_parent(db_path).join(format!(
+        "ro-{}-{timestamp}-{counter}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ))
 }
 
 fn analyst_temp_directory_parent(db_path: &Path) -> PathBuf {
@@ -101,13 +166,6 @@ fn apply_analyst_duckdb_resource_caps(
     caps: &AnalystDuckDbResourceCaps,
     temp_dir: &Path,
 ) -> Result<()> {
-    std::fs::create_dir_all(temp_dir).with_context(|| {
-        format!(
-            "failed to create analyst DuckDB temp directory {}",
-            temp_dir.display()
-        )
-    })?;
-
     let memory_limit = caps.memory_limit.replace('\'', "''");
     let temp_directory = sql_string_literal(&temp_dir.to_string_lossy());
     // preserve_insertion_order=false shrinks the working set of large
@@ -142,7 +200,7 @@ mod tests {
         let db_path = temp_dir.path().join("analyst.duckdb");
         drop(Connection::open(&db_path).expect("create fixture db"));
 
-        let conn: Connection = open_analyst_connection_read_only_with_caps(
+        let conn = open_analyst_connection_read_only_with_caps(
             &db_path,
             AnalystDuckDbResourceCaps {
                 memory_limit: "64MiB".to_owned(),
@@ -221,6 +279,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_only_connection_removes_temp_directory_on_drop() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("analyst.duckdb");
+        drop(Connection::open(&db_path).expect("create fixture db"));
+
+        let conn = open_analyst_connection_read_only_with_caps(
+            &db_path,
+            AnalystDuckDbResourceCaps {
+                memory_limit: "64MiB".to_owned(),
+                threads: 1,
+            },
+        )
+        .expect("open read-only connection");
+        let temp_directory: String = conn
+            .query_row(
+                "SELECT current_setting('temp_directory')::VARCHAR",
+                [],
+                |row: &duckdb::Row<'_>| row.get::<_, String>(0),
+            )
+            .expect("read temp_directory setting");
+        let temp_directory = std::path::PathBuf::from(temp_directory);
+
+        assert!(
+            temp_directory.exists(),
+            "scratch directory should exist while the connection is alive"
+        );
+        drop(conn);
+        assert!(
+            !temp_directory.exists(),
+            "scratch directory should be removed when the connection is dropped"
+        );
+    }
+
     fn humanized_memory_setting_bytes(setting: &str) -> f64 {
         let mut parts = setting.split_whitespace();
         let value: f64 = parts
@@ -238,7 +330,8 @@ mod tests {
         value * multiplier
     }
 
-    fn open_connection_with_default_caps() -> (tempfile::TempDir, Connection) {
+    fn open_connection_with_default_caps() -> (tempfile::TempDir, super::AnalystReadOnlyConnection)
+    {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let db_path = temp_dir.path().join("analyst.duckdb");
         drop(Connection::open(&db_path).expect("create fixture db"));

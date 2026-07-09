@@ -124,8 +124,8 @@ async fn query_show_tables_returns_expected_columns() {
 async fn query_blocks_stale_analyst_db_unless_allow_stale_is_explicit() {
     let fixture = QueryFixture::new(
         r#"
-        CREATE TABLE _meta (graph_content_hash VARCHAR);
-        INSERT INTO _meta VALUES ('old');
+        CREATE TABLE _meta (graph_content_hash VARCHAR, complete BOOLEAN);
+        INSERT INTO _meta VALUES ('old', TRUE);
         CREATE TABLE facts (value INTEGER);
         INSERT INTO facts VALUES (42);
         "#,
