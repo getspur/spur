@@ -1724,6 +1724,41 @@ async fn knowledge_context_pack_2_uses_single_connection_for_pack_request() {
     );
 }
 
+#[test]
+fn open_pack_connection_reuses_one_connection_for_concurrent_calls_to_same_db_path() {
+    let (_temp_dir, db_path) = minimal_analyst_db_with_meta();
+    crate::db::connection::reset_analyst_connection_open_count_for_test(&db_path);
+
+    let db_path = Arc::new(db_path);
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let db_path = Arc::clone(&db_path);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let conn = open_pack_connection(&db_path, "knowledge_context_pack")
+                    .expect("open pooled pack connection");
+                let conn = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let hash: String = conn
+                    .query_row("SELECT graph_content_hash FROM _meta", [], |row| row.get(0))
+                    .expect("read fixture hash");
+                assert_eq!(hash, "fixture-hash");
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("pack thread");
+    }
+
+    assert_eq!(
+        crate::db::connection::analyst_connection_open_count_for_test(&db_path),
+        1,
+        "pack service should pool one read-only connection per analyst DB path"
+    );
+}
+
 #[tokio::test]
 async fn knowledge_context_pack_2_preserves_v1_fields_and_adds_empty_v2_sections_when_disabled() {
     let (_temp_dir, db_path) = minimal_analyst_db_with_meta();

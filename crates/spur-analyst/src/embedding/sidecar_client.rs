@@ -60,10 +60,7 @@ pub(super) async fn ping(timeout_duration: Duration) -> bool {
             true
         }
         Err(error) => {
-            tracing::debug!(
-                %error,
-                "knowledge_context_pack sidecar ping failed"
-            );
+            tracing::debug!(%error, "knowledge_context_pack sidecar ping failed");
             false
         }
     }
