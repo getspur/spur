@@ -44,10 +44,12 @@ as a normal tarball. Raw `s3://` URLs are not part of the handoff contract.
 The indexing worker Lambda and ECS fallback run inside `worker_subnets`. The
 default network model is NAT-free for AWS service access: Terraform creates S3
 and DynamoDB gateway endpoints on `worker_route_table_ids`, plus private-DNS
-interface endpoints in `worker_subnets` for Step Functions, Secrets Manager,
-ECR API, ECR Docker registry, CloudWatch Logs, and STS. The interface endpoint
-security group accepts HTTPS only from the worker security group. Operators who
-already provide NAT or equivalent shared endpoints can set
+interface endpoints for Step Functions, Secrets Manager, ECR API, ECR Docker
+registry, CloudWatch Logs, and STS. Interface endpoint ENIs use
+`interface_vpc_endpoint_subnet_ids` when set, otherwise they fall back to the
+worker subnets. The interface endpoint security group accepts HTTPS only from
+the worker security group. Operators who already provide NAT or equivalent
+shared endpoints can set
 `create_vpc_endpoints=false`.
 
 VPC endpoints do not provide arbitrary public internet egress. Presigned S3
@@ -331,6 +333,7 @@ terraform apply -var concurrent_warm_instances=1
 | `allowed_source_domains` | `[]` | Optional `source_url` domain allow-list |
 | `vpc_id` | n/a | VPC for ECS worker tasks |
 | `worker_subnets` | n/a | Private subnets for Lambda and ECS worker tasks |
+| `interface_vpc_endpoint_subnet_ids` | `[]` | Optional subnet IDs for interface endpoint ENIs; empty reuses worker subnets |
 | `worker_route_table_ids` | `[]` | Route tables associated with `worker_subnets`; required when `create_vpc_endpoints=true` |
 | `create_vpc_endpoints` | `true` | Create NAT-free worker endpoints for S3, DynamoDB, Step Functions, Secrets Manager, ECR, CloudWatch Logs, and STS |
 | `vpc_endpoint_region` | `null` | Optional endpoint service-name region override; defaults to `aws_region` |
