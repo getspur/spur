@@ -30,6 +30,6 @@ pub fn parse_chat_input(raw: &str) -> ParsedChatInput {
         "/sessions" => ParsedChatInput::Command(BotCommand::Sessions),
         "/current" => ParsedChatInput::Command(BotCommand::Current),
         "/cancel" => ParsedChatInput::Command(BotCommand::Cancel),
-        _ => ParsedChatInput::PlainText(trimmed.to_string()),
+        _ => ParsedChatInput::PlainText(raw.to_string()),
     }
 }

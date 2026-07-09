@@ -42,7 +42,7 @@ pub async fn run_telegram_bot(
     let poll_cancellation_for_loop = cancellation.clone();
     let poll_cancellation_for_main = cancellation.clone();
     let cfg_poll_timeout = cfg.poll_timeout_secs;
-    tokio::spawn(async move {
+    let poll_handle = tokio::spawn(async move {
         let result = poll_loop::run_poll_loop(
             &poll_client,
             cfg_poll_timeout,
@@ -131,7 +131,12 @@ pub async fn run_telegram_bot(
         }
     }
 
+    cancellation.cancel();
     drain_remaining_inputs(&mut update_rx, &mut runtime, &handle, &client, &sender).await;
+    if let Err(e) = poll_handle.await {
+        tracing::error!(error = ?e, "poll loop task panicked");
+    }
+    sender.shutdown();
     host.shutdown().await
 }
 
