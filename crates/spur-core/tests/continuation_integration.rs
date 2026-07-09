@@ -43,6 +43,7 @@ fn mk_cont(id: &str) -> BrainContinuation {
         brain_session: SessionId("brain-session-1".into()),
         source: ContinuationSource::AsyncRequested,
         payload: ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: Some("ok".into()),
             diff_summary: None,
@@ -227,6 +228,7 @@ async fn test_no_double_delivery_on_block_timeout() {
         let delegation_id: String = req.id.clone().into();
         tokio::time::sleep(Duration::from_secs(WORKER_DELAY_SECS)).await;
         let _ = req.respond_to.send(DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -357,6 +359,7 @@ async fn test_no_double_delivery_on_fast_path() {
         let delegation_id: String = req.id.clone().into();
         tokio::time::sleep(Duration::from_secs(WORKER_DELAY_SECS)).await;
         let _ = req.respond_to.send(DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,

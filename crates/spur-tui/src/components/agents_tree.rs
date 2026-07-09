@@ -325,6 +325,19 @@ impl AgentsTree {
             format!("{:<14} ", format!("{:?}", node.phase)),
             Style::default().fg(status_color),
         ));
+        // Compact inline receipt: the resolved model/effort that actually
+        // ran, when known. Full {agent, profile, model, effort} detail
+        // lives in the DetailPane Task tab — this is just a scan-friendly
+        // hint so a "which model is this?" question doesn't require
+        // selecting the row.
+        if let Some(model_effort) = model_effort_label(node) {
+            spans.push(Span::styled(
+                format!("[{model_effort}] "),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
         if !elapsed_str.is_empty() {
             spans.push(Span::styled(
                 format!("{} ", elapsed_str),
@@ -343,6 +356,20 @@ impl AgentsTree {
             ));
         }
         Line::from(spans)
+    }
+}
+
+/// Compact `model/effort` (or just `model`, or `·/effort`) inline label for
+/// the lineage tree row. `None` when no resolved config has arrived yet, or
+/// when neither model nor effort was resolved for this session — keeps the
+/// row uncluttered rather than printing an empty `[]`.
+fn model_effort_label(node: &ExecutorNode) -> Option<String> {
+    let cfg = node.resolved_config.as_ref()?;
+    match (cfg.model.as_deref(), cfg.effort.as_deref()) {
+        (Some(m), Some(e)) => Some(format!("{m}/{e}")),
+        (Some(m), None) => Some(m.to_string()),
+        (None, Some(e)) => Some(format!("·/{e}")),
+        (None, None) => None,
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::DiffSummary;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,6 +231,54 @@ pub struct DelegationResult {
     /// `crate::domain::artifact::WorkerArtifact`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<crate::domain::artifact::WorkerArtifact>,
+    /// The resolved `{agent, profile, model, effort, config_overrides}`
+    /// actually applied to the worker session that produced this result.
+    /// `None` for delegations that never reached a worker attempt (e.g.
+    /// unknown agent, profile load failure) and for pre-existing outcome
+    /// artifacts persisted before this field existed — additive/optional
+    /// for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_config: Option<ResolvedSessionConfig>,
+}
+
+/// Resolved worker-session configuration — the durable receipt for "what
+/// actually ran". Captured once per attempt at the point of dispatch
+/// (`apply_session_overrides` in `orchestrator::delegation::worker_attempt`)
+/// so `fetch_outcome_artifact` and the TUI lineage pane can show the
+/// concrete `{agent, profile, model, effort}` a worker session used,
+/// instead of only the request-time intent.
+///
+/// Resolution order for `model`/`effort` is request → profile frontmatter →
+/// agent default (see `orchestrator::delegation::execute::resolve_effective_model_effort`).
+/// This struct records what was actually APPLIED (or attempted) via ACP
+/// `set_session_config_option` / `set_session_mode`, not merely what was
+/// requested — `skipped` carries a human-readable note for any value that
+/// could not be applied (RPC rejected, or the agent exposed no matching
+/// option).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedSessionConfig {
+    /// Worker agent name (e.g. "codex", "claude-code").
+    pub agent: String,
+    /// Agent profile selected for this session, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Model resolved for this session, if a model override was
+    /// requested or inherited from the profile default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Effort/thought-level resolved for this session, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Raw `config_id -> value` overrides successfully applied via
+    /// `set_session_config_option`, beyond profile/model/effort.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config_overrides_applied: BTreeMap<String, String>,
+    /// Human-readable notes for resolved values that could NOT be
+    /// applied — e.g. `"effort: agent exposed no thought-level option
+    /// (requested 'high')"` or `"model: set_session_config_option
+    /// rejected: <error>"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 /// Structured reasoning trace the brain passes alongside each
@@ -443,6 +491,7 @@ mod delegation_result_tests {
     #[test]
     fn result_with_diff_summary_round_trips_json() {
         let result = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: Some("--- a/x\n+++ b/x\n".into()),
             diff_summary: Some(DiffSummary {
@@ -507,6 +556,7 @@ mod artifact_tests {
     #[test]
     fn delegation_result_omits_artifact_when_none() {
         let r = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,
@@ -531,6 +581,7 @@ mod artifact_tests {
             kind: ArtifactKind::Output,
         };
         let r = DelegationResult {
+            resolved_config: None,
             status: DelegationStatus::Success,
             diff: None,
             diff_summary: None,

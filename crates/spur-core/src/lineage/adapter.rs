@@ -21,6 +21,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 return;
             }
             lineage.insert_root_node(ExecutorNode {
+                resolved_config: None,
                 id: id.clone(),
                 parent_id: None,
                 child_ids: Vec::new(),
@@ -82,6 +83,7 @@ pub fn apply_legacy(lineage: &mut ExecutorLineage, event: &SpurEvent) {
                 })
                 .cloned();
             let node = ExecutorNode {
+                resolved_config: None,
                 id: id.clone(),
                 parent_id: parent.clone(),
                 child_ids: Vec::new(),
