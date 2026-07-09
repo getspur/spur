@@ -14,7 +14,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 toml = { workspace = true }
-frankenstein = { version = "0.49", features = ["client-reqwest"] }
+frankenstein = { version = "0.50.2", features = ["client-reqwest"] }
 pulldown-cmark = { workspace = true }
 spur-acp = { workspace = true }
 spur-core = { workspace = true }

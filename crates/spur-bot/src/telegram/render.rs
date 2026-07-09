@@ -24,14 +24,24 @@ pub async fn render_batch_to_thread(
             crate::runtime::RuntimeRender::ServiceMessage { text } => {
                 for chunk in markdown_to_telegram_chunks(&text) {
                     client
-                        .send_html_to_thread(chat_id, message_thread_id, chunk.html, chunk.plain)
+                        .send_rich_html_to_thread(
+                            chat_id,
+                            message_thread_id,
+                            chunk.html,
+                            chunk.plain,
+                        )
                         .await?;
                 }
             }
             crate::runtime::RuntimeRender::FinalAnswer { text } => {
                 for chunk in markdown_to_telegram_chunks(&text) {
                     client
-                        .send_html_to_thread(chat_id, message_thread_id, chunk.html, chunk.plain)
+                        .send_rich_html_to_thread(
+                            chat_id,
+                            message_thread_id,
+                            chunk.html,
+                            chunk.plain,
+                        )
                         .await?;
                 }
             }
