@@ -28,6 +28,12 @@ worker_subnets = [
   "subnet-yyyyyyyy",
 ]
 
+# Optional interface endpoint ENI subnets. Use one subnet for lower-cost dev
+# stacks, or leave empty to create endpoint ENIs in all worker_subnets.
+interface_vpc_endpoint_subnet_ids = [
+  "subnet-xxxxxxxx",
+]
+
 # Route table IDs associated with worker_subnets. Required for the default
 # S3 and DynamoDB gateway endpoints.
 worker_route_table_ids = [
