@@ -2891,6 +2891,46 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn find_jsonl_files_skips_unreadable_subdirectory_instead_of_failing_entirely() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+
+        let good_dir = tmp.path().join("good-project");
+        std::fs::create_dir(&good_dir).unwrap();
+        std::fs::write(good_dir.join("session.jsonl"), "{}").unwrap();
+
+        let bad_dir = tmp.path().join("unreadable-project");
+        std::fs::create_dir(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join("session.jsonl"), "{}").unwrap();
+        std::fs::set_permissions(&bad_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Root (and some CI sandboxes) ignore mode bits; skip rather than flake.
+        let actually_blocked = std::fs::read_dir(&bad_dir).is_err();
+
+        let result = AnalyticsEngine::find_jsonl_files(tmp.path());
+
+        // Always restore so TempDir's Drop can remove bad_dir.
+        std::fs::set_permissions(&bad_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !actually_blocked {
+            return;
+        }
+
+        let files = result.expect(
+            "find_jsonl_files should skip an unreadable subdirectory rather than \
+             failing the whole scan",
+        );
+        assert_eq!(
+            files.len(),
+            1,
+            "expected the readable sibling's session to still be found"
+        );
+        assert!(files[0].ends_with("session.jsonl"));
+    }
+
+    #[test]
     fn test_opencode_events_from_sqlite_fixture() {
         // Build a miniature opencode.db mirroring the real Drizzle schema
         // (columns narrowed to what our extractor reads).
