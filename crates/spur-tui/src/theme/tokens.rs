@@ -83,6 +83,11 @@ const DARK_DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("session_picker.row.muted.fg", "fg_subtle"),
     ("session_picker.row.cursor.fg", "accent"),
     ("session_picker.row.pinned.fg", "warning"),
+    ("session_picker.row.draft.fg", "highlight"),
+    ("session_picker.row.selected.bg", "bg_selection"),
+    ("session_picker.preview.value.fg", "fg"),
+    ("session_picker.preview.label.fg", "fg_subtle"),
+    ("session_picker.preview.border.fg", "fg_subtle"),
     ("session_picker.preview.draft.fg", "warning"),
     ("session_picker.preview.intent.fg", "fg_muted"),
     ("session_picker.preview.placeholder.fg", "fg_subtle"),
@@ -237,7 +242,7 @@ mod tests {
 
     #[test]
     fn dark_default_contains_all_spec_sample_bindings() {
-        assert_eq!(TokenMap::dark_default().0.len(), 159);
+        assert_eq!(TokenMap::dark_default().0.len(), 164);
     }
 
     #[test]
@@ -287,6 +292,26 @@ mod tests {
         for (token, palette_role) in expected {
             assert_eq!(tokens.0.get(token).map(String::as_str), Some(palette_role));
         }
+    }
+
+    #[test]
+    fn session_picker_review_tokens_are_bound() {
+        let tokens = TokenMap::dark_default();
+        let expected = [
+            ("session_picker.preview.value.fg", "fg"),
+            ("session_picker.preview.label.fg", "fg_subtle"),
+            ("session_picker.preview.border.fg", "fg_subtle"),
+            ("session_picker.row.draft.fg", "highlight"),
+            ("session_picker.row.selected.bg", "bg_selection"),
+        ];
+
+        for (token, palette_role) in expected {
+            assert_eq!(tokens.0.get(token).map(String::as_str), Some(palette_role));
+        }
+        assert_ne!(
+            tokens.0.get("session_picker.row.draft.fg"),
+            tokens.0.get("session_picker.row.pinned.fg")
+        );
     }
 
     #[test]
