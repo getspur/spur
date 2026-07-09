@@ -1,14 +1,10 @@
 Explore  [Skills]  Agents   Manage
 never synced
-┌Manage · Pool─────────────────────────────────────────────────────────────────────────────────────┐
-│[Pool]   Last materialization                                                                     │
-│name  kind  sha  verdict  license                                                                 │
-│                                                                                                  │
-│> review-helper  skill  0123456  clean  MIT                                                       │
-│stale-helper  skill  0123456  clean  MIT                                                          │
-│                                                                                                  │
-│status findings                                                                                   │
-│⚠ missing body  stale-helper                                                                      │
+[Pool]   Last materialization
+┌Manage · Pool (2 items)───────────────────────────────────────────────────────────────────────────┐
+│  name                                                    kind   sha     verdict      license     │
+│>>review-helper                                           skill  0123456 clean        MIT         │
+│  stale-helper                                            skill  0123456 clean        MIT         │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -26,5 +22,9 @@ never synced
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  1 missing, 0 sha mismatch                                                                       │
+└j/k navigate · l lens · x remove · r reload · Esc back────────────────────────────────────────────┘
 j/k move  l lens  x remove  m browse  r reload  Esc browse
