@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -23,35 +23,122 @@ pub fn schema_object<T: JsonSchema>() -> serde_json::Map<String, Value> {
 }
 
 fn normalize_defs_refs(value: &mut Value) {
-    if let Value::Object(map) = value {
-        if let Some(definitions) = map.remove("definitions") {
-            map.insert("$defs".to_string(), definitions);
+    let definitions = match value {
+        Value::Object(map) => {
+            let definitions = map.remove("definitions").or_else(|| map.remove("$defs"));
+            map.remove("$defs");
+            definitions
         }
-    }
+        _ => None,
+    };
+    let Some(Value::Object(definitions)) = definitions else {
+        return;
+    };
 
-    rewrite_definitions_refs(value);
+    // opencode's MCP client does not resolve nested `$ref`s in tool input schemas.
+    inline_refs(value, &definitions, &mut HashSet::new());
+    collapse_single_all_of(value);
 }
 
-fn rewrite_definitions_refs(value: &mut Value) {
+fn inline_refs(
+    value: &mut Value,
+    definitions: &serde_json::Map<String, Value>,
+    resolving: &mut HashSet<String>,
+) {
     match value {
         Value::Object(map) => {
-            if let Some(Value::String(reference)) = map.get_mut("$ref") {
-                if let Some(suffix) = reference.strip_prefix("#/definitions/") {
-                    *reference = format!("#/$defs/{suffix}");
+            if let Some(Value::String(reference)) = map.remove("$ref") {
+                let resolved = definition_ref_name(&reference)
+                    .map(|name| resolve_ref(name, definitions, resolving))
+                    .unwrap_or_else(permissive_object_schema);
+
+                if let Value::Object(resolved_map) = resolved {
+                    for (key, nested) in resolved_map {
+                        map.entry(key).or_insert(nested);
+                    }
                 }
             }
 
             for nested in map.values_mut() {
-                rewrite_definitions_refs(nested);
+                inline_refs(nested, definitions, resolving);
             }
         }
         Value::Array(values) => {
             for nested in values {
-                rewrite_definitions_refs(nested);
+                inline_refs(nested, definitions, resolving);
             }
         }
         _ => {}
     }
+}
+
+fn resolve_ref(
+    name: &str,
+    definitions: &serde_json::Map<String, Value>,
+    resolving: &mut HashSet<String>,
+) -> Value {
+    if !resolving.insert(name.to_string()) {
+        return permissive_object_schema();
+    }
+
+    let mut resolved = definitions
+        .get(name)
+        .cloned()
+        .unwrap_or_else(permissive_object_schema);
+    inline_refs(&mut resolved, definitions, resolving);
+    resolving.remove(name);
+    resolved
+}
+
+fn definition_ref_name(reference: &str) -> Option<&str> {
+    reference
+        .strip_prefix("#/definitions/")
+        .or_else(|| reference.strip_prefix("#/$defs/"))
+}
+
+fn collapse_single_all_of(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let sole_object = match map.remove("allOf") {
+                Some(Value::Array(mut values)) if values.len() == 1 => {
+                    match values.pop().unwrap() {
+                        Value::Object(sole) => Some(sole),
+                        other => {
+                            map.insert("allOf".to_string(), Value::Array(vec![other]));
+                            None
+                        }
+                    }
+                }
+                Some(other) => {
+                    map.insert("allOf".to_string(), other);
+                    None
+                }
+                None => None,
+            };
+
+            if let Some(sole_object) = sole_object {
+                for (key, nested) in sole_object {
+                    map.entry(key).or_insert(nested);
+                }
+            }
+
+            for nested in map.values_mut() {
+                collapse_single_all_of(nested);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                collapse_single_all_of(nested);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn permissive_object_schema() -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("type".to_string(), Value::String("object".to_string()));
+    Value::Object(map)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -346,5 +433,49 @@ mod tests {
         let json = r#"{"agent": "kimi", "task": "do work", "enable_worker_mcp": true}"#;
         let input: DelegateToWorkerInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.enable_worker_mcp, Some(true));
+    }
+
+    #[test]
+    fn submit_loop_params_schema_is_fully_inlined() {
+        let schema = schema_value::<SubmitLoopParams>();
+        let pretty = serde_json::to_string_pretty(&schema).unwrap();
+        assert!(
+            !pretty.contains("$ref"),
+            "tool schema still contains a $ref after normalization:\n{pretty}"
+        );
+        assert!(
+            schema.get("$defs").is_none() && schema.get("definitions").is_none(),
+            "tool schema must drop top-level defs once refs are inlined:\n{pretty}"
+        );
+        let spec = &schema["properties"]["spec"];
+        assert_eq!(
+            spec["type"], "object",
+            "`spec` is not an inline object schema"
+        );
+        let spec_props = spec["properties"]
+            .as_object()
+            .expect("`spec.properties` must be an inlined object");
+        for field in [
+            "goal",
+            "pattern",
+            "cadence_secs",
+            "template",
+            "governors",
+            "escalation",
+        ] {
+            assert!(
+                spec_props.contains_key(field),
+                "`spec.{field}` was not inlined into the schema"
+            );
+        }
+        let governors = &spec["properties"]["governors"];
+        assert_eq!(
+            governors["type"], "object",
+            "`spec.governors` is not an inline object schema"
+        );
+        assert!(
+            governors["properties"]["max_cost_micros_per_generation"].is_object(),
+            "`spec.governors.max_cost_micros_per_generation` was not inlined"
+        );
     }
 }
