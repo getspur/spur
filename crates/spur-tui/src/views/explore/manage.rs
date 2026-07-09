@@ -12,7 +12,7 @@ use spur_core::explore::{
     pool::{self, ManifestItem, StatusReport},
 };
 
-use crate::action::{Action, ViewId};
+use crate::action::Action;
 
 use super::{
     scroll_offset_for_selected_line, selected_marker_line, sha7, ExploreBrowserView, ExploreStage,
@@ -83,7 +83,11 @@ impl ExploreBrowserView {
                 self.remove_selected_pool_item();
                 None
             }
-            KeyCode::Esc if key.modifiers.is_empty() => Some(Action::NavigateTo(ViewId::Dashboard)),
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.stage = ExploreStage::Browse;
+                self.manage_selected = 0;
+                None
+            }
             _ => None,
         }
     }
@@ -149,8 +153,12 @@ impl ExploreBrowserView {
     }
 
     fn remove_selected_pool_item(&mut self) {
-        if self.manage_lens != ManageLens::Pool || self.manage_selected >= self.manifest.items.len()
-        {
+        if self.manage_lens != ManageLens::Pool {
+            return;
+        }
+        if self.manage_selected >= self.manifest.items.len() {
+            self.load_error =
+                Some("status findings can't be removed here; select a pool item".into());
             return;
         }
         let name = self.manifest.items[self.manage_selected].name.clone();
@@ -372,7 +380,6 @@ fn format_epoch_hhmm(epoch: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::ViewId;
     use crate::views::explore::{ExploreBrowserView, ExploreStage};
     use crossterm::event::KeyModifiers;
     use ratatui::{backend::TestBackend, Terminal};
@@ -556,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn r_reloads_pool_and_esc_navigates_to_dashboard() {
+    fn r_reloads_pool_and_esc_returns_to_browse() {
         let repo = repo_with_manifest(vec![]);
         let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
         enter_manage(&mut view);
@@ -564,10 +571,46 @@ mod tests {
         assert!(view.handle_key(key(KeyCode::Char('r'))).is_none());
 
         let action = view.handle_key(key(KeyCode::Esc));
-        assert!(matches!(
-            action,
-            Some(Action::NavigateTo(ViewId::Dashboard))
-        ));
+        assert!(action.is_none());
+        assert_eq!(view.stage, ExploreStage::Browse);
+        assert_eq!(view.manage_selected, 0);
+    }
+
+    #[test]
+    fn x_on_status_finding_reports_that_it_cannot_be_removed() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut entry = manifest_entry("missing-skill", Some("MIT"));
+        entry.content_sha256 = vendor_pool_body(repo.path(), &entry);
+        remove_pool_body(repo.path(), &entry);
+        Catalog {
+            synced_at_epoch: None,
+            entries: Vec::new(),
+        }
+        .save(repo.path())
+        .unwrap();
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item_from_entry(
+                &entry,
+                GateRecord {
+                    verdict: "clean".into(),
+                    justification: None,
+                    decided_at_epoch: None,
+                },
+            )],
+        }
+        .save(repo.path())
+        .unwrap();
+        let mut view = ExploreBrowserView::new(repo.path().to_path_buf());
+        enter_manage(&mut view);
+
+        assert!(view.handle_key(key(KeyCode::Char('j'))).is_none());
+        assert_eq!(view.manage_selected, 1);
+        assert!(view.handle_key(key(KeyCode::Char('x'))).is_none());
+
+        let message = view.load_error.as_deref().unwrap_or_default();
+        assert!(message.contains("status findings can't be removed"));
+        assert!(message.contains("select a pool item"));
     }
 
     #[test]
