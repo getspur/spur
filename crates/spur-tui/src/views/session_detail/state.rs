@@ -96,9 +96,12 @@ impl SessionDetailView {
             cancelling_in_flight: false,
             cancel_confirm_open: false,
             cancel_hint_until: None,
+            transient_status_until: None,
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
+            workers_panel_visible: false,
+            workers_panel_visibility_known: false,
             focused_panel: FocusedSessionPanel::ReactTrace,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names,
@@ -116,14 +119,17 @@ impl SessionDetailView {
     /// defaults so unit tests don't have to repeat the full argument list.
     #[cfg(any(test, debug_assertions))]
     pub fn new_for_tests() -> Self {
-        Self::new(
+        let mut view = Self::new(
             spur_acp::SessionId("test".to_string()),
             "claude".to_string(),
             "brain".to_string(),
             std::path::PathBuf::from("/tmp"),
             std::sync::Arc::new(spur_acp::AgentConfig::with_defaults("claude")),
             Vec::new(),
-        )
+        );
+        view.workers_panel_visible = false;
+        view.workers_panel_visibility_known = true;
+        view
     }
 
     /// Minimal `SessionDetailView` for palette-integration tests — only
@@ -183,9 +189,12 @@ impl SessionDetailView {
             cancelling_in_flight: false,
             cancel_confirm_open: false,
             cancel_hint_until: None,
+            transient_status_until: None,
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
+            workers_panel_visible: false,
+            workers_panel_visibility_known: false,
             focused_panel: FocusedSessionPanel::ReactTrace,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names: std::collections::HashSet::new(),
@@ -285,9 +294,12 @@ impl SessionDetailView {
             cancelling_in_flight: false,
             cancel_confirm_open: false,
             cancel_hint_until: None,
+            transient_status_until: None,
             cancel_mode: None,
             fs_unsafe: false,
             workers_panel_collapsed: false,
+            workers_panel_visible: false,
+            workers_panel_visibility_known: false,
             focused_panel: FocusedSessionPanel::ReactTrace,
             tool_depth: std::collections::HashMap::new(),
             known_worker_names: std::collections::HashSet::new(),
@@ -377,6 +389,7 @@ impl SessionDetailView {
         self.cancelling_in_flight = false;
         self.cancel_confirm_open = false;
         self.cancel_hint_until = None;
+        self.transient_status_until = None;
 
         // Draft debounce locals (spec §3.5). Gate is ALSO at the source in
         // force_save_draft/draft_save_action — this local wipe is
@@ -395,6 +408,7 @@ impl SessionDetailView {
         self.resume_banner = None;
         self.focused_panel = FocusedSessionPanel::ReactTrace;
         self.cancel_hint_until = None;
+        self.transient_status_until = None;
     }
 
     pub fn focused_panel(&self) -> FocusedSessionPanel {
@@ -725,6 +739,7 @@ impl SessionDetailView {
 
     /// Update the brain status label shown in the InputBar.
     pub fn set_brain_status(&mut self, status: &str) {
+        self.transient_status_until = None;
         if self.cancelling_in_flight {
             self.input_bar.set_status(
                 Some(format!("[{}: cancelling{{spinner}}]", self.agent_name)),

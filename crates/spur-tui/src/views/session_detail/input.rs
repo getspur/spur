@@ -348,6 +348,9 @@ impl SessionDetailView {
             KeyOwner::View => {
                 if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) && self.input_bar.is_empty()
                 {
+                    if self.workers_panel_visibility_known && !self.workers_panel_visible {
+                        return None;
+                    }
                     self.focused_panel = match self.focused_panel {
                         FocusedSessionPanel::ReactTrace => FocusedSessionPanel::Workers,
                         FocusedSessionPanel::Workers => FocusedSessionPanel::ReactTrace,
