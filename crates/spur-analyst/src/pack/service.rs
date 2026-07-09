@@ -1,4 +1,8 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
+};
 
 use crate::embedding::EmbeddingRuntime;
 use crate::search::graph_candidates::merge_graph_candidates;
@@ -35,6 +39,11 @@ use crate::overlay::{
     shared_overlay_session_coordinator, write_delta_for_session, OverlayMergeSession,
 };
 
+type PooledPackConnection = Arc<Mutex<crate::db::connection::AnalystReadOnlyConnection>>;
+
+static PACK_CONNECTION_POOL: OnceLock<Mutex<HashMap<PathBuf, PooledPackConnection>>> =
+    OnceLock::new();
+
 pub(crate) async fn knowledge_context_pack(
     request: KnowledgeContextPackRequest,
 ) -> Result<Value, McpHandlerError> {
@@ -49,6 +58,7 @@ pub(crate) async fn knowledge_context_pack(
         .map(Vec::from);
     let query_result = {
         let conn = open_pack_connection(&db_path, "knowledge_context_pack")?;
+        let conn = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         query_candidates_for_request_with_conn(
             &request,
             &db_path,
@@ -76,25 +86,40 @@ pub(crate) async fn knowledge_context_pack_2(
         .map(Vec::from);
     let pack_connection =
         open_pack_connection_with_overlay(&db_path, "knowledge_context_pack_2").await?;
-    let query_result = query_candidates_for_request_with_conn(
-        &request.base,
-        &db_path,
-        pack_connection.candidate_conn(),
-        "knowledge_context_pack_2",
-        query_vec,
-    )?;
+    let query_result = {
+        let conn = pack_connection.base_conn();
+        query_candidates_for_request_with_conn(
+            &request.base,
+            &db_path,
+            &conn,
+            "knowledge_context_pack_2",
+            query_vec,
+        )?
+    };
 
     let exact_context = exact_graph_context_for_result(&request.base, &query_result).await;
     let staleness = pack_connection.staleness.clone();
-    let graph_sections = graph_reasoning_sections_for_pack_with_conn(
-        &request,
-        &query_result,
-        &exact_context,
-        &db_path,
-        pack_connection.graph_conn(),
-        &staleness,
-    );
-    drop(pack_connection);
+    let graph_sections = match pack_connection.overlay_conn.as_ref() {
+        Some(conn) => graph_reasoning_sections_for_pack_with_conn(
+            &request,
+            &query_result,
+            &exact_context,
+            &db_path,
+            conn,
+            &staleness,
+        ),
+        None => {
+            let conn = pack_connection.base_conn();
+            graph_reasoning_sections_for_pack_with_conn(
+                &request,
+                &query_result,
+                &exact_context,
+                &db_path,
+                &conn,
+                &staleness,
+            )
+        }
+    };
     Ok(pack_query_result_v2_with_graph_sections_and_staleness(
         &request,
         query_result,
@@ -108,7 +133,13 @@ pub(crate) async fn knowledge_context_pack_2(
 fn open_pack_connection(
     db_path: &Path,
     tool_name: &str,
-) -> Result<duckdb::Connection, McpHandlerError> {
+) -> Result<PooledPackConnection, McpHandlerError> {
+    let pool = PACK_CONNECTION_POOL.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut pool = pool.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(conn) = pool.get(db_path) {
+        return Ok(Arc::clone(conn));
+    }
+
     let conn = open_analyst_connection_read_only(db_path).map_err(|error| {
         McpHandlerError::Internal(format!(
             "{tool_name} failed to query analyst DB at {}: {error}",
@@ -117,22 +148,22 @@ fn open_pack_connection(
     })?;
     load_analyst_icu_extension(&conn);
     load_analyst_lance_extension(&conn);
+    let conn = Arc::new(Mutex::new(conn));
+    pool.insert(db_path.to_path_buf(), Arc::clone(&conn));
     Ok(conn)
 }
 
 struct PackConnection {
-    base_conn: duckdb::Connection,
+    base_conn: PooledPackConnection,
     overlay_conn: Option<duckdb::Connection>,
     staleness: PackStaleness,
 }
 
 impl PackConnection {
-    fn candidate_conn(&self) -> &duckdb::Connection {
-        &self.base_conn
-    }
-
-    fn graph_conn(&self) -> &duckdb::Connection {
-        self.overlay_conn.as_ref().unwrap_or(&self.base_conn)
+    fn base_conn(&self) -> MutexGuard<'_, crate::db::connection::AnalystReadOnlyConnection> {
+        self.base_conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -141,7 +172,12 @@ async fn open_pack_connection_with_overlay(
     tool_name: &str,
 ) -> Result<PackConnection, McpHandlerError> {
     let base_conn = open_pack_connection(db_path, tool_name)?;
-    let base_graph_hash = graph_content_hash_from_conn(&base_conn);
+    let base_graph_hash = {
+        let conn = base_conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        graph_content_hash_from_conn(&conn)
+    };
     let mut staleness = PackStaleness::base_only(base_graph_hash.clone());
 
     let overlay_session = overlay_session_for_current_worktree(db_path, base_graph_hash).await;
