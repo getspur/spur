@@ -49,6 +49,7 @@ async fn cancel_wins_over_slow_worker() {
             biased;
             _ = token.cancelled() => {
                 DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Cancelled {
                         reason: "brain requested cancel".into(),
                     },
@@ -62,6 +63,7 @@ async fn cancel_wins_over_slow_worker() {
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
                 DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Success,
                     diff: None,
                     diff_summary: None,
@@ -135,6 +137,7 @@ async fn cancel_emits_delegation_completed() {
                     status: status.clone(),
                 });
                 DelegationResult {
+                    resolved_config: None,
                     status,
                     diff: None,
                     diff_summary: None,
@@ -146,6 +149,7 @@ async fn cancel_emits_delegation_completed() {
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
                 DelegationResult {
+                    resolved_config: None,
                     status: DelegationStatus::Success,
                     diff: None,
                     diff_summary: None,
@@ -279,6 +283,7 @@ async fn test_cancel_during_inline_window_fast_arm_wins() {
             _ = tokio::time::sleep(Duration::from_secs(600)) => DelegationStatus::Success,
         };
         let _ = req.respond_to.send(DelegationResult {
+            resolved_config: None,
             status,
             diff: None,
             diff_summary: None,
@@ -426,6 +431,7 @@ async fn test_cancel_during_detached_path_continuation_delivers_cancelled() {
             _ = tokio::time::sleep(Duration::from_secs(600)) => DelegationStatus::Success,
         };
         let _ = req.respond_to.send(DelegationResult {
+            resolved_config: None,
             status,
             diff: None,
             diff_summary: None,

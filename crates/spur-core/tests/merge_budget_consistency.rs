@@ -42,6 +42,7 @@ fn continuation(
 
 fn success_payload(id: &str, attempt: u32, summary: &str) -> ContinuationPayload {
     ContinuationPayload {
+        resolved_config: None,
         status: DelegationStatus::Success,
         summary: Some(summary.into()),
         diff_summary: None,
@@ -72,6 +73,7 @@ fn conservative_estimate_dominates_exact_cost() {
         2,
         ContinuationSource::PlanCompleted,
         ContinuationPayload {
+            resolved_config: None,
             diff_summary: Some(DiffSummary {
                 files_changed: 8,
                 insertions: 120,
@@ -93,6 +95,7 @@ fn conservative_estimate_dominates_exact_cost() {
         3,
         ContinuationSource::PlanReadyToMerge,
         ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Failed {
                 error: "x".repeat(512),
             },

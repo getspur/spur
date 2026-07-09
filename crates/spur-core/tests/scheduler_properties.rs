@@ -38,6 +38,7 @@ fn mk_cont(id: &str) -> BrainContinuation {
         brain_session: SessionId("brain-session-1".into()),
         source: ContinuationSource::AsyncRequested,
         payload: ContinuationPayload {
+            resolved_config: None,
             status: DelegationStatus::Success,
             summary: None,
             diff_summary: None,
