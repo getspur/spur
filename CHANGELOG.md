@@ -258,3 +258,22 @@ Spur 0.4.5 focuses on getting around faster and trusting what you see. A new uni
   framework = "v1"
   ```
   Release builds default to `legacy` for 0.4.5; the v1 framework will become default once it stabilizes.
+
+## [2026-07-09]
+
+### Added
+- **`spur-tui`: Explore pool table view.** The manage lens now renders explore-pool entries in a denser table layout, which makes larger pools easier to scan and compare without dropping back to raw detail views. (`3c1bfec39`)
+- **`spur-tui`: Browse catalog filter in Explore.** Explore browser sessions can now narrow the catalog with an in-view filter, reducing the amount of scrolling needed to find the right item in larger pools. (`3ef14e861`)
+- **`spur-tui`: Accept-all clean gate cards.** Clean gate cards can now be accepted in one pass, which removes repetitive confirmation work when a review batch has no blocking findings. (`5420dedad`)
+- **Telemetry performance and usage events.** Spur now emits slow-frame, view-opened, MCP tool/request, ACP request, and LLM request telemetry so operators can observe UI and request latency end to end. (`e71f8f288`)
+
+### Fixed
+- **`spur-core`: OpenCode MCP schema compatibility.** Tool schemas now inline `$ref` definitions before they are exposed through MCP, which fixes tool ingestion for OpenCode clients that could not follow the previous schema shape. (`2f8cc2c33`)
+- **`spur-context`: Worktree project attribution and scan resilience.** Context collection now collapses SPUR worktree checkouts back to their origin repo and skips unreadable filesystem entries instead of aborting the scan, which fixes fragmented or missing project rollups. (`a50655ed6`, `cce1c81bc`)
+- **`spur-analyst`: Database hardening.** Analyst scratch lifecycle ownership, nested Arrow value serialization, and incomplete-database blocking now prevent partially-built analyst stores from surfacing as live query failures. (`4ed1f4a1c`)
+- **`spur-tui`: Session detail UX regressions.** Session detail rendering and input handling regressions are corrected so navigation and readback behave consistently again in the detail pane. (`4d6f26706`)
+
+### Changed
+- **`spur-tui`: Explore view UX refresh.** Scroll-follow, preview caching, render-path caching, browse presentation, gate interaction feedback, and search filtering all landed together, making the Explore surface steadier under frequent updates. (`12b626b4c`)
+- **`spur-tui`: Loop browser polish.** The loop browser now documents `g`/`G`, masks notices correctly, shows governor placeholders, and wraps confirmations cleanly so long-running loop inspection reads more predictably. (`36f09d00a`)
+- **`spur-tui`: Session picker polish and render-frame cleanup.** Session picker theme tokens, preview styling, key handling, and render-path cleanup reduce visual churn and keep filtering responsive while moving through long session lists. (`e560f9995`)
