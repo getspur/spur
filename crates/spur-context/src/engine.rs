@@ -108,6 +108,12 @@ fn strip_provider_prefix(s: &str) -> &str {
     s.split_once('/').map_or(s, |(_, rest)| rest)
 }
 
+// TODO(TDD red phase): placeholder pending the real implementation.
+#[cfg(feature = "duckdb")]
+fn strip_spur_worktree_suffix(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 #[cfg(feature = "duckdb")]
 fn normalize_sql_type(sql_type: &str) -> String {
     sql_type
@@ -2491,6 +2497,43 @@ mod tests {
     }
 
     #[test]
+    fn create_claude_view_normalizes_project_across_spur_worktrees() {
+        let tmp = TempDir::new().unwrap();
+        let claude_root = tmp.path().join("claude");
+        // Claude Code encodes a session's cwd into its project directory
+        // name by replacing both `/` and `.` with `-`. A worker session
+        // running in `<repo>/.spur/worktrees/<id>` therefore lands in a
+        // directory like `...--spur-worktrees-<id>` (the doubled dash is
+        // the `/` before, and the `.` of, `.spur` colliding). That should
+        // still attribute to the same logical project as a plain checkout.
+        let claude_dir = claude_root
+            .join("projects/-repo-spur--spur-worktrees-183aa04d-848a-4482-b174-d8f50b048235");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        let jsonl_path = claude_dir.join("session.jsonl");
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","timestamp":"2026-04-23T10:00:00Z","sessionId":"sess-1","message":{{"usage":{{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}},"model":"claude-sonnet-4","id":"msg_1"}},"requestId":"req_1"}}"#
+        )
+        .unwrap();
+
+        let engine = setup_engine();
+        engine.create_claude_view(&claude_root).unwrap();
+
+        let project: String = engine
+            .conn
+            .query_row("SELECT project FROM claude_events LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            project, "-repo-spur",
+            "a worktree checkout should attribute to its origin repo's project name"
+        );
+    }
+
+    #[test]
     fn test_codex_events_delta_logic() {
         let tmp = TempDir::new().unwrap();
         let codex_root = tmp.path().join("codex");
@@ -3131,6 +3174,102 @@ mod tests {
             )
             .unwrap();
         assert!((total_cost - (0.01289272 + 0.0245 + 0.031)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn strip_spur_worktree_suffix_collapses_worktree_checkout_to_origin_repo() {
+        assert_eq!(
+            strip_spur_worktree_suffix(Path::new(
+                "/Volumes/Projects/spur/.spur/worktrees/183aa04d-848a-4482-b174-d8f50b048235"
+            )),
+            Path::new("/Volumes/Projects/spur")
+        );
+        // Nested worktree subvariants (preview/staging) also collapse.
+        assert_eq!(
+            strip_spur_worktree_suffix(Path::new(
+                "/Volumes/Projects/spur/.spur/worktrees/preview/abc123"
+            )),
+            Path::new("/Volumes/Projects/spur")
+        );
+        // A plain, non-worktree checkout passes through unchanged.
+        assert_eq!(
+            strip_spur_worktree_suffix(Path::new("/Volumes/Projects/spur")),
+            Path::new("/Volumes/Projects/spur")
+        );
+    }
+
+    #[test]
+    fn create_opencode_view_normalizes_project_across_spur_worktrees() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("opencode.db");
+        {
+            let sconn = rusqlite::Connection::open(&db_path).unwrap();
+            sconn
+                .execute_batch(
+                    r#"
+                    CREATE TABLE project (
+                        id TEXT PRIMARY KEY,
+                        worktree TEXT NOT NULL,
+                        name TEXT,
+                        time_created INTEGER NOT NULL,
+                        time_updated INTEGER NOT NULL,
+                        sandboxes TEXT NOT NULL
+                    );
+                    CREATE TABLE session (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL,
+                        directory TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        version TEXT NOT NULL,
+                        time_created INTEGER NOT NULL,
+                        time_updated INTEGER NOT NULL
+                    );
+                    CREATE TABLE message (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        time_created INTEGER NOT NULL,
+                        time_updated INTEGER NOT NULL,
+                        data TEXT NOT NULL
+                    );
+                    "#,
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO project VALUES ('p1', '/Volumes/Projects/spur/.spur/worktrees/183aa04d-848a-4482-b174-d8f50b048235', 'spur', 1, 1, '[]')",
+                    [],
+                )
+                .unwrap();
+            sconn
+                .execute(
+                    "INSERT INTO session VALUES ('s1', 'p1', '/Volumes/Projects/spur/.spur/worktrees/183aa04d-848a-4482-b174-d8f50b048235', 't', 'v1', 1, 1)",
+                    [],
+                )
+                .unwrap();
+            let m1 = r#"{"role":"assistant","cost":0.01,"tokens":{"input":100,"output":10,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"z-ai/glm-5.1","providerID":"openrouter"}"#;
+            sconn
+                .execute(
+                    "INSERT INTO message VALUES ('m1','s1',1,1,?1)",
+                    rusqlite::params![m1],
+                )
+                .unwrap();
+        }
+
+        let engine = setup_engine();
+        engine.create_opencode_view(&db_path).unwrap();
+
+        let project: Option<String> = engine
+            .conn
+            .query_row("SELECT project FROM opencode_events LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            project.as_deref(),
+            Some("spur"),
+            "a worker session running in a worktree checkout should attribute \
+             to its origin repo's project name"
+        );
     }
 
     /// Smoke test against the developer's real `~/.local/share/opencode/opencode.db`.
