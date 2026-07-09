@@ -39,7 +39,8 @@ The desired behavior is bounded server-side queueing:
   serialized by the recent Postgres advisory lock, so the data-plane conflict is
   bounded to the publish critical section.
 - `external_index_status` already serves DynamoDB job state and repairs stale
-  running/queued jobs when an execution ARN exists.
+  jobs only when an execution ARN exists. Queued jobs and pre-ARN dispatching
+  jobs require drainer-side repair.
 
 ## Goals
 
@@ -123,7 +124,12 @@ Initial production behavior:
 
 - Authenticated traffic maps to `BacklogOwnerKind::Caller` using the current
   `caller_id`.
-- Anonymous public traffic maps to one shared `Anonymous` owner.
+- Anonymous public traffic maps to `Anonymous` only when anonymous mutations are
+  enabled. The initial live/default stack may keep this enabled for evaluation;
+  secure staging/prod stacks should keep anonymous mutations disabled. If a
+  public anonymous stack needs a useful backlog, the owner ID must be derived
+  from a stable abuse-control key, such as a signed client token or normalized
+  source-IP bucket, not one global anonymous queue.
 - Job records continue to store `caller_id` for authorization/status lookup.
 - Job records also store `owner_kind` and `owner_id` for backlog accounting.
 
@@ -138,22 +144,61 @@ Future per-user extension:
 
 ## DynamoDB Control Plane Shape
 
-Keep one DynamoDB table for index jobs and add queue-specific item shapes:
+Keep one DynamoDB table for index jobs, but add one explicit sparse GSI for
+drainer reads. The existing table has only `pk` as its primary key, so a
+`QUEUE#<shard>#<queued_at>#<job_id>` primary-key item would not be queryable in
+FIFO order without a full table scan. The queue must be queryable through a
+Terraform-managed GSI before non-zero queue caps are enabled.
+
+### Item Shapes
 
 | Item | Purpose |
 |---|---|
-| `JOB#<job_id>` | Durable job record with `queued`, `dispatching`, `running`, `complete`, or `failed` status |
+| `JOB#<job_id>` | Durable job record with `queued`, `dispatching`, `running`, `complete`, `failed`, or `partial` status |
 | `DEDUPE#<source>#<package>#<revision>#<source_url_hash>` | Pointer to current queued/running job for idempotent admission |
 | `OWNER#<kind>#<id>#QUOTA` | Per-owner `queued_count` and `running_count` |
-| `GLOBAL#QUOTA` | Service-wide `queued_count` and `running_count` |
-| `QUEUE#<shard>#<queued_at>#<job_id>` | Queue index entry for drain scans |
+| `GLOBAL#QUEUE#<shard>` | Sharded service-wide queued counters for approximate global queued backpressure |
+| `RUNNING#<job_id>` | Release token for exactly-once running quota release |
+| `GLOBAL#RUNNING_TOKEN#<n>` | Optional hard global running token claimed at dispatch time |
 
-Queue indexes can live as table items or as a GSI over job records. The
-implementation should choose the smallest change that gives ordered reads by
-`queued_at` and enough sharding to avoid hot partitions.
+### Sparse Queue GSI
+
+Queued job records carry GSI attributes while they are eligible for dispatch:
+
+| Attribute | Meaning |
+|---|---|
+| `queue_shard` | Stable shard, e.g. `hash(owner_kind, owner_id, job_id) % index_queue_shard_count` |
+| `queue_sort_key` | Lexicographic key `<next_eligible_at>#<queued_at>#<job_id>` |
+| `next_eligible_at` | Unix seconds; used for requeue backoff |
+
+Terraform adds a GSI keyed by `(queue_shard, queue_sort_key)`. Only queued jobs
+have these attributes, so the GSI is sparse. Dispatch removes the GSI
+attributes in the same transaction that changes the job to `dispatching`.
+
+The first implementation should use 16 queue shards unless load testing shows a
+need for a different value. The drainer rotates both shard order and last-seen
+cursor per shard so jobs near the tail are eventually scanned.
+
+### Global Backpressure
+
+Per-owner caps are hard and transactionally enforced on `OWNER#...#QUOTA`.
+Global queued caps use sharded counters (`GLOBAL#QUEUE#<shard>`) to avoid one
+write-hot `GLOBAL#QUOTA` item. This makes global queued enforcement
+conservative/approximate under heavy contention; operators should set the
+global queued cap with slack and rely on the per-owner cap as the hard fairness
+boundary.
+
+Global running caps are hard when configured: dispatch claims one
+`GLOBAL#RUNNING_TOKEN#<n>` item before starting Step Functions and releases that
+token in the same terminal-release transaction as the owner running count. Small
+deployments can omit a global running cap and rely on per-owner caps plus API
+Gateway throttles; production stacks should configure the token pool.
 
 All counters are updated only by DynamoDB transactions. There must be no
-read-then-write quota checks outside a transaction.
+read-then-write quota checks outside a transaction. Quota items may use TTL only
+when the TTL is much larger than the maximum job lifetime and is refreshed on
+every non-zero update; the reconciler must recreate missing counters from job
+state if TTL or operator repair removes an item unexpectedly.
 
 ## Admission Flow
 
@@ -168,57 +213,131 @@ read-then-write quota checks outside a transaction.
 7. Transactionally create:
    - `JOB#<job_id>` with `status=queued`
    - dedupe pointer
-   - queue index item
+   - queue GSI attributes on the job record
    - owner queued counter increment
-   - global queued counter increment
+   - sharded global queued counter increment, when configured
 8. If owner/global queued cap would be exceeded, reject with `queue_full` or
    `global_queue_full`.
 9. Return the queued job response.
 10. Optionally invoke a small best-effort dispatch kick for low latency. The
     EventBridge drainer remains the correctness path.
 
+`force=true` bypasses the warm-catalog hit only. It does not bypass request
+rate limits, owner/global queued caps, owner/global running caps, URL abuse
+checks, or dedupe against an already queued/running job for the same coordinate
+and source URL.
+
 This keeps the client contract simple: an accepted request always has a durable
 job ID and can be polled with `external_index_status`.
 
 ## Drainer Design
 
-Use an EventBridge-scheduled drainer Lambda as the primary dispatch path.
+Use an EventBridge-scheduled drainer Lambda as the correctness path, plus
+best-effort dispatch kicks on admission and terminal worker updates for lower
+latency. The kicks may be an async Lambda invoke or EventBridge event; failure
+to kick must not affect job completion because the scheduled drainer is the
+fallback.
 
 The drainer runs frequently, for example every 30-60 seconds, and:
 
-1. Acquires a short DynamoDB lease per queue shard to avoid duplicate drainers.
-2. Reads queued jobs in FIFO order from one or more shards.
+1. Acquires a DynamoDB lease per queue shard to avoid duplicate drainers.
+2. Reads queued jobs from the sparse queue GSI where
+   `queue_sort_key <= <now>#...`.
 3. For each candidate, attempts a transaction:
    - condition `JOB.status = queued`
-   - condition owner/global running counts are below cap
+   - condition owner running count is below cap
+   - condition a global running token is available, when a hard global cap is
+     configured
    - decrement owner/global queued counts
    - increment owner/global running counts
+   - create `RUNNING#<job_id>` release token with owner and global token/shard
+     metadata
+   - remove queue GSI attributes from the job
    - set `JOB.status = dispatching`
 4. Starts Step Functions with `name = job_id`.
 5. Records `execution_arn` and sets `status = running`.
 6. If Step Functions start fails:
    - deterministic input/config errors mark the job `failed` and release running
      quota.
-   - transient service errors requeue the job with a bounded attempt counter and
+   - transient service errors requeue the job with bounded retry metadata and
      release running quota.
 
-`StartExecution` remains idempotent through the job ID execution name. If a
-drainer crashes after starting Step Functions but before recording the ARN, a
-repair path can use Step Functions execution-name lookup or mark the
-`dispatching` job stale and retry safely.
+### Drainer Leases
+
+Each shard lease has:
+
+- `lease_owner`: drainer invocation ID
+- `lease_expires_at`: now plus twice the expected per-shard scan budget
+- optional heartbeat renewal for long scans
+
+Concurrent drainers are still safe because dispatch is conditional on
+`JOB.status = queued`. A stale lease only delays that shard until expiry; it
+must not require manual cleanup.
+
+The drainer first checks whether the hard global running cap is already
+saturated. If it is, the drainer exits without scanning queued jobs. When only
+some owners are at cap, the drainer skips those candidates and continues until a
+bounded scan limit; rotating shard cursors ensures every queued job is examined
+within a configured number of drainer runs.
+
+### Requeue Semantics
+
+Transient dispatch failures move the job back to the queue with:
+
+- `attempt += 1`
+- exponential backoff, capped, stored as `next_eligible_at`
+- a new `queue_sort_key` so the job moves behind eligible work until backoff
+  expires
+- `running_count--` and `queued_count++` in the same transaction
+
+After `index_dispatch_max_attempts` (default 3), the job is marked `failed`
+with `error_code = "dispatch_exhausted"` and running quota is released.
+
+Step Functions execution names deduplicate dispatch, but `StartExecution` is
+not treated as a complete idempotency mechanism. If a drainer crashes after
+starting Step Functions but before recording the ARN, repair reconstructs the
+execution ARN from the state-machine ARN and `job_id`:
+
+`arn:aws:states:<region>:<account>:execution:<state_machine_name>:<job_id>`
+
+The drainer then calls `DescribeExecution` on that ARN. If it exists, the
+drainer records it and moves the job to `running` or a terminal state based on
+the execution status. If it does not exist, the drainer may retry
+`StartExecution`. If retry returns `ExecutionAlreadyExists`, repair falls back
+to the reconstructed ARN path. Stale pre-ARN `dispatching` jobs are repaired by
+the drainer only; `external_index_status` can repair only jobs that already have
+an execution ARN.
 
 ## Completion and Quota Release
 
 Worker terminal updates release running quota:
 
 - `complete` decrements owner/global running counts, removes queue-active
-  markers, and can retain the dedupe pointer briefly for status lookups.
+  markers, and deletes the active dedupe pointer so a later non-warm re-index
+  request can create a fresh job.
 - `failed` does the same release and records `error_code` / `error_detail`.
-- Stale `dispatching` or `running` jobs are repaired by the drainer and by
-  `external_index_status`, extending the current repair behavior.
+- `partial` is the spot-interruption/checkpoint state. It is terminal for quota
+  purposes: it releases running quota exactly once and records enough checkpoint
+  metadata for a future explicit resume/retry path. It must not hold a running
+  slot indefinitely.
+- Stale `running` jobs with an execution ARN can be repaired by
+  `external_index_status`. Stale `queued` and pre-ARN `dispatching` jobs are
+  repaired by the drainer.
 
 Quota release must be idempotent. A repeated terminal update must not decrement
-running counters twice.
+running counters twice. The terminal transition is a single DynamoDB
+transaction:
+
+1. condition `JOB.status IN ("dispatching", "running")`
+2. update job to terminal status
+3. delete `RUNNING#<job_id>` with `attribute_exists(pk)`
+4. decrement owner running count and release any global running token
+5. delete active dedupe pointer only if it still points at this job
+
+If the transaction fails because the job is already terminal or the
+`RUNNING#<job_id>` token is gone, the release is treated as already completed
+and no counters are decremented. A periodic reconciler compares stored counters
+against `JOB` and `RUNNING#` items and repairs drift.
 
 ## Fairness
 
@@ -227,12 +346,17 @@ owner from monopolizing all worker slots:
 
 - Per-owner running cap controls local concurrency.
 - Global running cap protects the whole service.
-- Drainer scans should rotate queue shards between runs.
+- Drainer scans rotate queue shards and per-shard start cursors between runs.
 - If a candidate owner is at running cap, the drainer skips that job and looks
   at later jobs up to a bounded scan limit, so other owners can make progress.
+- If the hard global running cap is saturated, the drainer exits before scanning
+  and relies on the completion kick or next schedule tick.
 
-Exact queue position is not required for the first version. A future status
-response can add a best-effort `queue_position_hint` if operators need it.
+Exact queue position is not required for the first version, but starvation is
+not allowed. The implementation must document a scan bound such as "every
+eligible queued job is scanned within K drainer runs at current shard count and
+scan limit." A future status response can add a best-effort
+`queue_position_hint` if operators need it.
 
 ## Configuration
 
@@ -247,6 +371,9 @@ queue admission:
 | `index_max_queued_jobs_global` | Global accepted queued backlog |
 | `index_backlog_owner_mode` | `caller` initially; future `user` / `tenant_user` |
 | `index_drainer_schedule_rate` | EventBridge schedule, e.g. 1 minute |
+| `index_queue_shard_count` | Queue GSI shard count, default 16 |
+| `index_dispatch_max_attempts` | Transient dispatch retry cap, default 3 |
+| `index_dispatch_backoff_base_seconds` | Requeue backoff base |
 
 The current live behavior maps cleanly to:
 
@@ -264,10 +391,40 @@ observable states are:
 - `queued` with `execution_arn = null`
 - `dispatching` with `execution_arn = null` or present depending on timing
 - `running` with `execution_arn`
+- `partial` for checkpointed interruption, terminal for quota accounting
 
 Existing over-cap clients should now see `queued` until backlog capacity is
 exhausted. Queue-full and global-queue-full rejections are new explicit failure
 reasons.
+
+## Observability and Reconciliation
+
+Queueing is not shippable without CloudWatch metrics, alarms, and a reconciler.
+
+Required metrics:
+
+| Metric | Purpose |
+|---|---|
+| `queue_depth_per_owner` / `queue_depth_global` | Detect backlog growth |
+| `dispatch_latency_seconds` | Time from queued to running |
+| `drainer_run_duration_seconds` | Drainer health and scan cost |
+| `drainer_skipped_owner_at_cap` / `drainer_global_cap_saturated` | Capacity tuning |
+| `stuck_dispatching_count` | Crash-recovery failures |
+| `quota_counter_drift` | Stored counters disagree with `JOB` / `RUNNING#` state |
+| `rejection_count{reason}` | Backpressure and abuse signal |
+| `requeue_attempts` / `requeue_exhausted` | Transient-dispatch failure loop detection |
+
+Required alarms:
+
+- `stuck_dispatching_count > 0` for 5 minutes.
+- `quota_counter_drift != 0`.
+- `dispatch_latency_seconds` above the configured SLO for 3 consecutive periods.
+- sustained `global_queue_full` or `queue_full` rejection spikes.
+
+A periodic reconciler recomputes queued/running counts from authoritative job
+and running-token items. It repairs counter drift and can fail jobs that exceed
+maximum queued/dispatching age. This reconciler is separate from the drainer:
+the drainer keeps work moving; the reconciler repairs accounting.
 
 ## Testing
 
@@ -277,9 +434,15 @@ TDD per repository convention:
   - create queued job increments queued counters.
   - queue-full rejects without partial writes.
   - duplicate request returns existing queued job.
+  - queue GSI attributes are present only while jobs are queued and are removed
+    on dispatch.
   - dispatch transition atomically moves queued -> dispatching and queued
     counters -> running counters.
-  - terminal update releases running counters exactly once.
+  - terminal update releases running counters exactly once under concurrent
+    complete/failed races.
+  - `partial` releases running quota exactly once.
+  - requeue restores queued accounting, moves behind eligible work, and honors
+    the attempt cap.
 - MCP tests:
   - 10 unique requests with queue capacity return 10 queued/active job IDs.
   - over owner queue capacity returns `queue_full`.
@@ -289,9 +452,16 @@ TDD per repository convention:
 - Drainer tests:
   - dispatches up to owner/global running caps.
   - skips owners at cap and dispatches other owners.
+  - exits without scanning when the hard global running cap is saturated.
   - handles Step Functions start failure by failing or requeueing with quota
     release.
   - stale dispatching repair is idempotent.
+  - stale pre-ARN dispatching repair reconstructs/describes execution ARN and
+    does not double-dispatch.
+  - lease expiry allows another drainer to continue the shard.
+- Reconciler tests:
+  - repairs stored queued/running counter drift from `JOB` / `RUNNING#` state.
+  - fails or requeues jobs beyond maximum stale queued/dispatching age.
 - Staging smoke follow-up:
   - submit a burst above running capacity.
   - assert all accepted jobs eventually complete in bounded-backlog mode.
@@ -299,12 +469,19 @@ TDD per repository convention:
 
 ## Rollout Plan
 
-1. Add schema-compatible job-store queue primitives behind config defaults that
+1. Add Terraform for the sparse queue GSI and wait for GSI backfill before any
+   queue-enabled code path is deployed.
+2. Add schema-compatible job-store queue primitives behind config defaults that
    preserve current behavior.
-2. Add tests for queue admission and dispatch transitions.
-3. Add EventBridge drainer Lambda and Terraform wiring.
-4. Deploy with queued cap still zero to prove no behavior change.
-5. Enable a small queued cap on the default/live stack and run burst smoke.
-6. Increase backlog limits deliberately after observing DynamoDB, Step
-   Functions, Lambda worker, and DuckLake publish metrics.
-
+3. Add tests for queue admission, dispatch transitions, terminal idempotency,
+   requeue, and reconciler repair.
+4. Add EventBridge drainer Lambda, optional completion/admission dispatch kick,
+   reconciler, metrics, and alarms.
+5. Deploy with queued cap still zero. Either drain all in-flight jobs before the
+   cutover or keep a compatibility release path that understands both old
+   `ACTIVE_JOB#` / `CALLER_QUOTA#` items and new `RUNNING#` /
+   `OWNER#...#QUOTA` items.
+6. Enable a small queued cap on the default/live stack and run burst smoke.
+7. Increase backlog limits deliberately after observing DynamoDB, Step
+   Functions, Lambda worker, DuckLake publish-lock wait time, queue depth, and
+   dispatch-latency metrics.
