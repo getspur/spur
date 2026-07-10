@@ -56,3 +56,9 @@ spur-context-source = { path = "../spur-context-source" }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# This crate is excluded from the main workspace (it uses a different duckdb
+# version). An empty [workspace] table makes it a standalone workspace root so
+# `cargo` does not walk up to the parent workspace and reject it as a
+# non-member.
+[workspace]

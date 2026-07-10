@@ -13,7 +13,10 @@ use thiserror::Error;
 
 use crate::abuse::{self, SourceKind, ValidateOptions};
 use crate::catalog::{readable_table, CatalogResolver, ResolvedRevision};
-use crate::jobs::{CreateJobOutcome, CreateJobRequest, JobRecord, JobStatus, JobStore, JobsError};
+use crate::jobs::{
+    BacklogOwner, CreateJobRequest, EnqueueOutcome, JobRecord, JobStatus, JobStore, JobsError,
+    QueueConfig,
+};
 use crate::knowledge::{self, KnowledgeContextOptions, KnowledgeScope};
 use crate::query::{self, SearchMode, SearchOptions};
 
@@ -46,6 +49,7 @@ pub struct IndexExecutionRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 struct IndexResourceLimits {
     max_source_bytes: u64,
     max_build_seconds: u64,
@@ -493,7 +497,7 @@ async fn route_index_inner(
     args: &Value,
     catalog: Option<&CatalogResolver>,
     jobs: &dyn JobStore,
-    sfn_client: &impl IndexExecutionStarter,
+    _sfn_client: &impl IndexExecutionStarter,
     caller_id: &str,
 ) -> Result<Value, McpHandlerError> {
     let args: ExternalIndexArgs = parse_args(args)?;
@@ -513,6 +517,9 @@ async fn route_index_inner(
         }
     };
 
+    // Preserve the existing per-owner request rate limit before enqueue. This
+    // protects the API from high-frequency callers before queue admission,
+    // independent of queue capacity.
     match jobs
         .check_index_rate_limit(caller_id, index_rate_limit_per_minute())
         .await
@@ -532,9 +539,9 @@ async fn route_index_inner(
     let revision = args.revision.trim();
     let source_url_hash = source_url_hash(&args.source_url);
     let source_kind = args.source_kind(parsed_url.source_kind);
-    let prefetch_source = should_prefetch_source(source_kind, &parsed_url.hostname);
-    let limits = index_resource_limits(source_kind);
 
+    // Warm catalog hit: return immediately unless force=true bypasses it.
+    // force=true does NOT bypass rate limits, queue caps, or dedupe.
     if !args.force.unwrap_or(false) {
         if let Some(catalog) = catalog {
             if let Some(resolved) =
@@ -549,87 +556,51 @@ async fn route_index_inner(
         }
     }
 
-    let max_active_jobs = index_max_concurrent_jobs_per_caller();
-    let outcome = match jobs
-        .create_or_get_active_job_with_limit(
-            CreateJobRequest {
-                source: source.to_owned(),
-                package: args.package.clone(),
-                revision: revision.to_owned(),
-                source_url: args.source_url.clone(),
-                source_url_hash: source_url_hash.clone(),
-                source_kind: source_kind_label(source_kind).to_owned(),
-                caller_id: caller_id.to_owned(),
-            },
-            max_active_jobs,
-        )
-        .await
-    {
-        Ok(outcome) => outcome,
-        Err(JobsError::ConcurrentLimit) => {
-            return Ok(json!({
-                "status": "rejected",
-                "reason": "concurrent_job_limit",
-                "max_active_jobs_per_caller": max_active_jobs
-            }));
-        }
-        Err(error) => {
-            return Err(jobs_error("external_index create_or_get_active_job failed")(error));
-        }
+    // ─── Bounded enqueue admission ─────────────────────────────────────────
+    //
+    // Build the BacklogOwner from the authenticated caller context. The first
+    // implementation maps to BacklogOwnerKind::Caller using the existing
+    // caller_id; future deployments can scope backlogs by User or TenantUser
+    // without changing the queue/drainer logic because DynamoDB keys are
+    // derived from (kind, id).
+    let owner = backlog_owner_from_caller(caller_id);
+    let config = index_queue_config();
+
+    let request = CreateJobRequest {
+        source: source.to_owned(),
+        package: args.package.clone(),
+        revision: revision.to_owned(),
+        source_url: args.source_url.clone(),
+        source_url_hash: source_url_hash.clone(),
+        source_kind: source_kind_label(source_kind).to_owned(),
+        caller_id: caller_id.to_owned(),
     };
 
-    let job = match outcome {
-        CreateJobOutcome::Created(record) => record,
-        CreateJobOutcome::Existing(record) => {
-            return Ok(active_job_response(&record));
+    match jobs.enqueue_job(request, owner, &config).await {
+        Ok(EnqueueOutcome::Enqueued(record)) | Ok(EnqueueOutcome::Existing(record)) => {
+            Ok(queued_job_response(&record))
         }
-    };
-
-    let payload = json!({
-        "job_id": job.job_id,
-        "source": source,
-        "package": args.package,
-        "revision": revision,
-        "source_url": args.source_url,
-        "source_kind": source_kind_label(source_kind),
-        "prefetch_source": prefetch_source,
-        "caller_id": caller_id,
-        "limits": {
-            "max_source_bytes": limits.max_source_bytes,
-            "max_build_seconds": limits.max_build_seconds
-        }
-    });
-    let execution_arn = match sfn_client
-        .start_execution(IndexExecutionRequest {
-            name: job.job_id.clone(),
-            input: payload,
-        })
-        .await
-    {
-        Ok(execution_arn) => execution_arn,
-        Err(error) => {
-            let _ = jobs
-                .mark_failed(&job.job_id, "start_execution", &error.to_string())
-                .await;
-            return Err(error);
-        }
-    };
-
-    let job = match jobs
-        .record_execution_started(&job.job_id, &execution_arn)
-        .await
-    {
-        Ok(record) => record,
-        Err(error) => {
-            let detail = error.to_string();
-            let _ = jobs
-                .mark_failed(&job.job_id, "record_execution_started", &detail)
-                .await;
-            return Err(jobs_error("external_index record_execution_started failed")(error));
-        }
-    };
-
-    Ok(active_job_response(&job))
+        Err(JobsError::QueueFull) => Ok(json!({
+            "status": "rejected",
+            "reason": "queue_full",
+            "max_queued_jobs_per_owner": config.max_queued_per_owner,
+            "retry_after_seconds": RATE_LIMIT_RETRY_AFTER_SECONDS
+        })),
+        Err(JobsError::GlobalQueueFull) => Ok(json!({
+            "status": "rejected",
+            "reason": "global_queue_full",
+            "max_queued_jobs_global": config.max_queued_global,
+            "retry_after_seconds": RATE_LIMIT_RETRY_AFTER_SECONDS
+        })),
+        // TransactionConflict / concurrent write contention: the cap may have
+        // room. Surface as a structured retryable rejection, NOT quota-full.
+        Err(JobsError::Conflict) => Ok(json!({
+            "status": "rejected",
+            "reason": "conflict",
+            "retry_after_seconds": 5
+        })),
+        Err(error) => Err(jobs_error("external_index enqueue failed")(error)),
+    }
 }
 
 pub async fn route_index_status(
@@ -1072,10 +1043,10 @@ fn jobs_error(context: &'static str) -> impl FnOnce(JobsError) -> McpHandlerErro
         JobsError::Conflict => McpHandlerError::Internal(format!("{context}: {error}")),
         JobsError::ConcurrentLimit => McpHandlerError::Internal(format!("{context}: {error}")),
         JobsError::RateLimited => McpHandlerError::Internal(format!("{context}: {error}")),
-        // Queue-full rejections are not produced by the current admission path
-        // (it still uses the legacy active-job cap). They are mapped to Internal
-        // here so the match stays exhaustive; a downstream task will surface a
-        // dedicated `queue_full` MCP error when it switches admission to enqueue.
+        // The admission path handles QueueFull / GlobalQueueFull explicitly
+        // before reaching this mapper. This branch is for other callers (e.g.
+        // route_index_status) where a queue-full error is unexpected and maps
+        // to Internal.
         JobsError::QueueFull | JobsError::GlobalQueueFull => {
             McpHandlerError::Internal(format!("{context}: {error}"))
         }
@@ -1251,6 +1222,10 @@ fn source_kind_label(source_kind: SourceKind) -> &'static str {
     }
 }
 
+/// Whether the Step Functions worker should prefetch the source before
+/// building. Kept for the drainer task which will construct the payload at
+/// dispatch time.
+#[allow(dead_code)]
 fn should_prefetch_source(source_kind: SourceKind, hostname: &str) -> bool {
     match source_kind {
         SourceKind::Git => true,
@@ -1258,6 +1233,7 @@ fn should_prefetch_source(source_kind: SourceKind, hostname: &str) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn is_s3_https_hostname(hostname: &str) -> bool {
     let Some(prefix) = hostname.strip_suffix(".amazonaws.com") else {
         return false;
@@ -1280,6 +1256,7 @@ fn is_s3_https_hostname(hostname: &str) -> bool {
         .is_some_and(|(bucket, region)| !bucket.is_empty() && is_single_label(region))
 }
 
+#[allow(dead_code)]
 fn is_single_label(value: &str) -> bool {
     !value.is_empty() && !value.contains('.')
 }
@@ -1305,6 +1282,9 @@ fn index_validate_options() -> ValidateOptions {
     }
 }
 
+/// Resource limits for the Step Functions index worker payload. Kept for the
+/// drainer task which will construct the payload at dispatch time.
+#[allow(dead_code)]
 fn index_resource_limits(source_kind: SourceKind) -> IndexResourceLimits {
     let max_source_bytes = match source_kind {
         SourceKind::Git => env_u64("SPUR_CONTEXT_MAX_GIT_BYTES", DEFAULT_GIT_SIZE_CAP_BYTES),
@@ -1330,6 +1310,33 @@ fn index_max_concurrent_jobs_per_caller() -> u32 {
     )
 }
 
+/// Default per-owner queued backlog cap when the env var is not set. A non-zero
+/// default enables the bounded-queue admission path out of the box; deployments
+/// that want legacy reject-over-cap behavior set
+/// `SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER=0`.
+const DEFAULT_MAX_QUEUED_JOBS_PER_OWNER: u32 = 20;
+const DEFAULT_QUEUE_SHARD_COUNT: u32 = 16;
+
+/// Build the [`QueueConfig`] for the enqueue admission path from environment
+/// variables. Maps the existing `SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER` to
+/// `max_running_per_owner` (the legacy active-job cap becomes the running cap)
+/// and adds new queue-specific variables.
+fn index_queue_config() -> QueueConfig {
+    QueueConfig {
+        max_queued_per_owner: env_u32(
+            "SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER",
+            DEFAULT_MAX_QUEUED_JOBS_PER_OWNER,
+        ),
+        max_queued_global: env_u32("SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL", 0),
+        max_running_per_owner: index_max_concurrent_jobs_per_caller(),
+        max_running_global: env_u32("SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL", 0),
+        shard_count: env_u32(
+            "SPUR_INDEX_QUEUE_SHARD_COUNT",
+            DEFAULT_QUEUE_SHARD_COUNT,
+        ),
+    }
+}
+
 fn env_u32(name: &str, default: u32) -> u32 {
     env::var(name)
         .ok()
@@ -1344,7 +1351,18 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn active_job_response(record: &JobRecord) -> Value {
+/// Build a [`BacklogOwner`] from the authenticated caller context.
+///
+/// The first implementation maps all traffic to [`BacklogOwnerKind::Caller`]
+/// using the existing `caller_id`. This is the stable owner identity that all
+/// queue quota keys are derived from. When per-user backlog isolation is added
+/// later, only this function needs to change — the enqueue/dispatch/drainer
+/// logic derives everything from `(kind, id)`.
+fn backlog_owner_from_caller(caller_id: &str) -> BacklogOwner {
+    BacklogOwner::caller(caller_id)
+}
+
+fn queued_job_response(record: &JobRecord) -> Value {
     json!({
         "job_id": record.job_id,
         "status": record.status.to_string(),
