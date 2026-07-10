@@ -1,11 +1,11 @@
 Explore  [Skills]  Agents   Browse
 never synced
 ┌Sources───────────────┐┌Catalog · Skills────────────────────┐┌Preview─────────────────────────────┐
-│catalog: 2 items      ││> review-helper  in pool            ││review-helper                       │
+│catalog: 2 items      ││> review-helper  in pool  local     ││review-helper                       │
 │pool: 1 items         ││Tightens code review with focused   ││Tightens code review with focused   │
 │                      ││risk checks.                        ││risk checks.                        │
-│getspur/ecosystem  2  ││                                    ││                                    │
-│                      ││                                    ││source: getspur/ecosystem           │
+│getspur/ecosystem     ││                                    ││                                    │
+│[local]  2            ││                                    ││source: getspur/ecosystem           │
 │                      ││                                    ││pin: 0123456                        │
 │                      ││                                    ││license: MIT                        │
 │                      ││                                    ││path: skills/review-helper          │

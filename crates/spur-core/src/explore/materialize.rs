@@ -1,5 +1,5 @@
 use crate::explore::catalog::ItemKind;
-use crate::explore::pool::{pool_dir, Manifest, ManifestItem};
+use crate::explore::pool::{Manifest, ManifestItem};
 use crate::skills::adapters::Adapter;
 use crate::skills::{SkillPayload, SkillRole, SkillSource};
 use anyhow::Context;
@@ -55,7 +55,7 @@ pub async fn materialize_pool_skills(
     let Some(adapter) = adapter_for_kind(kind) else {
         return;
     };
-    let manifest = match Manifest::load(repo_root) {
+    let manifest = match Manifest::load_layered(repo_root) {
         Ok(manifest) => manifest,
         Err(error) => {
             tracing::warn!(
@@ -212,7 +212,13 @@ fn should_materialize(item: &ManifestItem, requested_names: Option<&HashSet<&str
 }
 
 fn load_pool_skill(repo_root: &Path, item: &ManifestItem) -> anyhow::Result<SkillPayload> {
-    let path = pool_dir(repo_root, &item.source, &item.name, &item.pinned_commit).join("SKILL.md");
+    let path = crate::explore::store::layered_pool_dir(
+        repo_root,
+        &item.source,
+        &item.name,
+        &item.pinned_commit,
+    )
+    .join("SKILL.md");
     let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let parsed = crate::skills::frontmatter::parse_source(&raw);
     Ok(SkillPayload {
@@ -318,6 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn materialize_writes_subset_and_registers_excludes() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
         let repo = tempfile::tempdir().unwrap();
         init_git_repo(repo.path());
         let worktree = tempfile::tempdir().unwrap();
@@ -367,8 +374,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn empty_repo_inherits_global_pool_skills_during_materialization() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let home = tempfile::tempdir().unwrap();
+        let global_store = home.path().join(".spur/explore");
+        let _global_root =
+            crate::explore::store::force_global_root_for_tests(Some(global_store.clone()));
+        let item = write_pool_skill_in_store(&global_store, "global-clean", "clean");
+        Manifest {
+            sources: Vec::new(),
+            items: vec![item.clone()],
+        }
+        .save_to_store(&global_store)
+        .unwrap();
+        write_catalog_in_store(&global_store, &item);
+
+        let manager = WorktreeManager::new(worktree.path().to_path_buf());
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            materialize_pool_skills(
+                &manager,
+                worktree.path(),
+                AgentKind::CodexAcp,
+                repo.path(),
+                None,
+                None,
+            )
+            .await;
+        });
+
+        let rendered = worktree.path().join(".codex/skills/global-clean/SKILL.md");
+        let contents = std::fs::read_to_string(rendered).unwrap();
+        assert!(contents.contains("SPUR-MANAGED"));
+        assert!(contents.contains("name: global-clean"));
+        assert!(!repo.path().join(".spur/explore").exists());
+        assert!(!repo.path().join(".spur/explore.toml").exists());
+    }
+
     #[tokio::test]
     async fn materialize_requested_subset_and_committed_file_precedence() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
         let repo = tempfile::tempdir().unwrap();
         init_git_repo(repo.path());
         let worktree = tempfile::tempdir().unwrap();
@@ -413,6 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn materialize_appends_record_readable_by_reader() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
         let repo = tempfile::tempdir().unwrap();
         init_git_repo(repo.path());
         let worktree = tempfile::tempdir().unwrap();
@@ -461,6 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn materialize_without_meta_or_items_writes_no_record() {
+        let _global_root = crate::explore::store::force_global_root_for_tests(None);
         let repo = tempfile::tempdir().unwrap();
         init_git_repo(repo.path());
         let worktree = tempfile::tempdir().unwrap();
@@ -560,6 +610,60 @@ mod tests {
                 decided_at_epoch: None,
             },
         }
+    }
+
+    fn write_pool_skill_in_store(store_root: &Path, name: &str, verdict: &str) -> ManifestItem {
+        let source = "acme/skills";
+        let pinned_commit = "abcdef1234567890abcdef1234567890abcdef12";
+        let dir = store_root
+            .join("pool")
+            .join("acme")
+            .join(format!("{name}@abcdef1"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} skill\n---\nUse {name}.\n"),
+        )
+        .unwrap();
+        let content_sha256 = crate::explore::content_hash(&dir).unwrap();
+
+        ManifestItem {
+            name: name.to_string(),
+            kind: ItemKind::Skill,
+            source: source.to_string(),
+            rel_path: format!("skills/{name}"),
+            pinned_commit: pinned_commit.to_string(),
+            content_sha256,
+            license: None,
+            gate: GateRecord {
+                verdict: verdict.to_string(),
+                justification: None,
+                decided_at_epoch: None,
+            },
+        }
+    }
+
+    fn write_catalog_in_store(store_root: &Path, item: &ManifestItem) {
+        let catalog = crate::explore::catalog::Catalog {
+            synced_at_epoch: Some(1),
+            entries: vec![crate::explore::catalog::CatalogEntry {
+                kind: item.kind,
+                name: item.name.clone(),
+                source: item.source.clone(),
+                rel_path: item.rel_path.clone(),
+                pinned_commit: item.pinned_commit.clone(),
+                description: format!("{} skill", item.name),
+                license: item.license.clone(),
+                content_sha256: item.content_sha256.clone(),
+            }],
+        };
+        let dir = store_root.join("index");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("catalog.json"),
+            serde_json::to_string_pretty(&catalog).unwrap(),
+        )
+        .unwrap();
     }
 
     fn init_git_repo(path: &Path) {

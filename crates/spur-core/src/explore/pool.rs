@@ -54,7 +54,36 @@ pub struct StatusReport {
 impl Manifest {
     pub fn load(root: &Path) -> anyhow::Result<Self> {
         let path = manifest_path(root);
-        let raw = match std::fs::read_to_string(&path) {
+        Self::load_from_path(&path)
+    }
+
+    pub fn load_from_store(store_root: &Path) -> anyhow::Result<Self> {
+        let path = crate::explore::store::manifest_path_in_store(store_root);
+        Self::load_from_path(&path)
+    }
+
+    pub fn load_layered(repo_root: &Path) -> anyhow::Result<Self> {
+        let global = crate::explore::store::global_root();
+        Self::load_layered_from_roots(repo_root, global.as_deref())
+    }
+
+    pub(crate) fn load_layered_from_roots(
+        repo_root: &Path,
+        global_store_root: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let Some(global_store_root) = global_store_root.filter(|root| root.exists()) else {
+            return Self::load(repo_root);
+        };
+
+        let mut merged = Self::load_from_store(global_store_root)?;
+        let local = Self::load(repo_root)?;
+        merge_sources(&mut merged.sources, local.sources);
+        merge_items(&mut merged.items, local.items);
+        Ok(merged)
+    }
+
+    fn load_from_path(path: &Path) -> anyhow::Result<Self> {
+        let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
@@ -66,22 +95,45 @@ impl Manifest {
 
     pub fn save(&self, root: &Path) -> anyhow::Result<()> {
         let path = manifest_path(root);
+        self.save_to_path(&path)
+    }
+
+    pub fn save_to_store(&self, store_root: &Path) -> anyhow::Result<()> {
+        let path = crate::explore::store::manifest_path_in_store(store_root);
+        self.save_to_path(&path)
+    }
+
+    fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
         let raw = toml::to_string_pretty(self).context("serialize explore manifest")?;
-        atomic_write(&path, raw.as_bytes())
+        atomic_write(path, raw.as_bytes())
     }
 }
 
 pub fn pool_dir(root: &Path, source: &str, name: &str, pinned_commit: &str) -> PathBuf {
-    let owner = source.split('/').next().unwrap_or(source);
-    let sha7 = pinned_commit.get(..7).unwrap_or(pinned_commit);
-    root.join(".spur/explore/pool")
-        .join(owner)
-        .join(format!("{name}@{sha7}"))
+    crate::explore::store::local_pool_dir(root, source, name, pinned_commit)
 }
 
 pub fn vendor(root: &Path, checkout: &Path, entry: &CatalogEntry) -> anyhow::Result<()> {
+    let store_root = crate::explore::store::local_root(root);
+    vendor_to_store(&store_root, checkout, entry)
+}
+
+pub fn pool_dir_in_store(
+    store_root: &Path,
+    source: &str,
+    name: &str,
+    pinned_commit: &str,
+) -> PathBuf {
+    crate::explore::store::pool_dir_in_store(store_root, source, name, pinned_commit)
+}
+
+pub fn vendor_to_store(
+    store_root: &Path,
+    checkout: &Path,
+    entry: &CatalogEntry,
+) -> anyhow::Result<()> {
     let source = checkout.join(&entry.rel_path);
-    let dest_dir = pool_dir(root, &entry.source, &entry.name, &entry.pinned_commit);
+    let dest_dir = pool_dir_in_store(store_root, &entry.source, &entry.name, &entry.pinned_commit);
     remove_existing_path(&dest_dir)?;
 
     if source.is_dir() {
@@ -108,7 +160,12 @@ pub fn status(root: &Path, manifest: &Manifest) -> StatusReport {
     let mut report = StatusReport::default();
 
     for item in &manifest.items {
-        let dir = pool_dir(root, &item.source, &item.name, &item.pinned_commit);
+        let dir = crate::explore::store::layered_pool_dir(
+            root,
+            &item.source,
+            &item.name,
+            &item.pinned_commit,
+        );
         if !dir.exists() {
             report.missing.push(item.name.clone());
             continue;
@@ -151,7 +208,30 @@ pub fn item_from_entry(entry: &CatalogEntry, gate: GateRecord) -> ManifestItem {
 }
 
 fn manifest_path(root: &Path) -> PathBuf {
-    root.join(".spur/explore.toml")
+    crate::explore::store::local_manifest_path(root)
+}
+
+fn merge_sources(base: &mut Vec<SourceSpec>, overrides: Vec<SourceSpec>) {
+    for source in overrides {
+        if let Some(existing) = base
+            .iter_mut()
+            .find(|existing| existing.repo == source.repo)
+        {
+            *existing = source;
+        } else {
+            base.push(source);
+        }
+    }
+}
+
+fn merge_items(base: &mut Vec<ManifestItem>, overrides: Vec<ManifestItem>) {
+    for item in overrides {
+        if let Some(existing) = base.iter_mut().find(|existing| existing.name == item.name) {
+            *existing = item;
+        } else {
+            base.push(item);
+        }
+    }
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -271,6 +351,76 @@ mod tests {
         let empty = Manifest::load(empty_dir.path()).unwrap();
         assert!(empty.items.is_empty());
         assert!(empty.sources.is_empty());
+    }
+
+    #[test]
+    fn load_layered_local_manifest_item_overrides_global_item_by_name() {
+        let local = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        let mut global_manifest = Manifest {
+            sources: vec![SourceSpec {
+                repo: "global/skills".to_string(),
+                url: None,
+                pin: "main".to_string(),
+            }],
+            items: vec![ManifestItem {
+                source: "global/skills".to_string(),
+                pinned_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                ..sample_item("api-design", "clean")
+            }],
+        };
+        let local_manifest = Manifest {
+            sources: vec![SourceSpec {
+                repo: "local/skills".to_string(),
+                url: None,
+                pin: "main".to_string(),
+            }],
+            items: vec![ManifestItem {
+                source: "local/skills".to_string(),
+                pinned_commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                ..sample_item("api-design", "overridden")
+            }],
+        };
+
+        global_manifest.save_to_store(global.path()).unwrap();
+        local_manifest.save(local.path()).unwrap();
+
+        let layered = Manifest::load_layered_from_roots(local.path(), Some(global.path())).unwrap();
+
+        assert_eq!(layered.sources.len(), 2);
+        assert_eq!(layered.items.len(), 1);
+        assert_eq!(layered.items[0].name, "api-design");
+        assert_eq!(layered.items[0].source, "local/skills");
+        assert_eq!(
+            layered.items[0].pinned_commit,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(layered.items[0].gate.verdict, "overridden");
+
+        global_manifest.items.clear();
+        assert_ne!(layered, global_manifest);
+    }
+
+    #[test]
+    fn load_layered_without_global_store_matches_existing_local_load() {
+        let local = tempfile::tempdir().unwrap();
+        let absent_global = tempfile::tempdir().unwrap();
+        let absent_global_path = absent_global.path().join("missing-global-store");
+        let local_manifest = Manifest {
+            sources: vec![SourceSpec {
+                repo: "local/skills".to_string(),
+                url: None,
+                pin: "main".to_string(),
+            }],
+            items: vec![sample_item("api-design", "clean")],
+        };
+        local_manifest.save(local.path()).unwrap();
+
+        let existing = Manifest::load(local.path()).unwrap();
+        let layered =
+            Manifest::load_layered_from_roots(local.path(), Some(&absent_global_path)).unwrap();
+
+        assert_eq!(layered, existing);
     }
 
     #[test]
