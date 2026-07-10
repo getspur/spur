@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -43,6 +44,28 @@ DEFAULT_CODEX_PACKAGE = "@agentclientprotocol/codex-acp@1.1.2"
 MALFORMED_ROLE_WARNING = "Ignoring malformed agent role definition"
 CODEX_PROFILE_NAME = "spur-profile-probe-primary"
 CODEX_CHILD_ROLE_NAME = "spur-profile-probe-child"
+RESTRICTED_ARTIFACT_FAILURE_PREFIX = (
+    "[FAIL] restricted profile artifact operation failed"
+)
+PROFILE_SUBPROCESS_BLOCKER_MARKERS = (
+    "[blocked] restricted adapter",
+    "[blocked] restricted artifact invariant unsupported:",
+    "[fail] authenticate error:",
+    "authentication required",
+    "not authenticated",
+    "not logged in",
+    "unauthorized",
+    "npm err!",
+    "npm error",
+    "no matching version found",
+    "could not determine executable to run",
+    "eai_again",
+    "econnrefused",
+    "econnreset",
+    "enetunreach",
+    "network is unreachable",
+)
+_PRIVATE_ARTIFACT_ROOT_DESCRIPTORS: dict[Path, int] = {}
 
 CODEX_VERSION_NODE_SCRIPT = r"""
 const fs = require("node:fs");
@@ -134,6 +157,13 @@ class CodexRolloutActivity:
 
 
 @dataclass(frozen=True)
+class CodexRolloutAudit:
+    paths: tuple[Path, ...]
+    directory_count: int
+    failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CodexRoleBinding:
     parent_thread_id: Optional[str]
     requested_agent_type: Optional[str]
@@ -178,52 +208,350 @@ def utc_now_compact() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
 
-def ensure_private_directory(path: Path) -> Path:
-    if path.is_symlink():
-        raise OSError(f"private artifact directory cannot be a symlink: {path}")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.chmod(0o700)
+def require_posix_private_filesystem() -> None:
+    required = ("O_DIRECTORY", "O_NOFOLLOW")
+    if os.name != "posix" or any(not hasattr(os, name) for name in required):
+        raise OSError("restricted profile probe requires POSIX no-follow mode support")
+
+
+def _absolute_lexical_path(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path.expanduser()))
+    if sys.platform == "darwin" and len(absolute.parts) > 1:
+        system_alias = {
+            "tmp": Path("/private/tmp"),
+            "var": Path("/private/var"),
+        }.get(absolute.parts[1])
+        if system_alias is not None:
+            return system_alias.joinpath(*absolute.parts[2:])
+    return absolute
+
+
+def _open_directory_chain_no_follow(path: Path) -> int:
+    require_posix_private_filesystem()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    absolute = _absolute_lexical_path(path)
+    descriptor = os.open(absolute.anchor, flags)
+    try:
+        for component in absolute.parts[1:]:
+            child_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _retain_existing_private_root(root: Path) -> Path:
+    absolute = _absolute_lexical_path(root)
+    descriptor = _open_directory_chain_no_follow(absolute)
+    try:
+        state = os.fstat(descriptor)
+        if not stat.S_ISDIR(state.st_mode):
+            raise OSError(f"private artifact root is not a directory: {absolute}")
+        os.fchmod(descriptor, 0o700)
+        if os.fstat(descriptor).st_mode & 0o777 != 0o700:
+            raise OSError(f"private artifact root mode is not 0700: {absolute}")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    previous = _PRIVATE_ARTIFACT_ROOT_DESCRIPTORS.get(absolute)
+    if previous is not None:
+        os.close(descriptor)
+        return absolute
+    _PRIVATE_ARTIFACT_ROOT_DESCRIPTORS[absolute] = descriptor
+    return absolute
+
+
+def _retained_private_root(path: Path) -> Optional[tuple[Path, int]]:
+    absolute = _absolute_lexical_path(path)
+    matches = []
+    for root, descriptor in _PRIVATE_ARTIFACT_ROOT_DESCRIPTORS.items():
+        try:
+            absolute.relative_to(root)
+        except ValueError:
+            continue
+        matches.append((root, descriptor))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: len(item[0].parts))
+
+
+def _open_directory_no_follow(path: Path) -> int:
+    require_posix_private_filesystem()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    retained = _retained_private_root(path)
+    if retained is None:
+        return _open_directory_chain_no_follow(path)
+
+    root, root_descriptor = retained
+    descriptor = os.dup(root_descriptor)
+    try:
+        relative = _absolute_lexical_path(path).relative_to(root)
+        for component in relative.parts:
+            child_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _release_private_root(root: Path) -> None:
+    descriptor = _PRIVATE_ARTIFACT_ROOT_DESCRIPTORS.pop(
+        _absolute_lexical_path(root),
+        None,
+    )
+    if descriptor is not None:
+        os.close(descriptor)
+
+
+def _harden_directory(path: Path) -> None:
+    descriptor = _open_directory_no_follow(path)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISDIR(before.st_mode):
+            raise OSError(f"private artifact path is not a directory: {path}")
+        os.fchmod(descriptor, 0o700)
+        if os.fstat(descriptor).st_mode & 0o777 != 0o700:
+            raise OSError(f"private artifact directory mode is not 0700: {path}")
+    finally:
+        os.close(descriptor)
+
+
+def _harden_regular_file(path: Path) -> None:
+    require_posix_private_filesystem()
+    parent_descriptor = _open_directory_no_follow(path.parent)
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise OSError(f"private artifact path is not a regular file: {path}")
+            os.fchmod(descriptor, 0o600)
+            if os.fstat(descriptor).st_mode & 0o777 != 0o600:
+                raise OSError(f"private artifact file mode is not 0600: {path}")
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
+def ensure_private_directory(path: Path, *, exist_ok: bool = True) -> Path:
+    require_posix_private_filesystem()
+    parent_descriptor = _open_directory_no_follow(path.parent)
+    try:
+        try:
+            current = os.stat(
+                path.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            os.mkdir(path.name, 0o700, dir_fd=parent_descriptor)
+        else:
+            if stat.S_ISLNK(current.st_mode):
+                raise OSError(f"private artifact directory cannot be a symlink: {path}")
+            if not stat.S_ISDIR(current.st_mode):
+                raise OSError(f"private artifact path is not a directory: {path}")
+            if not exist_ok:
+                raise FileExistsError(
+                    f"private artifact directory already exists: {path}"
+                )
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        try:
+            os.fchmod(descriptor, 0o700)
+            if os.fstat(descriptor).st_mode & 0o777 != 0o700:
+                raise OSError(f"private artifact directory mode is not 0700: {path}")
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
     return path
+
+
+def create_fresh_private_root(requested: Path) -> Path:
+    require_posix_private_filesystem()
+    requested = requested.expanduser()
+    try:
+        existing = os.lstat(requested)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if stat.S_ISLNK(existing.st_mode):
+            raise OSError(f"profile probe output root cannot be a symlink: {requested}")
+        raise FileExistsError(f"profile probe output root already exists: {requested}")
+    requested.parent.mkdir(parents=True, exist_ok=True)
+    parent = requested.parent.resolve(strict=True)
+    root = parent / requested.name
+    parent_descriptor = _open_directory_no_follow(parent)
+    try:
+        os.mkdir(root.name, 0o700, dir_fd=parent_descriptor)
+        descriptor = os.open(
+            root.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        try:
+            os.fchmod(descriptor, 0o700)
+            if os.fstat(descriptor).st_mode & 0o777 != 0o700:
+                raise OSError(f"profile probe output root mode is not 0700: {root}")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        _PRIVATE_ARTIFACT_ROOT_DESCRIPTORS[root] = descriptor
+    finally:
+        os.close(parent_descriptor)
+    return root
+
+
+def open_general_probe_text(path: Path) -> Any:
+    if path.is_symlink():
+        raise OSError(f"probe output file cannot be a symlink: {path}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        path.chmod(0o600)
+        return os.fdopen(descriptor, "w", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def open_private_descriptor(path: Path) -> int:
+    require_posix_private_filesystem()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    parent_descriptor = _open_directory_no_follow(path.parent)
+    try:
+        descriptor = os.open(
+            path.name,
+            flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+    finally:
+        os.close(parent_descriptor)
+    try:
+        current = os.fstat(descriptor)
+        if not stat.S_ISREG(current.st_mode):
+            raise OSError(f"private artifact path is not a regular file: {path}")
+        os.fchmod(descriptor, 0o600)
+        if os.fstat(descriptor).st_mode & 0o777 != 0o600:
+            raise OSError(f"private artifact file mode is not 0600: {path}")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def write_private_text(path: Path, text: str) -> None:
     descriptor = open_private_descriptor(path)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
             stream.write(text)
-    except Exception:
-        try:
+    finally:
+        if descriptor >= 0:
             os.close(descriptor)
-        except OSError:
-            pass
-        raise
-    path.chmod(0o600)
 
 
 def open_private_text(path: Path) -> Any:
-    descriptor = open_private_descriptor(path)
-    path.chmod(0o600)
-    return os.fdopen(descriptor, "w", encoding="utf-8")
+    return os.fdopen(open_private_descriptor(path), "w", encoding="utf-8")
 
 
-def open_private_descriptor(path: Path) -> int:
-    if path.is_symlink():
-        raise OSError(f"private artifact file cannot be a symlink: {path}")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    return os.open(path, flags, 0o600)
+def read_text_no_follow(path: Path) -> str:
+    require_posix_private_filesystem()
+    parent_descriptor = _open_directory_no_follow(path.parent)
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+    finally:
+        os.close(parent_descriptor)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"private evidence path is not a regular file: {path}")
+        with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as stream:
+            descriptor = -1
+            return stream.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def protect_artifact_tree(root: Path) -> None:
-    if not root.exists():
-        return
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            continue
-        if path.is_dir():
-            path.chmod(0o700)
-        elif path.is_file():
-            path.chmod(0o600)
-    root.chmod(0o700)
+    try:
+        root_state = os.lstat(root)
+    except FileNotFoundError as exc:
+        raise OSError(f"artifact root is missing: {root}") from exc
+    if stat.S_ISLNK(root_state.st_mode) or not stat.S_ISDIR(root_state.st_mode):
+        raise OSError(f"artifact root is not a no-follow directory: {root}")
+    _harden_directory(root)
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for current_root, directories, files in os.walk(
+        root,
+        followlinks=False,
+        onerror=raise_walk_error,
+    ):
+        current = Path(current_root)
+        for name in sorted(directories):
+            path = current / name
+            state = os.lstat(path)
+            if stat.S_ISLNK(state.st_mode):
+                raise OSError(f"artifact tree contains a directory symlink: {path}")
+            if not stat.S_ISDIR(state.st_mode):
+                raise OSError(f"artifact tree contains an unsupported entry: {path}")
+            _harden_directory(path)
+        for name in sorted(files):
+            path = current / name
+            state = os.lstat(path)
+            if stat.S_ISLNK(state.st_mode):
+                raise OSError(f"artifact tree contains a file symlink: {path}")
+            if not stat.S_ISREG(state.st_mode):
+                raise OSError(f"artifact tree contains an unsupported entry: {path}")
+            _harden_regular_file(path)
+
+
+def finalize_profile_artifacts(root: Path, requested_exit: int) -> int:
+    try:
+        protect_artifact_tree(root)
+    except OSError as exc:
+        print(f"[FAIL] local artifact audit failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        _release_private_root(root)
+    return requested_exit
+
+
+class ProfileArtifactFinalizer:
+    def __init__(self) -> None:
+        self.root: Optional[Path] = None
+        self.finalized = False
+
+    def activate(self, root: Path) -> None:
+        if self.root is not None:
+            raise RuntimeError("profile artifact finalizer already has an active root")
+        self.root = root
+
+    def finish(self, requested_exit: int) -> int:
+        if self.root is None:
+            return requested_exit
+        if self.finalized:
+            raise RuntimeError("profile artifacts were finalized more than once")
+        self.finalized = True
+        return finalize_profile_artifacts(self.root, requested_exit)
 
 
 def create_codex_profile_fixture(
@@ -456,13 +784,18 @@ def codex_profile_probe_failures(
     return failures
 
 
-def prepare_app_server_log(log_dir: Path) -> Path:
-    log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    log_dir.chmod(0o700)
+def prepare_app_server_log(
+    log_dir: Path,
+    *,
+    directory_exists: bool = False,
+) -> Path:
+    if directory_exists:
+        ensure_private_directory(log_dir, exist_ok=True)
+    else:
+        ensure_private_directory(log_dir, exist_ok=False)
     log_path = log_dir / "app-server.log"
-    log_path.unlink(missing_ok=True)
-    log_path.touch(mode=0o600)
-    log_path.chmod(0o600)
+    descriptor = open_private_descriptor(log_path)
+    os.close(descriptor)
     return log_path
 
 
@@ -507,6 +840,98 @@ def codex_rollout_paths(session_root: Path) -> set[Path]:
     return set(session_root.rglob("rollout-*.jsonl"))
 
 
+def _rollout_directory_chain(session_root: Path, parent: Path) -> tuple[Path, ...]:
+    chain = []
+    current = parent
+    while True:
+        chain.append(current)
+        if current == session_root:
+            return tuple(reversed(chain))
+        if current.parent == current:
+            raise OSError(f"rollout path escaped expected session root: {parent}")
+        current = current.parent
+
+
+def audit_codex_rollouts(
+    session_root: Path,
+    rollout_paths: set[Path] | list[Path] | tuple[Path, ...],
+) -> CodexRolloutAudit:
+    failures = []
+    safe_paths = []
+    directories = set()
+    lexical_root = Path(os.path.abspath(session_root.expanduser()))
+    try:
+        canonical_root = lexical_root.resolve(strict=True)
+    except OSError as exc:
+        return CodexRolloutAudit(
+            paths=(),
+            directory_count=0,
+            failures=(f"session root unavailable: {type(exc).__name__}: {exc}",),
+        )
+    if not rollout_paths:
+        return CodexRolloutAudit(
+            paths=(),
+            directory_count=0,
+            failures=("no new Codex rollout files were discovered",),
+        )
+
+    for supplied in sorted(rollout_paths):
+        supplied_path = Path(os.path.abspath(Path(supplied).expanduser()))
+        try:
+            relative_path = supplied_path.relative_to(lexical_root)
+        except ValueError:
+            try:
+                relative_path = supplied_path.relative_to(canonical_root)
+            except ValueError:
+                failures.append(
+                    f"rollout path is outside expected session root: {supplied_path}"
+                )
+                continue
+        path = canonical_root / relative_path
+        try:
+            state = os.lstat(path)
+        except FileNotFoundError:
+            failures.append(f"rollout path is missing: {path}")
+            continue
+        except OSError as exc:
+            failures.append(
+                f"rollout lstat failed for {path}: {type(exc).__name__}: {exc}"
+            )
+            continue
+        if stat.S_ISLNK(state.st_mode):
+            failures.append(f"rollout path is a symlink: {path}")
+            continue
+        if not stat.S_ISREG(state.st_mode):
+            failures.append(f"rollout path is not a regular file: {path}")
+            continue
+        try:
+            for directory in _rollout_directory_chain(canonical_root, path.parent):
+                directory_state = os.lstat(directory)
+                if stat.S_ISLNK(directory_state.st_mode):
+                    raise OSError(f"rollout directory is a symlink: {directory}")
+                if not stat.S_ISDIR(directory_state.st_mode):
+                    raise OSError(f"rollout parent is not a directory: {directory}")
+                if directory_state.st_uid != os.getuid():
+                    raise OSError(
+                        f"rollout directory is not owned by current user: {directory}"
+                    )
+                _harden_directory(directory)
+                directories.add(directory)
+            _harden_regular_file(path)
+        except OSError as exc:
+            failures.append(str(exc))
+            continue
+        safe_paths.append(path)
+
+    if failures:
+        safe_paths = []
+    return CodexRolloutAudit(
+        paths=tuple(safe_paths),
+        directory_count=len(directories),
+        failures=tuple(failures),
+    )
+
+
 def load_codex_rollout_activity(
     rollout_paths: list[Path] | set[Path] | tuple[Path, ...],
     workspace: Path,
@@ -520,7 +945,7 @@ def load_codex_rollout_activity(
     for path in sorted(rollout_paths):
         records = []
         try:
-            raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            raw_lines = read_text_no_follow(path).splitlines()
         except OSError as exc:
             evidence_errors.append(f"{path}: read failed: {type(exc).__name__}: {exc}")
             continue
@@ -590,7 +1015,19 @@ def load_codex_role_binding(
     sessions_by_id: dict[str, dict[str, Any]] = {}
     for path in sorted(rollout_paths):
         records = []
-        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            raw_lines = read_text_no_follow(path).splitlines()
+        except OSError as exc:
+            return CodexRoleBinding(
+                parent_thread_id=None,
+                requested_agent_type=None,
+                spawn_call_id=None,
+                child_thread_id=None,
+                child_parent_thread_id=None,
+                child_agent_role=None,
+                evidence_error=(f"{path}: read failed: {type(exc).__name__}: {exc}"),
+            )
+        for raw_line in raw_lines:
             if not raw_line:
                 continue
             try:
@@ -800,9 +1237,17 @@ def codex_profile_activity_failures(
 
 
 def read_text_if_present(path: Path) -> Optional[str]:
-    if not path.is_file():
+    try:
+        return read_text_no_follow(path)
+    except FileNotFoundError:
         return None
-    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def configure_restricted_profile_process(restricted: bool) -> None:
+    if not restricted:
+        return
+    require_posix_private_filesystem()
+    os.umask(0o077)
 
 
 def new_request_id() -> str:
@@ -902,6 +1347,10 @@ def response_error_message(response: Optional[dict]) -> Optional[str]:
     if message is None:
         return f"code={code}"
     return f"code={code} {message}"
+
+
+class AdapterBlockerError(RuntimeError):
+    pass
 
 
 class ProbeRequestError(Exception):
@@ -1114,20 +1563,31 @@ class ProfileProbeRequestHandlers:
 
 
 class AcpClient:
-    def __init__(self, proc: subprocess.Popen, raw_log_path: Path, quiet: bool):
+    def __init__(
+        self,
+        proc: subprocess.Popen,
+        raw_log_path: Path,
+        quiet: bool,
+        *,
+        restricted_artifacts: bool = False,
+    ):
         assert (
             proc.stdin is not None
             and proc.stdout is not None
             and proc.stderr is not None
         )
         self.proc = proc
+        self.restricted_artifacts = restricted_artifacts
         self.stdin = proc.stdin
         self.stdout = proc.stdout
         self.stderr = proc.stderr
         self.responses: dict[JsonRpcId, dict] = {}
         self.notifications: list[dict] = []
         self.server_requests: list[dict] = []
-        self.raw_log = open_private_text(raw_log_path)
+        log_opener = (
+            open_private_text if restricted_artifacts else open_general_probe_text
+        )
+        self.raw_log = log_opener(raw_log_path)
         self.quiet = quiet
         self._log_lock = threading.Lock()
         self._lock = threading.Lock()
@@ -1172,8 +1632,15 @@ class AcpClient:
 
     def send(self, obj: dict) -> None:
         line = json.dumps(obj, separators=(",", ":"))
-        self.stdin.write(line + "\n")
-        self.stdin.flush()
+        try:
+            self.stdin.write(line + "\n")
+            self.stdin.flush()
+        except OSError as exc:
+            if self.restricted_artifacts:
+                raise AdapterBlockerError(
+                    f"restricted adapter stdin failed: {exc}"
+                ) from exc
+            raise
         self._log("send", obj)
         if not self.quiet:
             print(f"[send] {line[:240]}")
@@ -1294,7 +1761,7 @@ def load_codex_probe_evidence(
     server_request_methods = []
     spawn_agent_raw_inputs = []
     spawn_seen = False
-    for raw_line in raw_log_path.read_text(encoding="utf-8").splitlines():
+    for raw_line in read_text_no_follow(raw_log_path).splitlines():
         if not raw_line:
             continue
         record = json.loads(raw_line)
@@ -1312,7 +1779,7 @@ def load_codex_probe_evidence(
         snapshot = extract_tool_snapshot(notification)
         if snapshot is None:
             continue
-        title = str(snapshot.get("title") or "").replace("_", "").lower()
+        title = normalized_acp_tool_title(str(snapshot.get("title") or ""))
         original_title = str(snapshot.get("title") or "")
         tool_call_id = str(snapshot.get("toolCallId") or "<missing-tool-call-id>")
         tool_calls.setdefault((tool_call_id, original_title), original_title)
@@ -1471,7 +1938,22 @@ def run_captured_probe(
     return completed
 
 
-def run_codex_profile_probe(args: argparse.Namespace) -> int:
+def profile_subprocess_failure_exit(completed: subprocess.CompletedProcess[str]) -> int:
+    stderr = completed.stderr or ""
+    if RESTRICTED_ARTIFACT_FAILURE_PREFIX in stderr:
+        return 1
+    normalized_stderr = stderr.lower()
+    if any(
+        marker in normalized_stderr for marker in PROFILE_SUBPROCESS_BLOCKER_MARKERS
+    ):
+        return 2
+    return 1
+
+
+def _run_codex_profile_probe(
+    args: argparse.Namespace,
+    artifact_finalizer: ProfileArtifactFinalizer,
+) -> int:
     probe_env = normalized_codex_environment(os.environ.copy(), cwd=Path.cwd())
     version_command = codex_version_command(args.codex_package)
     print(f"VERSION_COMMAND={shlex.join(version_command)}")
@@ -1479,7 +1961,7 @@ def run_codex_profile_probe(args: argparse.Namespace) -> int:
         print(f"VERSION_ENV=CODEX_PATH={codex_path}")
     try:
         versions = resolve_codex_versions(args.codex_package, env=probe_env)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
         print(f"[BLOCKED] Codex version discovery failed: {exc}", file=sys.stderr)
         return 2
 
@@ -1497,17 +1979,20 @@ def run_codex_profile_probe(args: argparse.Namespace) -> int:
         base_out = (
             Path(".spur/logs") / f"codex-profile-probe-{utc_now_compact()}-{suffix}"
         )
-    base_out = base_out.resolve()
-    ensure_private_directory(base_out)
+    try:
+        base_out = create_fresh_private_root(base_out)
+    except OSError as exc:
+        print(f"[FAIL] unsafe profile probe output root: {exc}", file=sys.stderr)
+        return 1
+    artifact_finalizer.activate(base_out)
     positive_workspace = base_out / "positive-workspace"
     negative_workspace = base_out / "negative-workspace"
     try:
         initialize_codex_probe_workspace(positive_workspace)
         initialize_codex_probe_workspace(negative_workspace)
     except RuntimeError as exc:
-        print(f"[BLOCKED] Codex probe workspace setup failed: {exc}", file=sys.stderr)
-        protect_artifact_tree(base_out)
-        return 2
+        print(f"[FAIL] Codex probe workspace setup failed: {exc}", file=sys.stderr)
+        return artifact_finalizer.finish(1)
 
     primary_token = f"SPUR_PRIMARY_PROFILE_{uuid.uuid4().hex}"
     child_token = f"SPUR_NATIVE_CHILD_{uuid.uuid4().hex}"
@@ -1537,8 +2022,7 @@ def run_codex_profile_probe(args: argparse.Namespace) -> int:
         for failure in source_failures:
             print(f"[FAIL] {failure}", file=sys.stderr)
         print(f"artifacts={base_out}")
-        protect_artifact_tree(base_out)
-        return 1
+        return artifact_finalizer.finish(1)
 
     positive_log = base_out / "positive.jsonl"
     positive_command = codex_profile_inner_command(
@@ -1570,17 +2054,25 @@ def run_codex_profile_probe(args: argparse.Namespace) -> int:
     )
     print(f"positive_exit={positive.returncode}")
     if positive.returncode != 0:
+        failure_exit = profile_subprocess_failure_exit(positive)
+        outcome = "FAIL" if failure_exit == 1 else "BLOCKED"
         print(
-            "[BLOCKED] positive live probe failed: "
+            f"[{outcome}] positive live probe failed: "
             f"command={shlex.join(positive_command)} exit={positive.returncode} "
             f"stderr={positive.stderr.strip()!r}",
             file=sys.stderr,
         )
         print(f"artifacts={base_out}")
-        protect_artifact_tree(base_out)
-        return 2
+        return artifact_finalizer.finish(failure_exit)
 
     positive_rollouts = codex_rollout_paths(session_root) - positive_rollouts_before
+    positive_rollout_audit = audit_codex_rollouts(session_root, positive_rollouts)
+    if positive_rollout_audit.failures:
+        for failure in positive_rollout_audit.failures:
+            print(f"[FAIL] positive rollout audit: {failure}", file=sys.stderr)
+        print(f"artifacts={base_out}")
+        return artifact_finalizer.finish(1)
+    positive_rollouts = set(positive_rollout_audit.paths)
     role_binding = load_codex_role_binding(positive_rollouts, positive_workspace)
     positive_rollout_activity = load_codex_rollout_activity(
         positive_rollouts,
@@ -1620,17 +2112,25 @@ def run_codex_profile_probe(args: argparse.Namespace) -> int:
     )
     print(f"negative_exit={negative.returncode}")
     if negative.returncode != 0:
+        failure_exit = profile_subprocess_failure_exit(negative)
+        outcome = "FAIL" if failure_exit == 1 else "BLOCKED"
         print(
-            "[BLOCKED] negative live probe failed: "
+            f"[{outcome}] negative live probe failed: "
             f"command={shlex.join(negative_command)} exit={negative.returncode} "
             f"stderr={negative.stderr.strip()!r}",
             file=sys.stderr,
         )
         print(f"artifacts={base_out}")
-        protect_artifact_tree(base_out)
-        return 2
+        return artifact_finalizer.finish(failure_exit)
 
     negative_rollouts = codex_rollout_paths(session_root) - negative_rollouts_before
+    negative_rollout_audit = audit_codex_rollouts(session_root, negative_rollouts)
+    if negative_rollout_audit.failures:
+        for failure in negative_rollout_audit.failures:
+            print(f"[FAIL] negative rollout audit: {failure}", file=sys.stderr)
+        print(f"artifacts={base_out}")
+        return artifact_finalizer.finish(1)
+    negative_rollouts = set(negative_rollout_audit.paths)
     negative_rollout_activity = load_codex_rollout_activity(
         negative_rollouts,
         negative_workspace,
@@ -1717,14 +2217,44 @@ def run_codex_profile_probe(args: argparse.Namespace) -> int:
     print(f"no_profile_spawn_agent_calls={len(negative_evidence.spawn_agent_call_ids)}")
     print("restricted_client_capabilities=true")
     print(f"unexpected_profile_activity={str(bool(activity_failures)).lower()}")
+    print(
+        "rollout_private_audit="
+        f"{str(not positive_rollout_audit.failures and not negative_rollout_audit.failures).lower()}"
+    )
+    print(
+        "rollout_audit_counts="
+        f"positive_files:{len(positive_rollout_audit.paths)},"
+        f"negative_files:{len(negative_rollout_audit.paths)},"
+        f"directories:{positive_rollout_audit.directory_count + negative_rollout_audit.directory_count}"
+    )
     print(f"artifacts={base_out}")
-    protect_artifact_tree(base_out)
     if failures:
         for failure in failures:
             print(f"[FAIL] {failure}", file=sys.stderr)
-        return 1
+        return artifact_finalizer.finish(1)
+    audited_exit = artifact_finalizer.finish(0)
+    if audited_exit != 0:
+        return audited_exit
     print(f"PROFILE_PROBE_PASS label={label}")
     return 0
+
+
+def run_codex_profile_probe(args: argparse.Namespace) -> int:
+    artifact_finalizer = ProfileArtifactFinalizer()
+    try:
+        return _run_codex_profile_probe(args, artifact_finalizer)
+    except OSError as exc:
+        if artifact_finalizer.root is None:
+            raise
+        print(f"[FAIL] profile probe artifact operation failed: {exc}", file=sys.stderr)
+        print(f"artifacts={artifact_finalizer.root}")
+        if artifact_finalizer.finalized:
+            return 1
+        return artifact_finalizer.finish(1)
+    except BaseException:
+        if artifact_finalizer.root is not None and not artifact_finalizer.finalized:
+            artifact_finalizer.finish(1)
+        raise
 
 
 def run_probe(args: argparse.Namespace) -> int:
@@ -1741,17 +2271,41 @@ def run_probe(args: argparse.Namespace) -> int:
     print(f"raw_log={out_path}")
     print("=" * 72)
 
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        cwd=os.getcwd(),
-    )
-    client = AcpClient(proc, out_path, args.quiet)
     restricted_profile_probe = args.restricted_profile_probe
+    retained_root = (
+        _retain_existing_private_root(out_path.parent)
+        if restricted_profile_probe
+        else None
+    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=os.getcwd(),
+        )
+    except OSError as exc:
+        if retained_root is not None:
+            _release_private_root(retained_root)
+        if restricted_profile_probe:
+            raise AdapterBlockerError(
+                f"restricted adapter startup failed: {exc}"
+            ) from exc
+        raise
+    try:
+        client = AcpClient(
+            proc,
+            out_path,
+            args.quiet,
+            restricted_artifacts=restricted_profile_probe,
+        )
+    except BaseException:
+        if retained_root is not None:
+            _release_private_root(retained_root)
+        raise
     handlers = (
         ProfileProbeRequestHandlers(Path(os.getcwd()))
         if restricted_profile_probe
@@ -1962,6 +2516,8 @@ def run_probe(args: argparse.Namespace) -> int:
     finally:
         handlers.close()
         client.close()
+        if retained_root is not None:
+            _release_private_root(retained_root)
 
     print("\n" + "=" * 72)
     print("REPORT")
@@ -2096,9 +2652,29 @@ def main() -> int:
         help="Gemini only: pass --no-sandbox so ACP stdin is not consumed by sandbox relaunch.",
     )
     args = parser.parse_args()
+    try:
+        configure_restricted_profile_process(args.restricted_profile_probe)
+    except OSError as exc:
+        print(
+            f"[BLOCKED] restricted artifact invariant unsupported: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     if args.codex_profile_probe:
         return run_codex_profile_probe(args)
-    return run_probe(args)
+    try:
+        return run_probe(args)
+    except AdapterBlockerError as exc:
+        print(f"[BLOCKED] restricted adapter process failed: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        if not args.restricted_profile_probe:
+            raise
+        print(
+            f"{RESTRICTED_ARTIFACT_FAILURE_PREFIX}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":

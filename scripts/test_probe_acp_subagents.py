@@ -8,6 +8,7 @@ import time
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 import sys
 
@@ -279,9 +280,52 @@ class AcpSubagentProbeTests(unittest.TestCase):
                 with self.subTest(path=path):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
-    def test_private_artifact_writers_refuse_symlink_targets(self):
+    def test_general_log_reuses_existing_output_and_private_writers_reject_symlinks(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            general_out = root / "general-probe.jsonl"
+            general_out.write_text("stale general probe output")
+            client = None
+            with mock.patch.object(probe.os, "name", "nt"):
+                try:
+                    client = probe.AcpClient(FakeAcpProc(), general_out, quiet=True)
+                except OSError:
+                    pass
+            self.assertIsNotNone(
+                client,
+                "ordinary probes must retain the portable truncate-and-reuse writer",
+            )
+            client.close()
+            self.assertEqual(general_out.read_text(), "")
+
+            adapter_error = getattr(probe, "AdapterBlockerError", None)
+            self.assertIsNotNone(adapter_error)
+            restricted_out = root / "restricted-probe.jsonl"
+            restricted_client = probe.AcpClient(
+                FakeAcpProc(),
+                restricted_out,
+                quiet=True,
+                restricted_artifacts=True,
+            )
+
+            class BrokenAdapterInput:
+                def write(self, _text):
+                    raise BrokenPipeError("adapter stdin closed")
+
+                def flush(self):
+                    pass
+
+            original_stdin = restricted_client.stdin
+            restricted_client.stdin = BrokenAdapterInput()
+            try:
+                with self.assertRaises(adapter_error):
+                    restricted_client.send({"jsonrpc": "2.0", "method": "probe"})
+            finally:
+                restricted_client.stdin = original_stdin
+                restricted_client.close()
+
             for writer_name in ("open_private_text", "write_private_text"):
                 with self.subTest(writer=writer_name):
                     victim = root / f"{writer_name}-victim"
@@ -300,6 +344,417 @@ class AcpSubagentProbeTests(unittest.TestCase):
 
                     self.assertTrue(raised, "symlink target must be rejected")
                     self.assertEqual(victim.read_text(), "do-not-truncate")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow contract")
+    def test_fresh_private_root_rejects_existing_and_symlink_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            victim = parent / "victim"
+            victim.mkdir()
+            link = parent / "linked-output"
+            link.symlink_to(victim, target_is_directory=True)
+
+            with self.assertRaises(OSError):
+                probe.create_fresh_private_root(link)
+            self.assertTrue(victim.is_dir())
+
+            existing = parent / "existing-output"
+            existing.mkdir()
+            with self.assertRaises(FileExistsError):
+                probe.create_fresh_private_root(existing)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow contract")
+    def test_private_file_creation_rejects_intermediate_directory_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = probe.create_fresh_private_root(Path(tmp) / "artifacts")
+            victim = Path(tmp) / "victim-directory"
+            external_parent = victim / "captured"
+            external_parent.mkdir(parents=True)
+            link = root / "positive-workspace"
+            link.symlink_to(victim, target_is_directory=True)
+            artifact = link / "captured" / "positive.stdout"
+            external_artifact = external_parent / artifact.name
+
+            with self.assertRaises(OSError):
+                probe.write_private_text(artifact, "sensitive output")
+            self.assertFalse(external_artifact.exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow contract")
+    def test_final_artifact_audit_rejects_symlinks_and_finalizes_post_root_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = probe.create_fresh_private_root(Path(tmp) / "artifacts")
+            victim = Path(tmp) / "victim"
+            victim.write_text("outside")
+            (root / "linked-artifact").symlink_to(victim)
+
+            with self.assertRaises(OSError):
+                probe.protect_artifact_tree(root)
+            self.assertEqual(victim.read_text(), "outside")
+            with self.assertRaisesRegex(OSError, "artifact root is missing"):
+                probe.protect_artifact_tree(Path(tmp) / "missing-artifact-root")
+
+            def failing_walk(*_args, **kwargs):
+                onerror = kwargs.get("onerror")
+                if onerror is not None:
+                    onerror(OSError("injected artifact subtree scan failure"))
+                return ()
+
+            with (
+                mock.patch.object(probe.os, "walk", side_effect=failing_walk),
+                self.assertRaisesRegex(OSError, "subtree scan failure"),
+            ):
+                probe.protect_artifact_tree(root)
+
+        versions = Namespace(
+            adapter_version="1.1.2",
+            codex_package_version="0.144.1",
+            codex_cli_version="0.144.1",
+            codex_cli_path="/tmp/codex",
+            codex_cli_output="codex-cli 0.144.1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "post-root-security-error"
+            args = Namespace(
+                codex_package=probe.DEFAULT_CODEX_PACKAGE,
+                profile_probe_out_dir=output,
+            )
+            with (
+                mock.patch.object(
+                    probe,
+                    "resolve_codex_versions",
+                    return_value=versions,
+                ),
+                mock.patch.object(
+                    probe,
+                    "initialize_codex_probe_workspace",
+                    side_effect=OSError("injected post-root security failure"),
+                ),
+                mock.patch.object(
+                    probe,
+                    "finalize_profile_artifacts",
+                    wraps=probe.finalize_profile_artifacts,
+                ) as finalizer,
+                mock.patch.object(sys, "stdout", io.StringIO()),
+                mock.patch.object(sys, "stderr", io.StringIO()),
+            ):
+                try:
+                    exit_code = probe.run_codex_profile_probe(args)
+                except OSError:
+                    exit_code = None
+
+            self.assertEqual(exit_code, 1)
+            finalizer.assert_called_once_with(output.resolve(), 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "workspace-setup-error"
+            args = Namespace(
+                codex_package=probe.DEFAULT_CODEX_PACKAGE,
+                profile_probe_out_dir=output,
+            )
+            workspace_stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    probe,
+                    "resolve_codex_versions",
+                    return_value=versions,
+                ),
+                mock.patch.object(
+                    probe,
+                    "initialize_codex_probe_workspace",
+                    side_effect=RuntimeError("injected git init failure"),
+                ),
+                mock.patch.object(
+                    probe,
+                    "finalize_profile_artifacts",
+                    wraps=probe.finalize_profile_artifacts,
+                ) as finalizer,
+                mock.patch.object(sys, "stdout", io.StringIO()),
+                mock.patch.object(sys, "stderr", workspace_stderr),
+            ):
+                exit_code = probe.run_codex_profile_probe(args)
+
+            self.assertEqual(exit_code, 1)
+            finalizer.assert_called_once_with(output.resolve(), 1)
+            self.assertIn(
+                "[FAIL] Codex probe workspace setup failed",
+                workspace_stderr.getvalue(),
+            )
+
+        restricted_stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                probe,
+                "configure_restricted_profile_process",
+                return_value=None,
+            ),
+            mock.patch.object(
+                probe,
+                "run_probe",
+                side_effect=OSError("injected inner artifact failure"),
+            ),
+            mock.patch.object(
+                sys,
+                "argv",
+                ["probe_acp_subagents.py", "--restricted-profile-probe"],
+            ),
+            mock.patch.object(sys, "stderr", restricted_stderr),
+        ):
+            try:
+                restricted_exit = probe.main()
+            except OSError:
+                restricted_exit = None
+
+        self.assertEqual(restricted_exit, 1)
+        self.assertIn(
+            "[FAIL] restricted profile artifact operation failed",
+            restricted_stderr.getvalue(),
+        )
+
+        version_stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                probe,
+                "resolve_codex_versions",
+                side_effect=FileNotFoundError("npx executable missing"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", version_stderr),
+        ):
+            try:
+                version_exit = probe.run_codex_profile_probe(
+                    Namespace(
+                        codex_package=probe.DEFAULT_CODEX_PACKAGE,
+                        profile_probe_out_dir=Path("unused"),
+                    )
+                )
+            except OSError:
+                version_exit = None
+
+        self.assertEqual(version_exit, 2)
+        self.assertIn(
+            "[BLOCKED] Codex version discovery failed",
+            version_stderr.getvalue(),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter_stderr = io.StringIO()
+            adapter_out = Path(tmp) / "restricted.jsonl"
+            with (
+                mock.patch.object(
+                    probe,
+                    "configure_restricted_profile_process",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    probe,
+                    "_retain_existing_private_root",
+                    return_value=adapter_out.parent,
+                ),
+                mock.patch.object(
+                    probe.subprocess,
+                    "Popen",
+                    side_effect=FileNotFoundError("adapter executable missing"),
+                ),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "probe_acp_subagents.py",
+                        "--restricted-profile-probe",
+                        "--out",
+                        str(adapter_out),
+                    ],
+                ),
+                mock.patch.object(sys, "stdout", io.StringIO()),
+                mock.patch.object(sys, "stderr", adapter_stderr),
+            ):
+                adapter_exit = probe.main()
+
+            self.assertEqual(adapter_exit, 2)
+            self.assertIn("[BLOCKED] restricted adapter", adapter_stderr.getvalue())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode contract")
+    def test_restricted_profile_process_sets_private_umask(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "restricted-output"
+            code = "\n".join(
+                [
+                    "from pathlib import Path",
+                    "import probe_acp_subagents as probe",
+                    "probe.configure_restricted_profile_process(True)",
+                    f"root = Path({str(output)!r})",
+                    "root.mkdir()",
+                    "(root / 'rollout.jsonl').write_text('private')",
+                ]
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=Path(probe.__file__).resolve().parent,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(
+                (output / "rollout.jsonl").stat().st_mode & 0o777,
+                0o600,
+            )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode contract")
+    def test_rollout_audit_and_readers_reject_intermediate_symlink_swaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_root = Path(tmp) / "sessions"
+            rollout_dir = session_root / "2026" / "07" / "10"
+            rollout_dir.mkdir(parents=True, mode=0o755)
+            for directory in (
+                session_root,
+                session_root / "2026",
+                session_root / "2026" / "07",
+                rollout_dir,
+            ):
+                directory.chmod(0o755)
+            rollout = rollout_dir / "rollout-test.jsonl"
+            rollout.write_text('{"type":"session_meta"}\n')
+            rollout.chmod(0o644)
+            session_alias = Path(tmp) / "session-alias"
+            session_alias.symlink_to(session_root, target_is_directory=True)
+            supplied_rollout = session_alias / rollout.relative_to(session_root)
+
+            audit = probe.audit_codex_rollouts(session_alias, {supplied_rollout})
+
+            self.assertEqual(audit.failures, ())
+            observed_reader_paths = []
+            read_text_no_follow = probe.read_text_no_follow
+
+            def record_reader_path(path):
+                observed_reader_paths.append(path)
+                return read_text_no_follow(path)
+
+            with mock.patch.object(
+                probe,
+                "read_text_no_follow",
+                side_effect=record_reader_path,
+            ):
+                probe.load_codex_rollout_activity(audit.paths, Path(tmp))
+                probe.load_codex_role_binding(audit.paths, Path(tmp))
+
+            canonical_rollout = rollout.resolve()
+            self.assertEqual(observed_reader_paths, [canonical_rollout] * 2)
+            self.assertEqual(audit.paths, (canonical_rollout,))
+            self.assertEqual(rollout.stat().st_mode & 0o777, 0o600)
+            for directory in (
+                session_root,
+                session_root / "2026",
+                session_root / "2026" / "07",
+                rollout_dir,
+            ):
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
+            external_rollout = (
+                Path(tmp) / "external" / "2026" / "07" / "10" / rollout.name
+            )
+            external_rollout.parent.mkdir(parents=True)
+            external_contents = json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "external", "cwd": str(Path(tmp).resolve())},
+                }
+            )
+            external_rollout.write_text(external_contents)
+            external_rollout.chmod(0o644)
+            retired_year = session_root / "2026-before-reader-swap"
+            (session_root / "2026").rename(retired_year)
+            (session_root / "2026").symlink_to(
+                external_rollout.parents[2],
+                target_is_directory=True,
+            )
+
+            swapped_activity = probe.load_codex_rollout_activity(
+                audit.paths,
+                Path(tmp),
+            )
+            swapped_binding = probe.load_codex_role_binding(audit.paths, Path(tmp))
+
+            with self.subTest(swap="between audit and activity reader"):
+                self.assertTrue(
+                    any(
+                        "read failed" in item
+                        for item in swapped_activity.evidence_errors
+                    )
+                )
+            with self.subTest(swap="between audit and role-binding reader"):
+                self.assertIn("read failed", swapped_binding.evidence_error or "")
+            with self.subTest(swap="reader external victim"):
+                self.assertEqual(external_rollout.read_text(), external_contents)
+                self.assertEqual(external_rollout.stat().st_mode & 0o777, 0o644)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_root = root / "sessions"
+            year = session_root / "2026"
+            rollout_dir = year / "07" / "10"
+            rollout_dir.mkdir(parents=True)
+            rollout = rollout_dir / "rollout-test.jsonl"
+            rollout.write_text('{"type":"session_meta"}\n')
+
+            external_year = root / "external" / "2026"
+            external_rollout = external_year / "07" / "10" / rollout.name
+            external_rollout.parent.mkdir(parents=True)
+            external_contents = "external rollout must remain untouched"
+            external_rollout.write_text(external_contents)
+            external_rollout.chmod(0o644)
+            retired_year = session_root / "2026-before-audit-swap"
+            canonical_year = year.resolve()
+            original_harden_directory = probe._harden_directory
+            parent_swapped = False
+
+            def harden_then_swap_parent(path):
+                nonlocal parent_swapped
+                original_harden_directory(path)
+                if path == canonical_year and not parent_swapped:
+                    year.rename(retired_year)
+                    year.symlink_to(external_year, target_is_directory=True)
+                    parent_swapped = True
+
+            with mock.patch.object(
+                probe,
+                "_harden_directory",
+                side_effect=harden_then_swap_parent,
+            ):
+                audit = probe.audit_codex_rollouts(session_root, {rollout})
+
+            self.assertTrue(parent_swapped)
+            with self.subTest(swap="between rollout directory checks"):
+                self.assertEqual(audit.paths, ())
+                self.assertTrue(audit.failures)
+            with self.subTest(swap="audit external victim"):
+                self.assertEqual(external_rollout.read_text(), external_contents)
+                self.assertEqual(external_rollout.stat().st_mode & 0o777, 0o644)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow contract")
+    def test_rollout_audit_rejects_symlink_missing_and_out_of_root_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            victim = root / "victim.jsonl"
+            victim.write_text("external")
+            linked = session_root / "rollout-linked.jsonl"
+            linked.symlink_to(victim)
+            missing = session_root / "rollout-missing.jsonl"
+
+            audit = probe.audit_codex_rollouts(
+                session_root,
+                {linked, missing, victim},
+            )
+
+            self.assertEqual(audit.paths, ())
+            self.assertTrue(any("symlink" in item for item in audit.failures))
+            self.assertTrue(any("missing" in item for item in audit.failures))
+            self.assertTrue(any("outside" in item for item in audit.failures))
+            self.assertEqual(victim.read_text(), "external")
 
     def test_profile_control_workspace_is_an_isolated_git_root(self):
         self.assertTrue(
@@ -599,24 +1054,76 @@ class AcpSubagentProbeTests(unittest.TestCase):
         )
         self.assertIn("positive app-server log was empty", empty_failures)
 
-    def test_prepare_app_server_log_clears_stale_warning(self):
-        self.assertTrue(
-            hasattr(probe, "prepare_app_server_log"),
-            "each control needs an isolated, cleared APP_SERVER_LOGS target",
+        classifier = getattr(probe, "profile_subprocess_failure_exit", None)
+        self.assertIsNotNone(classifier)
+        security_failure = Namespace(
+            stderr="[FAIL] restricted profile artifact operation failed: unsafe path"
         )
+        adapter_blocker = Namespace(
+            stderr="[BLOCKED] restricted adapter process failed: executable missing"
+        )
+        generic_blocked_failure = Namespace(
+            stderr="[BLOCKED] deterministic profile contract failure"
+        )
+        unsupported_invariant = Namespace(
+            stderr=(
+                "[BLOCKED] restricted artifact invariant unsupported: "
+                "missing O_NOFOLLOW"
+            )
+        )
+        initialize_failure = Namespace(stderr="[FAIL] initialize timed out")
+        contract_failure = Namespace(
+            stderr=(
+                "[FAIL] session/prompt error: deterministic profile contract failure"
+            )
+        )
+        unclassified_failure = Namespace(stderr="arbitrary unexpected failure")
+        self.assertEqual(classifier(security_failure), 1)
+        self.assertEqual(classifier(adapter_blocker), 2)
+        self.assertEqual(classifier(generic_blocked_failure), 1)
+        self.assertEqual(classifier(unsupported_invariant), 2)
+        self.assertEqual(classifier(initialize_failure), 1)
+        self.assertEqual(classifier(contract_failure), 1)
+        self.assertEqual(classifier(unclassified_failure), 1)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow contract")
+    def test_prepare_app_server_log_rejects_symlinked_directory_and_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            log_dir = Path(tmp) / "positive-app-server-logs"
-            log_dir.mkdir()
+            root = probe.create_fresh_private_root(Path(tmp) / "artifacts")
+
+            victim_dir = Path(tmp) / "external-log-directory"
+            victim_dir.mkdir()
+            victim_log = victim_dir / "app-server.log"
+            victim_log.write_text("external-content")
+            linked_dir = root / "positive-app-server-logs"
+            linked_dir.symlink_to(victim_dir, target_is_directory=True)
+            with self.assertRaises(OSError):
+                probe.prepare_app_server_log(linked_dir)
+            self.assertEqual(victim_log.read_text(), "external-content")
+
+            safe_dir = probe.ensure_private_directory(
+                root / "negative-app-server-logs", exist_ok=False
+            )
+            second_victim = Path(tmp) / "external-file"
+            second_victim.write_text("do-not-replace")
+            (safe_dir / "app-server.log").symlink_to(second_victim)
+            with self.assertRaises(OSError):
+                probe.prepare_app_server_log(safe_dir, directory_exists=True)
+            self.assertEqual(second_victim.read_text(), "do-not-replace")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow contract")
+    def test_prepare_app_server_log_rejects_existing_regular_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = probe.create_fresh_private_root(Path(tmp) / "artifacts")
+            log_dir = probe.ensure_private_directory(
+                root / "positive-app-server-logs", exist_ok=False
+            )
             log_path = log_dir / "app-server.log"
             log_path.write_text(probe.MALFORMED_ROLE_WARNING)
 
-            prepared = probe.prepare_app_server_log(log_dir)
-
-            self.assertEqual(prepared, log_path)
-            self.assertEqual(log_path.read_text(), "")
-            self.assertEqual(log_dir.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(FileExistsError):
+                probe.prepare_app_server_log(log_dir, directory_exists=True)
+            self.assertEqual(log_path.read_text(), probe.MALFORMED_ROLE_WARNING)
 
     def test_profile_probe_verdict_rejects_profile_token_in_negative_control(self):
         failures = probe.codex_profile_probe_failures(
@@ -869,6 +1376,34 @@ class AcpSubagentProbeTests(unittest.TestCase):
         self.assertEqual(
             evidence.spawn_agent_raw_inputs,
             (json.dumps({"message": "return the token"}, sort_keys=True),),
+        )
+
+    def test_space_separated_spawn_title_participates_in_canary_scan(self):
+        records = [
+            {
+                "dir": "recv",
+                "msg": {
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": "spawn-1",
+                            "title": "spawn agent",
+                            "rawInput": {"message": "PRIMARY-123"},
+                        }
+                    },
+                },
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_log = Path(tmp) / "positive.jsonl"
+            raw_log.write_text("\n".join(json.dumps(item) for item in records))
+            evidence = probe.load_codex_probe_evidence(raw_log)
+
+        self.assertEqual(evidence.spawn_agent_call_ids, ("spawn-1",))
+        self.assertEqual(
+            evidence.spawn_agent_raw_inputs,
+            (json.dumps({"message": "PRIMARY-123"}, sort_keys=True),),
         )
 
     def test_load_codex_rollout_activity_filters_workspace_and_records_arguments(self):
