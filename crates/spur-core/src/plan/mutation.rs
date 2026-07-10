@@ -51,6 +51,8 @@ pub enum PlanMutationOp {
     /// sentinel that the projector reads as `Pending`.
     RetryTask {
         issue_id: String, // beads issue id
+        #[serde(default)]
+        append_prompt: Option<String>,
     },
     /// bd-2m2u Phase 2c — brain rewrites task text / agent / context / deps
     /// before re-dispatch. Atomically updates the beads issue body, agent
