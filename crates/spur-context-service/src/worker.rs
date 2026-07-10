@@ -4053,7 +4053,7 @@ impl TempWorkspace {
             "spur-context-worker-{}-{}-{}",
             sanitize_path_part(job_id),
             std::process::id(),
-            unix_secs()
+            Uuid::new_v4().simple()
         ));
         fs::create_dir_all(&path).map_err(|error| {
             WorkerError::Fetch(format!(
