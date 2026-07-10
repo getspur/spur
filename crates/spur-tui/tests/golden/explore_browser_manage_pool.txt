@@ -4,8 +4,8 @@ never synced
 │[Pool]   Last materialization                                                                     │
 │name  kind  sha  verdict  license                                                                 │
 │                                                                                                  │
-│> review-helper  skill  0123456  clean  MIT                                                       │
-│stale-helper  skill  0123456  clean  MIT                                                          │
+│> review-helper  local  skill  0123456  clean  MIT                                                │
+│stale-helper  local  skill  0123456  clean  MIT                                                   │
 │                                                                                                  │
 │status findings                                                                                   │
 │⚠ missing body  stale-helper                                                                      │

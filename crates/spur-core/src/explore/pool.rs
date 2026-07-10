@@ -114,8 +114,26 @@ pub fn pool_dir(root: &Path, source: &str, name: &str, pinned_commit: &str) -> P
 }
 
 pub fn vendor(root: &Path, checkout: &Path, entry: &CatalogEntry) -> anyhow::Result<()> {
+    let store_root = crate::explore::store::local_root(root);
+    vendor_to_store(&store_root, checkout, entry)
+}
+
+pub fn pool_dir_in_store(
+    store_root: &Path,
+    source: &str,
+    name: &str,
+    pinned_commit: &str,
+) -> PathBuf {
+    crate::explore::store::pool_dir_in_store(store_root, source, name, pinned_commit)
+}
+
+pub fn vendor_to_store(
+    store_root: &Path,
+    checkout: &Path,
+    entry: &CatalogEntry,
+) -> anyhow::Result<()> {
     let source = checkout.join(&entry.rel_path);
-    let dest_dir = pool_dir(root, &entry.source, &entry.name, &entry.pinned_commit);
+    let dest_dir = pool_dir_in_store(store_root, &entry.source, &entry.name, &entry.pinned_commit);
     remove_existing_path(&dest_dir)?;
 
     if source.is_dir() {
@@ -142,7 +160,12 @@ pub fn status(root: &Path, manifest: &Manifest) -> StatusReport {
     let mut report = StatusReport::default();
 
     for item in &manifest.items {
-        let dir = pool_dir(root, &item.source, &item.name, &item.pinned_commit);
+        let dir = crate::explore::store::layered_pool_dir(
+            root,
+            &item.source,
+            &item.name,
+            &item.pinned_commit,
+        );
         if !dir.exists() {
             report.missing.push(item.name.clone());
             continue;
