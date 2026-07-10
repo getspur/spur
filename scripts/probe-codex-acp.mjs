@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Probe codex-acp 0.12.0: speak ACP wire protocol over stdio, capture every
+// Probe codex-acp 1.1.2: speak ACP wire protocol over stdio, capture every
 // frame the agent sends so we can confirm what v1 (model/effort) and v2
 // (review-branch input + _meta) look like in practice.
 //
@@ -13,8 +13,99 @@
 // All frames are logged to stderr with a TX/RX prefix and a wallclock stamp.
 // stdout is reserved for a final JSON summary.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { resolve as resolvePath } from "node:path";
 import { stderr, stdout, exit } from "node:process";
+
+const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.1.2";
+const CODEX_VERSION_NODE_SCRIPT = String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const adapterBin = process.platform === "win32" ? "codex-acp.cmd" : "codex-acp";
+const binDir = process.env.PATH.split(path.delimiter).find((candidate) =>
+    fs.existsSync(path.join(candidate, adapterBin))
+);
+if (!binDir) throw new Error("npm exec PATH did not contain codex-acp");
+const nodeModules = path.dirname(binDir);
+const adapterPackagePath = path.join(
+    nodeModules, "@agentclientprotocol", "codex-acp", "package.json"
+);
+const adapterPackage = JSON.parse(fs.readFileSync(adapterPackagePath, "utf8"));
+const codexCandidates = [
+    path.join(nodeModules, "@openai", "codex", "package.json"),
+    path.join(
+        path.dirname(adapterPackagePath),
+        "node_modules",
+        "@openai",
+        "codex",
+        "package.json",
+    ),
+];
+const codexPackagePath = codexCandidates.find((candidate) => fs.existsSync(candidate));
+if (!codexPackagePath) throw new Error("resolved @openai/codex package.json not found");
+const codexPackage = JSON.parse(fs.readFileSync(codexPackagePath, "utf8"));
+const codexBin = process.env.CODEX_PATH || path.join(
+    binDir,
+    process.platform === "win32" ? "codex.cmd" : "codex",
+);
+const version = spawnSync(codexBin, ["--version"], {
+    encoding: "utf8",
+    shell: process.platform === "win32",
+});
+if (version.status !== 0) {
+    throw new Error("codex --version failed: " + (version.stderr || version.stdout));
+}
+process.stdout.write(JSON.stringify({
+    adapterVersion: adapterPackage.version,
+    codexPackageVersion: codexPackage.version,
+    codexCliPath: codexBin,
+    codexCliOutput: version.stdout.trim(),
+}));
+`;
+
+function normalizedCodexEnvironment(sourceEnv) {
+    const env = { ...sourceEnv };
+    if (env.CODEX_PATH) env.CODEX_PATH = resolvePath(env.CODEX_PATH);
+    return env;
+}
+
+function reportResolvedVersions(env) {
+    const result = spawnSync(
+        "npx",
+        [
+            "--yes",
+            "--package",
+            CODEX_ACP_PACKAGE,
+            "--",
+            "node",
+            "-e",
+            CODEX_VERSION_NODE_SCRIPT,
+        ],
+        { encoding: "utf8", env, shell: process.platform === "win32" },
+    );
+    if (result.error || result.status !== 0) {
+        stderr.write(
+            `[probe] version discovery failed: ${result.error || result.stderr || result.stdout}\n`,
+        );
+        exit(2);
+    }
+    let versions;
+    try {
+        versions = JSON.parse(result.stdout);
+    } catch (error) {
+        stderr.write(`[probe] invalid version JSON: ${error}; stdout=${result.stdout}\n`);
+        exit(2);
+    }
+    stderr.write(`[probe] adapter_version=${versions.adapterVersion}\n`);
+    stderr.write(`[probe] codex_package_version=${versions.codexPackageVersion}\n`);
+    stderr.write(`[probe] codex_cli_path=${versions.codexCliPath}\n`);
+    stderr.write(`[probe] codex_cli_output=${versions.codexCliOutput}\n`);
+    return versions;
+}
+
+const probeEnv = normalizedCodexEnvironment(process.env);
+const resolvedVersions = reportResolvedVersions(probeEnv);
 
 const args = process.argv.slice(2);
 const wantLoad = args.includes("--load");
@@ -33,9 +124,10 @@ const captured = {
     sessionInfoUpdates: [], // M8 Wave 0.3
 };
 
-const child = spawn("npx", ["--yes", "@zed-industries/codex-acp@0.12.0"], {
+const child = spawn("npx", ["--yes", CODEX_ACP_PACKAGE], {
     stdio: ["pipe", "pipe", "inherit"],
-    env: { ...process.env },
+    env: probeEnv,
+    shell: process.platform === "win32",
 });
 
 child.on("error", (e) => {
@@ -199,6 +291,7 @@ async function main() {
 
     // 4. Print summary to stdout.
     stdout.write(JSON.stringify({
+        resolved_versions: resolvedVersions,
         initialize: captured.initialize,
         new_session: captured.new_session,
         notification_count: captured.notifications.length,
