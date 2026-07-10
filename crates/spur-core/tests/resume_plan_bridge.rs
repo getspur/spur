@@ -252,6 +252,7 @@ async fn retry_plan_task_no_brain_session_emits_plan_command_error() {
         .send(InteractiveInput::RetryPlanTask {
             plan_id: Some(plan_id.to_string()),
             issue_id: issue_id.to_string(),
+            append_prompt: None,
         })
         .await
         .expect("send RetryPlanTask");

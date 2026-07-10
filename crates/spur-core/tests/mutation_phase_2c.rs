@@ -109,6 +109,7 @@ async fn mutation_op_retry_task_resets_to_pending_preserves_history() {
         issue_id.clone(),
         vec![PlanMutationOp::RetryTask {
             issue_id: issue_id.clone(),
+            append_prompt: None,
         }],
     );
 
@@ -169,6 +170,7 @@ async fn mutation_op_retry_task_rolls_back_on_executor_failure() {
         vec![
             PlanMutationOp::RetryTask {
                 issue_id: target.clone(),
+                append_prompt: None,
             },
             PlanMutationOp::ModifyTaskSpec {
                 issue_id: target.clone(),
@@ -538,6 +540,7 @@ async fn submit_plan_mutation_applies_batch_atomically() {
         a.clone(),
         vec![PlanMutationOp::RetryTask {
             issue_id: a.clone(),
+            append_prompt: None,
         }],
     )
     .await
@@ -645,6 +648,7 @@ async fn submit_plan_mutation_clears_signal_escalated_label_on_success() {
         a.clone(),
         vec![PlanMutationOp::RetryTask {
             issue_id: a.clone(),
+            append_prompt: None,
         }],
     )
     .await
@@ -730,6 +734,7 @@ async fn submit_plan_mutation_after_escalation_clears_signal_and_resumes_engine(
         issue_id.clone(),
         vec![PlanMutationOp::RetryTask {
             issue_id: issue_id.clone(),
+            append_prompt: None,
         }],
     )
     .await
@@ -822,6 +827,7 @@ async fn brain_directed_retries_capped_by_max_attempts() {
         issue_id.clone(),
         vec![PlanMutationOp::RetryTask {
             issue_id: issue_id.clone(),
+            append_prompt: None,
         }],
     )
     .await
