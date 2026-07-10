@@ -690,6 +690,83 @@ class AcpSubagentProbeTests(unittest.TestCase):
                 self.assertEqual(external_rollout.read_text(), external_contents)
                 self.assertEqual(external_rollout.stat().st_mode & 0o777, 0o644)
 
+        for tamper in (
+            "rename replacement 0644",
+            "rename replacement 0600",
+            "in-place content mutation",
+            "hard-link substitution",
+        ):
+            with self.subTest(tamper=tamper), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                session_root = root / "sessions"
+                rollout_dir = session_root / "2026" / "07" / "10"
+                rollout_dir.mkdir(parents=True)
+                rollout = rollout_dir / "rollout-test.jsonl"
+                original_contents = json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "parent", "cwd": str(workspace)},
+                    }
+                )
+                rollout.write_text(original_contents + "\n")
+
+                audit = probe.audit_codex_rollouts(session_root, {rollout})
+
+                self.assertEqual(audit.failures, ())
+                audited = audit.paths[0]
+                audited_path = getattr(audited, "path", audited)
+                external_victim = None
+                if tamper.startswith("rename replacement"):
+                    audited_path.rename(audited_path.with_suffix(".audited"))
+                    audited_path.write_text("FORGED replacement\n")
+                    replacement_mode = 0o644 if tamper.endswith("0644") else 0o600
+                    audited_path.chmod(replacement_mode)
+                elif tamper == "in-place content mutation":
+                    audited_path.write_text("FORGED mutation\n")
+                    audited_path.chmod(0o600)
+                else:
+                    audited_path.rename(audited_path.with_suffix(".audited"))
+                    external_victim = root / "external-victim.jsonl"
+                    external_victim.write_text("FORGED hard-link victim\n")
+                    external_victim.chmod(0o644)
+                    os.link(external_victim, audited_path)
+
+                direct_error = None
+                try:
+                    probe.read_text_no_follow(audited)
+                except OSError as exc:
+                    direct_error = str(exc)
+                activity = probe.load_codex_rollout_activity(audit.paths, workspace)
+                binding = probe.load_codex_role_binding(audit.paths, workspace)
+                activity_read_failed = any(
+                    "read failed" in error for error in activity.evidence_errors
+                )
+                binding_read_failed = "read failed" in (binding.evidence_error or "")
+
+                self.assertEqual(
+                    (
+                        direct_error is not None,
+                        activity_read_failed,
+                        binding_read_failed,
+                    ),
+                    (True, True, True),
+                )
+                combined_errors = " ".join(
+                    (
+                        direct_error or "",
+                        *activity.evidence_errors,
+                        binding.evidence_error or "",
+                    )
+                )
+                self.assertNotIn("FORGED", combined_errors)
+                if external_victim is not None:
+                    self.assertEqual(
+                        external_victim.read_text(), "FORGED hard-link victim\n"
+                    )
+                    self.assertEqual(external_victim.stat().st_mode & 0o777, 0o644)
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_root = root / "sessions"
@@ -744,17 +821,27 @@ class AcpSubagentProbeTests(unittest.TestCase):
             linked = session_root / "rollout-linked.jsonl"
             linked.symlink_to(victim)
             missing = session_root / "rollout-missing.jsonl"
+            shared_victim = root / "shared-victim.jsonl"
+            shared_victim.write_text("shared external content")
+            shared_victim.chmod(0o644)
+            hardlinked = session_root / "rollout-hardlinked.jsonl"
+            os.link(shared_victim, hardlinked)
 
             audit = probe.audit_codex_rollouts(
                 session_root,
-                {linked, missing, victim},
+                {hardlinked, linked, missing, victim},
             )
 
             self.assertEqual(audit.paths, ())
+            self.assertTrue(
+                any("link count" in item for item in audit.failures), audit.failures
+            )
             self.assertTrue(any("symlink" in item for item in audit.failures))
             self.assertTrue(any("missing" in item for item in audit.failures))
             self.assertTrue(any("outside" in item for item in audit.failures))
             self.assertEqual(victim.read_text(), "external")
+            self.assertEqual(shared_victim.read_text(), "shared external content")
+            self.assertEqual(shared_victim.stat().st_mode & 0o777, 0o644)
 
     def test_profile_control_workspace_is_an_isolated_git_root(self):
         self.assertTrue(
@@ -1712,7 +1799,7 @@ class AcpSubagentProbeTests(unittest.TestCase):
     def test_response_error_message_ignores_success_response(self):
         self.assertIsNone(probe.response_error_message({"result": {"sessionId": "s"}}))
 
-    def test_terminal_wait_response_drains_reader_threads(self):
+    def test_terminal_wait_response_and_failed_client_setup_clean_up_processes(self):
         terminal = probe.TerminalState(FakeProc(), 1024)
 
         self.assertEqual(terminal.wait_response(), {"exitCode": 0})
@@ -1722,6 +1809,125 @@ class AcpSubagentProbeTests(unittest.TestCase):
         self.assertIn("stderr-tail", output)
         self.assertFalse(terminal._stdout.is_alive())
         self.assertFalse(terminal._stderr.is_alive())
+
+        if os.name != "posix":
+            return
+
+        with self.subTest(cleanup="real child"), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out_path = root / "raw.jsonl"
+            args = Namespace(
+                agent="codex",
+                out=out_path,
+                quiet=True,
+                restricted_profile_probe=True,
+            )
+            real_popen = subprocess.Popen
+            children = []
+
+            def capture_popen(*popen_args, **popen_kwargs):
+                child = real_popen(*popen_args, **popen_kwargs)
+                children.append(child)
+                return child
+
+            try:
+                with (
+                    mock.patch.object(
+                        probe,
+                        "agent_command",
+                        return_value=[
+                            sys.executable,
+                            "-c",
+                            "import time; time.sleep(30)",
+                        ],
+                    ),
+                    mock.patch.object(
+                        probe.subprocess,
+                        "Popen",
+                        side_effect=capture_popen,
+                    ),
+                    mock.patch.object(
+                        probe.AcpClient,
+                        "__init__",
+                        side_effect=OSError("client setup failed"),
+                    ),
+                    mock.patch("builtins.print"),
+                ):
+                    with self.assertRaisesRegex(OSError, "client setup failed"):
+                        probe.run_probe(args)
+
+                child = children[0]
+                observed = (
+                    child.poll() is None,
+                    tuple(
+                        stream.closed
+                        for stream in (child.stdin, child.stdout, child.stderr)
+                    ),
+                    probe._absolute_lexical_path(root)
+                    in probe._PRIVATE_ARTIFACT_ROOT_DESCRIPTORS,
+                )
+            finally:
+                for child in children:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=5)
+                    for stream in (child.stdin, child.stdout, child.stderr):
+                        if stream is not None and not stream.closed:
+                            stream.close()
+
+            self.assertEqual(observed, (False, (True, True, True), False))
+
+        with (
+            self.subTest(cleanup="kill fallback"),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            root = Path(tmp)
+            args = Namespace(
+                agent="codex",
+                out=root / "raw.jsonl",
+                quiet=True,
+                restricted_profile_probe=True,
+            )
+            stubborn = mock.Mock()
+            stubborn.stdin = io.StringIO()
+            stubborn.stdout = io.StringIO()
+            stubborn.stderr = io.StringIO()
+            stubborn.poll.return_value = None
+            stubborn.wait.side_effect = [
+                subprocess.TimeoutExpired(cmd="adapter", timeout=5),
+                0,
+            ]
+            try:
+                with (
+                    mock.patch.object(probe, "agent_command", return_value=["adapter"]),
+                    mock.patch.object(probe.subprocess, "Popen", return_value=stubborn),
+                    mock.patch.object(
+                        probe.AcpClient,
+                        "__init__",
+                        side_effect=OSError("client setup failed"),
+                    ),
+                    mock.patch("builtins.print"),
+                ):
+                    with self.assertRaisesRegex(OSError, "client setup failed"):
+                        probe.run_probe(args)
+
+                observed = (
+                    stubborn.terminate.call_count,
+                    stubborn.kill.call_count,
+                    stubborn.wait.call_count,
+                    tuple(
+                        stream.closed
+                        for stream in (stubborn.stdin, stubborn.stdout, stubborn.stderr)
+                    ),
+                    probe._absolute_lexical_path(root)
+                    in probe._PRIVATE_ARTIFACT_ROOT_DESCRIPTORS,
+                )
+            finally:
+                for stream in (stubborn.stdin, stubborn.stdout, stubborn.stderr):
+                    if not stream.closed:
+                        stream.close()
+
+            self.assertEqual(observed, (1, 1, 2, (True, True, True), False))
 
     def test_probe_client_capabilities_do_not_advertise_writes(self):
         caps = probe.probe_client_capabilities()
