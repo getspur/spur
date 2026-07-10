@@ -52,9 +52,9 @@ resource "aws_dynamodb_table" "index_jobs" {
   # Sparse queue GSI keyed by (queue_shard, queue_sort_key). Only queued job
   # records carry these attributes (set at enqueue, removed at dispatch), so the
   # GSI only indexes the active backlog — keeping it sparse and cheap. The
-  # drainer queries this GSI in FIFO order to find dispatch candidates, then
-  # fetches the full JOB#<job_id> record by the table primary key. KEYS_ONLY
-  # projection minimizes write/storage cost; the GSI always projects `pk`.
+  # drainer queries this GSI in FIFO order and deserializes full JOB#<job_id>
+  # records directly from Query results. ALL keeps that access pattern to one
+  # request per shard.
   # See docs/superpowers/specs/2026-07-10-context-service-index-queue-backpressure-design.md
   attribute {
     name = "queue_shard"
@@ -70,7 +70,7 @@ resource "aws_dynamodb_table" "index_jobs" {
     name            = var.index_queue_gsi_name
     hash_key        = "queue_shard"
     range_key       = "queue_sort_key"
-    projection_type = "KEYS_ONLY"
+    projection_type = "ALL"
   }
 
   point_in_time_recovery {
@@ -192,7 +192,7 @@ resource "aws_lambda_function" "service" {
       SPUR_CATALOG_S3_URI                       = var.catalog_s3_uri
       SPUR_INDEX_STATE_MACHINE_ARN              = aws_sfn_state_machine.index_build.arn
       SPUR_INDEX_JOBS_TABLE                     = aws_dynamodb_table.index_jobs.name
-      SPUR_INDEX_QUEUE_GSI_NAME                 = aws_dynamodb_table.index_jobs.global_secondary_index[0].name
+      SPUR_INDEX_QUEUE_GSI_NAME                 = var.index_queue_gsi_name
       SPUR_CATALOG_LEASES_TABLE                 = aws_dynamodb_table.catalog_leases.name
       SPUR_INDEX_RATE_LIMIT_PER_MINUTE          = tostring(var.index_rate_limit_per_minute)
       SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER = tostring(var.index_max_concurrent_jobs_per_caller)
@@ -202,12 +202,14 @@ resource "aws_lambda_function" "service" {
       SPUR_CONTEXT_ALLOWED_SOURCE_DOMAINS       = join(",", var.allowed_source_domains)
       SPUR_CONTEXT_ALLOW_ANONYMOUS_MUTATIONS    = var.allow_anonymous_mutations ? "1" : "0"
       # Bounded backlog queueing config. Defaults preserve current behavior
-      # (reject over capacity) until the admission path switches to enqueue.
+      # (reject over capacity) until an operator sets a non-zero queue cap.
       SPUR_INDEX_QUEUE_SHARD_COUNT             = tostring(var.index_queue_shard_count)
-      SPUR_INDEX_MAX_RUNNING_JOBS_PER_OWNER    = tostring(var.index_max_running_jobs_per_owner)
+      SPUR_INDEX_MAX_RUNNING_JOBS_PER_OWNER    = tostring(coalesce(var.index_max_running_jobs_per_owner, var.index_max_concurrent_jobs_per_caller))
       SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER     = tostring(var.index_max_queued_jobs_per_owner)
       SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL       = tostring(var.index_max_running_jobs_global)
       SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL        = tostring(var.index_max_queued_jobs_global)
+      SPUR_INDEX_DRAINER_BATCH_LIMIT           = tostring(var.index_drainer_batch_limit)
+      SPUR_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD  = tostring(var.index_drainer_scan_limit_per_shard)
       SPUR_INDEX_DISPATCH_MAX_ATTEMPTS         = tostring(var.index_dispatch_max_attempts)
       SPUR_INDEX_DISPATCH_BACKOFF_BASE_SECONDS = tostring(var.index_dispatch_backoff_base_seconds)
     }
@@ -217,6 +219,28 @@ resource "aws_lambda_function" "service" {
     aws_iam_role_policy_attachment.lambda_basic,
     aws_cloudwatch_log_group.lambda,
   ]
+}
+
+# A successful admission kick is only a latency optimization. This scheduled
+# invocation is the correctness path that eventually drains queued work after
+# running capacity becomes available.
+resource "aws_cloudwatch_event_rule" "index_queue_drainer" {
+  name                = "spur-context-index-queue-drainer"
+  description         = "Periodically dispatch bounded context-service index backlog"
+  schedule_expression = "rate(${var.index_drainer_schedule_rate_minutes} ${var.index_drainer_schedule_rate_minutes == 1 ? "minute" : "minutes"})"
+}
+
+resource "aws_cloudwatch_event_target" "index_queue_drainer" {
+  rule      = aws_cloudwatch_event_rule.index_queue_drainer.name
+  target_id = "spur-context-service-drainer"
+  arn       = aws_lambda_function.service.arn
+  input = jsonencode({
+    source      = "aws.events"
+    detail-type = "Scheduled Event"
+    detail = {
+      operation = "drain_queued_jobs"
+    }
+  })
 }
 
 resource "aws_lambda_provisioned_concurrency_config" "warm" {
@@ -263,4 +287,12 @@ resource "aws_lambda_permission" "apigw" {
   function_name = aws_lambda_function.service.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "eventbridge_drainer" {
+  statement_id  = "eventbridge-index-queue-drainer"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.service.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.index_queue_drainer.arn
 }

@@ -12,6 +12,19 @@ api_throttle_rate_limit                  = 20
 api_throttle_burst_limit                 = 40
 index_rate_limit_per_minute              = 10
 index_max_concurrent_jobs_per_caller     = 2
+
+# Bounded backlog. Queue caps remain zero until an operator deliberately opts
+# in; the scheduled one-minute drainer is still installed as the correctness
+# path so enabling queueing cannot strand accepted work.
+index_queue_shard_count                = 16
+index_max_running_jobs_per_owner       = null
+index_max_queued_jobs_per_owner        = 0
+index_max_running_jobs_global          = 0
+index_max_queued_jobs_global           = 0
+index_drainer_batch_limit              = 8
+index_drainer_scan_limit_per_shard     = 32
+index_drainer_schedule_rate_minutes    = 1
+
 context_max_tarball_bytes                = 524288000
 context_max_git_bytes                    = 2147483648
 context_max_build_seconds                = 1800

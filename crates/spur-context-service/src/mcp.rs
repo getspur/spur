@@ -1047,7 +1047,7 @@ fn jobs_error(context: &'static str) -> impl FnOnce(JobsError) -> McpHandlerErro
         // before reaching this mapper. This branch is for other callers (e.g.
         // route_index_status) where a queue-full error is unexpected and maps
         // to Internal.
-        JobsError::QueueFull | JobsError::GlobalQueueFull => {
+        JobsError::QueueFull | JobsError::GlobalQueueFull | JobsError::GlobalRunningFull => {
             McpHandlerError::Internal(format!("{context}: {error}"))
         }
         JobsError::Db(error) => McpHandlerError::Internal(format!("{context}: {error}")),
@@ -1421,6 +1421,16 @@ fn index_max_concurrent_jobs_per_caller() -> u32 {
     )
 }
 
+pub const DEFAULT_INDEX_DRAINER_BATCH_LIMIT: usize = 8;
+pub const DEFAULT_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD: usize = 32;
+pub const MAX_INDEX_GLOBAL_RUNNING_TOKENS: u32 = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexDrainerLimits {
+    pub max_dispatches_per_run: usize,
+    pub scan_limit_per_shard: usize,
+}
+
 /// Default per-owner queued backlog cap when the env var is not set. A non-zero
 /// default enables the bounded-queue admission path out of the box; deployments
 /// that want legacy reject-over-cap behavior set
@@ -1429,9 +1439,9 @@ const DEFAULT_MAX_QUEUED_JOBS_PER_OWNER: u32 = 20;
 const DEFAULT_QUEUE_SHARD_COUNT: u32 = 16;
 
 /// Build the [`QueueConfig`] for the enqueue admission path from environment
-/// variables. Maps the existing `SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER` to
-/// `max_running_per_owner` (the legacy active-job cap becomes the running cap)
-/// and adds new queue-specific variables.
+/// variables. The dedicated per-owner running cap falls back to the legacy
+/// `SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER` value for deployments that have
+/// not yet adopted the bounded-backlog configuration surface.
 pub fn index_queue_config() -> QueueConfig {
     QueueConfig {
         max_queued_per_owner: env_u32(
@@ -1439,9 +1449,28 @@ pub fn index_queue_config() -> QueueConfig {
             DEFAULT_MAX_QUEUED_JOBS_PER_OWNER,
         ),
         max_queued_global: env_u32("SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL", 0),
-        max_running_per_owner: index_max_concurrent_jobs_per_caller(),
-        max_running_global: env_u32("SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL", 0),
+        max_running_per_owner: env_u32(
+            "SPUR_INDEX_MAX_RUNNING_JOBS_PER_OWNER",
+            index_max_concurrent_jobs_per_caller(),
+        ),
+        max_running_global: env_u32("SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL", 0)
+            .min(MAX_INDEX_GLOBAL_RUNNING_TOKENS),
         shard_count: env_u32("SPUR_INDEX_QUEUE_SHARD_COUNT", DEFAULT_QUEUE_SHARD_COUNT),
+    }
+}
+
+pub fn index_drainer_limits() -> IndexDrainerLimits {
+    IndexDrainerLimits {
+        max_dispatches_per_run: env_usize(
+            "SPUR_INDEX_DRAINER_BATCH_LIMIT",
+            DEFAULT_INDEX_DRAINER_BATCH_LIMIT,
+        )
+        .max(1),
+        scan_limit_per_shard: env_usize(
+            "SPUR_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD",
+            DEFAULT_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD,
+        )
+        .max(1),
     }
 }
 
@@ -1453,6 +1482,13 @@ fn env_u32(name: &str, default: u32) -> u32 {
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
     env::var(name)
         .ok()
         .and_then(|value| value.trim().parse().ok())
