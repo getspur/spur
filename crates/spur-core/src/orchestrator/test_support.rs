@@ -188,6 +188,7 @@ pub async fn call_shutdown_mcp_server<S: RetirableMcpServer + ?Sized>(
 pub type WorkerConnectionFactoryForTest<'a> = dyn Fn(
         &spur_acp::config::AgentConfig,
         Vec<String>,
+        std::collections::BTreeMap<String, String>,
         &std::path::Path,
     ) -> Box<dyn spur_acp::connection::AgentConnection>
     + Send

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -211,7 +211,7 @@ impl Orchestrator {
         // callbacks (ACP native); other transports ignore the value.
         let perm_tx = if perms.skip { None } else { permission_tx };
 
-        build_connection_from_transport(config, args, perm_tx, &self.repo_root)
+        build_connection_from_transport(config, args, BTreeMap::new(), perm_tx, &self.repo_root)
     }
 
     pub(super) async fn list_sessions_from_rpc(
@@ -864,11 +864,13 @@ fn parse_opencode_history_from_sqlite(
 /// its own copy of the match, and would drift when transports changed.
 ///
 /// `spawn_args` is the final, bypass-aware spawn argv (callers invoke
-/// `config.effective_args()` before passing them in). `permission_tx` is
-/// honored only by the ACP transport; other transports ignore it.
+/// `config.effective_args()` before passing them in). `launch_env` is applied
+/// only by the native ACP transport. `permission_tx` is honored only by the
+/// ACP transport; other transports ignore it.
 pub(super) fn build_connection_from_transport(
     config: &spur_acp::config::AgentConfig,
     spawn_args: Vec<String>,
+    launch_env: BTreeMap<String, String>,
     permission_tx: Option<tokio::sync::mpsc::UnboundedSender<spur_acp::types::PermissionRequest>>,
     repo_root: &Path,
 ) -> Box<dyn AgentConnection> {
@@ -883,6 +885,7 @@ pub(super) fn build_connection_from_transport(
             );
             conn.set_repo_root(repo_root.to_path_buf());
             conn.set_additional_directories(config.additional_directories.clone());
+            conn.set_launch_env(launch_env);
             Box::new(conn)
         }
         TransportKind::Stdio => Box::new(StdioAdapter::new(
