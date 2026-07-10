@@ -155,6 +155,75 @@ variable "index_max_concurrent_jobs_per_caller" {
   default     = 2
 }
 
+# ─── Bounded Backlog Queueing ────────────────────────────────────────────────
+# Config surface for the DynamoDB backlog/backpressure design. Defaults preserve
+# the current live behavior (reject over capacity) until a downstream task
+# switches admission to the bounded-queue path. See
+# docs/superpowers/specs/2026-07-10-context-service-index-queue-backpressure-design.md
+
+variable "index_queue_gsi_name" {
+  description = "Name of the sparse DynamoDB GSI keyed by (queue_shard, queue_sort_key) used by the drainer to scan queued jobs in FIFO order."
+  type        = string
+  default     = "queue-gsi"
+}
+
+variable "index_queue_shard_count" {
+  description = "Number of shards for the sparse queue GSI partition key. The drainer rotates shard order/cursor so every queued job is scanned within a bounded number of runs. Default 16 per the design spec."
+  type        = number
+  default     = 16
+
+  validation {
+    condition     = var.index_queue_shard_count > 0 && var.index_queue_shard_count <= 1024
+    error_message = "index_queue_shard_count must be between 1 and 1024."
+  }
+}
+
+variable "index_max_running_jobs_per_owner" {
+  description = "Maximum concurrent running/dispatching index jobs per backlog owner (replaces the legacy per-caller active-job cap once the queue path is enabled). Default mirrors index_max_concurrent_jobs_per_caller to preserve current behavior."
+  type        = number
+  default     = 2
+}
+
+variable "index_max_queued_jobs_per_owner" {
+  description = "Maximum accepted queued backlog per backlog owner. 0 (default) preserves the current reject-over-capacity contract until queueing is enabled."
+  type        = number
+  default     = 0
+}
+
+variable "index_max_running_jobs_global" {
+  description = "Global concurrent running/dispatching job cap enforced via a RUNNING# token pool. 0 (default) disables the hard global running cap; small deployments rely on per-owner caps plus API Gateway throttles."
+  type        = number
+  default     = 0
+}
+
+variable "index_max_queued_jobs_global" {
+  description = "Global accepted queued backlog, enforced via sharded GLOBAL#QUEUE# counters (conservative/approximate under contention). 0 (default) disables the global queued cap."
+  type        = number
+  default     = 0
+}
+
+variable "index_dispatch_max_attempts" {
+  description = "Maximum transient-dispatch retry attempts before a queued job is marked failed with error_code=dispatch_exhausted."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.index_dispatch_max_attempts > 0
+    error_message = "index_dispatch_max_attempts must be greater than zero."
+  }
+}
+
+variable "index_dispatch_backoff_base_seconds" {
+  description = "Base seconds for exponential backoff when re-queuing a job after a transient dispatch failure. The actual backoff is base * 2^(attempt-1), capped at a sane maximum."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.index_dispatch_backoff_base_seconds > 0
+    error_message = "index_dispatch_backoff_base_seconds must be greater than zero."
+  }
+}
+
 variable "context_max_tarball_bytes" {
   description = "Maximum downloaded tarball bytes for external_index"
   type        = number
