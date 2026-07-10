@@ -473,6 +473,204 @@ fn partial_release_is_terminal_for_quota() -> Result<()> {
     })
 }
 
+// ─── Terminal release wiring ───────────────────────────────────────────────
+//
+// The live worker terminal paths (success/failure/spot) must release running
+// quota exactly once after recording terminal status. These tests exercise the
+// combined store methods that compose `mark_complete`/`mark_failed` with
+// `release_running_quota`, proving no running capacity leaks and a terminal job
+// no longer dedupes a fresh request.
+
+/// Enqueue + dispatch a job so it holds a running slot, then return the
+/// dispatched record and owner for assertions.
+async fn setup_dispatched_running_job(
+    store: &FakeJobStore,
+    owner: &BacklogOwner,
+    config: &QueueConfig,
+) -> JobRecord {
+    let enqueued = store
+        .enqueue_job(create_job_request(), owner.clone(), config)
+        .await
+        .expect("enqueue")
+        .into_record();
+    store
+        .dispatch_queued_job(&enqueued.job_id, config)
+        .await
+        .expect("dispatch")
+}
+
+#[test]
+fn terminal_success_releases_running_quota_and_active_dedupe() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = queue_config(5);
+        let dispatched = setup_dispatched_running_job(&store, &owner, &config).await;
+        assert_eq!(store.owner_running(&owner), 1, "running slot held");
+        assert!(store.has_running_token(&dispatched.job_id));
+
+        store
+            .mark_complete_and_release_running_quota(&dispatched.job_id, 99, json!({ "nodes": 1 }))
+            .await
+            .context("complete + release")?;
+
+        assert_eq!(store.owner_running(&owner), 0, "running quota released");
+        assert!(
+            !store.has_running_token(&dispatched.job_id),
+            "running token removed"
+        );
+        assert!(
+            store
+                .find_active_dedupe_job(&create_job_request().key())
+                .await?
+                .is_none(),
+            "active dedupe must be cleared so a fresh request can enqueue"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn terminal_failure_releases_running_quota_and_active_dedupe() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = queue_config(5);
+        let dispatched = setup_dispatched_running_job(&store, &owner, &config).await;
+        assert_eq!(store.owner_running(&owner), 1);
+
+        store
+            .mark_failed_and_release_running_quota(&dispatched.job_id, "translate", "boom")
+            .await
+            .context("fail + release")?;
+
+        assert_eq!(store.owner_running(&owner), 0, "running quota released");
+        assert!(
+            !store.has_running_token(&dispatched.job_id),
+            "running token removed"
+        );
+        assert!(
+            store
+                .find_active_dedupe_job(&create_job_request().key())
+                .await?
+                .is_none(),
+            "active dedupe must be cleared on failure"
+        );
+        let record = store.lookup_job(&dispatched.job_id).await?.context("job")?;
+        assert_eq!(record.status, JobStatus::Failed);
+        Ok(())
+    })
+}
+
+#[test]
+fn duplicate_terminal_event_does_not_decrement_counters_twice() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = queue_config(5);
+        let dispatched = setup_dispatched_running_job(&store, &owner, &config).await;
+
+        // First terminal release decrements the running counter and removes the
+        // token.
+        store
+            .mark_failed_and_release_running_quota(&dispatched.job_id, "fail", "first")
+            .await
+            .context("first terminal release")?;
+        assert_eq!(store.owner_running(&owner), 0);
+
+        // A duplicate terminal event (e.g. a retry/duplicate delivery) must NOT
+        // decrement again — the token is already gone.
+        store
+            .mark_failed_and_release_running_quota(&dispatched.job_id, "fail", "duplicate")
+            .await
+            .context("duplicate terminal release")?;
+        assert_eq!(
+            store.owner_running(&owner),
+            0,
+            "duplicate terminal must not underflow the running counter"
+        );
+        assert!(
+            !store.has_running_token(&dispatched.job_id),
+            "token still absent after duplicate"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn transaction_conflict_during_release_is_not_treated_as_success() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = queue_config(5);
+        let dispatched = setup_dispatched_running_job(&store, &owner, &config).await;
+
+        // Inject a TransactionConflict on the release path — the token still
+        // exists and the counter is still held.
+        store.fail_release.store(true, Ordering::SeqCst);
+
+        let err = store
+            .mark_failed_and_release_running_quota(&dispatched.job_id, "fail", "conflict")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, JobsError::Conflict),
+            "release conflict must surface, not be swallowed as success; got {err:?}"
+        );
+        // The status WAS recorded, but the running slot must remain held so the
+        // reconciler can retry — the release must not be dropped.
+        assert_eq!(
+            store.owner_running(&owner),
+            1,
+            "running quota must NOT be released on conflict"
+        );
+        assert!(
+            store.has_running_token(&dispatched.job_id),
+            "token must remain so the release can be retried"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn after_terminal_same_package_can_enqueue_fresh_job() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = queue_config(5);
+        let dispatched = setup_dispatched_running_job(&store, &owner, &config).await;
+
+        store
+            .mark_complete_and_release_running_quota(&dispatched.job_id, 1, json!({}))
+            .await
+            .context("terminal")?;
+
+        // The same package/revision request must now be able to enqueue a fresh
+        // job instead of deduping to the (now terminal) completed job.
+        let outcome = store
+            .enqueue_job(create_job_request(), owner.clone(), &config)
+            .await
+            .context("enqueue after terminal")?;
+        let fresh = match outcome {
+            EnqueueOutcome::Enqueued(record) => record,
+            EnqueueOutcome::Existing(_) => anyhow::bail!("expected fresh job, got existing"),
+        };
+        assert_ne!(fresh.job_id, dispatched.job_id);
+        assert_eq!(fresh.status, JobStatus::Queued);
+        assert_eq!(
+            store.owner_queued(&owner),
+            1,
+            "fresh job consumes a queued slot"
+        );
+        assert_eq!(
+            store.owner_running(&owner),
+            0,
+            "completed job's running slot stays released"
+        );
+        Ok(())
+    })
+}
+
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -520,6 +718,10 @@ struct FakeJobStore {
     /// When true, `record_execution_started` returns a `Conflict` error so the
     /// drainer's record-failure no-leak path can be exercised.
     fail_record_started: AtomicBool,
+    /// When true, `release_running_quota` returns a `Conflict` error (leaving
+    /// the token and counter untouched) so the terminal-release conflict path
+    /// can be exercised.
+    fail_release: AtomicBool,
 }
 
 #[derive(Default)]
@@ -815,6 +1017,12 @@ impl JobStore for FakeJobStore {
         &self,
         record: &JobRecord,
     ) -> spur_context_service::jobs::Result<()> {
+        // Injected conflict: the token still exists and the counter is held.
+        // Mirrors the DynamoDB TransientConflict/QuotaConflict path where the
+        // release transaction is cancelled but the running slot is not freed.
+        if self.fail_release.load(Ordering::SeqCst) {
+            return Err(JobsError::Conflict);
+        }
         let mut state = self.state.lock().expect("fake store lock");
         // Exactly-once: only release if the RUNNING#<job_id> token still
         // exists. A repeat call finds no token and is a no-op.

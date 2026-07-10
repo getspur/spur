@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex, MutexGuard,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1159,6 +1159,216 @@ async fn external_index_status_returns_dynamodb_state_when_describe_execution_fa
     assert_eq!(response["stage"], "building_graph");
     assert_eq!(response["execution_arn"], "arn:transient");
     assert_eq!(checker.described_arns(), ["arn:transient"]);
+    Ok(())
+}
+
+// ─── Terminal release wiring (status-repair paths) ──────────────────────────
+//
+// `external_index_status` repairs stale jobs via `update_stale_job`. After the
+// brain feedback, those repairs must:
+//   1. Use `mark_*_and_release_running_quota` so owner/global running capacity
+//      is freed after a stale succeeded/failed reconciliation.
+//   2. Reconcile stale `Dispatching` jobs (pre-first-stage) in addition to
+//      `Queued`/`Running`.
+//   3. Repair terminal jobs that still hold a running token (the worker's
+//      release conflicted) by releasing exactly once on the next poll.
+
+fn seed_owner() -> BacklogOwner {
+    BacklogOwner::caller("seed-owner")
+}
+
+#[tokio::test]
+async fn status_repair_succeeded_releases_running_quota() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let owner = seed_owner();
+    let job = jobs.seed_dispatched_job("arn:stale-success", JobStatus::Running, |_| {});
+    assert_eq!(jobs.owner_running(&owner), 1, "running slot held");
+    assert!(jobs.has_running_token(&job.job_id));
+
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Succeeded,
+        output: Some(json!({ "snapshot_id": 4242, "rows_inserted": { "nodes": 9 } })),
+        error: None,
+    }));
+
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
+
+    assert_eq!(response["status"], "complete");
+    assert_eq!(response["snapshot_id"], 4242);
+    assert_eq!(checker.described_arns(), ["arn:stale-success"]);
+    assert_eq!(jobs.owner_running(&owner), 0, "owner running released");
+    assert!(
+        !jobs.has_running_token(&job.job_id),
+        "running token removed"
+    );
+    assert_eq!(jobs.global_running(), 0, "global running released");
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_repair_failed_releases_running_quota() -> Result<()> {
+    let jobs = FakeJobStore::default();
+    let owner = seed_owner();
+    let job = jobs.seed_dispatched_job("arn:stale-fail", JobStatus::Running, |_| {});
+    assert_eq!(jobs.owner_running(&owner), 1);
+
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Failed,
+        output: None,
+        error: Some("translate: duckdb error".to_owned()),
+    }));
+
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
+
+    assert_eq!(response["status"], "failed");
+    assert_eq!(response["error"]["code"], "translate");
+    assert_eq!(response["error"]["detail"], "duckdb error");
+    assert_eq!(jobs.owner_running(&owner), 0, "owner running released");
+    assert!(
+        !jobs.has_running_token(&job.job_id),
+        "running token removed"
+    );
+    assert_eq!(jobs.global_running(), 0, "global running released");
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_repair_reconciles_stale_dispatching_job() -> Result<()> {
+    // A dispatched job sits in `Dispatching` until the worker reports its first
+    // stage. If Step Functions fails before that update, the job is stuck
+    // holding running capacity. `update_stale_job` must reconcile it.
+    let jobs = FakeJobStore::default();
+    let owner = seed_owner();
+    let job = jobs.seed_dispatched_job("arn:dispatching", JobStatus::Dispatching, |_| {});
+    assert_eq!(jobs.owner_running(&owner), 1);
+    assert!(jobs.has_running_token(&job.job_id));
+
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Failed,
+        output: None,
+        error: Some("execution: timed out".to_owned()),
+    }));
+
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
+
+    assert_eq!(response["status"], "failed");
+    assert_eq!(checker.described_arns(), ["arn:dispatching"]);
+    assert_eq!(
+        jobs.owner_running(&owner),
+        0,
+        "dispatching job releases running quota"
+    );
+    assert!(
+        !jobs.has_running_token(&job.job_id),
+        "running token removed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_repair_dispatching_to_succeeded_releases_running_quota() -> Result<()> {
+    // Same dispatching path but reconciling to a succeeded outcome.
+    let jobs = FakeJobStore::default();
+    let owner = seed_owner();
+    let job = jobs.seed_dispatched_job("arn:dispatching-ok", JobStatus::Dispatching, |_| {});
+
+    let checker = StubExecutionStatusChecker::new(Some(ExecutionOutcome {
+        status: ExecutionOutcomeStatus::Succeeded,
+        output: Some(json!({ "snapshot_id": 10, "rows_inserted": { "nodes": 1 } })),
+        error: None,
+    }));
+
+    let response =
+        route_index_status(&json!({ "job_id": job.job_id }), &jobs, Some(&checker)).await?;
+
+    assert_eq!(response["status"], "complete");
+    assert_eq!(response["snapshot_id"], 10);
+    assert_eq!(jobs.owner_running(&owner), 0);
+    assert!(!jobs.has_running_token(&job.job_id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_poll_repairs_terminal_job_with_leftover_running_token() -> Result<()> {
+    // Simulate the TransactionConflict scenario: the worker marked the job
+    // complete via `mark_complete` (raw — terminal status recorded, dedupe
+    // released) but the running-quota release conflicted, leaving the
+    // `RUNNING#` token and owner/global counters in place. The next status
+    // poll must release the leftover token exactly once.
+    let jobs = FakeJobStore::default();
+    let owner = seed_owner();
+    let job = jobs.seed_dispatched_job("arn:terminal-leak", JobStatus::Running, |_| {});
+    assert_eq!(jobs.owner_running(&owner), 1);
+
+    // Record terminal status WITHOUT releasing running quota — mirrors the
+    // worker's `mark_complete` succeeding but `release_running_quota` failing.
+    jobs.mark_complete(&job.job_id, 555, json!({ "nodes": 3 }))
+        .await
+        .context("mark complete (raw)")?;
+    assert_eq!(
+        jobs.owner_running(&owner),
+        1,
+        "token still held after raw mark_complete"
+    );
+    assert!(jobs.has_running_token(&job.job_id));
+
+    // No checker needed — the terminal-repair branch fires before the checker.
+    let response = route_index_status(&json!({ "job_id": job.job_id }), &jobs, None).await?;
+
+    assert_eq!(response["status"], "complete");
+    assert_eq!(response["snapshot_id"], 555);
+    assert_eq!(
+        jobs.owner_running(&owner),
+        0,
+        "leftover token released by poll"
+    );
+    assert!(
+        !jobs.has_running_token(&job.job_id),
+        "running token removed"
+    );
+    assert_eq!(jobs.global_running(), 0, "global running released");
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_poll_terminal_release_conflict_surfaces_for_retry() -> Result<()> {
+    // Same leftover-token scenario, but the release transaction still
+    // conflicts. The error must surface (not be swallowed as success) so the
+    // next poll retries and the slot is eventually freed.
+    let jobs = FakeJobStore::default();
+    let owner = seed_owner();
+    let job = jobs.seed_dispatched_job("arn:terminal-conflict", JobStatus::Running, |_| {});
+    jobs.mark_complete(&job.job_id, 1, json!({})).await?;
+    assert_eq!(jobs.owner_running(&owner), 1);
+
+    jobs.set_fail_release(true);
+
+    let error = route_index_status(&json!({ "job_id": job.job_id }), &jobs, None)
+        .await
+        .unwrap_err();
+
+    match error {
+        McpHandlerError::Internal(message) => {
+            assert!(
+                message.contains("terminal quota release repair"),
+                "expected release-repair context in error, got: {message}"
+            );
+        }
+        other => panic!("expected Internal error for release conflict, got {other:?}"),
+    }
+    // The token and counter must remain so the next poll can retry.
+    assert_eq!(
+        jobs.owner_running(&owner),
+        1,
+        "running quota must stay held on conflict"
+    );
+    assert!(
+        jobs.has_running_token(&job.job_id),
+        "token must remain for retry"
+    );
     Ok(())
 }
 
@@ -2796,6 +3006,10 @@ impl ExecutionStatusChecker for StubExecutionStatusChecker {
 struct FakeJobStore {
     next_id: AtomicU64,
     state: Mutex<FakeJobState>,
+    /// When true, `release_running_quota` returns a `Conflict` error (leaving
+    /// the token and counter untouched) so the terminal-release conflict repair
+    /// path can be exercised.
+    fail_release: AtomicBool,
 }
 
 #[derive(Default)]
@@ -2807,12 +3021,13 @@ struct FakeJobState {
     // ─── Bounded queueing accounting ──────────────────────────────────────
     owner_counters: HashMap<String, OwnerCounters>,
     global_queued: u32,
+    global_running: u32,
+    running_tokens: HashSet<String>,
 }
 
 #[derive(Default, Clone, Copy)]
 struct OwnerCounters {
     queued: u32,
-    #[allow(dead_code)]
     running: u32,
 }
 
@@ -3057,6 +3272,74 @@ impl JobStore for FakeJobStore {
         state.jobs.insert(job_id, record.clone());
         Ok(EnqueueOutcome::Enqueued(record))
     }
+
+    async fn dispatch_queued_job(
+        &self,
+        job_id: &str,
+        config: &QueueConfig,
+    ) -> spur_context_service::jobs::Result<JobRecord> {
+        let mut state = self.state.lock().expect("fake store lock");
+
+        let owner = {
+            let record = state.jobs.get(job_id).ok_or(JobsError::NotFound)?;
+            if record.status != JobStatus::Queued {
+                return Err(JobsError::Conflict);
+            }
+            record.owner().ok_or(JobsError::Conflict)?
+        };
+        let owner_pk = owner.pk();
+
+        let running = state
+            .owner_counters
+            .get(&owner_pk)
+            .map(|c| c.running)
+            .unwrap_or_default();
+        if running >= config.max_running_per_owner {
+            return Err(JobsError::Conflict);
+        }
+        if config.max_running_global > 0 && state.global_running >= config.max_running_global {
+            return Err(JobsError::Conflict);
+        }
+
+        {
+            let counters = state.owner_counters.entry(owner_pk).or_default();
+            counters.queued = counters.queued.saturating_sub(1);
+            counters.running += 1;
+        }
+        state.global_queued = state.global_queued.saturating_sub(1);
+        state.global_running += 1;
+        state.running_tokens.insert(job_id.to_owned());
+
+        let record = state.jobs.get_mut(job_id).ok_or(JobsError::NotFound)?;
+        record.status = JobStatus::Dispatching;
+        record.queue_shard = None;
+        record.queue_sort_key = None;
+        record.next_eligible_at = None;
+        record.dispatched_at = Some("dispatched".to_owned());
+        Ok(record.clone())
+    }
+
+    async fn release_running_quota(
+        &self,
+        record: &JobRecord,
+    ) -> spur_context_service::jobs::Result<()> {
+        if self.fail_release.load(Ordering::SeqCst) {
+            return Err(JobsError::Conflict);
+        }
+        let mut state = self.state.lock().expect("fake store lock");
+        if !state.running_tokens.remove(&record.job_id) {
+            return Ok(());
+        }
+        if let Some(owner) = record.owner() {
+            if let Some(counters) = state.owner_counters.get_mut(&owner.pk()) {
+                counters.running = counters.running.saturating_sub(1);
+            }
+        }
+        if state.global_running > 0 {
+            state.global_running -= 1;
+        }
+        Ok(())
+    }
 }
 
 fn active_dedupe_in_state(state: &FakeJobState, key: &JobKey) -> Option<JobRecord> {
@@ -3113,6 +3396,59 @@ impl FakeJobStore {
         record
     }
 
+    /// Seed a job that already holds a running quota slot (dispatching/running)
+    /// and is stale, simulating a dispatched job whose worker has not reported
+    /// its first stage — or a terminal job whose release conflicted. The owner
+    /// running counter, global running counter, and `RUNNING#<job_id>` token are
+    /// all populated so release assertions are meaningful.
+    fn seed_dispatched_job(
+        &self,
+        execution_arn: &str,
+        status: JobStatus,
+        update: impl FnOnce(&mut JobRecord),
+    ) -> JobRecord {
+        let job_id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+        let owner = BacklogOwner::caller("seed-owner");
+        let owner_pk = owner.pk();
+        let mut record = JobRecord {
+            job_id: job_id.clone(),
+            status,
+            source: "git:custom".to_owned(),
+            package: PACKAGE.to_owned(),
+            revision: "main".to_owned(),
+            source_url: SOURCE_URL.to_owned(),
+            source_url_hash: source_url_hash(SOURCE_URL),
+            source_kind: "git".to_owned(),
+            caller_id: "seed".to_owned(),
+            execution_arn: Some(execution_arn.to_owned()),
+            attempt: 1,
+            stage: None,
+            snapshot_id: None,
+            row_counts: None,
+            error_code: None,
+            error_detail: None,
+            created_at: "now".to_owned(),
+            updated_at: "0".to_owned(),
+            owner_kind: Some(owner.kind),
+            owner_id: Some(owner.id),
+            queue_shard: None,
+            queue_sort_key: None,
+            next_eligible_at: None,
+            dispatched_at: Some("dispatched".to_owned()),
+        };
+        update(&mut record);
+        let mut state = self.state.lock().expect("fake store lock");
+        let holds_token = record.status.holds_running_quota();
+        if holds_token {
+            state.owner_counters.entry(owner_pk).or_default().running += 1;
+            state.global_running += 1;
+            state.running_tokens.insert(job_id.clone());
+        }
+        state.dedupe.insert(record.key(), job_id.clone());
+        state.jobs.insert(job_id, record.clone());
+        record
+    }
+
     fn job_count(&self) -> usize {
         self.state.lock().expect("fake store lock").jobs.len()
     }
@@ -3125,6 +3461,32 @@ impl FakeJobStore {
             .get(&owner.pk())
             .map(|c| c.queued)
             .unwrap_or_default()
+    }
+
+    fn owner_running(&self, owner: &BacklogOwner) -> u32 {
+        self.state
+            .lock()
+            .expect("fake store lock")
+            .owner_counters
+            .get(&owner.pk())
+            .map(|c| c.running)
+            .unwrap_or_default()
+    }
+
+    fn global_running(&self) -> u32 {
+        self.state.lock().expect("fake store lock").global_running
+    }
+
+    fn has_running_token(&self, job_id: &str) -> bool {
+        self.state
+            .lock()
+            .expect("fake store lock")
+            .running_tokens
+            .contains(job_id)
+    }
+
+    fn set_fail_release(&self, fail: bool) {
+        self.fail_release.store(fail, Ordering::SeqCst);
     }
 
     fn lookup_job_sync(&self, job_id: &str) -> Option<JobRecord> {
