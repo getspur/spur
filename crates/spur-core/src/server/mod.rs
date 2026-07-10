@@ -43,7 +43,7 @@ use spur_worktree::WorktreeManager;
 use crate::outcome_materializer::OutcomeMaterializer;
 use crate::plan::proposers::{CompositeProposer, RetryExhaustedProposer, TrivialScorer};
 use crate::plan::reconciler::{
-    Reconciler, ReconcilerConfig, ReconcilerDispatch, ReconcilerDispatchCtx,
+    PlanScope, Reconciler, ReconcilerConfig, ReconcilerDispatch, ReconcilerDispatchCtx,
 };
 use crate::plan::signal_watcher::SignalWatcher;
 use crate::{DelegationChannel, DelegationRequest};
@@ -292,6 +292,8 @@ pub struct McpCallbackServer {
     pub(crate) loops_enabled: bool,
     /// Runtime startup default for the global loop pause guard.
     pub(crate) pause_all_loops: bool,
+    pub(crate) loop_sweep_scope: crate::plan::loops::LoopSweepScope,
+    pub(crate) plan_scope: PlanScope,
     /// Grace period before startup quarantines stale `spur:plan-pending`
     /// persisted-plan epics.
     pub(crate) plan_pending_grace: std::time::Duration,
@@ -331,10 +333,59 @@ impl McpCallbackServer {
         outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
         feature_gate: Arc<spur_license::FeatureGate>,
     ) -> (Self, DelegationChannel) {
+        let (mut server, channel) = Self::new_unregistered(
+            session_id,
+            pm_service,
+            event_sink,
+            continuation_ctx,
+            outcome_store,
+            feature_gate,
+        );
+        let tool_registry = crate::mcp::brain_tool_registry(
+            crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
+            crate::mcp::plan::PlanMcpDeps::from_server(&server),
+            crate::mcp::signals::SignalMcpDeps {
+                pm_service: server.pm_service.clone(),
+                event_sink: server.event_sink.clone(),
+                feature_gate: Arc::clone(&server.feature_gate),
+            },
+            &spur_acp::config::ContextServiceConfig::default(),
+        )
+        .expect("core MCP tool registry must be valid");
+        server.tool_registry = Arc::new(tool_registry);
+        (server, channel)
+    }
+
+    pub(crate) fn new_headless_project_runtime(
+        session_id: &spur_acp::BrainSessionId,
+        pm_service: Arc<PmService>,
+        event_sink: Option<Arc<dyn spur_mcp::events::McpEventSink>>,
+        continuation_ctx: DetachedContinuationCtx,
+        outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+    ) -> (Self, DelegationChannel) {
+        Self::new_unregistered(
+            Some(session_id),
+            Some(pm_service),
+            event_sink,
+            continuation_ctx,
+            outcome_store,
+            feature_gate,
+        )
+    }
+
+    fn new_unregistered(
+        session_id: Option<&spur_acp::BrainSessionId>,
+        pm_service: Option<Arc<PmService>>,
+        event_sink: Option<Arc<dyn spur_mcp::events::McpEventSink>>,
+        continuation_ctx: DetachedContinuationCtx,
+        outcome_store: Arc<dyn spur_blob_store::OutcomeStore>,
+        feature_gate: Arc<spur_license::FeatureGate>,
+    ) -> (Self, DelegationChannel) {
         let (req_tx, req_rx) = mpsc::channel::<DelegationRequest>(32);
         let materializer = OutcomeMaterializer::new(outcome_store.clone());
 
-        let mut server = Self {
+        let server = Self {
             delegation_tx: req_tx,
             workers: Vec::new(),
             brain_session_id: {
@@ -377,6 +428,8 @@ impl McpCallbackServer {
             auto_merge_approved_plans: false,
             loops_enabled: true,
             pause_all_loops: false,
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::All,
+            plan_scope: PlanScope::BrainOwned,
             plan_pending_grace: DEFAULT_PLAN_PENDING_GRACE,
             versioned_cache_serve: false,
             nonadvisory_review_writes: false,
@@ -386,18 +439,6 @@ impl McpCallbackServer {
             dispatch_orphan_resume_hook: None,
             brain_model: Arc::new(RwLock::new(None)),
         };
-        let tool_registry = crate::mcp::brain_tool_registry(
-            crate::mcp::delegation::DelegationMcpDeps::from_server(&server),
-            crate::mcp::plan::PlanMcpDeps::from_server(&server),
-            crate::mcp::signals::SignalMcpDeps {
-                pm_service: server.pm_service.clone(),
-                event_sink: server.event_sink.clone(),
-                feature_gate: Arc::clone(&server.feature_gate),
-            },
-            &spur_acp::config::ContextServiceConfig::default(),
-        )
-        .expect("core MCP tool registry must be valid");
-        server.tool_registry = Arc::new(tool_registry);
 
         let channel = DelegationChannel { request_rx: req_rx };
         (server, channel)
@@ -661,8 +702,25 @@ impl McpCallbackServer {
         };
     }
 
+    pub(crate) fn set_reconciler_scopes(
+        &mut self,
+        loop_sweep_scope: crate::plan::loops::LoopSweepScope,
+        plan_scope: PlanScope,
+    ) {
+        self.loop_sweep_scope = loop_sweep_scope;
+        self.plan_scope = plan_scope;
+    }
+
     pub fn fast_forward_reconciler(&self) {
         notify_fast_forward(&self.reconciler_fast_forward);
+    }
+
+    pub(crate) fn reconciler_task_finished(&self) -> bool {
+        self.reconciler_handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|handle| handle.handle.is_finished())
     }
 
     /// Set the repository root path. Required for beads-backed startup and
@@ -881,6 +939,8 @@ impl McpCallbackServer {
             repo_root: repo_root.clone(),
             loops_enabled: self.loops_enabled,
             pause_all_loops: self.pause_all_loops,
+            loop_sweep_scope: self.loop_sweep_scope,
+            plan_scope: self.plan_scope,
             ..Default::default()
         };
         let automation: Option<Arc<dyn crate::plan::reconciler::ReconcilerAutomation>> =
