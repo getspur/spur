@@ -124,30 +124,23 @@ fn parsers_round_trip_through_real_br_labels() {
     assert!(seen_plan && seen_task && seen_agent && seen_src);
 }
 
-/// Regression guard for the asymmetric label-length cap in `br 0.1.14`.
-///
-/// `br create --label <label>` rejects labels longer than 50 characters
-/// (`Validation failed: label: exceeds 50 characters`), while `br label add`
-/// accepts arbitrary lengths. Constructors in `plan::labels` that feed into
-/// `IssueCreate.labels` MUST stay under 50 characters — enforced by using
-/// the compact (hyphen-free) UUID form for `mutation_id_label` and
-/// `signal_processed_label`.
+/// Regression guard: `br create --label` no longer enforces a label length
+/// cap. The previous 50-char limit was removed from `beads_rust` — both
+/// `br create --label` and `br label add` now accept labels of any
+/// reasonable length.
 #[test]
-fn br_create_enforces_50_char_cap_but_label_add_does_not() {
+fn br_create_accepts_long_labels() {
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]).unwrap();
 
-    // `br create --label` enforces the cap.
-    let create_49 = "x".repeat(49);
-    run_br(dir.path(), &["create", "t", "-t", "task", "-l", &create_49])
-        .expect("br create must accept 49-char label");
-    let create_51 = "x".repeat(51);
-    assert!(
-        run_br(dir.path(), &["create", "t", "-t", "task", "-l", &create_51]).is_err(),
-        "br create must reject 51-char label (regression: 50-char cap may have moved)"
-    );
+    // `br create --label` accepts labels of any length.
+    for len in [49usize, 50, 51, 100, 256] {
+        let label = "x".repeat(len);
+        run_br(dir.path(), &["create", "t", "-t", "task", "-l", &label])
+            .unwrap_or_else(|e| panic!("br create must accept {len}-char label: {e}"));
+    }
 
-    // `br label add` does not enforce the cap.
+    // `br label add` also accepts long labels.
     let id = extract_id(&run_br(dir.path(), &["create", "t", "-t", "task"]).unwrap());
     for len in [51usize, 64, 128, 256] {
         let label = "x".repeat(len);
@@ -156,23 +149,32 @@ fn br_create_enforces_50_char_cap_but_label_add_does_not() {
     }
 }
 
-/// Regression guard: constructors whose output feeds `IssueCreate.labels`
-/// (the `br create --label` path) must fit under the 50-character cap.
-/// Currently only `mutation_id_label` reaches that path
-/// (see `mutation_executor::apply_mutation`). `signal_processed_label` is
-/// used only via `IssueUpdate.add_labels` (the `br label add` path), so it
-/// is not constrained here — the module docstring documents this asymmetry.
+/// Regression guard: `mutation_id_label` produces a br-legal label accepted
+/// by `br create --label`.
 #[test]
-fn mutation_id_label_fits_under_br_create_cap() {
+fn mutation_id_label_accepted_by_br_create() {
     let dir = TempDir::new().unwrap();
     run_br(dir.path(), &["init"]).unwrap();
 
     let label = labels::mutation_id_label(&uuid::Uuid::new_v4());
+    run_br(dir.path(), &["create", "t", "-t", "task", "-l", &label])
+        .unwrap_or_else(|e| panic!("br create rejected mutation_id_label {label:?}: {e}"));
+}
+
+/// Production regression: `plan_task_id` with a long task_id previously
+/// exceeded the 50-char cap and caused `submit_plan` to fail with
+/// `Validation failed: label: exceeds 50 characters`.
+#[test]
+fn plan_task_id_label_with_long_task_id_accepted_by_br_create() {
+    let dir = TempDir::new().unwrap();
+    run_br(dir.path(), &["init"]).unwrap();
+
+    let label = labels::plan_task_id("index-queue-E-infra-observability");
     assert!(
-        label.len() <= 50,
-        "mutation_id_label must fit under br create cap: {label:?} ({} chars)",
+        label.len() > 50,
+        "regression label should exceed 50 chars: {label} ({} chars)",
         label.len()
     );
     run_br(dir.path(), &["create", "t", "-t", "task", "-l", &label])
-        .unwrap_or_else(|e| panic!("br create rejected mutation_id_label {label:?}: {e}"));
+        .unwrap_or_else(|e| panic!("br create rejected plan_task_id label {label:?}: {e}"));
 }
