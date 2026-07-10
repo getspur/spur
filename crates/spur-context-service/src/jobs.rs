@@ -396,6 +396,55 @@ pub trait JobStore: Send + Sync {
 
     async fn mark_failed(&self, job_id: &str, code: &str, detail: &str) -> Result<JobRecord>;
 
+    /// Mark a job complete, then release its running quota exactly once.
+    ///
+    /// This is the live terminal-success path: after the terminal status is
+    /// recorded ([`Self::mark_complete`] releases the active dedupe pointer and
+    /// legacy caller quota), the owner running count and any global running
+    /// token are released via [`Self::release_running_quota`].
+    ///
+    /// The release is idempotent: a repeated call (e.g. a duplicate terminal
+    /// event delivery) finds the `RUNNING#<job_id>` token already gone and is a
+    /// no-op, so running counters are never decremented twice. If the release
+    /// encounters a transient [`JobsError::Conflict`] (concurrent write
+    /// contention on the token/counter), the error is **surfaced** rather than
+    /// swallowed — the caller (or reconciler) must retry so a running slot is
+    /// never silently leaked. The terminal status has already been recorded by
+    /// that point.
+    async fn mark_complete_and_release_running_quota(
+        &self,
+        job_id: &str,
+        snapshot_id: i64,
+        row_counts: serde_json::Value,
+    ) -> Result<JobRecord> {
+        let record = self.mark_complete(job_id, snapshot_id, row_counts).await?;
+        self.release_running_quota(&record).await?;
+        Ok(record)
+    }
+
+    /// Mark a job failed, then release its running quota exactly once.
+    ///
+    /// This is the live terminal-failure path (worker execution error, Step
+    /// Functions failure, cancellation): after the terminal status is recorded
+    /// ([`Self::mark_failed`] releases the active dedupe pointer and legacy
+    /// caller quota), the owner running count and any global running token are
+    /// released via [`Self::release_running_quota`].
+    ///
+    /// Same exactly-once and conflict-surfacing guarantees as
+    /// [`Self::mark_complete_and_release_running_quota`]: a duplicate terminal
+    /// event does not double-decrement, and a `Conflict` during release is
+    /// surfaced for retry rather than dropped.
+    async fn mark_failed_and_release_running_quota(
+        &self,
+        job_id: &str,
+        code: &str,
+        detail: &str,
+    ) -> Result<JobRecord> {
+        let record = self.mark_failed(job_id, code, detail).await?;
+        self.release_running_quota(&record).await?;
+        Ok(record)
+    }
+
     async fn lookup_job(&self, job_id: &str) -> Result<Option<JobRecord>>;
 
     async fn release_dedupe_if_owner(&self, record: &JobRecord) -> Result<()>;
