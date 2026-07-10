@@ -66,6 +66,17 @@ enum PlanInspectorConfirm {
         status: String,
         attempt: u32,
         max_attempts: u32,
+        append_prompt: String,
+        cursor: usize,
+    },
+    StopTask {
+        plan_id: String,
+        task_id: String,
+        task_name: String,
+        delegation_id: String,
+        status: String,
+        append_prompt: String,
+        cursor: usize,
     },
     Review {
         plan_id: String,
@@ -488,6 +499,43 @@ impl PlanInspectorView {
             status: task.status.clone(),
             attempt: task.attempt,
             max_attempts: task.max_attempts,
+            append_prompt: String::new(),
+            cursor: 0,
+        });
+        None
+    }
+
+    fn stop_selected_task(&mut self, plan: &TrackedPlan) -> Option<Action> {
+        if self.open_issue_id.is_some() || !matches!(self.mode, PlanInspectorMode::Browse) {
+            return None;
+        }
+
+        let Some(task) = self.selected_task(plan) else {
+            return Some(Action::FlashHint {
+                message: "Cannot stop: no selected task".into(),
+            });
+        };
+
+        if !is_stoppable_task_status(&task.status) {
+            return Some(Action::FlashHint {
+                message: format!("Cannot stop: task {} is {}", task.task_id, task.status),
+            });
+        }
+
+        let Some(delegation_id) = task.delegation_id.clone() else {
+            return Some(Action::FlashHint {
+                message: format!("Cannot stop: task {} has no delegation", task.task_id),
+            });
+        };
+
+        self.confirm = Some(PlanInspectorConfirm::StopTask {
+            plan_id: plan.plan_id.clone(),
+            task_id: task.task_id.clone(),
+            task_name: task.task_name.clone(),
+            delegation_id,
+            status: task.status.clone(),
+            append_prompt: String::new(),
+            cursor: 0,
         });
         None
     }
@@ -559,12 +607,18 @@ impl PlanInspectorView {
         match confirm {
             PlanInspectorConfirm::Start { plan_id } => Some(Action::ResumePlan { plan_id }),
             PlanInspectorConfirm::RetryTask {
-                plan_id, issue_id, ..
+                plan_id,
+                issue_id,
+                append_prompt,
+                ..
             } => Some(Action::RetryPlanTask {
                 plan_id: Some(plan_id),
                 issue_id,
-                append_prompt: None,
+                append_prompt: non_empty_prompt(append_prompt),
             }),
+            PlanInspectorConfirm::StopTask { delegation_id, .. } => {
+                Some(Action::CancelDelegation { delegation_id })
+            }
             PlanInspectorConfirm::Review {
                 executor_id,
                 attempt_n,
@@ -664,6 +718,55 @@ impl PlanInspectorView {
         }
 
         <Self as View>::handle_key(self, key, ctx)
+    }
+
+    fn handle_prompt_confirm_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Enter if key.modifiers.is_empty() => self.confirm_action(),
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.confirm = None;
+                None
+            }
+            KeyCode::Backspace if key.modifiers.is_empty() => {
+                if let Some((append_prompt, cursor)) = confirm_prompt_mut(&mut self.confirm) {
+                    delete_before_cursor(append_prompt, cursor);
+                }
+                None
+            }
+            KeyCode::Left if key.modifiers.is_empty() => {
+                if let Some((append_prompt, cursor)) = confirm_prompt_mut(&mut self.confirm) {
+                    *cursor = previous_char_boundary(append_prompt, *cursor);
+                }
+                None
+            }
+            KeyCode::Right if key.modifiers.is_empty() => {
+                if let Some((append_prompt, cursor)) = confirm_prompt_mut(&mut self.confirm) {
+                    *cursor = next_char_boundary(append_prompt, *cursor);
+                }
+                None
+            }
+            KeyCode::Home if key.modifiers.is_empty() => {
+                if let Some((_, cursor)) = confirm_prompt_mut(&mut self.confirm) {
+                    *cursor = 0;
+                }
+                None
+            }
+            KeyCode::End if key.modifiers.is_empty() => {
+                if let Some((append_prompt, cursor)) = confirm_prompt_mut(&mut self.confirm) {
+                    *cursor = append_prompt.len();
+                }
+                None
+            }
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some((append_prompt, cursor)) = confirm_prompt_mut(&mut self.confirm) {
+                    insert_at_cursor(append_prompt, cursor, ch);
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     fn render_peek_overlay(
@@ -822,6 +925,12 @@ fn is_terminal_phase(phase: LifecycleState) -> bool {
 impl View for PlanInspectorView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &super::ViewContext) -> Option<Action> {
         let key = super::normalize_macos_option(key);
+        if matches!(
+            self.confirm,
+            Some(PlanInspectorConfirm::RetryTask { .. } | PlanInspectorConfirm::StopTask { .. })
+        ) {
+            return self.handle_prompt_confirm_key(key);
+        }
         if self.confirm.is_some() {
             return match key.code {
                 KeyCode::Enter if key.modifiers.is_empty() => self.confirm_action(),
@@ -884,6 +993,11 @@ impl View for PlanInspectorView {
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
                     return self.retry_selected_task(plan);
+                }
+                KeyCode::Char('X')
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    return self.stop_selected_task(plan);
                 }
                 KeyCode::Char(ch @ ('a' | 'd' | 'c'))
                     if key.modifiers.is_empty()
@@ -1250,6 +1364,11 @@ impl View for PlanInspectorView {
             .and_then(|plan| self.selected_task(plan))
             .map(is_retryable_task)
             .unwrap_or(false);
+        let selected_task_stoppable = self
+            .active_plan(ctx)
+            .and_then(|plan| self.selected_task(plan))
+            .map(is_stoppable_task)
+            .unwrap_or(false);
         let selected_task_reviewable = self
             .active_plan(ctx)
             .and_then(|plan| self.selected_task(plan))
@@ -1278,6 +1397,11 @@ impl View for PlanInspectorView {
         } else {
             ""
         };
+        let stop_hint = if self.open_issue_id.is_none() && selected_task_stoppable {
+            "  X: stop"
+        } else {
+            ""
+        };
         let review_hint = if self.open_issue_id.is_none() && selected_task_reviewable {
             "  a: approve  d: reject  c: changes"
         } else {
@@ -1288,6 +1412,7 @@ impl View for PlanInspectorView {
             enter_hint,
             peek_hint,
             retry_hint,
+            stop_hint,
             review_hint,
             scroll_hint,
             self.open_issue_id.is_none() && self.active_plan(ctx).is_some(),
@@ -1316,6 +1441,8 @@ impl PlanInspectorView {
                 feedback: Some(feedback),
                 ..
             } if !feedback.trim().is_empty() => 10,
+            PlanInspectorConfirm::RetryTask { .. } => 10,
+            PlanInspectorConfirm::StopTask { .. } => 11,
             _ => 9,
         };
         let popup = centered_rect(area, 72, popup_height);
@@ -1340,6 +1467,8 @@ impl PlanInspectorView {
                 status,
                 attempt,
                 max_attempts,
+                append_prompt,
+                cursor,
                 ..
             } => (
                 " Retry Task ",
@@ -1349,7 +1478,32 @@ impl PlanInspectorView {
                     Line::from(format!("  Issue: {issue_id}")),
                     Line::from(format!("  Status: {status}")),
                     Line::from(format!("  Attempt: {attempt}/{max_attempts}")),
+                    prompt_input_line(append_prompt, *cursor, theme),
                     Line::from("  This requeues the selected task for another worker attempt."),
+                ],
+            ),
+            PlanInspectorConfirm::StopTask {
+                plan_id,
+                task_id,
+                task_name,
+                delegation_id,
+                status,
+                append_prompt,
+                cursor,
+                ..
+            } => (
+                " Stop Task ",
+                "Stop",
+                vec![
+                    Line::from(format!("  Plan: {plan_id}")),
+                    Line::from(format!("  Task: {task_id} - {task_name}")),
+                    Line::from(format!("  Delegation: {delegation_id}")),
+                    Line::from(format!("  Status: {status}")),
+                    prompt_input_line(append_prompt, *cursor, theme),
+                    Line::from(""),
+                    Line::from(
+                        "  Task will be cancelled. Press R after stop to retry with appended instructions.",
+                    ),
                 ],
             ),
             PlanInspectorConfirm::Review {
@@ -1572,6 +1726,10 @@ fn is_retryable_task_status(status: &str) -> bool {
     matches!(status, "failed" | "rejected" | "error")
 }
 
+fn is_stoppable_task_status(status: &str) -> bool {
+    matches!(status, "dispatched" | "running" | "active")
+}
+
 fn is_reviewable_task_status(status: &str) -> bool {
     status == "awaiting_review"
 }
@@ -1580,6 +1738,10 @@ fn is_retryable_task(task: &spur_core::TrackedTask) -> bool {
     task.issue_id.is_some()
         && is_retryable_task_status(&task.status)
         && task.attempt < task.max_attempts
+}
+
+fn is_stoppable_task(task: &spur_core::TrackedTask) -> bool {
+    task.delegation_id.is_some() && is_stoppable_task_status(&task.status)
 }
 
 fn plan_review_decision_for_key(
@@ -1642,11 +1804,102 @@ fn truncate_display(s: &str, max: usize) -> String {
     out
 }
 
+fn prompt_input_line(text: &str, cursor: usize, theme: &Theme) -> Line<'static> {
+    let cursor = clamp_char_boundary(text, cursor);
+    Line::from(vec![
+        Span::raw("  Append: "),
+        Span::raw(text[..cursor].to_string()),
+        Span::styled(
+            "|",
+            Style::default()
+                .fg(token(theme, "plan_browser.confirm.primary_key.fg"))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(text[cursor..].to_string()),
+    ])
+}
+
+fn confirm_prompt_mut(
+    confirm: &mut Option<PlanInspectorConfirm>,
+) -> Option<(&mut String, &mut usize)> {
+    match confirm.as_mut()? {
+        PlanInspectorConfirm::RetryTask {
+            append_prompt,
+            cursor,
+            ..
+        }
+        | PlanInspectorConfirm::StopTask {
+            append_prompt,
+            cursor,
+            ..
+        } => Some((append_prompt, cursor)),
+        _ => None,
+    }
+}
+
+fn non_empty_prompt(prompt: String) -> Option<String> {
+    if prompt.trim().is_empty() {
+        None
+    } else {
+        Some(prompt)
+    }
+}
+
+fn insert_at_cursor(text: &mut String, cursor: &mut usize, ch: char) {
+    let cursor_pos = clamp_char_boundary(text, *cursor);
+    text.insert(cursor_pos, ch);
+    *cursor = cursor_pos + ch.len_utf8();
+}
+
+fn delete_before_cursor(text: &mut String, cursor: &mut usize) {
+    let cursor_pos = clamp_char_boundary(text, *cursor);
+    if cursor_pos == 0 {
+        *cursor = 0;
+        return;
+    }
+    let previous = previous_char_boundary(text, cursor_pos);
+    text.drain(previous..cursor_pos);
+    *cursor = previous;
+}
+
+fn previous_char_boundary(text: &str, cursor: usize) -> usize {
+    let cursor = clamp_char_boundary(text, cursor);
+    if cursor == 0 {
+        return 0;
+    }
+    let mut previous = cursor - 1;
+    while previous > 0 && !text.is_char_boundary(previous) {
+        previous -= 1;
+    }
+    previous
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    let cursor = clamp_char_boundary(text, cursor);
+    if cursor >= text.len() {
+        return text.len();
+    }
+    let mut next = cursor + 1;
+    while next < text.len() && !text.is_char_boundary(next) {
+        next += 1;
+    }
+    next
+}
+
+fn clamp_char_boundary(text: &str, cursor: usize) -> usize {
+    let mut cursor = cursor.min(text.len());
+    while cursor > 0 && !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
+}
+
 fn footer_hint(
     width: u16,
     enter_hint: &str,
     peek_hint: &str,
     retry_hint: &str,
+    stop_hint: &str,
     review_hint: &str,
     scroll_hint: &str,
     show_start: bool,
@@ -1656,6 +1909,7 @@ fn footer_hint(
         enter_hint,
         peek_hint,
         retry_hint,
+        stop_hint,
         review_hint,
         scroll_hint,
         show_start,
@@ -1671,14 +1925,15 @@ fn footer_hint_tiers(
     enter_hint: &str,
     peek_hint: &str,
     retry_hint: &str,
+    stop_hint: &str,
     review_hint: &str,
     scroll_hint: &str,
     show_start: bool,
 ) -> [String; 3] {
     let start_hint = if show_start { "  r: start/resume" } else { "" };
     let full = format!(
-        " h/l: lane  j/k: task  b: blocker  {}  o: work item{}{}{}{}  g/G: ends  Alt+P/Esc: close {}",
-        enter_hint, start_hint, retry_hint, review_hint, peek_hint, scroll_hint
+        " h/l: lane  j/k: task  b: blocker  {}  o: work item{}{}{}{}{}  g/G: ends  Alt+P/Esc: close {}",
+        enter_hint, start_hint, retry_hint, stop_hint, review_hint, peek_hint, scroll_hint
     );
 
     let compact_peek = if peek_hint.is_empty() {
@@ -1692,18 +1947,23 @@ fn footer_hint_tiers(
     } else {
         "  R: retry"
     };
+    let compact_stop = if stop_hint.is_empty() {
+        ""
+    } else {
+        "  X: stop"
+    };
     let compact_review = if review_hint.is_empty() {
         ""
     } else {
         "  a/d/c: review"
     };
     let compact = format!(
-        " h/l lane  j/k task  b blocker  {}  o item{}{}{}{}  Esc close",
-        enter_hint, compact_start, compact_retry, compact_review, compact_peek
+        " h/l lane  j/k task  b blocker  {}  o item{}{}{}{}{}  Esc close",
+        enter_hint, compact_start, compact_retry, compact_stop, compact_review, compact_peek
     );
     let minimal = format!(
-        " j/k task  b blocker{}{}{}  Esc close",
-        compact_start, compact_retry, compact_review
+        " j/k task  b blocker{}{}{}{}  Esc close",
+        compact_start, compact_retry, compact_stop, compact_review
     );
 
     [full, compact, minimal]
@@ -2690,6 +2950,7 @@ mod tests {
             "",
             "",
             "",
+            "",
             true,
             None,
         );
@@ -2734,7 +2995,7 @@ mod tests {
 
         let footer = buffer_row(terminal.backend().buffer(), 23);
         assert!(
-            footer.contains("loop loop-with-a-long"),
+            footer.contains("loop loop-with-a-lo"),
             "expected footer to include loop status:\n{footer}"
         );
         assert!(
@@ -2767,6 +3028,32 @@ mod tests {
         assert!(
             dump.contains("R: retry"),
             "expected footer to advertise retry for eligible task:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn footer_advertises_stop_for_dispatched_task() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = lineage_with_worker_for_task(&session_id, "t-12", "worker-session-1");
+        let ctx = view_context_for_tests(&lineage, &projection);
+
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+        view.set_selected_task_id_for_tests(Some("t-12".into()));
+
+        let backend = ratatui::backend::TestBackend::new(180, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <PlanInspectorView as View>::render(&mut view, frame, frame.area(), &ctx);
+            })
+            .unwrap();
+
+        let dump = format!("{:?}", terminal.backend().buffer());
+        assert!(
+            dump.contains("X: stop"),
+            "expected footer to advertise stop for eligible task:\n{dump}"
         );
     }
 
@@ -3032,6 +3319,8 @@ mod tests {
                 ref status,
                 attempt,
                 max_attempts,
+                ref append_prompt,
+                cursor,
             }) if plan_id == "plan-1"
                 && task_id == "t-12"
                 && task_name == "Stage A"
@@ -3039,6 +3328,94 @@ mod tests {
                 && status == "failed"
                 && attempt == 1
                 && max_attempts == 3
+                && append_prompt.is_empty()
+                && cursor == 0
+        ));
+    }
+
+    #[test]
+    fn stop_key_opens_confirm_for_dispatched_task() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_shift('X'), &ctx);
+
+        assert!(action.is_none(), "X should open confirmation first");
+        assert!(matches!(
+            view.confirm,
+            Some(PlanInspectorConfirm::StopTask {
+                ref plan_id,
+                ref task_id,
+                ref task_name,
+                ref delegation_id,
+                ref status,
+                ref append_prompt,
+                cursor,
+            }) if plan_id == "plan-1"
+                && task_id == "t-12"
+                && task_name == "Stage A"
+                && delegation_id == "deleg-12"
+                && status == "dispatched"
+                && append_prompt.is_empty()
+                && cursor == 0
+        ));
+    }
+
+    #[test]
+    fn stop_key_rejected_for_non_dispatched_task() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "pending", Some("bd-epic.1"), 0, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_shift('X'), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::FlashHint { message }) if message == "Cannot stop: task t-12 is pending"
+        ));
+    }
+
+    #[test]
+    fn stop_key_rejected_without_delegation_id() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "dispatched", Some("bd-epic.1"), 1, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        let action = view.handle_key(key_shift('X'), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::FlashHint { message })
+                if message == "Cannot stop: task t-12 has no delegation"
+        ));
+    }
+
+    #[test]
+    fn confirm_stop_emits_cancel_delegation() {
+        let session_id = SessionId("brain-1".into());
+        let projection = projection_with_epic_and_worker(&session_id);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_shift('X'), &ctx).is_none());
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::CancelDelegation { delegation_id }) if delegation_id == "deleg-12"
         ));
     }
 
@@ -3062,6 +3439,34 @@ mod tests {
                 issue_id,
                 append_prompt: None,
             }) if plan_id == "plan-1" && issue_id == "bd-epic.1"
+        ));
+    }
+
+    #[test]
+    fn retry_confirmation_emits_typed_append_prompt() {
+        let session_id = SessionId("brain-1".into());
+        let projection =
+            projection_with_single_task_status(&session_id, "failed", Some("bd-epic.1"), 1, 3);
+        let lineage = ExecutorLineage::new();
+        let ctx = view_context_for_tests(&lineage, &projection);
+        let mut view = PlanInspectorView::new_for_plan(session_id, "plan-1".into());
+
+        assert!(view.handle_key(key_char('R'), &ctx).is_none());
+        for ch in "add tests".chars() {
+            assert!(view.handle_key(key_char(ch), &ctx).is_none());
+        }
+        let action = view.handle_key(key(KeyCode::Enter), &ctx);
+
+        assert!(view.confirm.is_none());
+        assert!(matches!(
+            action,
+            Some(Action::RetryPlanTask {
+                plan_id: Some(plan_id),
+                issue_id,
+                append_prompt: Some(prompt),
+            }) if plan_id == "plan-1"
+                && issue_id == "bd-epic.1"
+                && prompt == "add tests"
         ));
     }
 
