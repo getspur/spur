@@ -1433,6 +1433,12 @@ impl JobStore for FakeJobStore {
             error_detail: None,
             created_at: "now".to_owned(),
             updated_at: "now".to_owned(),
+            owner_kind: None,
+            owner_id: None,
+            queue_shard: None,
+            queue_sort_key: None,
+            next_eligible_at: None,
+            dispatched_at: None,
         };
         state.dedupe.insert(key, job_id.clone());
         state.jobs.insert(job_id, record.clone());
@@ -1551,6 +1557,12 @@ impl FakeJobStore {
             error_detail: None,
             created_at: "now".to_owned(),
             updated_at: "now".to_owned(),
+            owner_kind: None,
+            owner_id: None,
+            queue_shard: None,
+            queue_sort_key: None,
+            next_eligible_at: None,
+            dispatched_at: None,
         };
         let mut state = self.state.lock().expect("fake store lock");
         state.dedupe.insert(record.key(), job_id.to_owned());
