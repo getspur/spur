@@ -2,10 +2,9 @@ Explore  [Skills]  Agents   Manage
 never synced
 [Pool]   Last materialization
 ┌Manage · Pool (2 items)───────────────────────────────────────────────────────────────────────────┐
-│  name                                                    kind   sha     verdict      license     │
-│>>review-helper                                           skill  0123456 clean        MIT         │
-│  stale-helper                                            skill  0123456 clean        MIT         │
-│                                                                                                  │
+│  name        layer   kind   sha       verdict      license                                     │
+│>>review-hel  local   skill  0123456   clean        MIT                                         │
+│  stale-help  local   skill  0123456   clean        MIT                                         │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
