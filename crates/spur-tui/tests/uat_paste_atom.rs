@@ -51,7 +51,6 @@ fn action_kind(action: &UserInput) -> &'static str {
         UserInput::ClaimPlan { .. } => "ClaimPlan",
         UserInput::ForceReclaimPlan { .. } => "ForceReclaimPlan",
         UserInput::ResumePlan { .. } => "ResumePlan",
-        UserInput::CancelDelegation { .. } => "CancelDelegation",
         UserInput::RetryPlanTask { .. } => "RetryPlanTask",
         UserInput::InspectPlan { .. } => "InspectPlan",
         UserInput::GetIssueDetail { .. } => "GetIssueDetail",
