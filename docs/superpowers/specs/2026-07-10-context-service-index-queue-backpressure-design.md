@@ -188,6 +188,19 @@ conservative/approximate under heavy contention; operators should set the
 global queued cap with slack and rely on the per-owner cap as the hard fairness
 boundary.
 
+To prevent a small global cap from inflating total capacity, the number of
+counter shards is `min(shard_count, max_queued_global)` (the *effective* shard
+count). Each effective shard gets a budget of
+`floor(max_queued_global / effective_shards) ≥ 1`. Total service-wide queued
+capacity is `effective_shards × per_shard_budget`, which is always
+`≤ max_queued_global`. For example, `max_queued_global=1, shard_count=16`
+uses 1 effective counter shard with a budget of 1, not 16 shards each allowing
+1. The global counter shard for a job is computed deterministically from
+`(owner_kind, owner_id, job_id)` modulo the effective count — it is separate
+from the queue GSI shard (which uses `shard_count`). Dispatch recomputes the
+same shard from the job record + config so it decrements the exact counter
+that enqueue incremented.
+
 Global running caps are hard when configured: dispatch claims one
 `GLOBAL#RUNNING_TOKEN#<n>` item before starting Step Functions and releases that
 token in the same terminal-release transaction as the owner running count. Small
@@ -221,6 +234,17 @@ state if TTL or operator repair removes an item unexpectedly.
 9. Return the queued job response.
 10. Optionally invoke a small best-effort dispatch kick for low latency. The
     EventBridge drainer remains the correctness path.
+
+The enqueue transaction may be cancelled atomically by DynamoDB. A
+`ConditionalCheckFailed` cancellation reason at the dedupe item means a
+duplicate; at the owner/global counter item it means the cap is genuinely full
+(`queue_full`/`global_queue_full`). A `TransactionConflict` reason is transient
+write contention — the cap may have room — and is surfaced as a retryable
+conflict instead. This distinction also covers the no-reasons paths
+(`TransactionInProgressException`, or a message-only `TransactionConflict`
+without populated item reasons): these are surfaced for retry, never reported as
+quota-full, so concurrent enqueue contention does not produce false capacity
+rejections.
 
 `force=true` bypasses the warm-catalog hit only. It does not bypass request
 rate limits, owner/global queued caps, owner/global running caps, URL abuse

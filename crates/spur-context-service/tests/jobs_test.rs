@@ -267,6 +267,50 @@ fn enqueue_global_queue_full_rejects() -> Result<()> {
 }
 
 #[test]
+fn dispatch_frees_global_queue_capacity_for_next_owner() -> Result<()> {
+    block_on(async {
+        // Verifies that dispatch decrements the global queued counter so a
+        // subsequent enqueue from a different owner succeeds. This mirrors
+        // the production DynamoDB path where dispatch decrements the matching
+        // GLOBAL#QUEUE#<shard> counter.
+        let config = QueueConfig {
+            max_queued_per_owner: 10,
+            max_queued_global: 1,
+            max_running_per_owner: u32::MAX,
+            max_running_global: 0,
+            shard_count: 16,
+        };
+        let store = FakeJobStore::default();
+        let alice = BacklogOwner::caller("alice");
+        let bob = BacklogOwner::caller("bob");
+
+        // Fill the single global queued slot.
+        let enqueued = store
+            .enqueue_job(create_job_request(), alice.clone(), &config)
+            .await?
+            .into_record();
+
+        // Bob is rejected — global queue is full.
+        let err = store
+            .enqueue_job(with_package("serde2"), bob.clone(), &config)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, JobsError::GlobalQueueFull));
+
+        // Dispatch frees the global queued slot.
+        store.dispatch_queued_job(&enqueued.job_id, &config).await?;
+
+        // Bob can now enqueue — global capacity was released.
+        let outcome = store
+            .enqueue_job(with_package("serde2"), bob.clone(), &config)
+            .await
+            .context("enqueue after dispatch should succeed")?;
+        assert!(outcome.is_enqueued());
+        Ok(())
+    })
+}
+
+#[test]
 fn enqueue_zero_cap_preserves_legacy_reject_over_capacity() -> Result<()> {
     block_on(async {
         let store = FakeJobStore::default();
