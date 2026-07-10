@@ -104,6 +104,46 @@ Surfaces over the engine:
   `SPUR-MANAGED` sha256 marker; they become delegation targets immediately
   via the existing agent-profile system. Skills never install at Apply.
 
+### 5.1 Global and local store layers
+
+The resource store is layered:
+
+- **Global store** — `~/.spur/explore/` holds shared `index/catalog.json`,
+  `cache/<repo>/`, and `pool/<owner>/<name>@<sha>/` resources. Empty projects
+  inherit this layer, so a synced/adopted item is available across repos
+  without copying the body into every checkout.
+- **Local store** — `<repo>/.spur/explore/` remains supported for explicit
+  `--local` syncs and for backward compatibility with existing checkouts.
+  Reads merge global first and local second; local catalog/manifest entries
+  win on name conflicts. If no global store exists, behavior matches the
+  original project-local layout.
+- **Manifest policy** — the default project policy manifest remains
+  `<repo>/.spur/explore.toml`. `spur explore add --global` writes the manifest
+  item to `~/.spur/explore/manifest.toml`; `spur explore add --local` and the
+  no-flag default write the manifest item to the project-local manifest.
+  Personas always render into the current repo, while pool bodies stay in the
+  selected resource store.
+
+CLI flags:
+
+- `spur explore sync --global` writes catalog/cache to the shared store;
+  this is the no-flag default for `sync`.
+- `spur explore sync --local` writes catalog/cache to the project-local store.
+- `spur explore add --global` adopts into the shared manifest/pool; an empty
+  repo can then remove that item and clean the shared pool entry plus its local
+  managed persona.
+- `spur explore add --local` adopts into the project manifest while using the
+  shared pool when available.
+- `spur explore migrate-global [--dry-run]` performs a one-shot migration of
+  legacy `<repo>/.spur/explore/{index/catalog.json,cache/,pool/}` into
+  `~/.spur/explore/`. It merges instead of overwriting: catalog entries are
+  unioned with local entries winning conflicts, identical content-addressed
+  pool directories are deduped, conflicting existing destinations are left in
+  place, and source paths are deleted only after target content verifies.
+  The project manifest is intentionally kept local and the command reports
+  that policy decision. `--dry-run` prints the planned merge/copy/dedupe
+  operations without changing files.
+
 ## 6. Sync and gate
 
 `spur explore sync` runs host-side (network allowed there and only there):
