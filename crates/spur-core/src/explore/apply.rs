@@ -31,6 +31,44 @@ pub fn apply(
     selections: &[Selection],
     bundled_ids: &[String],
 ) -> anyhow::Result<ApplyOutcome> {
+    let pool_store_root = crate::explore::store::local_root(root);
+    apply_with_store_roots(
+        root,
+        &pool_store_root,
+        None,
+        manifest,
+        selections,
+        bundled_ids,
+    )
+}
+
+pub fn apply_layered(
+    repo_root: &Path,
+    manifest: &mut Manifest,
+    selections: &[Selection],
+    bundled_ids: &[String],
+) -> anyhow::Result<ApplyOutcome> {
+    let pool_store_root = crate::explore::store::global_root()
+        .filter(|root| root.exists())
+        .unwrap_or_else(|| crate::explore::store::local_root(repo_root));
+    apply_with_store_roots(
+        repo_root,
+        &pool_store_root,
+        None,
+        manifest,
+        selections,
+        bundled_ids,
+    )
+}
+
+pub fn apply_with_store_roots(
+    repo_root: &Path,
+    pool_store_root: &Path,
+    manifest_store_root: Option<&Path>,
+    manifest: &mut Manifest,
+    selections: &[Selection],
+    bundled_ids: &[String],
+) -> anyhow::Result<ApplyOutcome> {
     let mut outcome = ApplyOutcome::default();
 
     for selection in selections {
@@ -42,7 +80,7 @@ pub fn apply(
             continue;
         }
 
-        let checkout = ensure_cache_checkout(root, &entry.source)?;
+        let checkout = ensure_cache_checkout(repo_root, &entry.source)?;
         let source_path = checkout.join(&entry.rel_path);
         let Some(gate) = gate_record(entry, &source_path, &selection.resolution, bundled_ids)
         else {
@@ -54,7 +92,7 @@ pub fn apply(
         };
 
         let persona = if entry.kind == ItemKind::Agent {
-            match prepare_persona_write(root, &checkout, entry)? {
+            match prepare_persona_write(repo_root, &checkout, entry)? {
                 PersonaWrite::Skip(reason) => {
                     outcome.skipped.push((entry.name.clone(), reason));
                     continue;
@@ -65,17 +103,17 @@ pub fn apply(
             None
         };
 
-        pool::vendor(root, &checkout, entry)
+        pool::vendor_to_store(pool_store_root, &checkout, entry)
             .with_context(|| format!("vendor explore item {}", entry.name))?;
         if let Some(persona) = persona {
-            write_persona(root, persona)
+            write_persona(repo_root, persona)
                 .with_context(|| format!("write persona {}", entry.name))?;
         }
         upsert_manifest_item(manifest, entry, gate);
         outcome.installed.push(entry.name.clone());
     }
 
-    manifest.save(root)?;
+    save_manifest(repo_root, manifest_store_root, manifest)?;
     Ok(outcome)
 }
 
@@ -103,6 +141,26 @@ pub fn remove(root: &Path, manifest: &mut Manifest, name: &str) -> anyhow::Resul
     manifest.save(root)
 }
 
+pub fn remove_layered(root: &Path, manifest: &mut Manifest, name: &str) -> anyhow::Result<()> {
+    let mut local = Manifest::load(root)?;
+    if local.items.iter().any(|item| item.name == name) {
+        remove(root, &mut local, name)?;
+        *manifest = Manifest::load_layered(root)?;
+        return Ok(());
+    }
+
+    if let Some(global_root) = crate::explore::store::global_root().filter(|root| root.exists()) {
+        let mut global = Manifest::load_from_store(&global_root)?;
+        if global.items.iter().any(|item| item.name == name) {
+            remove_from_store(root, &global_root, &mut global, name)?;
+            *manifest = Manifest::load_layered(root)?;
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
 enum PersonaWrite {
     Absent(crate::agent_profiles::render::RenderedProfile),
     Replace(crate::agent_profiles::render::RenderedProfile),
@@ -119,6 +177,46 @@ fn ensure_cache_checkout(root: &Path, source: &str) -> anyhow::Result<PathBuf> {
         );
     }
     Ok(checkout)
+}
+
+fn save_manifest(
+    repo_root: &Path,
+    manifest_store_root: Option<&Path>,
+    manifest: &Manifest,
+) -> anyhow::Result<()> {
+    match manifest_store_root {
+        Some(store_root) => manifest.save_to_store(store_root),
+        None => manifest.save(repo_root),
+    }
+}
+
+fn remove_from_store(
+    repo_root: &Path,
+    store_root: &Path,
+    manifest: &mut Manifest,
+    name: &str,
+) -> anyhow::Result<()> {
+    let mut removed = Vec::new();
+    manifest.items.retain(|item| {
+        if item.name == name {
+            removed.push(item.clone());
+            false
+        } else {
+            true
+        }
+    });
+
+    for item in &removed {
+        remove_existing_path(&pool::pool_dir_in_store(
+            store_root,
+            &item.source,
+            &item.name,
+            &item.pinned_commit,
+        ))?;
+    }
+
+    remove_managed_persona_if_marker_matches(repo_root, name)?;
+    manifest.save_to_store(store_root)
 }
 
 fn gate_record(
