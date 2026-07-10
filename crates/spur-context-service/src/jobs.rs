@@ -915,9 +915,19 @@ impl JobStore for DynamoDbJobStore {
         // Optional sharded global queued counter. Omitted entirely when the
         // global cap is disabled (0) so small deployments pay no extra write.
         if config.max_queued_global > 0 {
+            // The global counter shard is computed separately from the queue
+            // GSI shard: when max_queued_global < shard_count, fewer counter
+            // shards are used so total capacity stays ≤ max_queued_global.
+            let global_shard = global_counter_shard_for(
+                owner.kind,
+                &owner.id,
+                &job_id,
+                config.max_queued_global,
+                config.shard_count,
+            );
             let global_update = global_queue_enqueue_update(
                 &self.table_name,
-                &shard,
+                &global_shard,
                 config.max_queued_global,
                 config.shard_count,
             )?;
@@ -944,6 +954,11 @@ impl JobStore for DynamoDbJobStore {
                     }
                     EnqueueCancellation::OwnerFull => Err(JobsError::QueueFull),
                     EnqueueCancellation::GlobalFull => Err(JobsError::GlobalQueueFull),
+                    // TransactionConflict at an owner/global counter item:
+                    // concurrent write contention, not a definitive capacity
+                    // rejection. Surface as Conflict so the caller retries
+                    // rather than falsely reporting the queue as full.
+                    EnqueueCancellation::TransientConflict => Err(JobsError::Conflict),
                     // Fallback: re-check dedupe; otherwise default to
                     // QueueFull since the most common non-positioned cancel is
                     // an owner cap collision under message-only errors.
@@ -1032,8 +1047,19 @@ impl JobStore for DynamoDbJobStore {
 
         // Decrement the matching sharded global queued counter so dispatch
         // frees global queue capacity. Omitted when the global cap is disabled.
+        // The global counter shard is recomputed from the job identity + config
+        // (not read from the record's queue_shard) because it may differ from
+        // the queue GSI shard when max_queued_global < shard_count. The owner
+        // and job_id are still on the record after GSI attributes are removed.
         if config.max_queued_global > 0 {
-            let global_update = global_queue_dispatch_update(&self.table_name, &queue_shard)?;
+            let global_shard = global_counter_shard_for(
+                owner.kind,
+                &owner.id,
+                job_id,
+                config.max_queued_global,
+                config.shard_count,
+            );
+            let global_update = global_queue_dispatch_update(&self.table_name, &global_shard)?;
             tx = tx.transact_items(TransactWriteItem::builder().update(global_update).build());
         }
 
@@ -1084,6 +1110,11 @@ impl JobStore for DynamoDbJobStore {
                     // reconciler can repair the counter; do not pretend
                     // success.
                     ReleaseCancellation::QuotaConflict => Err(JobsError::Conflict),
+                    // TransactionConflict: concurrent write contention on the
+                    // token or counter. The token may still exist — must NOT
+                    // treat as already released (would leak a running slot).
+                    // Surface as Conflict so the caller retries.
+                    ReleaseCancellation::TransientConflict => Err(JobsError::Conflict),
                     // Unknown cancellation: conservatively treat as a conflict
                     // so the caller/reconciler can retry rather than silently
                     // dropping the release.
@@ -1595,18 +1626,65 @@ fn owner_quota_release_update(table_name: &str, owner: &BacklogOwner) -> Result<
         .map_err(dynamodb_error)
 }
 
+/// Effective number of global counter shards for the sharded
+/// `GLOBAL#QUEUE#<shard>` items.
+///
+/// Capped at `min(shard_count, max_queued_global)` so a small global cap does
+/// not inflate total capacity. Previously the per-shard limit was floored to
+/// 1, which meant `max_queued_global=1, shard_count=16` allowed one job per
+/// shard (16 total) despite a cap of 1.
+///
+/// With effective shards `E = min(shard_count, max_queued_global)` and a
+/// per-shard budget of `floor(max_queued_global / E) ≥ 1`, the total capacity
+/// `E × floor(max_queued_global / E)` is always `≤ max_queued_global`.
+fn global_counter_shard_count(max_queued_global: u32, shard_count: u32) -> u32 {
+    shard_count.max(1).min(max_queued_global.max(1))
+}
+
 /// Per-shard budget for the sharded global queued counter.
 ///
-/// The global cap is enforced across `shard_count` independent
+/// The global cap is enforced across `global_counter_shard_count` independent
 /// `GLOBAL#QUEUE#<shard>` items to avoid a single write-hot partition. Each
-/// shard is allowed at most this many queued jobs. Floor division keeps the
-/// total service-wide capacity at or below the configured cap:
-/// `shard_count * per_shard_budget ≤ max_queued_global`. This is deliberately
-/// conservative — the spec calls global enforcement "approximate" and relies on
-/// the per-owner cap as the hard fairness boundary.
+/// effective shard is allowed at most this many queued jobs. Floor division
+/// keeps the total service-wide capacity at or below the configured cap:
+/// `effective_shards × per_shard_budget ≤ max_queued_global`. This is
+/// deliberately conservative — the spec calls global enforcement "approximate"
+/// and relies on the per-owner cap as the hard fairness boundary.
 fn global_queue_per_shard_limit(max_queued_global: u32, shard_count: u32) -> u32 {
-    let count = shard_count.max(1);
-    (max_queued_global / count).max(1)
+    let effective = global_counter_shard_count(max_queued_global, shard_count);
+    (max_queued_global / effective).max(1)
+}
+
+/// Deterministic global counter shard for a job.
+///
+/// Maps the job identity to `[0, effective_global_shards)` using the same
+/// FNV-1a hash as [`queue_shard_for`] but modulo the effective global shard
+/// count. This is **separate** from the queue GSI shard (which uses
+/// `shard_count`) because the effective global shard count may be smaller than
+/// the queue shard count when `max_queued_global < shard_count`.
+///
+/// Both enqueue and dispatch MUST compute this from the same inputs —
+/// `(owner_kind, owner_id, job_id, max_queued_global, shard_count)` — so
+/// dispatch decrements the exact `GLOBAL#QUEUE#<shard>` counter that enqueue
+/// incremented. All inputs are available on the job record (owner_kind,
+/// owner_id, job_id) plus the runtime config, so no extra metadata needs to be
+/// persisted.
+fn global_counter_shard_for(
+    kind: BacklogOwnerKind,
+    owner_id: &str,
+    job_id: &str,
+    max_queued_global: u32,
+    shard_count: u32,
+) -> String {
+    let effective = global_counter_shard_count(max_queued_global, shard_count);
+    let mut bytes = Vec::with_capacity(kind.as_str().len() + owner_id.len() + job_id.len() + 2);
+    bytes.extend_from_slice(kind.as_str().as_bytes());
+    bytes.push(b'#');
+    bytes.extend_from_slice(owner_id.as_bytes());
+    bytes.push(b'#');
+    bytes.extend_from_slice(job_id.as_bytes());
+    let index = fnv1a_64(&bytes) % u64::from(effective);
+    format!("{index:02}")
 }
 
 /// Sharded global queued counter increment. The shard key is precomputed by the
@@ -1948,14 +2026,25 @@ fn cancellation_reasons(error: &SdkError<TransactWriteItemsError>) -> Option<&[C
     }
 }
 
-/// Index of the first cancellation reason whose code indicates a conditional
-/// check failure or transaction conflict. Returns `None` when the reasons are
-/// absent or no item failed (e.g. the transaction was cancelled for a non-item
-/// reason such as `TransactionInProgressException`).
-fn first_conflicting_reason_index(reasons: &[CancellationReason]) -> Option<usize> {
-    reasons
-        .iter()
-        .position(|reason| cancellation_reason_is_conflict(reason.code()))
+/// What kind of cancellation a specific transaction item experienced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemCancellation {
+    /// `ConditionalCheckFailed` — the item's condition expression evaluated
+    /// false. Definitive: the semantic reason maps from the item position.
+    ConditionalCheckFailed,
+    /// `TransactionConflict` — concurrent write contention on the item.
+    /// Transient/retryable; the item's condition may have been satisfiable.
+    TransactionConflict,
+}
+
+/// Classify a single `CancellationReason` code into a typed cancellation kind.
+/// Returns `None` for `"None"` (success) and unrecognized codes.
+fn item_cancellation_kind(code: Option<&str>) -> Option<ItemCancellation> {
+    match code {
+        Some("ConditionalCheckFailed") => Some(ItemCancellation::ConditionalCheckFailed),
+        Some("TransactionConflict") => Some(ItemCancellation::TransactionConflict),
+        _ => None,
+    }
 }
 
 /// Classification of an enqueue transaction cancellation so the caller returns
@@ -1970,6 +2059,12 @@ enum EnqueueCancellation {
     OwnerFull,
     /// Global queued cap overflow (item 3) → `JobsError::GlobalQueueFull`.
     GlobalFull,
+    /// A `TransactionConflict` (concurrent write contention) at an owner/global
+    /// counter item. The quota may not be full — this is a transient retryable
+    /// conflict, not a definitive capacity rejection. The caller should surface
+    /// `Conflict` so the caller can retry rather than falsely reporting the
+    /// queue as full.
+    TransientConflict,
     /// No specific item identified (e.g. job pk collision or missing reasons);
     /// caller falls back to a dedupe re-check.
     Unknown,
@@ -1979,40 +2074,127 @@ fn classify_enqueue_cancellation(
     error: &SdkError<TransactWriteItemsError>,
     has_global_item: bool,
 ) -> EnqueueCancellation {
-    let Some(reasons) = cancellation_reasons(error) else {
-        return EnqueueCancellation::Unknown;
-    };
-    classify_enqueue_reasons(reasons, has_global_item)
+    classify_enqueue_cancellation_from(
+        cancellation_reasons(error),
+        has_global_item,
+        enqueue_unknown_is_retryable_conflict(error),
+    )
 }
 
-/// Pure classification of enqueue cancellation reasons by item position. Kept
-/// separate from the SDK error so unit tests can exercise the position mapping
-/// without constructing a full `SdkError`.
-fn classify_enqueue_reasons(reasons: &[CancellationReason], has_global_item: bool) -> EnqueueCancellation {
-    let Some(index) = first_conflicting_reason_index(reasons) else {
-        return EnqueueCancellation::Unknown;
+/// Pure classification of an enqueue cancellation from its extracted signals,
+/// kept separate from the `SdkError` so the no-reasons transaction-conflict
+/// fallback is directly unit-testable without constructing a full `SdkError`
+/// (the AWS SDK's `HttpResponse` raw payload is awkward to build in tests).
+///
+/// - `reasons`: structured `TransactionCanceledException` cancellation
+///   reasons, when present.
+/// - `no_reasons_is_retryable_conflict`: whether the error signals retryable
+///   transaction-level contention when item-level reasons are absent or
+///   unresolved (see [`enqueue_unknown_is_retryable_conflict`]).
+///
+/// Item-level reasons take precedence: a definitive `ConditionalCheckFailed`
+/// at a quota position is a real capacity rejection. Only when the reasons are
+/// absent or resolve to [`EnqueueCancellation::Unknown`] do we consult the
+/// retryable flag — a `TransactionInProgressException` or message-only
+/// `TransactionConflict` upgrades to [`EnqueueCancellation::TransientConflict`]
+/// so the caller retries (`JobsError::Conflict`) instead of falling through to
+/// the owner-cap `QueueFull` default. A message-only `ConditionalCheckFailed`
+/// keeps `Unknown` so the dedupe-recheck / `QueueFull` fallback is preserved.
+fn classify_enqueue_cancellation_from(
+    reasons: Option<&[CancellationReason]>,
+    has_global_item: bool,
+    no_reasons_is_retryable_conflict: bool,
+) -> EnqueueCancellation {
+    let classified = match reasons {
+        Some(reasons) => classify_enqueue_reasons(reasons, has_global_item),
+        None => EnqueueCancellation::Unknown,
     };
-    // Transaction items: [job_put(0), dedupe_put(1), owner_update(2), global?(3)]
-    match index {
-        0 => EnqueueCancellation::Unknown, // job pk collision (UUID, improbable)
-        1 => EnqueueCancellation::Duplicate,
-        2 => EnqueueCancellation::OwnerFull,
-        3 if has_global_item => EnqueueCancellation::GlobalFull,
-        _ => EnqueueCancellation::Unknown,
+    if classified == EnqueueCancellation::Unknown && no_reasons_is_retryable_conflict {
+        EnqueueCancellation::TransientConflict
+    } else {
+        classified
     }
+}
+
+/// Whether an enqueue transaction error whose item-level cancellation reasons
+/// are absent or unresolved signals retryable transaction-level contention
+/// rather than a capacity-style conditional failure.
+///
+/// This covers the errors that reach the conflict branch of
+/// [`is_transaction_conflict`] but carry no populated item reasons:
+/// - A typed `TransactionInProgressException` — the transaction could not
+///   start because another is in flight on the same items.
+/// - A message-only `TransactionConflict` — the error string contains the
+///   conflict code but no structured reasons were attached.
+///
+/// Both are transient: the queue may have capacity and a retry can succeed, so
+/// the caller should surface `JobsError::Conflict`. A message-only
+/// `ConditionalCheckFailed` is NOT retryable here — it is a capacity-style
+/// rejection (e.g. an owner-cap collision) and is left for the dedupe-recheck
+/// / owner-cap `QueueFull` default.
+fn enqueue_unknown_is_retryable_conflict(error: &SdkError<TransactWriteItemsError>) -> bool {
+    let is_in_progress = matches!(
+        error,
+        SdkError::ServiceError(service_error) if matches!(
+            service_error.err(),
+            TransactWriteItemsError::TransactionInProgressException(_)
+        )
+    );
+    is_in_progress || error.to_string().contains("TransactionConflict")
+}
+
+/// Pure classification of enqueue cancellation reasons by item position AND
+/// reason code. Kept separate from the SDK error so unit tests can exercise
+/// the position mapping without constructing a full `SdkError`.
+///
+/// `ConditionalCheckFailed` at a quota position is definitive (the cap is
+/// full). `TransactionConflict` at any position is transient contention — the
+/// capacity may exist but a concurrent transaction collided. We distinguish
+/// the two so concurrent enqueue contention does not produce false
+/// `queue_full`/`global_queue_full` rejections.
+fn classify_enqueue_reasons(reasons: &[CancellationReason], has_global_item: bool) -> EnqueueCancellation {
+    // Transaction items: [job_put(0), dedupe_put(1), owner_update(2), global?(3)]
+    // Iterate in order; the first failing item identifies the primary cause.
+    for (index, reason) in reasons.iter().enumerate() {
+        match item_cancellation_kind(reason.code()) {
+            Some(ItemCancellation::ConditionalCheckFailed) => {
+                return match index {
+                    0 => EnqueueCancellation::Unknown, // job pk collision (UUID, improbable)
+                    1 => EnqueueCancellation::Duplicate,
+                    2 => EnqueueCancellation::OwnerFull,
+                    3 if has_global_item => EnqueueCancellation::GlobalFull,
+                    _ => EnqueueCancellation::Unknown,
+                };
+            }
+            Some(ItemCancellation::TransactionConflict) => {
+                // Concurrent write contention — capacity may exist. Do NOT
+                // report as queue_full/global_queue_full.
+                return EnqueueCancellation::TransientConflict;
+            }
+            None => {}
+        }
+    }
+    EnqueueCancellation::Unknown
 }
 
 /// Classification of a release transaction cancellation. The release items are
 /// ordered `[token_delete(0), quota_update(1)]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReleaseCancellation {
-    /// The `RUNNING#<job_id>` token was already deleted (item 0) — the release
-    /// is already complete; the caller treats it as a no-op.
+    /// The `RUNNING#<job_id>` token was already deleted (item 0, code
+    /// `ConditionalCheckFailed`) — the release is already complete; the caller
+    /// treats it as a no-op.
     TokenGone,
-    /// The quota-update condition failed (item 1) — the token still exists but
-    /// the owner running counter is inconsistent (e.g. drifted to 0). The
-    /// caller should surface this so the reconciler can repair it.
+    /// The quota-update condition failed (item 1, code
+    /// `ConditionalCheckFailed`) — the token still exists but the owner
+    /// running counter is inconsistent (e.g. drifted to 0). The caller should
+    /// surface this so the reconciler can repair it.
     QuotaConflict,
+    /// A `TransactionConflict` at either item — concurrent write contention.
+    /// The token may still exist (not gone) and the counter may be consistent;
+    /// the caller should retry rather than falsely treating the release as done
+    /// or permanently failed.
+    TransientConflict,
     /// Unknown cancellation — caller falls back to conservative handling.
     Unknown,
 }
@@ -2024,16 +2206,27 @@ fn classify_release_cancellation(error: &SdkError<TransactWriteItemsError>) -> R
     classify_release_reasons(reasons)
 }
 
-/// Pure classification of release cancellation reasons by item position.
+/// Pure classification of release cancellation reasons by item position AND
+/// reason code. `ConditionalCheckFailed` at the token (item 0) means the token
+/// is genuinely gone. `TransactionConflict` at the token means contention — the
+/// token likely still exists and must not be treated as already released.
 fn classify_release_reasons(reasons: &[CancellationReason]) -> ReleaseCancellation {
-    let Some(index) = first_conflicting_reason_index(reasons) else {
-        return ReleaseCancellation::Unknown;
-    };
-    match index {
-        0 => ReleaseCancellation::TokenGone,
-        1 => ReleaseCancellation::QuotaConflict,
-        _ => ReleaseCancellation::Unknown,
+    for (index, reason) in reasons.iter().enumerate() {
+        match item_cancellation_kind(reason.code()) {
+            Some(ItemCancellation::ConditionalCheckFailed) => {
+                return match index {
+                    0 => ReleaseCancellation::TokenGone,
+                    1 => ReleaseCancellation::QuotaConflict,
+                    _ => ReleaseCancellation::Unknown,
+                };
+            }
+            Some(ItemCancellation::TransactionConflict) => {
+                return ReleaseCancellation::TransientConflict;
+            }
+            None => {}
+        }
     }
+    ReleaseCancellation::Unknown
 }
 
 fn dynamodb_error(error: impl fmt::Display) -> JobsError {
@@ -2368,21 +2561,51 @@ mod tests {
     }
 
     #[test]
-    fn per_shard_limit_is_at_least_one() {
-        // A small cap (1) across many shards still allows 1 per shard.
+    fn per_shard_limit_for_small_cap_uses_effective_shards() {
+        // A small cap (1) across many shards must NOT allow 1 per shard (16
+        // total). With effective shards = min(16, 1) = 1, the per-shard budget
+        // is 1/1 = 1, and total capacity is 1 — matching the configured cap.
         assert_eq!(global_queue_per_shard_limit(1, 16), 1);
+        // cap=15, shards=16: effective=min(16,15)=15, per_shard=15/15=1.
         assert_eq!(global_queue_per_shard_limit(15, 16), 1);
+        // cap=3, shards=16: effective=min(16,3)=3, per_shard=3/3=1.
+        assert_eq!(global_queue_per_shard_limit(3, 16), 1);
     }
 
     #[test]
-    fn per_shard_limit_floors_so_total_never_exceeds_cap() {
-        // Verify the invariant: shard_count * per_shard ≤ max_global.
-        for (cap, shards) in [(100u32, 16u32), (1, 1), (50, 8), (3, 16), (7, 3)] {
+    fn effective_shard_count_caps_at_max_queued_global() {
+        // When the global cap is smaller than shard_count, the effective
+        // counter shard count is the cap itself so each shard gets a
+        // meaningful budget instead of a forced floor of 1.
+        assert_eq!(global_counter_shard_count(1, 16), 1);
+        assert_eq!(global_counter_shard_count(3, 16), 3);
+        assert_eq!(global_counter_shard_count(5, 16), 5);
+        // When the cap is larger, effective shards = shard_count.
+        assert_eq!(global_counter_shard_count(100, 16), 16);
+        assert_eq!(global_counter_shard_count(20, 16), 16);
+    }
+
+    #[test]
+    fn per_shard_limit_total_never_exceeds_cap() {
+        // Verify the core invariant: effective_shards * per_shard ≤ cap.
+        // This is the fix for the bug where max_queued_global=1,
+        // shard_count=16 allowed 16 jobs in production DynamoDB.
+        for (cap, shards) in [
+            (100u32, 16u32),
+            (1, 1),
+            (50, 8),
+            (3, 16),
+            (7, 3),
+            (1, 16),
+            (5, 16),
+            (20, 16),
+        ] {
+            let effective = global_counter_shard_count(cap, shards);
             let per_shard = global_queue_per_shard_limit(cap, shards);
+            let total = effective * per_shard;
             assert!(
-                per_shard * shards <= cap || per_shard == 1,
-                "per_shard={per_shard} * shards={shards} = {} > cap={cap}",
-                per_shard * shards
+                total <= cap,
+                "effective={effective} * per_shard={per_shard} = {total} > cap={cap}"
             );
         }
     }
@@ -2412,6 +2635,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn global_queue_enqueue_update_small_cap_uses_budget_of_one() {
+        // max_queued_global=1, shard_count=16: effective shards = 1, so the
+        // per-shard budget is 1. The enqueue condition must limit to 1, not 16.
+        let update = global_queue_enqueue_update("tbl", "00", 1, 16).unwrap();
+        let values = update.expression_attribute_values().unwrap();
+        let limit = values
+            .get(":limit")
+            .and_then(|v| v.as_n().ok())
+            .expect(":limit must be present");
+        assert_eq!(limit, "1", "small cap must produce per-shard budget of 1");
+    }
+
+    // ─── Global counter shard determinism ──────────────────────────────────
+
+    #[test]
+    fn global_counter_shard_is_deterministic() {
+        let shard_a =
+            global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 10, 16);
+        let shard_b =
+            global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 10, 16);
+        assert_eq!(shard_a, shard_b, "must be deterministic for same inputs");
+    }
+
+    #[test]
+    fn global_counter_shard_bounded_by_effective_count() {
+        // When cap < shard_count, effective = cap, so shards are in [0, cap).
+        for cap in [1u32, 3, 5] {
+            for shards in [16u32] {
+                let shard =
+                    global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", cap, shards);
+                let value: u32 = shard.parse().unwrap();
+                assert!(
+                    value < cap,
+                    "shard {shard} must be < effective={cap} (cap={cap}, shards={shards})"
+                );
+            }
+        }
+        // When cap >= shard_count, effective = shard_count.
+        let shard = global_counter_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 100, 16);
+        let value: u32 = shard.parse().unwrap();
+        assert!(value < 16, "shard {shard} must be < 16");
+    }
+
+    #[test]
+    fn global_counter_shard_independent_of_queue_gsi_shard() {
+        // The global counter shard and the queue GSI shard use different
+        // moduli (effective vs shard_count), so they can differ. This test
+        // documents that dispatch must NOT reuse the queue_shard for the global
+        // counter decrement.
+        let gsi_shard = queue_shard_for(BacklogOwnerKind::Caller, "alice", "job-1", 16);
+        let global_shard = global_counter_shard_for(
+            BacklogOwnerKind::Caller,
+            "alice",
+            "job-1",
+            1,
+            16, // effective = 1, so global_shard is always "00"
+        );
+        // With effective=1, the global counter shard is always "00" regardless
+        // of the GSI shard assignment.
+        assert_eq!(global_shard, "00");
+        // The GSI shard can be anything in [0,16).
+        let gsi_val: u32 = gsi_shard.parse().unwrap();
+        assert!(gsi_val < 16);
+    }
+
+    #[test]
+    fn enqueue_and_dispatch_target_same_global_counter_shard() {
+        // The core invariant: dispatch must decrement the exact
+        // GLOBAL#QUEUE#<shard> that enqueue incremented. Since both recompute
+        // from the same identity + config, the PKs must match.
+        let kind = BacklogOwnerKind::Caller;
+        let owner_id = "alice";
+        let job_id = "job-42";
+        // Test across various cap/shard combos including small caps.
+        for (cap, shards) in [(1u32, 16u32), (3, 16), (5, 16), (100, 16), (20, 8)] {
+            let shard = global_counter_shard_for(kind, owner_id, job_id, cap, shards);
+
+            let enqueue = global_queue_enqueue_update("tbl", &shard, cap, shards).unwrap();
+            let dispatch = global_queue_dispatch_update("tbl", &shard).unwrap();
+
+            let enqueue_pk = enqueue.key().get("pk").and_then(|v| v.as_s().ok()).unwrap();
+            let dispatch_pk = dispatch.key().get("pk").and_then(|v| v.as_s().ok()).unwrap();
+
+            assert_eq!(
+                enqueue_pk, dispatch_pk,
+                "enqueue and dispatch must target the same shard (cap={cap}, shards={shards})"
+            );
+            assert_eq!(enqueue_pk, &format!("GLOBAL#QUEUE#{shard}"));
+        }
+    }
+
+    #[test]
+    fn global_counter_shard_recomputable_after_dispatch_removes_gsi_attrs() {
+        // After dispatch, the GSI attributes (queue_shard, queue_sort_key,
+        // next_eligible_at) are removed from the job record. But owner_kind,
+        // owner_id, and job_id remain. The global counter shard must be
+        // recomputable from just those fields + config.
+        let kind = BacklogOwnerKind::Caller;
+        let owner_id = "alice";
+        let job_id = "job-77";
+        let cap = 3u32;
+        let shards = 16u32;
+
+        // "Enqueue" computation:
+        let enqueue_shard = global_counter_shard_for(kind, owner_id, job_id, cap, shards);
+
+        // "Dispatch" recomputation from the surviving record fields:
+        let dispatch_shard = global_counter_shard_for(kind, owner_id, job_id, cap, shards);
+
+        assert_eq!(
+            enqueue_shard, dispatch_shard,
+            "global counter shard must be recomputable from job record + config"
+        );
+    }
+
     // ─── Enqueue cancellation classification ──────────────────────────────
 
     /// Build cancellation reasons matching the enqueue transaction item order:
@@ -2420,15 +2759,21 @@ mod tests {
         failing_index: usize,
         has_global: bool,
     ) -> Vec<CancellationReason> {
+        enqueue_reasons_with_failure_code(failing_index, has_global, "ConditionalCheckFailed")
+    }
+
+    /// Same as [`enqueue_reasons_with_failure`] but lets the caller pick the
+    /// cancellation reason code (e.g. `"TransactionConflict"`).
+    fn enqueue_reasons_with_failure_code(
+        failing_index: usize,
+        has_global: bool,
+        code: &str,
+    ) -> Vec<CancellationReason> {
         let item_count = if has_global { 4 } else { 3 };
         (0..item_count)
             .map(|i| {
-                let code = if i == failing_index {
-                    "ConditionalCheckFailed"
-                } else {
-                    "None"
-                };
-                CancellationReason::builder().code(code).build()
+                let reason_code = if i == failing_index { code } else { "None" };
+                CancellationReason::builder().code(reason_code).build()
             })
             .collect()
     }
@@ -2478,19 +2823,164 @@ mod tests {
         );
     }
 
+    #[test]
+    fn enqueue_transaction_conflict_at_owner_is_transient_not_owner_full() {
+        // TransactionConflict at the owner quota item means concurrent write
+        // contention — the owner may have capacity. Must NOT be classified as
+        // OwnerFull (which maps to QueueFull).
+        let reasons = enqueue_reasons_with_failure_code(2, false, "TransactionConflict");
+        assert_eq!(
+            classify_enqueue_reasons(&reasons, false),
+            EnqueueCancellation::TransientConflict,
+            "TransactionConflict at owner must be transient, not QueueFull"
+        );
+    }
+
+    #[test]
+    fn enqueue_transaction_conflict_at_global_is_transient_not_global_full() {
+        // TransactionConflict at the global counter item means concurrent write
+        // contention — the global queue may have capacity. Must NOT be
+        // classified as GlobalFull.
+        let reasons = enqueue_reasons_with_failure_code(3, true, "TransactionConflict");
+        assert_eq!(
+            classify_enqueue_reasons(&reasons, true),
+            EnqueueCancellation::TransientConflict,
+            "TransactionConflict at global must be transient, not GlobalQueueFull"
+        );
+    }
+
+    #[test]
+    fn enqueue_transaction_conflict_at_dedupe_is_transient() {
+        // Even at the dedupe position, TransactionConflict is contention, not
+        // a definitive duplicate. Surface as transient so the caller retries.
+        let reasons = enqueue_reasons_with_failure_code(1, false, "TransactionConflict");
+        assert_eq!(
+            classify_enqueue_reasons(&reasons, false),
+            EnqueueCancellation::TransientConflict
+        );
+    }
+
+    #[test]
+    fn enqueue_conditional_check_at_owner_still_maps_to_owner_full() {
+        // Regression guard: ConditionalCheckFailed must still map correctly.
+        let reasons = enqueue_reasons_with_failure_code(2, false, "ConditionalCheckFailed");
+        assert_eq!(
+            classify_enqueue_reasons(&reasons, false),
+            EnqueueCancellation::OwnerFull
+        );
+    }
+
+    #[test]
+    fn enqueue_conditional_check_at_global_still_maps_to_global_full() {
+        let reasons = enqueue_reasons_with_failure_code(3, true, "ConditionalCheckFailed");
+        assert_eq!(
+            classify_enqueue_reasons(&reasons, true),
+            EnqueueCancellation::GlobalFull
+        );
+    }
+
+    // ─── No-reasons transaction-conflict fallback ─────────────────────────
+    //
+    // A `TransactionInProgressException` or a message-only `TransactionConflict`
+    // reaches the conflict branch of `is_transaction_conflict` with no populated
+    // item-level cancellation reasons. These are transient write-contention
+    // failures where capacity may exist, so they must surface as
+    // `TransientConflict` (→ `JobsError::Conflict` for retry) rather than fall
+    // through to the owner-cap `QueueFull` default. A message-only
+    // `ConditionalCheckFailed` is a capacity-style rejection and must stay on
+    // the `QueueFull` default.
+
+    #[test]
+    fn enqueue_no_reasons_retryable_conflict_is_transient_not_queue_full() {
+        // Core regression: a no-reasons retryable conflict (e.g.
+        // TransactionInProgressException) must NOT become a false quota-full
+        // rejection.
+        assert_eq!(
+            classify_enqueue_cancellation_from(None, false, true),
+            EnqueueCancellation::TransientConflict,
+            "no-reasons retryable conflict must be transient, not QueueFull"
+        );
+    }
+
+    #[test]
+    fn enqueue_no_reasons_retryable_conflict_with_global_item_is_transient() {
+        // Same regression with a global counter item in the transaction.
+        assert_eq!(
+            classify_enqueue_cancellation_from(None, true, true),
+            EnqueueCancellation::TransientConflict
+        );
+    }
+
+    #[test]
+    fn enqueue_no_reasons_conditional_check_stays_on_queue_full_fallback() {
+        // A message-only ConditionalCheckFailed is a capacity-style rejection.
+        // It must stay Unknown so the caller applies the dedupe-recheck /
+        // owner-cap QueueFull fallback. It must NOT be upgraded to
+        // TransientConflict.
+        assert_eq!(
+            classify_enqueue_cancellation_from(None, false, false),
+            EnqueueCancellation::Unknown,
+            "message-only ConditionalCheckFailed must stay on the QueueFull fallback"
+        );
+    }
+
+    #[test]
+    fn enqueue_unresolved_reasons_retryable_conflict_is_transient() {
+        // Reasons present but none recognized (all "None") → classified
+        // Unknown → upgraded to TransientConflict when the error is retryable.
+        let reasons = vec![
+            CancellationReason::builder().code("None").build(),
+            CancellationReason::builder().code("None").build(),
+            CancellationReason::builder().code("None").build(),
+        ];
+        assert_eq!(
+            classify_enqueue_cancellation_from(Some(&reasons), false, true),
+            EnqueueCancellation::TransientConflict
+        );
+    }
+
+    #[test]
+    fn enqueue_resolved_reasons_take_precedence_over_fallback() {
+        // When item-level reasons resolve to a definitive cause, the fallback
+        // must not override it — even if the retryable flag is set (the flag is
+        // only meaningful when reasons are absent/unresolved).
+        let reasons = enqueue_reasons_with_failure_code(2, false, "ConditionalCheckFailed");
+        assert_eq!(
+            classify_enqueue_cancellation_from(Some(&reasons), false, true),
+            EnqueueCancellation::OwnerFull,
+            "resolved reasons must take precedence over the no-reasons fallback"
+        );
+    }
+
+    #[test]
+    fn enqueue_resolved_transaction_conflict_reason_is_transient() {
+        // An item-level TransactionConflict reason still classifies as
+        // TransientConflict (retryable flag is irrelevant here).
+        let reasons = enqueue_reasons_with_failure_code(2, false, "TransactionConflict");
+        assert_eq!(
+            classify_enqueue_cancellation_from(Some(&reasons), false, false),
+            EnqueueCancellation::TransientConflict
+        );
+    }
+
     // ─── Release cancellation classification ──────────────────────────────
 
     /// Build cancellation reasons matching the release transaction item order:
     /// `[token_delete(0), quota_update(1)]`.
     fn release_reasons_with_failure(failing_index: usize) -> Vec<CancellationReason> {
+        release_reasons_with_failure_code(failing_index, "ConditionalCheckFailed")
+    }
+
+    /// Same as [`release_reasons_with_failure`] but lets the caller pick the
+    /// cancellation reason code.
+    fn release_reasons_with_failure_code(
+        failing_index: usize,
+        code: &str,
+    ) -> Vec<CancellationReason> {
         (0..2)
             .map(|i| {
-                let code = if i == failing_index {
-                    "ConditionalCheckFailed"
-                } else {
-                    "None"
-                };
-                CancellationReason::builder().code(code).build()
+                let reason_code = if i == failing_index { code } else { "None" };
+                CancellationReason::builder().code(reason_code).build()
             })
             .collect()
     }
@@ -2522,6 +3012,38 @@ mod tests {
         assert_eq!(
             classify_release_reasons(&reasons),
             ReleaseCancellation::Unknown
+        );
+    }
+
+    #[test]
+    fn release_transaction_conflict_at_token_is_transient_not_token_gone() {
+        // TransactionConflict at the token delete means concurrent contention
+        // — the token likely still exists. Must NOT be classified as TokenGone
+        // (which would skip the counter decrement and leak a running slot).
+        let reasons = release_reasons_with_failure_code(0, "TransactionConflict");
+        assert_eq!(
+            classify_release_reasons(&reasons),
+            ReleaseCancellation::TransientConflict,
+            "TransactionConflict at token must be transient, not TokenGone"
+        );
+    }
+
+    #[test]
+    fn release_transaction_conflict_at_quota_is_transient_not_quota_conflict() {
+        let reasons = release_reasons_with_failure_code(1, "TransactionConflict");
+        assert_eq!(
+            classify_release_reasons(&reasons),
+            ReleaseCancellation::TransientConflict
+        );
+    }
+
+    #[test]
+    fn release_conditional_check_at_token_still_maps_to_token_gone() {
+        // Regression guard: ConditionalCheckFailed must still map correctly.
+        let reasons = release_reasons_with_failure_code(0, "ConditionalCheckFailed");
+        assert_eq!(
+            classify_release_reasons(&reasons),
+            ReleaseCancellation::TokenGone
         );
     }
 
