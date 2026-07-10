@@ -1,14 +1,20 @@
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::json;
+use spur_context_service::drainer::{self, DrainSummary};
 use spur_context_service::jobs::{
     BacklogOwner, BacklogOwnerKind, CreateJobOutcome, CreateJobRequest, EnqueueOutcome, JobKey,
     JobRecord, JobStatus, JobStore, JobsError, QueueConfig,
 };
+use spur_context_service::mcp::{
+    self, IndexExecutionRequest, IndexExecutionStarter, McpHandlerError,
+};
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
 };
@@ -164,7 +170,10 @@ fn enqueue_creates_queued_job_with_owner_accounting() -> Result<()> {
         assert_eq!(record.status, JobStatus::Queued);
         assert_eq!(record.owner_kind, Some(BacklogOwnerKind::Caller));
         assert_eq!(record.owner_id.as_deref(), Some("alice"));
-        assert!(record.has_queue_gsi_attributes(), "queued job must carry GSI attrs");
+        assert!(
+            record.has_queue_gsi_attributes(),
+            "queued job must carry GSI attrs"
+        );
         assert_eq!(store.owner_queued(&owner), 1);
         Ok(())
     })
@@ -186,10 +195,7 @@ fn enqueue_dedupe_returns_existing_active_job() -> Result<()> {
 
         assert!(first.is_enqueued());
         assert!(matches!(second, EnqueueOutcome::Existing(_)));
-        assert_eq!(
-            second.into_record().job_id,
-            first.into_record().job_id
-        );
+        assert_eq!(second.into_record().job_id, first.into_record().job_id);
         // Only one queued slot consumed.
         assert_eq!(store.owner_queued(&owner), 1);
         Ok(())
@@ -224,7 +230,11 @@ fn enqueue_owner_queue_full_rejects_without_partial_writes() -> Result<()> {
 
         // No partial writes: the overflowing job was not persisted, the dedupe
         // pointer was not created, and the queued counter did not move.
-        assert_eq!(store.owner_queued(&owner), 2, "counter must not move on reject");
+        assert_eq!(
+            store.owner_queued(&owner),
+            2,
+            "counter must not move on reject"
+        );
         assert_eq!(store.job_count(), 2, "no job record written on reject");
         assert!(
             store
@@ -251,7 +261,9 @@ fn enqueue_global_queue_full_rejects() -> Result<()> {
         let alice = BacklogOwner::caller("alice");
         let bob = BacklogOwner::caller("bob");
 
-        store.enqueue_job(create_job_request(), alice.clone(), &config).await?;
+        store
+            .enqueue_job(create_job_request(), alice.clone(), &config)
+            .await?;
         let err = store
             .enqueue_job(with_package("serde2"), bob.clone(), &config)
             .await
@@ -505,6 +517,9 @@ fn dedupe_key(package: &str) -> JobKey {
 struct FakeJobStore {
     next_id: AtomicU64,
     state: Mutex<FakeJobState>,
+    /// When true, `record_execution_started` returns a `Conflict` error so the
+    /// drainer's record-failure no-leak path can be exercised.
+    fail_record_started: AtomicBool,
 }
 
 #[derive(Default)]
@@ -574,6 +589,9 @@ impl JobStore for FakeJobStore {
         job_id: &str,
         execution_arn: &str,
     ) -> spur_context_service::jobs::Result<JobRecord> {
+        if self.fail_record_started.load(Ordering::SeqCst) {
+            return Err(JobsError::Conflict);
+        }
         self.update_job(job_id, |record| {
             record.execution_arn = Some(execution_arn.to_string());
             record.updated_at = "started".to_string();
@@ -646,7 +664,11 @@ impl JobStore for FakeJobStore {
     ) -> spur_context_service::jobs::Result<()> {
         let mut state = self.state.lock().expect("fake store lock");
         let key = record.key();
-        if state.dedupe.get(&key).is_some_and(|job_id| job_id == &record.job_id) {
+        if state
+            .dedupe
+            .get(&key)
+            .is_some_and(|job_id| job_id == &record.job_id)
+        {
             state.dedupe.remove(&key);
         }
         Ok(())
@@ -809,12 +831,34 @@ impl JobStore for FakeJobStore {
         }
         Ok(())
     }
+
+    async fn list_queued_jobs(
+        &self,
+        shard: &str,
+        now_unix_secs: u64,
+        limit: usize,
+    ) -> spur_context_service::jobs::Result<Vec<JobRecord>> {
+        let state = self.state.lock().expect("fake store lock");
+        let mut candidates: Vec<JobRecord> = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.status == JobStatus::Queued
+                    && record.queue_shard.as_deref() == Some(shard)
+                    && record
+                        .next_eligible_at
+                        .is_some_and(|eligible| eligible <= now_unix_secs)
+            })
+            .cloned()
+            .collect();
+        // FIFO order: ascending queue_sort_key.
+        candidates.sort_by(|a, b| a.queue_sort_key.cmp(&b.queue_sort_key));
+        candidates.truncate(limit);
+        Ok(candidates)
+    }
 }
 
-fn active_dedupe_in_state(
-    state: &FakeJobState,
-    key: &JobKey,
-) -> Option<JobRecord> {
+fn active_dedupe_in_state(state: &FakeJobState, key: &JobKey) -> Option<JobRecord> {
     let job_id = state.dedupe.get(key)?;
     let record = state.jobs.get(job_id)?;
     if record.status.holds_running_quota() || record.status == JobStatus::Queued {
@@ -870,4 +914,426 @@ impl FakeJobStore {
             .running_tokens
             .contains(job_id)
     }
+}
+
+// ─── Drainer tests ──────────────────────────────────────────────────────────
+
+/// Fake `IndexExecutionStarter` that records every `start_execution` call and
+/// returns a synthetic execution ARN derived from the job name. Can be
+/// configured to always fail.
+struct FakeStarter {
+    calls: Mutex<Vec<IndexExecutionRequest>>,
+    fail: AtomicBool,
+}
+
+impl FakeStarter {
+    fn new() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            fail: AtomicBool::new(false),
+        }
+    }
+
+    fn set_fail(&self, fail: bool) {
+        self.fail.store(fail, Ordering::SeqCst);
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.lock().expect("starter lock").len()
+    }
+}
+
+impl IndexExecutionStarter for FakeStarter {
+    fn start_execution<'a>(
+        &'a self,
+        request: IndexExecutionRequest,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<String, McpHandlerError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("starter lock")
+                .push(request.clone());
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(McpHandlerError::Internal(
+                    "fake start_execution failure".to_owned(),
+                ));
+            }
+            Ok(format!("arn:aws:states:execution:fake/{}", request.name))
+        })
+    }
+}
+
+fn drainer_queue_config(max_running_per_owner: u32) -> QueueConfig {
+    QueueConfig {
+        max_queued_per_owner: 20,
+        max_queued_global: 0,
+        max_running_per_owner,
+        max_running_global: 0,
+        shard_count: 4,
+    }
+}
+
+#[test]
+fn drainer_dispatches_queued_jobs_and_starts_each_once() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = drainer_queue_config(u32::MAX);
+        // Enqueue 3 unique jobs.
+        let mut job_ids = Vec::new();
+        for i in 1..=3 {
+            let record = store
+                .enqueue_job(with_package(&format!("pkg{i}")), owner.clone(), &config)
+                .await?
+                .into_record();
+            job_ids.push(record.job_id);
+        }
+
+        let starter = FakeStarter::new();
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+
+        assert_eq!(summary.dispatched, 3, "all 3 queued jobs should dispatch");
+        assert_eq!(
+            starter.call_count(),
+            3,
+            "start_execution called exactly once per job"
+        );
+
+        // Each job should have an execution ARN recorded and be running.
+        for job_id in &job_ids {
+            let record = store
+                .lookup_job(job_id)
+                .await?
+                .context("job should exist")?;
+            assert!(
+                record.execution_arn.is_some(),
+                "job {job_id} should have execution ARN"
+            );
+            assert!(
+                !record.has_queue_gsi_attributes(),
+                "job {job_id} should have GSI attrs removed after dispatch"
+            );
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn drainer_running_caps_limit_dispatch_concurrency() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = drainer_queue_config(2);
+        // Enqueue 5 unique jobs; only 2 can run at once.
+        for i in 1..=5 {
+            store
+                .enqueue_job(with_package(&format!("pkg{i}")), owner.clone(), &config)
+                .await?;
+        }
+
+        let starter = FakeStarter::new();
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+
+        assert_eq!(summary.dispatched, 2, "running cap limits to 2 dispatches");
+        // Remaining jobs stay queued with GSI attrs intact.
+        let queued = store
+            .state
+            .lock()
+            .expect("lock")
+            .jobs
+            .values()
+            .filter(|r| r.status == JobStatus::Queued)
+            .count();
+        assert_eq!(queued, 3, "3 jobs should remain queued");
+        Ok(())
+    })
+}
+
+#[test]
+fn drainer_conflict_skips_contested_job_without_crashing() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = drainer_queue_config(1);
+        // Enqueue 3 jobs; only 1 can run.
+        for i in 1..=3 {
+            store
+                .enqueue_job(with_package(&format!("pkg{i}")), owner.clone(), &config)
+                .await?;
+        }
+
+        let starter = FakeStarter::new();
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+
+        // First job dispatches; the other two hit the running cap and are
+        // skipped as Conflict — the drainer must not crash.
+        assert_eq!(summary.dispatched, 1);
+        assert_eq!(
+            summary.skipped, 2,
+            "at-cap candidates are skipped, not crashed"
+        );
+        assert_eq!(starter.call_count(), 1);
+        Ok(())
+    })
+}
+
+#[test]
+fn drainer_dispatch_removes_queue_gsi_and_frees_queued_capacity() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = drainer_queue_config(u32::MAX);
+        let enqueued = store
+            .enqueue_job(create_job_request(), owner.clone(), &config)
+            .await?
+            .into_record();
+        assert_eq!(store.owner_queued(&owner), 1);
+
+        let starter = FakeStarter::new();
+        drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large()).await;
+
+        let record = store.lookup_job(&enqueued.job_id).await?.context("job")?;
+        assert!(
+            !record.has_queue_gsi_attributes(),
+            "GSI attrs removed on dispatch"
+        );
+        assert_eq!(
+            store.owner_queued(&owner),
+            0,
+            "queued counter freed on dispatch"
+        );
+        assert_eq!(
+            store.owner_running(&owner),
+            1,
+            "running counter claimed on dispatch"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn drainer_start_failure_marks_job_failed_and_releases_quota() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = drainer_queue_config(u32::MAX);
+        let enqueued = store
+            .enqueue_job(create_job_request(), owner.clone(), &config)
+            .await?
+            .into_record();
+
+        let starter = FakeStarter::new();
+        starter.set_fail(true);
+
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+
+        assert_eq!(summary.failed, 1, "start failure → failed outcome");
+        assert_eq!(starter.call_count(), 1, "start_execution was attempted");
+
+        let record = store.lookup_job(&enqueued.job_id).await?.context("job")?;
+        assert_eq!(
+            record.status,
+            JobStatus::Failed,
+            "job must be failed, not stuck dispatching"
+        );
+        assert!(
+            record.error_code.as_deref() == Some("start_execution"),
+            "error code must be recorded"
+        );
+        // Running quota must be released — no leak.
+        assert_eq!(
+            store.owner_running(&owner),
+            0,
+            "running quota released after start failure"
+        );
+        assert!(
+            !store.has_running_token(&enqueued.job_id),
+            "running token removed after start failure"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn drainer_record_failure_marks_job_failed_and_releases_quota() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = drainer_queue_config(u32::MAX);
+        let enqueued = store
+            .enqueue_job(create_job_request(), owner.clone(), &config)
+            .await?
+            .into_record();
+
+        // Step Functions start succeeds, but record_execution_started fails.
+        store.fail_record_started.store(true, Ordering::SeqCst);
+        let starter = FakeStarter::new();
+
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+
+        assert_eq!(summary.failed, 1, "record failure → failed outcome");
+        assert_eq!(
+            starter.call_count(),
+            1,
+            "start_execution succeeded before record failure"
+        );
+
+        let record = store.lookup_job(&enqueued.job_id).await?.context("job")?;
+        assert_eq!(
+            record.status,
+            JobStatus::Failed,
+            "job must be failed, not stuck dispatching with no ARN"
+        );
+        assert!(
+            record
+                .error_code
+                .is_some_and(|code| code.contains("record_execution_started")),
+            "error code must reference record_execution_started"
+        );
+        // No leaked running quota.
+        assert_eq!(
+            store.owner_running(&owner),
+            0,
+            "running quota released after record failure — no leak"
+        );
+        assert!(
+            !store.has_running_token(&enqueued.job_id),
+            "running token removed after record failure"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn build_index_execution_request_matches_admission_payload_contract() -> Result<()> {
+    let record = JobRecord {
+        job_id: "job-abc".to_owned(),
+        status: JobStatus::Dispatching,
+        source: "registry:crates-io".to_owned(),
+        package: "serde".to_owned(),
+        revision: "1.0.197".to_owned(),
+        source_url: "https://crates.io/api/v1/crates/serde/1.0.197/download".to_owned(),
+        source_url_hash: "sha256:serde".to_owned(),
+        source_kind: "tarball".to_owned(),
+        caller_id: "caller-42".to_owned(),
+        execution_arn: None,
+        attempt: 1,
+        stage: None,
+        snapshot_id: None,
+        row_counts: None,
+        error_code: None,
+        error_detail: None,
+        created_at: "now".to_owned(),
+        updated_at: "now".to_owned(),
+        owner_kind: Some(BacklogOwnerKind::Caller),
+        owner_id: Some("caller-42".to_owned()),
+        queue_shard: None,
+        queue_sort_key: None,
+        next_eligible_at: None,
+        dispatched_at: None,
+    };
+
+    let request = mcp::build_index_execution_request(&record);
+
+    assert_eq!(request.name, "job-abc", "execution name is the job_id");
+    assert_eq!(request.input["job_id"], "job-abc");
+    assert_eq!(request.input["source"], "registry:crates-io");
+    assert_eq!(request.input["package"], "serde");
+    assert_eq!(request.input["revision"], "1.0.197");
+    assert_eq!(
+        request.input["source_url"],
+        "https://crates.io/api/v1/crates/serde/1.0.197/download"
+    );
+    assert_eq!(request.input["source_kind"], "tarball");
+    assert_eq!(
+        request.input["prefetch_source"], true,
+        "tarball from non-S3 host must prefetch"
+    );
+    assert_eq!(request.input["caller_id"], "caller-42");
+    assert!(
+        request.input["limits"]["max_source_bytes"].is_u64(),
+        "limits must carry max_source_bytes"
+    );
+    assert!(
+        request.input["limits"]["max_build_seconds"].is_u64(),
+        "limits must carry max_build_seconds"
+    );
+    Ok(())
+}
+
+#[test]
+fn build_index_execution_request_s3_tarball_skips_prefetch() -> Result<()> {
+    let record = JobRecord {
+        job_id: "job-s3".to_owned(),
+        status: JobStatus::Dispatching,
+        source: "registry:custom".to_owned(),
+        package: "pkg".to_owned(),
+        revision: "rev".to_owned(),
+        source_url: "https://bucket.s3.us-east-1.amazonaws.com/pkg.tar.gz".to_owned(),
+        source_url_hash: "hash".to_owned(),
+        source_kind: "tarball".to_owned(),
+        caller_id: "caller".to_owned(),
+        execution_arn: None,
+        attempt: 1,
+        stage: None,
+        snapshot_id: None,
+        row_counts: None,
+        error_code: None,
+        error_detail: None,
+        created_at: "now".to_owned(),
+        updated_at: "now".to_owned(),
+        owner_kind: Some(BacklogOwnerKind::Caller),
+        owner_id: Some("caller".to_owned()),
+        queue_shard: None,
+        queue_sort_key: None,
+        next_eligible_at: None,
+        dispatched_at: None,
+    };
+
+    let request = mcp::build_index_execution_request(&record);
+    assert_eq!(
+        request.input["prefetch_source"], false,
+        "S3-hosted tarball does not need worker-side prefetch"
+    );
+    Ok(())
+}
+
+#[test]
+fn drainer_production_entrypoint_delegates_to_drainer() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let config = drainer_queue_config(u32::MAX);
+        store
+            .enqueue_job(create_job_request(), owner.clone(), &config)
+            .await?;
+
+        let starter = FakeStarter::new();
+        // The production entrypoint delegates through
+        // drain_queued_jobs_with_services — this test proves the runtime path.
+        let summary: DrainSummary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+
+        assert_eq!(summary.dispatched, 1);
+        assert_eq!(starter.call_count(), 1);
+        Ok(())
+    })
+}
+
+fn now_secs_large() -> u64 {
+    // Use a large now_secs so all jobs (next_eligible_at from the fake store
+    // is the job sequence number n) are eligible.
+    9_999_999_999
 }

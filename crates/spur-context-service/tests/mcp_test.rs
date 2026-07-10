@@ -2509,6 +2509,7 @@ fn insert_node(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_node_with_kind(
     conn: &Connection,
     id: &str,
@@ -2521,7 +2522,7 @@ fn insert_node_with_kind(
     line_end: i64,
 ) -> Result<()> {
     let byte_start = source_text
-        .find(&marker)
+        .find(marker)
         .with_context(|| format!("find marker {marker}"))? as i64;
     let byte_end = source_text[byte_start as usize..]
         .find("\n\n")
@@ -2728,6 +2729,7 @@ impl StubIndexExecutionStarter {
         self.started.lock().unwrap().len()
     }
 
+    #[allow(dead_code)]
     fn started_requests(&self) -> Vec<IndexExecutionRequest> {
         self.started.lock().unwrap().clone()
     }
@@ -2810,6 +2812,7 @@ struct FakeJobState {
 #[derive(Default, Clone, Copy)]
 struct OwnerCounters {
     queued: u32,
+    #[allow(dead_code)]
     running: u32,
 }
 
@@ -3048,11 +3051,7 @@ impl JobStore for FakeJobStore {
             dispatched_at: None,
         };
 
-        state
-            .owner_counters
-            .entry(owner_pk)
-            .or_default()
-            .queued += 1;
+        state.owner_counters.entry(owner_pk).or_default().queued += 1;
         state.global_queued += 1;
         state.dedupe.insert(key, job_id.clone());
         state.jobs.insert(job_id, record.clone());
