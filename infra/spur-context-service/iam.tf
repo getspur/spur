@@ -140,20 +140,29 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "dynamodb:GetItem",
-        "dynamodb:PutItem",
-        "dynamodb:UpdateItem",
-        "dynamodb:DeleteItem",
-        "dynamodb:TransactWriteItems"
-      ]
-      Resource = [
-        aws_dynamodb_table.index_jobs.arn,
-        aws_dynamodb_table.catalog_leases.arn
-      ]
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:TransactWriteItems"
+        ]
+        Resource = [
+          aws_dynamodb_table.index_jobs.arn,
+          aws_dynamodb_table.catalog_leases.arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:Query"
+        ]
+        Resource = "${aws_dynamodb_table.index_jobs.arn}/index/${var.index_queue_gsi_name}"
+      }
+    ]
   })
 }
 
