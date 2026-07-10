@@ -333,6 +333,9 @@ impl Orchestrator {
             }
         }
 
+        let mut project_loop_runtime =
+            super::loop_runtime::ProjectLoopRuntimeSupervisor::start_for_orchestrator(&self);
+
         loop {
             // ── (a) Drain overflow buffer so scheduler sees fresh state ──
             {
@@ -1938,6 +1941,9 @@ impl Orchestrator {
         }) = agent_connection.take()
         {
             let _ = conn.shutdown().await;
+        }
+        if let Some(runtime) = project_loop_runtime.as_mut() {
+            runtime.shutdown().await;
         }
 
         info!("Interactive session ended");

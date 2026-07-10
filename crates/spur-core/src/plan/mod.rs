@@ -2016,7 +2016,7 @@ pub(crate) async fn emit_approval_audit(
     }
 }
 
-async fn apply_issue_update(
+pub(crate) async fn apply_issue_update(
     pm: &dyn PmLike,
     issue_id: &str,
     mut update: spur_pm::IssueUpdate,
@@ -2449,7 +2449,7 @@ fn review_ready_label_removals() -> Vec<String> {
     ]
 }
 
-fn approve_review_update(closed_status: &str, comment: String) -> spur_pm::IssueUpdate {
+pub(crate) fn approve_review_update(closed_status: &str, comment: String) -> spur_pm::IssueUpdate {
     spur_pm::IssueUpdate {
         status: Some(closed_status.to_string()),
         comment: Some(comment),

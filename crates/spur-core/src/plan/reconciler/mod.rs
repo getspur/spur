@@ -32,6 +32,8 @@
 
 mod leases;
 
+mod ownership;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -49,6 +51,8 @@ use crate::plan::outcomes::{
 const COMPLETION_PROJECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 mod ready;
+
+mod reviews;
 
 mod conflict;
 
@@ -805,6 +809,14 @@ pub struct ReconcilerConfig {
     pub predispatch_preview: PreviewStrategy,
     pub loops_enabled: bool,
     pub pause_all_loops: bool,
+    pub loop_sweep_scope: crate::plan::loops::LoopSweepScope,
+    pub plan_scope: PlanScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanScope {
+    BrainOwned,
+    SystemL3Only,
 }
 
 impl Default for ReconcilerConfig {
@@ -819,6 +831,8 @@ impl Default for ReconcilerConfig {
             predispatch_preview: PreviewStrategy::Real,
             loops_enabled: true,
             pause_all_loops: false,
+            loop_sweep_scope: crate::plan::loops::LoopSweepScope::All,
+            plan_scope: PlanScope::BrainOwned,
         }
     }
 }
@@ -894,6 +908,50 @@ pub struct Reconciler {
 }
 
 impl Reconciler {
+    pub(super) fn scoped_epic_labels(&self) -> Vec<String> {
+        let mut labels = vec![crate::plan::labels::PLAN_COMPLETE.to_string()];
+        match self.config.plan_scope {
+            PlanScope::BrainOwned => {
+                if let Some(dispatch) = self.dispatch.as_ref() {
+                    labels.push(crate::plan::labels::plan_owner(
+                        &dispatch.brain_session_id().as_session_id().0,
+                    ));
+                }
+            }
+            PlanScope::SystemL3Only => {
+                labels.push(crate::plan::labels::plan_owner(
+                    crate::plan::loops::LOOP_RUNTIME_OWNER_ID,
+                ));
+                labels.push(format!("{}l3", crate::plan::labels::AUTONOMY_PREFIX));
+            }
+        }
+        labels
+    }
+
+    pub(super) async fn scoped_plan_ids(&self) -> anyhow::Result<Vec<String>> {
+        let mut labels = self.scoped_epic_labels();
+        if let Some(plan_id) = self.plan_id.as_deref() {
+            labels.push(crate::plan::labels::plan_id(plan_id));
+        }
+        Ok(self
+            .pm
+            .list_issues(spur_pm::IssueFilter {
+                labels,
+                issue_type: Some("epic".to_string()),
+                limit: Some(10_000),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .filter_map(|epic| {
+                epic.labels
+                    .iter()
+                    .find_map(|label| crate::plan::labels::parse_plan_id(label))
+                    .map(str::to_string)
+            })
+            .collect())
+    }
+
     pub fn new(
         config: ReconcilerConfig,
         pm: Arc<spur_pm::PmService>,
@@ -1193,7 +1251,9 @@ impl Reconciler {
 
     pub async fn tick_once(&self) -> anyhow::Result<bool> {
         self.mark_tick().await;
-        let mut did_work = self.reconcile_terminal_epics().await?;
+        let mut did_work = self.reconcile_plan_owner_leases().await?;
+        did_work |= self.reconcile_system_l3_reviews().await?;
+        did_work |= self.reconcile_terminal_epics().await?;
 
         let Some(dispatch) = &self.dispatch else {
             let ready_ids = self.observe_ready().await?;
