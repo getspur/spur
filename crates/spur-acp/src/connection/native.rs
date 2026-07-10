@@ -144,7 +144,7 @@ pub fn spur_client_capabilities() -> ClientCapabilities {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub async fn spawn_native_worker_for_test(
+pub fn spawn_native_worker_for_test(
     command: &str,
     args: &[&str],
 ) -> std::io::Result<tokio::process::Child> {

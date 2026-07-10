@@ -35,7 +35,7 @@ use crate::protocol::claude_events::{map_to_notifications, parse_event, ClaudeEv
 use crate::types::AgentHealth;
 
 #[cfg(any(test, feature = "test-support"))]
-pub async fn spawn_stream_json_for_test(
+pub fn spawn_stream_json_for_test(
     command: &str,
     args: &[&str],
 ) -> std::io::Result<tokio::process::Child> {
