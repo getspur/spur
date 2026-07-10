@@ -715,6 +715,7 @@ pub async fn drain_queued_jobs() -> Result<drainer::DrainSummary, Error> {
         .unwrap_or(0);
     Ok(drainer::Drainer::new(&jobs, &starter, config)
         .with_limits(limits.max_dispatches_per_run, limits.scan_limit_per_shard)
+        .with_rotation_interval_secs(limits.rotation_interval_secs)
         .drain(now_secs)
         .await)
 }

@@ -210,6 +210,7 @@ resource "aws_lambda_function" "service" {
       SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL        = tostring(var.index_max_queued_jobs_global)
       SPUR_INDEX_DRAINER_BATCH_LIMIT           = tostring(var.index_drainer_batch_limit)
       SPUR_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD  = tostring(var.index_drainer_scan_limit_per_shard)
+      SPUR_INDEX_DRAINER_SCHEDULE_RATE_MINUTES = tostring(var.index_drainer_schedule_rate_minutes)
       SPUR_INDEX_DISPATCH_MAX_ATTEMPTS         = tostring(var.index_dispatch_max_attempts)
       SPUR_INDEX_DISPATCH_BACKOFF_BASE_SECONDS = tostring(var.index_dispatch_backoff_base_seconds)
     }
