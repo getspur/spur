@@ -16,6 +16,7 @@ use crate::action::Action;
 
 use super::{
     scroll_offset_for_selected_line, selected_marker_line, sha7, ExploreBrowserView, ExploreStage,
+    StoreLayer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +163,7 @@ impl ExploreBrowserView {
             return;
         }
         let name = self.manifest.items[self.manage_selected].name.clone();
-        match apply::remove(&self.repo_root, &mut self.manifest, &name) {
+        match apply::remove_layered(&self.repo_root, &mut self.manifest, &name) {
             Ok(()) => {
                 self.invalidate_manage_cache();
                 self.reload();
@@ -187,7 +188,8 @@ impl ExploreBrowserView {
             )));
         } else {
             for (index, item) in self.manifest.items.iter().enumerate() {
-                lines.push(pool_item_line(item, index == self.manage_selected));
+                let layer = self.manifest_layers.get(&item.name).copied();
+                lines.push(pool_item_line(item, layer, index == self.manage_selected));
             }
         }
 
@@ -279,11 +281,20 @@ fn lens_span(label: &'static str, active: bool) -> Span<'static> {
     }
 }
 
-fn pool_item_line(item: &ManifestItem, selected: bool) -> Line<'static> {
+fn pool_item_line(item: &ManifestItem, layer: Option<StoreLayer>, selected: bool) -> Line<'static> {
     let prefix = if selected { "> " } else { "  " };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(prefix, Style::default().fg(Color::Cyan)),
         Span::styled(item.name.clone(), row_style(selected)),
+    ];
+    if let Some(layer) = layer {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            layer.label().to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.extend([
         Span::raw("  "),
         Span::styled(kind_label(item.kind), row_style(selected)),
         Span::raw("  "),
@@ -297,7 +308,8 @@ fn pool_item_line(item: &ManifestItem, selected: bool) -> Line<'static> {
                 .unwrap_or_else(|| "unknown".to_string()),
             row_style(selected),
         ),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 fn push_status_lines(
@@ -713,7 +725,7 @@ mod tests {
                 decided_at_epoch: None,
             },
         );
-        let line = pool_item_line(&item, false);
+        let line = pool_item_line(&item, None, false);
         assert!(line_text(&line).contains("unknown"));
     }
 
