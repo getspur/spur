@@ -208,3 +208,52 @@ fn validate_job_id(job_id: &str) -> Result<(), StoreError> {
         Err(StoreError::InvalidJobId)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s3_key_and_metadata_are_deterministic_and_idempotency_checked() {
+        let metadata = build_archive_metadata(
+            "https://github.com/getspur/spur.git",
+            "abc123",
+            "git",
+            "content-hash",
+            42,
+        );
+
+        assert_eq!(
+            build_archive_key("/fetch/", "job-123").unwrap(),
+            "fetch/job-123/source.tar.gz"
+        );
+        assert_eq!(metadata.get("revision").map(String::as_str), Some("abc123"));
+        assert_eq!(metadata.get("source-kind").map(String::as_str), Some("git"));
+        assert_eq!(
+            metadata.get("content-sha256").map(String::as_str),
+            Some("content-hash")
+        );
+        assert_eq!(metadata.get("bytes").map(String::as_str), Some("42"));
+
+        let existing = metadata.into_iter().collect::<BTreeMap<_, _>>();
+        assert!(idempotency_metadata_matches(
+            &existing,
+            "https://github.com/getspur/spur.git",
+            "abc123",
+            "git"
+        ));
+        assert!(!idempotency_metadata_matches(
+            &existing,
+            "https://github.com/getspur/other.git",
+            "abc123",
+            "git"
+        ));
+    }
+
+    #[test]
+    fn s3_key_rejects_path_traversal_job_id() {
+        let error = build_archive_key("fetch", "../other-job").unwrap_err();
+
+        assert!(error.to_string().contains("invalid job_id"));
+    }
+}
