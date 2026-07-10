@@ -11,9 +11,10 @@ Client → API Gateway (HTTP, AWS_IAM) → Lambda (ARM64, provided.al2023)
                                 │       ↓
                                 │   S3 (.ducklake catalog + Parquet data via httpfs)
                                 ├── DynamoDB job/status/dedupe/quota records
+                                ├── scheduled queue drainer → Step Functions
                                 └── Step Functions DescribeExecution repair
 
-external_index → DynamoDB job + dedupe → Step Functions → source fetcher Lambda
+external_index → bounded DynamoDB queue → drainer → Step Functions → source fetcher Lambda
                                                    │          │
                                                    │          └── public HTTPS/git source
                                                    │              → S3 fetch artifact
@@ -31,8 +32,10 @@ external_index → DynamoDB job + dedupe → Step Functions → source fetcher L
 
 DuckLake/S3 is the data plane for indexed package rows, refs, catalog metadata,
 and Parquet files. DynamoDB is the production control plane for job status,
-idempotency, execution ARNs, per-caller active-job quotas, and catalog write
-leases.
+idempotency, execution ARNs, bounded queued/running quotas, running-release
+tokens, and catalog write leases. EventBridge invokes the queue drainer on a
+fixed schedule; the post-admission kick reduces latency but is not required for
+eventual dispatch.
 
 The source fetcher Lambda is deliberately outside the worker VPC. Public GitHub
 and non-S3 HTTPS tarball inputs take the fetch-split path: Step Functions invokes
@@ -73,7 +76,7 @@ ARN is present.
 | Resource | Purpose |
 |---|---|
 | `aws_s3_bucket.data` | DuckLake catalog (.ducklake) + Parquet data files |
-| `aws_dynamodb_table.index_jobs` | Job records, active dedupe pointers, caller quota records, execution ARNs |
+| `aws_dynamodb_table.index_jobs` | Job records, sparse queue GSI, active dedupe pointers, owner/global quota counters, running-release tokens, execution ARNs |
 | `aws_dynamodb_table.catalog_leases` | Serialized DuckLake catalog write leases |
 | `aws_lambda_function.service` | ARM64 Lambda, 1024MB, 30s timeout |
 | `aws_sfn_state_machine.index_build` | Lambda-first on-demand indexing orchestration |
@@ -81,6 +84,7 @@ ARN is present.
 | `aws_lambda_function.source_fetcher` | Non-VPC public source fetcher image |
 | `aws_ecs_cluster.indexing` / task definition | Fargate fallback worker runtime |
 | `aws_apigatewayv2_api.http` | HTTP API front door |
+| `aws_cloudwatch_event_rule.index_queue_drainer` | Scheduled correctness path for dispatching queued jobs |
 | `aws_iam_policy.context_service_invoke` | Same-account SigV4 invoke policy for allowed callers |
 | `aws_iam_role.lambda` | Execution role with S3 read, DynamoDB, SFN + CloudWatch Logs |
 | `aws_iam_role.worker_task` | ECS fallback worker role with S3, DynamoDB, SFN callback permissions |
@@ -104,12 +108,67 @@ unauthenticated route does not silently fall back to source IP identity.
 
 - API Gateway route throttling via `api_throttle_rate_limit` and
   `api_throttle_burst_limit`.
-- Per authenticated caller DynamoDB-backed fixed-window rate limiting and an
-  active-job cap. The active-job cap is atomic with job creation and is released
-  when a job reaches a terminal state.
+- Per authenticated caller DynamoDB-backed fixed-window rate limiting plus
+  transactional per-owner/global queued and running caps. Running capacity is
+  released exactly once when a job reaches a terminal state.
 - Source and build caps. URL size hints are checked before job creation; workers
   revalidate URLs, cap tarball downloads/source trees, and kill `spur graph
   build` after `context_max_build_seconds`.
+
+## Bounded Backlog Operations
+
+The module keeps queue admission opt-in: `index_max_queued_jobs_per_owner=0`
+leaves durable queue admission disabled, so a cold `external_index` request is
+rejected with `queue_full`. Set a finite per-owner queue cap to enable the
+backlog. Global caps use `0` to mean disabled; operators enabling queueing in a
+multi-owner deployment should set finite global queued and running caps as
+well. The legacy `index_max_concurrent_jobs_per_caller` value remains the
+per-owner running fallback when `index_max_running_jobs_per_owner` is null.
+
+| Variable | Default | Runtime effect |
+|---|---:|---|
+| `index_max_queued_jobs_per_owner` | `0` | Hard queued cap per backlog owner; zero disables cold-job queue admission |
+| `index_max_queued_jobs_global` | `0` | Service-wide queued cap; zero disables this optional cap |
+| `index_max_running_jobs_per_owner` | `null` | Running/dispatching cap per owner; null inherits the legacy per-caller cap (`2`) |
+| `index_max_running_jobs_global` | `0` | Hard global running-token cap (`1..32`); zero disables this optional cap |
+| `index_queue_shard_count` | `16` | Sparse queue-GSI partitions scanned in rotated order |
+| `index_drainer_batch_limit` | `8` | Maximum jobs dispatched by one drainer invocation |
+| `index_drainer_scan_limit_per_shard` | `32` | Maximum queue candidates queried per shard and invocation |
+| `index_drainer_schedule_rate_minutes` | `1` | EventBridge correctness cadence; whole minutes, minimum `1` |
+| `index_dispatch_max_attempts` | `3` | Dispatch attempts before terminal `dispatch_exhausted` |
+| `index_dispatch_backoff_base_seconds` | `5` | Base for transient-dispatch exponential backoff |
+
+The Lambda receives these as `SPUR_INDEX_*` environment variables. Queue scans
+use `Query` against `${index_jobs_table_arn}/index/<index_queue_gsi_name>`;
+admission, dispatch, and terminal release use DynamoDB transactions on the base
+table. Queue job records carry string `queue_shard` and `queue_sort_key`
+attributes for the sparse GSI; its `ALL` projection returns the full job record
+that the drainer deserializes. Owner/global counters and `RUNNING#<job_id>` /
+`GLOBAL#RUNNING_TOKEN#<n>` items use only the table's string `pk`, so they do
+not require or violate additional table key attributes.
+
+For a concrete small-cap burst, configure:
+
+```hcl
+index_rate_limit_per_minute         = 10
+index_queue_shard_count             = 1
+index_max_queued_jobs_per_owner     = 10
+index_max_queued_jobs_global        = 10
+index_max_running_jobs_per_owner    = 2
+index_max_running_jobs_global       = 2
+index_drainer_batch_limit           = 2
+index_drainer_scan_limit_per_shard  = 10
+index_drainer_schedule_rate_minutes = 1
+```
+
+With 10 unique cold `external_index` requests from one owner, all 10 can be
+admitted (or an active duplicate is deduplicated). Transactional running caps
+allow at most two jobs to reach `dispatching`/`running`; the rest remain queued.
+Admission kicks may start those first jobs immediately. As terminal workers
+release capacity, the EventBridge invocation starts replacements in batches of
+at most two, so a failed or missed kick cannot strand the remaining backlog.
+Requests beyond either finite queued cap receive `queue_full` or
+`global_queue_full` instead of creating unbounded work.
 
 ## Tenant Isolation Notes
 
