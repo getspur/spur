@@ -150,6 +150,7 @@ impl MutationProposer for RetryExhaustedProposer {
             trigger_task_id: triggering_task.to_string(),
             ops: vec![PlanMutationOp::RetryTask {
                 issue_id: target_id.to_string(),
+                append_prompt: None,
             }],
         }]
     }
@@ -334,7 +335,7 @@ mod tests {
         assert_eq!(batches[0].ops.len(), 1);
         assert!(matches!(
             batches[0].ops[0],
-            PlanMutationOp::RetryTask { ref issue_id } if issue_id == "bd-200"
+            PlanMutationOp::RetryTask { ref issue_id, .. } if issue_id == "bd-200"
         ));
         assert_eq!(batches[0].trigger_signal_id, Some(signal.signal_id()));
     }
@@ -406,7 +407,7 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert!(matches!(
             batches[0].ops[0],
-            PlanMutationOp::RetryTask { ref issue_id } if issue_id == "bd-203"
+            PlanMutationOp::RetryTask { ref issue_id, .. } if issue_id == "bd-203"
         ));
     }
 }

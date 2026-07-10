@@ -120,10 +120,15 @@ pub enum InteractiveInput {
     ResumePlan {
         plan_id: String,
     },
+    /// Cancel a running worker delegation by delegation id.
+    CancelDelegation {
+        delegation_id: String,
+    },
     /// Retry one persisted plan task by beads issue id.
     RetryPlanTask {
         plan_id: Option<String>,
         issue_id: String,
+        append_prompt: Option<String>,
     },
     /// Load/project a persisted implementation plan and emit PlanSnapshotUpdated.
     /// This is read-only and must not claim plan ownership.
