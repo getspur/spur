@@ -245,7 +245,7 @@ variable "index_drainer_scan_limit_per_shard" {
 }
 
 variable "index_drainer_schedule_rate_minutes" {
-  description = "EventBridge correctness-drainer cadence in whole minutes. EventBridge scheduled rules have one-minute minimum precision."
+  description = "EventBridge correctness-drainer cadence in whole minutes. The same value drives runtime shard-start rotation so every shard is visited even when cadence and shard count share factors."
   type        = number
   default     = 1
 

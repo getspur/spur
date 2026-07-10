@@ -1423,12 +1423,14 @@ fn index_max_concurrent_jobs_per_caller() -> u32 {
 
 pub const DEFAULT_INDEX_DRAINER_BATCH_LIMIT: usize = 8;
 pub const DEFAULT_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD: usize = 32;
+pub const DEFAULT_INDEX_DRAINER_SCHEDULE_RATE_MINUTES: u64 = 1;
 pub const MAX_INDEX_GLOBAL_RUNNING_TOKENS: u32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexDrainerLimits {
     pub max_dispatches_per_run: usize,
     pub scan_limit_per_shard: usize,
+    pub rotation_interval_secs: u64,
 }
 
 /// Default per-owner queued backlog cap when the env var is not set. A non-zero
@@ -1471,6 +1473,12 @@ pub fn index_drainer_limits() -> IndexDrainerLimits {
             DEFAULT_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD,
         )
         .max(1),
+        rotation_interval_secs: env_u64(
+            "SPUR_INDEX_DRAINER_SCHEDULE_RATE_MINUTES",
+            DEFAULT_INDEX_DRAINER_SCHEDULE_RATE_MINUTES,
+        )
+        .max(1)
+        .saturating_mul(60),
     }
 }
 
