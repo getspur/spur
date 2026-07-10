@@ -32,12 +32,12 @@ use crate::mcp::{self, IndexExecutionStarter};
 /// Default maximum number of jobs a single drainer invocation will dispatch.
 /// Keeps one Lambda invocation from exhausting the global running capacity or
 /// running past its timeout.
-const DEFAULT_MAX_DISPATCHES_PER_RUN: usize = 8;
+const DEFAULT_MAX_DISPATCHES_PER_RUN: usize = mcp::DEFAULT_INDEX_DRAINER_BATCH_LIMIT;
 
 /// Default maximum candidates examined per shard per invocation. Each candidate
 /// that is at-capacity or contended counts toward this bound so a backlog of
 /// at-cap owners cannot cause an unbounded scan.
-const DEFAULT_SCAN_LIMIT_PER_SHARD: usize = 32;
+const DEFAULT_SCAN_LIMIT_PER_SHARD: usize = mcp::DEFAULT_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD;
 
 /// Summary of a single drainer invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -70,6 +70,9 @@ enum DispatchOutcome {
     /// Job failed after the dispatch transaction claimed running quota. The
     /// drainer marked it `failed` and released running quota so no slot leaked.
     Failed,
+    /// The hard global running-token pool is saturated. Stop the invocation so
+    /// a large backlog cannot repeat the same bounded token probes per job.
+    GlobalCapacityFull,
 }
 
 /// Bounded correctness drainer for queued index jobs.
@@ -154,6 +157,10 @@ impl<'a> Drainer<'a> {
                     DispatchOutcome::Started => summary.dispatched += 1,
                     DispatchOutcome::Skipped => summary.skipped += 1,
                     DispatchOutcome::Failed => summary.failed += 1,
+                    DispatchOutcome::GlobalCapacityFull => {
+                        summary.skipped += 1;
+                        return summary;
+                    }
                 }
             }
         }
@@ -182,6 +189,9 @@ impl<'a> Drainer<'a> {
             .await
         {
             Ok(record) => record,
+            Err(JobsError::GlobalRunningFull) => {
+                return DispatchOutcome::GlobalCapacityFull;
+            }
             Err(
                 JobsError::Conflict
                 | JobsError::QueueFull

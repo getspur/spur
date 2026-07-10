@@ -732,6 +732,7 @@ struct FakeJobState {
     global_queued: u32,
     global_running: u32,
     running_tokens: HashSet<String>,
+    dispatch_attempts: usize,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -970,6 +971,7 @@ impl JobStore for FakeJobStore {
         config: &QueueConfig,
     ) -> spur_context_service::jobs::Result<JobRecord> {
         let mut state = self.state.lock().expect("fake store lock");
+        state.dispatch_attempts += 1;
 
         // Validate + extract owner without holding a record borrow.
         let owner = {
@@ -990,7 +992,7 @@ impl JobStore for FakeJobStore {
             return Err(JobsError::Conflict);
         }
         if config.max_running_global > 0 && state.global_running >= config.max_running_global {
-            return Err(JobsError::Conflict);
+            return Err(JobsError::GlobalRunningFull);
         }
 
         // Move counters, scoping the mutable borrow so subsequent state access
@@ -1225,6 +1227,44 @@ fn drainer_dispatches_queued_jobs_and_starts_each_once() -> Result<()> {
                 "job {job_id} should have GSI attrs removed after dispatch"
             );
         }
+        Ok(())
+    })
+}
+
+#[test]
+fn drainer_stops_after_global_running_pool_is_saturated() -> Result<()> {
+    block_on(async {
+        let store = FakeJobStore::default();
+        let owner = BacklogOwner::caller("alice");
+        let mut config = drainer_queue_config(u32::MAX);
+        config.max_running_global = 1;
+
+        for i in 1..=3 {
+            store
+                .enqueue_job(
+                    with_package(&format!("global-cap-{i}")),
+                    owner.clone(),
+                    &config,
+                )
+                .await?;
+        }
+
+        let starter = FakeStarter::new();
+        let summary =
+            drainer::drain_queued_jobs_with_services(&store, &starter, config, now_secs_large())
+                .await;
+
+        assert_eq!(summary.dispatched, 1);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .expect("fake store lock")
+                .dispatch_attempts,
+            2,
+            "global saturation must stop the invocation instead of probing every queued job"
+        );
         Ok(())
     })
 }
