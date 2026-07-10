@@ -13,7 +13,10 @@ use thiserror::Error;
 
 use crate::abuse::{self, SourceKind, ValidateOptions};
 use crate::catalog::{readable_table, CatalogResolver, ResolvedRevision};
-use crate::jobs::{CreateJobOutcome, CreateJobRequest, JobRecord, JobStatus, JobStore, JobsError};
+use crate::jobs::{
+    BacklogOwner, CreateJobRequest, EnqueueOutcome, JobRecord, JobStatus, JobStore, JobsError,
+    QueueConfig,
+};
 use crate::knowledge::{self, KnowledgeContextOptions, KnowledgeScope};
 use crate::query::{self, SearchMode, SearchOptions};
 
@@ -46,9 +49,10 @@ pub struct IndexExecutionRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct IndexResourceLimits {
-    max_source_bytes: u64,
-    max_build_seconds: u64,
+#[allow(dead_code)]
+pub struct IndexResourceLimits {
+    pub max_source_bytes: u64,
+    pub max_build_seconds: u64,
 }
 
 pub trait IndexExecutionStarter {
@@ -493,7 +497,7 @@ async fn route_index_inner(
     args: &Value,
     catalog: Option<&CatalogResolver>,
     jobs: &dyn JobStore,
-    sfn_client: &impl IndexExecutionStarter,
+    _sfn_client: &impl IndexExecutionStarter,
     caller_id: &str,
 ) -> Result<Value, McpHandlerError> {
     let args: ExternalIndexArgs = parse_args(args)?;
@@ -513,6 +517,9 @@ async fn route_index_inner(
         }
     };
 
+    // Preserve the existing per-owner request rate limit before enqueue. This
+    // protects the API from high-frequency callers before queue admission,
+    // independent of queue capacity.
     match jobs
         .check_index_rate_limit(caller_id, index_rate_limit_per_minute())
         .await
@@ -532,9 +539,9 @@ async fn route_index_inner(
     let revision = args.revision.trim();
     let source_url_hash = source_url_hash(&args.source_url);
     let source_kind = args.source_kind(parsed_url.source_kind);
-    let prefetch_source = should_prefetch_source(source_kind, &parsed_url.hostname);
-    let limits = index_resource_limits(source_kind);
 
+    // Warm catalog hit: return immediately unless force=true bypasses it.
+    // force=true does NOT bypass rate limits, queue caps, or dedupe.
     if !args.force.unwrap_or(false) {
         if let Some(catalog) = catalog {
             if let Some(resolved) =
@@ -549,87 +556,51 @@ async fn route_index_inner(
         }
     }
 
-    let max_active_jobs = index_max_concurrent_jobs_per_caller();
-    let outcome = match jobs
-        .create_or_get_active_job_with_limit(
-            CreateJobRequest {
-                source: source.to_owned(),
-                package: args.package.clone(),
-                revision: revision.to_owned(),
-                source_url: args.source_url.clone(),
-                source_url_hash: source_url_hash.clone(),
-                source_kind: source_kind_label(source_kind).to_owned(),
-                caller_id: caller_id.to_owned(),
-            },
-            max_active_jobs,
-        )
-        .await
-    {
-        Ok(outcome) => outcome,
-        Err(JobsError::ConcurrentLimit) => {
-            return Ok(json!({
-                "status": "rejected",
-                "reason": "concurrent_job_limit",
-                "max_active_jobs_per_caller": max_active_jobs
-            }));
-        }
-        Err(error) => {
-            return Err(jobs_error("external_index create_or_get_active_job failed")(error));
-        }
+    // ─── Bounded enqueue admission ─────────────────────────────────────────
+    //
+    // Build the BacklogOwner from the authenticated caller context. The first
+    // implementation maps to BacklogOwnerKind::Caller using the existing
+    // caller_id; future deployments can scope backlogs by User or TenantUser
+    // without changing the queue/drainer logic because DynamoDB keys are
+    // derived from (kind, id).
+    let owner = backlog_owner_from_caller(caller_id);
+    let config = index_queue_config();
+
+    let request = CreateJobRequest {
+        source: source.to_owned(),
+        package: args.package.clone(),
+        revision: revision.to_owned(),
+        source_url: args.source_url.clone(),
+        source_url_hash: source_url_hash.clone(),
+        source_kind: source_kind_label(source_kind).to_owned(),
+        caller_id: caller_id.to_owned(),
     };
 
-    let job = match outcome {
-        CreateJobOutcome::Created(record) => record,
-        CreateJobOutcome::Existing(record) => {
-            return Ok(active_job_response(&record));
+    match jobs.enqueue_job(request, owner, &config).await {
+        Ok(EnqueueOutcome::Enqueued(record)) | Ok(EnqueueOutcome::Existing(record)) => {
+            Ok(queued_job_response(&record))
         }
-    };
-
-    let payload = json!({
-        "job_id": job.job_id,
-        "source": source,
-        "package": args.package,
-        "revision": revision,
-        "source_url": args.source_url,
-        "source_kind": source_kind_label(source_kind),
-        "prefetch_source": prefetch_source,
-        "caller_id": caller_id,
-        "limits": {
-            "max_source_bytes": limits.max_source_bytes,
-            "max_build_seconds": limits.max_build_seconds
-        }
-    });
-    let execution_arn = match sfn_client
-        .start_execution(IndexExecutionRequest {
-            name: job.job_id.clone(),
-            input: payload,
-        })
-        .await
-    {
-        Ok(execution_arn) => execution_arn,
-        Err(error) => {
-            let _ = jobs
-                .mark_failed(&job.job_id, "start_execution", &error.to_string())
-                .await;
-            return Err(error);
-        }
-    };
-
-    let job = match jobs
-        .record_execution_started(&job.job_id, &execution_arn)
-        .await
-    {
-        Ok(record) => record,
-        Err(error) => {
-            let detail = error.to_string();
-            let _ = jobs
-                .mark_failed(&job.job_id, "record_execution_started", &detail)
-                .await;
-            return Err(jobs_error("external_index record_execution_started failed")(error));
-        }
-    };
-
-    Ok(active_job_response(&job))
+        Err(JobsError::QueueFull) => Ok(json!({
+            "status": "rejected",
+            "reason": "queue_full",
+            "max_queued_jobs_per_owner": config.max_queued_per_owner,
+            "retry_after_seconds": RATE_LIMIT_RETRY_AFTER_SECONDS
+        })),
+        Err(JobsError::GlobalQueueFull) => Ok(json!({
+            "status": "rejected",
+            "reason": "global_queue_full",
+            "max_queued_jobs_global": config.max_queued_global,
+            "retry_after_seconds": RATE_LIMIT_RETRY_AFTER_SECONDS
+        })),
+        // TransactionConflict / concurrent write contention: the cap may have
+        // room. Surface as a structured retryable rejection, NOT quota-full.
+        Err(JobsError::Conflict) => Ok(json!({
+            "status": "rejected",
+            "reason": "conflict",
+            "retry_after_seconds": 5
+        })),
+        Err(error) => Err(jobs_error("external_index enqueue failed")(error)),
+    }
 }
 
 pub async fn route_index_status(
@@ -1072,6 +1043,13 @@ fn jobs_error(context: &'static str) -> impl FnOnce(JobsError) -> McpHandlerErro
         JobsError::Conflict => McpHandlerError::Internal(format!("{context}: {error}")),
         JobsError::ConcurrentLimit => McpHandlerError::Internal(format!("{context}: {error}")),
         JobsError::RateLimited => McpHandlerError::Internal(format!("{context}: {error}")),
+        // The admission path handles QueueFull / GlobalQueueFull explicitly
+        // before reaching this mapper. This branch is for other callers (e.g.
+        // route_index_status) where a queue-full error is unexpected and maps
+        // to Internal.
+        JobsError::QueueFull | JobsError::GlobalQueueFull | JobsError::GlobalRunningFull => {
+            McpHandlerError::Internal(format!("{context}: {error}"))
+        }
         JobsError::Db(error) => McpHandlerError::Internal(format!("{context}: {error}")),
     }
 }
@@ -1101,7 +1079,32 @@ async fn update_stale_job(
     jobs: &dyn JobStore,
     checker: Option<&dyn ExecutionStatusChecker>,
 ) -> Result<JobRecord, McpHandlerError> {
-    if !matches!(record.status, JobStatus::Queued | JobStatus::Running) {
+    // ─── Terminal-with-leftover-token repair ────────────────────────────
+    //
+    // A live worker may record terminal status and then fail the running-quota
+    // release with a transient `TransactionConflict`. The release error is
+    // logged best-effort by the worker; this poll is the durable retry path.
+    // When a poll finds a terminal job that still holds a `RUNNING#` token,
+    // release it exactly once. The release is idempotent: if the token is
+    // already gone the call is a no-op, and a `Conflict` surfaces so the next
+    // poll retries rather than silently leaking capacity.
+    if record.status.is_terminal_for_quota() {
+        jobs.release_running_quota(&record)
+            .await
+            .map_err(jobs_error(
+                "external_index_status terminal quota release repair",
+            ))?;
+        return Ok(record);
+    }
+
+    // Include `Dispatching` so a job that was dispatched but whose worker never
+    // reported its first stage (Step Functions failed before the first update)
+    // can still be reconciled here. Without it the job would be stuck
+    // indefinitely holding running capacity.
+    if !matches!(
+        record.status,
+        JobStatus::Queued | JobStatus::Dispatching | JobStatus::Running
+    ) {
         return Ok(record);
     }
     if !is_stale_job(&record) {
@@ -1143,7 +1146,11 @@ async fn update_stale_job(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            jobs.mark_complete(&record.job_id, snapshot_id, row_counts)
+            // Use the combined method so running quota is released exactly once
+            // after the terminal status is recorded. A stale running/dispatching
+            // job repaired here would otherwise leak owner/global running
+            // capacity.
+            jobs.mark_complete_and_release_running_quota(&record.job_id, snapshot_id, row_counts)
                 .await
                 .map_err(jobs_error("external_index_status update complete failed"))
         }
@@ -1154,7 +1161,7 @@ async fn update_stale_job(
                 .filter(|error| !error.trim().is_empty())
                 .unwrap_or("execution: failed");
             let (code, detail) = split_job_error(error);
-            jobs.mark_failed(&record.job_id, code, detail)
+            jobs.mark_failed_and_release_running_quota(&record.job_id, code, detail)
                 .await
                 .map_err(jobs_error(
                     "external_index_status update failed status failed",
@@ -1244,14 +1251,17 @@ fn source_kind_label(source_kind: SourceKind) -> &'static str {
     }
 }
 
-fn should_prefetch_source(source_kind: SourceKind, hostname: &str) -> bool {
+/// Whether the Step Functions worker should prefetch the source before
+/// building. Used by the drainer to construct the dispatch payload from the
+/// queued `JobRecord`.
+pub fn should_prefetch_source(source_kind: SourceKind, hostname: &str) -> bool {
     match source_kind {
         SourceKind::Git => true,
         SourceKind::Tarball => !is_s3_https_hostname(hostname),
     }
 }
 
-fn is_s3_https_hostname(hostname: &str) -> bool {
+pub fn is_s3_https_hostname(hostname: &str) -> bool {
     let Some(prefix) = hostname.strip_suffix(".amazonaws.com") else {
         return false;
     };
@@ -1273,7 +1283,7 @@ fn is_s3_https_hostname(hostname: &str) -> bool {
         .is_some_and(|(bucket, region)| !bucket.is_empty() && is_single_label(region))
 }
 
-fn is_single_label(value: &str) -> bool {
+pub fn is_single_label(value: &str) -> bool {
     !value.is_empty() && !value.contains('.')
 }
 
@@ -1298,7 +1308,9 @@ fn index_validate_options() -> ValidateOptions {
     }
 }
 
-fn index_resource_limits(source_kind: SourceKind) -> IndexResourceLimits {
+/// Resource limits for the Step Functions index worker payload. Used by the
+/// drainer to construct the dispatch payload from the queued `JobRecord`.
+pub fn index_resource_limits(source_kind: SourceKind) -> IndexResourceLimits {
     let max_source_bytes = match source_kind {
         SourceKind::Git => env_u64("SPUR_CONTEXT_MAX_GIT_BYTES", DEFAULT_GIT_SIZE_CAP_BYTES),
         SourceKind::Tarball => env_u64(
@@ -1312,6 +1324,92 @@ fn index_resource_limits(source_kind: SourceKind) -> IndexResourceLimits {
     }
 }
 
+/// Build the [`IndexExecutionRequest`] payload for a dispatched job from its
+/// persisted [`JobRecord`].
+///
+/// This reconstructs the exact payload contract the old immediate-start
+/// admission path used to build inline:
+///
+/// ```json
+/// {
+///   "job_id": "<job_id>",
+///   "source": "<source>",
+///   "package": "<package>",
+///   "revision": "<revision>",
+///   "source_url": "<source_url>",
+///   "source_kind": "<git|tarball>",
+///   "prefetch_source": <bool>,
+///   "caller_id": "<caller_id>",
+///   "limits": { "max_source_bytes": <u64>, "max_build_seconds": <u64> }
+/// }
+/// ```
+///
+/// The drainer calls this after the transactional queued→dispatching
+/// transition succeeds, then hands the resulting [`IndexExecutionRequest`] to
+/// the production Step Functions starter. The `name` is the `job_id` so Step
+/// Functions execution names deduplicate dispatch (a retry for the same job
+/// lands on the same execution name).
+///
+/// `prefetch_source` and `limits` are derived from the stored `source_url` /
+/// `source_kind` using the same helpers as the old admission path. The URL was
+/// already validated at enqueue time; if re-parsing the hostname fails
+/// unexpectedly (e.g. env-var-driven allowlist drift), `prefetch_source`
+/// defaults to `true` — a safe, conservative choice that never silently drops
+/// a dispatch.
+pub fn build_index_execution_request(record: &JobRecord) -> IndexExecutionRequest {
+    let source_kind = parse_source_kind(&record.source_kind);
+    let hostname = hostname_from_url(&record.source_url);
+    let prefetch_source = should_prefetch_source(source_kind, &hostname);
+    let limits = index_resource_limits(source_kind);
+    let input = json!({
+        "job_id": record.job_id,
+        "source": record.source,
+        "package": record.package,
+        "revision": record.revision,
+        "source_url": record.source_url,
+        "source_kind": record.source_kind,
+        "prefetch_source": prefetch_source,
+        "caller_id": record.caller_id,
+        "limits": {
+            "max_source_bytes": limits.max_source_bytes,
+            "max_build_seconds": limits.max_build_seconds
+        }
+    });
+    IndexExecutionRequest {
+        name: record.job_id.clone(),
+        input,
+    }
+}
+
+/// Parse a `source_kind` label string ("git" / "tarball") back into the typed
+/// enum. Defaults to [`SourceKind::Git`] for unrecognized labels (git is the
+/// safer default — it always prefetches).
+fn parse_source_kind(label: &str) -> SourceKind {
+    match label.trim() {
+        "tarball" => SourceKind::Tarball,
+        _ => SourceKind::Git,
+    }
+}
+
+/// Extract the lower-cased hostname from a URL string for the prefetch-source
+/// decision. This is a lightweight parse (no DNS, no validation) — the URL was
+/// already validated at enqueue time. Returns an empty string if the hostname
+/// cannot be extracted, in which case `should_prefetch_source` defaults to
+/// `true`.
+fn hostname_from_url(url: &str) -> String {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = authority.split(':').next().unwrap_or(authority);
+    let host = host.strip_prefix('@').unwrap_or(host).trim().to_lowercase();
+    if host.is_empty() {
+        // Fallback: try the whole URL lower-cased so the S3-hostname check has
+        // something to work with.
+        url.trim().to_lowercase()
+    } else {
+        host
+    }
+}
+
 fn index_rate_limit_per_minute() -> u32 {
     env_u32("SPUR_INDEX_RATE_LIMIT_PER_MINUTE", DEFAULT_CALLS_PER_MINUTE)
 }
@@ -1321,6 +1419,67 @@ fn index_max_concurrent_jobs_per_caller() -> u32 {
         "SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER",
         DEFAULT_MAX_CONCURRENT_JOBS_PER_CALLER,
     )
+}
+
+pub const DEFAULT_INDEX_DRAINER_BATCH_LIMIT: usize = 8;
+pub const DEFAULT_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD: usize = 32;
+pub const DEFAULT_INDEX_DRAINER_SCHEDULE_RATE_MINUTES: u64 = 1;
+pub const MAX_INDEX_GLOBAL_RUNNING_TOKENS: u32 = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexDrainerLimits {
+    pub max_dispatches_per_run: usize,
+    pub scan_limit_per_shard: usize,
+    pub rotation_interval_secs: u64,
+}
+
+/// Default per-owner queued backlog cap when the env var is not set. A non-zero
+/// default enables the bounded-queue admission path out of the box; deployments
+/// that want legacy reject-over-cap behavior set
+/// `SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER=0`.
+const DEFAULT_MAX_QUEUED_JOBS_PER_OWNER: u32 = 20;
+const DEFAULT_QUEUE_SHARD_COUNT: u32 = 16;
+
+/// Build the [`QueueConfig`] for the enqueue admission path from environment
+/// variables. The dedicated per-owner running cap falls back to the legacy
+/// `SPUR_INDEX_MAX_CONCURRENT_JOBS_PER_CALLER` value for deployments that have
+/// not yet adopted the bounded-backlog configuration surface.
+pub fn index_queue_config() -> QueueConfig {
+    QueueConfig {
+        max_queued_per_owner: env_u32(
+            "SPUR_INDEX_MAX_QUEUED_JOBS_PER_OWNER",
+            DEFAULT_MAX_QUEUED_JOBS_PER_OWNER,
+        ),
+        max_queued_global: env_u32("SPUR_INDEX_MAX_QUEUED_JOBS_GLOBAL", 0),
+        max_running_per_owner: env_u32(
+            "SPUR_INDEX_MAX_RUNNING_JOBS_PER_OWNER",
+            index_max_concurrent_jobs_per_caller(),
+        ),
+        max_running_global: env_u32("SPUR_INDEX_MAX_RUNNING_JOBS_GLOBAL", 0)
+            .min(MAX_INDEX_GLOBAL_RUNNING_TOKENS),
+        shard_count: env_u32("SPUR_INDEX_QUEUE_SHARD_COUNT", DEFAULT_QUEUE_SHARD_COUNT),
+    }
+}
+
+pub fn index_drainer_limits() -> IndexDrainerLimits {
+    IndexDrainerLimits {
+        max_dispatches_per_run: env_usize(
+            "SPUR_INDEX_DRAINER_BATCH_LIMIT",
+            DEFAULT_INDEX_DRAINER_BATCH_LIMIT,
+        )
+        .max(1),
+        scan_limit_per_shard: env_usize(
+            "SPUR_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD",
+            DEFAULT_INDEX_DRAINER_SCAN_LIMIT_PER_SHARD,
+        )
+        .max(1),
+        rotation_interval_secs: env_u64(
+            "SPUR_INDEX_DRAINER_SCHEDULE_RATE_MINUTES",
+            DEFAULT_INDEX_DRAINER_SCHEDULE_RATE_MINUTES,
+        )
+        .max(1)
+        .saturating_mul(60),
+    }
 }
 
 fn env_u32(name: &str, default: u32) -> u32 {
@@ -1337,7 +1496,25 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn active_job_response(record: &JobRecord) -> Value {
+fn env_usize(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// Build a [`BacklogOwner`] from the authenticated caller context.
+///
+/// The first implementation maps all traffic to [`BacklogOwnerKind::Caller`]
+/// using the existing `caller_id`. This is the stable owner identity that all
+/// queue quota keys are derived from. When per-user backlog isolation is added
+/// later, only this function needs to change — the enqueue/dispatch/drainer
+/// logic derives everything from `(kind, id)`.
+fn backlog_owner_from_caller(caller_id: &str) -> BacklogOwner {
+    BacklogOwner::caller(caller_id)
+}
+
+fn queued_job_response(record: &JobRecord) -> Value {
     json!({
         "job_id": record.job_id,
         "status": record.status.to_string(),

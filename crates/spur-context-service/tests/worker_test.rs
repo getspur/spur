@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::future::Future;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -19,7 +21,9 @@ use serde_json::Value;
 use sha2::Digest as _;
 use spur_context_service::jobs::{
     CreateJobOutcome, CreateJobRequest, JobKey, JobRecord, JobStatus, JobStore, JobsError,
+    QueueConfig,
 };
+use spur_context_service::mcp::{IndexExecutionRequest, IndexExecutionStarter, McpHandlerError};
 use spur_context_service::worker::{
     build_graph, fetch_source, fetch_source_with_bronze_services, handle_spot_interruption,
     persist_silver_graph_artifact, prepare_job_with_services, retrieve_bronze_source_by_coordinate,
@@ -644,8 +648,8 @@ async fn catalog_download_upload_uses_conditional_s3_write_metadata() -> Result<
 
 #[test]
 fn worker_image_builds_spur_cli_without_embedding_features() -> Result<()> {
-    let deploy_script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../infra/spur-context-service/deploy.sh");
+    let deploy_script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/spur-context-service/deploy.sh");
     let deploy_script = fs::read_to_string(&deploy_script)
         .with_context(|| format!("read {}", deploy_script.display()))?;
 
@@ -790,6 +794,38 @@ async fn spot_interruption_handler_writes_checkpoint_to_s3() -> Result<()> {
 
     handle_spot_interruption(&env, "fetch").await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn drainer_is_noop_when_store_has_no_queued_jobs() -> Result<()> {
+    // The worker-test FakeJobStore does not implement queue accounting, so the
+    // default `list_queued_jobs` returns empty. The drainer must not crash and
+    // must return an empty summary.
+    use spur_context_service::drainer;
+
+    let store = Arc::new(FakeJobStore::default());
+    let starter = NoopStarter;
+    let config = QueueConfig::default();
+
+    let summary = drainer::drain_queued_jobs_with_services(&*store, &starter, config, 0).await;
+
+    assert_eq!(summary.dispatched, 0);
+    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.failed, 0);
+    Ok(())
+}
+
+/// Fake `IndexExecutionStarter` that never actually starts an execution.
+struct NoopStarter;
+
+impl IndexExecutionStarter for NoopStarter {
+    fn start_execution<'a>(
+        &'a self,
+        _request: IndexExecutionRequest,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<String, McpHandlerError>> + Send + 'a>>
+    {
+        Box::pin(async { Ok("arn:fake".to_owned()) })
+    }
 }
 
 fn create_tarball(source_dir: &Path, archive: &Path) -> Result<()> {
@@ -1433,6 +1469,12 @@ impl JobStore for FakeJobStore {
             error_detail: None,
             created_at: "now".to_owned(),
             updated_at: "now".to_owned(),
+            owner_kind: None,
+            owner_id: None,
+            queue_shard: None,
+            queue_sort_key: None,
+            next_eligible_at: None,
+            dispatched_at: None,
         };
         state.dedupe.insert(key, job_id.clone());
         state.jobs.insert(job_id, record.clone());
@@ -1551,6 +1593,12 @@ impl FakeJobStore {
             error_detail: None,
             created_at: "now".to_owned(),
             updated_at: "now".to_owned(),
+            owner_kind: None,
+            owner_id: None,
+            queue_shard: None,
+            queue_sort_key: None,
+            next_eligible_at: None,
+            dispatched_at: None,
         };
         let mut state = self.state.lock().expect("fake store lock");
         state.dedupe.insert(record.key(), job_id.to_owned());
