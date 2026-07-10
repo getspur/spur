@@ -20,9 +20,7 @@ async fn native_worker_dies_on_drop() {
     use spur_acp::connection::native::spawn_native_worker_for_test;
 
     // Spawn a long-running child via the production helper.
-    let child = spawn_native_worker_for_test("/bin/sh", &["-c", "sleep 60"])
-        .await
-        .expect("spawn child");
+    let child = spawn_native_worker_for_test("/bin/sh", &["-c", "sleep 60"]).expect("spawn child");
 
     let pid = child.id().expect("pid present");
     assert!(pid_alive(pid).await, "child should be alive after spawn");
@@ -43,9 +41,7 @@ async fn native_worker_dies_on_drop() {
 async fn stdio_adapter_dies_on_drop() {
     use spur_acp::connection::stdio_adapter::spawn_stdio_for_test;
 
-    let child = spawn_stdio_for_test("/bin/sh", &["-c", "sleep 60"])
-        .await
-        .expect("spawn child");
+    let child = spawn_stdio_for_test("/bin/sh", &["-c", "sleep 60"]).expect("spawn child");
     let pid = child.id().expect("pid present");
     assert!(pid_alive(pid).await);
 
@@ -64,9 +60,7 @@ async fn stdio_adapter_dies_on_drop() {
 #[tokio::test]
 async fn cli_wrap_dies_on_drop() {
     use spur_acp::connection::cli_wrap_adapter::spawn_cli_wrap_for_test;
-    let child = spawn_cli_wrap_for_test("/bin/sh", &["-c", "sleep 60"])
-        .await
-        .expect("spawn child");
+    let child = spawn_cli_wrap_for_test("/bin/sh", &["-c", "sleep 60"]).expect("spawn child");
     let pid = child.id().expect("pid present");
     assert!(pid_alive(pid).await);
     drop(child);
@@ -83,9 +77,7 @@ async fn cli_wrap_dies_on_drop() {
 #[tokio::test]
 async fn stream_json_dies_on_drop() {
     use spur_acp::connection::stream_json_adapter::spawn_stream_json_for_test;
-    let child = spawn_stream_json_for_test("/bin/sh", &["-c", "sleep 60"])
-        .await
-        .expect("spawn child");
+    let child = spawn_stream_json_for_test("/bin/sh", &["-c", "sleep 60"]).expect("spawn child");
     let pid = child.id().expect("pid present");
     assert!(pid_alive(pid).await);
     drop(child);
