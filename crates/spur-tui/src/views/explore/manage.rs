@@ -179,6 +179,7 @@ impl ExploreBrowserView {
                     let layer = self
                         .manifest_layers
                         .get(&item.name)
+                        .copied()
                         .map(StoreLayer::label)
                         .unwrap_or("");
                     Row::new(vec![
