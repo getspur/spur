@@ -179,12 +179,13 @@ args = [
     "--yes",
     "@agentclientprotocol/codex-acp@1.0.2",
 ]
-
 transport = "acp"
 kind = "codex-acp"
 role = "both"
 capabilities = []
 cost_tier = "low"
+skip_permissions = false
+skip_permissions_args = []
 
 [agents.entries.review]
 review_required = false
@@ -314,9 +315,7 @@ inherit_defaults = true
 [[agents.entries]]
 name = "opencode"
 command = "opencode"
-args = [
-    "acp",
-]
+args = ["acp"]
 transport = "acp"
 kind = "open-code"
 role = "both"
@@ -427,14 +426,13 @@ max_requests_per_second = 20
 [delegation]
 inline_wait_ms = 0
 
-[context_service]
-url = "https://n1sbuuxt9k.execute-api.ap-southeast-5.amazonaws.com"
-
 [delegation.normalize]
 bypass_hooks = false
 
 [spur]
 auto_merge_approved_plans = false
+loops_enabled = true
+pause_all_loops = false
 plan_pending_grace_secs = 3600
 dispatch_lease_secs = 600
 dispatch_lease_heartbeat_secs = 200
@@ -442,6 +440,9 @@ dispatch_lease_heartbeat_secs = 200
 [plan.substrate_migration]
 versioned_cache_serve = false
 nonadvisory_review_writes = true
+
+[context_service]
+url = "https://n1sbuuxt9k.execute-api.ap-southeast-5.amazonaws.com"
 
 [tui]
 edit_mode = "vim"

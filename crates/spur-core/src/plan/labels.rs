@@ -6,21 +6,20 @@
 //!
 //! # Grammar constraint
 //!
-//! `br 0.1.14` enforces label grammar `[A-Za-z0-9_:-]+` (empirically verified
+//! `br` enforces label grammar `[A-Za-z0-9_:-]+` (empirically verified
 //! via `br label add` — `VALIDATION_FAILED` error surface). Labels containing
 //! `.`, `=`, `/`, or whitespace are rejected. All constructors in this module
 //! produce br-legal labels. Callers supplying raw components (plan IDs, task
 //! IDs, agent names) are responsible for ensuring those components use only
 //! `[A-Za-z0-9_:-]` characters.
 //!
-//! # Length cap (asymmetric)
+//! # Length
 //!
-//! `br create --label <label>` enforces a **50-character cap** — longer labels
-//! surface as `Validation failed: label: exceeds 50 characters`. `br label add`
-//! imposes no such cap (accepts labels up to at least 512 chars). Constructors
-//! that MAY be used at create time (`mutation_id_label`, `signal_processed_label`)
-//! use the compact UUID form (32 hex chars, no hyphens) to stay under the cap.
-//! This asymmetry is pinned by `labels_br_round_trip::br_create_enforces_50_char_cap`.
+//! `beads_rust` no longer enforces a label length cap (the previous 50-char
+//! limit was removed). Labels of any reasonable length are accepted at both
+//! `br create --label` and `br label add`. Some constructors retain compact
+//! UUID forms for historical brevity but this is no longer a correctness
+//! requirement.
 //!
 //! See `docs/superpowers/specs/2026-04-20-adaptive-plan-repair-design.md`
 //! §Information Flow → Label vocabulary for the authoritative list.
@@ -100,9 +99,7 @@ pub fn parse_dispatched_base_oid(label: &str) -> Option<&str> {
         .filter(|oid| !oid.is_empty())
 }
 
-/// Mint a fresh 16-char hex delegation_id derived from a v4 UUID. The 16-char
-/// length keeps `spur:delegation-id:<id>` (35 chars) under the `br create`
-/// 50-char cap.
+/// Mint a fresh 16-char hex delegation_id derived from a v4 UUID.
 ///
 /// 60 bits of effective entropy: the high 64 bits of a v4 UUID include the
 /// 4-bit version nibble (RFC 4122 §4.4 byte 6 upper nibble = `0100`), which
@@ -124,9 +121,7 @@ pub fn mint_delegation_id() -> String {
 /// the same BrainSessionId, so plan-owner labels match across spur restarts
 /// when the user resumes the same ACP session.
 ///
-/// Output: `[0-9a-f]{16}` - `br`-legal under `[A-Za-z0-9_:-]+`. The 19-char
-/// `spur:plan-owner:` prefix + 16 hex = 35 chars, well under the 50-char
-/// `br create --label` cap.
+/// Output: `[0-9a-f]{16}` - `br`-legal under `[A-Za-z0-9_:-]+`.
 ///
 /// 64 bits of derived entropy from a SHA-256 prefix. Birthday-collision-immune
 /// for any single project's brain-session lifetime.
@@ -154,8 +149,7 @@ pub fn plan_owner(owner: &str) -> String {
     format!("{PLAN_OWNER_PREFIX}{}", compact_label_component(owner))
 }
 
-/// Update-path only: prefix + compact UUID is 54 chars, exceeding the
-/// 50-character `br create --label` cap.
+/// Uses compact_label_component for br-legal formatting.
 pub fn plan_owner_token(token: &str) -> String {
     format!(
         "{PLAN_OWNER_TOKEN_PREFIX}{}",
@@ -322,11 +316,8 @@ pub fn parse_signal_kind(label: &str) -> Option<&str> {
 }
 
 /// Label marker set on beads issues created as part of a mutation batch.
-/// Uses the compact (hyphen-free) UUID form: `br create --label` enforces a
-/// 50-character cap (verified via `labels_br_round_trip.rs`), while
-/// `br label add` does not. The compact form keeps a single label shape
-/// across both code paths.
-/// Example: `spur:mutation-id:f30c1a2e...` (total 41 chars).
+/// Uses the compact (hyphen-free) UUID form for brevity.
+/// Example: `spur:mutation-id:f30c1a2e...`
 pub fn mutation_id_label(mutation_id: &uuid::Uuid) -> String {
     format!("spur:mutation-id:{}", mutation_id.simple())
 }
@@ -350,20 +341,14 @@ pub fn superseded_by_labels(child_ids: &[String]) -> Vec<String> {
 /// Durable dedup is keyed by the triggering signal's `signal_id`, not by the
 /// mutation or the issue as a whole. That allows distinct signals on one task
 /// to be processed independently over time.
-///
-/// **Only safe via `br label add` (IssueUpdate.add_labels)**, not via
-/// `br create --label`: `spur:signal-processed:` is a 22-char prefix, which
-/// combined with the 32-char compact UUID totals 54 chars — over the 50-char
-/// create-path cap. Callers at create time must use `mutation_id_label` instead.
-/// Example: `spur:signal-processed:f30c1a2e...` (total 54 chars).
+/// Example: `spur:signal-processed:f30c1a2e...`
 pub fn signal_processed_label(signal_id: &uuid::Uuid) -> String {
     format!("spur:signal-processed:{}", signal_id.simple())
 }
 
 /// Beads audit-reference label for a peer mailbox message.
 ///
-/// Format: `spur:peer:{compact_uuid}` (42 chars). Fits the 50-char
-/// `br create --label` cap, unlike `signal_processed_label`.
+/// Format: `spur:peer:{compact_uuid}`.
 pub fn peer_message_label(message_id: &uuid::Uuid) -> String {
     format!("spur:peer:{}", message_id.simple())
 }
@@ -529,12 +514,8 @@ mod tests {
     }
 
     #[test]
-    fn lease_expires_at_label_fits_create_time_cap() {
+    fn lease_expires_at_label_is_br_legal() {
         let label = lease_expires_at(9_999_999_999);
-        assert!(
-            label.len() <= 50,
-            "lease label exceeds br create cap: {label}"
-        );
         assert!(is_br_legal(&label), "lease label is br-illegal: {label}");
     }
 
@@ -642,15 +623,10 @@ mod tests {
     }
 
     #[test]
-    fn delegation_id_label_under_50_chars_for_minted_id() {
+    fn delegation_id_label_is_br_legal_for_minted_id() {
         for _ in 0..100 {
             let minted = mint_delegation_id();
             let label = delegation_id(&minted);
-            assert!(
-                label.len() <= 50,
-                "label exceeds 50-char br create cap: {} chars: {label}",
-                label.len()
-            );
             assert!(is_br_legal(&label), "label not br-legal: {label}");
         }
     }
@@ -709,27 +685,18 @@ mod tests {
     }
 
     #[test]
-    fn derive_brain_session_id_label_under_50_chars_and_br_legal() {
+    fn derive_brain_session_id_label_is_br_legal() {
         let acp = spur_acp::SessionId(uuid::Uuid::new_v4().to_string());
         let derived = derive_brain_session_id(&acp);
         let label = plan_owner(&derived.as_session_id().0);
-        assert!(label.len() <= 50, "label {} chars: {label}", label.len());
         assert!(is_br_legal(&label), "label not br-legal: {label}");
     }
 
     #[test]
-    fn peer_message_label_is_under_50_chars_and_uses_compact_uuid() {
+    fn peer_message_label_uses_compact_uuid_and_is_br_legal() {
         let id = uuid::Uuid::parse_str("0123456789abcdef0123456789abcdef").unwrap();
         let label = peer_message_label(&id);
         assert_eq!(label, "spur:peer:0123456789abcdef0123456789abcdef");
-        assert!(
-            label.len() <= 50,
-            "label exceeds 50-char br create cap: {} chars",
-            label.len()
-        );
-        // Grammar: [A-Za-z0-9_:-]+
-        assert!(label
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-'));
+        assert!(is_br_legal(&label), "label not br-legal: {label}");
     }
 }

@@ -285,8 +285,8 @@ async fn git_blob_store_accepts_short_hex_brain_session_id() {
 #[tokio::test]
 async fn git_blob_store_accepts_short_hex_delegation_id() {
     // Regression: bd-ttyo's `mint_delegation_id` produces 16-char `[0-9a-f]+`
-    // ids to fit the `br create --label` 50-char cap. Before this fix the
-    // git blob store rejected them with "non-uuid delegation_id: wrong length
+    // ids. Before this fix the git blob store rejected them with "non-uuid
+    // delegation_id: wrong length
     // (16)", forcing fallback to the legacy artifact ref and breaking the
     // worker-output invariant downstream (no worker branch existed for
     // `git rev-list base..branch` to inspect).
