@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{self, CatalogResolver};
+use crate::drainer;
 use crate::jobs::{DynamoDbJobStore, JobStore};
 use crate::mcp::{self, McpHandlerError};
 
@@ -146,12 +147,12 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
     };
 
     let authenticated_caller = match request.tool.as_str() {
-        "external_index" | "external_index_status" => {
-            Some(match authenticated_caller_id(&event.payload, anonymous_mutations_allowed()) {
+        "external_index" | "external_index_status" => Some(
+            match authenticated_caller_id(&event.payload, anonymous_mutations_allowed()) {
                 Ok(caller_id) => caller_id,
                 Err(error) => return auth_error_response(error),
-            })
-        }
+            },
+        ),
         _ => None,
     };
 
@@ -171,14 +172,24 @@ pub async fn handler(event: LambdaEvent<ApiGatewayRequest>) -> Result<ApiGateway
             let caller_id = authenticated_caller
                 .as_deref()
                 .expect("external_index authenticated caller should be available");
-            if let Some(prepared_catalog) = prepared_catalog {
+            let result = if let Some(prepared_catalog) = prepared_catalog {
                 let mut catalog_guard = catalog_resolver()?;
                 let catalog = initialized_catalog(&mut catalog_guard, &prepared_catalog)?;
                 let db = catalog.connection();
                 mcp::route_index(&request.args, db, catalog, &jobs, &sfn_client, caller_id).await
             } else {
                 mcp::route_index_without_catalog(&request.args, &jobs, &sfn_client, caller_id).await
+            };
+            // Best-effort drainer kick: if the job was accepted into the queue,
+            // try to dispatch queued work immediately for lower latency. The
+            // scheduled EventBridge drainer remains the correctness fallback;
+            // failure to kick must not affect the admission response.
+            if let Ok(value) = &result {
+                if is_queued_job_response(value) {
+                    kick_drainer().await;
+                }
             }
+            result
         }
         _ => {
             let prepared_catalog = prepare_catalog().await?;
@@ -652,6 +663,38 @@ fn sfn_client() -> Result<SfnIndexExecutionStarter, Error> {
             ))
         })?,
     })
+}
+
+/// Run one bounded drainer invocation using the production DynamoDB job store
+/// and Step Functions starter. This is the correctness path that dispatches
+/// queued index jobs under configured running caps.
+///
+/// It is called as a best-effort kick after a successful enqueue (see
+/// [`handler`]) and should also be wired to an EventBridge-scheduled Lambda
+/// trigger. Errors are logged and do not affect the admission response.
+pub async fn drain_queued_jobs() -> Result<drainer::DrainSummary, Error> {
+    let jobs = job_store();
+    let starter = sfn_client()?;
+    let config = mcp::index_queue_config();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    Ok(drainer::drain_queued_jobs_with_services(&jobs, &starter, config, now_secs).await)
+}
+
+/// Whether an `external_index` response represents a job accepted into the
+/// queue (status = "queued"). Used to decide whether to kick the drainer.
+fn is_queued_job_response(value: &Value) -> bool {
+    value.get("status").and_then(Value::as_str) == Some("queued")
+}
+
+/// Best-effort drainer kick. Logs failures but never propagates them — the
+/// scheduled EventBridge drainer is the correctness fallback.
+async fn kick_drainer() {
+    if let Err(error) = drain_queued_jobs().await {
+        eprintln!("[lambda] best-effort drainer kick failed: {error}");
+    }
 }
 
 #[derive(Debug, Clone)]
